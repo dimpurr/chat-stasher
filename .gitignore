@@ -1,0 +1,11 @@
+# 🔴 私有内核 —— 绝不进公开仓
+.private/
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# OS / 编辑器
+.DS_Store
+*.log
