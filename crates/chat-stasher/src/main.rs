@@ -6,9 +6,10 @@ use chat_stasher::models::HarnessSource;
 use chat_stasher::reap;
 use chat_stasher::scanner;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
+use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -97,9 +98,40 @@ enum Command {
         #[arg(long)]
         no_reap: bool,
     },
-    /// Diagnostic: does any harness on this machine silently delete its
-    /// sessions? Read-only (paths/counts/bytes/timestamps only).
-    Doctor,
+/// Diagnostic: does any harness on this machine silently delete its
+/// sessions? Read-only (paths/counts/bytes/timestamps only).
+Doctor,
+/// Prove the archive is intact. Three independently runnable levels:
+/// l1 = rustic structure check (cheap, no payload reads), l2 = rustic content
+/// check (downloads and re-hashes every pack), l3 = reconcile against an
+/// expected manifest derived from the sealed staging tree (per session:
+/// shard count / concatenated bytes / concatenated sha256).
+Verify {
+    /// Which level(s) to run: `l1`, `l2`, `l3` or `all`.
+    #[arg(long, default_value = "all")]
+    level: VerifyLevel,
+    /// Stage directory holding the sealed shard tree (required by l3 / all).
+    #[arg(long)]
+    stage: Option<PathBuf>,
+    /// Machine partition (default: this machine's normalised hostname).
+    #[arg(long)]
+    machine: Option<String>,
+    /// Repository path override.
+    #[arg(long)]
+    repo: Option<String>,
+    /// Masterkey file override.
+    #[arg(long)]
+    key_file: Option<String>,
+    /// Concurrency cap override.
+    #[arg(long)]
+    connections: Option<usize>,
+    /// Backend option `key=value`, repeatable.
+    #[arg(long = "option")]
+    options: Vec<String>,
+    /// Disable ssh connection reaping after this run (for troubleshooting).
+    #[arg(long)]
+    no_reap: bool,
+},
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -119,6 +151,15 @@ enum Command {
         #[arg(long)]
         machine: Option<String>,
     },
+}
+
+/// verify `--level` selector.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum VerifyLevel {
+    L1,
+    L2,
+    L3,
+    All,
 }
 
 fn main() -> ExitCode {
@@ -143,6 +184,18 @@ fn main() -> ExitCode {
             )
         }
         Command::Doctor => cmd_doctor(),
+        Command::Verify { level, stage, machine, repo, key_file, connections, options, no_reap } => {
+            cmd_verify(
+                level,
+                &stage,
+                machine.as_deref(),
+                repo,
+                key_file,
+                connections,
+                &options,
+                no_reap,
+            )
+        }
         Command::Ingest { inbox, stage, machine } => cmd_ingest(&inbox, &stage, machine.as_deref()),
     }
 }
@@ -439,6 +492,157 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
         println!("  WARN: {w}");
     }
     ExitCode::SUCCESS
+}
+
+/// `verify` — prove the archive is intact, level by level. Each level prints
+/// its own verdict; the exit code is FAILURE if any requested level failed.
+fn cmd_verify(
+    level: VerifyLevel,
+    stage: &Option<PathBuf>,
+    machine: Option<&str>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
+    let cfg = store_config_from(&config, repo, key_file, connections, options);
+    let store = BackupStore::new(cfg.clone(), machine.clone());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!("verify: {e}");
+            reap_remote(&cfg, no_reap);
+            return ExitCode::FAILURE;
+        }
+    };
+    let need_stage = matches!(level, VerifyLevel::L3 | VerifyLevel::All);
+    let stage = match (need_stage, stage) {
+        (true, Some(s)) => s.clone(),
+        (true, None) => {
+            eprintln!("verify: `--stage` is required for level l3 / all");
+            reap_remote(&cfg, no_reap);
+            return ExitCode::FAILURE;
+        }
+        (false, _) => PathBuf::from("."),
+    };
+
+    println!("[verify] repo           : {}", store.cfg.repo_root);
+    println!("[verify] machine        : {machine}");
+    println!("[verify] reap           : {}", if no_reap { "OFF (--no-reap)" } else { "ON" });
+
+    let mut failed = 0usize;
+    match level {
+        VerifyLevel::L1 => run_check(&store, &mk, false, "L1 structure", &mut failed),
+        VerifyLevel::L2 => run_check(&store, &mk, true, "L2 content", &mut failed),
+        VerifyLevel::L3 => {
+            println!("[verify] stage          : {}", stage.display());
+            run_reconcile(&store, &mk, &stage, &mut failed);
+        }
+        VerifyLevel::All => {
+            run_check(&store, &mk, false, "L1 structure", &mut failed);
+            run_check(&store, &mk, true, "L2 content", &mut failed);
+            println!("[verify] stage          : {}", stage.display());
+            run_reconcile(&store, &mk, &stage, &mut failed);
+        }
+    }
+
+    reap_remote(&cfg, no_reap);
+    if failed == 0 {
+        println!("[verify] RESULT         : OK");
+        ExitCode::SUCCESS
+    } else {
+        println!("[verify] RESULT         : FAILED ({failed} level(s) reported failures)");
+        ExitCode::FAILURE
+    }
+}
+
+fn run_check(store: &BackupStore, mk: &MasterKey, data: bool, name: &str, failed: &mut usize) {
+    match store.check_repo(mk, data) {
+        Ok(summary) => {
+            print_check_summary(&summary, name);
+            if !summary.ok() {
+                *failed += 1;
+            }
+        }
+        Err(e) => {
+            eprintln!("verify: {name} failed to run: {e:#}");
+            *failed += 1;
+        }
+    }
+}
+
+fn print_check_summary(s: &CheckSummary, name: &str) {
+    let kind = if s.read_data { "read_data=true" } else { "read_data=false" };
+    println!(
+        "[verify] {name:<16} ok={:<5} findings={:<3} errors={:<3} warns={:<3} ({kind}) took {:?}",
+        s.ok(),
+        s.findings,
+        s.errors,
+        s.warns,
+        s.duration
+    );
+    for detail in &s.details {
+        println!("  ! {detail}");
+    }
+}
+
+fn run_reconcile(store: &BackupStore, mk: &MasterKey, stage: &Path, failed: &mut usize) {
+    match store.reconcile_manifest(mk, stage) {
+        Ok(report) => {
+            print_reconcile(&report);
+            if !report.ok() {
+                *failed += 1;
+            }
+        }
+        Err(e) => {
+            eprintln!("verify: L3 reconcile failed to run: {e:#}");
+            *failed += 1;
+        }
+    }
+}
+
+fn print_reconcile(r: &ReconcileReport) {
+    println!(
+        "[verify] L3 reconcile     : machines={} expected={} took {:?}",
+        r.machines,
+        r.rows.len(),
+        r.duration
+    );
+    for row in &r.rows {
+        let mark = if row.outcome == SessionOutcome::Match { "ok " } else { "!! " };
+        match &row.outcome {
+            SessionOutcome::Match => println!(
+                "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}",
+                row.machine, row.session_id, row.observed_shards, row.observed_bytes, row.observed_sha
+            ),
+            SessionOutcome::MissingInArchive => println!(
+                "  {mark} {:<12} {:<20} MISSING IN ARCHIVE",
+                row.machine, row.session_id
+            ),
+            SessionOutcome::ShardCountMismatch { expected, observed } => println!(
+                "  {mark} {:<12} {:<20} SHARD COUNT expected={expected} observed={observed}",
+                row.machine, row.session_id
+            ),
+            SessionOutcome::ByteLengthMismatch { expected, observed } => println!(
+                "  {mark} {:<12} {:<20} BYTE LENGTH expected={expected} observed={observed}",
+                row.machine, row.session_id
+            ),
+            SessionOutcome::ShaMismatch { expected, observed } => println!(
+                "  {mark} {:<12} {:<20} SHA MISMATCH\n      expected={expected}\n      observed={observed}",
+                row.machine, row.session_id
+            ),
+        }
+    }
+    for (m, s) in &r.extra_in_archive {
+        println!("  !? {m:<12} {s:<20} in archive but NOT in expected manifest (informational)");
+    }
+    println!(
+        "[verify] L3 verdict       : {}",
+        if r.ok() { "OK" } else { "FAILED" }
+    );
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
