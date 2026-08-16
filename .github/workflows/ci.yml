@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    # release-gate.sh uses BSD stat/shasum conventions, so keep this job on a
+    # macOS runner until the script is made portable.
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Create synthetic release-gate input
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_root="$RUNNER_TEMP/chat-stasher-claude-projects"
+          mkdir -p "$fixture_root"
+          for n in 1 2 3; do
+            file="$fixture_root/synthetic-$n.jsonl"
+            : > "$file"
+            for i in $(seq 1 600); do
+              printf '{"synthetic":true,"session":%s,"event":%s}\n' "$n" "$i" >> "$file"
+            done
+          done
+
+      - name: Run release gate
+        shell: bash
+        env:
+          CLAUDE_PROJECTS_DIR: ${{ runner.temp }}/chat-stasher-claude-projects
+        run: bash scripts/release-gate.sh
