@@ -26,13 +26,13 @@
 
 use crate::config::Config;
 use crate::scanner;
+use crate::sqlite_probe::{probe_sqlite_store, SqliteSessionProbe};
 use crate::store::{self, StoreConfig};
-use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Day threshold below which an explicit `cleanupPeriodDays` is still treated
 /// as a live deletion threat. Claude Code's default is 30; we call anything
@@ -482,129 +482,6 @@ fn gemini_footprint(home: &Path) -> HarnessFootprint {
     }
 }
 
-#[derive(Debug)]
-enum SqliteSessionProbe {
-    Known {
-        count: u64,
-        earliest: Option<SystemTime>,
-        latest: Option<SystemTime>,
-    },
-    SchemaMismatch {
-        actual: String,
-    },
-    ReadFailed {
-        error: String,
-    },
-}
-
-/// Read an SQLite database without ever opening a write-capable connection.
-///
-/// The expected schema is deliberately narrow and based on the schema observed
-/// in the local opencode database: `session(id, time_created, time_updated)`.
-/// A missing or changed shape is reported loudly with a schema summary instead
-/// of being converted into the old silent `N/A` result.
-fn probe_opencode_sqlite(db: &Path) -> SqliteSessionProbe {
-    let uri = format!("file:{}?mode=ro", db.display());
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let conn = match Connection::open_with_flags(uri, flags) {
-        Ok(conn) => conn,
-        Err(e) => {
-            return SqliteSessionProbe::ReadFailed {
-                error: format!("只读打开失败: {e}"),
-            };
-        }
-    };
-    if let Err(e) = conn.busy_timeout(Duration::from_secs(2)) {
-        return SqliteSessionProbe::ReadFailed {
-            error: format!("设置只读查询超时失败: {e}"),
-        };
-    }
-
-    let actual = sqlite_schema_summary(&conn);
-    let expected = ["id", "time_created", "time_updated"];
-    let session_columns = match sqlite_table_columns(&conn, "session") {
-        Ok(columns) => columns,
-        Err(e) => {
-            return SqliteSessionProbe::ReadFailed {
-                error: format!("读取 schema 失败: {e}"),
-            };
-        }
-    };
-    if !expected
-        .iter()
-        .all(|expected_column| session_columns.iter().any(|c| c == expected_column))
-    {
-        return SqliteSessionProbe::SchemaMismatch { actual };
-    }
-
-    let stats = conn.query_row(
-        "SELECT count(*), min(time_created), max(time_created) FROM \"session\"",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        },
-    );
-    match stats {
-        Ok((count, earliest, latest)) if count >= 0 => SqliteSessionProbe::Known {
-            count: count as u64,
-            earliest: earliest.and_then(sqlite_millis_to_system_time),
-            latest: latest.and_then(sqlite_millis_to_system_time),
-        },
-        Ok((count, _, _)) => SqliteSessionProbe::ReadFailed {
-            error: format!("SQLite 返回了负会话数: {count}"),
-        },
-        Err(e) => SqliteSessionProbe::ReadFailed {
-            error: format!("读取 session 统计失败: {e}"),
-        },
-    }
-}
-
-fn sqlite_table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")?;
-    let rows = stmt.query_map([table], |row| row.get::<_, String>(0))?;
-    rows.collect()
-}
-
-/// Schema-only summary used in loud mismatch diagnostics; it never selects
-/// rows from application tables.
-fn sqlite_schema_summary(conn: &Connection) -> String {
-    let names = match conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .and_then(|mut stmt| {
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-        }) {
-        Ok(names) => names,
-        Err(e) => return format!("<读取表名失败: {e}>"),
-    };
-
-    if names.is_empty() {
-        return "<无用户表>".to_string();
-    }
-
-    names
-        .iter()
-        .map(|name| match sqlite_table_columns(conn, name) {
-            Ok(columns) => format!("{name}({})", columns.join(", ")),
-            Err(e) => format!("{name}(<读取列失败: {e}>)"),
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn sqlite_millis_to_system_time(millis: i64) -> Option<SystemTime> {
-    let duration = Duration::from_millis(millis.unsigned_abs());
-    if millis >= 0 {
-        UNIX_EPOCH.checked_add(duration)
-    } else {
-        UNIX_EPOCH.checked_sub(duration)
-    }
-}
-
 fn opencode_footprint(home: &Path) -> HarnessFootprint {
     let root = home.join(".local").join("share").join("opencode");
     let db = root.join("opencode.db");
@@ -621,21 +498,10 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
             note: "not installed (no opencode.db)".to_string(),
         };
     }
-    let mut total = 0u64;
-    let mut latest: Option<SystemTime> = None;
-    for f in fs::read_dir(&root).into_iter().flatten().flatten() {
-        let p = f.path();
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("opencode.db") {
-                if let Ok(md) = fs::metadata(&p) {
-                    total += md.len();
-                    let m = md.modified().unwrap_or(UNIX_EPOCH);
-                    latest = Some(latest.map_or(m, |l: SystemTime| l.max(m)));
-                }
-            }
-        }
-    }
-    let (session_count, earliest, latest, note) = match probe_opencode_sqlite(&db) {
+    // Single source of truth for both count *and* bytes: the shared SQLite
+    // probe (`crate::sqlite_probe`) used by the registry scan too.
+    let info = probe_sqlite_store(&db);
+    let (session_count, earliest, latest, note) = match info.sessions {
         SqliteSessionProbe::Known {
             count,
             earliest,
@@ -644,7 +510,7 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
             Some(count),
             earliest,
             latest,
-            "SQLite 只读连接；session(time_created) 已识别".to_string(),
+            "SQLite 只读连接；session(time_created) 已识别（bytes 含 .db+-wal+-shm）".to_string(),
         ),
         SqliteSessionProbe::SchemaMismatch { actual } => (
             None,
@@ -667,7 +533,7 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
         root,
         installed: true,
         session_count,
-        total_bytes: total,
+        total_bytes: info.total_bytes,
         earliest,
         latest,
         compressed_count: 0,
@@ -1382,6 +1248,16 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             scanner::ProbeState::FileTarget => format!(" bytes={}", fmt_bytes(p.bytes)),
             _ => String::new(),
         };
+        // 会话数：单文件 SQLite 无法枚举时打印 未知（绝不伪装成 0）；
+        // 其余状态沿用旧的 0 占位（那些行与 footprint 表没有并列对照）。
+        let count = match p.state {
+            scanner::ProbeState::FileTarget => match p.record_count {
+                Some(c) => c.to_string(),
+                None => "未知".to_string(),
+            },
+            scanner::ProbeState::Scanned => p.record_count.unwrap_or(0).to_string(),
+            _ => "0".to_string(),
+        };
         let extra = if p.note.is_empty() {
             String::new()
         } else {
@@ -1389,7 +1265,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         };
         println!(
             "    {mark} {:<16} {conf:<26} 会话={:<4}{bytes:<0} {root}{extra}",
-            p.display_name, p.record_count
+            p.display_name, count
         );
     }
     let flagged = probes

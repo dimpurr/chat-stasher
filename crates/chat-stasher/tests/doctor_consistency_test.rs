@@ -1,0 +1,168 @@
+//! The anti-regression test this spike exists for: `doctor` must never print
+//! two contradictory numbers for the same harness.
+//!
+//! This is deliberately **not** "the opencode test" — it loops over *every*
+//! harness that appears in both doctor tables (the footprint table and the
+//! registry probe table) and asserts the two agree on session count, and on
+//! bytes for single-file stores. If a future harness is added to both tables
+//! and someone wires its count into only one path (the bug fixed here, and
+//! before that for Gemini), this test goes red.
+//!
+//! The real opening-can-fail proof lives in the task report; mechanically this
+//! test is built so that *any* divergence between the two tables fails.
+
+use chat_stasher::doctor::{self, HarnessFootprint};
+use chat_stasher::scanner::{self, HarnessProbe};
+use rusqlite::Connection;
+use std::fs;
+use std::path::Path;
+
+/// How many sessions exist in each harness store the test plants, so the
+/// assertion is against known counts, not just "the two numbers are equal".
+const CLAUDE_SESSIONS: u64 = 2;
+const CODEX_SESSIONS: u64 = 1;
+const GEMINI_SESSIONS: u64 = 1;
+const OPENCODE_SESSIONS: u64 = 3;
+
+fn write(path: &Path, content: &str) {
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p).unwrap();
+    }
+    fs::write(path, content).unwrap();
+}
+
+/// Plant one real SQLite store (`session(id, time_created, time_updated)`)
+/// with `n` rows — the recognised opencode schema.
+fn plant_opencode_db(home: &Path) {
+    let db = home.join(".local/share/opencode/opencode.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session(id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)",
+    )
+    .unwrap();
+    for i in 0..OPENCODE_SESSIONS {
+        conn.execute(
+            "INSERT INTO session (id, time_created, time_updated) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                format!("test-{i}"),
+                1760000000000i64 + i as i64,
+                1760000000000i64
+            ],
+        )
+        .unwrap();
+    }
+    drop(conn);
+}
+
+/// Plant the other three harnesses' session files inside `home`.
+fn plant_dir_sessions(home: &Path) {
+    for i in 0..CLAUDE_SESSIONS {
+        write(
+            &home.join(format!(".claude/projects/repo-abc/019bf00d-{i:04}.jsonl")),
+            "{}\n",
+        );
+    }
+    for i in 0..CODEX_SESSIONS {
+        write(
+            &home.join(format!(".codex/sessions/2026-08-01/019bf00d-{i:04}.jsonl")),
+            "{}\n",
+        );
+    }
+    for i in 0..GEMINI_SESSIONS {
+        write(
+            &home.join(format!(".gemini/tmp/session-2026-08-16-{i:04}.json")),
+            "{}\n",
+        );
+    }
+    // A non-session JSON that the session_pattern must reject.
+    write(&home.join(".gemini/tmp/settings.json"), "{}\n");
+}
+
+/// Link a footprint table row to its registry probe-table row.
+///
+/// Footprint names are the map keys; probe ids are registry `id` values — they
+/// differ for gemini (`gemini` vs `gemini-cli`), so the join is explicit
+/// rather than guessed by string equality.
+const FOOTPRINT_TO_PROBE_ID: [(&str, &str); 4] = [
+    ("claude-code", "claude-code"),
+    ("codex", "codex"),
+    ("gemini", "gemini-cli"),
+    ("opencode", "opencode"),
+];
+
+/// The one consistency invariant shared by every harness in both tables:
+/// the two tables must never contradict on session count, and on bytes for
+/// single-file stores.
+fn assert_report_self_consistent(report: &doctor::DoctorReport) {
+    for (fp_name, probe_id) in FOOTPRINT_TO_PROBE_ID {
+        let fp: &HarnessFootprint = report
+            .footprints
+            .iter()
+            .find(|f| f.name == fp_name)
+            .unwrap_or_else(|| panic!("footprint row missing for {fp_name}"));
+        let probe: &HarnessProbe = report
+            .probes
+            .iter()
+            .find(|p| p.id == probe_id)
+            .unwrap_or_else(|| panic!("registry probe row missing for {probe_id}"));
+
+        // Session count: two identical tables must not print different numbers
+        // for the same harness. `None` (not enumerable) is consistent only
+        // with `None`; a real count must equal a real count.
+        match (fp.session_count, probe.record_count) {
+            (Some(a), Some(b)) => assert_eq!(
+                a, b,
+                "harness {fp_name} 自相矛盾: footprint 表会话 {a} vs registry 表会话 {b}"
+            ),
+            (None, None) => {}
+            (a, b) => panic!(
+                "harness {fp_name} 对会话数口径不一致: footprint={a:?} registry={b:?}（一个能枚举另一个不能，或反之）"
+            ),
+        }
+
+        // Bytes: for single-file stores both tables measure the same set
+        // (`.db` + `-wal` + `-shm`); they must agree byte for byte.
+        if matches!(probe.state, scanner::ProbeState::FileTarget) {
+            assert_eq!(
+                fp.total_bytes, probe.bytes,
+                "harness {fp_name} 字节口径不一致: footprint={} B vs registry={} B",
+                fp.total_bytes, probe.bytes
+            );
+        }
+    }
+}
+
+/// Regression: `doctor` may not show two contradictory numbers for the same
+/// harness (previously: footprint said opencode 243 / registry table said 0,
+/// because the SQLite enumeration only reached one of the two paths).
+#[test]
+fn doctor_tables_never_contradict_any_harness() {
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("HOME", home.path());
+    std::env::set_var("XDG_DATA_HOME", home.path());
+    std::env::remove_var("XDG_CONFIG_HOME");
+    std::env::remove_var("XDG_STATE_HOME");
+
+    plant_opencode_db(home.path());
+    plant_dir_sessions(home.path());
+
+    let report = doctor::run();
+    assert!(!report.scan_failed, "registry scan must have run");
+
+    // Negative self-check against known ground truth before the join asserts
+    // equality of the two tables (a test that only compares two wrong numbers
+    // to each other could go green by accident).
+    let opencode = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "opencode")
+        .unwrap();
+    assert_eq!(
+        opencode.session_count,
+        Some(OPENCODE_SESSIONS),
+        "footprint 表带着已知真值自校：应认出我们种下的 {OPENCODE_SESSIONS} 个 SQLite 会话"
+    );
+
+    assert_report_self_consistent(&report);
+}

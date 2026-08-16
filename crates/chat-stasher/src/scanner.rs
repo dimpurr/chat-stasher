@@ -31,6 +31,7 @@
 
 use crate::config::Config;
 use crate::models::{HarnessSource, SessionRecord};
+use crate::sqlite_probe::{probe_sqlite_store, SqliteSessionProbe};
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -280,9 +281,12 @@ pub struct HarnessProbe {
     pub root: Option<PathBuf>,
     pub confidence: Confidence,
     pub state: ProbeState,
-    /// Session records found at this harness's root.
-    pub record_count: u64,
-    /// For single-file stores: the file's size in bytes. 0 otherwise.
+    /// Session records found at this harness's root. `None` when this harness
+    /// cannot be enumerated at all (missing, skipped, single-file store whose
+    /// schema we do not recognise) — never a fabricated zero.
+    pub record_count: Option<u64>,
+    /// For single-file stores: the store's bytes on disk (`.db` + sidecars for
+    /// SQLite). 0 otherwise.
     pub bytes: u64,
     pub note: String,
 }
@@ -369,7 +373,7 @@ fn probe_harness(
         root: None,
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
-        record_count: 0,
+        record_count: None,
         bytes: 0,
         note: String::new(),
     };
@@ -420,14 +424,41 @@ fn probe_harness(
     // 6. Single-file stores are probed for existence; directory roots are walked.
     if is_file {
         match fs::metadata(&root) {
-            Ok(md) if md.is_file() => HarnessProbe {
-                root: Some(root),
-                confidence,
-                state: ProbeState::FileTarget,
-                bytes: md.len(),
-                note: "单文件存储（如 sqlite db），只探测存在与大小".to_string(),
-                ..base
-            },
+            Ok(md) if md.is_file() => {
+                let mut probe = HarnessProbe {
+                    root: Some(root.clone()),
+                    confidence,
+                    state: ProbeState::FileTarget,
+                    bytes: md.len(),
+                    record_count: None,
+                    note: "单文件存储，只探测存在与大小".to_string(),
+                    ..base
+                };
+                if cell.format == "sqlite" {
+                    // The registry-driven scan and the doctor footprint table
+                    // share ONE SQLite probe (`crate::sqlite_probe`), so the
+                    // same harness can never show two different counts again.
+                    let info = probe_sqlite_store(&root);
+                    probe.bytes = info.total_bytes;
+                    match info.sessions {
+                        SqliteSessionProbe::Known { count, .. } => {
+                            probe.record_count = Some(count);
+                            probe.note = format!(
+                                "SQLite 只读枚举 session 表（bytes 含 .db+-wal+-shm）；{count} 会话"
+                            );
+                        }
+                        SqliteSessionProbe::SchemaMismatch { actual } => {
+                            probe.note = format!(
+                                "检测到 SQLite 但表结构不认识（期望 session(id, time_created, time_updated)，实到 {actual}）—— 不是 0，是无法枚举"
+                            );
+                        }
+                        SqliteSessionProbe::ReadFailed { error } => {
+                            probe.note = format!("检测到 SQLite 但只读枚举失败（{error}）");
+                        }
+                    }
+                }
+                probe
+            }
             _ => {
                 report.missing_roots.push(root.clone());
                 HarnessProbe {
@@ -435,6 +466,7 @@ fn probe_harness(
                     confidence,
                     state: ProbeState::Missing,
                     bytes: 0,
+                    record_count: None,
                     note: "单文件不存在".to_string(),
                     ..base
                 }
@@ -446,6 +478,7 @@ fn probe_harness(
             root: Some(root),
             confidence,
             state: ProbeState::Missing,
+            record_count: None,
             note: "目录不存在".to_string(),
             ..base
         }
@@ -463,7 +496,7 @@ fn probe_harness(
             root: Some(root),
             confidence,
             state: ProbeState::Scanned,
-            record_count: count,
+            record_count: Some(count),
             note: if count == 0 {
                 "目录在，但没有可枚举的会话文件".to_string()
             } else {
