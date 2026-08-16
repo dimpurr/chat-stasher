@@ -18,9 +18,16 @@
 //!   * D3 — Coverage: how many harnesses exist on this machine, and whether
 //!     each is accounted for here.
 //!   * D4 — A single human sentence synthesising "so what, and when".
+//!   * D5 — How much reclaimable garbage sits in the archive repository — via
+//!     `prune_plan`, which is **read-only**: it computes the plan without
+//!     touching a single pack, and even works inside an append-only repo.
+//!     It also says why the garbage cannot be cleaned right now (append-only)
+//!     and what the safe cleanup sequence is — but never runs it.
 
 use crate::config::Config;
 use crate::scanner;
+use crate::store::{self, StoreConfig};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -621,6 +628,7 @@ pub struct DoctorReport {
     pub footprints: Vec<HarnessFootprint>,
     pub other_present: Vec<PathBuf>,
     pub risks: Vec<String>,
+    pub reclaim: ReclaimCheck,
 }
 
 /// Run every check against the real machine and assemble the report.
@@ -680,7 +688,10 @@ pub fn run() -> DoctorReport {
     // D4
     let risks = build_risks(&claude, &gemini, &footprints);
 
-    DoctorReport { claude, gemini, footprints, other_present, risks }
+    // D5
+    let reclaim = inspect_reclaim(&config);
+
+    DoctorReport { claude, gemini, footprints, other_present, risks, reclaim }
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
@@ -691,6 +702,154 @@ fn expand_tilde(p: &str) -> PathBuf {
     } else {
         PathBuf::from(p)
     }
+}
+
+// ---------------------------------------------------------------------------
+// D5 — reclaimable garbage in the archive repository (`prune_plan`, read-only)
+// ---------------------------------------------------------------------------
+
+/// Outcome of probing the archive repository for reclaimable garbage.
+///
+/// Every non-`Ok` variant is a graceful skip: `doctor` never crashes just
+/// because the repository is missing, unreadable or wrongly shaped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReclaimCheck {
+    /// No repository directory at the resolved path → nothing to plan.
+    NoRepo { repo_root: PathBuf },
+    /// Repository directory exists but the masterkey cannot be read → the
+    /// repo cannot be opened, so no plan can be computed.
+    NoKey { key_file: PathBuf, error: String },
+    /// Repository present, but opening / indexing / planning failed.
+    OpenFailed { repo_root: PathBuf, error: String },
+    /// `prune_plan` (read-only) computed and measured. Nothing was executed.
+    Ok {
+        /// Packs referenced by no index — the real, unreferenced garbage.
+        packs_unref: u64,
+        /// Bytes of the unreferenced packs.
+        size_unref: u64,
+        /// Packs a `prune` run would repack to recover wasted space.
+        packs_repack: u64,
+        /// Bytes of the packs-to-repack.
+        size_repack: u64,
+        /// `true` when the repo config seals `append_only` — the exact reason
+        /// the actual `prune` step is blocked today.
+        append_only: bool,
+    },
+}
+
+impl ReclaimCheck {
+    /// The measurement ran and produced numbers.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ReclaimCheck::Ok { .. })
+    }
+
+    /// Measured garbage exists (unreferenced packs or repack candidates).
+    pub fn has_garbage(&self) -> bool {
+        match self {
+            ReclaimCheck::Ok {
+                packs_unref,
+                size_unref,
+                packs_repack,
+                size_repack,
+                ..
+            } => *packs_unref > 0 || *size_unref > 0 || *packs_repack > 0 || *size_repack > 0,
+            _ => false,
+        }
+    }
+}
+
+/// D5 — measure the archive repo's reclaimable garbage via `prune_plan`.
+///
+/// `PrunePlan::from_prune_options` is **read-only**: it only computes what a
+/// `prune` would do and never deletes or marks anything. It succeeds even in
+/// an append-only repository — it is the *execution* (`Repository::prune`)
+/// that is blocked by `append_only` (`commands/prune.rs`, verified in the
+/// prior spikes): the garbage is measurable, just not removable while
+/// append-only holds.
+pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
+    use rustic_core::{
+        Credentials, PruneOptions, PrunePlan, Repository, RepositoryOptions,
+    };
+
+    let data_root = default_data_root();
+    let repo_root = config
+        .rustic_repo
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("repo"));
+    let key_file = config
+        .rustic_key_file
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("masterkey.json"));
+
+    // No repository configured and none at the default location → nothing to
+    // plan. This is the "no repo / no remote wired yet" skip.
+    if !repo_root.is_dir() {
+        return ReclaimCheck::NoRepo { repo_root };
+    }
+
+    let cfg = StoreConfig {
+        repo_root: repo_root.to_string_lossy().into_owned(),
+        key_file: key_file.clone(),
+        connections: 1,
+        options: BTreeMap::new(),
+    };
+
+    // The masterkey is required to decrypt the index and plan.
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => return ReclaimCheck::NoKey { key_file, error: format!("{e:#}") },
+    };
+
+    // Open + index the repository (same read-only path `push`/`read` use).
+    // Backend options are built exactly like `BackupStore::backends` (the
+    // method is private to `store`; reproduced here to keep doctor self-contained).
+    let mut opts = rustic_backend::BackendOptions::default().repository(cfg.repo_root.as_str());
+    if cfg.repo_root.starts_with("opendal:") || cfg.repo_root.starts_with("rest:") {
+        let mut options = BTreeMap::new();
+        options.insert("connections".to_string(), cfg.connections.to_string());
+        opts = opts.options(options);
+    }
+    let backends = match opts.to_backends() {
+        Ok(b) => b,
+        Err(e) => return ReclaimCheck::OpenFailed { repo_root, error: format!("{e:#}") },
+    };
+    let repo = match Repository::new(&RepositoryOptions::default(), &backends) {
+        Ok(r) => r,
+        Err(e) => return ReclaimCheck::OpenFailed { repo_root: repo_root.clone(), error: format!("{e:#}") },
+    };
+    let repo = match repo.open(&Credentials::Masterkey(mk)) {
+        Ok(r) => r,
+        Err(e) => return ReclaimCheck::OpenFailed { repo_root: repo_root.clone(), error: format!("{e:#}") },
+    };
+    let repo = match repo.to_indexed() {
+        Ok(r) => r,
+        Err(e) => return ReclaimCheck::OpenFailed { repo_root: repo_root.clone(), error: format!("{e:#}") },
+    };
+    let append_only = repo.config().append_only == Some(true);
+
+    // The meat: plan-only, read-only, allowed even under append_only.
+    let plan = match PrunePlan::from_prune_options(&repo, &PruneOptions::default()) {
+        Ok(p) => p,
+        Err(e) => return ReclaimCheck::OpenFailed { repo_root, error: format!("{e:#}") },
+    };
+    let s = &plan.stats;
+    ReclaimCheck::Ok {
+        packs_unref: s.packs_unref,
+        size_unref: s.size_unref,
+        packs_repack: s.packs.repack,
+        size_repack: s.size_sum().repack,
+        append_only,
+    }
+}
+
+/// Default data dir for the repository + key file (mirrors main.rs).
+fn default_data_root() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("chat-stasher");
+    }
+    crate::config::home_dir().join(".local").join("share").join("chat-stasher")
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +944,68 @@ pub fn print_report(r: &DoctorReport) {
     }
     for (i, risk) in r.risks.iter().enumerate() {
         println!("  {}. {risk}", i + 1);
+    }
+    println!();
+
+    // D5 — reclaimable garbage in the archive repository (prune_plan, read-only)
+    println!("D5 · 仓库里有多少可回收的垃圾？");
+    println!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
+    match &r.reclaim {
+        ReclaimCheck::NoRepo { repo_root } => {
+            println!(
+                "  （跳过）没有仓库目录：{} —— 没仓库就没有垃圾，也不用诊断。",
+                repo_root.display()
+            );
+        }
+        ReclaimCheck::NoKey { key_file, error } => {
+            println!(
+                "  （跳过）仓库目录在，但 masterkey 读不了（{}）：{error}—— \
+                 打不开就无可规划，先确认 key 文件没丢。",
+                key_file.display()
+            );
+        }
+        ReclaimCheck::OpenFailed { repo_root, error } => {
+            println!(
+                "  （跳过）仓库打不开 / 算不出计划：{} —— {error}",
+                repo_root.display()
+            );
+        }
+        ReclaimCheck::Ok {
+            packs_unref,
+            size_unref,
+            packs_repack,
+            size_repack,
+            append_only,
+        } => {
+            println!(
+                "  未被引用的 pack    : {packs_unref} 个 · {}（`packs_unref`/`size_unref`）",
+                fmt_bytes(*size_unref)
+            );
+            println!(
+                "  需要 repack 的量   : {packs_repack} 个 pack · {}（`packs.repack`/`size.repack`）",
+                fmt_bytes(*size_repack)
+            );
+            if *packs_unref > 0 || *size_unref > 0 || *packs_repack > 0 || *size_repack > 0 {
+                println!("  🔴 这些垃圾现在清不掉 —— 本仓库是 append_only（{append_only}）。");
+                println!(
+                    "     `prune`/`repair`/`rewrite --forget` 都被 append_only 挡死（源码 `commands/prune.rs`）。"
+                );
+                println!(
+                    "     要清的标准流程：临时关掉 append_only → 跑一次 `prune` → 再开回 append_only。"
+                );
+                println!(
+                    "     代价：关掉到再开回来之间，仓库失去“防误删”的保险网 —— 先备份、只在一个窗口期内操作。"
+                );
+                println!(
+                    "     doctor 是只读诊断：它只报告数字和操作步骤，绝不会替你执行 prune 或切换 append_only。"
+                );
+            } else {
+                println!("  ✅ 没有任何可回收的垃圾 —— 不用清。");
+                if *append_only {
+                    println!("     （append_only=true，即便有垃圾也只会被挡下，不会自动发生误删。）");
+                }
+            }
+        }
     }
     println!();
 }
