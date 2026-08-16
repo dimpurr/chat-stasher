@@ -203,11 +203,18 @@ pub fn ingest_with_cap(
     report.total_inbox_files = candidates.len();
 
     for path in &candidates {
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         match consume_one(&name, path, stage, machine, &consumed_dir, bucket_cap) {
             Ok(Outcome::Consumed(c)) => report.consumed.push(c),
             Ok(Outcome::Duplicate(d)) => report.duplicates.push(d),
-            Err(e) => report.errors.push(ErrorEntry { source_file: name, message: e.to_string() }),
+            Err(e) => report.errors.push(ErrorEntry {
+                source_file: name,
+                message: e.to_string(),
+            }),
         }
     }
     Ok(report)
@@ -319,7 +326,8 @@ fn write_shard_atomic(
     fs::create_dir_all(final_dir)?;
     let tmp_path = final_dir.join(format!("{seq:06}{TMP_SUFFIX}"));
 
-    let mut f = fs::File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
+    let mut f =
+        fs::File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
     for l in lines {
         f.write_all(l.as_bytes())?;
         f.write_all(b"\n")?;
@@ -327,7 +335,11 @@ fn write_shard_atomic(
     f.sync_all().context("sync temp shard")?;
     drop(f);
     fs::rename(&tmp_path, &final_path).with_context(|| {
-        format!("seal shard {} (rename {})", final_path.display(), tmp_path.display())
+        format!(
+            "seal shard {} (rename {})",
+            final_path.display(),
+            tmp_path.display()
+        )
     })?;
     fsync_dir(final_dir).ok();
     Ok(store::shard_filename(seq))
@@ -353,7 +365,8 @@ fn retire(name: &str, src: &Path, consumed_dir: &Path) -> anyhow::Result<()> {
     if dst.exists() {
         let _ = fs::remove_file(&dst);
     }
-    fs::rename(src, &dst).with_context(|| format!("retire {} -> {}", src.display(), dst.display()))?;
+    fs::rename(src, &dst)
+        .with_context(|| format!("retire {} -> {}", src.display(), dst.display()))?;
     fsync_dir(consumed_dir).ok();
     Ok(())
 }
@@ -388,8 +401,14 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
         session_id: fallback_id,
         captured_at: None,
         kind: "raw",
-        parsed: ParsedEnvelope { has_json: false, keys: Vec::new() },
-        raw: RawEnvelope { text: String::new(), bytes: 0 },
+        parsed: ParsedEnvelope {
+            has_json: false,
+            keys: Vec::new(),
+        },
+        raw: RawEnvelope {
+            text: String::new(),
+            bytes: 0,
+        },
     };
 
     let bundle: Bundle = match serde_json::from_slice(bytes) {
@@ -422,11 +441,19 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
         out.parsed.keys = v
             .get("keys")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
     }
     if let Some(v) = bundle.raw.as_ref() {
-        out.raw.text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        out.raw.text = v
+            .get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         out.raw.bytes = v
             .get("bytes")
             .and_then(|x| x.as_u64())
@@ -457,7 +484,13 @@ fn native_id_from_name(name: &str) -> String {
 fn sanitize_component(raw: &str) -> String {
     let out: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = out.trim_matches('-').to_string();
     if trimmed.is_empty() {
@@ -524,9 +557,15 @@ mod tests {
         assert_eq!(report.consumed[0].shard, "000001.jsonl");
         assert!(report.consumed[0].file_sha256.len() == 64);
 
-        assert_eq!(shard_names(&stage, "mbp-test", "deepseek.sess-a1"), vec!["000001.jsonl"]);
+        assert_eq!(
+            shard_names(&stage, "mbp-test", "deepseek.sess-a1"),
+            vec!["000001.jsonl"]
+        );
         // retired to consumed/
-        assert!(inbox.join(CONSUMED_DIR).join("deepseek-sess-a1.json").exists());
+        assert!(inbox
+            .join(CONSUMED_DIR)
+            .join("deepseek-sess-a1.json")
+            .exists());
         assert!(!inbox.join("deepseek-sess-a1.json").exists());
         drop(dir);
     }
@@ -554,7 +593,10 @@ mod tests {
         assert_eq!(r2.consumed.len(), 0, "no second shard may be produced");
         assert_eq!(r2.duplicates.len(), 1, "identical bytes recognised");
         assert_eq!(r2.duplicates[0].matched_shard, "000001.jsonl");
-        assert_eq!(shard_names(&stage, "mbp-test", "deepseek.sess-a1"), vec!["000001.jsonl"]);
+        assert_eq!(
+            shard_names(&stage, "mbp-test", "deepseek.sess-a1"),
+            vec!["000001.jsonl"]
+        );
         drop(dir);
     }
 
@@ -571,7 +613,10 @@ mod tests {
         let r = ingest(&inbox, &stage, "mbp-test").unwrap();
         assert_eq!(r.consumed.len(), 1);
         assert_eq!(r.duplicates.len(), 1);
-        assert_eq!(shard_names(&stage, "mbp-test", "deepseek.sess-a1"), vec!["000001.jsonl"]);
+        assert_eq!(
+            shard_names(&stage, "mbp-test", "deepseek.sess-a1"),
+            vec!["000001.jsonl"]
+        );
         drop(dir);
     }
 
@@ -582,7 +627,12 @@ mod tests {
         let stage = dir.path().join("stage");
         fs::create_dir_all(&inbox).unwrap();
         write_bundle(&inbox, "deepseek-sess-a1.json", "sess-a1", "hello a");
-        write_bundle(&inbox, "deepseek-sess-a1-2.json", "sess-a1", "hello a (continued)");
+        write_bundle(
+            &inbox,
+            "deepseek-sess-a1-2.json",
+            "sess-a1",
+            "hello a (continued)",
+        );
 
         let r = ingest(&inbox, &stage, "mbp-test").unwrap();
         assert_eq!(r.consumed.len(), 2);
@@ -600,14 +650,21 @@ mod tests {
         let inbox = dir.path().join("inbox");
         let stage = dir.path().join("stage");
         fs::create_dir_all(&inbox).unwrap();
-        fs::write(inbox.join("deepseek-weird-1.json"), "this is not json at all").unwrap();
+        fs::write(
+            inbox.join("deepseek-weird-1.json"),
+            "this is not json at all",
+        )
+        .unwrap();
 
         let r = ingest(&inbox, &stage, "mbp-test").unwrap();
         assert_eq!(r.errors.len(), 0, "raw-only records do not error");
         assert_eq!(r.consumed.len(), 1);
         assert_eq!(r.consumed[0].kind, "raw");
         assert_eq!(r.consumed[0].id, "deepseek.weird-1");
-        assert_eq!(shard_names(&stage, "mbp-test", "deepseek.weird-1"), vec!["000001.jsonl"]);
+        assert_eq!(
+            shard_names(&stage, "mbp-test", "deepseek.weird-1"),
+            vec!["000001.jsonl"]
+        );
         drop(dir);
     }
 
@@ -626,8 +683,14 @@ mod tests {
 
         let r = ingest(&inbox, &stage, "mbp-test").unwrap();
         assert_eq!(r.consumed.len(), 1);
-        assert_eq!(shard_names(&stage, "mbp-test", "deepseek.sess-a1"), vec!["000001.jsonl"]);
-        assert!(!session.join("000001.jsonl.tmp").exists(), "stale tmp cleaned");
+        assert_eq!(
+            shard_names(&stage, "mbp-test", "deepseek.sess-a1"),
+            vec!["000001.jsonl"]
+        );
+        assert!(
+            !session.join("000001.jsonl.tmp").exists(),
+            "stale tmp cleaned"
+        );
         drop(dir);
     }
 

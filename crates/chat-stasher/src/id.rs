@@ -33,7 +33,13 @@ pub fn normalize_machine(raw: &str) -> String {
     let dashed: String = raw
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
 
     let mut out = String::with_capacity(dashed.len());
@@ -87,7 +93,8 @@ pub fn is_uuid_like(s: &str) -> bool {
     let mut widths = Vec::new();
     for g in groups {
         let hex_ok = !g.is_empty()
-            && g.iter().all(|b| b.is_ascii_hexdigit() || b.is_ascii_lowercase());
+            && g.iter()
+                .all(|b| b.is_ascii_hexdigit() || b.is_ascii_lowercase());
         if !hex_ok {
             return false;
         }

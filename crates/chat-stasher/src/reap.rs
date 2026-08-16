@@ -71,7 +71,10 @@ pub fn reap_masters_for_host(host: &str) -> usize {
 /// Returns `None` when `ps` itself is unavailable or unreadable; otherwise a
 /// (possibly empty) de-duplicated list of sockets.
 fn masters_for_host(host: &str) -> Option<Vec<String>> {
-    let out = Command::new("ps").args(["-eo", "pid,command"]).output().ok()?;
+    let out = Command::new("ps")
+        .args(["-eo", "pid,command"])
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut socks = Vec::new();
     for line in text.lines() {
@@ -99,7 +102,9 @@ fn sockets_in_line(line: &str, host: &str) -> Vec<String> {
     if !toks.iter().any(|t| *t == "-M") {
         return Vec::new();
     }
-    let names_host = toks.iter().any(|t| *t == host || t.strip_suffix(':') == Some(host));
+    let names_host = toks
+        .iter()
+        .any(|t| *t == host || t.strip_suffix(':') == Some(host));
     if !names_host {
         return Vec::new();
     }
@@ -128,7 +133,10 @@ mod tests {
             host_of_endpoint("sftp://user@host.example.com:2222").as_deref(),
             Some("host.example.com")
         );
-        assert_eq!(host_of_endpoint("host.example.com:23").as_deref(), Some("host.example.com"));
+        assert_eq!(
+            host_of_endpoint("host.example.com:23").as_deref(),
+            Some("host.example.com")
+        );
         assert_eq!(
             host_of_endpoint("ssh://u@h.example:23/sub").as_deref(),
             Some("h.example")
@@ -143,10 +151,16 @@ mod tests {
         let line = format!(
             "  1234 ssh -E /tmp/x.log -S {sock} -M -f -N -o ControlPersist=yes -p 23 -l u000000 u000000.your-storagebox.example"
         );
-        assert_eq![sockets_in_line(&line, "u000000.your-storagebox.example"), vec![sock.to_string()]];
+        assert_eq![
+            sockets_in_line(&line, "u000000.your-storagebox.example"),
+            vec![sock.to_string()]
+        ];
         // A client (no -M) of the same host is not a master.
         let client = format!(" 5555 ssh -S /tmp/x/client -o ControlPersist=yes -p 23 -l u000000 u000000.your-storagebox.example");
-        assert_eq![sockets_in_line(&client, "u000000.your-storagebox.example"), Vec::<String>::new()];
+        assert_eq![
+            sockets_in_line(&client, "u000000.your-storagebox.example"),
+            Vec::<String>::new()
+        ];
     }
 
     #[test]

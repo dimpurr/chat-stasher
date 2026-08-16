@@ -29,11 +29,7 @@ fn make_stage(dir: &Path, machine: &str, sessions: &[(&str, u64)]) -> PathBuf {
 
 fn build_repo(dir: &Path, connections: usize) -> (StoreConfig, MasterKey, PathBuf) {
     let stage = dir.join("stage");
-    let stage = make_stage(
-        &stage,
-        "m-verify",
-        &[("s-aaa", 2), ("s-bbb", 1)],
-    );
+    let stage = make_stage(&stage, "m-verify", &[("s-aaa", 2), ("s-bbb", 1)]);
     let cfg = StoreConfig {
         repo_root: dir.join("repo").to_string_lossy().into_owned(),
         key_file: dir.join("masterkey.json"),
@@ -133,7 +129,10 @@ fn l2_and_l3_catch_a_payload_byte_flip() {
 
     // L3 must not report OK on bytes that no longer decrypt to the same shard.
     let l3 = bs.reconcile_manifest(&mk, &stage);
-    assert!(l3.is_err(), "L3 must not report OK on a corrupted data pack");
+    assert!(
+        l3.is_err(),
+        "L3 must not report OK on a corrupted data pack"
+    );
     drop(dir);
 }
 
@@ -174,6 +173,10 @@ fn l1_does_not_verify_payload_bytes_but_l2_does() {
         l1.details
     );
     let l2 = bs.check_repo(&mk, true).unwrap();
-    assert!(!l2.ok(), "L2 must catch the payload byte flip: {:?}", l2.details);
+    assert!(
+        !l2.ok(),
+        "L2 must catch the payload byte flip: {:?}",
+        l2.details
+    );
     drop(dir);
 }

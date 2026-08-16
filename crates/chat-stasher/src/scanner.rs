@@ -464,7 +464,11 @@ fn probe_harness(
             confidence,
             state: ProbeState::Scanned,
             record_count: count,
-            note: if count == 0 { "目录在，但没有可枚举的会话文件".to_string() } else { String::new() },
+            note: if count == 0 {
+                "目录在，但没有可枚举的会话文件".to_string()
+            } else {
+                String::new()
+            },
             ..base
         }
     }
@@ -502,10 +506,7 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
                 if out.ends_with('/') {
                     out.pop();
                 }
-                out = out
-                    .trim_end_matches('/')
-                    .trim_end_matches('\\')
-                    .to_string();
+                out = out.trim_end_matches('/').trim_end_matches('\\').to_string();
                 seen_placeholder = true;
                 break;
             }
@@ -573,7 +574,11 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
 /// `~/Library/App Support/Zed/threads/threads.db` → `threads.db` looks like a
 /// file (basename has a dotted extension, dirname does not).
 fn looks_like_file_path(s: &str) -> bool {
-    let comp = s.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("");
+    let comp = s
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
     comp.contains('.') && !comp.starts_with('.')
 }
 
@@ -816,11 +821,16 @@ mod tests {
         env::set_var("HOME", dir.path());
         let home_abs = dir.path().to_path_buf();
 
-        let (root, is_file) = static_prefix_root("~/Library/Application Support/Zed/threads/threads.db").unwrap();
-        assert_eq!(root, home_abs.join("Library/Application Support/Zed/threads/threads.db"));
+        let (root, is_file) =
+            static_prefix_root("~/Library/Application Support/Zed/threads/threads.db").unwrap();
+        assert_eq!(
+            root,
+            home_abs.join("Library/Application Support/Zed/threads/threads.db")
+        );
         assert!(is_file);
 
-        let (root, is_file) = static_prefix_root("~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl").unwrap();
+        let (root, is_file) =
+            static_prefix_root("~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl").unwrap();
         assert_eq!(root, home_abs.join(".claude").join("projects"));
         assert!(!is_file);
 
@@ -844,12 +854,18 @@ mod tests {
         env::set_var("XDG_DATA_HOME", data.path());
 
         let expanded = static_prefix_root("$XDG_DATA_HOME/zed/threads/threads.db").unwrap();
-        assert_eq!(expanded.0, data.path().join("zed").join("threads/threads.db"));
+        assert_eq!(
+            expanded.0,
+            data.path().join("zed").join("threads/threads.db")
+        );
         assert!(expanded.1);
 
         env::remove_var("XDG_DATA_HOME");
         let (root, _) = static_prefix_root("$XDG_DATA_HOME/zed/threads/threads.db").unwrap();
-        assert_eq!(root, home.path().join(".local/share/zed/threads/threads.db"));
+        assert_eq!(
+            root,
+            home.path().join(".local/share/zed/threads/threads.db")
+        );
     }
 
     #[test]
@@ -866,9 +882,15 @@ mod tests {
     fn confidence_classification_and_skip_rules() {
         assert_eq!(Confidence::classify("源码确认"), Confidence::Confirmed);
         assert_eq!(Confidence::classify("官方文档"), Confidence::OfficialDocs);
-        assert_eq!(Confidence::classify("仅社区说法未核实"), Confidence::CommunityClaim);
+        assert_eq!(
+            Confidence::classify("仅社区说法未核实"),
+            Confidence::CommunityClaim
+        );
         assert_eq!(Confidence::classify("未查明"), Confidence::Unascertained);
-        assert_eq!(Confidence::classify("某未知措辞"), Confidence::Unascertained);
+        assert_eq!(
+            Confidence::classify("某未知措辞"),
+            Confidence::Unascertained
+        );
 
         assert!(!Confidence::Unascertained.scan_allowed());
         assert!(Confidence::Confirmed.scan_allowed());
@@ -906,9 +928,14 @@ mod tests {
 
     #[test]
     fn registry_missing_file_errors_loudly() {
-        let p = tempfile::TempDir::new().unwrap().path().join("does-not-exist.json");
+        let p = tempfile::TempDir::new()
+            .unwrap()
+            .path()
+            .join("does-not-exist.json");
         let err = load_registry(&p).unwrap_err();
-        assert!(err.to_string().contains("harness-registry") || err.kind() == io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("harness-registry") || err.kind() == io::ErrorKind::NotFound
+        );
     }
 
     #[test]
@@ -918,27 +945,24 @@ mod tests {
                 "019bf00d-97b6-7eb2-9bf8-eacbacc09765.jsonl",
                 "jsonl / jsonl.zst",
             ),
-            Some((
-                "019bf00d-97b6-7eb2-9bf8-eacbacc09765".to_string(),
-                false
-            ))
+            Some(("019bf00d-97b6-7eb2-9bf8-eacbacc09765".to_string(), false))
         );
         assert_eq!(
             strip_format_suffix(
                 "019bf00d-97b6-7eb2-9bf8-eacbacc09765.jsonl.zst",
                 "jsonl / jsonl.zst",
             ),
-            Some((
-                "019bf00d-97b6-7eb2-9bf8-eacbacc09765".to_string(),
-                true
-            ))
+            Some(("019bf00d-97b6-7eb2-9bf8-eacbacc09765".to_string(), true))
         );
         assert_eq!(strip_format_suffix("notes.txt", "jsonl"), None);
     }
 
     #[test]
     fn session_pattern_separates_json_from_config_names() {
-        assert!(matches_session_pattern("session-2026-01-id.json", Some("session-*")));
+        assert!(matches_session_pattern(
+            "session-2026-01-id.json",
+            Some("session-*")
+        ));
         assert!(!matches_session_pattern("settings.json", Some("session-*")));
         assert!(!matches_session_pattern("state.json", Some("session-*")));
         assert!(!matches_session_pattern("config.json", Some("session-*")));

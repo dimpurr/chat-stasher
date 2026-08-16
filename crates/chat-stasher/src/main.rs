@@ -1,12 +1,12 @@
 //! chat-stasher CLI entry point.
 
-use clap::{Parser, Subcommand};
 use chat_stasher::config::{self, Config};
 use chat_stasher::reap;
 use chat_stasher::scanner;
 use chat_stasher::seal;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
+use clap::{Parser, Subcommand};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -98,40 +98,40 @@ enum Command {
         #[arg(long)]
         no_reap: bool,
     },
-/// Diagnostic: does any harness on this machine silently delete its
-/// sessions? Read-only (paths/counts/bytes/timestamps only).
-Doctor,
-/// Prove the archive is intact. Three independently runnable levels:
-/// l1 = rustic structure check (cheap, no payload reads), l2 = rustic content
-/// check (downloads and re-hashes every pack), l3 = reconcile against an
-/// expected manifest derived from the sealed staging tree (per session:
-/// shard count / concatenated bytes / concatenated sha256).
-Verify {
-    /// Which level(s) to run: `l1`, `l2`, `l3` or `all`.
-    #[arg(long, default_value = "all")]
-    level: VerifyLevel,
-    /// Stage directory holding the sealed shard tree (required by l3 / all).
-    #[arg(long)]
-    stage: Option<PathBuf>,
-    /// Machine partition (default: this machine's normalised hostname).
-    #[arg(long)]
-    machine: Option<String>,
-    /// Repository path override.
-    #[arg(long)]
-    repo: Option<String>,
-    /// Masterkey file override.
-    #[arg(long)]
-    key_file: Option<String>,
-    /// Concurrency cap override.
-    #[arg(long)]
-    connections: Option<usize>,
-    /// Backend option `key=value`, repeatable.
-    #[arg(long = "option")]
-    options: Vec<String>,
-    /// Disable ssh connection reaping after this run (for troubleshooting).
-    #[arg(long)]
-    no_reap: bool,
-},
+    /// Diagnostic: does any harness on this machine silently delete its
+    /// sessions? Read-only (paths/counts/bytes/timestamps only).
+    Doctor,
+    /// Prove the archive is intact. Three independently runnable levels:
+    /// l1 = rustic structure check (cheap, no payload reads), l2 = rustic content
+    /// check (downloads and re-hashes every pack), l3 = reconcile against an
+    /// expected manifest derived from the sealed staging tree (per session:
+    /// shard count / concatenated bytes / concatenated sha256).
+    Verify {
+        /// Which level(s) to run: `l1`, `l2`, `l3` or `all`.
+        #[arg(long, default_value = "all")]
+        level: VerifyLevel,
+        /// Stage directory holding the sealed shard tree (required by l3 / all).
+        #[arg(long)]
+        stage: Option<PathBuf>,
+        /// Machine partition (default: this machine's normalised hostname).
+        #[arg(long)]
+        machine: Option<String>,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Disable ssh connection reaping after this run (for troubleshooting).
+        #[arg(long)]
+        no_reap: bool,
+    },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -201,49 +201,86 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init => cmd_init(),
-        Command::Push { stage, repo, key_file, machine, connections, options, no_reap } => {
-            cmd_push(&stage, repo, key_file, machine, connections, &options, no_reap)
-        }
+        Command::Push {
+            stage,
+            repo,
+            key_file,
+            machine,
+            connections,
+            options,
+            no_reap,
+        } => cmd_push(
+            &stage,
+            repo,
+            key_file,
+            machine,
+            connections,
+            &options,
+            no_reap,
+        ),
         Command::Status => cmd_status(),
-        Command::Read { stage, session, all_machines, machine, repo, key_file, connections, options, no_reap } => {
-            cmd_read(
-                &stage,
-                &session,
-                all_machines,
-                machine.as_deref(),
-                repo,
-                key_file,
-                connections,
-                &options,
-                no_reap,
-            )
-        }
+        Command::Read {
+            stage,
+            session,
+            all_machines,
+            machine,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_read(
+            &stage,
+            &session,
+            all_machines,
+            machine.as_deref(),
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
+        ),
         Command::Doctor => cmd_doctor(),
-        Command::Verify { level, stage, machine, repo, key_file, connections, options, no_reap } => {
-            cmd_verify(
-                level,
-                &stage,
-                machine.as_deref(),
-                repo,
-                key_file,
-                connections,
-                &options,
-                no_reap,
-            )
-        }
-        Command::Ingest { inbox, stage, machine, shard_bucket_cap } => {
-            cmd_ingest(&inbox, &stage, machine.as_deref(), shard_bucket_cap)
-        }
-        Command::Seal { harness, active, stage, machine, session, shard_bucket_cap } => {
-            cmd_seal(
-                &harness,
-                &active,
-                &stage,
-                machine.as_deref(),
-                session.as_deref(),
-                shard_bucket_cap,
-            )
-        }
+        Command::Verify {
+            level,
+            stage,
+            machine,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_verify(
+            level,
+            &stage,
+            machine.as_deref(),
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
+        ),
+        Command::Ingest {
+            inbox,
+            stage,
+            machine,
+            shard_bucket_cap,
+        } => cmd_ingest(&inbox, &stage, machine.as_deref(), shard_bucket_cap),
+        Command::Seal {
+            harness,
+            active,
+            stage,
+            machine,
+            session,
+            shard_bucket_cap,
+        } => cmd_seal(
+            &harness,
+            &active,
+            &stage,
+            machine.as_deref(),
+            session.as_deref(),
+            shard_bucket_cap,
+        ),
     }
 }
 
@@ -259,19 +296,17 @@ fn cmd_ingest(
     machine: Option<&str>,
     shard_bucket_cap: usize,
 ) -> ExitCode {
-    let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
-    let report = match chat_stasher::inbox::ingest_with_cap(
-        inbox,
-        stage,
-        &machine,
-        shard_bucket_cap,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("ingest: {e:#}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let machine = machine
+        .map(String::from)
+        .unwrap_or_else(chat_stasher::id::machine_id);
+    let report =
+        match chat_stasher::inbox::ingest_with_cap(inbox, stage, &machine, shard_bucket_cap) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("ingest: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        };
     println!("[ingest] shard bucket cap : {shard_bucket_cap}");
     print_ingest(&report, &machine);
     ExitCode::SUCCESS
@@ -305,9 +340,16 @@ fn cmd_seal(
     };
     let policy = seal::SealPolicy::classify(&h.seal_policy);
     println!("[seal] harness        : {} ({})", h.id, h.display_name);
-    println!("[seal] policy         : {} (raw `{}`)", policy.label(), h.seal_policy);
+    println!(
+        "[seal] policy         : {} (raw `{}`)",
+        policy.label(),
+        h.seal_policy
+    );
     let Some(cell) = h.paths.cell_for(scanner::current_platform()) else {
-        println!("[seal] REFUSED: no `{}` registry cell -> no rename (default)", scanner::current_platform());
+        println!(
+            "[seal] REFUSED: no `{}` registry cell -> no rename (default)",
+            scanner::current_platform()
+        );
         return ExitCode::FAILURE;
     };
     if !seal::seal_allowed(h, cell) {
@@ -324,7 +366,9 @@ fn cmd_seal(
         println!("[seal] active untouched : {}", active.display());
         return ExitCode::FAILURE;
     }
-    let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = machine
+        .map(String::from)
+        .unwrap_or_else(chat_stasher::id::machine_id);
     let session = session
         .map(String::from)
         .or_else(|| active.file_stem().map(|s| s.to_string_lossy().into_owned()))
@@ -340,7 +384,9 @@ fn cmd_seal(
                 store::shard_bucket_name(seq, shard_bucket_cap),
                 store::shard_filename(seq),
             );
-            println!("[seal] original path now free: a reopen-by-path harness starts its new tail there");
+            println!(
+                "[seal] original path now free: a reopen-by-path harness starts its new tail there"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -353,8 +399,10 @@ fn cmd_seal(
 /// Metadata-only ingest summary: counts, paths, shard names, bytes, sha256.
 /// Never prints any session content.
 fn print_ingest(report: &chat_stasher::inbox::IngestReport, machine: &str) {
-    println!("[ingest] inbox            : candidates={} skipped_{}={}",
-        report.total_inbox_files, "part", report.part_files_seen);
+    println!(
+        "[ingest] inbox            : candidates={} skipped_{}={}",
+        report.total_inbox_files, "part", report.part_files_seen
+    );
     println!("[ingest] consumed         : {}", report.consumed.len());
     for c in &report.consumed {
         println!(
@@ -387,7 +435,10 @@ fn data_root() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(xdg).join("chat-stasher");
     }
-    config::home_dir().join(".local").join("share").join("chat-stasher")
+    config::home_dir()
+        .join(".local")
+        .join("share")
+        .join("chat-stasher")
 }
 
 fn store_config_from(
@@ -480,8 +531,15 @@ fn cmd_push(
     println!("[push] machine        : {machine}");
     println!("[push] repo           : {}", store.cfg.repo_root);
     println!("[push] key file       : {}", store.cfg.key_file.display());
-    println!("[push] connections    : {} (cap {})", store.cfg.connections, store::DEFAULT_CONNECTIONS);
-    println!("[push] reap           : {}", if no_reap { "OFF (--no-reap)" } else { "ON" });
+    println!(
+        "[push] connections    : {} (cap {})",
+        store.cfg.connections,
+        store::DEFAULT_CONNECTIONS
+    );
+    println!(
+        "[push] reap           : {}",
+        if no_reap { "OFF (--no-reap)" } else { "ON" }
+    );
     let summary = match store.push(stage, &mk) {
         Ok(s) => s,
         Err(e) => {
@@ -493,8 +551,16 @@ fn cmd_push(
     let was_init = summary.repo_was_init;
     println!(
         "[push] {} {}",
-        if was_init { "INIT (new repository created)" } else { "OPEN (existing repository)" },
-        if key_was_new { "· masterkey created+persisted" } else { "· masterkey loaded" },
+        if was_init {
+            "INIT (new repository created)"
+        } else {
+            "OPEN (existing repository)"
+        },
+        if key_was_new {
+            "· masterkey created+persisted"
+        } else {
+            "· masterkey loaded"
+        },
     );
     println!(
         "[push] summary: files_new={} files_changed={} files_unmodified={} data_blobs={} data_added={} data_added_packed={}",
@@ -505,7 +571,10 @@ fn cmd_push(
         summary.data_added,
         summary.data_added_packed,
     );
-    println!("[push] snapshot host  : {} (must equal machine)", summary.snapshot_host);
+    println!(
+        "[push] snapshot host  : {} (must equal machine)",
+        summary.snapshot_host
+    );
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
     reap_remote(&cfg, no_reap);
     ExitCode::SUCCESS
@@ -523,7 +592,9 @@ fn cmd_read(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = machine
+        .map(String::from)
+        .unwrap_or_else(chat_stasher::id::machine_id);
     let cfg = store_config_from(&config, repo, key_file, connections, options);
     let store = BackupStore::new(cfg.clone(), machine.clone());
     let mk = match store::load_key_file(&cfg) {
@@ -556,7 +627,10 @@ fn cmd_read(
         };
         println!("[read] machine        : {machine}");
         println!("[read] repo           : {}", store.cfg.repo_root);
-        println!("[read] reap           : {}", if no_reap { "OFF (--no-reap)" } else { "ON" });
+        println!(
+            "[read] reap           : {}",
+            if no_reap { "OFF (--no-reap)" } else { "ON" }
+        );
         let (bytez, hashes) = match store.read_session_readback(stage, session, &mk) {
             Ok(v) => v,
             Err(e) => {
@@ -576,7 +650,8 @@ fn cmd_read(
         );
         println!(
             "[read] expected src    : sha256={}",
-            store::expected_concat_sha(stage, &machine, session).unwrap_or_else(|e| format!("<ein> {e}"))
+            store::expected_concat_sha(stage, &machine, session)
+                .unwrap_or_else(|e| format!("<ein> {e}"))
         );
         ExitCode::SUCCESS
     };
@@ -638,7 +713,9 @@ fn cmd_verify(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = machine
+        .map(String::from)
+        .unwrap_or_else(chat_stasher::id::machine_id);
     let cfg = store_config_from(&config, repo, key_file, connections, options);
     let store = BackupStore::new(cfg.clone(), machine.clone());
     let mk = match store::load_key_file(&cfg) {
@@ -662,7 +739,10 @@ fn cmd_verify(
 
     println!("[verify] repo           : {}", store.cfg.repo_root);
     println!("[verify] machine        : {machine}");
-    println!("[verify] reap           : {}", if no_reap { "OFF (--no-reap)" } else { "ON" });
+    println!(
+        "[verify] reap           : {}",
+        if no_reap { "OFF (--no-reap)" } else { "ON" }
+    );
 
     let mut failed = 0usize;
     match level {
@@ -706,7 +786,11 @@ fn run_check(store: &BackupStore, mk: &MasterKey, data: bool, name: &str, failed
 }
 
 fn print_check_summary(s: &CheckSummary, name: &str) {
-    let kind = if s.read_data { "read_data=true" } else { "read_data=false" };
+    let kind = if s.read_data {
+        "read_data=true"
+    } else {
+        "read_data=false"
+    };
     println!(
         "[verify] {name:<16} ok={:<5} findings={:<3} errors={:<3} warns={:<3} ({kind}) took {:?}",
         s.ok(),
@@ -743,7 +827,11 @@ fn print_reconcile(r: &ReconcileReport) {
         r.duration
     );
     for row in &r.rows {
-        let mark = if row.outcome == SessionOutcome::Match { "ok " } else { "!! " };
+        let mark = if row.outcome == SessionOutcome::Match {
+            "ok "
+        } else {
+            "!! "
+        };
         match &row.outcome {
             SessionOutcome::Match => println!(
                 "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}",
@@ -826,7 +914,11 @@ fn print_status(report: &scanner::ScanReport) {
     for (src, n) in &per_source {
         println!("  {src:<22} sessions : {n}");
     }
-    println!("  total                : {}  ({} compressed)", report.records.len(), compressed);
+    println!(
+        "  total                : {}  ({} compressed)",
+        report.records.len(),
+        compressed
+    );
     for miss in &report.missing_roots {
         println!("  (missing root, skipped: {})", miss.display());
     }
@@ -837,7 +929,10 @@ fn print_status(report: &scanner::ScanReport) {
         return;
     }
 
-    println!("  {:<14} {:>12} {:>14}  {:<3}  {}", "source", "bytes", "mtime(sec)", "zst", "id");
+    println!(
+        "  {:<14} {:>12} {:>14}  {:<3}  {}",
+        "source", "bytes", "mtime(sec)", "zst", "id"
+    );
     for rec in &report.records {
         let secs = rec
             .mtime

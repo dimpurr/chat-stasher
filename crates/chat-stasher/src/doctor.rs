@@ -119,7 +119,10 @@ fn classify_layer(path: &Path, raw: &str) -> ClaudeRetention {
             path: path.to_path_buf(),
             error: format!("{e}"),
         },
-        Ok(v) => match v.get("cleanupPeriodDays").and_then(serde_json::Value::as_u64) {
+        Ok(v) => match v
+            .get("cleanupPeriodDays")
+            .and_then(serde_json::Value::as_u64)
+        {
             Some(days) if days >= CLEANUP_SAFE_DAYS => ClaudeRetention::Safe {
                 days,
                 source: path.to_path_buf(),
@@ -179,13 +182,18 @@ pub fn inspect_claude_settings(home: &Path) -> ClaudeCheck {
         results
             .iter()
             .find_map(|(_, v)| match v {
-                ClaudeRetention::Safe { .. } | ClaudeRetention::SmallValue { .. } => Some(v.clone()),
+                ClaudeRetention::Safe { .. } | ClaudeRetention::SmallValue { .. } => {
+                    Some(v.clone())
+                }
                 _ => None,
             })
             .unwrap_or(ClaudeRetention::UnsetDefault)
     };
 
-    ClaudeCheck { layers: results, verdict }
+    ClaudeCheck {
+        layers: results,
+        verdict,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +258,10 @@ pub fn inspect_gemini_settings(home: &Path) -> GeminiRetention {
         let Some(sr) = v.get("sessionRetention") else {
             continue;
         };
-        enabled = sr.get("enabled").and_then(serde_json::Value::as_bool).or(enabled);
+        enabled = sr
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .or(enabled);
         max_age = sr
             .get("maxAge")
             .and_then(serde_json::Value::as_str)
@@ -336,7 +347,11 @@ pub fn coverage_from_records<'a>(
         name: name.to_string(),
         root,
         installed,
-        session_count: if installed { Some(recs.len() as u64) } else { None },
+        session_count: if installed {
+            Some(recs.len() as u64)
+        } else {
+            None
+        },
         total_bytes,
         earliest,
         latest,
@@ -409,7 +424,9 @@ fn gemini_footprint(home: &Path) -> HarnessFootprint {
     let mut latest: Option<SystemTime> = None;
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
@@ -538,36 +555,39 @@ fn build_risks(
         );
     } else {
         match &claude.verdict {
-        ClaudeRetention::UnsetDefault => {
-            let earliest = claude_fp.earliest.map(format_date).unwrap_or_else(|| "n/a".to_string());
-            let days_old = claude_fp.earliest.map(days_since).unwrap_or(0.0);
-            risks.push(format!(
+            ClaudeRetention::UnsetDefault => {
+                let earliest = claude_fp
+                    .earliest
+                    .map(format_date)
+                    .unwrap_or_else(|| "n/a".to_string());
+                let days_old = claude_fp.earliest.map(days_since).unwrap_or(0.0);
+                risks.push(format!(
                 "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。你最早的会话是 {earliest}（约 {days_old:.0} 天前，今天 {today}）。\
                  \n    —— 下一次清理触发时会删掉早于 30 天的第一批；你的历史只还剩约 {days_old:.0} 天。"
             ));
-        }
-        ClaudeRetention::Safe { days, source } => {
-            risks.push(format!(
+            }
+            ClaudeRetention::Safe { days, source } => {
+                risks.push(format!(
                 "🟡 Claude Code: cleanupPeriodDays = {days} 天（已设大值，来源 {}）→ 本机历史不至于被轮换。\
                  \n    —— 但这是 fail-destructive：任何一次 settings.json 解析失败都会静默退回 30 天并开始删；`.last-cleanup` 时间戳存在即说明清理兼职曾运行。",
                 source.display()
             ));
-        }
-        ClaudeRetention::SmallValue { days, source } => {
-            risks.push(format!(
+            }
+            ClaudeRetention::SmallValue { days, source } => {
+                risks.push(format!(
                 "🔴 Claude Code: cleanupPeriodDays = {days} 天（来源 {}）→ 低于安全阈值，仍在轮换。\
                  \n    —— 下一次清理触发时会删掉早于 {days} 天的第一批。",
                 source.display()
             ));
-        }
-        ClaudeRetention::ParseFailed { path, error } => {
-            risks.push(format!(
+            }
+            ClaudeRetention::ParseFailed { path, error } => {
+                risks.push(format!(
                 "🔴🔴 Claude Code: settings 解析失败—— 这就是 fail-destructive bug 的触发条件本身：\
                  \n    —— 无论你配置过什么，现在都已静默退回 30 天开始计算删除。文件 {}：{error}",
                 path.display()
             ));
+            }
         }
-    }
     }
 
     // --- Gemini -----------------------------------------------------------
@@ -681,7 +701,9 @@ pub fn run() -> DoctorReport {
     footprints.push(coverage_from_records(
         "claude-code",
         claude_root,
-        scan.records.iter().filter(|r| r.source == crate::models::HarnessSource::ClaudeCode),
+        scan.records
+            .iter()
+            .filter(|r| r.source == crate::models::HarnessSource::ClaudeCode),
     ));
 
     let codex_root = config
@@ -692,7 +714,9 @@ pub fn run() -> DoctorReport {
     footprints.push(coverage_from_records(
         "codex",
         codex_root,
-        scan.records.iter().filter(|r| r.source == crate::models::HarnessSource::Codex),
+        scan.records
+            .iter()
+            .filter(|r| r.source == crate::models::HarnessSource::Codex),
     ));
 
     footprints.push(gemini_footprint(&home));
@@ -711,7 +735,16 @@ pub fn run() -> DoctorReport {
     let reclaim = inspect_reclaim(&config);
 
     let probes = scan.probes;
-    DoctorReport { claude, gemini, footprints, other_present, risks, reclaim, probes, scan_failed }
+    DoctorReport {
+        claude,
+        gemini,
+        footprints,
+        other_present,
+        risks,
+        reclaim,
+        probes,
+        scan_failed,
+    }
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
@@ -787,9 +820,7 @@ impl ReclaimCheck {
 /// prior spikes): the garbage is measurable, just not removable while
 /// append-only holds.
 pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
-    use rustic_core::{
-        Credentials, PruneOptions, PrunePlan, Repository, RepositoryOptions,
-    };
+    use rustic_core::{Credentials, PruneOptions, PrunePlan, Repository, RepositoryOptions};
 
     let data_root = default_data_root();
     let repo_root = config
@@ -819,7 +850,12 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
     // The masterkey is required to decrypt the index and plan.
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
-        Err(e) => return ReclaimCheck::NoKey { key_file, error: format!("{e:#}") },
+        Err(e) => {
+            return ReclaimCheck::NoKey {
+                key_file,
+                error: format!("{e:#}"),
+            }
+        }
     };
 
     // Open + index the repository (same read-only path `push`/`read` use).
@@ -833,26 +869,51 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
     }
     let backends = match opts.to_backends() {
         Ok(b) => b,
-        Err(e) => return ReclaimCheck::OpenFailed { repo_root, error: format!("{e:#}") },
+        Err(e) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root,
+                error: format!("{e:#}"),
+            }
+        }
     };
     let repo = match Repository::new(&RepositoryOptions::default(), &backends) {
         Ok(r) => r,
-        Err(e) => return ReclaimCheck::OpenFailed { repo_root: repo_root.clone(), error: format!("{e:#}") },
+        Err(e) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root: repo_root.clone(),
+                error: format!("{e:#}"),
+            }
+        }
     };
     let repo = match repo.open(&Credentials::Masterkey(mk)) {
         Ok(r) => r,
-        Err(e) => return ReclaimCheck::OpenFailed { repo_root: repo_root.clone(), error: format!("{e:#}") },
+        Err(e) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root: repo_root.clone(),
+                error: format!("{e:#}"),
+            }
+        }
     };
     let repo = match repo.to_indexed() {
         Ok(r) => r,
-        Err(e) => return ReclaimCheck::OpenFailed { repo_root: repo_root.clone(), error: format!("{e:#}") },
+        Err(e) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root: repo_root.clone(),
+                error: format!("{e:#}"),
+            }
+        }
     };
     let append_only = repo.config().append_only == Some(true);
 
     // The meat: plan-only, read-only, allowed even under append_only.
     let plan = match PrunePlan::from_prune_options(&repo, &PruneOptions::default()) {
         Ok(p) => p,
-        Err(e) => return ReclaimCheck::OpenFailed { repo_root, error: format!("{e:#}") },
+        Err(e) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root,
+                error: format!("{e:#}"),
+            }
+        }
     };
     let s = &plan.stats;
     ReclaimCheck::Ok {
@@ -869,7 +930,10 @@ fn default_data_root() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(xdg).join("chat-stasher");
     }
-    crate::config::home_dir().join(".local").join("share").join("chat-stasher")
+    crate::config::home_dir()
+        .join(".local")
+        .join("share")
+        .join("chat-stasher")
 }
 
 // ---------------------------------------------------------------------------
@@ -889,12 +953,16 @@ pub fn print_report(r: &DoctorReport) {
         r.claude.verdict.label(),
         match &r.claude.verdict {
             ClaudeRetention::UnsetDefault => "未设置 → 默认 30 天 = 危险".to_string(),
-            ClaudeRetention::Safe { .. } => "已设大值，安全，但见 D4 的 fail-destructive 提醒".to_string(),
+            ClaudeRetention::Safe { .. } =>
+                "已设大值，安全，但见 D4 的 fail-destructive 提醒".to_string(),
             ClaudeRetention::SmallValue { days, .. } => {
                 format!("已显式设置 {days} 天，低于安全阈值 = 仍在轮换")
             }
             ClaudeRetention::ParseFailed { path, error } => {
-                format!("🔴 文件在但解析失败（这是 fail-destructive 的触发条件）：{} — {error}", path.display())
+                format!(
+                    "🔴 文件在但解析失败（这是 fail-destructive 的触发条件）：{} — {error}",
+                    path.display()
+                )
             }
         }
     );
@@ -925,9 +993,7 @@ pub fn print_report(r: &DoctorReport) {
         println!(
             "    拒绝用硬编码路径假装扫全（stderr 上方已有 “Refusing to scan with hardcoded roots”）。"
         );
-        println!(
-            "    仅列出与本 registry 无关、来自独立只读探测的条目：",
-        );
+        println!("    仅列出与本 registry 无关、来自独立只读探测的条目：",);
         for f in &r.footprints {
             if f.name != "gemini" && f.name != "opencode" {
                 continue;
@@ -936,8 +1002,14 @@ pub fn print_report(r: &DoctorReport) {
                 println!("  {:<10} 未安装（{}）", f.name, f.root.display());
                 continue;
             }
-            let count = f.session_count.map(|c| c.to_string()).unwrap_or_else(|| "N/A".to_string());
-            let earliest = f.earliest.map(format_date).unwrap_or_else(|| "-".to_string());
+            let count = f
+                .session_count
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            let earliest = f
+                .earliest
+                .map(format_date)
+                .unwrap_or_else(|| "-".to_string());
             let latest = f.latest.map(format_date).unwrap_or_else(|| "-".to_string());
             println!(
                 "  {:<10} 会话 {:<6} · {} · 最早 {earliest} · 最晚 {latest}",
@@ -962,21 +1034,26 @@ pub fn print_report(r: &DoctorReport) {
         return;
     }
 
-    let (known, installed) = (r.probes.len(), r.probes.iter().filter(|p| p.installed_p()).count());
+    let (known, installed) = (
+        r.probes.len(),
+        r.probes.iter().filter(|p| p.installed_p()).count(),
+    );
     println!(
         "D3 · 覆盖率 —— 本机 {installed}/{known} 个已知 harness 命中（registry v1 驱动）；轮转分析对象如下：",
     );
     for f in &r.footprints {
         if !f.installed {
-            println!(
-                "  {:<10} 未安装（{}）",
-                f.name,
-                f.root.display()
-            );
+            println!("  {:<10} 未安装（{}）", f.name, f.root.display());
             continue;
         }
-        let count = f.session_count.map(|c| c.to_string()).unwrap_or_else(|| "N/A".to_string());
-        let earliest = f.earliest.map(format_date).unwrap_or_else(|| "-".to_string());
+        let count = f
+            .session_count
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let earliest = f
+            .earliest
+            .map(format_date)
+            .unwrap_or_else(|| "-".to_string());
         let latest = f.latest.map(format_date).unwrap_or_else(|| "-".to_string());
         println!(
             "  {:<10} 会话 {:<6} · {} · 最早 {earliest} · 最晚 {latest}",
@@ -994,7 +1071,10 @@ pub fn print_report(r: &DoctorReport) {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        println!("  已装但不在本命令范围（仅探测，不分析轮转）：{}", others.join(", "));
+        println!(
+            "  已装但不在本命令范围（仅探测，不分析轮转）：{}",
+            others.join(", ")
+        );
     }
     print_probes(&r.probes);
     println!();
@@ -1073,16 +1153,16 @@ fn print_reclaim(r: &ReclaimCheck) {
                 println!(
                     "     ⚠️ 这要求临时关掉 append_only —— 那是你的安全设置：关掉到再开回之间仓库失去“防误删”的保险网，"
                 );
-                println!(
-                    "        只在这个窗口期内操作、先做一次备份，操作完立刻开回。"
-                );
+                println!("        只在这个窗口期内操作、先做一次备份，操作完立刻开回。");
                 println!(
                     "     doctor 是只读诊断：它只报告数字和操作步骤，绝不会替你执行 prune 或切换 append_only。"
                 );
             } else {
                 println!("  ✅ 没有任何可回收的垃圾 —— 不用清。");
                 if *append_only {
-                    println!("     （append_only=true，即便有垃圾也只会被挡下，不会自动发生误删。）");
+                    println!(
+                        "     （append_only=true，即便有垃圾也只会被挡下，不会自动发生误删。）"
+                    );
                 }
             }
         }
@@ -1175,7 +1255,10 @@ mod tests {
         let check = inspect_claude_settings(dir.path());
         assert_eq!(
             check.verdict,
-            ClaudeRetention::Safe { days: 99999, source: dir.path().join(".claude/settings.json") }
+            ClaudeRetention::Safe {
+                days: 99999,
+                source: dir.path().join(".claude/settings.json")
+            }
         );
         assert!(!check.verdict.is_dangerous());
     }
@@ -1193,7 +1276,10 @@ mod tests {
     #[test]
     fn claude_broken_json_is_parse_failed() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir.path().join(".claude/settings.json"), r#"{ "cleanupPeriodDays": 99999, "#);
+        write(
+            &dir.path().join(".claude/settings.json"),
+            r#"{ "cleanupPeriodDays": 99999, "#,
+        );
         let check = inspect_claude_settings(dir.path());
         assert!(matches!(check.verdict, ClaudeRetention::ParseFailed { .. }));
         assert!(check.verdict.is_dangerous());
@@ -1204,8 +1290,14 @@ mod tests {
     #[test]
     fn broken_json_outranks_valid_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir.path().join(".claude/settings.json"), r#"{ "cleanupPeriodDays": 99999, "#);
-        write(&dir.path().join(".claude/settings.local.json"), r#"{ "cleanupPeriodDays": 99999 }"#);
+        write(
+            &dir.path().join(".claude/settings.json"),
+            r#"{ "cleanupPeriodDays": 99999, "#,
+        );
+        write(
+            &dir.path().join(".claude/settings.local.json"),
+            r#"{ "cleanupPeriodDays": 99999 }"#,
+        );
         let check = inspect_claude_settings(dir.path());
         assert!(matches!(check.verdict, ClaudeRetention::ParseFailed { .. }));
     }
@@ -1214,7 +1306,10 @@ mod tests {
     #[test]
     fn gemini_unset_retention_is_default_dangerous() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir.path().join(".gemini/config.json"), r#"{ "model": "gemini-3.1-pro-preview" }"#);
+        write(
+            &dir.path().join(".gemini/config.json"),
+            r#"{ "model": "gemini-3.1-pro-preview" }"#,
+        );
         let r = inspect_gemini_settings(dir.path());
         assert!(r.enabled);
         assert_eq!(r.max_age, "30d");

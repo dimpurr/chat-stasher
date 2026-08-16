@@ -125,7 +125,10 @@ impl ReconcileReport {
     }
 
     pub fn failed(&self) -> usize {
-        self.rows.iter().filter(|r| r.outcome != SessionOutcome::Match).count()
+        self.rows
+            .iter()
+            .filter(|r| r.outcome != SessionOutcome::Match)
+            .count()
     }
 }
 
@@ -218,7 +221,10 @@ impl BackupStore {
                 outcome,
                 observed_shards: obs_map.get(&key).map(|o| o.shard_count).unwrap_or(0),
                 observed_bytes: obs_map.get(&key).map(|o| o.concat_bytes).unwrap_or(0),
-                observed_sha: obs_map.get(&key).map(|o| o.sha256.clone()).unwrap_or_default(),
+                observed_sha: obs_map
+                    .get(&key)
+                    .map(|o| o.sha256.clone())
+                    .unwrap_or_default(),
             });
         }
 

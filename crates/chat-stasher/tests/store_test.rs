@@ -36,11 +36,12 @@ fn sealed_shards_roundtrip_in_partitioned_layout() {
         store::session_shard_dir(stage, machine, session),
         stage.join("sessions").join(machine).join(session)
     );
-    let mut names: Vec<_> = store::sealed_shard_entries(&store::session_shard_dir(stage, machine, session))
-        .unwrap()
-        .into_iter()
-        .map(|(_, path)| path.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
+    let mut names: Vec<_> =
+        store::sealed_shard_entries(&store::session_shard_dir(stage, machine, session))
+            .unwrap()
+            .into_iter()
+            .map(|(_, path)| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
     names.sort();
     assert_eq!(names, vec!["000001.jsonl", "000002.jsonl", "000003.jsonl"]);
 
