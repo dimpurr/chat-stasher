@@ -58,19 +58,22 @@
       "paths": {
         "macos": {
           "template": "~/.gemini/tmp/",
-          "format": "jsonl",
+          "format": "json",
+          "session_pattern": "session-*",
           "confidence": "源码确认",
           "source": "任务已知事实（macOS 实测）"
         },
         "linux": {
           "template": "$HOME/.gemini/tmp/<projectId>/chats/",
           "format": "json / jsonl",
+          "session_pattern": "session-*",
           "confidence": "源码确认",
           "source": "packages/core/src/utils/paths.ts:17,25-34；packages/core/src/config/storage.ts:56-68,181-184,363-401"
         },
         "windows": {
           "template": "%USERPROFILE%\\.gemini\\tmp\\<projectId>\\chats\\",
           "format": "json / jsonl",
+          "session_pattern": "session-*",
           "confidence": "源码确认",
           "source": "同上（os.homedir() → %USERPROFILE%）"
         }

@@ -1,11 +1,46 @@
-//! Black-box tests for the scanner: build a scratch harness tree, scan it,
-//! and assert on the metadata-only records. Nothing here touches real user
-//! sessions — everything lives under a temp dir the test creates and removes.
+//! Black-box tests for the scanner: build a scratch harness tree, scan it
+//! against a scratch registry, and assert on the metadata-only records.
+//! Nothing here touches real user sessions or the repo's registry — everything
+//! lives under a temp dir the test creates and removes.
 
 use chat_stasher::config::Config;
 use chat_stasher::models::HarnessSource;
-use chat_stasher::scanner;
+use chat_stasher::scanner::{self, HarnessRegistry, ProbeState};
+use serde_json::json;
 use std::fs;
+
+/// Build a registry with just claude-code + codex, every platform cell
+/// populated (so the test passes regardless of which OS it runs on).
+fn scratch_registry() -> HarnessRegistry {
+    let cell = |template: &str| {
+        json!({ "template": template, "format": "jsonl / jsonl.zst", "confidence": "源码确认", "source": "test" })
+    };
+    serde_json::from_value(json!({
+        "schema_version": 1,
+        "generated": "2026-08-16",
+        "harnesses": [
+            {
+                "id": "claude-code",
+                "display_name": "Claude Code",
+                "paths": {
+                    "macos": cell("~/.claude/projects"),
+                    "linux": cell("~/.claude/projects"),
+                    "windows": cell("%USERPROFILE%\\.claude\\projects"),
+                }
+            },
+            {
+                "id": "codex",
+                "display_name": "OpenAI Codex CLI",
+                "paths": {
+                    "macos": cell("~/.codex/sessions/"),
+                    "linux": cell("~/.codex/sessions/"),
+                    "windows": cell("%USERPROFILE%\\.codex\\sessions\\"),
+                }
+            }
+        ]
+    }))
+    .expect("scratch registry must deserialize")
+}
 
 /// Create a scratch `~/.claude/projects` + `~/.codex/sessions` pair that the
 /// test can then point the scanner at via config overrides.
@@ -38,10 +73,12 @@ fn scan_indexes_both_harnesses_and_counts_compressed() {
     fs::write(codex_root.join(format!("{UUID_A}.jsonl")), b"{}\n{}\n").unwrap();
     fs::write(codex_root.join(format!("{UUID_B}.jsonl.zst")), vec![0u8; 64]).unwrap();
 
-    let report = scanner::scan(&config).unwrap();
+    let registry = scratch_registry();
+    let report = scanner::scan_with_registry(&config, &registry).unwrap();
 
     assert_eq!(report.records.len(), 3);
     assert!(report.missing_roots.is_empty());
+    assert_eq!(report.probes.len(), 2);
 
     let mut claude = report.records.iter().filter(|r| r.source == HarnessSource::ClaudeCode);
     let c = claude.next().unwrap();
@@ -77,9 +114,11 @@ fn scan_reports_missing_root_instead_of_failing() {
         codex_sessions_dir: Some(dir.path().join("no-such-either").to_string_lossy().into()),
         ..Default::default()
     };
-    let report = scanner::scan(&config).unwrap();
+    let registry = scratch_registry();
+    let report = scanner::scan_with_registry(&config, &registry).unwrap();
     assert!(report.records.is_empty());
     assert_eq!(report.missing_roots.len(), 2);
+    assert!(report.probes.iter().all(|p| p.state == ProbeState::Missing));
     drop(dir);
 }
 
@@ -91,10 +130,60 @@ fn scan_strips_zst_suffix_into_native_uuid() {
     fs::create_dir_all(&nested).unwrap();
     fs::write(nested.join(format!("{UUID_A}.jsonl.zst")), vec![0u8; 10]).unwrap();
 
-    let report = scanner::scan(&config).unwrap();
+    let registry = scratch_registry();
+    let report = scanner::scan_with_registry(&config, &registry).unwrap();
     assert_eq!(report.records.len(), 1);
     let rec = &report.records[0];
     assert!(rec.id.ends_with(&format!(".{UUID_A}")));
     assert!(!rec.id.contains(".jsonl"));
     drop(dir);
+}
+
+#[test]
+fn gemini_pattern_counts_session_and_rejects_config_json() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let chats = dir.path().join("gemini-project").join("chats");
+    fs::create_dir_all(&chats).unwrap();
+
+    fs::write(chats.join("session-2026-08-16-example.json"), b"{}\n").unwrap();
+    fs::write(chats.join("settings.json"), b"{}\n").unwrap();
+    fs::write(chats.join("state.json"), b"{}\n").unwrap();
+
+    let cell = json!({
+        "template": chats.to_string_lossy(),
+        "format": "json",
+        "session_pattern": "session-*",
+        "confidence": "源码确认",
+        "source": "test"
+    });
+    let paths = match scanner::current_platform() {
+        "macos" => json!({ "macos": cell }),
+        "linux" => json!({ "linux": cell }),
+        "windows" => json!({ "windows": cell }),
+        other => panic!("unexpected platform: {other}"),
+    };
+    let registry: HarnessRegistry = serde_json::from_value(json!({
+        "schema_version": 1,
+        "generated": "2026-08-16",
+        "harnesses": [{
+            "id": "gemini-cli",
+            "display_name": "Gemini CLI",
+            "paths": paths
+        }]
+    }))
+    .unwrap();
+
+    let report = scanner::scan_with_registry(&Config::default(), &registry).unwrap();
+    println!(
+        "negative self-check: files=3, registry session records={}",
+        report.records.len()
+    );
+    assert_eq!(report.records.len(), 1);
+    assert_eq!(report.probes[0].record_count, 1);
+    assert!(report.records[0]
+        .absolute_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("session-"));
 }

@@ -513,10 +513,15 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
 }
 
 /// Turn the D1/D2/D3 findings into a short list of "so what + when" lines.
+///
+/// `scan_failed` means the registry-driven scan could not run: the
+/// claude/codex risk lines depend on session counts and are *omitted* rather
+/// than fabricated from a bogus zero.
 fn build_risks(
     claude: &ClaudeCheck,
     gemini: &GeminiRetention,
     footprints: &[HarnessFootprint],
+    scan_failed: bool,
 ) -> Vec<String> {
     let today = format_date(SystemTime::now());
     let mut risks = Vec::new();
@@ -527,7 +532,12 @@ fn build_risks(
         .find(|f| f.name == "claude-code")
         .cloned()
         .unwrap_or_else(|| default_footprint("claude-code", PathBuf::new()));
-    match &claude.verdict {
+    if scan_failed {
+        risks.push(
+            "🔴 registry 缺失/无法解析 —— 会话覆盖未知，拒绝用硬编码路径假装扫全。".to_string(),
+        );
+    } else {
+        match &claude.verdict {
         ClaudeRetention::UnsetDefault => {
             let earliest = claude_fp.earliest.map(format_date).unwrap_or_else(|| "n/a".to_string());
             let days_old = claude_fp.earliest.map(days_since).unwrap_or(0.0);
@@ -558,6 +568,7 @@ fn build_risks(
             ));
         }
     }
+    }
 
     // --- Gemini -----------------------------------------------------------
     let gem_fp = footprints.iter().find(|f| f.name == "gemini");
@@ -585,20 +596,23 @@ fn build_risks(
     }
 
     // --- Codex --------------------------------------------------------------
-    if let Some(cx) = footprints.iter().find(|f| f.name == "codex") {
-        if cx.installed {
-            let count = cx.session_count.unwrap_or(0);
-            risks.push(if cx.compressed_count > 0 {
-                format!(
-                    "🟡 Codex: 源码没有按天数自动删除的机制，但 {n} 个空闲 rollout 已被压成 .jsonl.zst —— \
-                     \n    —— 无需现在行动，空闲即压缩，与\"删除\"无关。",
-                    n = cx.compressed_count
-                )
-            } else {
-                format!(
-                    "🟢 Codex: 源码没有按天数自动删除的机制（本机 {count} 个 rollout 均未压缩）——无风险。"
-                )
-            });
+    // Scan-count dependent: omitted (not fabricated) when the scan failed.
+    if !scan_failed {
+        if let Some(cx) = footprints.iter().find(|f| f.name == "codex") {
+            if cx.installed {
+                let count = cx.session_count.unwrap_or(0);
+                risks.push(if cx.compressed_count > 0 {
+                    format!(
+                        "🟡 Codex: 源码没有按天数自动删除的机制，但 {n} 个空闲 rollout 已被压成 .jsonl.zst —— \
+                         \n    —— 无需现在行动，空闲即压缩，与\"删除\"无关。",
+                        n = cx.compressed_count
+                    )
+                } else {
+                    format!(
+                        "🟢 Codex: 源码没有按天数自动删除的机制（本机 {count} 个 rollout 均未压缩）——无风险。"
+                    )
+                });
+            }
         }
     }
 
@@ -629,6 +643,11 @@ pub struct DoctorReport {
     pub other_present: Vec<PathBuf>,
     pub risks: Vec<String>,
     pub reclaim: ReclaimCheck,
+    /// Per-harness fate decided by the path registry (`scanner::scan`).
+    pub probes: Vec<scanner::HarnessProbe>,
+    /// True when the registry-driven scan failed (registry missing/unparseable)
+    /// — the coverage numbers are then *unknown*, never faked zeros.
+    pub scan_failed: bool,
 }
 
 /// Run every check against the real machine and assemble the report.
@@ -644,11 +663,11 @@ pub fn run() -> DoctorReport {
     // D3 — reuse the crate's scanner for claude-code & codex session files,
     // walk gemini/openccde roots directly.
     let config = Config::load();
-    let scan = match scanner::scan(&config) {
-        Ok(s) => s,
+    let (scan, scan_failed) = match scanner::scan(&config) {
+        Ok(s) => (s, false),
         Err(e) => {
             eprintln!("doctor: scan failed: {e}");
-            scanner::ScanReport::default()
+            (scanner::ScanReport::default(), true)
         }
     };
 
@@ -686,12 +705,13 @@ pub fn run() -> DoctorReport {
         .collect();
 
     // D4
-    let risks = build_risks(&claude, &gemini, &footprints);
+    let risks = build_risks(&claude, &gemini, &footprints, scan_failed);
 
     // D5
     let reclaim = inspect_reclaim(&config);
 
-    DoctorReport { claude, gemini, footprints, other_present, risks, reclaim }
+    let probes = scan.probes;
+    DoctorReport { claude, gemini, footprints, other_present, risks, reclaim, probes, scan_failed }
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
@@ -900,10 +920,51 @@ pub fn print_report(r: &DoctorReport) {
     println!();
 
     // D3
-    let installed = r.footprints.iter().filter(|f| f.installed).count();
+    if r.scan_failed {
+        println!("D3 · 覆盖率 —— 🔴 registry 缺失/无法解析，会话覆盖未知。");
+        println!(
+            "    拒绝用硬编码路径假装扫全（stderr 上方已有 “Refusing to scan with hardcoded roots”）。"
+        );
+        println!(
+            "    仅列出与本 registry 无关、来自独立只读探测的条目：",
+        );
+        for f in &r.footprints {
+            if f.name != "gemini" && f.name != "opencode" {
+                continue;
+            }
+            if !f.installed {
+                println!("  {:<10} 未安装（{}）", f.name, f.root.display());
+                continue;
+            }
+            let count = f.session_count.map(|c| c.to_string()).unwrap_or_else(|| "N/A".to_string());
+            let earliest = f.earliest.map(format_date).unwrap_or_else(|| "-".to_string());
+            let latest = f.latest.map(format_date).unwrap_or_else(|| "-".to_string());
+            println!(
+                "  {:<10} 会话 {:<6} · {} · 最早 {earliest} · 最晚 {latest}",
+                f.name,
+                count,
+                fmt_bytes(f.total_bytes)
+            );
+            if !f.note.is_empty() {
+                println!("             ({})", f.note);
+            }
+        }
+        println!();
+        println!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
+        for (i, risk) in r.risks.iter().enumerate() {
+            println!("  {}. {risk}", i + 1);
+        }
+        println!();
+        println!("D5 · 仓库里有多少可回收的垃圾？");
+        println!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
+        print_reclaim(&r.reclaim);
+        println!();
+        return;
+    }
+
+    let (known, installed) = (r.probes.len(), r.probes.iter().filter(|p| p.installed_p()).count());
     println!(
-        "D3 · 覆盖率 —— 本机有 {n} 个已知 harness，其中 {installed} 个已安装",
-        n = r.footprints.len()
+        "D3 · 覆盖率 —— 本机 {installed}/{known} 个已知 harness 命中（registry v1 驱动）；轮转分析对象如下：",
     );
     for f in &r.footprints {
         if !f.installed {
@@ -935,6 +996,7 @@ pub fn print_report(r: &DoctorReport) {
             .collect();
         println!("  已装但不在本命令范围（仅探测，不分析轮转）：{}", others.join(", "));
     }
+    print_probes(&r.probes);
     println!();
 
     // D4
@@ -950,7 +1012,13 @@ pub fn print_report(r: &DoctorReport) {
     // D5 — reclaimable garbage in the archive repository (prune_plan, read-only)
     println!("D5 · 仓库里有多少可回收的垃圾？");
     println!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
-    match &r.reclaim {
+    print_reclaim(&r.reclaim);
+    println!();
+}
+
+/// D5 printing — shared by the normal path and the scan-failed early return.
+fn print_reclaim(r: &ReclaimCheck) {
+    match r {
         ReclaimCheck::NoRepo { repo_root } => {
             println!(
                 "  （跳过）没有仓库目录：{} —— 没仓库就没有垃圾，也不用诊断。",
@@ -1008,6 +1076,65 @@ pub fn print_report(r: &DoctorReport) {
         }
     }
     println!();
+}
+
+/// D3 supplement — the registry-driven probe table: every harness the
+/// registry listed for this platform, whether it was scanned / exists here,
+/// and which cells were flagged low-confidence or skipped (`未查明`, other
+/// platform, template not statically resolvable).
+fn print_probes(probes: &[scanner::HarnessProbe]) {
+    if probes.is_empty() {
+        println!("  （registry 探测为空 —— 扫描未运行，或没有候选 harness。）");
+        return;
+    }
+    let platform = scanner::current_platform();
+    let hit = probes.iter().filter(|p| p.installed_p()).count();
+    println!(
+        "  [registry] 驱动表 —— 平台={platform} · 本机命中/扫描成功 {hit}/{n} 个 harness",
+        n = probes.len()
+    );
+    for p in probes {
+        let mark = match p.state {
+            scanner::ProbeState::Scanned => "已扫    ",
+            scanner::ProbeState::FileTarget => "单文件  ",
+            scanner::ProbeState::Missing => "不存在  ",
+            scanner::ProbeState::SkipUnascertained => "跳过(未查明) ",
+            scanner::ProbeState::SkipWrongPlatform => "跨平台  ",
+            scanner::ProbeState::SkipUnresolvable => "跳过(模板)   ",
+        };
+        let conf = if p.low_confidence_p() {
+            format!("[低置信] {}", p.confidence.label())
+        } else {
+            format!("[{}]", p.confidence.label())
+        };
+        let root = p
+            .root
+            .as_ref()
+            .map(|r| r.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let bytes = match p.state {
+            scanner::ProbeState::FileTarget => format!(" bytes={}", fmt_bytes(p.bytes)),
+            _ => String::new(),
+        };
+        let extra = if p.note.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", p.note)
+        };
+        println!(
+            "    {mark} {:<16} {conf:<26} 会话={:<4}{bytes:<0} {root}{extra}",
+            p.display_name, p.record_count
+        );
+    }
+    let flagged = probes
+        .iter()
+        .filter(|p| p.low_confidence_p())
+        .map(|p| p.display_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !flagged.is_empty() {
+        println!("    低置信（仅社区说法未核实，扫了但不可当作核实）：{flagged}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -37,7 +37,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::readback::SessionBackedUp;
-use crate::store::{BackupStore, SESSIONS_DIR, SHARD_SUFFIX};
+use crate::store::{BackupStore, SESSIONS_DIR};
 
 /// Outcome of rustic's `check` at one data level.
 #[derive(Debug, Clone)]
@@ -248,9 +248,10 @@ impl BackupStore {
 }
 
 /// Build the L3 expected manifest from the sealed staging tree:
-/// `sessions/<machine>/<session-id>/{NNNNNN}.jsonl`. Each session contributes
-/// its shard count, concatenated byte length and concatenated sha256 — the
-/// three properties `read --all-machines` later reports for the archive.
+/// `sessions/<machine>/<session-id>/<bucket>/{NNNNNN}.jsonl` (plus the legacy
+/// unbucketed layout). Each session contributes its shard count, concatenated
+/// byte length and concatenated sha256 — the three properties `read
+/// --all-machines` later reports for the archive.
 pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
     let sessions_root = stage.join(SESSIONS_DIR);
     let mut out = Vec::new();
@@ -284,16 +285,9 @@ pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>
     Ok(out)
 }
 
-/// Count sealed shards (`NNNNNN.jsonl`) directly under a session dir.
+/// Count sealed shards in both the legacy direct layout and one-level buckets.
 fn count_shards(session_dir: &Path) -> anyhow::Result<usize> {
-    let mut n = 0usize;
-    for entry in fs::read_dir(session_dir).context("read session dir")? {
-        let name = entry?.file_name();
-        if name.to_string_lossy().ends_with(SHARD_SUFFIX) {
-            n += 1;
-        }
-    }
-    Ok(n)
+    Ok(crate::store::sealed_shard_entries(session_dir)?.len())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

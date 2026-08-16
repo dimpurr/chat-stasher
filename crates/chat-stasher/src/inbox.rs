@@ -8,8 +8,8 @@
 //!   re-upload and turns the dedup into a lottery); the inbox and the stage
 //!   tree are therefore distinct directories.
 //! * **Each complete bundle becomes exactly one record** in a *sealed* shard
-//!   at `sessions/<machine>/<id>/NNNNNN.jsonl`. Sequence numbers continue past
-//!   existing shards and a sealed shard is never touched again.
+//!   at `sessions/<machine>/<id>/<bucket>/NNNNNN.jsonl`. Sequence numbers
+//!   continue past existing shards and a sealed shard is never touched again.
 //! * **`.part` files are skipped** — ext writes two-phase (`.part` first, final
 //!   name second, then the `.part` is removed); a `.part` is mid-write and must
 //!   not be archived.
@@ -162,8 +162,19 @@ struct LookupRecord {
 // ---------------------------------------------------------------- ingest
 
 /// Consume every complete bundle in `inbox` into sealed shards under
-/// `<stage>/sessions/<machine>/<id>/NNNNNN.jsonl`.
+/// `<stage>/sessions/<machine>/<id>/<bucket>/NNNNNN.jsonl` using the default
+/// bucket cap.
 pub fn ingest(inbox: &Path, stage: &Path, machine: &str) -> anyhow::Result<IngestReport> {
+    ingest_with_cap(inbox, stage, machine, store::DEFAULT_SHARD_BUCKET_CAP)
+}
+
+/// As [`ingest`], with an explicit maximum number of shards per bucket.
+pub fn ingest_with_cap(
+    inbox: &Path,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+) -> anyhow::Result<IngestReport> {
     let consumed_dir = inbox.join(CONSUMED_DIR);
     fs::create_dir_all(&consumed_dir)
         .with_context(|| format!("create {}", consumed_dir.display()))?;
@@ -193,7 +204,7 @@ pub fn ingest(inbox: &Path, stage: &Path, machine: &str) -> anyhow::Result<Inges
 
     for path in &candidates {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        match consume_one(&name, path, stage, machine, &consumed_dir) {
+        match consume_one(&name, path, stage, machine, &consumed_dir, bucket_cap) {
             Ok(Outcome::Consumed(c)) => report.consumed.push(c),
             Ok(Outcome::Duplicate(d)) => report.duplicates.push(d),
             Err(e) => report.errors.push(ErrorEntry { source_file: name, message: e.to_string() }),
@@ -213,6 +224,7 @@ fn consume_one(
     stage: &Path,
     machine: &str,
     consumed_dir: &Path,
+    bucket_cap: usize,
 ) -> anyhow::Result<Outcome> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let file_sha256 = sha256_hex(&bytes);
@@ -249,7 +261,7 @@ fn consume_one(
     let line = serde_json::to_string(&record).context("serialise shard record")?;
 
     // Seal first, retire second.
-    let shard = write_shard_atomic(stage, machine, &parsed.id, &[line])?;
+    let shard = write_shard_atomic(stage, machine, &parsed.id, &[line], bucket_cap)?;
     retire(name, path, consumed_dir)?;
 
     Ok(Outcome::Consumed(Consumed {
@@ -269,15 +281,14 @@ fn existing_file_shas(session_dir: &Path) -> anyhow::Result<BTreeMap<String, Str
     if !session_dir.exists() {
         return Ok(out);
     }
-    let mut names: Vec<String> = fs::read_dir(session_dir)
-        .with_context(|| format!("read {}", session_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .filter(|n| n.ends_with(store::SHARD_SUFFIX))
-        .collect();
-    names.sort();
-    for name in names {
-        let raw = fs::read_to_string(session_dir.join(&name))
-            .with_context(|| format!("read {}", session_dir.join(&name).display()))?;
+    let mut entries = store::sealed_shard_entries(session_dir)?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    for (_, path) in entries {
+        let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| store::shard_filename(0));
         for line in raw.lines() {
             if let Ok(r) = serde_json::from_str::<LookupRecord>(line) {
                 if let Some(sha) = r.file_sha256 {
@@ -297,13 +308,16 @@ fn write_shard_atomic(
     machine: &str,
     id: &str,
     lines: &[String],
+    bucket_cap: usize,
 ) -> anyhow::Result<String> {
     let dir = store::session_shard_dir(stage, machine, id);
     fs::create_dir_all(&dir)?;
     clean_stale_tmp(&dir)?;
     let seq = store::next_shard_seq(stage, machine, id);
-    let final_path = store::shard_path(stage, machine, id, seq);
-    let tmp_path = dir.join(format!("{seq:06}{TMP_SUFFIX}"));
+    let final_path = store::shard_path_with_cap(stage, machine, id, seq, bucket_cap);
+    let final_dir = final_path.parent().expect("shard path has bucket parent");
+    fs::create_dir_all(final_dir)?;
+    let tmp_path = final_dir.join(format!("{seq:06}{TMP_SUFFIX}"));
 
     let mut f = fs::File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
     for l in lines {
@@ -315,7 +329,7 @@ fn write_shard_atomic(
     fs::rename(&tmp_path, &final_path).with_context(|| {
         format!("seal shard {} (rename {})", final_path.display(), tmp_path.display())
     })?;
-    fsync_dir(&dir).ok();
+    fsync_dir(final_dir).ok();
     Ok(store::shard_filename(seq))
 }
 
@@ -324,7 +338,9 @@ fn clean_stale_tmp(dir: &Path) -> anyhow::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(TMP_SUFFIX) {
+        if entry.file_type()?.is_dir() {
+            clean_stale_tmp(&entry.path())?;
+        } else if name.ends_with(TMP_SUFFIX) {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -479,10 +495,10 @@ mod tests {
 
     fn shard_names(stage: &Path, machine: &str, id: &str) -> Vec<String> {
         let dir = store::session_shard_dir(stage, machine, id);
-        let mut names: Vec<String> = fs::read_dir(dir)
+        let mut names: Vec<String> = store::sealed_shard_entries(&dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(store::SHARD_SUFFIX))
+            .into_iter()
+            .map(|(_, path)| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         names.sort();
         names

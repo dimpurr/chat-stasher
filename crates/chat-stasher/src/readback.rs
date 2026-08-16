@@ -4,7 +4,7 @@
 //! re-opens the repository, lists *all* snapshots, groups them by `hostname`,
 //! and for the newest snapshot of each machine buckets its sealed shards by
 //! the `sessions/<machine>/…` marker. Every session's shards are concatenated
-//! in sequence order and hashed.
+//! in global sequence order and hashed, across bucket directories.
 //!
 //! Why "newest per hostname" and not "the newest snapshot":
 //!
@@ -200,9 +200,8 @@ impl BackupStore {
 
             let mut sessions = Vec::new();
             for ((machine, session_id), mut shards) in buckets {
-                // zero-padded seq => name order == chronological order, but we
-                // still sort by parsed seq so a future non-padded shard layout
-                // cannot reorder history silently.
+                // Bucket names are not the ordering key: the six-digit shard
+                // sequence is global across all buckets.
                 shards.sort_by_key(|(n, _)| store_seq_of(n));
                 let mut concat = Vec::new();
                 for (shard, idx) in &shards {
@@ -240,11 +239,14 @@ fn store_seq_of(name: &str) -> u64 {
 }
 
 /// Bucket one file path into `(machine, session, shard-name)` if its trailing
-/// components are `…/sessions/<machine>/<session>/<shard>.jsonl`.
+/// components are either the legacy
+/// `…/sessions/<machine>/<session>/<shard>.jsonl` or the bucketed
+/// `…/sessions/<machine>/<session>/<bucket>/<shard>.jsonl` layout.
 ///
 /// The `sessions` marker is *anywhere* in the path (the stage prefix differs
 /// per machine and even per host), so we take the last component equal to
-/// `sessions` and require exactly three more components after it.
+/// `sessions` and require exactly three or four more components after it. The
+/// bucket component is intentionally ignored because sequence is global.
 pub fn bucket_shard_path(path: &Path) -> Option<(String, String, String)> {
     let comps: Vec<&str> = path
         .components()
@@ -258,13 +260,14 @@ pub fn bucket_shard_path(path: &Path) -> Option<(String, String, String)> {
     }
     let i = marker?;
     let rest = &comps[i + 1..];
-    if rest.len() != 3 {
+    if rest.len() != 3 && rest.len() != 4 {
         return None;
     }
-    if !rest[2].ends_with(SHARD_SUFFIX) {
+    let shard = rest.last()?;
+    if !shard.ends_with(SHARD_SUFFIX) {
         return None;
     }
-    Some((rest[0].to_string(), rest[1].to_string(), rest[2].to_string()))
+    Some((rest[0].to_string(), rest[1].to_string(), (*shard).to_string()))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -307,6 +310,22 @@ mod tests {
             .map(|(p, _)| p.to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["000002.jsonl", "zzz-unknown"]);
+    }
+
+    #[test]
+    fn bucket_path_parser_accepts_legacy_and_bucketed_layouts() {
+        assert_eq!(
+            bucket_shard_path(Path::new("/stage/sessions/m/s/000001.jsonl")),
+            Some(("m".into(), "s".into(), "000001.jsonl".into()))
+        );
+        assert_eq!(
+            bucket_shard_path(Path::new("/stage/sessions/m/s/007/000141.jsonl")),
+            Some(("m".into(), "s".into(), "000141.jsonl".into()))
+        );
+        assert_eq!(
+            bucket_shard_path(Path::new("/stage/sessions/m/s/007/deeper/000141.jsonl")),
+            None
+        );
     }
 
     /// Negative self-check unit: a one-byte flip in a payload must change the

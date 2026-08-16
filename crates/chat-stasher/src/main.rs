@@ -2,7 +2,6 @@
 
 use clap::{Parser, Subcommand};
 use chat_stasher::config::{self, Config};
-use chat_stasher::models::HarnessSource;
 use chat_stasher::reap;
 use chat_stasher::scanner;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
@@ -136,7 +135,7 @@ Verify {
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
     /// (skipping `.part` files), archives each as one record in a sealed
-    /// shard under `<stage>/sessions/<machine>/<id>/NNNNNN.jsonl`, and retires
+    /// shard under `<stage>/sessions/<machine>/<id>/<bucket>/NNNNNN.jsonl`, and retires
     /// the source file to `<inbox>/consumed/`. Idempotent by content: the same
     /// bytes are never archived twice. Prints paths/counts/sha256 only.
     Ingest {
@@ -150,6 +149,9 @@ Verify {
         /// Default: this machine's normalised hostname.
         #[arg(long)]
         machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
     },
 }
 
@@ -196,7 +198,9 @@ fn main() -> ExitCode {
                 no_reap,
             )
         }
-        Command::Ingest { inbox, stage, machine } => cmd_ingest(&inbox, &stage, machine.as_deref()),
+        Command::Ingest { inbox, stage, machine, shard_bucket_cap } => {
+            cmd_ingest(&inbox, &stage, machine.as_deref(), shard_bucket_cap)
+        }
     }
 }
 
@@ -206,15 +210,26 @@ fn cmd_doctor() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_ingest(inbox: &PathBuf, stage: &PathBuf, machine: Option<&str>) -> ExitCode {
+fn cmd_ingest(
+    inbox: &PathBuf,
+    stage: &PathBuf,
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+) -> ExitCode {
     let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
-    let report = match chat_stasher::inbox::ingest(inbox, stage, &machine) {
+    let report = match chat_stasher::inbox::ingest_with_cap(
+        inbox,
+        stage,
+        &machine,
+        shard_bucket_cap,
+    ) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("ingest: {e:#}");
             return ExitCode::FAILURE;
         }
     };
+    println!("[ingest] shard bucket cap : {shard_bucket_cap}");
     print_ingest(&report, &machine);
     ExitCode::SUCCESS
 }
@@ -683,18 +698,18 @@ fn cmd_status() -> ExitCode {
 /// Only ids, paths, sizes, mtimes and flags ever reach stdout — never the
 /// content of a session.
 fn print_status(report: &scanner::ScanReport) {
-    let (claude, codex) = report
-        .records
-        .iter()
-        .fold((0usize, 0usize), |(c, x), r| match r.source {
-            HarnessSource::ClaudeCode => (c + 1, x),
-            HarnessSource::Codex => (c, x + 1),
-        });
+    // One line per source actually found (registry-driven, so any harness
+    // id from data/harness-registry-v1.json can appear here).
+    let mut per_source: std::collections::BTreeMap<&str, usize> = Default::default();
+    for rec in &report.records {
+        *per_source.entry(rec.source.short()).or_default() += 1;
+    }
     let compressed = report.records.iter().filter(|r| r.compressed).count();
 
     println!();
-    println!("  claude-code sessions : {claude}");
-    println!("  codex sessions       : {codex}");
+    for (src, n) in &per_source {
+        println!("  {src:<22} sessions : {n}");
+    }
     println!("  total                : {}  ({} compressed)", report.records.len(), compressed);
     for miss in &report.missing_roots {
         println!("  (missing root, skipped: {})", miss.display());
