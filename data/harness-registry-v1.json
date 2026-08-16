@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "generated": "2026-08-16",
+  "harnesses": [
+    {
+      "id": "claude-code",
+      "display_name": "Claude Code",
+      "paths": {
+        "macos": {
+          "template": "~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl",
+          "format": "jsonl",
+          "confidence": "源码确认",
+          "source": "任务已知事实（macOS 实测）"
+        },
+        "linux": {
+          "template": "~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl",
+          "format": "jsonl",
+          "confidence": "官方文档",
+          "source": "https://code.claude.com/docs/en/claude-directory （Linux 例 -home-user-work-my-repo 证实 /→-）"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.claude\\projects\\<sanitized-cwd>\\<session-uuid>.jsonl",
+          "format": "jsonl",
+          "confidence": "官方文档",
+          "source": "https://code.claude.com/docs/en/claude-directory（原话：~/.claude → %USERPROFILE%\\.claude）+ anthropics/claude-code#80683 #84354"
+        }
+      },
+      "notes": "Windows 走 %USERPROFILE%，不是 %APPDATA%\\Claude。Windows 上短路径用可读 slug；长路径(>~200字符)用路径哈希目录(issue #84354)；该哈希 Windows 上仍区分大小写(c:\\ vs C:\\ 产生不同目录→会话消失)。盘符冒号:与反斜杠\\在短路径下的具体 sanitize：未查明，需 Windows 真机实测。CLAUDE_CONFIG_DIR 覆盖整个 base；清理默认 30 天。"
+    },
+    {
+      "id": "codex",
+      "display_name": "OpenAI Codex CLI",
+      "paths": {
+        "macos": {
+          "template": "~/.codex/sessions/",
+          "format": "jsonl / jsonl.zst",
+          "confidence": "源码确认",
+          "source": "任务已知事实（macOS 实测）"
+        },
+        "linux": {
+          "template": "$CODEX_HOME/sessions/（默认 $HOME/.codex/sessions/）",
+          "format": "jsonl / jsonl.zst",
+          "confidence": "源码确认",
+          "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()（dirs::home_dir().push(\".codex\")）+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235"
+        },
+        "windows": {
+          "template": "%CODEX_HOME%\\sessions\\（默认 %USERPROFILE%\\.codex\\sessions\\）",
+          "format": "jsonl / jsonl.zst",
+          "confidence": "源码确认",
+          "source": "同上（dirs::home_dir() Windows 返回 %USERPROFILE%，无平台分支）"
+        }
+      },
+      "notes": "不 honor XDG_DATA_HOME（home-dir crate 无 XDG 引用）。空闲 rollout 压缩为 .jsonl.zst。session_index.jsonl 在 codex home 根。CODEX_HOME 可覆盖。"
+    },
+    {
+      "id": "gemini-cli",
+      "display_name": "Gemini CLI",
+      "paths": {
+        "macos": {
+          "template": "~/.gemini/tmp/",
+          "format": "jsonl",
+          "confidence": "源码确认",
+          "source": "任务已知事实（macOS 实测）"
+        },
+        "linux": {
+          "template": "$HOME/.gemini/tmp/<projectId>/chats/",
+          "format": "json / jsonl",
+          "confidence": "源码确认",
+          "source": "packages/core/src/utils/paths.ts:17,25-34；packages/core/src/config/storage.ts:56-68,181-184,363-401"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.gemini\\tmp\\<projectId>\\chats\\",
+          "format": "json / jsonl",
+          "confidence": "源码确认",
+          "source": "同上（os.homedir() → %USERPROFILE%）"
+        }
+      },
+      "notes": "用 os.homedir()（Windows=%USERPROFILE%），无 APPDATA/XDG 逻辑；不 honor XDG_DATA_HOME。GEMINI_CLI_HOME 环境变量会整体覆盖 home。30 天清理：全局 tmp 目录 sweep。聊天历史在 tmp/<projectId>/chats/（名字叫 tmp 但并非临时）。"
+    },
+    {
+      "id": "opencode",
+      "display_name": "opencode",
+      "paths": {
+        "macos": {
+          "template": "~/.local/share/opencode/opencode.db",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "任务已知事实（v1.2.0+）；但注意下方版本差异"
+        },
+        "linux": {
+          "template": "$CWD/.opencode/opencode.db（当前 main 默认，相对路径）",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "internal/db/connect.go:26 + internal/config/config.go:101,231"
+        },
+        "windows": {
+          "template": ".\\opencode\\opencode.db（当前 main 默认，相对 CWD）",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "同上（无 %APPDATA%/%LOCALAPPDATA% 分支存放 db）"
+        }
+      },
+      "notes": "⚠️前提修正：opencode 是 Go 项目(github.com/opencode-ai/opencode)，不是 Rust，不用 xdg-basedir crate。当前 main 全仓库 grep 找不到 ~/.local/share/opencode——默认 data.directory 是相对 .opencode。~/.local/share 的绝对化解析在当前源码未找到(未查明，疑为旧版或安装时配置)。xdg-basedir crate 实测 unix-only(lib.rs:1 #![cfg(any(unix,redox))])，Windows 不编译；XDG_DATA_HOME 未设→~/.local/share。config.go:944 的 %LOCALAPPDATA% 只用于读 GitHub Copilot hosts.json，与 opencode.db 无关。"
+    },
+    {
+      "id": "cursor",
+      "display_name": "Cursor",
+      "paths": {
+        "macos": {
+          "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+          "format": "sqlite",
+          "confidence": "仅社区说法未核实",
+          "source": "github.com/Callum-Ward/cursaves/docs/how-cursor-stores-chats.md"
+        },
+        "linux": {
+          "template": "$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb（默认 ~/.config/Cursor/...）",
+          "format": "sqlite",
+          "confidence": "仅社区说法未核实",
+          "source": "同上 + forum.cursor.com/t/77295"
+        },
+        "windows": {
+          "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
+          "format": "sqlite",
+          "confidence": "仅社区说法未核实",
+          "source": "同上 + Electron userData 惯例（%APPDATA%\\<name>）"
+        }
+      },
+      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。"
+    },
+    {
+      "id": "github-copilot-cli",
+      "display_name": "GitHub Copilot CLI",
+      "paths": {
+        "macos": {
+          "template": "~/.copilot/",
+          "format": "sqlite + jsonl",
+          "confidence": "源码确认",
+          "source": "@github/copilot v1.0.80 编译产物（app.js + runtime.node 内嵌 SQLite DDL）"
+        },
+        "linux": {
+          "template": "~/.copilot/（+ XDG 迁移：$XDG_CONFIG_HOME/copilot、$XDG_STATE_HOME/copilot）",
+          "format": "sqlite + jsonl",
+          "confidence": "源码确认",
+          "source": "同上（bOn=\".copilot\"、join(homedir,.copilot)、session-store.db）"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.copilot\\",
+          "format": "sqlite + jsonl",
+          "confidence": "源码确认",
+          "source": "同上（home 无 win32 分支）；缓存走 %LOCALAPPDATA%\\copilot\\"
+        }
+      },
+      "notes": "会持久化会话（非 ephemeral）：session-store.db SQLite(sessions/turns/... WAL)+每会话 events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir 可覆盖。Linux 若设 XDG_CONFIG_HOME/XDG_STATE_HOME 会一次性迁移 config→XDG_CONFIG_HOME/copilot、state(含 session-store.db)→XDG_STATE_HOME/copilot。Windows 不适用 XDG 迁移。"
+    },
+    {
+      "id": "aider",
+      "display_name": "aider",
+      "paths": {
+        "macos": {
+          "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）",
+          "format": "markdown / txt / jsonl",
+          "confidence": "源码确认",
+          "source": "aider/args.py:271-276；aider/io.py:1117-1136"
+        },
+        "linux": {
+          "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）；config 在 ~/.aider/",
+          "format": "markdown / txt / jsonl",
+          "confidence": "源码确认",
+          "source": "同上 + aider/main.py:370,1185"
+        },
+        "windows": {
+          "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）；config 在 %USERPROFILE%\\.aider\\",
+          "format": "markdown / txt / jsonl",
+          "confidence": "源码确认",
+          "source": "同上（平台无关 CWD 相对）"
+        }
+      },
+      "notes": "聊天历史在 CWD，不在 home；~/.aider/ 只放 config/state（installs.json、oauth-keys.env、model settings）。旧的 .aider.history.jsonl 已不存在（改为 .aider.chat.history.md）。不 honor XDG/APPDATA。"
+    },
+    {
+      "id": "crush",
+      "display_name": "crush",
+      "paths": {
+        "macos": {
+          "template": "$CWD/.crush/crush.db",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "internal/db/connect.go:93 + internal/config/load.go:559-562"
+        },
+        "linux": {
+          "template": "$CWD/.crush/crush.db（项目级）；全局 config ~/.config/crush/、data ~/.local/share/crush/",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "同上 + internal/config/load.go:1181-1258"
+        },
+        "windows": {
+          "template": "$CWD/.crush/crush.db（项目级）；全局 config %APPDATA%\\crush\\、data %LOCALAPPDATA%\\crush\\",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "同上"
+        }
+      },
+      "notes": "项目级 SQLite（data_directory 默认 .crush，随项目走）。全局目录只放 config，不放聊天历史。"
+    },
+    {
+      "id": "zed",
+      "display_name": "Zed",
+      "paths": {
+        "macos": {
+          "template": "~/Library/Application Support/Zed/threads/threads.db",
+          "format": "sqlite",
+          "confidence": "仅社区说法未核实",
+          "source": "未直接核实 macOS 分支；由 crates/paths 平台惯例推断"
+        },
+        "linux": {
+          "template": "$XDG_DATA_HOME/zed/threads/threads.db（默认 ~/.local/share/zed/threads/threads.db）",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "crates/agent/src/db.rs:438-440 + crates/paths/src/paths.rs:57-65"
+        },
+        "windows": {
+          "template": "%LOCALAPPDATA%\\Zed\\threads\\threads.db",
+          "format": "sqlite",
+          "confidence": "源码确认",
+          "source": "同上"
+        }
+      },
+      "notes": "AI 面板/agent 聊天历史在 <data_dir>/threads/threads.db（ThreadStore）。主 app DB 在 <data_dir>/db/0-<channel>/db.sqlite（非聊天）。✅Zed 是 Linux 上真正走 XDG_DATA_HOME 的第二个例子。macOS 分支未逐一核实。"
+    },
+    {
+      "id": "continue",
+      "display_name": "Continue",
+      "paths": {
+        "macos": {
+          "template": "~/.continue/sessions/<id>.json + sessions.json",
+          "format": "json",
+          "confidence": "源码确认",
+          "source": "core/util/paths.ts:27-35,79-112（os.homedir 平台无关）"
+        },
+        "linux": {
+          "template": "~/.continue/sessions/<id>.json + sessions.json",
+          "format": "json",
+          "confidence": "源码确认",
+          "source": "同上 + core/util/history.ts:26-30"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.continue\\sessions\\<id>.json + sessions.json",
+          "format": "json",
+          "confidence": "源码确认",
+          "source": "同上（os.homedir → %USERPROFILE%，无 %APPDATA%/XDG，除非 CONTINUE_GLOBAL_DIR 覆盖）"
+        }
+      },
+      "notes": "每会话一个 JSON + sessions.json 索引。Continue 的 SQLite(dev_data at ~/.continue/dev_data/) 是 analytics，不是聊天历史。CONTINUE_GLOBAL_DIR 可整体覆盖。"
+    }
+  ]
+}
