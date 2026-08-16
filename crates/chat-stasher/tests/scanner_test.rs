@@ -189,7 +189,7 @@ fn gemini_pattern_counts_session_and_rejects_config_json() {
         report.records.len()
     );
     assert_eq!(report.records.len(), 1);
-    assert_eq!(report.probes[0].record_count, 1);
+    assert_eq!(report.probes[0].record_count, Some(1));
     assert!(report.records[0]
         .absolute_path
         .file_name()
