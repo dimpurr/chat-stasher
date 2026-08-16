@@ -1,0 +1,13 @@
+LICENSE STATUS: PENDING OWNER CONFIRMATION
+
+The project license has not been selected yet. Do not treat this placeholder as
+a grant of rights to copy, modify, or distribute this repository.
+
+Candidates recorded for owner review:
+
+- MIT
+- Apache-2.0 (recommended for review)
+- AGPL-3.0
+
+Replace this file with the complete text of the owner-selected license before
+making the repository public. Also update Cargo.toml and README.md together.
