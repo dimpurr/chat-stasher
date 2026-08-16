@@ -11,6 +11,6 @@ Cargo.lock.bak
 *.log
 
 # 扩展（WXT）
-ext/node_modules/
-ext/.output/
-ext/.wxt/
+apps/extension/node_modules/
+apps/extension/.output/
+apps/extension/.wxt/

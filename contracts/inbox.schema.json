@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dimpurr/chat-stasher/contracts/inbox.schema.json",
+  "title": "chat-stasher inbox bundle",
+  "description": "扩展落盘给 CLI 消费的单个捕获包。🔴 这是两端共享的单一真相源 —— 改这里必须同时改 apps/extension/lib/contract.ts 与 crates/chat-stasher/src/inbox.rs。",
+  "type": "object",
+  "required": [
+    "schema",
+    "platform",
+    "sessionId",
+    "raw"
+  ],
+  "properties": {
+    "schema": {
+      "enum": [
+        "chat-stasher/inbox@1",
+        "chat-stasher/inbox@2"
+      ],
+      "description": "@1 无 identity 字段；CLI 读到 @1 时视 identity 为 {level:'default',value:''}"
+    },
+    "platform": {
+      "type": "string",
+      "examples": [
+        "deepseek"
+      ]
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string"
+    },
+    "method": {
+      "type": "string"
+    },
+    "status": {
+      "type": "integer"
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "parsed": {
+      "type": "object",
+      "description": "尽力而为的信封字段，🔴 非权威",
+      "properties": {
+        "hasJson": {
+          "type": "boolean"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "raw": {
+      "type": "object",
+      "required": [
+        "text",
+        "bytes"
+      ],
+      "description": "🔴 原始响应，authoritative —— 解析错了还能从这里重来",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "level",
+        "value"
+      ],
+      "description": "@2 起。Web 平台的身份轴是【账号】不是机器（ADR-002）—— 两机抓同一会话必须得到相同 ID 才能去重。🔴 level='default' 表示身份不可靠，CLI 必须退回 platform:sessionId 做去重键。",
+      "properties": {
+        "level": {
+          "enum": [
+            "platform_uid",
+            "email",
+            "handle",
+            "default"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
