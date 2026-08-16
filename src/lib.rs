@@ -1,0 +1,16 @@
+//! chat-stasher: append-only archive for LLM harness conversations.
+//!
+//! This crate currently exposes the CLI skeleton plus the local harness
+//! scanner and the BackupStore (rustic_core wrapper). Everything is
+//! deliberately read-only: no session content is ever read or printed in this
+//! spike, except when `read` verifies a session back from the repository.
+
+pub mod config;
+pub mod doctor;
+pub mod id;
+pub mod inbox;
+pub mod models;
+pub mod readback;
+pub mod reap;
+pub mod scanner;
+pub mod store;
