@@ -1059,10 +1059,22 @@ fn print_reclaim(r: &ReclaimCheck) {
                     "     `prune`/`repair`/`rewrite --forget` 都被 append_only 挡死（源码 `commands/prune.rs`）。"
                 );
                 println!(
-                    "     要清的标准流程：临时关掉 append_only → 跑一次 `prune` → 再开回 append_only。"
+                    "     要清的标准流程：临时关掉 append_only → 跑一次 `rustic prune --instant-delete` → 再开回 append_only。"
                 );
                 println!(
-                    "     代价：关掉到再开回来之间，仓库失去“防误删”的保险网 —— 先备份、只在一个窗口期内操作。"
+                    "     ⚠️ 必须带 `--instant-delete`：普通 `prune` 的默认 `--keep-delete 23h` 只把 pack 标记为待删、"
+                );
+                println!(
+                    "        23 小时宽限期后才真删 —— 实测即使关掉 append_only 也会停在 nothing to do!，垃圾根本没走。"
+                );
+                println!(
+                    "     ⚠️ 代价：`--instant-delete` 跳过这 23 小时宽限期 —— 删了就没了，没有反悔窗口；执行前先确认上面两个数字确实是垃圾。"
+                );
+                println!(
+                    "     ⚠️ 这要求临时关掉 append_only —— 那是你的安全设置：关掉到再开回之间仓库失去“防误删”的保险网，"
+                );
+                println!(
+                    "        只在这个窗口期内操作、先做一次备份，操作完立刻开回。"
                 );
                 println!(
                     "     doctor 是只读诊断：它只报告数字和操作步骤，绝不会替你执行 prune 或切换 append_only。"
