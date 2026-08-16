@@ -301,7 +301,7 @@ fn cmd_push(
     let summary = match store.push(stage, &mk) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("push: {e}");
+            eprintln!("push: {e:#}");
             reap_remote(&cfg, no_reap);
             return ExitCode::FAILURE;
         }
