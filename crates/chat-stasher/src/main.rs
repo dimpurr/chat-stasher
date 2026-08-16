@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use chat_stasher::config::{self, Config};
 use chat_stasher::reap;
 use chat_stasher::scanner;
+use chat_stasher::seal;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
 use rustic_core::repofile::MasterKey;
@@ -153,6 +154,38 @@ Verify {
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
     },
+    /// Seal one active (live) file by renaming it into the next sealed-shard
+    /// slot, leaving the original path free as the new tail.
+    ///
+    /// Gated by `data/harness-registry-v1.json` (`seal_policy` + `seal_source`
+    /// + the platform cell's `confidence`): only a harness whose policy is
+    /// `rename`, with an evidence `seal_source` line **and** a `源码确认`
+    /// platform cell may be renamed. Everything else (Codex = fd-holder,
+    /// opencode = sqlite, any unconfirmed harness) is refused with the active
+    /// file untouched — renaming an fd-holder silently drops its post-rename
+    /// data.
+    Seal {
+        /// Registry harness id that owns the active file (e.g. `claude-code`).
+        #[arg(long)]
+        harness: String,
+        /// Path of the live (active) file to seal. After the rename this path
+        /// is free: a reopen-by-path harness starts its new tail there.
+        #[arg(long)]
+        active: PathBuf,
+        /// Stage directory that holds the sealed `sessions/` tree.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Machine partition for `sessions/<machine>/…`.
+        /// Default: this machine's normalised hostname.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Session id to seal into. Default: the active file's stem.
+        #[arg(long)]
+        session: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+    },
 }
 
 /// verify `--level` selector.
@@ -201,6 +234,16 @@ fn main() -> ExitCode {
         Command::Ingest { inbox, stage, machine, shard_bucket_cap } => {
             cmd_ingest(&inbox, &stage, machine.as_deref(), shard_bucket_cap)
         }
+        Command::Seal { harness, active, stage, machine, session, shard_bucket_cap } => {
+            cmd_seal(
+                &harness,
+                &active,
+                &stage,
+                machine.as_deref(),
+                session.as_deref(),
+                shard_bucket_cap,
+            )
+        }
     }
 }
 
@@ -232,6 +275,79 @@ fn cmd_ingest(
     println!("[ingest] shard bucket cap : {shard_bucket_cap}");
     print_ingest(&report, &machine);
     ExitCode::SUCCESS
+}
+
+/// `seal` — allowlist-checked rename-sealing of one active file.
+///
+/// The registry (`data/harness-registry-v1.json`) is the single decision
+/// source: `seal_policy` (`rename` / `no-rename` / `not-applicable`),
+/// mandatory `seal_source` evidence, and the platform cell's `confidence`
+/// must all clear the gate. On refusal the active file is left untouched and
+/// the command exits non-zero (sealing was requested but is not permitted).
+fn cmd_seal(
+    harness_id: &str,
+    active: &Path,
+    stage: &Path,
+    machine: Option<&str>,
+    session: Option<&str>,
+    shard_bucket_cap: usize,
+) -> ExitCode {
+    let registry = match scanner::load_registry_from_repo() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("seal: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(h) = seal::harness_by_id(&registry, harness_id) else {
+        eprintln!("seal: harness `{harness_id}` unknown to the registry");
+        return ExitCode::FAILURE;
+    };
+    let policy = seal::SealPolicy::classify(&h.seal_policy);
+    println!("[seal] harness        : {} ({})", h.id, h.display_name);
+    println!("[seal] policy         : {} (raw `{}`)", policy.label(), h.seal_policy);
+    let Some(cell) = h.paths.cell_for(scanner::current_platform()) else {
+        println!("[seal] REFUSED: no `{}` registry cell -> no rename (default)", scanner::current_platform());
+        return ExitCode::FAILURE;
+    };
+    if !seal::seal_allowed(h, cell) {
+        let reason = if policy != seal::SealPolicy::Rename {
+            "registry seal_policy is not `rename`".to_string()
+        } else if h.seal_source.trim().is_empty() {
+            "seal_source is empty (rename needs a measured/source evidence line)".to_string()
+        } else if cell.source.trim().is_empty() {
+            "platform cell source is empty".to_string()
+        } else {
+            "platform cell confidence is not 源码确认".to_string()
+        };
+        println!("[seal] REFUSED: {reason}");
+        println!("[seal] active untouched : {}", active.display());
+        return ExitCode::FAILURE;
+    }
+    let machine = machine.map(String::from).unwrap_or_else(chat_stasher::id::machine_id);
+    let session = session
+        .map(String::from)
+        .or_else(|| active.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("[seal] machine        : {machine}");
+    println!("[seal] session        : {session}");
+    println!("[seal] bucket cap     : {shard_bucket_cap}");
+    match seal::seal_active_file(active, stage, &machine, &session, shard_bucket_cap) {
+        Ok(seq) => {
+            println!(
+                "[seal] sealed          : {} -> {}/{} (seq {seq})",
+                active.display(),
+                store::shard_bucket_name(seq, shard_bucket_cap),
+                store::shard_filename(seq),
+            );
+            println!("[seal] original path now free: a reopen-by-path harness starts its new tail there");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("seal: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Metadata-only ingest summary: counts, paths, shard names, bytes, sha256.

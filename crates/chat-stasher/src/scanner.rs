@@ -157,6 +157,19 @@ pub struct RegistryHarness {
     pub paths: RegistryPaths,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Active-file sealing policy for this harness: `rename` / `no-rename` /
+    /// `not-applicable`. Lives here — the *same* file that drives scanning —
+    /// so the sealing allowlist can never drift from the path registry. Any
+    /// missing / unknown value resolves to `no-rename` (fail-safe, see
+    /// `crate::seal`). To be on the `rename` list a harness needs a `源码确认`
+    /// platform cell **and** a non-empty `seal_source` evidence line.
+    #[serde(default)]
+    pub seal_policy: String,
+    /// Concrete measurement / source line backing `seal_policy`. Required for
+    /// `rename`; the gate in `crate::seal::seal_allowed` rejects empty values,
+    /// so an uncredited harness can never be rename-sealed.
+    #[serde(default)]
+    pub seal_source: String,
 }
 
 /// The three platform cells. Missing keys deserialize to `None`.
@@ -308,6 +321,14 @@ pub struct ScanReport {
 /// harness whose cell is confidence `未查明` is skipped; `仅社区说法未核实`
 /// cells are scanned but the probe is flagged low-confidence.
 pub fn scan(config: &Config) -> io::Result<ScanReport> {
+    let registry = load_registry_from_repo()?;
+    scan_with_registry(config, &registry)
+}
+
+/// Resolve + parse the registry from the repo layout (walking up from the cwd
+/// and `CARGO_MANIFEST_DIR`). Shared by the scanner and the sealing allowlist
+/// (`crate::seal`) so both read the exact same file.
+pub fn load_registry_from_repo() -> io::Result<HarnessRegistry> {
     let Some(path) = resolve_registry_path() else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -317,8 +338,7 @@ pub fn scan(config: &Config) -> io::Result<ScanReport> {
             ),
         ));
     };
-    let registry = load_registry(&path)?;
-    scan_with_registry(config, &registry)
+    load_registry(&path)
 }
 
 /// Registry-driven scan against an already-loaded [`HarnessRegistry`];

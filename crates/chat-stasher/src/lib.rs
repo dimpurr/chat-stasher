@@ -13,5 +13,6 @@ pub mod models;
 pub mod readback;
 pub mod reap;
 pub mod scanner;
+pub mod seal;
 pub mod store;
 pub mod verify;

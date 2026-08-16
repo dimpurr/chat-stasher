@@ -25,7 +25,9 @@
           "source": "https://code.claude.com/docs/en/claude-directory（原话：~/.claude → %USERPROFILE%\\.claude）+ anthropics/claude-code#80683 #84354"
         }
       },
-      "notes": "Windows 走 %USERPROFILE%，不是 %APPDATA%\\Claude。Windows 上短路径用可读 slug；长路径(>~200字符)用路径哈希目录(issue #84354)；该哈希 Windows 上仍区分大小写(c:\\ vs C:\\ 产生不同目录→会话消失)。盘符冒号:与反斜杠\\在短路径下的具体 sanitize：未查明，需 Windows 真机实测。CLAUDE_CONFIG_DIR 覆盖整个 base；清理默认 30 天。"
+      "notes": "Windows 走 %USERPROFILE%，不是 %APPDATA%\\Claude。Windows 上短路径用可读 slug；长路径(>~200字符)用路径哈希目录(issue #84354)；该哈希 Windows 上仍区分大小写(c:\\ vs C:\\ 产生不同目录→会话消失)。盘符冒号:与反斜杠\\在短路径下的具体 sanitize：未查明，需 Windows 真机实测。CLAUDE_CONFIG_DIR 覆盖整个 base；清理默认 30 天。",
+      "seal_policy": "rename",
+      "seal_source": "A9 实测（macOS）：201 采样点跨真实写入窗口（172210→194561 B，11 次 size 变化）全部 lsof=0 ⇒ 每次按路径 reopen，rename 封口安全"
     },
     {
       "id": "codex",
@@ -50,7 +52,9 @@
           "source": "同上（dirs::home_dir() Windows 返回 %USERPROFILE%，无平台分支）"
         }
       },
-      "notes": "不 honor XDG_DATA_HOME（home-dir crate 无 XDG 引用）。空闲 rollout 压缩为 .jsonl.zst。session_index.jsonl 在 codex home 根。CODEX_HOME 可覆盖。"
+      "notes": "不 honor XDG_DATA_HOME（home-dir crate 无 XDG 引用）。空闲 rollout 压缩为 .jsonl.zst。session_index.jsonl 在 codex home 根。CODEX_HOME 可覆盖。",
+      "seal_policy": "no-rename",
+      "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746（ensure_writer_open 已开则不重开）+ :1928（JsonlWriter 持 tokio::fs::File）⇒ 持 fd，rename 后新增会写进旧 inode"
     },
     {
       "id": "gemini-cli",
@@ -78,7 +82,9 @@
           "source": "同上（os.homedir() → %USERPROFILE%）"
         }
       },
-      "notes": "用 os.homedir()（Windows=%USERPROFILE%），无 APPDATA/XDG 逻辑；不 honor XDG_DATA_HOME。GEMINI_CLI_HOME 环境变量会整体覆盖 home。30 天清理：全局 tmp 目录 sweep。聊天历史在 tmp/<projectId>/chats/（名字叫 tmp 但并非临时）。"
+      "notes": "用 os.homedir()（Windows=%USERPROFILE%），无 APPDATA/XDG 逻辑；不 honor XDG_DATA_HOME。GEMINI_CLI_HOME 环境变量会整体覆盖 home。30 天清理：全局 tmp 目录 sweep。聊天历史在 tmp/<projectId>/chats/（名字叫 tmp 但并非临时）。",
+      "seal_policy": "rename",
+      "seal_source": "packages/core/src/services/chatRecordingService.ts:559-564 fs.appendFileSync = 每次调用 open→append→close，不跨调用持 fd ⇒ 每次 reopen，rename 封口安全"
     },
     {
       "id": "opencode",
@@ -103,7 +109,9 @@
           "source": "同上（无 %APPDATA%/%LOCALAPPDATA% 分支存放 db）"
         }
       },
-      "notes": "⚠️前提修正：opencode 是 Go 项目(github.com/opencode-ai/opencode)，不是 Rust，不用 xdg-basedir crate。当前 main 全仓库 grep 找不到 ~/.local/share/opencode——默认 data.directory 是相对 .opencode。~/.local/share 的绝对化解析在当前源码未找到(未查明，疑为旧版或安装时配置)。xdg-basedir crate 实测 unix-only(lib.rs:1 #![cfg(any(unix,redox))])，Windows 不编译；XDG_DATA_HOME 未设→~/.local/share。config.go:944 的 %LOCALAPPDATA% 只用于读 GitHub Copilot hosts.json，与 opencode.db 无关。"
+      "notes": "⚠️前提修正：opencode 是 Go 项目(github.com/opencode-ai/opencode)，不是 Rust，不用 xdg-basedir crate。当前 main 全仓库 grep 找不到 ~/.local/share/opencode——默认 data.directory 是相对 .opencode。~/.local/share 的绝对化解析在当前源码未找到(未查明，疑为旧版或安装时配置)。xdg-basedir crate 实测 unix-only(lib.rs:1 #![cfg(any(unix,redox))])，Windows 不编译；XDG_DATA_HOME 未设→~/.local/share。config.go:944 的 %LOCALAPPDATA% 只用于读 GitHub Copilot hosts.json，与 opencode.db 无关。",
+      "seal_policy": "not-applicable",
+      "seal_source": "单一 SQLite（database.ts path() → opencode.db，WAL 必然长期持 fd，但本身也非 append jsonl）⇒ 没有可 rename 的活跃 jsonl"
     },
     {
       "id": "cursor",
@@ -128,7 +136,9 @@
           "source": "同上 + Electron userData 惯例（%APPDATA%\\<name>）"
         }
       },
-      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。"
+      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。",
+      "seal_policy": "no-rename",
+      "seal_source": "（fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename；社区说法 cell 也过不了 源码确认 闸门）"
     },
     {
       "id": "github-copilot-cli",
@@ -153,7 +163,9 @@
           "source": "同上（home 无 win32 分支）；缓存走 %LOCALAPPDATA%\\copilot\\"
         }
       },
-      "notes": "会持久化会话（非 ephemeral）：session-store.db SQLite(sessions/turns/... WAL)+每会话 events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir 可覆盖。Linux 若设 XDG_CONFIG_HOME/XDG_STATE_HOME 会一次性迁移 config→XDG_CONFIG_HOME/copilot、state(含 session-store.db)→XDG_STATE_HOME/copilot。Windows 不适用 XDG 迁移。"
+      "notes": "会持久化会话（非 ephemeral）：session-store.db SQLite(sessions/turns/... WAL)+每会话 events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir 可覆盖。Linux 若设 XDG_CONFIG_HOME/XDG_STATE_HOME 会一次性迁移 config→XDG_CONFIG_HOME/copilot、state(含 session-store.db)→XDG_STATE_HOME/copilot。Windows 不适用 XDG 迁移。",
+      "seal_policy": "no-rename",
+      "seal_source": "（fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）"
     },
     {
       "id": "aider",
@@ -178,7 +190,9 @@
           "source": "同上（平台无关 CWD 相对）"
         }
       },
-      "notes": "聊天历史在 CWD，不在 home；~/.aider/ 只放 config/state（installs.json、oauth-keys.env、model settings）。旧的 .aider.history.jsonl 已不存在（改为 .aider.chat.history.md）。不 honor XDG/APPDATA。"
+      "notes": "聊天历史在 CWD，不在 home；~/.aider/ 只放 config/state（installs.json、oauth-keys.env、model settings）。旧的 .aider.history.jsonl 已不存在（改为 .aider.chat.history.md）。不 honor XDG/APPDATA。",
+      "seal_policy": "no-rename",
+      "seal_source": "（CWD 相对 store 且 fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）"
     },
     {
       "id": "crush",
@@ -203,7 +217,9 @@
           "source": "同上"
         }
       },
-      "notes": "项目级 SQLite（data_directory 默认 .crush，随项目走）。全局目录只放 config，不放聊天历史。"
+      "notes": "项目级 SQLite（data_directory 默认 .crush，随项目走）。全局目录只放 config，不放聊天历史。",
+      "seal_policy": "no-rename",
+      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）"
     },
     {
       "id": "zed",
@@ -228,7 +244,9 @@
           "source": "同上"
         }
       },
-      "notes": "AI 面板/agent 聊天历史在 <data_dir>/threads/threads.db（ThreadStore）。主 app DB 在 <data_dir>/db/0-<channel>/db.sqlite（非聊天）。✅Zed 是 Linux 上真正走 XDG_DATA_HOME 的第二个例子。macOS 分支未逐一核实。"
+      "notes": "AI 面板/agent 聊天历史在 <data_dir>/threads/threads.db（ThreadStore）。主 app DB 在 <data_dir>/db/0-<channel>/db.sqlite（非聊天）。✅Zed 是 Linux 上真正走 XDG_DATA_HOME 的第二个例子。macOS 分支未逐一核实。",
+      "seal_policy": "no-rename",
+      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）"
     },
     {
       "id": "continue",
@@ -253,7 +271,9 @@
           "source": "同上（os.homedir → %USERPROFILE%，无 %APPDATA%/XDG，除非 CONTINUE_GLOBAL_DIR 覆盖）"
         }
       },
-      "notes": "每会话一个 JSON + sessions.json 索引。Continue 的 SQLite(dev_data at ~/.continue/dev_data/) 是 analytics，不是聊天历史。CONTINUE_GLOBAL_DIR 可整体覆盖。"
+      "notes": "每会话一个 JSON + sessions.json 索引。Continue 的 SQLite(dev_data at ~/.continue/dev_data/) 是 analytics，不是聊天历史。CONTINUE_GLOBAL_DIR 可整体覆盖。",
+      "seal_policy": "no-rename",
+      "seal_source": "（每会话独立 JSON 文件、覆盖/新建语义，fd 语义未在 B20 前确认 ⇒ 默认 no-rename）"
     }
   ]
 }
