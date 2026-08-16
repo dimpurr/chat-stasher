@@ -9,3 +9,8 @@ Cargo.lock.bak
 # OS / 编辑器
 .DS_Store
 *.log
+
+# 扩展（WXT）
+ext/node_modules/
+ext/.output/
+ext/.wxt/
