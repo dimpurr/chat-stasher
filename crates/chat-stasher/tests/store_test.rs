@@ -36,9 +36,10 @@ fn sealed_shards_roundtrip_in_partitioned_layout() {
         store::session_shard_dir(stage, machine, session),
         stage.join("sessions").join(machine).join(session)
     );
-    let mut names: Vec<_> = fs::read_dir(store::session_shard_dir(stage, machine, session))
+    let mut names: Vec<_> = store::sealed_shard_entries(&store::session_shard_dir(stage, machine, session))
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .into_iter()
+        .map(|(_, path)| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     names.sort();
     assert_eq!(names, vec!["000001.jsonl", "000002.jsonl", "000003.jsonl"]);
@@ -60,8 +61,41 @@ fn next_shard_seq_continues_after_latest() {
     assert_eq!(store::next_shard_seq(stage, "m", "s"), 3);
     assert_eq!(
         store::shard_path(stage, "m", "s", 3),
-        PathBuf::from(stage.join("sessions/m/s/000003.jsonl"))
+        PathBuf::from(stage.join("sessions/m/s/000/000003.jsonl"))
     );
+    drop(dir);
+}
+
+#[test]
+fn bucket_cap_keeps_single_bucket_bounded_and_reads_legacy_mix() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path();
+    let machine = "m";
+    let session = "s";
+
+    for i in 0..21 {
+        store::write_sealed_shard_with_cap(
+            stage,
+            machine,
+            session,
+            &[format!("{{\"i\":{i}}}")],
+            20,
+        )
+        .unwrap();
+    }
+    let session_dir = store::session_shard_dir(stage, machine, session);
+    let bucket_000 = session_dir.join("000");
+    let bucket_001 = session_dir.join("001");
+    assert_eq!(fs::read_dir(bucket_000).unwrap().count(), 20);
+    assert_eq!(fs::read_dir(bucket_001).unwrap().count(), 1);
+
+    // A legacy direct shard remains readable alongside newly bucketed shards.
+    fs::write(session_dir.join("000022.jsonl"), b"legacy\n").unwrap();
+    let entries = store::sealed_shard_entries(&session_dir).unwrap();
+    assert_eq!(entries.len(), 22);
+    assert_eq!(store::next_shard_seq(stage, machine, session), 23);
+    let concat = store::concat_shards(stage, machine, session).unwrap();
+    assert!(concat.ends_with(b"legacy\n"));
     drop(dir);
 }
 

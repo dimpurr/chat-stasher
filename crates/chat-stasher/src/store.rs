@@ -6,10 +6,11 @@
 //!     file is written once and never appended to again. Old shards keep their
 //!     size+mtime so rustic's file-level parent match hits `files_unmodified`
 //!     and the old files are never re-read (`data_added ≈ 0`).
-//!   * **Paths are partitioned**: `sessions/<machine>/<session-id>/NNNNNN.jsonl`.
+//!   * **Paths are partitioned**: `sessions/<machine>/<session-id>/<bucket>/NNNNNN.jsonl`.
 //!     Two machines can never claim the same path, so every machine's data is
 //!     permanently addressable. The zero-padded sequence keeps lexicographic
-//!     order equal to chronological order.
+//!     order equal to chronological order. The reader also accepts the legacy
+//!     unbucketed `sessions/<machine>/<session-id>/NNNNNN.jsonl` layout.
 //!   * **The chunker is left at rustic's default** (Rabin / 1 MiB) — the
 //!     sealed-shard scheme does not depend on it.
 //!   * **append_only is set at init time** — after the chunker is fixed, so the
@@ -28,7 +29,7 @@
 use anyhow::{Context, anyhow};
 use rayon::ThreadPoolBuilder;
 use rustic_backend::BackendOptions;
-use rustic_core::repofile::{MasterKey, SnapshotFile};
+use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
 use rustic_core::{
     BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions, LsOptions,
     ParentOptions, PathList, Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions,
@@ -45,6 +46,12 @@ pub const DEFAULT_CONNECTIONS: usize = 10;
 pub const SESSIONS_DIR: &str = "sessions";
 /// Suffix used for every sealed shard file.
 pub const SHARD_SUFFIX: &str = ".jsonl";
+/// Default maximum number of sealed shards in one bucket.
+///
+/// G7 measured 20-shard buckets at 21,568 B fixed overhead on push 200 versus
+/// 238,755 B when all shards shared one directory; the cap is therefore a
+/// measured bound, not a filesystem limit.
+pub const DEFAULT_SHARD_BUCKET_CAP: usize = 20;
 
 /// Everything BackupStore needs to reach a repository.
 #[derive(Debug, Clone)]
@@ -266,22 +273,35 @@ impl BackupStore {
                 ))
             }
         };
-        let mut entries: Vec<_> = repo
+        let entries: Vec<_> = repo
             .ls(&dir_node, &LsOptions::default())?
             .collect::<rustic_core::RusticResult<Vec<_>>>()?;
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b)); // zero-padded seq ⇒ lex == chrono
+        let mut entries: Vec<_> = entries
+            .into_iter()
+            .filter_map(|(path, node)| {
+                if node.node_type != NodeType::File {
+                    return None;
+                }
+                let name = path.file_name()?.to_str()?.to_string();
+                let seq = parse_shard_seq(&name)?;
+                Some((seq, path, node))
+            })
+            .collect();
+        entries.sort_by(|(seq_a, path_a, _), (seq_b, path_b, _)| {
+            seq_a.cmp(seq_b).then_with(|| path_a.cmp(path_b))
+        });
         if entries.is_empty() {
             return Err(anyhow!("session dir is empty in snapshot"));
         }
 
         let mut concat = Vec::new();
         let mut hashes = Vec::new();
-        for (name, node) in entries {
+        for (seq, _path, node) in entries {
             let mut buf = Vec::new();
             repo.dump(&node, &mut buf).context("dump shard")?;
             concat.extend_from_slice(&buf);
             let hash = hex_digest(&Sha256::digest(&buf));
-            hashes.push((name.to_string_lossy().into_owned(), hash));
+            hashes.push((shard_filename(seq), hash));
         }
         Ok((concat, hashes))
     }
@@ -294,15 +314,12 @@ pub fn expected_concat_sha(stage_root: &Path, machine: &str, session_id: &str) -
 
 /// Concatenated bytes of all sealed shards of a session (seq order).
 pub fn concat_shards(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<Vec<u8>> {
-    let mut names: Vec<String> = fs::read_dir(session_shard_dir(stage_root, machine, session_id))
-        .context("read session shard dir")?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .filter(|n| n.ends_with(SHARD_SUFFIX))
-        .collect();
-    names.sort();
+    let dir = session_shard_dir(stage_root, machine, session_id);
+    let mut entries = sealed_shard_entries(&dir)?;
+    entries.sort_by_key(|(seq, _)| *seq);
     let mut all = Vec::new();
-    for name in names {
-        let bytes = fs::read(session_shard_dir(stage_root, machine, session_id).join(&name))?;
+    for (_, path) in entries {
+        let bytes = fs::read(path)?;
         all.extend_from_slice(&bytes);
     }
     Ok(all)
@@ -323,10 +340,28 @@ pub fn session_shard_dir(stage_root: &Path, machine: &str, session_id: &str) -> 
         .join(session_id)
 }
 
-/// Absolute path of shard `seq` (zero-padded to 6 digits, `.jsonl` suffix).
+/// Absolute path of shard `seq` using the default bucket cap.
 pub fn shard_path(stage_root: &Path, machine: &str, session_id: &str, seq: u64) -> PathBuf {
-    let canon = shard_filename(seq);
-    session_shard_dir(stage_root, machine, session_id).join(canon)
+    shard_path_with_cap(stage_root, machine, session_id, seq, DEFAULT_SHARD_BUCKET_CAP)
+}
+
+/// Absolute path of shard `seq` with an explicit bucket cap.
+pub fn shard_path_with_cap(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    seq: u64,
+    bucket_cap: usize,
+) -> PathBuf {
+    session_shard_dir(stage_root, machine, session_id)
+        .join(shard_bucket_name(seq, bucket_cap))
+        .join(shard_filename(seq))
+}
+
+/// Bucket name for a one-based shard sequence. Sequence 1..=CAP is `000`.
+pub fn shard_bucket_name(seq: u64, bucket_cap: usize) -> String {
+    let cap = bucket_cap.max(1) as u64;
+    format!("{:03}", seq.saturating_sub(1) / cap)
 }
 
 /// `000001.jsonl` style file name for a sequence number.
@@ -346,16 +381,13 @@ pub fn parse_shard_seq(name: &str) -> Option<u64> {
 /// Next sequence number for a sealed session shard set (1 + highest existing).
 pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> u64 {
     let dir = session_shard_dir(stage_root, machine, session_id);
-    let mut max = 0u64;
-    if let Ok(rd) = fs::read_dir(&dir) {
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(seq) = parse_shard_seq(&name) {
-                max = max.max(seq);
-            }
-        }
-    }
-    max + 1
+    sealed_shard_entries(&dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(seq, _)| seq)
+        .max()
+        .unwrap_or(0)
+        + 1
 }
 
 /// Append a batch of lines as a new sealed shard. Returns the shard's file
@@ -366,10 +398,29 @@ pub fn write_sealed_shard(
     session_id: &str,
     lines: &[String],
 ) -> anyhow::Result<String> {
+    write_sealed_shard_with_cap(
+        stage_root,
+        machine,
+        session_id,
+        lines,
+        DEFAULT_SHARD_BUCKET_CAP,
+    )
+}
+
+/// Append a batch of lines as a new sealed shard in the bucket selected by its
+/// sequence. Existing shards are never moved when the cap changes.
+pub fn write_sealed_shard_with_cap(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    lines: &[String],
+    bucket_cap: usize,
+) -> anyhow::Result<String> {
     let dir = session_shard_dir(stage_root, machine, session_id);
     fs::create_dir_all(&dir)?;
     let seq = next_shard_seq(stage_root, machine, session_id);
-    let path = shard_path(stage_root, machine, session_id, seq);
+    let path = shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
+    fs::create_dir_all(path.parent().expect("shard path has bucket parent"))?;
     let mut f = fs::File::create(&path)?;
     for line in lines {
         f.write_all(line.as_bytes())?;
@@ -377,6 +428,39 @@ pub fn write_sealed_shard(
     }
     f.sync_all()?;
     Ok(shard_filename(seq))
+}
+
+/// Find sealed shards in both layouts: legacy files directly under the
+/// session directory and new files one directory below it. The result carries
+/// the parsed global sequence so callers can sort across buckets.
+pub fn sealed_shard_entries(session_dir: &Path) -> anyhow::Result<Vec<(u64, PathBuf)>> {
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(session_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e).with_context(|| format!("read session shard dir {}", session_dir.display())),
+    };
+    for entry in rd {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_file() {
+            if let Some(seq) = parse_shard_seq(&entry.file_name().to_string_lossy()) {
+                out.push((seq, path));
+            }
+        } else if file_type.is_dir() {
+            for child in fs::read_dir(&path)? {
+                let child = child?;
+                if !child.file_type()?.is_file() {
+                    continue;
+                }
+                if let Some(seq) = parse_shard_seq(&child.file_name().to_string_lossy()) {
+                    out.push((seq, child.path()));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------------------- keys
@@ -473,7 +557,7 @@ mod tests {
         let stage = Path::new("/tmp/stage");
         assert_eq!(
             shard_path(stage, "mbp-2", "sess-1", 7),
-            PathBuf::from("/tmp/stage/sessions/mbp-2/sess-1/000007.jsonl")
+            PathBuf::from("/tmp/stage/sessions/mbp-2/sess-1/000/000007.jsonl")
         );
     }
 }
