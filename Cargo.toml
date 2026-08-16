@@ -1,28 +1,12 @@
-[package]
-name = "chat-stasher"
-version = "0.1.0"
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
 edition = "2021"
-description = "Append-only archive for every LLM conversation, across harnesses."
-license = "LicenseRef-scratch" # placeholder until the decision record lands
+license = "TBD"          # 🔴 许可证未定（docs/11-decision.md D2 仍待拍板）
+repository = "https://github.com/dimpurr/chat-stasher"
 
-[dependencies]
-clap = { version = "4", features = ["derive"] }
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-# BackupStore (spike B4): pinned to the versions proven by the A-series spikes
-# (rustic_check crate in scratch/spike used exactly these).
-rustic_core = { version = "=0.12.0" }
-rustic_backend = { version = "=0.6.2", default-features = false, features = ["opendal"] }
-anyhow = "1"
 serde_json = "1"
-sha2 = "0.11"
-rayon = "1"
-
-[dev-dependencies]
-tempfile = "3"
-
-[profile.release]
-lto = true
-
-[profile.test]
-# keep test builds quiet unless a test fails
