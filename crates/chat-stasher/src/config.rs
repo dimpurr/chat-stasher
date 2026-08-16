@@ -63,9 +63,7 @@ impl Config {
                     Config::default()
                 }
             },
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound =>
-            {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // First run — no config yet. That is explicitly fine.
                 Config::default()
             }

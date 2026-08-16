@@ -26,7 +26,7 @@
 //!     backend `connections` option; locally we pin the global rayon pool,
 //!     which backs `decrypt.rs`'s read fan-out).
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use rayon::ThreadPoolBuilder;
 use rustic_backend::BackendOptions;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
@@ -110,7 +110,9 @@ impl BackupStore {
     /// to `connections`. Once another part of the process built a bigger pool
     /// this is a no-op — the hard bound lives at the backend layer.
     fn limit_parallelism(connections: usize) {
-        let _ = ThreadPoolBuilder::new().num_threads(connections).build_global();
+        let _ = ThreadPoolBuilder::new()
+            .num_threads(connections)
+            .build_global();
     }
 
     pub fn new(cfg: StoreConfig, machine: String) -> Self {
@@ -125,16 +127,10 @@ impl BackupStore {
     /// wiring applies the connections cap as the backend `connections` option
     /// (`ConcurrentLimitLayer`).
     pub fn backends(&self) -> anyhow::Result<RepositoryBackends> {
-        let mut opts =
-            BackendOptions::default().repository(self.cfg.repo_root.as_str());
-        if self.cfg.repo_root.starts_with("opendal:")
-            || self.cfg.repo_root.starts_with("rest:")
-        {
+        let mut opts = BackendOptions::default().repository(self.cfg.repo_root.as_str());
+        if self.cfg.repo_root.starts_with("opendal:") || self.cfg.repo_root.starts_with("rest:") {
             let mut options = BTreeMap::new();
-            options.insert(
-                "connections".to_string(),
-                self.cfg.connections.to_string(),
-            );
+            options.insert("connections".to_string(), self.cfg.connections.to_string());
             options.extend(self.cfg.options.iter().map(|(k, v)| (k.clone(), v.clone())));
             opts = opts.options(options);
         }
@@ -190,8 +186,11 @@ impl BackupStore {
         .context("parse stage root")?
         .sanitize()
         .context("sanitize stage root")?;
-        let build_opts = BackupOptions::default()
-            .parent_opts(ParentOptions::default().ignore_ctime(true).ignore_inode(true));
+        let build_opts = BackupOptions::default().parent_opts(
+            ParentOptions::default()
+                .ignore_ctime(true)
+                .ignore_inode(true),
+        );
         let snap = r
             .backup(&build_opts, &source, snap)
             .context("run rustic backup")?;
@@ -256,7 +255,9 @@ impl BackupStore {
         mk: &MasterKey,
     ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
         let (repo, snap) = self.open_with_newest_snapshot(mk)?;
-        let canon = stage_root.canonicalize().context("canonicalize stage root")?;
+        let canon = stage_root
+            .canonicalize()
+            .context("canonicalize stage root")?;
         let dir_rel = canon
             .strip_prefix("/")
             .unwrap_or(&canon)
@@ -308,12 +309,20 @@ impl BackupStore {
 }
 
 /// sha256 of concatenated source shards on disk (the expected value).
-pub fn expected_concat_sha(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<String> {
+pub fn expected_concat_sha(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<String> {
     concat_sha_of(stage_root, machine, session_id)
 }
 
 /// Concatenated bytes of all sealed shards of a session (seq order).
-pub fn concat_shards(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<Vec<u8>> {
+pub fn concat_shards(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<Vec<u8>> {
     let dir = session_shard_dir(stage_root, machine, session_id);
     let mut entries = sealed_shard_entries(&dir)?;
     entries.sort_by_key(|(seq, _)| *seq);
@@ -334,15 +343,18 @@ fn concat_sha_of(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::
 
 /// `<stage>/sessions/<machine>/<session_id>` — the partitioned directory.
 pub fn session_shard_dir(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
-    stage_root
-        .join(SESSIONS_DIR)
-        .join(machine)
-        .join(session_id)
+    stage_root.join(SESSIONS_DIR).join(machine).join(session_id)
 }
 
 /// Absolute path of shard `seq` using the default bucket cap.
 pub fn shard_path(stage_root: &Path, machine: &str, session_id: &str, seq: u64) -> PathBuf {
-    shard_path_with_cap(stage_root, machine, session_id, seq, DEFAULT_SHARD_BUCKET_CAP)
+    shard_path_with_cap(
+        stage_root,
+        machine,
+        session_id,
+        seq,
+        DEFAULT_SHARD_BUCKET_CAP,
+    )
 }
 
 /// Absolute path of shard `seq` with an explicit bucket cap.
@@ -438,7 +450,10 @@ pub fn sealed_shard_entries(session_dir: &Path) -> anyhow::Result<Vec<(u64, Path
     let rd = match fs::read_dir(session_dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e).with_context(|| format!("read session shard dir {}", session_dir.display())),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("read session shard dir {}", session_dir.display()))
+        }
     };
     for entry in rd {
         let entry = entry?;

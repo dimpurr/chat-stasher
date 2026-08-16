@@ -12,9 +12,7 @@ use std::fs;
 /// Build a registry with just claude-code + codex, every platform cell
 /// populated (so the test passes regardless of which OS it runs on).
 fn scratch_registry() -> HarnessRegistry {
-    let cell = |template: &str| {
-        json!({ "template": template, "format": "jsonl / jsonl.zst", "confidence": "源码确认", "source": "test" })
-    };
+    let cell = |template: &str| json!({ "template": template, "format": "jsonl / jsonl.zst", "confidence": "源码确认", "source": "test" });
     serde_json::from_value(json!({
         "schema_version": 1,
         "generated": "2026-08-16",
@@ -71,7 +69,11 @@ fn scan_indexes_both_harnesses_and_counts_compressed() {
     // One claude session, two codex sessions (one of them zst-compressed).
     fs::write(claude_root.join(format!("{UUID_A}.jsonl")), b"{}\n").unwrap();
     fs::write(codex_root.join(format!("{UUID_A}.jsonl")), b"{}\n{}\n").unwrap();
-    fs::write(codex_root.join(format!("{UUID_B}.jsonl.zst")), vec![0u8; 64]).unwrap();
+    fs::write(
+        codex_root.join(format!("{UUID_B}.jsonl.zst")),
+        vec![0u8; 64],
+    )
+    .unwrap();
 
     let registry = scratch_registry();
     let report = scanner::scan_with_registry(&config, &registry).unwrap();
@@ -80,7 +82,10 @@ fn scan_indexes_both_harnesses_and_counts_compressed() {
     assert!(report.missing_roots.is_empty());
     assert_eq!(report.probes.len(), 2);
 
-    let mut claude = report.records.iter().filter(|r| r.source == HarnessSource::ClaudeCode);
+    let mut claude = report
+        .records
+        .iter()
+        .filter(|r| r.source == HarnessSource::ClaudeCode);
     let c = claude.next().unwrap();
     assert_eq!(c.byte_size, 3);
     assert!(!c.compressed);
@@ -98,7 +103,12 @@ fn scan_indexes_both_harnesses_and_counts_compressed() {
         .position(|r| r.compressed)
         .expect("zst file must be listed, never skipped");
     let z = codex[idx];
-    let zname = z.absolute_path.file_name().unwrap().to_string_lossy().to_string();
+    let zname = z
+        .absolute_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     assert!(zname.ends_with(".jsonl.zst"));
     assert_eq!(z.byte_size, 64);
     assert!(z.id.ends_with(&format!(".{UUID_B}")));

@@ -267,7 +267,11 @@ pub fn bucket_shard_path(path: &Path) -> Option<(String, String, String)> {
     if !shard.ends_with(SHARD_SUFFIX) {
         return None;
     }
-    Some((rest[0].to_string(), rest[1].to_string(), (*shard).to_string()))
+    Some((
+        rest[0].to_string(),
+        rest[1].to_string(),
+        (*shard).to_string(),
+    ))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -293,7 +297,15 @@ mod tests {
             .into_iter()
             .map(|(p, _)| p.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["000001.jsonl", "000002.jsonl", "000003.jsonl", "000010.jsonl"]);
+        assert_eq!(
+            names,
+            [
+                "000001.jsonl",
+                "000002.jsonl",
+                "000003.jsonl",
+                "000010.jsonl"
+            ]
+        );
     }
 
     /// Non-conforming names survive the sort (they follow valid ones) instead
