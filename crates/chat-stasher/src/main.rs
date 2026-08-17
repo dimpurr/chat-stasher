@@ -33,8 +33,9 @@ enum Command {
     Init,
     /// Collect one pass, push only when configured and changed, then exit.
     ///
-    /// Exit codes are intentionally distinct: 0 = normal no-op, 10 = normal
-    /// completed cycle, 1 = real error. The command is safe to invoke again.
+    /// Normal outcomes return 0: `result: NOOP` means no snapshot was created,
+    /// while `result: COMPLETED` means a snapshot was created. Non-zero means
+    /// a real error. The command is safe to invoke again.
     RunOnce {
         /// Stage directory that holds the sealed session shard tree.
         #[arg(long)]
@@ -534,9 +535,6 @@ fn print_collect_report(
     }
 }
 
-const RUN_ONCE_NOOP_CODE: u8 = 0;
-const RUN_ONCE_COMPLETED_CODE: u8 = 10;
-
 fn cmd_run_once(
     stage: &Path,
     machine: Option<String>,
@@ -624,8 +622,8 @@ fn cmd_run_once(
                 }
             }
         }
-        println!("[run-once] result: NOOP exit_code={RUN_ONCE_NOOP_CODE} (no new snapshot)");
-        return ExitCode::from(RUN_ONCE_NOOP_CODE);
+        println!("[run-once] result: NOOP snapshot=not-created exit_code=0");
+        return ExitCode::SUCCESS;
     }
 
     let push_code = cmd_push(
@@ -659,8 +657,8 @@ fn cmd_run_once(
             return ExitCode::FAILURE;
         }
     }
-    println!("[run-once] result: COMPLETED exit_code={RUN_ONCE_COMPLETED_CODE} (snapshot created)");
-    ExitCode::from(RUN_ONCE_COMPLETED_CODE)
+    println!("[run-once] result: COMPLETED snapshot=created exit_code=0");
+    ExitCode::SUCCESS
 }
 
 fn cmd_schedule(
