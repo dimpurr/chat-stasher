@@ -94,7 +94,7 @@ fn plant_cursor_db(home: &Path) {
     for i in 0..CURSOR_SESSIONS {
         let key = format!("composerData:00000000-0000-4000-8000-{i:012}");
         let value = format!(
-            r#"{{"composerId":"c{i}","createdAt":{}}}"#,
+            r#"{{"composerId":"c{i}","createdAt":{},"fullConversationHeadersOnly":[{{}}]}}"#,
             1760000000000i64 + i as i64
         );
         conn.execute(

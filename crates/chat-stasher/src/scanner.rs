@@ -211,6 +211,10 @@ impl RegistryPaths {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistryCell {
     pub template: String,
+    /// Optional environment variable whose value is the harness-specific base
+    /// directory. When set, scanner resolution uses it before the template.
+    #[serde(default)]
+    pub env_override: Option<String>,
     #[serde(default)]
     pub format: String,
     /// Optional basename glob, e.g. `session-*`. This is required for
@@ -252,6 +256,9 @@ pub struct RegistryCell {
     /// True when `sql_time_column` holds Unix seconds instead of millis.
     #[serde(default)]
     pub sql_time_value_is_seconds: bool,
+    /// Optional named qualification rule for JSON key/value stores.
+    #[serde(default)]
+    pub sql_qualification: Option<String>,
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
@@ -327,6 +334,9 @@ pub struct HarnessProbe {
     /// cannot be enumerated at all (missing, skipped, single-file store whose
     /// schema we do not recognise) — never a fabricated zero.
     pub record_count: Option<u64>,
+    /// Candidate rows before a store-specific qualification rule. For Cursor
+    /// this is the raw `composerData:%` count shown beside `record_count`.
+    pub candidate_count: Option<u64>,
     /// Earliest / latest session timestamp, for single-file SQLite stores that
     /// carry one (via the registry-declared schema). `None` when unknown.
     pub earliest: Option<SystemTime>,
@@ -420,6 +430,7 @@ fn probe_harness(
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
         record_count: None,
+        candidate_count: None,
         earliest: None,
         latest: None,
         bytes: 0,
@@ -445,19 +456,29 @@ fn probe_harness(
         };
     }
 
-    // 3. The template must reduce to a static root we can probe.
-    let Some((mut root, is_file)) = static_prefix_root(&cell.template) else {
-        return HarnessProbe {
-            confidence,
-            state: ProbeState::SkipUnresolvable,
-            note: format!("模板无法静态解析为根路径：{}", cell.template),
-            ..base
-        };
+    // 3. Resolve the registry-declared environment override first. The
+    // template is the fallback when the override is unset or has no usable
+    // suffix mapping.
+    let (mut root, is_file, used_env_override) = match root_from_env_override(cell) {
+        Some((root, is_file)) => (root, is_file, true),
+        None => match static_prefix_root(&cell.template) {
+            Some((root, is_file)) => (root, is_file, false),
+            None => {
+                return HarnessProbe {
+                    confidence,
+                    state: ProbeState::SkipUnresolvable,
+                    note: format!("模板无法静态解析为根路径：{}", cell.template),
+                    ..base
+                }
+            }
+        },
     };
 
-    // 4. Config overrides for the two legacy harnesses still win (and keep the
-    //    sandboxed integration tests deterministic).
-    root = root_for_id(&h.id, root, config);
+    // 4. Config overrides remain available when no registry env override was
+    // applied. An explicitly set environment variable wins over config.
+    if !used_env_override {
+        root = root_for_id(&h.id, root, config);
+    }
 
     // 5. This build must know the harness, or we refuse to label its files.
     let Some(source) = HarnessSource::from_id(&h.id) else {
@@ -469,6 +490,26 @@ fn probe_harness(
         };
     };
 
+    let env_note = cell
+        .env_override
+        .as_deref()
+        .filter(|_| used_env_override)
+        .map(|name| format!("env_override=${name}; "))
+        .unwrap_or_default();
+
+    // Cursor's old layout is a directory of workspace databases, not the
+    // global single-file target declared by the current layout.
+    if h.id == "cursor" && cell.format == "sqlite" {
+        return probe_cursor_harness(
+            base,
+            confidence,
+            root,
+            env_note,
+            &mut report.missing_roots,
+            cell,
+        );
+    }
+
     // 6. Single-file stores are probed for existence; directory roots are walked.
     if is_file {
         match fs::metadata(&root) {
@@ -479,6 +520,7 @@ fn probe_harness(
                     state: ProbeState::FileTarget,
                     bytes: md.len(),
                     record_count: None,
+                    candidate_count: None,
                     note: "单文件存储，只探测存在与大小".to_string(),
                     ..base
                 };
@@ -495,27 +537,21 @@ fn probe_harness(
                     };
                     probe.bytes = info.total_bytes;
                     let expected = spec
-                        .map(|s| {
-                            format!(
-                                "{}表({})",
-                                s.table,
-                                s.required_columns.join(", ")
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            "session(id, time_created, time_updated)".to_string()
-                        });
+                        .map(|s| format!("{}表({})", s.table, s.required_columns.join(", ")))
+                        .unwrap_or_else(|| "session(id, time_created, time_updated)".to_string());
                     match info.sessions {
                         SqliteSessionProbe::Known {
                             count,
+                            candidate_count,
                             earliest,
                             latest,
                         } => {
                             probe.record_count = Some(count);
+                            probe.candidate_count = Some(candidate_count);
                             probe.earliest = earliest;
                             probe.latest = latest;
                             probe.note = format!(
-                                "SQLite 只读枚举 {expected}（bytes 含 .db+-wal+-shm）；{count} 会话"
+                                "{env_note}SQLite 只读枚举 {expected}（bytes 含 .db+-wal+-shm）；过滤前 {candidate_count} / 过滤后 {count} 会话"
                             );
                         }
                         SqliteSessionProbe::SchemaMismatch { actual } => {
@@ -550,6 +586,7 @@ fn probe_harness(
             confidence,
             state: ProbeState::Missing,
             record_count: None,
+            candidate_count: None,
             note: "目录不存在".to_string(),
             ..base
         }
@@ -568,6 +605,7 @@ fn probe_harness(
             confidence,
             state: ProbeState::Scanned,
             record_count: Some(count),
+            candidate_count: Some(count),
             note: if count == 0 {
                 "目录在，但没有可枚举的会话文件".to_string()
             } else {
@@ -576,6 +614,177 @@ fn probe_harness(
             ..base
         }
     }
+}
+
+/// Resolve an env override as the base directory represented by the registry
+/// template. The current cells use stable harness markers: Cursor's override
+/// is its `User` directory, Codex's is its `.codex` directory, and Gemini's is
+/// its `.gemini` directory. The suffix after that marker remains registry data.
+fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
+    let variable = cell.env_override.as_deref()?;
+    let value = env::var_os(variable).filter(|value| !value.is_empty())?;
+    let template = cell.template.replace('\\', "/");
+    let marker = if template.contains("Cursor/User/") {
+        "Cursor/User/"
+    } else if template.contains(".codex/") {
+        ".codex/"
+    } else if template.contains(".gemini/") {
+        ".gemini/"
+    } else {
+        return None;
+    };
+    let suffix = template.split_once(marker)?.1;
+    let static_suffix = suffix.split('<').next()?.trim_end_matches('/');
+    if static_suffix.is_empty() {
+        return Some((PathBuf::from(value), false));
+    }
+    let root = PathBuf::from(value).join(static_suffix);
+    let is_file = looks_like_file_path(static_suffix);
+    Some((root, is_file))
+}
+
+/// Probe Cursor's current global store and, when it cannot yield a qualified
+/// composer count, its legacy workspaceStorage stores. This keeps the fallback
+/// source visible in doctor output while preserving one Cursor footprint row.
+fn probe_cursor_harness(
+    base: HarnessProbe,
+    confidence: Confidence,
+    global_db: PathBuf,
+    env_note: String,
+    missing_roots: &mut Vec<PathBuf>,
+    cell: &RegistryCell,
+) -> HarnessProbe {
+    let Some(user_dir) = cursor_user_dir_from_global_db(&global_db) else {
+        return HarnessProbe {
+            confidence,
+            state: ProbeState::SkipUnresolvable,
+            note: format!("{env_note}Cursor globalStorage 路径无法推导 User 根目录"),
+            ..base
+        };
+    };
+    let workspace_storage = user_dir.join("workspaceStorage");
+
+    let global_info = if global_db.is_file() {
+        let spec = crate::sqlite_probe::spec_from_cell(cell);
+        Some(match spec {
+            Some(spec) => crate::sqlite_probe::probe_sqlite_store_with(&global_db, &spec),
+            None => probe_sqlite_store(&global_db),
+        })
+    } else {
+        None
+    };
+
+    let global_needs_fallback = match global_info.as_ref().map(|info| &info.sessions) {
+        None => true,
+        Some(SqliteSessionProbe::Known { count, .. }) => *count == 0,
+        Some(SqliteSessionProbe::SchemaMismatch { .. })
+        | Some(SqliteSessionProbe::ReadFailed { .. }) => true,
+    };
+    let global_summary = match global_info.as_ref().map(|info| &info.sessions) {
+        Some(SqliteSessionProbe::Known {
+            candidate_count,
+            count,
+            ..
+        }) => format!("global cursorDiskKV 过滤前 {candidate_count} / 过滤后 {count}；"),
+        Some(SqliteSessionProbe::SchemaMismatch { .. }) => {
+            "global cursorDiskKV 表结构不认识；".to_string()
+        }
+        Some(SqliteSessionProbe::ReadFailed { .. }) => {
+            "global cursorDiskKV 只读枚举失败；".to_string()
+        }
+        None => "global cursorDiskKV 不存在；".to_string(),
+    };
+    if global_needs_fallback {
+        if let Some(legacy) =
+            crate::sqlite_probe::probe_cursor_legacy_workspace_storage(&workspace_storage)
+        {
+            if let SqliteSessionProbe::Known {
+                candidate_count,
+                count,
+                earliest,
+                latest,
+            } = legacy.sessions
+            {
+                return HarnessProbe {
+                    root: Some(workspace_storage),
+                    confidence,
+                    state: ProbeState::FileTarget,
+                    record_count: Some(count),
+                    candidate_count: Some(candidate_count),
+                    earliest,
+                    latest,
+                    bytes: legacy.total_bytes,
+                    note: format!(
+                        "{env_note}来自 legacy workspaceStorage；{global_summary}SQLite 只读枚举 ItemTable；过滤前 {candidate_count} / 过滤后 {count} 会话"
+                    ),
+                    ..base
+                };
+            }
+        }
+    }
+
+    let Some(info) = global_info else {
+        missing_roots.push(global_db.clone());
+        return HarnessProbe {
+            root: Some(global_db),
+            confidence,
+            state: ProbeState::Missing,
+            note: format!(
+                "{env_note}globalStorage/state.vscdb 不存在，legacy workspaceStorage 也未找到可读 composer 数据"
+            ),
+            ..base
+        };
+    };
+
+    match info.sessions {
+        SqliteSessionProbe::Known {
+            candidate_count,
+            count,
+            earliest,
+            latest,
+        } => HarnessProbe {
+            root: Some(global_db),
+            confidence,
+            state: ProbeState::FileTarget,
+            record_count: Some(count),
+            candidate_count: Some(candidate_count),
+            earliest,
+            latest,
+            bytes: info.total_bytes,
+            note: format!(
+                "{env_note}SQLite 只读枚举 cursorDiskKV表(key, value)；过滤前 {candidate_count} / 过滤后 {count} 会话"
+            ),
+            ..base
+        },
+        SqliteSessionProbe::SchemaMismatch { actual } => HarnessProbe {
+            root: Some(global_db),
+            confidence,
+            state: ProbeState::FileTarget,
+            bytes: info.total_bytes,
+            note: format!(
+                "{env_note}检测到 SQLite 但表结构不认识（期望 cursorDiskKV(key, value)，实到 {actual}）；legacy workspaceStorage 未找到可读 composer 数据"
+            ),
+            ..base
+        },
+        SqliteSessionProbe::ReadFailed { error } => HarnessProbe {
+            root: Some(global_db),
+            confidence,
+            state: ProbeState::FileTarget,
+            bytes: info.total_bytes,
+            note: format!(
+                "{env_note}检测到 SQLite 但只读枚举失败（{error}）；legacy workspaceStorage 未找到可读 composer 数据"
+            ),
+            ..base
+        },
+    }
+}
+
+fn cursor_user_dir_from_global_db(global_db: &Path) -> Option<PathBuf> {
+    let global_storage = global_db.parent()?;
+    if global_storage.file_name()?.to_string_lossy() != "globalStorage" {
+        return None;
+    }
+    Some(global_storage.parent()?.to_path_buf())
 }
 
 /// Config overrides for claude-code / codex keep working on top of the
@@ -980,6 +1189,23 @@ mod tests {
         assert!(static_prefix_root("$CODEX_HOME/sessions/").is_none());
         assert!(static_prefix_root("$CWD/.aider.chat.history.md").is_none());
         let _ = dir;
+    }
+
+    #[test]
+    fn registry_env_override_wins_for_cursor_user_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        env::set_var("CURSOR_USER_DIR", dir.path());
+        let cell: RegistryCell = serde_json::from_value(serde_json::json!({
+            "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+            "env_override": "CURSOR_USER_DIR",
+            "format": "sqlite"
+        }))
+        .unwrap();
+        let (root, is_file) = root_from_env_override(&cell).unwrap();
+        assert_eq!(root, dir.path().join("globalStorage/state.vscdb"));
+        assert!(is_file);
+        env::remove_var("CURSOR_USER_DIR");
     }
 
     #[test]
