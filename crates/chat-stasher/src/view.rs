@@ -137,16 +137,61 @@ impl Response {
     }
 }
 
+/// Fill `buf` from the OS CSPRNG.
+///
+/// Each platform's own facility is called directly rather than adding a
+/// `rand`/`getrandom` dependency: one more crate is one more piece of supply
+/// chain for 32 bytes. There is deliberately **no** portable fallback branch —
+/// a platform we have not wired up must fail to build, not quietly reach for
+/// something weaker.
+#[cfg(unix)]
+fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
+    let mut f = std::fs::File::open("/dev/urandom")?;
+    f.read_exact(buf)
+}
+
+/// Windows has no `/dev/urandom`. `BCryptGenRandom` with the system-preferred
+/// RNG is the documented equivalent and needs no crate — CI on `windows-latest`
+/// is what actually checks this, since it cannot be exercised here.
+#[cfg(windows)]
+fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
+    #[link(name = "bcrypt")]
+    extern "system" {
+        fn BCryptGenRandom(
+            h_algorithm: *mut core::ffi::c_void,
+            pb_buffer: *mut u8,
+            cb_buffer: u32,
+            dw_flags: u32,
+        ) -> i32;
+    }
+    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+    let len = u32::try_from(buf.len())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "buffer too large"))?;
+    let status = unsafe {
+        BCryptGenRandom(
+            core::ptr::null_mut(),
+            buf.as_mut_ptr(),
+            len,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("BCryptGenRandom failed: 0x{status:08x}"),
+        ))
+    }
+}
+
 /// A per-launch token from the OS CSPRNG.
 ///
-/// `/dev/urandom` is used directly rather than adding a `rand`/`getrandom`
-/// dependency: one more crate is one more piece of supply chain for 32 bytes.
-/// A read failure is an error, never a weaker fallback — a guessable token is
-/// worse than a `view` that refuses to start.
+/// A failure is an error, never a weaker fallback — a guessable token is worse
+/// than a `view` that refuses to start.
 pub fn new_token() -> std::io::Result<String> {
     let mut buf = [0u8; 32];
-    let mut f = std::fs::File::open("/dev/urandom")?;
-    f.read_exact(&mut buf)?;
+    os_random(&mut buf)?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
