@@ -136,14 +136,14 @@ impl Config {
     pub fn init_default(template: &str) -> std::io::Result<()> {
         let path = config_path();
         if path.exists() {
-            println!("config already exists: {}", path.display());
+            eprintln!("config already exists: {}", path.display());
             return Ok(());
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, template)?;
-        println!("wrote default config: {}", path.display());
+        eprintln!("wrote default config: {}", path.display());
         Ok(())
     }
 }
