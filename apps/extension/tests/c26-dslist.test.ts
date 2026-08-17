@@ -333,7 +333,7 @@ describe('C26-5 · 只列得出会话 ≠ 补得回历史', () => {
   });
 
   it('平台名单把这个中间态单列出来，不四舍五入到任何一边', () => {
-    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['deepseek']);
+    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['deepseek', 'perplexity']);
     // 🔴 「能补回历史」仍然只有 chatgpt —— 只能列出会话不算补得回历史。
     expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
     expect(DEEPSEEK_PLAN.partial?.missing.length ?? 0).toBeGreaterThan(0);

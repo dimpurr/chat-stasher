@@ -385,6 +385,44 @@ export function parseDeepSeekListPage(text: string): ParseResult {
   };
 }
 
+/**
+ * 解析一页 Perplexity 会话列表。
+ *
+ * 🔴 R26 的三条独立来源都把这个接口当成「返回一个列表」来消费；本解析器
+ * 只认顶层数组和数组项里的 `thread_id`，拿不到数组或会话 id 就报
+ * `shape-changed`，绝不把未知响应折叠成空列表。total / has_more / count
+ * 都没有出处，所以这里不会读取它们。
+ *
+ * 🔴 这里故意不读取任何时间字段。R26 的三个来源对时间字段名互相冲突：
+ * `last_query_datetime` 只有单源，`inserted_at || created_at || new Date()`
+ * 是作者自己的三重猜测，第三个来源根本不取时间；没有名字达到两个独立来源，
+ * 所以一个也不写进解析器。
+ */
+export function parsePerplexityListPage(text: string): ParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'perplexity list response is not JSON' };
+  }
+  if (!Array.isArray(body)) {
+    return { ok: false, detail: 'perplexity list response has no top-level array (shape changed?)' };
+  }
+
+  const ids: string[] = [];
+  for (const item of body) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, detail: 'perplexity thread item is not an object' };
+    }
+    const threadId = (item as Record<string, unknown>).thread_id;
+    if (typeof threadId !== 'string' || threadId.length === 0) {
+      return { ok: false, detail: 'perplexity thread item has no string `thread_id`' };
+    }
+    ids.push(threadId);
+  }
+  return { ok: true, page: { ids, total: null } };
+}
+
 // ---------------------------------------------------------------------------
 // 能回溯的平台
 // ---------------------------------------------------------------------------
@@ -493,7 +531,71 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
     + '本任务未做任何真实端到端验证（禁止联网与登录态）。',
 };
 
-const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, CHATGPT_PLAN];
+export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
+
+/**
+ * 🔴 C27 · Perplexity 的会话列表。**只有列表段**；正文段仍然没有出处。
+ *
+ * 请求事实（R26 调研，2026-08-17；本任务不联网、不登录、不对 perplexity.ai
+ * 发请求）逐项保留独立来源数：
+ *   POST /rest/thread/list_ask_threads?version=2.18&source=default  · 3 源
+ *   body.limit（每页条数）                                               · 3 源
+ *   body.offset（整数偏移；客户端 offset += limit）                      · 3 源
+ *   body.ascending=false                                                  · 3 源
+ *   body.search_term=""                                                   · 3 源
+ *
+ * 🔴 三源都没有读取 total / has_more / count；也没有可靠的时间字段名。
+ * 因此 engine 只能把空页和短页当作两种**客户端推断**的停点，不能写成接口
+ * 明确说「到底了」。它们分别落到 empty-page-inferred / short-page-inferred，
+ * 并且 complete 保持 false；如果哪天确认响应里其实有终止字段，改动点就是
+ * engine.ts 枚举分支里 Perplexity 的这两个长度判断：改为读取该字段，并只在
+ * 字段明确为 false 时把 state.enumCursor.complete 置为 true。
+ *
+ * 🔴 通道 B（GraphQL）需要随前端发版变化的 sha256 持久化查询哈希，没有公开
+ * 稳定值，所以不走；Space / Collection 的 threads 路由只有路径，没有参数与
+ * 响应出处，本单也不做。正文段没有出处，detailPath/detailUrl 必须保持 null。
+ */
+export const PERPLEXITY_PLAN: BackfillEnumPlan = {
+  platform: 'perplexity',
+  listPath: PERPLEXITY_LIST_PATH,
+  // 参数全在 JSON body；URL 只保留已查证的固定版本与来源 query。
+  listUrl: (origin) => `${origin}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`,
+  listPost: {
+    contentType: 'application/json',
+    bodyKeys: ['limit', 'offset', 'ascending', 'search_term'],
+    body: (_origin, offset, limit) => JSON.stringify({
+      limit,
+      offset,
+      ascending: false,
+      search_term: '',
+    }),
+  },
+  parseListPage: parsePerplexityListPage,
+  // 🔴 正文段：没有任何出处，本单不猜路径或参数。
+  detailPath: null,
+  detailUrl: null,
+  partial: {
+    missing: [
+      'detailPath / detailUrl：单条 thread 的正文路由与参数本单没有任何出处；'
+      + '正文段不猜，所以 Perplexity 只进入 LIST_ONLY。',
+    ],
+    userNote:
+      'Perplexity：还不能回溯历史正文。已经能列出你的历史会话了，'
+      + '但还不会去取每条会话的内容，所以暂时一条也不会存下来。',
+  },
+  provenance:
+    'cross-source reverse-engineering (R26 调研, 2026-08-17；三个独立的「自己构造请求」实现逐字一致；'
+    + '非官方文档，未做真实端到端验证) · '
+    + 'POST /rest/thread/list_ask_threads?version=2.18&source=default：3 源；'
+    + 'body.limit：3 源；body.offset（客户端 offset += limit）：3 源；'
+    + 'body.ascending=false：3 源；body.search_term=""：3 源。'
+    + 'total / has_more / count：三源均未读取，不能当作接口字段；'
+    + 'GraphQL 通道需要无公开稳定值的 sha256 持久化查询哈希，未采用；'
+    + 'Space / Collection threads 只有路径没有参数与响应出处，未采用；'
+    + '单条正文段没有出处，detailPath/detailUrl 保持 null。',
+};
+
+const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, PERPLEXITY_PLAN, CHATGPT_PLAN];
 
 // ---------------------------------------------------------------------------
 // 🔴 填不了 / 只能填一半的平台 —— 逐条写明缺什么

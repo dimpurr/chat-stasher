@@ -12,6 +12,7 @@ describe('data-driven platform contracts', () => {
   it('keeps content-script matches closed to explicit origins', () => {
     expect(CONTENT_MATCHES).toEqual([
       'https://chat.deepseek.com/*',
+      'https://www.perplexity.ai/*',
       'https://chatgpt.com/*',
       'https://chat.openai.com/*',
       'https://gemini.google.com/*',

@@ -274,8 +274,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * complete=true 在这里【不是】「全部列完了」的意思 —— truncated 就是用来区分这两者的。
    * 少了它，「只回溯到第一页」和「一共就这一页」在账本上会长得一模一样。
    */
-  const stopEnumerating = (why: EnumTruncation): void => {
-    state.enumCursor.complete = true;
+  const stopEnumerating = (why: EnumTruncation, opts: { complete?: boolean } = {}): void => {
+    // C26 的 cursor/has_more 缺失仍然把循环停在这里并置 complete=true，
+    // 因为那是旧状态契约里的「不要空转」标记；truncated 才说明它不是完整枚举。
+    // C27 的 Perplexity 空页/短页更严格：它连接口终止字段都没有，只有客户端
+    // 推断，所以 complete 必须保持 false。循环同时看 truncated，避免把这个
+    // “未确认完成”的状态误当成可以继续发请求或已经补完。
+    if (opts.complete !== false) state.enumCursor.complete = true;
     state.enumCursor.truncated = why;
     enumTruncated = why;
     console.warn(
@@ -349,7 +354,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     cursorMode
       ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
       : `list offset=${state.enumCursor.offset}`;
-  while (!state.enumCursor.complete) {
+  while (!state.enumCursor.complete && state.enumCursor.truncated === undefined) {
     if (opts.shouldAbort?.()) return report('aborted');
     if (await guardTripped()) return report('download-paused');
     await enumPacer.gate();
@@ -393,11 +398,21 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     newDebts += enqueueDebts(state, parsed.page.ids).length;
 
-    // offset 在两种模式下都往前走：offset 模式它【就是】下一页的参数，
-    // 游标模式它只是「已经枚举过多少条」的计数（进度那边在用）。
-    state.enumCursor.offset += parsed.page.ids.length;
+    // offset 模式通常按读到的条数往前走；Perplexity 的三个来源明确写的是
+    // 客户端自己 `offset += limit`，所以即便本页是短页/空页，落盘也保留
+    // 那个请求步长。游标模式的 offset 仍只是「已经枚举过多少条」的计数。
+    state.enumCursor.offset += plan.platform === 'perplexity'
+      ? listLimit
+      : parsed.page.ids.length;
     if (parsed.page.ids.length === 0) {
-      state.enumCursor.complete = true;
+      if (plan.platform === 'perplexity') {
+        // 🔴 Perplexity 没有 has_more / total / count 等已知终止字段。
+        // 空页只是“这次没读到更多”，不是接口明说“到底了”；与短页分开留痕。
+        // DeepSeek 则走下面的 has_more 分支，不能把两种平台的规矩混为一谈。
+        stopEnumerating('empty-page-inferred', { complete: false });
+      } else {
+        state.enumCursor.complete = true;
+      }
     } else if (cursorMode) {
       // 🔴 游标翻页的终止判断【只认 has_more】。
       //    绝不用「这一页比 count 少 ⇒ 到底了」去推断 —— 那是拿未知当已知。
@@ -413,6 +428,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       } else {
         state.enumCursor.cursor = parsed.page.nextCursor;
       }
+    } else if (plan.platform === 'perplexity' && parsed.page.ids.length < listLimit) {
+      // 🔴 C27 · 这里是唯一的“短页即止”分支。它是三源实现共同采用的
+      // 客户端推断，不是接口提供的终止信号，所以不能置 complete=true。
+      // 如果未来确认 Perplexity 返回了终止字段，就改这一行分支：读取那个
+      // 字段，并仅在它明确为 false 时置 complete=true。
+      stopEnumerating('short-page-inferred', { complete: false });
     } else if (state.totalKnown !== null && state.enumCursor.offset >= state.totalKnown) {
       state.enumCursor.complete = true;
     }

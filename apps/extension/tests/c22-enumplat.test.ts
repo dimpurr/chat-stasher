@@ -237,9 +237,11 @@ describe('C22-4 · 每个平台都必须有一个明确结论', () => {
     }
     expect(BACKFILL_SUPPORTED_PLATFORMS.length + BACKFILL_UNSUPPORTED_PLATFORMS.length)
       .toBe(PLATFORMS.length);
-    // 今天的真实状况，写死在测试里：5 个平台，只有 1 个补得回历史。
+    // 今天的真实状况，写死在测试里：6 个平台，只有 1 个补得回历史。
     expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
-    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual(['deepseek', 'gemini', 'claude', 'kimi']);
+    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([
+      'deepseek', 'perplexity', 'gemini', 'claude', 'kimi',
+    ]);
   });
 
   it('每条「暂时不能」都必须写明缺哪几项 + 给用户一句人话', () => {
