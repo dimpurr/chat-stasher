@@ -232,6 +232,79 @@ impl BackupStore {
         report.machines = merges;
         Ok(report)
     }
+
+    /// Dump the individual sealed shards of selected sessions of one machine
+    /// partition, in global sequence order, from that machine's newest
+    /// snapshot.
+    ///
+    /// [`Self::read_all_machines`] answers "what is archived" and deliberately
+    /// only returns digests. This answers "hand me those bytes back", which is
+    /// what the ADR-013 difference-set restore needs; shards are kept separate
+    /// (not concatenated) so the restored stage reproduces the archived shard
+    /// *set*, not just its concatenation.
+    ///
+    /// A session in `wanted` that the newest snapshot does not hold is simply
+    /// absent from the result — the caller must treat "asked for, not
+    /// returned" as a failure to copy, never as "there was nothing to copy".
+    pub fn dump_machine_sessions(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        wanted: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<BTreeMap<String, Vec<Vec<u8>>>> {
+        let mut out: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+        if wanted.is_empty() {
+            return Ok(out);
+        }
+        let backends = self.backends()?;
+        let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+            .open(&Credentials::Masterkey(mk.clone()))
+            .context("open repository for shard restore")?
+            .to_indexed()
+            .context("index repository for shard restore")?;
+        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        for snap in newest_snapshot_per_host(snaps) {
+            if snap.hostname != machine {
+                continue;
+            }
+            let root = repo
+                .node_from_snapshot_and_path(&snap, "")
+                .context("read snapshot root for shard restore")?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())
+                .context("ls snapshot root for shard restore")?
+                .collect::<rustic_core::RusticResult<Vec<_>>>()
+                .context("collect snapshot entries for shard restore")?;
+            let mut buckets: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+            for (i, (path, node)) in entries.iter().enumerate() {
+                if node.node_type != NodeType::File {
+                    continue;
+                }
+                let Some((found_machine, session, shard)) = bucket_shard_path(path) else {
+                    continue;
+                };
+                if found_machine != machine || !wanted.contains(&session) {
+                    continue;
+                }
+                buckets
+                    .entry(session)
+                    .or_default()
+                    .push((store_seq_of(&shard), i));
+            }
+            for (session, mut shards) in buckets {
+                shards.sort_by_key(|(seq, _)| *seq);
+                let mut bytes = Vec::with_capacity(shards.len());
+                for (_, idx) in &shards {
+                    let mut buf = Vec::new();
+                    repo.dump(&entries[*idx].1, &mut buf)
+                        .context("dump shard for restore")?;
+                    bytes.push(buf);
+                }
+                out.insert(session, bytes);
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn store_seq_of(name: &str) -> u64 {

@@ -7,6 +7,7 @@
 
 pub mod collect;
 pub mod config;
+pub mod destinit;
 pub mod doctor;
 pub mod id;
 pub mod inbox;

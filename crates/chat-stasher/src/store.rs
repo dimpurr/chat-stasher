@@ -78,6 +78,9 @@ pub enum StageWriter {
     Collect,
     Ingest,
     Seal,
+    /// `dest-init`: shards copied back from an *existing* destination because
+    /// the local source no longer has them (ADR-013 difference set).
+    Restore,
 }
 
 impl StageWriter {
@@ -86,6 +89,7 @@ impl StageWriter {
             Self::Collect => "collect",
             Self::Ingest => "ingest",
             Self::Seal => "seal",
+            Self::Restore => "restore",
         }
     }
 }
@@ -108,6 +112,10 @@ pub const STAGE_WRITER_REGISTRY: &[StageWriterRegistration] = &[
     StageWriterRegistration {
         writer: StageWriter::Seal,
         reconciliation_hook: Some("stage-owned rename audit"),
+    },
+    StageWriterRegistration {
+        writer: StageWriter::Restore,
+        reconciliation_hook: Some("restored concat sha256 vs source destination"),
     },
 ];
 
@@ -721,6 +729,28 @@ pub fn write_sealed_shard_bytes_with_cap(
     lines: &[Vec<u8>],
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
+    let mut raw = Vec::new();
+    for line in lines {
+        raw.extend_from_slice(line);
+        raw.push(b'\n');
+    }
+    write_sealed_shard_raw_with_cap(writer, stage_root, machine, session_id, &raw, bucket_cap)
+}
+
+/// Install `raw` verbatim as the next sealed shard — no line framing is added.
+///
+/// This is what a *restore* needs: a shard copied back from a destination has
+/// to land byte-for-byte, or the concatenated sha256 that both the stage and
+/// the archive compute independently stops matching and every cursor speaking
+/// for that session becomes unverifiable.
+pub fn write_sealed_shard_raw_with_cap(
+    writer: StageWriter,
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    raw: &[u8],
+    bucket_cap: usize,
+) -> anyhow::Result<String> {
     assert_stage_writer_audited(writer)?;
     let dir = session_shard_dir(stage_root, machine, session_id);
     fs::create_dir_all(&dir)?;
@@ -732,10 +762,7 @@ pub fn write_sealed_shard_bytes_with_cap(
         fs::remove_file(&tmp)?;
     }
     let mut f = fs::File::create(&tmp)?;
-    for line in lines {
-        f.write_all(line)?;
-        f.write_all(b"\n")?;
-    }
+    f.write_all(raw)?;
     f.sync_all()?;
     drop(f);
     if path.exists() {
@@ -889,7 +916,7 @@ mod tests {
 
     #[test]
     fn every_registered_stage_writer_has_a_reconciliation_hook() {
-        assert_eq!(STAGE_WRITER_REGISTRY.len(), 3);
+        assert_eq!(STAGE_WRITER_REGISTRY.len(), 4);
         for registration in STAGE_WRITER_REGISTRY {
             assert!(
                 registration

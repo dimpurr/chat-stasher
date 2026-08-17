@@ -7,6 +7,7 @@
 //! degrade to defaults rather than aborting a scan.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Directory + filename of the config relative to the user's config home
@@ -66,6 +67,35 @@ pub struct Config {
     /// snapshot re-writes the tree of every touched session directory — so
     /// pushing on a timer regardless of change pays that cost for nothing.
     pub push_only_if_changed: Option<bool>,
+
+    /// Named destinations. More than one may be declared; each carries its own
+    /// repository and its own key.
+    ///
+    /// ADR-013: a destination is a *place a copy lives*, not a shard of one
+    /// archive — so "add a destination" means "keep one more full copy". The
+    /// singular `rustic_*` fields above stay as the single-destination
+    /// (pre-ADR-013) mode; once this table is non-empty every command that
+    /// reaches a repository has to say **which** one, because picking one
+    /// silently is exactly the failure this table exists to prevent.
+    pub destinations: BTreeMap<String, DestinationConfig>,
+}
+
+/// One named destination. Fields left unset fall back to the same defaults the
+/// single-destination mode uses, so a destination can be declared with nothing
+/// but a `repo`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DestinationConfig {
+    /// Repository location (local path today, backend string later).
+    pub repo: Option<String>,
+    /// Masterkey file for *this* destination. Two destinations sharing one key
+    /// file is legal but is not the default: each destination is expected to
+    /// carry its own key.
+    pub key_file: Option<String>,
+    /// Per-destination concurrency cap (clamped like `rustic_connections`).
+    pub connections: Option<usize>,
+    /// Backend options forwarded verbatim (e.g. `endpoint` for `opendal:sftp`).
+    pub options: BTreeMap<String, String>,
 }
 
 /// Decided default archive cadence: hourly.
@@ -176,4 +206,24 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Override the Codex session root.
 # Default: ~/.codex/sessions
 # codex_sessions_dir = "~/.codex/sessions"
+
+# ---------------------------------------------------------------- destinations
+# Named destinations. Declare as many as you keep copies in. Each one is a
+# *full copy*, not a shard: `dest-init` gives a new destination the union of
+# your local sources and what your existing destinations already hold.
+#
+# Once this table is non-empty, commands that reach a repository require
+# `--destination <name>` (or an explicit `--repo`). There is deliberately no
+# default destination: retrieval must name the copy it is reading.
+#
+# [destinations.laptop]
+# repo = "~/stash/chat-stasher/repo"
+# key_file = "~/stash/chat-stasher/masterkey.json"
+#
+# [destinations.storagebox]
+# repo = "opendal:sftp"
+# key_file = "~/stash/chat-stasher/masterkey-storagebox.json"
+# connections = 4
+# [destinations.storagebox.options]
+# endpoint = "ssh://example:23"
 "#;
