@@ -11,6 +11,10 @@ import {
   isMainVerifyResultMessage,
 } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
+import {
+  warnIfFallbackHookUnverified,
+  FALLBACK_HOOK_VERIFICATION_WARNING,
+} from '../lib/fallback-verification';
 
 /**
  * ISOLATED-world bridge. WHY ISOLATED: MAIN/page world has no extension API
@@ -24,8 +28,11 @@ export default defineContentScript({
   main() {
     const probeToken = makeProbeToken();
     let mainReady = false;
-    let fallbackInjected = false;
-    let verifyRequested = false;
+    let fallbackInjectionAttempted = false;
+    let fallbackScriptAppended = false;
+    let mainVerificationRequested = false;
+    let fallbackVerificationRequested = false;
+    let fallbackVerificationTimer: ReturnType<typeof setTimeout> | undefined;
 
     const pageOrigin = window.location.origin;
     const isPageMessage = (event: MessageEvent<unknown>): boolean =>
@@ -37,14 +44,37 @@ export default defineContentScript({
       if (!isPageMessage(event)) return;
 
       if (isMainReadyMessage(event.data) && event.data.token === probeToken) {
-        if (!verifyRequested) {
-          verifyRequested = true;
-          injectPageVerifier(probeToken);
+        if (!mainReady && !mainVerificationRequested && !fallbackVerificationRequested) {
+          mainVerificationRequested = true;
+          if (!injectPageVerifier(probeToken)) {
+            mainVerificationRequested = false;
+            injectFallbackHook();
+          }
         }
         return;
       }
 
       if (isMainVerifyResultMessage(event.data) && event.data.token === probeToken) {
+        if (fallbackVerificationRequested) {
+          fallbackVerificationRequested = false;
+          if (fallbackVerificationTimer !== undefined) {
+            clearTimeout(fallbackVerificationTimer);
+            fallbackVerificationTimer = undefined;
+          }
+          if (
+            warnIfFallbackHookUnverified({
+              scriptAppended: fallbackScriptAppended,
+              markerInstalled: event.data.installed,
+            })
+          ) {
+            return;
+          }
+          mainReady = true;
+          return;
+        }
+
+        if (!mainVerificationRequested) return;
+        mainVerificationRequested = false;
         if (event.data.installed) {
           mainReady = true;
         } else {
@@ -72,11 +102,11 @@ export default defineContentScript({
       return true;
     }
 
-    function injectPageVerifier(token: string): void {
+    function injectPageVerifier(token: string): boolean {
       const marker = JSON.stringify(PAGE_HOOK_FETCH_MARKER);
       const version = JSON.stringify(PAGE_HOOK_VERSION);
       const origin = JSON.stringify(pageOrigin);
-      injectPageScript(`(() => {
+      return injectPageScript(`(() => {
         const fetchFn = window.fetch;
         const installed = typeof fetchFn === 'function' && fetchFn[${marker}] === ${version};
         window.postMessage({
@@ -89,9 +119,27 @@ export default defineContentScript({
     }
 
     function injectFallbackHook(): void {
-      if (fallbackInjected) return;
+      if (fallbackInjectionAttempted || mainReady) return;
+      fallbackInjectionAttempted = true;
       const source = `(${installPageFetchHook.toString()})(${JSON.stringify(PAGE_HOOK_OPTIONS)});`;
-      fallbackInjected = injectPageScript(source);
+      fallbackScriptAppended = injectPageScript(source);
+      if (!fallbackScriptAppended) {
+        console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
+        return;
+      }
+
+      fallbackVerificationRequested = true;
+      if (!injectPageVerifier(probeToken)) {
+        fallbackVerificationRequested = false;
+        console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
+        return;
+      }
+      fallbackVerificationTimer = setTimeout(() => {
+        if (!fallbackVerificationRequested) return;
+        fallbackVerificationRequested = false;
+        fallbackVerificationTimer = undefined;
+        console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
+      }, MAIN_FALLBACK_TIMEOUT_MS);
     }
 
     window.addEventListener('message', onMessage);
@@ -99,7 +147,9 @@ export default defineContentScript({
     // document_start content script runs first.
     window.postMessage({ type: MAIN_PROBE_MESSAGE, token: probeToken }, pageOrigin);
     setTimeout(() => {
-      if (!mainReady) injectFallbackHook();
+      if (!mainReady && !mainVerificationRequested && !fallbackVerificationRequested) {
+        injectFallbackHook();
+      }
     }, MAIN_FALLBACK_TIMEOUT_MS);
   },
 });
