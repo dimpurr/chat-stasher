@@ -79,6 +79,10 @@ pub struct Consumed {
     pub file_sha256: String,
     /// `bundle` when the envelope parsed, `raw` when it degraded to raw-only.
     pub kind: String,
+    /// `identity.level` carried by an `inbox@2` bundle, `None` for `@1`.
+    /// Reported so a run can say how many bundles actually carried the axis
+    /// instead of asserting up front that none do.
+    pub identity_level: Option<String>,
 }
 
 /// A file whose bytes were already archived by an earlier run.
@@ -316,6 +320,9 @@ struct Bundle {
     capturedAt: Option<String>,
     parsed: Option<serde_json::Value>,
     raw: Option<serde_json::Value>,
+    /// `inbox@2` only. Not part of `raw`, so dropping it here loses it for
+    /// good — `raw.text` cannot re-derive it.
+    identity: Option<serde_json::Value>,
 }
 
 /// Record stored inside each sealed shard (one JSONL line per bundle).
@@ -332,6 +339,21 @@ struct ShardRecord {
     captured_at: Option<String>,
     parsed: ParsedEnvelope,
     raw: RawEnvelope,
+    /// The `inbox@2` identity axis, preserved verbatim when the bundle carried
+    /// one. Omitted entirely for `@1` bundles, so `@1` shard lines keep their
+    /// existing bytes. It is *stored* but deliberately does NOT take part in
+    /// the id or the dedup key — that remains `platform.sessionId` /
+    /// `file_sha256`. Changing the id is a separate decision (ADR-002);
+    /// silently discarding the field is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<IdentityEnvelope>,
+}
+
+/// The `identity` envelope — the account axis an `inbox@2` bundle carries.
+#[derive(Debug, Clone, Serialize)]
+struct IdentityEnvelope {
+    level: String,
+    value: String,
 }
 
 /// The `parsed` envelope — best-effort, re-derivable from `raw`.
@@ -460,6 +482,7 @@ fn consume_one(
         captured_at: parsed.captured_at,
         parsed: parsed.parsed,
         raw: parsed.raw,
+        identity: parsed.identity,
     };
     let line = serde_json::to_string(&record).context("serialise shard record")?;
 
@@ -474,6 +497,7 @@ fn consume_one(
         file_bytes,
         file_sha256,
         kind: record.kind.to_string(),
+        identity_level: record.identity.as_ref().map(|i| i.level.clone()),
     }))
 }
 
@@ -583,6 +607,7 @@ struct ParseOutcome {
     kind: &'static str,
     parsed: ParsedEnvelope,
     raw: RawEnvelope,
+    identity: Option<IdentityEnvelope>,
 }
 
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
@@ -605,6 +630,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
             text: String::new(),
             bytes: 0,
         },
+        identity: None,
     };
 
     let bundle: Bundle = match serde_json::from_slice(bytes) {
@@ -654,6 +680,20 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
             .get("bytes")
             .and_then(|x| x.as_u64())
             .unwrap_or(out.raw.text.len() as u64);
+    }
+    // `inbox@2` identity. A `level` of `default` means the axis is explicitly
+    // unreliable (contract), so it is kept verbatim rather than normalised —
+    // the reader has to see the difference between "absent" and "default".
+    if let Some(v) = bundle.identity.as_ref() {
+        if let (Some(level), Some(value)) = (
+            v.get("level").and_then(|x| x.as_str()),
+            v.get("value").and_then(|x| x.as_str()),
+        ) {
+            out.identity = Some(IdentityEnvelope {
+                level: level.to_string(),
+                value: value.to_string(),
+            });
+        }
     }
     out
 }
@@ -731,6 +771,93 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// An `inbox@2` bundle carrying the account axis (`contracts/inbox.schema.json`).
+    fn synthetic_bundle_v2(session_id: &str, raw_text: &str, level: &str, value: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher/inbox@2","platform":"deepseek","sessionId":"{sid}","method":"POST","status":200,"capturedAt":"2026-08-16T00:00:00.000Z","parsed":{{"hasJson":true,"keys":["id"]}},"raw":{{"text":{raw},"bytes":{n}}},"identity":{{"level":"{level}","value":"{value}"}}}}"#,
+            sid = session_id,
+            raw = serde_json::to_string(raw_text).unwrap(),
+            n = raw_text.len(),
+        )
+    }
+
+    fn only_shard_record(stage: &Path, machine: &str, id: &str) -> serde_json::Value {
+        let dir = store::session_shard_dir(stage, machine, id);
+        let entries = store::sealed_shard_entries(&dir).unwrap();
+        assert_eq!(entries.len(), 1, "expected exactly one sealed shard");
+        let raw = fs::read_to_string(&entries[0].1).unwrap();
+        serde_json::from_str(raw.lines().next().unwrap()).unwrap()
+    }
+
+    /// B53: the `@2` identity axis must survive ingest. It is not inside
+    /// `raw.text`, so dropping it here loses it permanently.
+    #[test]
+    fn v2_identity_is_archived_verbatim() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("deepseek-sess-v2.json"),
+            synthetic_bundle_v2("sess-v2", "hello v2", "platform_uid", "uid-4242"),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        assert_eq!(
+            report.consumed[0].identity_level.as_deref(),
+            Some("platform_uid"),
+        );
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-v2");
+        assert_eq!(rec["identity"]["level"], "platform_uid");
+        assert_eq!(rec["identity"]["value"], "uid-4242");
+        // The axis is stored, but it must NOT have moved the id or the dedup
+        // key — that is a separate (ADR-002) decision.
+        assert_eq!(rec["id"], "deepseek.sess-v2");
+    }
+
+    /// An `@1` bundle has no identity, and its shard line must not grow an
+    /// empty one — existing archives keep their bytes.
+    #[test]
+    fn v1_bundle_has_no_identity_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        write_bundle(&inbox, "deepseek-sess-v1.json", "sess-v1", "hello v1");
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed[0].identity_level, None);
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-v1");
+        assert!(
+            rec.get("identity").is_none(),
+            "an @1 bundle must not gain an identity key",
+        );
+    }
+
+    /// `level:"default"` means "unreliable", which is different from absent —
+    /// the reader has to be able to tell them apart.
+    #[test]
+    fn default_identity_level_is_kept_not_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("deepseek-sess-d.json"),
+            synthetic_bundle_v2("sess-d", "hello d", "default", ""),
+        )
+        .unwrap();
+
+        ingest(&inbox, &stage, "mbp-test").unwrap();
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-d");
+        assert_eq!(rec["identity"]["level"], "default");
+        assert_eq!(rec["identity"]["value"], "");
     }
 
     #[test]

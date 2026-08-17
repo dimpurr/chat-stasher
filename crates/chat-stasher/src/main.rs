@@ -1902,10 +1902,31 @@ fn print_ingest(report: &chat_stasher::inbox::IngestReport, machine: &str) {
         "[ingest] staging machine   : sha256={}",
         store::machine_fingerprint(machine)
     );
-    println!(
-        "[ingest] note             : bundles carry NO account field - the identity axis is missing, \
-waiting for the adapter to supply it; ids are `platform.sessionId` (machine-independent)"
-    );
+    // The identity axis is now something a bundle may or may not carry
+    // (`inbox@2`), so report what this pass actually saw instead of asserting
+    // up front that it saw none.
+    let mut levels: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in &report.consumed {
+        if let Some(level) = c.identity_level.as_deref() {
+            *levels.entry(level).or_default() += 1;
+        }
+    }
+    if levels.is_empty() {
+        println!(
+            "[ingest] note             : no consumed bundle carried an `identity` field - the \
+account axis is missing; ids are `platform.sessionId` (machine-independent)"
+        );
+    } else {
+        let seen = levels
+            .iter()
+            .map(|(level, n)| format!("{level}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "[ingest] identity axis    : {seen} (archived verbatim, NOT yet used for the id or the \
+dedup key - ids stay `platform.sessionId`)"
+        );
+    }
 }
 
 /// Local data dir used for the default repository + key file.
