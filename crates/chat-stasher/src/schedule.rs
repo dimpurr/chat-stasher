@@ -161,7 +161,7 @@ fn render_launchd(binary: &Path, stage: &Path, interval: u64, verify: bool, home
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- chat-stasher is a one-shot process: 0=no-op, 10=completed, 1=error. -->
+  <!-- chat-stasher is a one-shot process: exit 0 is success; result=NOOP means no snapshot, result=COMPLETED means snapshot created; non-zero is error. -->
   <key>Label</key>
   <string>{LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
@@ -199,9 +199,10 @@ Description=Run one chat-stasher archive cycle
 
 [Service]
 Type=oneshot
-# 0 = normal no-op, 10 = normal completed cycle; 1 = real error.
+# exit 0 = success: result=NOOP means no snapshot; result=COMPLETED means snapshot created.
+# Non-zero = error; read the result line in the journal.
 ExecStart={args}
-SuccessExitStatus=0 10
+SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal
 "#
@@ -269,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn both_systemd_units_accept_noop_as_success() {
+    fn scheduler_templates_describe_zero_as_the_only_success_status() {
         let files = render(
             Format::Systemd,
             Path::new("/opt/chat-stasher"),
@@ -279,7 +280,20 @@ mod tests {
             Path::new("/home/tester"),
         );
         assert_eq!(files.len(), 2);
-        assert!(files[0].content.contains("SuccessExitStatus=0 10"));
+        assert!(files[0].content.contains("SuccessExitStatus=0\n"));
+        assert!(!files[0].content.contains("SuccessExitStatus=0 10"));
+        assert!(files[0].content.contains("result=NOOP means no snapshot"));
         assert!(files[1].content.contains("OnUnitActiveSec=3600s"));
+        let launchd = render(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            false,
+            Path::new("/home/tester"),
+        );
+        assert!(launchd[0]
+            .content
+            .contains("exit 0 is success; result=NOOP means no snapshot"));
     }
 }
