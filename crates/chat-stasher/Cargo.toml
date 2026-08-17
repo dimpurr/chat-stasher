@@ -3,7 +3,7 @@ name = "chat-stasher"
 version = "0.1.0"
 edition.workspace = true
 description = "Append-only archive for every LLM conversation, across harnesses."
-license = "LicenseRef-scratch" # placeholder until the decision record lands
+license = "Apache-2.0"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

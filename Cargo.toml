@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license = "TBD"          # 🔴 许可证未定（docs/11-decision.md D2 仍待拍板）
+license = "Apache-2.0"
 repository = "https://github.com/dimpurr/chat-stasher"
 
 [workspace.dependencies]
