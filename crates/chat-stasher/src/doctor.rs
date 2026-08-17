@@ -454,6 +454,55 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
     }
 }
 
+/// Build a footprint row for a **directory** harness from its registry probe.
+///
+/// The probe is the only thing that actually touched the disk, so it decides
+/// both `installed` and whether a count may be claimed at all. A probe that
+/// never resolved a root (`未查明` cell, template not statically resolvable, no
+/// cell for this platform) or that found no root gets `session_count: None` —
+/// "unknown" — even when a directory happens to sit at the path this build
+/// would otherwise have guessed. Reporting `Some(0)` there would assert
+/// "I enumerated it and it is empty" about a directory nothing ever opened;
+/// that is the same lie `push` refuses when it will not archive an unprovable
+/// empty snapshot (`main.rs`, "refusing empty snapshot"), and the same
+/// distinction `destinit::SourceStatus` draws between `KnownEmpty` and
+/// `Unknown`.
+///
+/// Consequence for `doctor_tables_never_contradict_any_harness`: every row of
+/// the footprint table now derives its `installed`/`session_count` from the
+/// same probe the registry table prints, for directory harnesses exactly as
+/// [`footprint_from_sqlite_probe`] already did for the single-file ones.
+fn footprint_from_dir_probe<'a>(
+    name: &str,
+    fallback_root: PathBuf,
+    probe: Option<&scanner::HarnessProbe>,
+    recs: impl Iterator<Item = &'a crate::models::SessionRecord>,
+) -> HarnessFootprint {
+    let Some(probe) = probe else {
+        return HarnessFootprint {
+            note: "registry 没有本平台条目 —— 会话数未知（不是 0）".to_string(),
+            ..default_footprint(name, fallback_root)
+        };
+    };
+    let root = probe.root.clone().unwrap_or(fallback_root);
+    if !probe.installed_p() {
+        return HarnessFootprint {
+            note: if probe.note.is_empty() {
+                "registry 没有扫描这个 harness —— 会话数未知（不是 0）".to_string()
+            } else {
+                probe.note.clone()
+            },
+            ..default_footprint(name, root)
+        };
+    }
+    HarnessFootprint {
+        // The probe walked this root; `installed` is its verdict, never a
+        // second independent `is_dir()` that could disagree with it.
+        installed: true,
+        ..coverage_from_records(name, root, recs)
+    }
+}
+
 fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
     HarnessFootprint {
         name: name.to_string(),
@@ -649,9 +698,10 @@ pub fn run() -> DoctorReport {
         .as_deref()
         .map(expand_tilde)
         .unwrap_or_else(|| home.join(".claude").join("projects"));
-    footprints.push(coverage_from_records(
+    footprints.push(footprint_from_dir_probe(
         "claude-code",
         claude_root,
+        scan.probes.iter().find(|p| p.id == "claude-code"),
         scan.records
             .iter()
             .filter(|r| r.source == crate::models::HarnessSource::ClaudeCode),
@@ -662,27 +712,23 @@ pub fn run() -> DoctorReport {
         .as_deref()
         .map(expand_tilde)
         .unwrap_or_else(|| home.join(".codex").join("sessions"));
-    footprints.push(coverage_from_records(
+    footprints.push(footprint_from_dir_probe(
         "codex",
         codex_root,
+        scan.probes.iter().find(|p| p.id == "codex"),
         scan.records
             .iter()
             .filter(|r| r.source == crate::models::HarnessSource::Codex),
     ));
 
-    match scan.probes.iter().find(|p| p.id == "gemini-cli") {
-        Some(probe) => footprints.push(coverage_from_records(
-            "gemini",
-            probe.root.clone().unwrap_or_default(),
-            scan.records
-                .iter()
-                .filter(|r| r.source == crate::models::HarnessSource::GeminiCli),
-        )),
-        None => footprints.push(default_footprint(
-            "gemini",
-            home.join(".gemini").join("tmp"),
-        )),
-    }
+    footprints.push(footprint_from_dir_probe(
+        "gemini",
+        home.join(".gemini").join("tmp"),
+        scan.probes.iter().find(|p| p.id == "gemini-cli"),
+        scan.records
+            .iter()
+            .filter(|r| r.source == crate::models::HarnessSource::GeminiCli),
+    ));
 
     // opencode, Cursor and Grok are single-SQLite stores driven by the registry: their
     // footprint rows are built straight from the registry probe results, so
