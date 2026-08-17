@@ -652,13 +652,25 @@ fn probe_harness(
 
 /// Resolve an env override as the base directory represented by the registry
 /// template. The current cells use stable harness markers: Cursor's override
-/// is its `User` directory, Codex's is its `.codex` directory, and Gemini's is
-/// its `.gemini` directory. The suffix after that marker remains registry data.
+/// is its `User` directory, Codex's is its `.codex` directory, Gemini's is its
+/// `.gemini` directory, and opencode's `OPENCODE_DB` is a database filename
+/// (absolute values stay absolute; relative values live below XDG data).
 fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
     let variable = cell.env_override.as_deref()?;
     let value = env::var_os(variable).filter(|value| !value.is_empty())?;
-    if variable == "OPENCODE_HOME" {
-        return Some((PathBuf::from(value).join("opencode.db"), true));
+    if variable == "OPENCODE_DB" {
+        let value = PathBuf::from(value);
+        if value == Path::new(":memory:") {
+            return Some((value, true));
+        }
+        return Some((
+            if value.is_absolute() {
+                value
+            } else {
+                xdg_data_home().join(value)
+            },
+            true,
+        ));
     }
     let template = cell.template.replace('\\', "/");
     let marker = if template.contains("Cursor/User/") {

@@ -625,6 +625,35 @@ fn cmd_push(
 ) -> ExitCode {
     let config = Config::load();
     let machine = machine.unwrap_or_else(chat_stasher::id::machine_id);
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let stage_check =
+        match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir) {
+            Ok(check) => check,
+            Err(e) => {
+                eprintln!("push: cannot establish empty-stage safety: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+    println!(
+        "[push] stage check   : shards={} scanner_records={} sqlite_sessions={} sqlite_unknown={} committed_reads={}",
+        stage_check.stage_shards,
+        stage_check.scanner_records,
+        stage_check.scanner_sqlite_sessions,
+        stage_check.scanner_sqlite_unknown,
+        stage_check.committed_reads,
+    );
+    if stage_check.stage_shards == 0 {
+        if stage_check.empty_stage_is_safe() {
+            println!(
+                "[push] no archivable content this run: stage is empty, scanner found no sessions, and collector state has no committed reads"
+            );
+            return ExitCode::SUCCESS;
+        }
+        eprintln!(
+            "push: refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
+        );
+        return ExitCode::FAILURE;
+    }
     let cfg = store_config_from(&config, repo, key_file, connections, options);
     let (mk, key_was_new) = masterkey(&cfg);
     let store = BackupStore::new(cfg.clone(), machine.clone());
