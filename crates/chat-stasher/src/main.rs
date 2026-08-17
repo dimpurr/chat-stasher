@@ -39,6 +39,10 @@ enum Command {
         /// Stage directory holding the sealed shard tree.
         #[arg(long)]
         stage: PathBuf,
+        /// Inbox whose consumed/ directory must be accounted for when stage
+        /// is empty. If omitted, the most recent CLI ingest inboxes are used.
+        #[arg(long)]
+        inbox: Option<PathBuf>,
         /// Repository path override (default: config `rustic_repo` / data dir).
         #[arg(long)]
         repo: Option<String>,
@@ -221,6 +225,7 @@ fn main() -> ExitCode {
         Command::Init => cmd_init(),
         Command::Push {
             stage,
+            inbox,
             repo,
             key_file,
             machine,
@@ -229,6 +234,7 @@ fn main() -> ExitCode {
             no_reap,
         } => cmd_push(
             &stage,
+            inbox,
             repo,
             key_file,
             machine,
@@ -330,6 +336,11 @@ fn cmd_ingest(
                 return ExitCode::FAILURE;
             }
         };
+    let state_dir = chat_stasher::collect::default_state_dir();
+    if let Err(e) = chat_stasher::inbox::remember_inbox(inbox, &state_dir) {
+        eprintln!("ingest: cannot persist consumed-inbox audit pointer: {e:#}");
+        return ExitCode::FAILURE;
+    }
     println!("[ingest] shard bucket cap : {shard_bucket_cap}");
     print_ingest(&report, &machine);
     ExitCode::SUCCESS
@@ -506,8 +517,9 @@ fn cmd_seal(
     }
 }
 
-/// Metadata-only ingest summary: counts, paths, shard names, bytes, sha256.
-/// Never prints any session content.
+/// Metadata-only ingest summary: counts, shard names, bytes, sha256, and
+/// session-id prefixes. Source file names and error text are intentionally not
+/// printed because they may contain project or account identifiers.
 fn print_ingest(report: &chat_stasher::inbox::IngestReport, machine: &str) {
     println!(
         "[ingest] inbox            : candidates={} skipped_{}={}",
@@ -516,24 +528,30 @@ fn print_ingest(report: &chat_stasher::inbox::IngestReport, machine: &str) {
     println!("[ingest] consumed         : {}", report.consumed.len());
     for c in &report.consumed {
         println!(
-            "  + {}  kind={}  bytes={}  sha256={}  -> {}  ({})",
-            c.source_file, c.kind, c.file_bytes, c.file_sha256, c.shard, c.id,
+            "  + kind={}  bytes={}  sha256={}  -> {}  (session={})",
+            c.kind,
+            c.file_bytes,
+            c.file_sha256,
+            c.shard,
+            short_session_id(&c.id),
         );
     }
     println!("[ingest] duplicates (same bytes already archived, not re-sealed):");
     for d in &report.duplicates {
         println!(
-            "  = {}  sha256={}  matched in {}  (id {})",
-            d.source_file, d.file_sha256, d.matched_shard, d.id,
+            "  = sha256={}  matched in {}  (session={})",
+            d.file_sha256,
+            d.matched_shard,
+            short_session_id(&d.id),
         );
     }
     if !report.errors.is_empty() {
         println!("[ingest] errors           : {}", report.errors.len());
-        for e in &report.errors {
-            println!("  ! {}  {}", e.source_file, e.message);
-        }
     }
-    println!("[ingest] staging machine   : {machine}");
+    println!(
+        "[ingest] staging machine   : sha256={}",
+        store::machine_fingerprint(machine)
+    );
     println!(
         "[ingest] note             : bundles carry NO account field - the identity axis is missing, \
 waiting for the adapter to supply it; ids are `platform.sessionId` (machine-independent)"
@@ -626,6 +644,7 @@ fn reap_remote(cfg: &StoreConfig, no_reap: bool) {
 
 fn cmd_push(
     stage: &PathBuf,
+    inbox: Option<PathBuf>,
     repo: Option<String>,
     key_file: Option<String>,
     machine: Option<String>,
@@ -636,6 +655,7 @@ fn cmd_push(
     let config = Config::load();
     let machine = machine.unwrap_or_else(chat_stasher::id::machine_id);
     let state_dir = chat_stasher::collect::default_state_dir();
+    let cfg = store_config_from(&config, repo, key_file, connections, options);
     let stage_check =
         match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir) {
             Ok(check) => check,
@@ -653,23 +673,92 @@ fn cmd_push(
         stage_check.committed_reads,
     );
     if stage_check.stage_shards == 0 {
-        if stage_check.empty_stage_is_safe() {
+        let inboxes = match inbox {
+            Some(inbox) => vec![inbox],
+            None => match chat_stasher::inbox::remembered_inboxes(&state_dir) {
+                Ok(inboxes) => inboxes,
+                Err(_) => Vec::new(),
+            },
+        };
+        let consumed =
+            match chat_stasher::inbox::audit_consumed_against_stage(&inboxes, stage, &state_dir) {
+                Ok(audit) => audit,
+                Err(_) => {
+                    eprintln!("push: cannot establish consumed-inbox audit for empty stage");
+                    return ExitCode::FAILURE;
+                }
+            };
+        let store = BackupStore::new(cfg.clone(), machine.clone());
+        let mut repo_covered_files = 0usize;
+        let mut archive_error = false;
+        if !consumed.stage_missing_sha256.is_empty() {
+            match store.repository_exists() {
+                Ok(true) => match store::load_key_file(&cfg) {
+                    Ok(mk) => {
+                        match store.archived_file_sha256s(&mk, &consumed.stage_missing_sha256) {
+                            Ok(found) => {
+                                repo_covered_files = consumed
+                                    .hash_counts
+                                    .iter()
+                                    .filter(|(sha, _)| found.contains(*sha))
+                                    .map(|(_, count)| *count)
+                                    .sum();
+                            }
+                            Err(_) => archive_error = true,
+                        }
+                    }
+                    Err(_) => archive_error = true,
+                },
+                Ok(false) => {}
+                Err(_) => archive_error = true,
+            }
+        }
+        let missing_files = consumed
+            .file_count
+            .saturating_sub(consumed.stage_covered_files + repo_covered_files);
+        println!(
+            "[push] consumed audit: inboxes={} files={} bytes={} unique_sha256={} cache_hits={} rehashed={} stage_covered={} repo_covered={} missing={}",
+            inboxes.len(),
+            consumed.file_count,
+            consumed.total_bytes,
+            consumed.unique_sha256(),
+            consumed.cache_hits,
+            consumed.rehashed,
+            consumed.stage_covered_files,
+            repo_covered_files,
+            missing_files,
+        );
+        if stage_check.empty_stage_is_safe() && missing_files == 0 && !archive_error {
             println!(
-                "[push] no archivable content this run: stage is empty, scanner found no sessions, and collector state has no committed reads"
+                "[push] no archivable content this run: stage, scanner, collector, and consumed audit agree"
             );
             return ExitCode::SUCCESS;
+        }
+        if missing_files > 0 || archive_error {
+            eprintln!(
+                "push: refusing empty snapshot: consumed files are not proven in stage or repository"
+            );
+            return ExitCode::FAILURE;
         }
         eprintln!(
             "push: refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
         );
         return ExitCode::FAILURE;
     }
-    let cfg = store_config_from(&config, repo, key_file, connections, options);
     let (mk, key_was_new) = masterkey(&cfg);
     let store = BackupStore::new(cfg.clone(), machine.clone());
-    println!("[push] machine        : {machine}");
-    println!("[push] repo           : {}", store.cfg.repo_root);
-    println!("[push] key file       : {}", store.cfg.key_file.display());
+    println!(
+        "[push] machine        : sha256={}",
+        store::machine_fingerprint(&machine)
+    );
+    println!(
+        "[push] repo            : sha256={}",
+        sha256_hex(store.cfg.repo_root.as_bytes())
+    );
+    println!(
+        "[push] key file       : sha256={}",
+        sha256_hex(store.cfg.key_file.to_string_lossy().as_bytes())
+    );
     println!(
         "[push] connections    : {} (cap {})",
         store.cfg.connections,
@@ -712,8 +801,8 @@ fn cmd_push(
         summary.data_added_packed,
     );
     println!(
-        "[push] snapshot host  : {} (must equal machine)",
-        summary.snapshot_host
+        "[push] snapshot host  : sha256={} (must equal machine)",
+        store::machine_fingerprint(&summary.snapshot_host)
     );
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
     reap_remote(&cfg, no_reap);

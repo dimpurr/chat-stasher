@@ -1,5 +1,6 @@
 import {
-  DEEPSEEK_ORIGIN,
+  CONTENT_MATCHES,
+  PLATFORMS,
   MAIN_FALLBACK_TIMEOUT_MS,
   MAIN_PROBE_MESSAGE,
   PAGE_HOOK_FETCH_MARKER,
@@ -15,10 +16,10 @@ import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
  * ISOLATED-world bridge. WHY ISOLATED: MAIN/page world has no extension API
  * access, so this script converts validated page messages into
  * browser.runtime.sendMessage for the background service worker.
- * Matches only chat.deepseek.com, never <all_urls>.
+ * Matches only the explicit origins in the platform table, never <all_urls>.
  */
 export default defineContentScript({
-  matches: [`${DEEPSEEK_ORIGIN}/*`],
+  matches: CONTENT_MATCHES,
   runAt: 'document_start',
   main() {
     const probeToken = makeProbeToken();
@@ -26,8 +27,11 @@ export default defineContentScript({
     let fallbackInjected = false;
     let verifyRequested = false;
 
+    const pageOrigin = window.location.origin;
     const isPageMessage = (event: MessageEvent<unknown>): boolean =>
-      event.source === window && event.origin === DEEPSEEK_ORIGIN;
+      event.source === window &&
+      event.origin === pageOrigin &&
+      PLATFORMS.some((platform) => platform.origins.includes(event.origin));
 
     const onMessage = (event: MessageEvent<unknown>): void => {
       if (!isPageMessage(event)) return;
@@ -71,7 +75,7 @@ export default defineContentScript({
     function injectPageVerifier(token: string): void {
       const marker = JSON.stringify(PAGE_HOOK_FETCH_MARKER);
       const version = JSON.stringify(PAGE_HOOK_VERSION);
-      const origin = JSON.stringify(DEEPSEEK_ORIGIN);
+      const origin = JSON.stringify(pageOrigin);
       injectPageScript(`(() => {
         const fetchFn = window.fetch;
         const installed = typeof fetchFn === 'function' && fetchFn[${marker}] === ${version};
@@ -93,7 +97,7 @@ export default defineContentScript({
     window.addEventListener('message', onMessage);
     // A tokenized probe makes the readiness handshake insensitive to which
     // document_start content script runs first.
-    window.postMessage({ type: MAIN_PROBE_MESSAGE, token: probeToken }, DEEPSEEK_ORIGIN);
+    window.postMessage({ type: MAIN_PROBE_MESSAGE, token: probeToken }, pageOrigin);
     setTimeout(() => {
       if (!mainReady) injectFallbackHook();
     }, MAIN_FALLBACK_TIMEOUT_MS);

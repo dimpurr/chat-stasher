@@ -569,6 +569,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "toml",
+ "zstd",
 ]
 
 [[package]]

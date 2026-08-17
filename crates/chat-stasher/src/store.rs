@@ -34,8 +34,9 @@ use rustic_core::{
     BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions, LsOptions,
     ParentOptions, PathList, Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions,
 };
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,70 @@ pub const SHARD_SUFFIX: &str = ".jsonl";
 /// 238,755 B when all shards shared one directory; the cap is therefore a
 /// measured bound, not a filesystem limit.
 pub const DEFAULT_SHARD_BUCKET_CAP: usize = 20;
+
+/// The only production code paths allowed to create stage content.
+///
+/// The registry is deliberately kept next to the low-level stage writer: a
+/// new writer must name itself here and provide its reconciliation hook before
+/// it can call the writer API. The unit test below makes a missing hook a
+/// visible failure instead of relying on a convention in a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageWriter {
+    Collect,
+    Ingest,
+    Seal,
+}
+
+impl StageWriter {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Collect => "collect",
+            Self::Ingest => "ingest",
+            Self::Seal => "seal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StageWriterRegistration {
+    pub writer: StageWriter,
+    pub reconciliation_hook: Option<&'static str>,
+}
+
+pub const STAGE_WRITER_REGISTRY: &[StageWriterRegistration] = &[
+    StageWriterRegistration {
+        writer: StageWriter::Collect,
+        reconciliation_hook: Some("collector cursor + stage shard audit"),
+    },
+    StageWriterRegistration {
+        writer: StageWriter::Ingest,
+        reconciliation_hook: Some("consumed file_sha256 audit"),
+    },
+    StageWriterRegistration {
+        writer: StageWriter::Seal,
+        reconciliation_hook: Some("stage-owned rename audit"),
+    },
+];
+
+/// Runtime guard used by each production writer before it mutates stage.
+pub fn assert_stage_writer_audited(writer: StageWriter) -> anyhow::Result<()> {
+    let Some(registration) = STAGE_WRITER_REGISTRY
+        .iter()
+        .find(|registration| registration.writer == writer)
+    else {
+        anyhow::bail!(
+            "stage writer `{}` is not registered for reconciliation",
+            writer.name()
+        );
+    };
+    if registration.reconciliation_hook.is_none_or(str::is_empty) {
+        anyhow::bail!(
+            "stage writer `{}` has no reconciliation hook",
+            writer.name()
+        );
+    }
+    Ok(())
+}
 
 /// Everything BackupStore needs to reach a repository.
 #[derive(Debug, Clone)]
@@ -158,6 +223,12 @@ impl BackupStore {
         Ok(!backends.repository().list(FileType::Config)?.is_empty())
     }
 
+    /// Whether the configured repository has been initialised.
+    pub fn repository_exists(&self) -> anyhow::Result<bool> {
+        let backends = self.backends()?;
+        self.repo_exists(&backends)
+    }
+
     /// Open the repo if present, otherwise init it fresh.
     ///
     /// `append_only` is applied at init only — after the chunker (here the
@@ -190,6 +261,9 @@ impl BackupStore {
     /// Push the whole stage tree (`sessions/<machine>/<id>/NNNNNN.jsonl`) into
     /// a fresh snapshot. The stage root must already hold only sealed shards.
     pub fn push(&self, stage_root: &Path, mk: &MasterKey) -> anyhow::Result<PushSummary> {
+        // This must run before opening or backing up the repository. A stage
+        // assembled for machine A must never be snapshotted as machine B.
+        validate_stage_machines(stage_root, &self.machine)?;
         let stage_shards = sealed_shard_count(stage_root)?;
         if stage_shards == 0 {
             anyhow::bail!(
@@ -235,6 +309,71 @@ impl BackupStore {
             snapshot_host: snap.hostname.clone(),
             repo_was_init: init,
         })
+    }
+
+    /// Find archived inbox `file_sha256` values in repository snapshots.
+    ///
+    /// This is intentionally a targeted fallback for the empty-stage guard:
+    /// callers pass only hashes not found in the current stage, and the walk
+    /// stops as soon as all requested hashes are found. The repository has no
+    /// index for the JSON field, so the worst case still reads archived shard
+    /// files; it is never used on a non-empty push.
+    pub fn archived_file_sha256s(
+        &self,
+        mk: &MasterKey,
+        wanted: &BTreeSet<String>,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        if wanted.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let backends = self.backends()?;
+        let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+            .open(&Credentials::Masterkey(mk.clone()))
+            .context("open repository for consumed audit")?
+            .to_indexed()
+            .context("index repository for consumed audit")?;
+        let snapshots = repo
+            .get_all_snapshots()
+            .context("list snapshots for consumed audit")?;
+        let mut found = BTreeSet::new();
+
+        for snapshot in snapshots {
+            if found.len() == wanted.len() {
+                break;
+            }
+            let root = repo
+                .node_from_snapshot_and_path(&snapshot, "")
+                .context("read snapshot root for consumed audit")?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())
+                .context("list snapshot for consumed audit")?
+                .collect::<rustic_core::RusticResult<Vec<_>>>()
+                .context("collect snapshot entries for consumed audit")?;
+            for (path, node) in entries {
+                if node.node_type != NodeType::File
+                    || crate::readback::bucket_shard_path(&path).is_none()
+                {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                repo.dump(&node, &mut bytes)
+                    .context("read archived shard for consumed audit")?;
+                for line in bytes.split(|byte| *byte == b'\n') {
+                    let Ok(record) = serde_json::from_slice::<AuditRecord>(line) else {
+                        continue;
+                    };
+                    if let Some(sha) = record.file_sha256 {
+                        if wanted.contains(&sha) {
+                            found.insert(sha);
+                        }
+                    }
+                }
+                if found.len() == wanted.len() {
+                    break;
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// Re-open the repository (fresh, so the index reflects everything stored)
@@ -370,6 +509,90 @@ pub fn session_shard_dir(stage_root: &Path, machine: &str, session_id: &str) -> 
     stage_root.join(SESSIONS_DIR).join(machine).join(session_id)
 }
 
+#[derive(Debug, Deserialize)]
+struct AuditRecord {
+    file_sha256: Option<String>,
+}
+
+/// Collect the `file_sha256` values embedded by the ingest writer in sealed
+/// stage shards. Other stage writers legitimately have no such field and are
+/// ignored by this metadata-only scan.
+pub fn stage_file_sha256s(stage_root: &Path) -> anyhow::Result<BTreeSet<String>> {
+    let sessions_root = stage_root.join(SESSIONS_DIR);
+    let machines = match fs::read_dir(&sessions_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
+    };
+    let mut out = BTreeSet::new();
+    for machine in machines {
+        let machine = machine?;
+        if !machine.file_type()?.is_dir() {
+            continue;
+        }
+        for session in fs::read_dir(machine.path())? {
+            let session = session?;
+            if !session.file_type()?.is_dir() {
+                continue;
+            }
+            for (_, shard) in sealed_shard_entries(&session.path())? {
+                let raw = fs::read(&shard)
+                    .with_context(|| format!("read stage shard for audit ({})", shard.display()))?;
+                for line in raw.split(|byte| *byte == b'\n') {
+                    let Ok(record) = serde_json::from_slice::<AuditRecord>(line) else {
+                        continue;
+                    };
+                    if let Some(sha) = record.file_sha256 {
+                        out.insert(sha);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Reject a stage containing any machine partition other than `expected`.
+/// Machine values are represented by full SHA-256 digests in the diagnostic,
+/// never by hostnames.
+pub fn validate_stage_machines(stage_root: &Path, expected: &str) -> anyhow::Result<()> {
+    let sessions_root = stage_root.join(SESSIONS_DIR);
+    let machines = match fs::read_dir(&sessions_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
+    };
+    let mut unexpected = Vec::new();
+    for entry in machines {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != expected {
+            unexpected.push(name);
+        }
+    }
+    if unexpected.is_empty() {
+        return Ok(());
+    }
+    let fingerprints: Vec<String> = unexpected
+        .iter()
+        .map(|name| machine_fingerprint(name))
+        .collect();
+    anyhow::bail!(
+        "stage machine mismatch: expected_machine_sha256={} unexpected_machine_dirs={} unexpected_machine_sha256={}",
+        machine_fingerprint(expected),
+        unexpected.len(),
+        fingerprints.join(",")
+    )
+}
+
+/// Privacy-safe machine identity used in diagnostics.
+pub fn machine_fingerprint(machine: &str) -> String {
+    hex_digest(&Sha256::digest(machine.as_bytes()))
+}
+
 /// Count sealed shards across every machine/session in a stage. Directories
 /// without a shard do not make an archive look non-empty, and unrelated files
 /// are ignored. This is the push guard that distinguishes a retained stage
@@ -456,12 +679,14 @@ pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> u64
 /// Append a batch of lines as a new sealed shard. Returns the shard's file
 /// name. Callers must never append to a returned shard again (sealing rule).
 pub fn write_sealed_shard(
+    writer: StageWriter,
     stage_root: &Path,
     machine: &str,
     session_id: &str,
     lines: &[String],
 ) -> anyhow::Result<String> {
     write_sealed_shard_with_cap(
+        writer,
         stage_root,
         machine,
         session_id,
@@ -473,6 +698,7 @@ pub fn write_sealed_shard(
 /// Append a batch of lines as a new sealed shard in the bucket selected by its
 /// sequence. Existing shards are never moved when the cap changes.
 pub fn write_sealed_shard_with_cap(
+    writer: StageWriter,
     stage_root: &Path,
     machine: &str,
     session_id: &str,
@@ -480,7 +706,7 @@ pub fn write_sealed_shard_with_cap(
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
     let bytes: Vec<Vec<u8>> = lines.iter().map(|line| line.as_bytes().to_vec()).collect();
-    write_sealed_shard_bytes_with_cap(stage_root, machine, session_id, &bytes, bucket_cap)
+    write_sealed_shard_bytes_with_cap(writer, stage_root, machine, session_id, &bytes, bucket_cap)
 }
 
 /// Append a batch of arbitrary UTF-8-independent line bytes as one sealed
@@ -488,12 +714,14 @@ pub fn write_sealed_shard_with_cap(
 /// shard is installed atomically, so a crash cannot leave a file that the
 /// next `push` mistakes for a complete sealed shard.
 pub fn write_sealed_shard_bytes_with_cap(
+    writer: StageWriter,
     stage_root: &Path,
     machine: &str,
     session_id: &str,
     lines: &[Vec<u8>],
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
+    assert_stage_writer_audited(writer)?;
     let dir = session_shard_dir(stage_root, machine, session_id);
     fs::create_dir_all(&dir)?;
     let seq = next_shard_seq(stage_root, machine, session_id);
@@ -593,6 +821,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn connections_are_clamped_to_ceiling() {
@@ -656,5 +885,51 @@ mod tests {
             shard_path(stage, "mbp-2", "sess-1", 7),
             PathBuf::from("/tmp/stage/sessions/mbp-2/sess-1/000/000007.jsonl")
         );
+    }
+
+    #[test]
+    fn every_registered_stage_writer_has_a_reconciliation_hook() {
+        assert_eq!(STAGE_WRITER_REGISTRY.len(), 3);
+        for registration in STAGE_WRITER_REGISTRY {
+            assert!(
+                registration
+                    .reconciliation_hook
+                    .is_some_and(|hook| !hook.is_empty()),
+                "stage writer {} is missing its reconciliation hook",
+                registration.writer.name()
+            );
+            assert_stage_writer_audited(registration.writer).unwrap();
+        }
+    }
+
+    #[test]
+    fn push_rejects_a_stage_partition_owned_by_another_machine_before_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        write_sealed_shard(
+            StageWriter::Collect,
+            &stage,
+            "machine-a",
+            "session-a",
+            &["synthetic".to_string()],
+        )
+        .unwrap();
+        let repo = dir.path().join("repo");
+        let cfg = StoreConfig {
+            repo_root: repo.to_string_lossy().into_owned(),
+            key_file: dir.path().join("key.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+        };
+        let store = BackupStore::new(cfg, "machine-b".to_string());
+        let err = store.push(&stage, &MasterKey::new()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("stage machine mismatch"));
+        assert!(message.contains("unexpected_machine_dirs=1"));
+        assert!(
+            !repo.exists(),
+            "machine validation must run before repository initialisation"
+        );
+        let _ = fs::remove_dir_all(repo);
     }
 }

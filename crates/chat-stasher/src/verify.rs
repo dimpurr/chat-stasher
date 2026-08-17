@@ -316,7 +316,14 @@ mod tests {
             let lines: Vec<String> = (0..10)
                 .map(|i| format!("{{\"seq\":{seq},\"i\":{i}}}"))
                 .collect();
-            crate::store::write_sealed_shard(stage, machine, session, &lines).unwrap();
+            crate::store::write_sealed_shard(
+                crate::store::StageWriter::Collect,
+                stage,
+                machine,
+                session,
+                &lines,
+            )
+            .unwrap();
             for l in &lines {
                 expected_bytes.extend_from_slice(l.as_bytes());
                 expected_bytes.push(b'\n');
