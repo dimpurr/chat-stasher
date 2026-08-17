@@ -808,6 +808,33 @@ pub fn sealed_shard_entries(session_dir: &Path) -> anyhow::Result<Vec<(u64, Path
     Ok(out)
 }
 
+// ----------------------------------------------------------- rustic's cache
+
+/// Where `rustic_core` keeps this machine's local metadata cache.
+///
+/// Every repository this crate opens does so with `RepositoryOptions::default()`
+/// (`open_or_init`, `consumed_shas`, `open_with_newest_snapshot`), which leaves
+/// `no_cache = false` and `cache_dir = None` — so rustic falls back to
+/// `dirs::cache_dir()/rustic` (rustic_core-0.12.0 `src/backend/cache.rs:261`,
+/// `src/repository.rs:549`). `dirs` spells that directory differently per
+/// platform, and on Windows it is not under `$HOME` at all
+/// (dirs-6.0.0 `src/win.rs:10` → `known_folder_local_app_data()`).
+///
+/// The cache holds metadata only — snapshots, index, and *tree* packs
+/// (rustic_core-0.12.0 `src/backend.rs:82`, `src/blob.rs:54`) — so anything
+/// that needs to observe a repository whose metadata has changed underneath it
+/// has to find this directory, and must not guess at it from `$HOME`.
+///
+/// A list, not one path: the Windows spelling cannot be exercised from the
+/// other two platforms, so an extra candidate is cheap insurance — callers
+/// match on content, and a candidate that does not exist costs nothing.
+pub fn rustic_cache_roots() -> Vec<PathBuf> {
+    crate::scanner::user_cache_dirs()
+        .into_iter()
+        .map(|base| base.join("rustic"))
+        .collect()
+}
+
 // ------------------------------------------------------------------- keys
 
 /// Serialise a `MasterKey` (it is `serde.Deserialize`d from the same json by
