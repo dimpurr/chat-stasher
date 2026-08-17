@@ -68,6 +68,34 @@ This section is intentionally blunt:
 - **The release gate is not a substitute for installation.** `scripts/release-gate.sh` expects a built `target/debug/chat-stasher`, reads real local Claude JSONL files to make opaque fixtures, and exercises push/read/verify/doctor. It was not run for this README rewrite. (`scripts/release-gate.sh:3-19`; `scripts/release-gate.sh:23-50`; `scripts/release-gate.sh:66-112`.)
 - **The license is not selected.** `LICENSE` is still a pending-owner-confirmation placeholder and explicitly says not to treat it as a grant of rights. Do not publish or redistribute this repository as if it already had an open-source license. (`LICENSE:1-13`.)
 
+## Security and privacy
+
+Two documents, both written to be read before you trust this with an archive you
+cannot recreate:
+
+- **[`docs/threat-model.md`](docs/threat-model.md)** — organised as *who can see
+  what*: us (nothing — there is no server in this design), your destination
+  provider (encrypted objects, but your backup rhythm and volume leak as
+  metadata), other programs on your machine (they can read the **plaintext**
+  files the extension drops in your download directory, and your master key
+  file), the chat platforms, and one row we honestly could not resolve: what
+  other browser extensions can observe. It also lists the weaknesses and the
+  threats we do **not** defend against.
+- **[`SECURITY.md`](SECURITY.md)** — how to report a vulnerability, what is in
+  scope, and what response you can and cannot expect. The reporting contact is
+  still a `TODO(owner)` placeholder; there is no private channel yet.
+
+Three things worth knowing before reading either:
+
+- **Your master key file is the only key.** Lose it and the archive is
+  unreadable forever, with no recovery path of any kind
+  (`crates/chat-stasher/src/store.rs:813-815`, `:834-841`).
+- **There is no restore command.** `read` returns one session at a time to
+  stdout (`crates/chat-stasher/src/main.rs:130-133`); bulk restore is not
+  implemented.
+- **Captured conversations are plaintext on disk** in your download directory
+  until `ingest` consumes them (`apps/extension/lib/download.ts:91-93`).
+
 ## Development status
 
 The repository contains the command implementation, harness registry, inbox schema, and release-gate script. `scripts/release-gate.sh` prints `GATE: PASS` or `GATE: FAIL`; both directions were exercised on this checkout (`--selftest` injects one byte and must produce `GATE: FAIL`). Note that the gate currently reads real local session files to build its fixtures — see the limits section. (`scripts/release-gate.sh:3-19`.)
