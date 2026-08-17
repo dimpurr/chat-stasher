@@ -325,6 +325,9 @@ pub struct HarnessFootprint {
     /// `None` when the harness stores sessions in something non-enumerable
     /// by a file walk (e.g. opencode's single SQLite).
     pub session_count: Option<u64>,
+    /// Raw candidate rows before any store-specific qualification rule.
+    /// Cursor's doctor line prints this beside `session_count`.
+    pub candidate_count: Option<u64>,
     pub total_bytes: u64,
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
@@ -353,6 +356,7 @@ pub fn coverage_from_records<'a>(
         } else {
             None
         },
+        candidate_count: None,
         total_bytes,
         earliest,
         latest,
@@ -427,6 +431,7 @@ fn gemini_footprint(home: &Path) -> HarnessFootprint {
             root,
             installed: false,
             session_count: None,
+            candidate_count: None,
             total_bytes: 0,
             earliest: None,
             latest: None,
@@ -474,6 +479,7 @@ fn gemini_footprint(home: &Path) -> HarnessFootprint {
         root,
         installed: true,
         session_count: Some(count),
+        candidate_count: None,
         total_bytes: total,
         earliest,
         latest,
@@ -491,6 +497,7 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
             root: root.clone(),
             installed: db.exists() || root.exists(),
             session_count: None,
+            candidate_count: None,
             total_bytes: 0,
             earliest: None,
             latest: None,
@@ -501,13 +508,15 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
     // Single source of truth for both count *and* bytes: the shared SQLite
     // probe (`crate::sqlite_probe`) used by the registry scan too.
     let info = probe_sqlite_store(&db);
-    let (session_count, earliest, latest, note) = match info.sessions {
+    let (session_count, candidate_count, earliest, latest, note) = match info.sessions {
         SqliteSessionProbe::Known {
+            candidate_count,
             count,
             earliest,
             latest,
         } => (
             Some(count),
+            Some(candidate_count),
             earliest,
             latest,
             "SQLite 只读连接；session(time_created) 已识别（bytes 含 .db+-wal+-shm）".to_string(),
@@ -516,11 +525,13 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
             None,
             None,
             None,
+            None,
             format!(
                 "检测到 SQLite 但表结构不认识（期望 session(id, time_created, time_updated)，实到 {actual}）"
             ),
         ),
         SqliteSessionProbe::ReadFailed { error } => (
+            None,
             None,
             None,
             None,
@@ -533,6 +544,7 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
         root,
         installed: true,
         session_count,
+        candidate_count,
         total_bytes: info.total_bytes,
         earliest,
         latest,
@@ -556,6 +568,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         root: probe.root.clone().unwrap_or_default(),
         installed: probe.installed_p(),
         session_count: probe.record_count,
+        candidate_count: probe.candidate_count,
         total_bytes: probe.bytes,
         earliest: probe.earliest,
         latest: probe.latest,
@@ -570,6 +583,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         root,
         installed: false,
         session_count: None,
+        candidate_count: None,
         total_bytes: 0,
         earliest: None,
         latest: None,
@@ -786,7 +800,9 @@ pub fn run() -> DoctorReport {
             None => footprints.push(default_footprint(
                 id,
                 home.join(match id {
-                    "cursor" => Path::new("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+                    "cursor" => Path::new(
+                        "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+                    ),
                     _ => Path::new(".grok/sessions/session_search.sqlite"),
                 }),
             )),
@@ -1021,6 +1037,15 @@ fn footprint_count_label(f: &HarnessFootprint) -> String {
     }
 }
 
+fn footprint_count_detail(f: &HarnessFootprint) -> String {
+    if f.name == "cursor" {
+        if let (Some(before), Some(after)) = (f.candidate_count, f.session_count) {
+            return format!("（过滤前 {before} / 过滤后 {after}）");
+        }
+    }
+    String::new()
+}
+
 pub fn print_report(r: &DoctorReport) {
     println!();
     println!("doctor — “你的 harness 正在偷偷删你的数据吗？”");
@@ -1084,6 +1109,7 @@ pub fn print_report(r: &DoctorReport) {
                 continue;
             }
             let count = footprint_count_label(f);
+            let count_detail = footprint_count_detail(f);
             let earliest = f
                 .earliest
                 .map(format_timestamp)
@@ -1093,9 +1119,10 @@ pub fn print_report(r: &DoctorReport) {
                 .map(format_timestamp)
                 .unwrap_or_else(|| "-".to_string());
             println!(
-                "  {:<10} 会话 {:<6} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
+                "  {:<10} 会话 {:<6}{} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
                 f.name,
                 count,
+                count_detail,
                 fmt_bytes(f.total_bytes),
                 f.total_bytes
             );
@@ -1129,6 +1156,7 @@ pub fn print_report(r: &DoctorReport) {
             continue;
         }
         let count = footprint_count_label(f);
+        let count_detail = footprint_count_detail(f);
         let earliest = f
             .earliest
             .map(format_timestamp)
@@ -1138,9 +1166,10 @@ pub fn print_report(r: &DoctorReport) {
             .map(format_timestamp)
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "  {:<10} 会话 {:<6} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
+            "  {:<10} 会话 {:<6}{} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
             f.name,
             count,
+            count_detail,
             fmt_bytes(f.total_bytes),
             f.total_bytes
         );

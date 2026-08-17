@@ -28,7 +28,8 @@
 //! creates or touches `-wal`/`-shm`, so the user's live Cursor/Grok stores
 //! stay byte-identical.
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{types::ValueRef, Connection, OpenFlags};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -62,6 +63,10 @@ pub struct SqliteSchemaSpec<'a> {
     /// When `time_column` stores Unix **seconds** (Grok's `updated_at` is
     /// seconds; opencode `time_created` and Cursor `createdAt` are millis).
     pub time_is_seconds: bool,
+    /// Optional named qualification rule for JSON key/value stores.
+    /// `cursor_composer` excludes archived/empty composers after the raw key
+    /// prefix count, so callers can report both numbers.
+    pub qualification: Option<&'a str>,
 }
 
 /// The pre-B27 default schema (opencode's `session` table, millis).
@@ -75,6 +80,7 @@ pub fn opencode_schema() -> SqliteSchemaSpec<'static> {
         json_value_column: None,
         json_time_path: None,
         time_is_seconds: false,
+        qualification: None,
     }
 }
 
@@ -100,7 +106,10 @@ pub fn spec_from_cell(cell: &crate::scanner::RegistryCell) -> Option<SqliteSchem
         }
         v
     } else {
-        cell.sql_required_columns.iter().map(String::as_str).collect()
+        cell.sql_required_columns
+            .iter()
+            .map(String::as_str)
+            .collect()
     };
     Some(SqliteSchemaSpec {
         table,
@@ -111,6 +120,7 @@ pub fn spec_from_cell(cell: &crate::scanner::RegistryCell) -> Option<SqliteSchem
         json_value_column: cell.sql_value_column.as_deref(),
         json_time_path: cell.sql_time_json_path.as_deref(),
         time_is_seconds: cell.sql_time_value_is_seconds,
+        qualification: cell.sql_qualification.as_deref(),
     })
 }
 
@@ -120,6 +130,9 @@ pub enum SqliteSessionProbe {
     /// Session table recognised, stats read. `earliest`/`latest` are the
     /// `min`/`max` of the schema-declared time source.
     Known {
+        /// Number of rows selected by the key/table predicate before any
+        /// JSON qualification rule is applied.
+        candidate_count: u64,
         count: u64,
         earliest: Option<SystemTime>,
         latest: Option<SystemTime>,
@@ -155,6 +168,100 @@ pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStor
         total_bytes: sqlite_store_bytes(db),
         sessions: probe_sqlite_sessions_with(db, spec),
     }
+}
+
+/// Probe Cursor's pre-global-storage layout. Each immediate workspace directory
+/// may contain `state.vscdb`; its `ItemTable` stores either the
+/// `composer.composerData` object (usually with an `allComposers` array) or an
+/// `allComposers` value directly. Every database is opened through the same
+/// strict read-only URI as the global probe.
+pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option<SqliteStoreProbe> {
+    if !workspace_storage.is_dir() {
+        return None;
+    }
+
+    let mut saw_database = false;
+    let mut saw_composer_value = false;
+    let mut total_bytes = 0u64;
+    let mut candidate_count = 0u64;
+    let mut count = 0u64;
+    let mut earliest: Option<SystemTime> = None;
+    let mut latest: Option<SystemTime> = None;
+
+    let entries = fs::read_dir(workspace_storage).ok()?;
+    for entry in entries.flatten() {
+        let workspace = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let db = workspace.join("state.vscdb");
+        if !db.is_file() {
+            continue;
+        }
+        saw_database = true;
+        total_bytes += sqlite_store_bytes(&db);
+        let Ok(conn) = open_readonly(&db) else {
+            continue;
+        };
+        let value = conn
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key IN ('composer.composerData', 'allComposers') ORDER BY CASE key WHEN 'composer.composerData' THEN 0 ELSE 1 END LIMIT 1",
+                [],
+                |row| match row.get_ref(0)? {
+                    ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(bytes.to_vec()),
+                    ValueRef::Null => Ok(Vec::new()),
+                    _ => Err(rusqlite::Error::InvalidColumnType(
+                        0,
+                        "value".to_string(),
+                        rusqlite::types::Type::Integer,
+                    )),
+                },
+            )
+            .ok();
+        let Some(value) = value else {
+            continue;
+        };
+        saw_composer_value = true;
+        let Ok(json) = serde_json::from_slice::<Value>(&value) else {
+            continue;
+        };
+        let Some(composers) = json
+            .get("allComposers")
+            .and_then(Value::as_array)
+            .or_else(|| json.as_array())
+        else {
+            continue;
+        };
+        for composer in composers {
+            candidate_count += 1;
+            if !cursor_composer_is_qualified(composer) {
+                continue;
+            }
+            count += 1;
+            if let Some(created_at) = composer.get("createdAt").and_then(Value::as_i64) {
+                if let Some(timestamp) = sqlite_millis_to_system_time(created_at) {
+                    earliest = Some(earliest.map_or(timestamp, |old| old.min(timestamp)));
+                    latest = Some(latest.map_or(timestamp, |old| old.max(timestamp)));
+                }
+            }
+        }
+    }
+
+    if !saw_database || !saw_composer_value {
+        return None;
+    }
+    Some(SqliteStoreProbe {
+        total_bytes,
+        sessions: SqliteSessionProbe::Known {
+            candidate_count,
+            count,
+            earliest,
+            latest,
+        },
+    })
 }
 
 /// Total on-disk bytes of a SQLite store: the main file plus `-wal` and
@@ -260,12 +367,17 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
         return SqliteSessionProbe::SchemaMismatch { actual };
     }
 
-    let where_sql = match (spec.key_column, spec.key_prefix) {
+    let candidate_where_sql = match (spec.key_column, spec.key_prefix) {
         (Some(col), Some(prefix)) => {
             format!(" WHERE \"{col}\" LIKE '{}'", prefix.replace('\'', "''"))
         }
         _ => String::new(),
     };
+    let where_sql = qualification_where_sql(spec, &candidate_where_sql);
+    let candidate_count_sql = format!(
+        "SELECT count(*) FROM \"{}\"{candidate_where_sql}",
+        spec.table
+    );
     let count_sql = format!("SELECT count(*) FROM \"{}\"{where_sql}", spec.table);
     let time_sql = time_expression(spec).map(|expr| {
         // `json_extract` errors (does not return NULL) on malformed JSON, so a
@@ -280,9 +392,26 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
         } else {
             String::new()
         };
-        format!("SELECT {expr} FROM \"{}\"{where_sql}{json_guard}", spec.table)
+        format!(
+            "SELECT {expr} FROM \"{}\"{where_sql}{json_guard}",
+            spec.table
+        )
     });
 
+    let candidate_count = match conn.query_row(&candidate_count_sql, [], |row| row.get::<_, i64>(0))
+    {
+        Ok(c) if c >= 0 => c as u64,
+        Ok(c) => {
+            return SqliteSessionProbe::ReadFailed {
+                error: format!("SQLite 返回了负候选会话数: {c}"),
+            }
+        }
+        Err(e) => {
+            return SqliteSessionProbe::ReadFailed {
+                error: format!("读取 {} 表候选统计失败: {e}", spec.table),
+            }
+        }
+    };
     let count = match conn.query_row(&count_sql, [], |row| row.get::<_, i64>(0)) {
         Ok(c) if c >= 0 => c as u64,
         Ok(c) => {
@@ -314,10 +443,55 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
     };
 
     SqliteSessionProbe::Known {
+        candidate_count,
         count,
         earliest,
         latest,
     }
+}
+
+/// SQL predicate for the Cursor composer qualification rule. The initial
+/// candidate predicate remains separate so the probe can expose before/after
+/// counts. `json_valid` makes malformed values in a key/value store ineligible
+/// without allowing one bad row to abort the whole count.
+fn qualification_where_sql(spec: &SqliteSchemaSpec, candidate_where_sql: &str) -> String {
+    if spec.qualification != Some("cursor_composer") {
+        return candidate_where_sql.to_string();
+    }
+    let value = spec.json_value_column.unwrap_or("value");
+    format!(
+        "{candidate_where_sql} AND json_valid(\"{value}\")=1 \
+         AND COALESCE(CAST(json_extract(\"{value}\", '$.isArchived') AS INTEGER), 0) <> 1 \
+         AND (\
+           (json_type(\"{value}\", '$.fullConversationHeadersOnly')='array' \
+            AND json_array_length(\"{value}\", '$.fullConversationHeadersOnly') > 0) \
+           OR CAST(COALESCE(json_extract(\"{value}\", '$.promptTokenBreakdown.totalUsedTokens'), 0) AS INTEGER) > 0\
+         )"
+    )
+}
+
+/// Rust equivalent of the Cursor qualification used by the legacy workspace
+/// fallback. Keeping this beside the SQL rule prevents the two storage paths
+/// from silently acquiring different session definitions.
+fn cursor_composer_is_qualified(value: &Value) -> bool {
+    if value
+        .get("isArchived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let has_headers = value
+        .get("fullConversationHeadersOnly")
+        .and_then(Value::as_array)
+        .is_some_and(|headers| !headers.is_empty());
+    let has_tokens = value
+        .get("promptTokenBreakdown")
+        .and_then(|v| v.get("totalUsedTokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0;
+    has_headers || has_tokens
 }
 
 /// `min, max` SQL fragment for the schema's time source, or `None` when the
@@ -449,6 +623,7 @@ mod tests {
         assert_eq!(
             info.sessions,
             SqliteSessionProbe::Known {
+                candidate_count: 3,
                 count: 3,
                 earliest: sqlite_millis_to_system_time(0),
                 latest: sqlite_millis_to_system_time(2),
@@ -495,10 +670,19 @@ mod tests {
         )
         .unwrap();
         let sessions = [
-            ("composerData:aaaaaaaa-1111", r#"{"composerId":"a","createdAt":1751779149032}"#),
-            ("composerData:bbbbbbbb-2222", r#"{"composerId":"b","createdAt":1752849959504}"#),
+            (
+                "composerData:aaaaaaaa-1111",
+                r#"{"composerId":"a","createdAt":1751779149032,"fullConversationHeadersOnly":[{}]}"#,
+            ),
+            (
+                "composerData:bbbbbbbb-2222",
+                r#"{"composerId":"b","createdAt":1752849959504,"isArchived":true,"fullConversationHeadersOnly":[{}]}"#,
+            ),
             ("inlineDiffs-123456", r#"{"n":1}"#), // must not count as a session
-            ("composerData:cccccccc-3333", "not-json"), // counts, but no timestamp
+            (
+                "composerData:cccccccc-3333",
+                r#"{"composerId":"c","createdAt":1753000000000}"#,
+            ), // empty composer
         ];
         for (key, value) in &sessions {
             conn.execute(
@@ -518,14 +702,48 @@ mod tests {
             json_value_column: Some("value"),
             json_time_path: Some("$.createdAt"),
             time_is_seconds: false,
+            qualification: Some("cursor_composer"),
         };
         let info = probe_sqlite_store_with(&db, &spec);
         assert_eq!(
             info.sessions,
             SqliteSessionProbe::Known {
-                count: 3,
+                candidate_count: 3,
+                count: 1,
                 earliest: sqlite_millis_to_system_time(1751779149032),
-                latest: sqlite_millis_to_system_time(1752849959504),
+                latest: sqlite_millis_to_system_time(1751779149032),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_workspace_storage_counts_only_qualified_composers() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspaceStorage").join("opaque-workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let db = workspace.join("state.vscdb");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value TEXT)")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composer.composerData",
+                r#"{"allComposers":[{"createdAt":1751779149032,"fullConversationHeadersOnly":[{}]},{"createdAt":1752849959504,"isArchived":true,"fullConversationHeadersOnly":[{}]},{"createdAt":1753000000000}]}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let info =
+            probe_cursor_legacy_workspace_storage(&dir.path().join("workspaceStorage")).unwrap();
+        assert_eq!(
+            info.sessions,
+            SqliteSessionProbe::Known {
+                candidate_count: 3,
+                count: 1,
+                earliest: sqlite_millis_to_system_time(1751779149032),
+                latest: sqlite_millis_to_system_time(1751779149032),
             }
         );
     }
@@ -556,11 +774,13 @@ mod tests {
             json_value_column: None,
             json_time_path: None,
             time_is_seconds: true,
+            qualification: None,
         };
         let info = probe_sqlite_store_with(&db, &spec);
         assert_eq!(
             info.sessions,
             SqliteSessionProbe::Known {
+                candidate_count: 1,
                 count: 1,
                 earliest: UNIX_EPOCH.checked_add(Duration::from_secs(1784924765)),
                 latest: UNIX_EPOCH.checked_add(Duration::from_secs(1784924765)),
@@ -604,6 +824,7 @@ mod tests {
             json_value_column: None,
             json_time_path: None,
             time_is_seconds: true,
+            qualification: None,
         };
         let info = probe_sqlite_store_with(&db, &spec);
         assert!(matches!(
@@ -645,15 +866,14 @@ mod tests {
         .unwrap();
         assert!(spec_from_cell(&non_sqlite).is_none());
 
-        let sqlite_no_table: crate::scanner::RegistryCell = serde_json::from_value(
-            serde_json::json!({
+        let sqlite_no_table: crate::scanner::RegistryCell =
+            serde_json::from_value(serde_json::json!({
                 "template": "~/x.db",
                 "format": "sqlite",
                 "confidence": "源码确认",
                 "source": "s"
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         assert!(spec_from_cell(&sqlite_no_table).is_none());
     }
 }
