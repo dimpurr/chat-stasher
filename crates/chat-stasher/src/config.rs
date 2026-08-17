@@ -26,9 +26,25 @@ pub struct Config {
     /// Kept so the config schema is stable.
     pub archive_root: Option<String>,
     /// Root directory that holds Claude Code session JSONL files.
+    /// Alias of `harness_roots["claude-code"]`, kept for compatibility.
     pub claude_projects_dir: Option<String>,
     /// Root directory that holds Codex session JSONL files.
+    /// Alias of `harness_roots["codex"]`.
     pub codex_sessions_dir: Option<String>,
+    /// Explicit per-harness store roots, keyed by **registry harness id**
+    /// (`claude-code`, `codex`, `gemini-cli`, `opencode`, `cursor`, `grok`, …).
+    ///
+    /// This is the user *stating* where a harness keeps its sessions, which is
+    /// categorically different from the path registry *guessing* one. The
+    /// registry's per-platform template and its `confidence` gate exist to stop
+    /// the scanner walking a guessed path; neither applies to a path the user
+    /// wrote down. So an entry here outranks the template and bypasses the
+    /// `未查明` skip — see `scanner::probe_harness`.
+    ///
+    /// It does **not** relax "unknown is not empty": a configured path that
+    /// does not exist still probes as missing and still reports an unknown
+    /// session count, never `0`.
+    pub harness_roots: BTreeMap<String, String>,
     /// Local rustic repository that `push`/`read` operate on.
     ///
     /// Default: `$XDG_DATA_HOME/chat-stasher/repo` (falls back to
@@ -128,6 +144,25 @@ impl Config {
         }
     }
 
+    /// The store root the user explicitly declared for registry harness `id`,
+    /// if any. Empty strings count as "not set" so a stray `foo = ""` cannot
+    /// silently re-point a scan at the current directory.
+    ///
+    /// `harness_roots` wins over the two legacy single-harness fields, which
+    /// remain aliases for the same thing.
+    pub fn explicit_harness_root(&self, id: &str) -> Option<&str> {
+        let legacy = match id {
+            "claude-code" => self.claude_projects_dir.as_deref(),
+            "codex" => self.codex_sessions_dir.as_deref(),
+            _ => None,
+        };
+        self.harness_roots
+            .get(id)
+            .map(String::as_str)
+            .or(legacy)
+            .filter(|value| !value.is_empty())
+    }
+
     /// Write a documented, commented template config file if one does not
     /// already exist. Never overwrites an existing file.
     ///
@@ -206,6 +241,24 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Override the Codex session root.
 # Default: ~/.codex/sessions
 # codex_sessions_dir = "~/.codex/sessions"
+
+# ---------------------------------------------------------------- harness_roots
+# Tell the tool where a harness actually keeps its sessions, keyed by the
+# registry harness id. Use this when your install is not where the shipped path
+# registry looks — or when the registry has no verified path for your platform
+# at all (it then refuses to guess, and reports "unknown" rather than 0).
+#
+# A path you write here is a statement, not a guess: it is probed even when the
+# registry cell for your platform is missing or marked 未查明. If the path does
+# not exist, the count stays "unknown" — it never becomes 0.
+#
+# Single-file (SQLite) harnesses want the file itself; directory harnesses want
+# the directory.
+#
+# [harness_roots]
+# cursor = "~/.config/Cursor/User/globalStorage/state.vscdb"
+# grok = "~/.grok/sessions/session_search.sqlite"
+# opencode = "~/.local/share/opencode/opencode.db"
 
 # ---------------------------------------------------------------- destinations
 # Named destinations. Declare as many as you keep copies in. Each one is a

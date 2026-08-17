@@ -694,8 +694,7 @@ pub fn run() -> DoctorReport {
     let mut footprints = Vec::new();
 
     let claude_root = config
-        .claude_projects_dir
-        .as_deref()
+        .explicit_harness_root("claude-code")
         .map(expand_tilde)
         .unwrap_or_else(|| home.join(".claude").join("projects"));
     footprints.push(footprint_from_dir_probe(
@@ -708,8 +707,7 @@ pub fn run() -> DoctorReport {
     ));
 
     let codex_root = config
-        .codex_sessions_dir
-        .as_deref()
+        .explicit_harness_root("codex")
         .map(expand_tilde)
         .unwrap_or_else(|| home.join(".codex").join("sessions"));
     footprints.push(footprint_from_dir_probe(
@@ -721,9 +719,13 @@ pub fn run() -> DoctorReport {
             .filter(|r| r.source == crate::models::HarnessSource::Codex),
     ));
 
+    let gemini_root = config
+        .explicit_harness_root("gemini-cli")
+        .map(expand_tilde)
+        .unwrap_or_else(|| home.join(".gemini").join("tmp"));
     footprints.push(footprint_from_dir_probe(
         "gemini",
-        home.join(".gemini").join("tmp"),
+        gemini_root,
         scan.probes.iter().find(|p| p.id == "gemini-cli"),
         scan.records
             .iter()
