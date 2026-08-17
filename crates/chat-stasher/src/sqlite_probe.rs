@@ -8,32 +8,123 @@
 //! table vs 会话=0 in the registry table) was a real bug, because the SQLite
 //! enumeration was wired into only one of the two paths.
 //!
+//! Since B27 the probe is schema-driven: each harness's registry cell declares
+//! which table holds one row per session, which key pattern selects session
+//! rows (Cursor's `cursorDiskKV.composerData:%`), and where the per-session
+//! timestamp lives (`session.time_created`, `session_docs.updated_at`, or the
+//! `createdAt` field inside Cursor's JSON `value`). A changed schema is still
+//! reported loudly, never silently turned into a fabricated count of zero.
+//!
 //! Byte scope is part of the contract too: a live SQLite store is its `.db`
 //! file *plus* its `-wal`/`-shm` siblings. Both consumers measure exactly this
 //! set — counting only `.db` silently under-reports the store by the size of
 //! the write-ahead log.
+//!
+//! Read-only guarantee: every connection opens with `mode=ro`; when that fails
+//! because a WAL-mode store has no `-shm` yet (SQLite read-only WAL cannot
+//! create the shared-memory file it needs — observed on Grok's
+//! `session_search.sqlite`), we retry with `mode=ro&immutable=1`, which reads
+//! only the main file and writes nothing. A read-only probe therefore never
+//! creates or touches `-wal`/`-shm`, so the user's live Cursor/Grok stores
+//! stay byte-identical.
 
 use rusqlite::{Connection, OpenFlags};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Columns the session table must carry (in any order) before we claim we can
-/// enumerate sessions inside a store. Narrow on purpose: a changed schema is
-/// reported loudly, never silently turned into a fabricated count of zero.
+/// Columns the opencode `session` table must carry (in any order) before we
+/// claim we can enumerate its sessions. Kept for compatibility with the
+/// pre-B27 default schema.
 pub const EXPECTED_SESSION_COLUMNS: [&str; 3] = ["id", "time_created", "time_updated"];
+
+/// How one SQLite store keeps its sessions, resolved from the registry cell
+/// (`data/harness-registry-v1.json`). Both the scanner and the doctor build
+/// the exact same spec for a harness, so they can never use two different
+/// queries against the same database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteSchemaSpec<'a> {
+    /// Table that holds one row per session.
+    pub table: &'a str,
+    /// Columns that must all exist before we claim we can enumerate sessions.
+    pub required_columns: Vec<&'a str>,
+    /// Key/value-store selection: count only rows where `key_column` matches
+    /// `key_prefix` with a trailing `%` (e.g. Cursor `composerData:%`).
+    /// `None` = count all rows of `table`.
+    pub key_column: Option<&'a str>,
+    pub key_prefix: Option<&'a str>,
+    /// Column holding a per-session timestamp for `min`/`max`, if any.
+    pub time_column: Option<&'a str>,
+    /// Alternative to `time_column`: read the field at this JSON path from the
+    /// JSON stored in `json_value_column` (epoch **millis**, like opencode).
+    pub json_value_column: Option<&'a str>,
+    pub json_time_path: Option<&'a str>,
+    /// When `time_column` stores Unix **seconds** (Grok's `updated_at` is
+    /// seconds; opencode `time_created` and Cursor `createdAt` are millis).
+    pub time_is_seconds: bool,
+}
+
+/// The pre-B27 default schema (opencode's `session` table, millis).
+pub fn opencode_schema() -> SqliteSchemaSpec<'static> {
+    SqliteSchemaSpec {
+        table: "session",
+        required_columns: EXPECTED_SESSION_COLUMNS.to_vec(),
+        key_column: None,
+        key_prefix: None,
+        time_column: Some("time_created"),
+        json_value_column: None,
+        json_time_path: None,
+        time_is_seconds: false,
+    }
+}
+
+/// Build the schema spec for a harness from its registry cell. `None` when the
+/// cell is not a recognised SQLite store (no `sql_table` declared) — the
+/// caller then falls back to [`opencode_schema`], preserving pre-B27 behaviour
+/// for the SQLite harnesses whose schema is not registry-declared.
+pub fn spec_from_cell(cell: &crate::scanner::RegistryCell) -> Option<SqliteSchemaSpec<'_>> {
+    if cell.format != "sqlite" {
+        return None;
+    }
+    let table = cell.sql_table.as_deref()?;
+    let required_columns: Vec<&str> = if cell.sql_required_columns.is_empty() {
+        let mut v = Vec::new();
+        if let Some(k) = cell.sql_key_column.as_deref() {
+            v.push(k);
+        }
+        if let Some(t) = cell.sql_time_column.as_deref() {
+            v.push(t);
+        }
+        if let Some(vc) = cell.sql_value_column.as_deref() {
+            v.push(vc);
+        }
+        v
+    } else {
+        cell.sql_required_columns.iter().map(String::as_str).collect()
+    };
+    Some(SqliteSchemaSpec {
+        table,
+        required_columns,
+        key_column: cell.sql_key_column.as_deref(),
+        key_prefix: cell.sql_key_pattern.as_deref(),
+        time_column: cell.sql_time_column.as_deref(),
+        json_value_column: cell.sql_value_column.as_deref(),
+        json_time_path: cell.sql_time_json_path.as_deref(),
+        time_is_seconds: cell.sql_time_value_is_seconds,
+    })
+}
 
 /// Outcome of enumerating sessions inside one SQLite database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqliteSessionProbe {
-    /// `session` table recognised, stats read. `earliest`/`latest` are the
-    /// `min`/`max` of `time_created`.
+    /// Session table recognised, stats read. `earliest`/`latest` are the
+    /// `min`/`max` of the schema-declared time source.
     Known {
         count: u64,
         earliest: Option<SystemTime>,
         latest: Option<SystemTime>,
     },
-    /// SQLite readable but the `session` table has a different shape. This is
+    /// SQLite readable but the session table has a different shape. This is
     /// *not* "0 sessions" — it is "cannot enumerate", and the caller must say
     /// so instead of printing a fake zero.
     SchemaMismatch { actual: String },
@@ -51,12 +142,18 @@ pub struct SqliteStoreProbe {
 }
 
 /// Probe one SQLite store, read-only (`mode=ro`, never a write-capable
-/// connection). Shared by the doctor footprint walk and the scanner so both
-/// tables report the same count *and* the same byte scope.
+/// connection), using the default opencode schema. Shared by the doctor
+/// footprint walk and the scanner so both tables report the same count *and*
+/// the same byte scope.
 pub fn probe_sqlite_store(db: &Path) -> SqliteStoreProbe {
+    probe_sqlite_store_with(db, &opencode_schema())
+}
+
+/// [`probe_sqlite_store`] with an explicit schema spec (registry-declared).
+pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStoreProbe {
     SqliteStoreProbe {
         total_bytes: sqlite_store_bytes(db),
-        sessions: probe_sqlite_sessions(db),
+        sessions: probe_sqlite_sessions_with(db, spec),
     }
 }
 
@@ -83,15 +180,56 @@ fn sidecar(db: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Open `db` read-only and count rows in `session`.
+/// True when the SQLite header marks the store as WAL journal mode (the file
+/// format read/write version bytes at offsets 18/19 are both `2`; rollback
+/// journal stores use `1`). Read straight from the file — no SQLite connection
+/// involved, so zero side effects.
+fn db_is_wal(db: &Path) -> bool {
+    let mut hdr = [0u8; 100];
+    let read_ok = fs::File::open(db)
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut hdr)
+        })
+        .is_ok();
+    read_ok && hdr[18] == 2 && hdr[19] == 2
+}
+
+/// Open `db` strictly read-only, guaranteeing no file is ever created next to
+/// the store (so the user's live Cursor/Grok databases stay byte-identical).
+///
+/// SQLite's read-only WAL access needs the store's `-shm` file; when it does
+/// not exist a read-only connection *creates* `-shm`/`-wal` instead of
+/// failing (observed with rusqlite's bundled SQLite on Grok's
+/// `session_search.sqlite`). That is exactly the side effect we must not have,
+/// so:
+///   * WAL store with no `-shm` ⇒ open `mode=ro&immutable=1` (reads only the
+///     main file, touches nothing; may not see uncheckpointed WAL content, but
+///     a live WAL writer keeps its sidecars, so this case means "not live"),
+///   * everything else (rollback-journal stores, live WAL stores whose
+///     sidecars already exist) ⇒ `mode=ro` (correct on live stores, creates
+///     nothing new).
+fn open_readonly(db: &Path) -> rusqlite::Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
+    let mut uri = format!("file:{}?mode=ro", db.display());
+    if db_is_wal(db) && !sidecar(db, "-shm").exists() {
+        uri = format!("file:{}?mode=ro&immutable=1", db.display());
+    }
+    Connection::open_with_flags(uri, flags)
+}
+
+/// Open `db` read-only and enumerate sessions per the schema spec.
 ///
 /// A missing or changed schema is reported loudly via
 /// [`SqliteSessionProbe::SchemaMismatch`] instead of becoming the old silent
 /// `N/A` — and never a fake `0`.
 pub fn probe_sqlite_sessions(db: &Path) -> SqliteSessionProbe {
-    let uri = format!("file:{}?mode=ro", db.display());
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let conn = match Connection::open_with_flags(uri, flags) {
+    probe_sqlite_sessions_with(db, &opencode_schema())
+}
+
+/// [`probe_sqlite_sessions`] with an explicit schema spec.
+pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteSessionProbe {
+    let conn = match open_readonly(db) {
         Ok(conn) => conn,
         Err(e) => {
             return SqliteSessionProbe::ReadFailed {
@@ -106,7 +244,7 @@ pub fn probe_sqlite_sessions(db: &Path) -> SqliteSessionProbe {
     }
 
     let actual = sqlite_schema_summary(&conn);
-    let session_columns = match sqlite_table_columns(&conn, "session") {
+    let columns = match sqlite_table_columns(&conn, spec.table) {
         Ok(columns) => columns,
         Err(e) => {
             return SqliteSessionProbe::ReadFailed {
@@ -114,36 +252,100 @@ pub fn probe_sqlite_sessions(db: &Path) -> SqliteSessionProbe {
             };
         }
     };
-    if !EXPECTED_SESSION_COLUMNS
+    if !spec
+        .required_columns
         .iter()
-        .all(|expected_column| session_columns.iter().any(|c| c == expected_column))
+        .all(|expected_column| columns.iter().any(|c| c == expected_column))
     {
         return SqliteSessionProbe::SchemaMismatch { actual };
     }
 
-    let stats = conn.query_row(
-        "SELECT count(*), min(time_created), max(time_created) FROM \"session\"",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
+    let where_sql = match (spec.key_column, spec.key_prefix) {
+        (Some(col), Some(prefix)) => {
+            format!(" WHERE \"{col}\" LIKE '{}'", prefix.replace('\'', "''"))
+        }
+        _ => String::new(),
+    };
+    let count_sql = format!("SELECT count(*) FROM \"{}\"{where_sql}", spec.table);
+    let time_sql = time_expression(spec).map(|expr| {
+        // `json_extract` errors (does not return NULL) on malformed JSON, so a
+        // key/value store whose rows carry junk must not make the *whole*
+        // probe fail — restrict the time extraction to well-formed rows only.
+        // The count above still covers every row, exactly like `count(*)`.
+        let json_guard = if spec.json_time_path.is_some() {
+            format!(
+                " AND json_valid(\"{}\")=1",
+                spec.json_value_column.unwrap_or("value")
+            )
+        } else {
+            String::new()
+        };
+        format!("SELECT {expr} FROM \"{}\"{where_sql}{json_guard}", spec.table)
+    });
+
+    let count = match conn.query_row(&count_sql, [], |row| row.get::<_, i64>(0)) {
+        Ok(c) if c >= 0 => c as u64,
+        Ok(c) => {
+            return SqliteSessionProbe::ReadFailed {
+                error: format!("SQLite 返回了负会话数: {c}"),
+            }
+        }
+        Err(e) => {
+            return SqliteSessionProbe::ReadFailed {
+                error: format!("读取 {} 表统计失败: {e}", spec.table),
+            }
+        }
+    };
+    let (earliest, latest) = match time_sql {
+        Some(sql) => match conn.query_row(&sql, [], |row| {
+            Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))
+        }) {
+            Ok((earliest, latest)) => (
+                earliest.and_then(|v| convert_epoch(v, spec.time_is_seconds)),
+                latest.and_then(|v| convert_epoch(v, spec.time_is_seconds)),
+            ),
+            Err(e) => {
+                return SqliteSessionProbe::ReadFailed {
+                    error: format!("读取 {} 表时间统计失败: {e}", spec.table),
+                }
+            }
         },
-    );
-    match stats {
-        Ok((count, earliest, latest)) if count >= 0 => SqliteSessionProbe::Known {
-            count: count as u64,
-            earliest: earliest.and_then(sqlite_millis_to_system_time),
-            latest: latest.and_then(sqlite_millis_to_system_time),
-        },
-        Ok((count, _, _)) => SqliteSessionProbe::ReadFailed {
-            error: format!("SQLite 返回了负会话数: {count}"),
-        },
-        Err(e) => SqliteSessionProbe::ReadFailed {
-            error: format!("读取 session 统计失败: {e}"),
-        },
+        None => (None, None),
+    };
+
+    SqliteSessionProbe::Known {
+        count,
+        earliest,
+        latest,
+    }
+}
+
+/// `min, max` SQL fragment for the schema's time source, or `None` when the
+/// schema declares no timestamp (Cursor's table has no time column at all —
+/// the JSON-path form is used instead).
+fn time_expression(spec: &SqliteSchemaSpec) -> Option<String> {
+    if let Some(col) = spec.time_column {
+        Some(format!("min(\"{col}\"), max(\"{col}\")"))
+    } else if let (Some(vcol), Some(path)) = (spec.json_value_column, spec.json_time_path) {
+        let expr = format!("json_extract(\"{vcol}\", '{}')", path.replace('\'', "''"));
+        Some(format!("min({expr}), max({expr})"))
+    } else {
+        None
+    }
+}
+
+/// Convert a stored epoch to a `SystemTime`. Millis (opencode `time_created`,
+/// Cursor `createdAt`) or seconds (Grok `updated_at`), chosen by the schema.
+fn convert_epoch(v: i64, is_seconds: bool) -> Option<SystemTime> {
+    if is_seconds {
+        let duration = Duration::from_secs(v.unsigned_abs());
+        if v >= 0 {
+            UNIX_EPOCH.checked_add(duration)
+        } else {
+            UNIX_EPOCH.checked_sub(duration)
+        }
+    } else {
+        sqlite_millis_to_system_time(v)
     }
 }
 
@@ -279,5 +481,179 @@ mod tests {
             info.sessions,
             SqliteSessionProbe::ReadFailed { .. }
         ));
+    }
+
+    /// A Cursor-shaped store: key/value table, session rows selected by
+    /// `composerData:%`, times pulled from `createdAt` inside the JSON value.
+    #[test]
+    fn cursor_schema_counts_key_prefix_and_extracts_json_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.vscdb");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+        )
+        .unwrap();
+        let sessions = [
+            ("composerData:aaaaaaaa-1111", r#"{"composerId":"a","createdAt":1751779149032}"#),
+            ("composerData:bbbbbbbb-2222", r#"{"composerId":"b","createdAt":1752849959504}"#),
+            ("inlineDiffs-123456", r#"{"n":1}"#), // must not count as a session
+            ("composerData:cccccccc-3333", "not-json"), // counts, but no timestamp
+        ];
+        for (key, value) in &sessions {
+            conn.execute(
+                "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let spec = SqliteSchemaSpec {
+            table: "cursorDiskKV",
+            required_columns: vec!["key", "value"],
+            key_column: Some("key"),
+            key_prefix: Some("composerData:%"),
+            time_column: None,
+            json_value_column: Some("value"),
+            json_time_path: Some("$.createdAt"),
+            time_is_seconds: false,
+        };
+        let info = probe_sqlite_store_with(&db, &spec);
+        assert_eq!(
+            info.sessions,
+            SqliteSessionProbe::Known {
+                count: 3,
+                earliest: sqlite_millis_to_system_time(1751779149032),
+                latest: sqlite_millis_to_system_time(1752849959504),
+            }
+        );
+    }
+
+    /// A Grok-shaped store: `session_docs`, all rows, `updated_at` in seconds.
+    #[test]
+    fn grok_schema_counts_all_rows_and_treats_time_as_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("session_search.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_docs (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, updated_at INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_docs (session_id, cwd, updated_at, title, content, content_hash) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["s1", "/tmp/x", 1784924765i64, "t", "c", "h"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = SqliteSchemaSpec {
+            table: "session_docs",
+            required_columns: vec!["session_id", "updated_at"],
+            key_column: None,
+            key_prefix: None,
+            time_column: Some("updated_at"),
+            json_value_column: None,
+            json_time_path: None,
+            time_is_seconds: true,
+        };
+        let info = probe_sqlite_store_with(&db, &spec);
+        assert_eq!(
+            info.sessions,
+            SqliteSessionProbe::Known {
+                count: 1,
+                earliest: UNIX_EPOCH.checked_add(Duration::from_secs(1784924765)),
+                latest: UNIX_EPOCH.checked_add(Duration::from_secs(1784924765)),
+            }
+        );
+    }
+
+    /// A WAL-mode store without `-shm` must still probe (read-only `mode=ro`
+    /// fails for it, so the immutable fallback must kick in) and must not
+    /// create sidecar files in the process.
+    #[test]
+    fn wal_store_without_shm_probes_immutable_and_creates_no_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("session_search.sqlite");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_docs (session_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL)",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_docs (session_id, updated_at) VALUES (?1, ?2)",
+                rusqlite::params!["s1", 1784924765i64],
+            )
+            .unwrap();
+            // The write-connection close normally checkpoints + removes the
+            // sidecars; force the "app closed cleanly, no sidecars" real state.
+            drop(conn);
+        }
+        for suffix in ["-wal", "-shm"] {
+            let _ = fs::remove_file(sidecar(&db, suffix));
+        }
+
+        let spec = SqliteSchemaSpec {
+            table: "session_docs",
+            required_columns: vec!["session_id", "updated_at"],
+            key_column: None,
+            key_prefix: None,
+            time_column: Some("updated_at"),
+            json_value_column: None,
+            json_time_path: None,
+            time_is_seconds: true,
+        };
+        let info = probe_sqlite_store_with(&db, &spec);
+        assert!(matches!(
+            info.sessions,
+            SqliteSessionProbe::Known { count: 1, .. }
+        ));
+        // Zero side effect: probing must not recreate the sidecars.
+        assert!(!sidecar(&db, "-wal").exists(), "probe must not create -wal");
+        assert!(!sidecar(&db, "-shm").exists(), "probe must not create -shm");
+    }
+
+    /// spec_from_cell: a declared sqlite cell yields a spec; anything else None.
+    #[test]
+    fn spec_from_cell_resolves_declared_sqlite_cells() {
+        let cell: crate::scanner::RegistryCell = serde_json::from_value(serde_json::json!({
+            "template": "~/x.db",
+            "format": "sqlite",
+            "confidence": "本机实测",
+            "source": "s",
+            "sql_table": "cursorDiskKV",
+            "sql_required_columns": ["key", "value"],
+            "sql_key_column": "key",
+            "sql_key_pattern": "composerData:%",
+            "sql_value_column": "value",
+            "sql_time_json_path": "$.createdAt"
+        }))
+        .unwrap();
+        let spec = spec_from_cell(&cell).unwrap();
+        assert_eq!(spec.table, "cursorDiskKV");
+        assert_eq!(spec.key_prefix, Some("composerData:%"));
+        assert_eq!(spec.json_time_path, Some("$.createdAt"));
+
+        let non_sqlite: crate::scanner::RegistryCell = serde_json::from_value(serde_json::json!({
+            "template": "~/x.jsonl",
+            "format": "jsonl",
+            "confidence": "源码确认",
+            "source": "s"
+        }))
+        .unwrap();
+        assert!(spec_from_cell(&non_sqlite).is_none());
+
+        let sqlite_no_table: crate::scanner::RegistryCell = serde_json::from_value(
+            serde_json::json!({
+                "template": "~/x.db",
+                "format": "sqlite",
+                "confidence": "源码确认",
+                "source": "s"
+            }),
+        )
+        .unwrap();
+        assert!(spec_from_cell(&sqlite_no_table).is_none());
     }
 }
