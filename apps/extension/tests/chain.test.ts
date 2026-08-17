@@ -5,11 +5,11 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { CAPTURE_EVENT, type CapturedFetch } from '../lib/contract';
+import { type CapturedFetch } from '../lib/contract';
 
 /**
  * End-to-end synthetic chain test (no real DeepSeek login):
- *   MAIN fetch hook (world MAIN) -> CustomEvent -> ISOLATED bridge
+ *   MAIN fetch hook (world MAIN) -> postMessage -> ISOLATED bridge
  *   -> runtime.sendMessage -> background -> chrome.downloads -> real file.
  *
  * The real entrypoint sources are loaded and executed; the browser API is a
@@ -162,6 +162,7 @@ function makeFakeWindow() {
   const listeners: Record<string, Array<(e: any) => void>> = {};
   return {
     listeners,
+    location: { origin: 'https://chat.deepseek.com' },
     addEventListener(name: string, fn: (e: any) => void) {
       (listeners[name] ??= []).push(fn);
     },
@@ -169,12 +170,18 @@ function makeFakeWindow() {
       for (const fn of listeners[e.type] ?? []) fn(e);
       return true;
     },
+    postMessage(data: unknown, targetOrigin: string) {
+      if (targetOrigin !== this.location.origin) return;
+      for (const fn of listeners.message ?? []) {
+        fn({ source: this, origin: this.location.origin, data });
+      }
+    },
     fetch: null as any,
   };
 }
 
 describe('chat-stasher capture chain', () => {
-  it('MAIN hook -> CustomEvent -> bridge -> background -> real file on disk', async () => {
+  it('MAIN hook -> postMessage -> bridge -> background -> real file on disk', async () => {
     await loadBackground();
 
     const fakeWin = makeFakeWindow();

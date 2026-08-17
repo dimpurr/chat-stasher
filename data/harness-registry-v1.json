@@ -83,7 +83,7 @@
       "display_name": "Gemini CLI",
       "paths": {
         "macos": {
-          "template": "~/.gemini/tmp/",
+          "template": "~/.gemini/tmp/<projectId>/chats/",
           "env_override": "GEMINI_CLI_HOME",
           "format": "json / jsonl",
           "session_pattern": "session-*",
