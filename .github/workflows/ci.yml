@@ -1,14 +1,21 @@
 name: CI
 
-# Manual-only for now, on the owner's instruction: while the cross-platform
-# matrix is still red, a run on every push means a failure email on every push,
-# and that noise costs more than the signal is currently worth. The matrix is
-# NOT being weakened or deleted — it has already found four real bugs that only
-# appear off macOS, and it goes back on `push` the moment it is green.
+# Back on `push` as of 2026-08-17: the cross-platform matrix is green on all
+# four jobs, so a run per push now costs the owner nothing.
 #
-# Re-enable by restoring `push:` and `pull_request:` below. Run it meanwhile
-# with: gh workflow run CI --ref main
+# It was manual-only for a stretch, on the owner's instruction, because a red
+# matrix meant a failure email on every push. What was *not* done during that
+# stretch is the part worth remembering: no job was deleted, no assertion was
+# weakened, and no `continue-on-error` was added. That matrix went on to surface
+# eight distinct real defects that never appear on macOS — among them a `view`
+# that could not start on Windows at all, and a doctor table that reported
+# "0 sessions" for a harness whose history was sitting on disk.
+#
+# If it goes red again and the noise is a problem, switch back to
+# `workflow_dispatch:` only — never to a green-by-suppression config.
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
