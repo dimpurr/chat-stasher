@@ -17,6 +17,7 @@ pub mod reap;
 pub mod scanner;
 pub mod schedule;
 pub mod seal;
+pub mod search;
 pub mod sqlite_probe;
 pub mod store;
 pub mod verify;
