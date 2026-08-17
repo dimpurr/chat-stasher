@@ -11,6 +11,7 @@ import { writeCommitted } from '../lib/download';
 import { recordCapture, refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
 import {
+  BACKFILL_ENABLED_KEY,
   isBackfillEnabled,
   tickBackfill,
   tickBlockReason,
@@ -388,6 +389,26 @@ export async function syncAlarmWithSwitch(): Promise<string> {
   return syncBackfillAlarm(alarmsApi(), enabled);
 }
 
+type StorageChange = { newValue?: unknown };
+
+function addBackfillSwitchListener(): void {
+  const storage = (browser as unknown as {
+    storage?: {
+      onChanged?: {
+        addListener(fn: (changes: Record<string, StorageChange>, areaName: string) => void): void;
+      };
+    };
+  }).storage;
+  storage?.onChanged?.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !(BACKFILL_ENABLED_KEY in changes)) return;
+    // storage.onChanged fires after the write is committed. Re-read through the
+    // same gate as startup so remove/non-boolean values also fail closed.
+    void syncAlarmWithSwitch().catch((err) => {
+      console.warn('[chat-stasher] backfill alarm switch sync failed', (err as Error).message);
+    });
+  });
+}
+
 export default defineBackground(async () => {
   browser.runtime.onMessage.addListener(
     (message: { type?: string; payload?: CapturedFetch }, sender, sendResponse) => {
@@ -459,12 +480,17 @@ export default defineBackground(async () => {
     });
   });
 
+  // Popup changes the persisted switch from another extension context. Keep
+  // the alarm lifecycle closed immediately instead of waiting for a later SW
+  // wake-up. The listener itself is synchronous, as required by MV3.
+  addBackfillSwitchListener();
+
   // Every SW wake (fresh start AND runtime.onStartup) re-asserts the badge's
   // truth, so a dead-worker leftover badge gets cleared once 5 min pass.
   void refreshBadge();
   // 开关是持久的，闹钟也该是。每次 SW 醒来对一次表：开着就确保有闹钟，
   // 关着就确保没有 —— 🔴 默认（关）下这里只会 clear，绝不会凭空创建。
-  void syncAlarmWithSwitch().catch((err) => {
+  await syncAlarmWithSwitch().catch((err) => {
     console.warn('[chat-stasher] backfill alarm sync failed', (err as Error).message);
   });
   browser.runtime.onStartup.addListener(() => {
