@@ -205,6 +205,34 @@ pub fn probe_archive(cfg: &StoreConfig, machine: &str) -> anyhow::Result<ReadAll
     probe_classified(cfg, machine).map_err(|(_, reason)| anyhow::anyhow!("{reason}"))
 }
 
+/// The plain filesystem path a repository location denotes — when it denotes
+/// one at all.
+///
+/// This mirrors `rustic_backend`'s own location parsing, and it has to: rustic
+/// accepts the *same* local directory under two spellings, a bare path and the
+/// explicit `local:<path>` form. B46 measured the cost of only recognising the
+/// first one — the identical unreadable directory resolved to `Unknown` spelled
+/// bare and to `KnownEmpty` spelled with the prefix, and `KnownEmpty` is the one
+/// absence that exits 0 and lets the run carry on. How a user spelled a location
+/// must not decide whether an unreadable copy is reported.
+///
+/// `None` means "a real backend": its errors are its own to report, and the
+/// local second-guess below would be meaningless.
+fn local_repo_path(repo_root: &str) -> Option<&str> {
+    match repo_root.split_once(':') {
+        // No scheme at all — a plain path.
+        None => Some(repo_root),
+        // The explicit spelling of a plain path.
+        Some(("local", path)) => Some(path),
+        // Windows: a drive letter, or any location with a backslash in it, is
+        // local for rustic too. Harmless elsewhere — such a path simply does
+        // not exist, which the `NotFound` arm already reads as "nothing there".
+        Some((scheme, _)) if scheme.len() == 1 => Some(repo_root),
+        Some((scheme, path)) if scheme.contains('\\') || path.contains('\\') => Some(repo_root),
+        Some(_) => None,
+    }
+}
+
 /// "The backend listed no config file" is not by itself proof that no
 /// repository is there.
 ///
@@ -214,6 +242,16 @@ pub fn probe_archive(cfg: &StoreConfig, machine: &str) -> anyhow::Result<ReadAll
 /// looks exactly like a directory that was never created. For a local path we
 /// can settle it ourselves: a path that is not there is genuinely nothing, and
 /// a path that is there but will not open is *unknown*.
+///
+/// A remote backend has to answer this for itself, and B46 measured that the
+/// ones reachable from this crate do: `opendal:sftp` (connection refused, wrong
+/// key, unreadable remote directory), `opendal:s3` (refused, 403) and
+/// `opendal:http` (401) all return `Err`, never `Ok(<empty>)`. Only a genuine
+/// "not found" comes back as `Ok(<empty>)`, which is exactly the case this
+/// function is allowed to call nothing. That measurement is pinned by
+/// `an_unreachable_remote_destination_is_unknown_not_empty`, because a backend
+/// that changed its mind about it would land in `KnownEmpty` — the one branch
+/// that exits 0 — with no other symptom.
 fn no_repository_or_unreadable(cfg: &StoreConfig) -> (Absence, String) {
     let definitely_nothing = (
         Absence::NoRepository,
@@ -221,10 +259,10 @@ fn no_repository_or_unreadable(cfg: &StoreConfig) -> (Absence, String) {
     );
     // Backend strings are the backend's business; only a plain path can be
     // second-guessed here.
-    if cfg.repo_root.contains(':') && !Path::new(&cfg.repo_root).exists() {
+    let Some(local) = local_repo_path(&cfg.repo_root) else {
         return definitely_nothing;
-    }
-    let root = Path::new(&cfg.repo_root);
+    };
+    let root = Path::new(local);
     match std::fs::read_dir(root) {
         Ok(_) => definitely_nothing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => definitely_nothing,
