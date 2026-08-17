@@ -415,6 +415,12 @@ enum Command {
     /// durable byte offset plus committed-prefix SHA-256; opencode SQLite
     /// sessions use a durable logical high-water cursor. The cursor state lives
     /// under chat-stasher's own data directory, not under any harness directory.
+    ///
+    /// Exit codes: 0 = every recognised session was archivable and was
+    /// collected; 3 = PARTIAL — the pass ran, but at least one harness
+    /// recognised sessions this build cannot archive (the `not archivable`
+    /// line), so what was written is real but incomplete; 1 = the pass failed
+    /// (collect itself errored, or individual sources could not be read).
     Collect {
         /// Stage directory that holds the sealed `sessions/` tree.
         #[arg(long)]
@@ -1389,8 +1395,30 @@ fn cmd_collect(
     };
 
     print_collect_report(&report, stage, &state_dir, &machine);
+    // Precedence is deliberate: a session we tried to read and failed on (1)
+    // outranks a harness this build cannot archive at all (3). The first says
+    // "this pass failed", the second says "this pass did not fail — and it did
+    // not finish either".
     if !report.errors.is_empty() {
         return ExitCode::FAILURE;
+    }
+    if !report.archive_gaps.is_empty() {
+        eprintln!(
+            "collect: PARTIAL exit_code=3 — {} harness(es) recognised sessions this build cannot \
+             turn into SessionRecord values, so they were not archived. The shards written above \
+             are real; the archive is not complete.",
+            report.archive_gaps.len()
+        );
+        // Deliberately 3, not 1, and certainly not 0. Reusing 1 would make
+        // "this build cannot read that store" indistinguishable from "a source
+        // we can read blew up", and 0 is the bug this replaces: the report
+        // above already said the run was incomplete while the exit code said
+        // it was clean. Same code family as `search` (see `cmd_search`):
+        // 3 == did not finish / never started, 1 == finished and failed.
+        // `run-once` already refuses to call an archive gap success
+        // (`run_once_pass`); this only stops `collect` from being the one
+        // surface that does.
+        return ExitCode::from(3);
     }
     ExitCode::SUCCESS
 }
