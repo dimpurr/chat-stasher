@@ -15,6 +15,7 @@ describe('data-driven platform contracts', () => {
       'https://chatgpt.com/*',
       'https://chat.openai.com/*',
       'https://gemini.google.com/*',
+      'https://claude.ai/*',
     ]);
     expect(CONTENT_MATCHES).not.toContain('<all_urls>');
   });

@@ -117,6 +117,65 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     sessionIdPatterns: ['/app/([A-Za-z0-9_-]{8,})'],
     credibility: 'from-source',
   },
+  {
+    id: 'claude',
+    origins: ['https://claude.ai'],
+    // Deliberately NOT '/api/organizations/' — every org-scoped call (settings,
+    // projects, ...) would then become a "conversation data" candidate and the
+    // shape-mismatch warning would turn into noise. This hint is the
+    // conversation-DETAIL route only. Note it has a trailing slash, so the
+    // conversation-LIST route ('/chat_conversations', an array of summaries we
+    // do not capture) falls outside and is skipped silently, which is correct:
+    // it is not the data we claim to back up.
+    // Also deliberately query-free: the two sources below disagree on the
+    // casing of the tree flag ('?tree=true' vs '?tree=True').
+    pathHints: ['/chat_conversations/'],
+    methods: ['GET'],
+    status: { min: 200, max: 299 },
+    responseShape: {
+      encoding: 'json',
+      // Exactly the check the MIT exporter performs before it will export.
+      // Required (not "any of"): on this route a body without chat_messages is
+      // the drift case, so it must fail the shape gate and get warned about
+      // rather than pass through as an empty-looking capture.
+      requiredPaths: ['chat_messages'],
+    },
+    sessionIdPatterns: [
+      '/chat_conversations/([0-9a-fA-F-]{8,})',
+      '/chat/([0-9a-fA-F-]{8,})',
+    ],
+    // 🔴 The route shape below is SECOND-HAND: it comes from reading public
+    // open-source exporters, NOT from a logged-in claude.ai session. Nobody on
+    // this change ever opened claude.ai, so this row is source-backed, never
+    // live-verified. If the real route or envelope differs, the generic gate
+    // above rejects it and page-hook.ts warns — it never guesses.
+    //
+    // External source evidence checked 2026-08-17 (source code, not README):
+    // claude-chat-exporter (MIT; commit
+    // 12da324dd158e9472251590d89d957fc767c0d85, 2026-08-08) requests
+    // /api/organizations/<org>/chat_conversations/<uuid>?tree=true&... and
+    // validates the response with Array.isArray(data.chat_messages), treating a
+    // missing chat_messages as "the endpoint may have changed" rather than as
+    // an empty conversation:
+    // https://github.com/agarwalvishal/claude-chat-exporter/blob/12da324dd158e9472251590d89d957fc767c0d85/claude-chat-exporter.js#L66
+    // https://github.com/agarwalvishal/claude-chat-exporter/blob/12da324dd158e9472251590d89d957fc767c0d85/claude-chat-exporter.js#L449-L452
+    // Its CLAUDE.md documents the envelope as { name, model,
+    // current_leaf_message_uuid, chat_messages: [{ uuid, parent_message_uuid,
+    // index, sender, created_at, content }] }.
+    // claude-extension (Apache-2.0; commit
+    // 89a20167bd71d0d5700a3679f22b5458c32b7e58, 2026-06-10) independently hooks
+    // the same route from a MAIN-world fetch interceptor with
+    // /^https:\/\/claude\.ai\/api\/organizations\/[\w-]+\/chat_conversations\/[\w-]+\?tree=True/ :
+    // https://github.com/abhimanyu-sikarwar/claude-extension/blob/89a20167bd71d0d5700a3679f22b5458c32b7e58/src/content/inject.js#L5
+    // That one matches on URL alone and never inspects the body, so it cannot
+    // tell drift from an empty chat — which is exactly why we add the body gate
+    // instead of copying its approach.
+    // A third project (withLinda/claude-project-conversations-exporter)
+    // documents the same GET /api/organizations/[org]/chat_conversations/[conv]
+    // but ships NO LICENSE, so it was read for architecture only and no code
+    // from it was used.
+    credibility: 'from-source',
+  },
 ];
 
 /** Content-script matches derived from the table — a closed set. */
