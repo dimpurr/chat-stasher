@@ -64,6 +64,15 @@ pub struct CollectError {
     pub source_path_sha256: String,
 }
 
+/// A state/stage mismatch repaired by forcing this session through the normal
+/// reset read path. The reason is intentionally fixed metadata, never source
+/// content or a real harness path.
+#[derive(Debug, Clone)]
+pub struct ReconcileNotice {
+    pub session_prefix: String,
+    pub reason: &'static str,
+}
+
 /// Complete metadata-only summary of one `collect` pass.
 #[derive(Debug, Clone, Default)]
 pub struct CollectReport {
@@ -78,6 +87,7 @@ pub struct CollectReport {
     pub prefix_bytes_validated: u64,
     pub outcomes: Vec<CollectOutcome>,
     pub errors: Vec<CollectError>,
+    pub reconciliations: Vec<ReconcileNotice>,
 }
 
 /// Default private state directory. It is owned by chat-stasher, never a
@@ -130,7 +140,23 @@ pub fn collect_scan_report(
     for record in records {
         let key = source_key(&record.absolute_path);
         let old = state.files.get(&key).cloned();
-        match collect_one(&record, old.as_ref(), stage, machine, bucket_cap) {
+        let missing_stage_shard = old.as_ref().is_some_and(|entry| entry.offset > 0)
+            && store::sealed_shard_entries(&store::session_shard_dir(stage, machine, &record.id))?
+                .is_empty();
+        if missing_stage_shard {
+            report.reconciliations.push(ReconcileNotice {
+                session_prefix: id_prefix(&record.id),
+                reason: "state offset > 0 but stage has no sealed shard",
+            });
+        }
+        match collect_one(
+            &record,
+            old.as_ref(),
+            missing_stage_shard,
+            stage,
+            machine,
+            bucket_cap,
+        ) {
             Ok(processed) => {
                 let outcome = processed.outcome;
                 let changed = outcome.bytes_read > 0 || outcome.reset;
@@ -184,27 +210,50 @@ struct Processed {
 fn collect_one(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
+    force_reset: bool,
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<Processed> {
     if record.compressed || is_zstd_path(&record.absolute_path) {
-        Ok(process_compressed(record, old, stage, machine, bucket_cap)?)
+        Ok(process_compressed(
+            record,
+            old,
+            force_reset,
+            stage,
+            machine,
+            bucket_cap,
+        )?)
     } else if is_jsonl_path(&record.absolute_path) {
-        Ok(process_jsonl(record, old, stage, machine, bucket_cap)?)
+        Ok(process_jsonl(
+            record,
+            old,
+            force_reset,
+            stage,
+            machine,
+            bucket_cap,
+        )?)
     } else {
-        Ok(process_whole_file(record, old, stage, machine, bucket_cap)?)
+        Ok(process_whole_file(
+            record,
+            old,
+            force_reset,
+            stage,
+            machine,
+            bucket_cap,
+        )?)
     }
 }
 
 fn process_jsonl(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
+    force_reset: bool,
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<Processed> {
-    let data = read_jsonl_delta(&record.absolute_path, old)?;
+    let data = read_jsonl_delta(&record.absolute_path, old, force_reset)?;
     let (lines, committed_delta) = complete_lines(&data.bytes);
     let new_offset = data.base_offset + committed_delta as u64;
     let new_state = if lines.is_empty() && !data.reset {
@@ -243,6 +292,7 @@ fn process_jsonl(
 fn process_whole_file(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
+    force_reset: bool,
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
@@ -251,12 +301,14 @@ fn process_whole_file(
         .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
     let source_len = bytes.len() as u64;
     let digest = sha256_hex(&bytes);
-    if old.is_some_and(|entry| {
-        !entry.compressed
-            && entry.offset == source_len
-            && entry.prefix_len == source_len
-            && entry.prefix_sha256 == digest
-    }) {
+    if !force_reset
+        && old.is_some_and(|entry| {
+            !entry.compressed
+                && entry.offset == source_len
+                && entry.prefix_len == source_len
+                && entry.prefix_sha256 == digest
+        })
+    {
         return Ok(Processed {
             state: old.expect("checked above").clone(),
             outcome: unchanged_outcome(record, source_len, false),
@@ -299,6 +351,7 @@ fn process_whole_file(
 fn process_compressed(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
+    force_reset: bool,
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
@@ -311,12 +364,14 @@ fn process_compressed(
     })?;
     let source_len = compressed.len() as u64;
     let digest = sha256_hex(&compressed);
-    if old.is_some_and(|entry| {
-        entry.compressed
-            && entry.offset == source_len
-            && entry.prefix_len == source_len
-            && entry.prefix_sha256 == digest
-    }) {
+    if !force_reset
+        && old.is_some_and(|entry| {
+            entry.compressed
+                && entry.offset == source_len
+                && entry.prefix_len == source_len
+                && entry.prefix_sha256 == digest
+        })
+    {
         return Ok(Processed {
             state: old.expect("checked above").clone(),
             outcome: unchanged_outcome(record, source_len, true),
@@ -331,13 +386,23 @@ fn process_compressed(
             stage, machine, &record.id, &lines, bucket_cap,
         )?)
     };
-    Ok(Processed {
-        state: OffsetEntry {
+    let state = if lines.is_empty() {
+        OffsetEntry {
+            offset: 0,
+            prefix_len: 0,
+            prefix_sha256: sha256_hex(&[]),
+            compressed: true,
+        }
+    } else {
+        OffsetEntry {
             offset: source_len,
             prefix_len: source_len,
             prefix_sha256: digest,
             compressed: true,
-        },
+        }
+    };
+    Ok(Processed {
+        state,
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
             source_path_sha256: path_digest(&record.absolute_path),
@@ -366,11 +431,18 @@ fn unchanged_outcome(record: &SessionRecord, source_len: u64, compressed: bool) 
     }
 }
 
-fn read_jsonl_delta(path: &Path, old: Option<&OffsetEntry>) -> anyhow::Result<ReadData> {
+fn read_jsonl_delta(
+    path: &Path,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+) -> anyhow::Result<ReadData> {
     for _ in 0..READ_RETRIES {
         let before = fs::metadata(path)?.len();
         let reusable = old.filter(|entry| {
-            !entry.compressed && entry.prefix_len == entry.offset && entry.offset <= before
+            !force_reset
+                && !entry.compressed
+                && entry.prefix_len == entry.offset
+                && entry.offset <= before
         });
         if let Some(entry) = reusable {
             let prefix = read_range(path, 0, entry.offset)?;

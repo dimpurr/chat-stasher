@@ -98,6 +98,7 @@ impl StoreConfig {
 /// A sealed shard batch that was handed to (or read back from) the store.
 #[derive(Debug, Clone)]
 pub struct PushSummary {
+    pub stage_shards: usize,
     pub files_new: u64,
     pub files_changed: u64,
     pub files_unmodified: u64,
@@ -189,6 +190,12 @@ impl BackupStore {
     /// Push the whole stage tree (`sessions/<machine>/<id>/NNNNNN.jsonl`) into
     /// a fresh snapshot. The stage root must already hold only sealed shards.
     pub fn push(&self, stage_root: &Path, mk: &MasterKey) -> anyhow::Result<PushSummary> {
+        let stage_shards = sealed_shard_count(stage_root)?;
+        if stage_shards == 0 {
+            anyhow::bail!(
+                "refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
+            );
+        }
         let (r, init) = self.open_or_init(mk)?;
         let snap_opt = SnapshotOptions::default().host(self.machine.clone());
         let snap = snap_opt.to_snapshot().context("build snapshot opts")?;
@@ -217,6 +224,7 @@ impl BackupStore {
             .as_ref()
             .ok_or_else(|| anyhow!("backup returned no summary"))?;
         Ok(PushSummary {
+            stage_shards,
             files_new: summary.files_new,
             files_changed: summary.files_changed,
             files_unmodified: summary.files_unmodified,
@@ -360,6 +368,33 @@ fn concat_sha_of(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::
 /// `<stage>/sessions/<machine>/<session_id>` — the partitioned directory.
 pub fn session_shard_dir(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
     stage_root.join(SESSIONS_DIR).join(machine).join(session_id)
+}
+
+/// Count sealed shards across every machine/session in a stage. Directories
+/// without a shard do not make an archive look non-empty, and unrelated files
+/// are ignored. This is the push guard that distinguishes a retained stage
+/// with no new content from an empty stage that must not create a snapshot.
+pub fn sealed_shard_count(stage_root: &Path) -> anyhow::Result<usize> {
+    let sessions_root = stage_root.join(SESSIONS_DIR);
+    let machines = match fs::read_dir(&sessions_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
+    };
+    let mut count = 0;
+    for machine in machines {
+        let machine = machine?;
+        if !machine.file_type()?.is_dir() {
+            continue;
+        }
+        for session in fs::read_dir(machine.path())? {
+            let session = session?;
+            if session.file_type()?.is_dir() {
+                count += sealed_shard_entries(&session.path())?.len();
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// Absolute path of shard `seq` using the default bucket cap.

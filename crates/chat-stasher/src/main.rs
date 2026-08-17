@@ -371,6 +371,18 @@ fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> 
         "[collect] read bytes      : delta_or_full={} prefix_validated={}",
         report.delta_bytes_read, report.prefix_bytes_validated
     );
+    if !report.reconciliations.is_empty() {
+        println!(
+            "[collect] reconciled      : {} session(s) forced through reset",
+            report.reconciliations.len()
+        );
+        for notice in &report.reconciliations {
+            println!(
+                "  ! session={} reason={}",
+                notice.session_prefix, notice.reason
+            );
+        }
+    }
     for outcome in &report.outcomes {
         println!(
             "  + session={} path_sha256={} source_bytes={} read_bytes={} prefix_bytes={} lines={} shard={} reset={} compressed={}",
@@ -650,6 +662,7 @@ fn cmd_push(
             "· masterkey loaded"
         },
     );
+    println!("[push] stage shards   : {}", summary.stage_shards);
     println!(
         "[push] summary: files_new={} files_changed={} files_unmodified={} data_blobs={} data_added={} data_added_packed={}",
         summary.files_new,

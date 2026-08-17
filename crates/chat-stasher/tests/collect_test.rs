@@ -120,6 +120,37 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
 }
 
 #[test]
+fn missing_stage_shard_reconciles_state_and_rereads() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let source_root = dir.path().join("source");
+    fs::create_dir_all(&source_root).unwrap();
+    let source = source_root.join("session.jsonl");
+    fs::write(&source, b"one\ntwo\n").unwrap();
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+    let scan_report = scan(&source_root);
+    let id = scan_report.records[0].id.clone();
+
+    let first =
+        collect::collect_scan_report(&scan_report, &stage, "fixture-machine", &state, 20).unwrap();
+    assert_eq!(first.lines_written, 2);
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &id).unwrap(),
+        b"one\ntwo\n"
+    );
+
+    fs::remove_dir_all(&stage).unwrap();
+    let second =
+        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
+            .unwrap();
+    let restored = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
+    assert_eq!(second.reset_records, 1);
+    assert_eq!(second.unchanged_records, 0);
+    assert_eq!(second.lines_written, 2);
+    assert_eq!(restored, b"one\ntwo\n");
+}
+
+#[test]
 fn incomplete_tail_is_left_for_the_next_read() {
     let dir = tempfile::TempDir::new().unwrap();
     let source_root = dir.path().join("source");
