@@ -103,8 +103,10 @@ pub struct SessionHit {
 
 impl SessionHit {
     /// Privacy-safe short form of the session id for terminal output.
+    /// See [`crate::id::short_session_id`] — a bare 8-char prefix does not
+    /// distinguish sessions, because both id shapes have a constant head.
     pub fn short_id(&self) -> String {
-        self.session_id.chars().take(8).collect()
+        crate::id::short_session_id(&self.session_id)
     }
     /// Privacy-safe short form of the snapshot id for terminal output.
     pub fn short_snapshot(&self) -> String {
@@ -412,7 +414,47 @@ mod tests {
     #[test]
     fn ids_are_shortened_for_terminal_output() {
         let h = hit("m-1", "0123456789abcdef", 1);
-        assert_eq!(h.short_id(), "01234567");
+        assert!(h.short_id().starts_with("01234567"));
+        assert!(!h.short_id().contains("0123456789"), "never the full id");
         assert_eq!(h.short_snapshot(), "abcdef01");
+    }
+
+    /// B54. Extension-path session ids are `platform.sessionId`
+    /// (`inbox.rs:658`), so two different DeepSeek sessions share their first
+    /// nine characters. A short form that cannot tell them apart has no reason
+    /// to exist: its whole job is to distinguish sessions in a report without
+    /// printing the full id.
+    #[test]
+    fn ext_ids_differing_only_in_the_tail_get_distinct_short_ids() {
+        let a = hit("m-1", "deepseek.d41f6a2b9c0e4711", 1);
+        let b = hit("m-1", "deepseek.d41f6a2b9c0e4722", 1);
+        assert_ne!(
+            a.short_id(),
+            b.short_id(),
+            "two distinct ext sessions must not render as the same short id"
+        );
+        // …and still without leaking either full id.
+        assert!(!a.short_id().contains("d41f6a2b9c0e4711"));
+        assert!(!b.short_id().contains("d41f6a2b9c0e4722"));
+    }
+
+    /// The native shape must stay readable and stable: same input, same output,
+    /// every time, and the leading part is still the recognisable id head.
+    #[test]
+    fn native_uuid_short_id_stays_readable_and_stable() {
+        let h = hit("m-1", "019bf00d-97b6-7eb2-9bf8-eacbacc09765", 1);
+        assert!(
+            h.short_id().starts_with("019bf00d"),
+            "native head must survive: {}",
+            h.short_id()
+        );
+        assert_eq!(h.short_id(), h.short_id(), "no randomness, no clock");
+        assert_eq!(
+            h.short_id(),
+            hit("m-2", "019bf00d-97b6-7eb2-9bf8-eacbacc09765", 999).short_id(),
+            "depends on the id alone"
+        );
+        assert!(h.short_id().len() <= 16, "short enough for a table column");
+        assert!(!h.short_id().contains("eacbacc09765"), "never the full id");
     }
 }

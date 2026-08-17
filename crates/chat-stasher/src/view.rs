@@ -46,7 +46,8 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 #[derive(Debug, Clone)]
 pub struct ViewSession {
     pub machine: String,
-    /// First 8 chars of the session id — never the full id.
+    /// Short form of the session id (`id::short_session_id`) — readable head
+    /// plus a sha256 tag, never the full id.
     pub short_id: String,
     pub shard_count: usize,
     pub bytes: u64,

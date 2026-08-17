@@ -1217,7 +1217,7 @@ fn path_digest(path: &Path) -> String {
 }
 
 fn id_prefix(id: &str) -> String {
-    id.chars().take(8).collect()
+    crate::id::short_session_id(id)
 }
 
 fn is_jsonl_path(path: &Path) -> bool {

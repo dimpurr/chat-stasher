@@ -318,7 +318,7 @@ fn safe_session_id(id: &str) -> bool {
 }
 
 fn id_prefix(id: &str) -> String {
-    id.chars().take(8).collect()
+    crate::id::short_session_id(id)
 }
 
 /// Copy back what the existing destinations have and the local re-collect did
