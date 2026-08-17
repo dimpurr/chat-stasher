@@ -376,6 +376,7 @@ pub struct PushStageCheck {
     pub scanner_records: usize,
     pub scanner_sqlite_sessions: u64,
     pub scanner_sqlite_unknown: usize,
+    pub scanner_unknown: usize,
     pub committed_reads: usize,
 }
 
@@ -389,6 +390,7 @@ impl PushStageCheck {
             && self.scanner_records == 0
             && self.scanner_sqlite_sessions == 0
             && self.scanner_sqlite_unknown == 0
+            && self.scanner_unknown == 0
             && self.committed_reads == 0
     }
 }
@@ -415,11 +417,17 @@ pub fn inspect_stage_for_push(
         .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
         .filter(|probe| probe.record_count.is_none())
         .count();
+    let scanner_unknown = scan
+        .probes
+        .iter()
+        .filter(|probe| probe.record_count.is_none())
+        .count();
     Ok(PushStageCheck {
         stage_shards: store::sealed_shard_count(stage)?,
         scanner_records: scan.records.len(),
         scanner_sqlite_sessions,
         scanner_sqlite_unknown,
+        scanner_unknown,
         // Counted across every destination on purpose: the question this guard
         // answers is "did this machine ever commit a read at all", and any
         // positive signal must keep the conservative failure path.

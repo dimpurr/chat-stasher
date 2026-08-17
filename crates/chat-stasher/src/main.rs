@@ -2124,11 +2124,12 @@ fn cmd_push(
             }
         };
     println!(
-        "[push] stage check   : shards={} scanner_records={} sqlite_sessions={} sqlite_unknown={} committed_reads={}",
+        "[push] stage check   : shards={} scanner_records={} sqlite_sessions={} sqlite_unknown={} scanner_unknown={} committed_reads={}",
         stage_check.stage_shards,
         stage_check.scanner_records,
         stage_check.scanner_sqlite_sessions,
         stage_check.scanner_sqlite_unknown,
+        stage_check.scanner_unknown,
         stage_check.committed_reads,
     );
     if stage_check.stage_shards == 0 {
