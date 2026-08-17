@@ -179,7 +179,7 @@
           "sql_qualification": "cursor_composer"
         },
         "linux": {
-          "template": "$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb（默认 ~/.config/Cursor/...）",
+          "template": "$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb",
           "env_override": "CURSOR_USER_DIR",
           "format": "sqlite",
           "confidence": "仅社区说法未核实",
@@ -193,7 +193,7 @@
           "source": "同上 + Electron userData 惯例（%APPDATA%\\<name>）"
         }
       },
-      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key，每会话一行)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。⚠️ confidence 说明：macOS cell 是「本机实测但未读源码」——现有取值(源码确认/官方文档/仅社区说法未核实/未查明)都不贴切，故新增取值「本机实测」（B27 发现：这四种证据来源词汇不足以表达『本机实测』这一类）。linux/windows cell 仍为社区说法，未核实。",
+      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key，每会话一行)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Linux 走 $XDG_CONFIG_HOME/Cursor/...，该变量未设置时按 XDG 惯例回退到 ~/.config/Cursor/...（B59：这句默认值说明原先写在 linux 格的 template 尾巴里，导致模板解析出的路径不以 globalStorage 结尾 ⇒ 没写配置的 Linux 用户一律 SkipUnresolvable；说明性文字统一放 notes，template 只放路径）。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具（%APPDATA% 未导出时按 Windows 惯例回退到 %USERPROFILE%\\AppData\\Roaming）。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。⚠️ confidence 说明：macOS cell 是「本机实测但未读源码」——现有取值(源码确认/官方文档/仅社区说法未核实/未查明)都不贴切，故新增取值「本机实测」（B27 发现：这四种证据来源词汇不足以表达『本机实测』这一类）。linux/windows cell 仍为社区说法，未核实。",
       "seal_policy": "not-applicable",
       "seal_source": "单 SQLite（state.vscdb，cursorDiskKV 表）——非 append 单文件 jsonl，无活跃文件可 rename；且 ADR-011 已废除 rename 封口方案",
       "reference": {

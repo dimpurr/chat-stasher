@@ -153,6 +153,23 @@ pub fn xdg_state_home() -> PathBuf {
     xdg_base_with("XDG_STATE_HOME", &crate::config::home_dir(), ".local/state")
 }
 
+/// `%APPDATA%` (Windows roaming app data), falling back to the documented
+/// default `%USERPROFILE%\AppData\Roaming`.
+///
+/// Same shape as the XDG helpers on purpose: this is Windows' equivalent of a
+/// base directory, and it is what Electron apps (Cursor, and the next one)
+/// use — resolving it here rather than in one template keeps the next harness
+/// from hitting the same wall.
+pub fn appdata_dir() -> PathBuf {
+    xdg_base_with("APPDATA", &crate::config::home_dir(), "AppData/Roaming")
+}
+
+/// `%LOCALAPPDATA%` (Windows local app data), falling back to
+/// `%USERPROFILE%\AppData\Local`.
+pub fn local_appdata_dir() -> PathBuf {
+    xdg_base_with("LOCALAPPDATA", &crate::config::home_dir(), "AppData/Local")
+}
+
 /// Currently running platform's registry key.
 pub fn current_platform() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -1181,15 +1198,20 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
                 rest = &rest[name_len..];
             }
             '%' => {
-                // `%VAR%` (Windows style); only `%USERPROFILE%` is known.
+                // `%VAR%` (Windows style). The known set mirrors the XDG one:
+                // the standard Windows base directories, resolved from the
+                // environment when exported and from their documented
+                // `%USERPROFILE%` defaults otherwise. Anything else is a
+                // per-install override this tool does not resolve.
                 let end = rest[1..].find('%').map(|i| i + 1);
-                match end {
-                    Some(end) if &rest[1..end] == "USERPROFILE" => {
-                        out.push_str(&home_dir().to_string_lossy());
-                        rest = &rest[end + 1..];
-                    }
+                let Some(end) = end else { return None };
+                match &rest[1..end] {
+                    "USERPROFILE" => out.push_str(&home_dir().to_string_lossy()),
+                    "APPDATA" => out.push_str(&appdata_dir().to_string_lossy()),
+                    "LOCALAPPDATA" => out.push_str(&local_appdata_dir().to_string_lossy()),
                     _ => return None,
                 }
+                rest = &rest[end + 1..];
             }
             _ => {
                 out.push(ch);
