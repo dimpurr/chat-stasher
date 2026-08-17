@@ -77,6 +77,9 @@ pub struct ReconcileNotice {
 #[derive(Debug, Clone, Default)]
 pub struct CollectReport {
     pub scanned_records: usize,
+    /// Harnesses with recognised sessions that produced fewer
+    /// `SessionRecord`s; these sessions were not consumed by this pass.
+    pub archive_gaps: Vec<scanner::ArchiveGap>,
     pub changed_records: usize,
     pub unchanged_records: usize,
     pub reset_records: usize,
@@ -193,6 +196,7 @@ pub fn collect_scan_report(
     let mut state = load_state(&state_path)?;
     let mut report = CollectReport {
         scanned_records: scan.records.len(),
+        archive_gaps: scan.archive_gaps(),
         ..CollectReport::default()
     };
 

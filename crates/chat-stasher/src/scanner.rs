@@ -394,6 +394,82 @@ pub struct ScanReport {
     pub probes: Vec<HarnessProbe>,
 }
 
+/// A harness probe recognised sessions, but the scanner produced fewer
+/// `SessionRecord`s for it. `collect` consumes only those records, so the
+/// difference is currently not archivable by this build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveGap {
+    pub harness_id: String,
+    pub display_name: String,
+    pub recognized_sessions: Option<u64>,
+    pub session_records: usize,
+}
+
+impl ScanReport {
+    /// Return installed harnesses whose recognised session count is greater
+    /// than the number of records that `collect` can consume. The comparison
+    /// is deliberately made against the records actually produced by this
+    /// scan; no harness allowlist is involved.
+    pub fn archive_gaps(&self) -> Vec<ArchiveGap> {
+        self.probes
+            .iter()
+            .filter_map(|probe| {
+                if !probe.installed_p() {
+                    return None;
+                }
+                let Some(source) = HarnessSource::from_id(&probe.id) else {
+                    return None;
+                };
+                let session_records = self
+                    .records
+                    .iter()
+                    .filter(|record| record.source == source)
+                    .count();
+                match probe.record_count {
+                    Some(0) => None,
+                    Some(recognized_sessions) if session_records as u64 >= recognized_sessions => {
+                        None
+                    }
+                    Some(recognized_sessions) => Some(ArchiveGap {
+                        harness_id: probe.id.clone(),
+                        display_name: probe.display_name.clone(),
+                        recognized_sessions: Some(recognized_sessions),
+                        session_records,
+                    }),
+                    // An existing single-file store whose schema/read failed
+                    // is still not consumable by `collect`; keep its count
+                    // honest rather than inventing a zero.
+                    None if matches!(probe.state, ProbeState::FileTarget)
+                        && session_records == 0 =>
+                    {
+                        Some(ArchiveGap {
+                            harness_id: probe.id.clone(),
+                            display_name: probe.display_name.clone(),
+                            recognized_sessions: None,
+                            session_records,
+                        })
+                    }
+                    None => None,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Render the same metadata-only warning for every CLI surface that reports
+/// scanner results. The counts come from the `ArchiveGap`, not from a harness
+/// name list.
+pub fn format_archive_gap(gap: &ArchiveGap) -> String {
+    format!(
+        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — 本版本还不支持归档这个 harness 的存储格式（不是你的配置问题，也没有可以设置的开关）",
+        gap.harness_id,
+        gap.recognized_sessions
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        gap.session_records
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Scanning
 // ---------------------------------------------------------------------------

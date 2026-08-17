@@ -612,6 +612,9 @@ pub struct DoctorReport {
     pub reclaim: ReclaimCheck,
     /// Per-harness fate decided by the path registry (`scanner::scan`).
     pub probes: Vec<scanner::HarnessProbe>,
+    /// Registry-recognised sessions that are not represented by a
+    /// `SessionRecord` and therefore cannot be consumed by `collect`.
+    pub archive_gaps: Vec<scanner::ArchiveGap>,
     /// True when the registry-driven scan failed (registry missing/unparseable)
     /// — the coverage numbers are then *unknown*, never faked zeros.
     pub scan_failed: bool,
@@ -637,6 +640,7 @@ pub fn run() -> DoctorReport {
             (scanner::ScanReport::default(), true)
         }
     };
+    let archive_gaps = scan.archive_gaps();
 
     let mut footprints = Vec::new();
 
@@ -719,6 +723,7 @@ pub fn run() -> DoctorReport {
         risks,
         reclaim,
         probes,
+        archive_gaps,
         scan_failed,
     }
 }
@@ -1077,6 +1082,7 @@ pub fn print_report(r: &DoctorReport) {
             others.join(", ")
         );
     }
+    print_archive_gaps(&r.archive_gaps);
     print_probes(&r.probes);
     println!();
 
@@ -1169,6 +1175,21 @@ fn print_reclaim(r: &ReclaimCheck) {
         }
     }
     println!();
+}
+
+fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
+    if gaps.is_empty() {
+        return;
+    }
+    println!(
+        "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。"
+    );
+    for gap in gaps {
+        println!("{}", scanner::format_archive_gap(gap));
+    }
+    println!(
+        "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。"
+    );
 }
 
 /// D3 supplement — the registry-driven probe table: every harness the
