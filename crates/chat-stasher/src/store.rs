@@ -40,8 +40,21 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Default (and also hard ceiling) for concurrency handed to rustic.
-pub const DEFAULT_CONNECTIONS: usize = 10;
+/// Hard ceiling for concurrency handed to rustic.
+///
+/// Bounded by what a remote backend will accept (Hetzner Storage Box allows 10
+/// simultaneous SFTP connections), not by anything we measured.
+pub const MAX_CONNECTIONS: usize = 10;
+
+/// Default concurrency handed to rustic.
+///
+/// Deliberately well below `MAX_CONNECTIONS`. D2 measured that `connections`
+/// is not a free knob and does not buy speed: at `connections=10` a single
+/// `read` opened a peak of 4 independent ssh ControlMasters (vs exactly 1 at
+/// `connections=1`), while wall clock was 11.32 s vs 10.00 s — i.e. raising it
+/// only adds masters that must later be reaped. The default is therefore a
+/// measured trade-off, not the backend's limit.
+pub const DEFAULT_CONNECTIONS: usize = 4;
 /// Top-level directory inside the repository holding every machine's shards.
 pub const SESSIONS_DIR: &str = "sessions";
 /// Suffix used for every sealed shard file.
@@ -61,7 +74,7 @@ pub struct StoreConfig {
     pub repo_root: String,
     /// Path of the persisted masterkey file (written on init, read on open).
     pub key_file: PathBuf,
-    /// Concurrency cap handed to rustic, clamped into `1..=DEFAULT_CONNECTIONS`.
+    /// Concurrency handed to rustic, clamped into `1..=MAX_CONNECTIONS`.
     pub connections: usize,
     /// Extra backend options (e.g. `endpoint`/`user`/`key`/`root` for
     /// `opendal:sftp`). Forwarded verbatim to the backend; only keys the
@@ -70,11 +83,14 @@ pub struct StoreConfig {
 }
 
 impl StoreConfig {
-    /// Clamp into the allowed range. Values `> DEFAULT_CONNECTIONS` are capped
-    /// (the cap is a hard ceiling, not a recommendation).
+    /// Clamp into the allowed range.
+    ///
+    /// Unset falls back to `DEFAULT_CONNECTIONS` (a measured trade-off);
+    /// values above `MAX_CONNECTIONS` are capped (a hard backend ceiling).
+    /// Raising it past the default is allowed but buys no measured speed.
     pub fn with_capped_connections(mut self, user_value: Option<usize>) -> Self {
         let n = user_value.unwrap_or(DEFAULT_CONNECTIONS);
-        self.connections = n.clamp(1, DEFAULT_CONNECTIONS);
+        self.connections = n.clamp(1, MAX_CONNECTIONS);
         self
     }
 }
@@ -544,7 +560,14 @@ mod tests {
             connections: 0,
         }
         .with_capped_connections(Some(100));
-        assert_eq!(cfg3.connections, DEFAULT_CONNECTIONS);
+        // Over-large values clamp to the hard backend ceiling, NOT to the
+        // (deliberately lower) measured default — the two are separate knobs.
+        assert_eq!(cfg3.connections, MAX_CONNECTIONS);
+        assert!(
+            DEFAULT_CONNECTIONS < MAX_CONNECTIONS,
+            "default must stay below the ceiling: raising concurrency buys no \
+             measured speed (D2) but does open masters that must be reaped"
+        );
         let cfg4 = StoreConfig {
             repo_root: "/tmp/x".into(),
             key_file: PathBuf::from("/tmp/x.key"),

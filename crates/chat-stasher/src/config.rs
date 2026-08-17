@@ -45,7 +45,31 @@ pub struct Config {
     /// config knob now so a remote backend's connection limit (e.g. <10 for
     /// SFTP) is honoured before it is wired in.
     pub rustic_connections: Option<usize>,
+
+    /// How often an unattended run should archive, in seconds.
+    ///
+    /// Default `DEFAULT_BACKUP_INTERVAL_SECS` (hourly). The scheduling
+    /// mechanism itself is **not implemented yet** — this knob records the
+    /// decided default so the number lives in one place when it is.
+    ///
+    /// Why hourly: it bounds worst-case loss to one hour, and G7/B18 measured
+    /// the cost of that cadence directly. With shards bucketed
+    /// (`DEFAULT_SHARD_BUCKET_CAP`) a 32 KB hourly delta settles around 152%
+    /// cumulative amplification and stays bounded; without bucketing the
+    /// per-push overhead grows linearly (R^2 = 0.99950) and reached 481% by
+    /// push 200. Hourly is therefore only viable *because* buckets are capped.
+    pub backup_interval_secs: Option<u64>,
+
+    /// Skip the archive run when no source file changed since the last one.
+    ///
+    /// Default `true`. A no-change push still writes a snapshot, and each
+    /// snapshot re-writes the tree of every touched session directory — so
+    /// pushing on a timer regardless of change pays that cost for nothing.
+    pub push_only_if_changed: Option<bool>,
 }
+
+/// Decided default archive cadence: hourly.
+pub const DEFAULT_BACKUP_INTERVAL_SECS: u64 = 3600;
 
 impl Config {
     /// Load configuration, falling back to defaults.
@@ -132,8 +156,18 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Default: $XDG_DATA_HOME/chat-stasher/masterkey.json.
 # rustic_key_file = "~/stash/chat-stasher/masterkey.json"
 
-# Cap on concurrency handed to rustic (default 10).
-# rustic_connections = 10
+# Concurrency handed to rustic. Default 4; hard ceiling 10.
+# Measured (D2): raising this does not buy speed (11.32 s at 10 vs 10.00 s at 1)
+# but does open more ssh ControlMasters that must later be reaped.
+# rustic_connections = 4
+
+# How often an unattended run should archive, in seconds. Default 3600 (hourly).
+# NOTE: the scheduler itself is not implemented yet; this records the default.
+# backup_interval_secs = 3600
+
+# Skip the run when nothing changed since the last one. Default true.
+# A no-change push still writes a snapshot, which is not free.
+# push_only_if_changed = true
 
 # Override the Claude Code session root.
 # Default: ~/.claude/projects
