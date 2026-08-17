@@ -17,11 +17,105 @@ export const PAGE_HOOK_FETCH_MARKER = '__chat_stasher_fetch_hook_marker__';
 /** Capability wait: short enough to precede normal app traffic, no browser sniffing. */
 export const MAIN_FALLBACK_TIMEOUT_MS = 100;
 
-/** Only DeepSeek web chat. Deliberately not <all_urls>. */
-export const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
+/** Open string: adding a platform must not require a type/logic edit. */
+export type PlatformId = string;
+export type CaptureConfidence = 'from-source' | 'unverified';
 
-/** Relative prefixes of chat/session traffic worth capturing. */
+export interface ResponseShape {
+  encoding: 'json' | 'text';
+  /** Every listed path must be present for JSON responses. */
+  requiredPaths?: readonly string[];
+  /** At least one listed path must be present for JSON responses. */
+  requiredAnyPaths?: readonly string[];
+  /** Every listed marker must be present for text responses. */
+  requiredTextIncludes?: readonly string[];
+}
+
+/** Data-only description of one capturable platform. */
+export interface ChatPlatform {
+  id: PlatformId;
+  /** Exact page/API origins. Never <all_urls>. */
+  origins: readonly string[];
+  pathHints: readonly string[];
+  methods: readonly string[];
+  status: { min: number; max: number };
+  responseShape: ResponseShape;
+  /** Regex source strings; the first capture group is the session id. */
+  sessionIdPatterns: readonly string[];
+  /** Source-backed is not the same as live verified. */
+  credibility: CaptureConfidence;
+}
+
+/**
+ * The platform table. Adding support means adding one row of data; the hook,
+ * bridge, validator, and saver all consume these generic fields.
+ */
+export const PLATFORMS: readonly ChatPlatform[] = [
+  {
+    id: 'deepseek',
+    origins: ['https://chat.deepseek.com'],
+    pathHints: ['/api/v0/chat', '/chat/session'],
+    methods: ['GET', 'POST'],
+    status: { min: 200, max: 299 },
+    responseShape: {
+      encoding: 'json',
+      requiredAnyPaths: [
+        'session_id',
+        'sessionId',
+        'data.session_id',
+        'data.sessionId',
+        'data.chat_session_id',
+        'data.messages',
+        'messages',
+      ],
+    },
+    sessionIdPatterns: [
+      '/chat/session/([0-9a-fA-F-]{8,})',
+      '[?&]chat_session_id=([^&]+)',
+    ],
+    credibility: 'unverified',
+  },
+  {
+    id: 'chatgpt',
+    origins: ['https://chatgpt.com', 'https://chat.openai.com'],
+    pathHints: ['/backend-api/conversation/'],
+    methods: ['GET'],
+    status: { min: 200, max: 299 },
+    responseShape: {
+      encoding: 'json',
+      requiredPaths: ['mapping', 'current_node'],
+    },
+    sessionIdPatterns: ['/backend-api/conversation/([0-9a-fA-F-]{8,})'],
+    credibility: 'from-source',
+  },
+  {
+    id: 'gemini',
+    origins: ['https://gemini.google.com'],
+    pathHints: ['/_/BardChatUi/data/batchexecute'],
+    methods: ['POST'],
+    status: { min: 200, max: 299 },
+    responseShape: {
+      encoding: 'text',
+      requiredTextIncludes: ['wrb.fr', 'hNvQHb'],
+    },
+    sessionIdPatterns: ['/app/([A-Za-z0-9_-]{8,})'],
+    credibility: 'from-source',
+  },
+];
+
+/** Content-script matches derived from the table — a closed set. */
+export const CONTENT_MATCHES: string[] = Array.from(
+  new Set(PLATFORMS.flatMap((platform) => platform.origins.map((origin) => `${origin}/*`))),
+);
+
+/** Convenience back-compat alias for the incumbent platform origin. */
+export const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
 export const CHAT_PATH_HINTS = ['/api/v0/chat', '/chat/session'];
+
+/** Look up a platform by exact origin. */
+export function getPlatformByOrigin(origin: string): ChatPlatform | undefined {
+  return PLATFORMS.find((platform) => platform.origins.includes(origin));
+}
 
 /** Sizes above this are streamed media, not session JSON — skip. */
 export const MAX_RAW_BYTES = 4 * 1024 * 1024;
@@ -35,6 +129,8 @@ export interface CapturedFetch {
   status: number;
   /** Raw response text, passed through untouched so nothing is lost. */
   text: string;
+  /** Needed when the provider API URL does not contain the conversation id. */
+  pageUrl?: string;
   capturedAt: number;
 }
 
@@ -42,22 +138,70 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
 
+function getJsonPath(value: unknown, path: string): unknown {
+  let current: unknown = value;
+  for (const part of path.split('.')) {
+    if (!current || typeof current !== 'object' || !(part in current)) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function hasUsablePath(value: unknown, path: string): boolean {
+  const found = getJsonPath(value, path);
+  return found !== undefined && found !== null;
+}
+
+export function findPlatformForUrl(url: string): ChatPlatform | null {
+  try {
+    const origin = new URL(url).origin;
+    return getPlatformByOrigin(origin) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function matchesResponseShape(platform: ChatPlatform, text: string): boolean {
+  const shape = platform.responseShape;
+  if (shape.encoding === 'text') {
+    return (shape.requiredTextIncludes ?? []).every((marker) => text.includes(marker));
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const requiredPaths = shape.requiredPaths ?? [];
+  const requiredAnyPaths = shape.requiredAnyPaths ?? [];
+  return (
+    requiredPaths.every((path) => hasUsablePath(body, path)) &&
+    (requiredAnyPaths.length === 0 || requiredAnyPaths.some((path) => hasUsablePath(body, path)))
+  );
+}
+
 /** Validate page-originated capture payloads before they reach extension APIs. */
 export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   if (!isRecord(value)) return false;
   if (typeof value.url !== 'string' || typeof value.method !== 'string') return false;
-  if (!isChatTraffic(value.url, value.method)) return false;
+  const platform = platformForTraffic(value.url, value.method);
+  if (!platform) return false;
   if (
     typeof value.status !== 'number' ||
     !Number.isInteger(value.status) ||
-    value.status < 0 ||
-    value.status > 599
+    value.status < platform.status.min ||
+    value.status > platform.status.max
   ) return false;
   if (typeof value.text !== 'string' || value.text.length === 0) return false;
+  if (value.pageUrl !== undefined && typeof value.pageUrl !== 'string') return false;
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
   }
-  return new TextEncoder().encode(value.text).byteLength <= MAX_RAW_BYTES;
+  return (
+    new TextEncoder().encode(value.text).byteLength <= MAX_RAW_BYTES &&
+    matchesResponseShape(platform, value.text)
+  );
 }
 
 export function isCaptureMessage(
@@ -112,7 +256,7 @@ export interface InboxIdentity {
 
 export interface InboxBundle {
   schema: typeof SCHEMA;
-  platform: 'deepseek';
+  platform: PlatformId;
   sessionId: string;
   identity: InboxIdentity;
   url: string;
@@ -132,13 +276,20 @@ export interface InboxBundle {
 
 /** READS raw body. After completion the response body is already consumed; use response.clone(). */
 export function isChatTraffic(url: string, method: string): boolean {
+  return platformForTraffic(url, method) !== null;
+}
+
+export function platformForTraffic(url: string, method: string): ChatPlatform | null {
   try {
     const u = new URL(url);
-    if (u.origin !== DEEPSEEK_ORIGIN) return false;
-    if (!(method === 'POST' || method === 'GET')) return false;
-    return CHAT_PATH_HINTS.some((hint) => u.pathname.includes(hint));
+    return PLATFORMS.find(
+      (platform) =>
+        platform.origins.includes(u.origin) &&
+        platform.methods.includes(method.toUpperCase()) &&
+        platform.pathHints.some((hint) => u.pathname.includes(hint)),
+    ) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -146,11 +297,20 @@ export function isChatTraffic(url: string, method: string): boolean {
  * Extract a session id from URL or parsed body so the inbox file is stable per session.
  * Returns null when no id can be found — such captures are skipped (logged, not saved).
  */
-export function extractSessionId(url: string, text: string): string | null {
-  try {
-    const m = /\/chat\/session\/([0-9a-fA-F-]{8,})/.exec(url);
-    if (m && m[1]) return m[1] as string;
-  } catch { /* ignore */ }
+export function extractSessionId(url: string, text: string, pageUrl?: string): string | null {
+  const platform = findPlatformForUrl(url) ?? (pageUrl ? findPlatformForUrl(pageUrl) : null);
+  if (platform) {
+    for (const pattern of platform.sessionIdPatterns) {
+      const match = new RegExp(pattern).exec(url) ?? (pageUrl ? new RegExp(pattern).exec(pageUrl) : null);
+      if (match?.[1]) {
+        try {
+          return decodeURIComponent(match[1]);
+        } catch {
+          return match[1];
+        }
+      }
+    }
+  }
   try {
     const obj = JSON.parse(text);
     if (!obj || typeof obj !== 'object') return null;

@@ -116,6 +116,7 @@ pub fn seal_active_file(
     session_id: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<u64> {
+    crate::store::assert_stage_writer_audited(crate::store::StageWriter::Seal)?;
     validate_active_in_stage(active, stage_root)?;
     if !active.exists() {
         anyhow::bail!("active file does not exist: {}", active.display());
@@ -297,7 +298,14 @@ mod tests {
     fn seal_active_file_renames_into_next_seq_and_frees_original_path() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path();
-        write_sealed_shard(stage, "m", "s", &[format!("{{\"base\":1}}")]).unwrap();
+        write_sealed_shard(
+            store::StageWriter::Collect,
+            stage,
+            "m",
+            "s",
+            &[format!("{{\"base\":1}}")],
+        )
+        .unwrap();
 
         let active = session_shard_dir(stage, "m", "s").join("active.jsonl");
         fs::write(&active, b"tail-line\n").unwrap();

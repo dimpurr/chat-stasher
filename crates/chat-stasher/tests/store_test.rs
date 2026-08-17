@@ -24,7 +24,8 @@ fn sealed_shards_roundtrip_in_partitioned_layout() {
                 )
             })
             .collect();
-        store::write_sealed_shard(stage, machine, session, &lines).unwrap();
+        store::write_sealed_shard(store::StageWriter::Collect, stage, machine, session, &lines)
+            .unwrap();
         for l in &lines {
             total.extend_from_slice(l.as_bytes());
             total.push(b'\n');
@@ -57,8 +58,22 @@ fn sealed_shards_roundtrip_in_partitioned_layout() {
 fn next_shard_seq_continues_after_latest() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path();
-    store::write_sealed_shard(stage, "m", "s", &[format!("{{\"a\":1}}")]).unwrap();
-    store::write_sealed_shard(stage, "m", "s", &[format!("{{\"a\":2}}")]).unwrap();
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        stage,
+        "m",
+        "s",
+        &[format!("{{\"a\":1}}")],
+    )
+    .unwrap();
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        stage,
+        "m",
+        "s",
+        &[format!("{{\"a\":2}}")],
+    )
+    .unwrap();
     assert_eq!(store::next_shard_seq(stage, "m", "s"), 3);
     assert_eq!(
         store::shard_path(stage, "m", "s", 3),
@@ -76,6 +91,7 @@ fn bucket_cap_keeps_single_bucket_bounded_and_reads_legacy_mix() {
 
     for i in 0..21 {
         store::write_sealed_shard_with_cap(
+            store::StageWriter::Collect,
             stage,
             machine,
             session,

@@ -5,6 +5,7 @@
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify;
 use rustic_core::repofile::MasterKey;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,8 @@ fn make_stage(dir: &Path, machine: &str, sessions: &[(&str, u64)]) -> PathBuf {
                     )
                 })
                 .collect();
-            store::write_sealed_shard(dir, machine, session, &lines).unwrap();
+            store::write_sealed_shard(store::StageWriter::Collect, dir, machine, session, &lines)
+                .unwrap();
         }
     }
     dir.to_path_buf()
@@ -41,6 +43,38 @@ fn build_repo(dir: &Path, connections: usize) -> (StoreConfig, MasterKey, PathBu
     let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
     bs.push(&stage, &mk).unwrap();
     (cfg, mk, stage)
+}
+
+#[test]
+fn consumed_hash_audit_distinguishes_archived_and_missing_repo_records() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let archived = "a".repeat(64);
+    store::write_sealed_shard(
+        store::StageWriter::Ingest,
+        &stage,
+        "m-audit",
+        "s-audit",
+        &[format!(r#"{{"file_sha256":"{archived}"}}"#)],
+    )
+    .unwrap();
+    let cfg = StoreConfig {
+        repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+        key_file: dir.path().join("masterkey.json"),
+        connections: 1,
+        options: Default::default(),
+    };
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let bs = BackupStore::new(cfg, "m-audit".to_string());
+    bs.push(&stage, &mk).unwrap();
+
+    let mut wanted = BTreeSet::new();
+    wanted.insert(archived.clone());
+    wanted.insert("b".repeat(64));
+    let found = bs.archived_file_sha256s(&mk, &wanted).unwrap();
+    assert_eq!(found, BTreeSet::from([archived]));
+    drop(dir);
 }
 
 /// Recursively collect every file under a directory (rustic stores packs in

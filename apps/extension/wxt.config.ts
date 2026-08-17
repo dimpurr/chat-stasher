@@ -3,9 +3,9 @@ import { defineConfig } from 'wxt';
 export default defineConfig({
   manifest: {
     name: 'Chat Stasher',
-    description: 'Capture DeepSeek web chat sessions to files on your own machine.',
+    description: 'Capture selected web chat sessions to files on your own machine.',
     // Minimal permission set: only what the file-save channel needs.
-    // No <all_urls>. Content-script matches stay on chat.deepseek.com.
+    // No <all_urls>. Content-script matches stay on the explicit platform table.
     permissions: ['downloads'],
     browser_specific_settings: {
       gecko: {

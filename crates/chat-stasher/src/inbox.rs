@@ -43,7 +43,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -58,6 +58,8 @@ pub const CONSUMED_DIR: &str = "consumed";
 pub const SCHEMA: &str = "chat-stasher/inbox@1";
 /// Leftover temp name pattern for a half-written shard (`000123.jsonl.tmp`).
 const TMP_SUFFIX: &str = ".jsonl.tmp";
+const AUDIT_STATE_VERSION: u32 = 1;
+const AUDIT_STATE_FILE: &str = "consumed-audit-v1.json";
 
 // ---------------------------------------------------------------- report
 
@@ -105,6 +107,199 @@ pub struct IngestReport {
     pub consumed: Vec<Consumed>,
     pub duplicates: Vec<Duplicate>,
     pub errors: Vec<ErrorEntry>,
+}
+
+/// Metadata-only audit of the retired inbox files. Hashes are retained only
+/// as set/map keys; callers may report them, but never the file names or body.
+#[derive(Debug, Clone, Default)]
+pub struct ConsumedAudit {
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub cache_hits: usize,
+    pub rehashed: usize,
+    pub hash_counts: BTreeMap<String, usize>,
+    pub stage_covered_files: usize,
+    pub stage_missing_files: usize,
+    pub stage_missing_sha256: BTreeSet<String>,
+}
+
+impl ConsumedAudit {
+    pub fn unique_sha256(&self) -> usize {
+        self.hash_counts.len()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditCacheEntry {
+    bytes: u64,
+    modified_ns: u128,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AuditState {
+    version: u32,
+    #[serde(default)]
+    known_inboxes: BTreeSet<String>,
+    #[serde(default)]
+    files: BTreeMap<String, AuditCacheEntry>,
+}
+
+/// Remember the inbox used by the CLI ingest path so a later `push` can audit
+/// it without making every caller repeat the path. This is chat-stasher-owned
+/// state, never a harness directory.
+pub fn remember_inbox(inbox: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let mut state = load_audit_state(state_dir)?;
+    let normalized = fs::canonicalize(inbox)
+        .unwrap_or_else(|_| inbox.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    state.known_inboxes.insert(normalized);
+    save_audit_state(state_dir, &state)
+}
+
+/// Return inboxes previously used by the CLI ingest path.
+pub fn remembered_inboxes(state_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    Ok(load_audit_state(state_dir)?
+        .known_inboxes
+        .into_iter()
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// Hash current `consumed/` files and compare their hashes with the stage's
+/// embedded `file_sha256` set. A metadata cache avoids re-reading immutable
+/// retired files on every push; a size/mtime change forces a fresh hash. The
+/// first audit, replacements, and metadata failures are therefore expensive
+/// and conservative, while the steady-state cost is directory metadata plus
+/// a small JSON state read.
+pub fn audit_consumed_against_stage(
+    inboxes: &[PathBuf],
+    stage: &Path,
+    state_dir: &Path,
+) -> anyhow::Result<ConsumedAudit> {
+    let mut state = load_audit_state(state_dir)?;
+    let mut audit = ConsumedAudit::default();
+    let mut seen_cache_keys = BTreeSet::new();
+    let mut normalized_inboxes = BTreeSet::new();
+
+    for inbox in inboxes {
+        let normalized = fs::canonicalize(inbox)
+            .unwrap_or_else(|_| inbox.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        normalized_inboxes.insert(normalized);
+        let consumed_dir = inbox.join(CONSUMED_DIR);
+        let entries = match fs::read_dir(&consumed_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {}", consumed_dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let key = fs::canonicalize(&path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned();
+            let metadata = fs::metadata(&key).with_context(|| {
+                format!(
+                    "stat consumed file for audit ({})",
+                    sha256_hex(key.as_bytes())
+                )
+            })?;
+            let bytes = metadata.len();
+            let modified_ns = modified_ns(&metadata);
+            seen_cache_keys.insert(key.clone());
+            let sha256 = match state.files.get(&key) {
+                Some(cached) if cached.bytes == bytes && cached.modified_ns == modified_ns => {
+                    audit.cache_hits += 1;
+                    cached.sha256.clone()
+                }
+                _ => {
+                    let raw = fs::read(&key).with_context(|| {
+                        format!(
+                            "read consumed file for audit ({})",
+                            sha256_hex(key.as_bytes())
+                        )
+                    })?;
+                    let sha256 = sha256_hex(&raw);
+                    state.files.insert(
+                        key,
+                        AuditCacheEntry {
+                            bytes,
+                            modified_ns,
+                            sha256: sha256.clone(),
+                        },
+                    );
+                    audit.rehashed += 1;
+                    sha256
+                }
+            };
+            audit.file_count += 1;
+            audit.total_bytes += bytes;
+            *audit.hash_counts.entry(sha256).or_default() += 1;
+        }
+    }
+
+    state.known_inboxes.extend(normalized_inboxes);
+    state.files.retain(|key, _| seen_cache_keys.contains(key));
+    let stage_hashes = store::stage_file_sha256s(stage)?;
+    for (sha, count) in &audit.hash_counts {
+        if stage_hashes.contains(sha) {
+            audit.stage_covered_files += count;
+        } else {
+            audit.stage_missing_files += count;
+            audit.stage_missing_sha256.insert(sha.clone());
+        }
+    }
+    save_audit_state(state_dir, &state)?;
+    Ok(audit)
+}
+
+fn load_audit_state(state_dir: &Path) -> anyhow::Result<AuditState> {
+    let path = state_dir.join(AUDIT_STATE_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let state: AuditState = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse inbox audit state {}", path.display()))?;
+            if state.version != AUDIT_STATE_VERSION {
+                anyhow::bail!("unsupported inbox audit state version {}", state.version);
+            }
+            Ok(state)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AuditState {
+            version: AUDIT_STATE_VERSION,
+            ..AuditState::default()
+        }),
+        Err(e) => Err(e).with_context(|| format!("read inbox audit state {}", path.display())),
+    }
+}
+
+fn save_audit_state(state_dir: &Path, state: &AuditState) -> anyhow::Result<()> {
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("create inbox audit state {}", state_dir.display()))?;
+    let path = state_dir.join(AUDIT_STATE_FILE);
+    let tmp = state_dir.join(format!(".{AUDIT_STATE_FILE}.tmp"));
+    let bytes = serde_json::to_vec_pretty(state).context("serialise inbox audit state")?;
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+fn modified_ns(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 // -------------------------------------------------------------- envelopes
@@ -175,6 +370,7 @@ pub fn ingest_with_cap(
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<IngestReport> {
+    store::assert_stage_writer_audited(store::StageWriter::Ingest)?;
     let consumed_dir = inbox.join(CONSUMED_DIR);
     fs::create_dir_all(&consumed_dir)
         .with_context(|| format!("create {}", consumed_dir.display()))?;
@@ -708,5 +904,38 @@ mod tests {
         assert!(!id.contains(':'), "no colon in id: {id}");
         assert_eq!(id, "deepseek.a-b-c-d");
         drop(dir);
+    }
+
+    #[test]
+    fn consumed_audit_matches_stage_and_reuses_metadata_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        let state = dir.path().join("state");
+        fs::create_dir_all(inbox.join(CONSUMED_DIR)).unwrap();
+        let bytes = b"synthetic bundle bytes";
+        fs::write(inbox.join(CONSUMED_DIR).join("bundle.json"), bytes).unwrap();
+        let sha = sha256_hex(bytes);
+        store::write_sealed_shard(
+            store::StageWriter::Ingest,
+            &stage,
+            "machine",
+            "session",
+            &[format!(r#"{{"file_sha256":"{sha}"}}"#)],
+        )
+        .unwrap();
+
+        let first = audit_consumed_against_stage(&[inbox.clone()], &stage, &state).unwrap();
+        assert_eq!(first.file_count, 1);
+        assert_eq!(first.rehashed, 1);
+        assert_eq!(first.cache_hits, 0);
+        assert_eq!(first.stage_covered_files, 1);
+        assert_eq!(first.stage_missing_files, 0);
+
+        let second = audit_consumed_against_stage(&[inbox], &stage, &state).unwrap();
+        assert_eq!(second.file_count, 1);
+        assert_eq!(second.rehashed, 0);
+        assert_eq!(second.cache_hits, 1);
+        assert_eq!(second.stage_covered_files, 1);
     }
 }

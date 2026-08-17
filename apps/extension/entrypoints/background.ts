@@ -3,7 +3,7 @@ import {
   extractSessionId,
   SCHEMA,
   sanitizePathSegment,
-  DEEPSEEK_ORIGIN,
+  findPlatformForUrl,
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
@@ -31,10 +31,11 @@ function buildBundle(captured: CapturedFetch): InboxBundle {
       parsed.keys = Object.keys(obj);
     }
   } catch { /* not JSON */ }
-  const sessionId = extractSessionId(captured.url, captured.text) ?? 'unknown';
+  const sessionId = extractSessionId(captured.url, captured.text, captured.pageUrl) ?? 'unknown';
+  const platform = findPlatformForUrl(captured.url) ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
   return {
     schema: SCHEMA,
-    platform: 'deepseek',
+    platform: platform?.id ?? 'deepseek',
     sessionId,
     // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` guard keeps a
     // per-session id from ever being mistaken for the stable account id.
@@ -52,7 +53,7 @@ function buildBundle(captured: CapturedFetch): InboxBundle {
 }
 
 export async function handleCaptured(captured: CapturedFetch): Promise<HandledResult> {
-  const sessionId = extractSessionId(captured.url, captured.text);
+  const sessionId = extractSessionId(captured.url, captured.text, captured.pageUrl);
   if (cancelledIdLike(sessionId)) {
     // Per-session naming is the inbox contract; a session-less capture has no
     // stable file name and is dropped rather than polluting the inbox.
@@ -60,7 +61,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   }
 
   const bundle = buildBundle(captured);
-  const slug = `deepseek-${sanitizePathSegment(bundle.sessionId)}`;
+  const slug = `${bundle.platform}-${sanitizePathSegment(bundle.sessionId)}`;
   const { finalName, bytes } = await writeCommitted(slug, JSON.stringify(bundle));
   // Badge is never allowed to take the save down: fire-and-forget, log-only.
   void recordCapture().catch((err) => {
@@ -104,5 +105,5 @@ export default defineBackground(async () => {
     void refreshBadge();
   });
 
-  console.log('[chat-stasher] background ready, captures go to Downloads/', DEEPSEEK_ORIGIN);
+  console.log('[chat-stasher] background ready, captures go to Downloads/ for explicit platform origins');
 });

@@ -189,6 +189,7 @@ pub fn collect_scan_report(
     state_dir: &Path,
     bucket_cap: usize,
 ) -> anyhow::Result<CollectReport> {
+    store::assert_stage_writer_audited(store::StageWriter::Collect)?;
     fs::create_dir_all(stage).with_context(|| format!("create stage {}", stage.display()))?;
     fs::create_dir_all(state_dir)
         .with_context(|| format!("create collector state {}", state_dir.display()))?;
@@ -335,7 +336,12 @@ fn process_jsonl(
         None
     } else {
         Some(store::write_sealed_shard_bytes_with_cap(
-            stage, machine, &record.id, &lines, bucket_cap,
+            store::StageWriter::Collect,
+            stage,
+            machine,
+            &record.id,
+            &lines,
+            bucket_cap,
         )?)
     };
     Ok(Processed {
@@ -388,7 +394,12 @@ fn process_whole_file(
         None
     } else {
         Some(store::write_sealed_shard_bytes_with_cap(
-            stage, machine, &record.id, &lines, bucket_cap,
+            store::StageWriter::Collect,
+            stage,
+            machine,
+            &record.id,
+            &lines,
+            bucket_cap,
         )?)
     };
     let reset = old.is_some();
@@ -448,7 +459,12 @@ fn process_compressed(
         None
     } else {
         Some(store::write_sealed_shard_bytes_with_cap(
-            stage, machine, &record.id, &lines, bucket_cap,
+            store::StageWriter::Collect,
+            stage,
+            machine,
+            &record.id,
+            &lines,
+            bucket_cap,
         )?)
     };
     let state = if lines.is_empty() {
