@@ -114,6 +114,25 @@ struct DebtState {
     destinations: BTreeMap<String, DestinationDebts>,
 }
 
+/// Do we hold a local record of ever having collected *for* this destination?
+///
+/// ADR-015. The filesystem cannot distinguish "never built" from "built and
+/// since lost", but our own state can: `destinations` is keyed by
+/// [`destination_id`], and a key only appears once a collect pass ran against
+/// that destination. So this answers "have we dealt with it before" without a
+/// single byte of network.
+///
+/// Deliberately conservative in one direction: an unreadable or
+/// version-mismatched state file is discarded by [`load_state`] and therefore
+/// reports `false` here. That is the *safe* direction only because the caller
+/// pairs it with "is there a repository there" — a state we cannot read plus a
+/// repository that is present still consults the repository.
+pub fn destination_has_record(state_dir: &Path, destination_id: &str) -> bool {
+    load_state(&state_dir.join(STATE_FILE))
+        .map(|state| state.destinations.contains_key(destination_id))
+        .unwrap_or(false)
+}
+
 /// What a destination's archive can be shown to hold, keyed by
 /// `(machine, session_id)`.
 pub type ArchiveFacts = BTreeMap<(String, String), ShardFact>;

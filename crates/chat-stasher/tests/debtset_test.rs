@@ -350,3 +350,33 @@ fn a_second_destination_starts_owing_everything() {
         a_first.lines_written, b_first.lines_written, a_second.lines_written
     );
 }
+
+/// ADR-015: the debt set is also the answer to "have we ever dealt with this
+/// destination at all". That question has to be answerable *locally*, because
+/// it is exactly the question you cannot ask a destination that is not there.
+#[test]
+fn the_debt_set_records_which_destinations_we_have_dealt_with() {
+    let fx = fixture(b"one\ntwo\n");
+
+    // Before any pass, no destination is on record — including the one we are
+    // about to collect for.
+    assert!(!collect::destination_has_record(&fx.state, "dest-a"));
+
+    fx.collect(&unreachable("dest-a"));
+
+    assert!(
+        collect::destination_has_record(&fx.state, "dest-a"),
+        "a destination we have collected for must be on record, or its later absence \
+         cannot be told apart from never having been built"
+    );
+    assert!(
+        !collect::destination_has_record(&fx.state, "dest-b"),
+        "and one we never touched must not be — otherwise every declared-but-unbuilt \
+         destination would look like a lost copy"
+    );
+    println!(
+        "record a={} b={}",
+        collect::destination_has_record(&fx.state, "dest-a"),
+        collect::destination_has_record(&fx.state, "dest-b"),
+    );
+}
