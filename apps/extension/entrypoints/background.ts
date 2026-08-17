@@ -2,7 +2,7 @@ import {
   extractIdentity,
   extractSessionId,
   SCHEMA,
-  sanitizePathSegment,
+  pathSafeSessionId,
   findPlatformForUrl,
   type CapturedFetch,
   type InboxBundle,
@@ -70,7 +70,7 @@ function buildBundle(captured: CapturedFetch): InboxBundle {
       parsed.keys = Object.keys(obj);
     }
   } catch { /* not JSON */ }
-  const sessionId = extractSessionId(captured.url, captured.text, captured.pageUrl) ?? 'unknown';
+  const sessionId = resolveSessionId(captured) ?? 'unknown';
   const platform = findPlatformForUrl(captured.url) ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
   return {
     schema: SCHEMA,
@@ -91,8 +91,25 @@ function buildBundle(captured: CapturedFetch): InboxBundle {
   };
 }
 
+/**
+ * 🔴 C21 · **这条链路上唯一一处决定「这条会话是谁」的地方。**
+ *
+ * 顺序不是偏好，是根因治理本身：
+ *  1. `captured.sessionId` —— 上游【已经知道】身份时一路带下来的权威值
+ *     （回溯腿：欠账键 = 列表接口的 items[].id，见 lib/backfill/engine.ts）。
+ *     有它就【绝不再推导】—— 第二次表达就是在这里消失的。
+ *  2. 没有它才回落到 extractSessionId（实时腿：身份只存在于 URL 里，别无来源）。
+ *
+ * 页面来的载荷永远走不到第 1 支：lib/contract.ts 的 isCapturedFetchShape
+ * 对带 sessionId 的页面载荷【存在即拒收】。
+ */
+function resolveSessionId(captured: CapturedFetch): string | null {
+  if (captured.sessionId !== undefined) return captured.sessionId;
+  return extractSessionId(captured.url, captured.text, captured.pageUrl);
+}
+
 export async function handleCaptured(captured: CapturedFetch): Promise<HandledResult> {
-  const sessionId = extractSessionId(captured.url, captured.text, captured.pageUrl);
+  const sessionId = resolveSessionId(captured);
   if (cancelledIdLike(sessionId)) {
     // Per-session naming is the inbox contract; a session-less capture has no
     // stable file name and is dropped rather than polluting the inbox.
@@ -100,7 +117,14 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   }
 
   const bundle = buildBundle(captured);
-  const slug = `${bundle.platform}-${sanitizePathSegment(bundle.sessionId)}`;
+  // 🔴 C21 · 命名是【恒等映射】，不是「换掉不安全字符」：
+  //    sanitizePathSegment 是多对一的（'a b' 与 'a/b' 同名），而下载是 overwrite ⇒
+  //    两条不同的会话曾经能互相抹掉。起不出安全名字就当场收手、留痕，绝不硬塞。
+  const named = pathSafeSessionId(bundle.sessionId);
+  if (named === null) {
+    return { saved: false, reason: 'session id is not usable as a file name (refused, not collapsed)' };
+  }
+  const slug = `${bundle.platform}-${named}`;
   const { finalName, bytes } = await writeCommitted(slug, JSON.stringify(bundle), {
     // C12：实时腿的每一次写入也喂给守卫（观测是共享的），
     // 但【熔断只暂停回溯腿】—— 这里不做任何阻断，用户当前这条对话照存。

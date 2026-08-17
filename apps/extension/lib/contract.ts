@@ -317,6 +317,21 @@ export interface CapturedFetch {
   /** Needed when the provider API URL does not contain the conversation id. */
   pageUrl?: string;
   capturedAt: number;
+  /**
+   * 🔴 C21 · 会话身份的【权威值】，由「已经知道它是谁」的那一方一路带下来。
+   *
+   * 根因回顾：同一个会话的身份以前被表达了两次 —— 欠账键是列表接口的
+   * items[].id，文件名却是「从 URL 里再抠一次」。两次表达之间隔着有损函数，
+   * 于是两个不同的欠账键可以塌成同一个文件名（后写的覆盖先写的）。
+   * 这个字段就是那第二次表达的【消除口】：回溯腿把枚举给的 id 直接放进来，
+   * 落盘不再推导。
+   *
+   * 🔴 谁可以填：只有扩展自己（lib/backfill/engine.ts）。
+   *    页面来的载荷一律【不许】带这个字段 —— 见 isCapturedFetchShape：
+   *    能指定身份就等于能指定写到哪个文件名。
+   * 🔴 不填（undefined）⇒ 走 extractSessionId 的老路，实时腿行为逐字不变。
+   */
+  sessionId?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -380,6 +395,10 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   ) return false;
   if (typeof value.text !== 'string' || value.text.length === 0) return false;
   if (value.pageUrl !== undefined && typeof value.pageUrl !== 'string') return false;
+  // 🔴 C21：`sessionId` 是扩展内部的权威身份通道（回溯腿用），它直接决定文件名。
+  //    页面能填它 = 页面能指定写到哪个文件（覆盖别的会话）。所以这里不是「校验它」，
+  //    而是【存在即拒收】—— 一条页面来的载荷根本不该有这个字段。
+  if ('sessionId' in value) return false;
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
   }
@@ -603,4 +622,30 @@ export function extractIdentity(text: string, sessionId: string | null = null): 
 
 export function sanitizePathSegment(s: string): string {
   return s.replace(/[\x00-\x1f/\\:*?"<>| ]/g, '_');
+}
+
+/**
+ * 🔴 C21 · 会话 id → 文件名片段，**必须是单射的**（两个不同的 id 绝不可能得到同一个片段）。
+ *
+ * 为什么不是「把不安全字符换成 _ 就完事」：`sanitizePathSegment` 是**多对一**的
+ * （'a b' 和 'a/b' 都变成 'a_b'），而 lib/download.ts 是 conflictAction:'overwrite' ——
+ * 两个不同的会话塌成同一个名字，后写的会把先写的**从磁盘上抹掉**。
+ *
+ * 这里选的是【恒等 + 拒收】而不是【转义】：
+ *  · 片段安全（sanitize 是空操作）⇒ 原样返回。在这个定义域上命名函数就是恒等映射，
+ *    单射是**结构性**的，不依赖任何字符表的细节。
+ *  · 片段不安全 ⇒ 返回 null，调用方必须当成一次【留痕的失败】，绝不硬塞一个名字。
+ *
+ * 🔴 为什么不用转义（例如 '_'→'_5f'、' '→'_20'）：那样会把**已有用户**所有
+ *    含 '_' 的会话（gemini / kimi 的 id 字符集是 [A-Za-z0-9_-]）重命名一遍，
+ *    等于把整个收件箱重下一遍。恒等方案对所有既有的、路径安全的 id
+ *    **一个字节都不变** —— 实时腿的既有行为因此可以逐字保持。
+ */
+export function pathSafeSessionId(id: string): string | null {
+  if (!id) return null;
+  // 恒等即单射：只接受「原样就能当文件名」的 id。
+  if (sanitizePathSegment(id) !== id) return null;
+  // '.'/'..' 会被当成路径而不是名字；'.' 开头也不该出现在收件箱里。
+  if (id.startsWith('.')) return null;
+  return id;
 }
