@@ -202,6 +202,90 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
   },
+  {
+    id: 'kimi',
+    // 🔴 DOMAIN: verified against source, not against my own assumptions. The
+    // brief suggested 'https://kimi.moonshot.cn'; the CURRENT web app is
+    // https://www.kimi.com and that is the only origin here. kimi.moonshot.cn
+    // is the LEGACY origin (it still appears in a 2026-02 reverse-API project,
+    // paired with a completely different '/api/chat/<id>/...' route family);
+    // we have no source-backed evidence that today's page serves the route
+    // below from it, so it is deliberately NOT onboarded. Adding it would widen
+    // the content-script match set for a guess. One origin, closed set.
+    origins: ['https://www.kimi.com'],
+    // Deliberately NOT '/apiv2/' or 'ChatService' — every gateway call (send,
+    // list, usage, ...) would then become a "conversation data" candidate and
+    // the shape-mismatch warning would turn into noise. This hint is the
+    // message-LIST-for-one-conversation route only. Written without the leading
+    // service package because two sources disagree on it
+    // ('kimi.gateway.chat.v1.ChatService' vs 'kimi.chat.v1.ChatService'), and
+    // both are the same call. The conversation-INDEX route ('.../ListChats', an
+    // array of chat summaries we do not capture) falls outside and is skipped
+    // silently, which is correct: it is not the data we claim to back up.
+    pathHints: ['ChatService/ListMessages'],
+    // Connect-style unary RPC: the request is a POST with a JSON body, and the
+    // chat id lives in that body, not in the URL. Hence the page-URL fallback
+    // in sessionIdPatterns below.
+    methods: ['POST'],
+    status: { min: 200, max: 299 },
+    responseShape: {
+      encoding: 'json',
+      // Exactly the field the MIT exporter reads before it will export.
+      // Required (not "any of"): on this route a body without `messages` is the
+      // drift case, so it must fail the shape gate and get warned about rather
+      // than pass through as an empty-looking capture.
+      requiredPaths: ['messages'],
+    },
+    // Only the page URL carries the id, so a capture without pageUrl yields no
+    // session id and is skipped (logged, not saved) — the existing behaviour.
+    sessionIdPatterns: ['/chat/([A-Za-z0-9_-]{8,})'],
+    // 🔴 The route shape below is SOURCE-BACKED but NOT live-verified: it comes
+    // from reading public open-source projects, NOT from a logged-in Kimi
+    // session. Nobody on this change ever opened kimi.com, so this row is
+    // 'from-source', never 'verified'. If the real route or envelope differs,
+    // the generic gate above rejects it and page-hook.ts warns — it never
+    // guesses. Kimi is also known to run front-end signing/WAF challenges; that
+    // affects the page's own requests, not us — we only read what the page
+    // already fetched.
+    //
+    // External source evidence checked 2026-08-17 (source code, not README):
+    // conreo/kimi-chat-exporter (MIT; commit
+    // 9e3956b17ee44bceb453fea2107b9d6263ac0cd6, 2026-06-06) POSTs JSON to
+    // https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages
+    // with { chatId }, reads `data.messages`, and treats an absent/empty list
+    // as an error rather than as an empty conversation; its own manifest
+    // matches only https://www.kimi.com/* and its page menus key off
+    // https://www.kimi.com/chat/*:
+    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/background.js#L78-L80
+    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/background.js#L117-L123
+    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/manifest.json#L42-L44
+    // AshleyOSLab/kimi-chat-exporter (MIT; commit
+    // f27ca71d58eef9012535b2c7708c8865f641946e, 2026-03-15) independently uses
+    // BASE_URL https://www.kimi.com and a ListMessages call keyed by chat id,
+    // reading `messages` (with `items` / `data.messages` as fallbacks) — note
+    // it spells the service 'kimi.chat.v1.ChatService', which is why the path
+    // hint above stops at 'ChatService/ListMessages':
+    // https://github.com/AshleyOSLab/kimi-chat-exporter/blob/f27ca71d58eef9012535b2c7708c8865f641946e/exporters/kimi_exporter.py#L103-L115
+    // springrain1/kimi-pp (Apache-2.0; commit
+    // 6edf5494532845102e174d5f22669548309f5d18, 2026-08-02) independently hooks
+    // the same '/apiv2/kimi.gateway.chat.v1.ChatService/' gateway on
+    // www.kimi.com from a MAIN-world fetch interceptor:
+    // https://github.com/springrain1/kimi-pp/blob/6edf5494532845102e174d5f22669548309f5d18/core/kimi/fetch-interceptor.ts#L6
+    // chopper1026/kimi2api (MIT; commit
+    // 7f046d8627f275432f82788a6547bc905038738c, 2026-05-14) independently
+    // hard-codes KIMI_API_BASE = https://www.kimi.com and the same
+    // '/apiv2/kimi.gateway.chat.v1.ChatService/' service prefix:
+    // https://github.com/chopper1026/kimi2api/blob/7f046d8627f275432f82788a6547bc905038738c/app/config.py#L48
+    // https://github.com/chopper1026/kimi2api/blob/7f046d8627f275432f82788a6547bc905038738c/app/kimi/protocol.py#L8
+    // xiaoY233/Kimi-Free-API is GPL-3.0, so it was read for architecture only
+    // and no code from it was used; it is cited solely for the fact that the
+    // LEGACY origin https://kimi.moonshot.cn used an unrelated '/api/chat/...'
+    // route family, which is why that origin is not in `origins`.
+    credibility: 'from-source',
+    // No shipped row observes WebSocket frames. Stated explicitly, not left to
+    // the default, so that "did anyone turn this on?" is one grep away.
+    webSocketCapture: false,
+  },
 ];
 
 /** Content-script matches derived from the table — a closed set. */
