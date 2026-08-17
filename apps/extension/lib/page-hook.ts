@@ -7,12 +7,23 @@ import {
   PAGE_HOOK_STATE_KEY,
   PAGE_HOOK_VERSION,
   PLATFORMS,
+  WS_OBSERVED_MESSAGE,
   type ChatPlatform,
 } from './contract';
 
 /** Fixed, metadata-only signal for a supported-origin transport we do not capture. */
 export const UNSUPPORTED_TRANSPORT_WARNING =
   '[chat-stasher] unsupported transport candidate detected; capture not attempted';
+
+/**
+ * Fixed, metadata-only signal for the failure mode this whole capability exists
+ * to make visible: an origin whose platform row SAYS it speaks WebSocket, where
+ * our wrapper did not end up installed (CSP, a frozen global, the page grabbing
+ * the constructor first, or no WebSocket at all). Without this line that case is
+ * completely silent — the page just works and we back up nothing.
+ */
+export const WEBSOCKET_HOOK_UNINSTALLED_WARNING =
+  '[chat-stasher] websocket hook not installed on a websocket-declared origin';
 
 /** Values are serialized into the fallback <script>; no extension API belongs here. */
 export interface PageHookOptions {
@@ -21,6 +32,8 @@ export interface PageHookOptions {
   readyMessage: string;
   stateKey: string;
   fetchMarkerKey: string;
+  /** Page message name for an observed WebSocket frame (not a capture). */
+  wsObservedMessage: string;
   version: string;
   /** Platform table; the hook matches against the CURRENT page's own origin. */
   platforms: ChatPlatform[];
@@ -33,6 +46,7 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
   readyMessage: MAIN_READY_MESSAGE,
   stateKey: PAGE_HOOK_STATE_KEY,
   fetchMarkerKey: PAGE_HOOK_FETCH_MARKER,
+  wsObservedMessage: WS_OBSERVED_MESSAGE,
   version: PAGE_HOOK_VERSION,
   platforms: PLATFORMS.map((platform) => ({
     ...platform,
@@ -200,18 +214,95 @@ export function installPageFetchHook(options: PageHookOptions): void {
     });
   }
 
+  // ---- WebSocket ----------------------------------------------------------
+  // Opt-in per platform row and OFF everywhere else: an origin only gets its
+  // frames looked at when its own row says webSocketCapture. Everything below
+  // is observation only — we never send a frame, never replace onmessage/send,
+  // and never keep the page from seeing its own events.
+  const wsUninstalledWarning =
+    '[chat-stasher] websocket hook not installed on a websocket-declared origin';
+  const wsPlatform =
+    options.platforms.find(
+      (platform) => platform.origins.includes(pageOrigin) && platform.webSocketCapture === true,
+    ) ?? null;
+
+  /** Returns true when the frame was observed, so the caller skips the "unsupported" warn. */
+  const observeWebSocketFrame = (url: string, data: unknown): boolean => {
+    if (!wsPlatform) return false;
+    try {
+      const parsed = new URL(url, baseUrl);
+      const candidateOrigin = parsed.protocol === 'wss:'
+        ? `https://${parsed.host}`
+        : parsed.protocol === 'ws:'
+          ? `http://${parsed.host}`
+          : parsed.origin;
+      if (candidateOrigin !== pageOrigin || !wsPlatform.origins.includes(candidateOrigin)) return false;
+      if (!wsPlatform.pathHints.some((hint) => parsed.pathname.includes(hint))) return false;
+      // Binary frames are not decoded here: guessing an encoding would be the
+      // "hooked it but parsed it wrong" failure this capability is meant to avoid.
+      if (typeof data !== 'string' || data.length === 0) return false;
+      if (new TextEncoder().encode(data).byteLength > options.maxRawBytes) return false;
+      post({
+        type: options.wsObservedMessage,
+        payload: {
+          platformId: wsPlatform.id,
+          url: parsed.href,
+          text: data,
+          pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
+          observedAt: Date.now(),
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  let webSocketHookInstalled = false;
   const webSocketConstructor = pageWindow.WebSocket;
-  if (typeof webSocketConstructor === 'function') {
-    pageWindow.WebSocket = new Proxy(webSocketConstructor, {
-      construct(target, args, newTarget) {
-        const socket = Reflect.construct(target, args, newTarget) as WebSocket;
-        const url = String(args[0]);
-        socket.addEventListener('message', () => {
-          warnUnsupportedTransport('websocket', url);
-        }, { once: true });
-        return socket;
-      },
-    });
+  // Capability detection, never version sniffing: if any piece we need is
+  // missing we leave the page's constructor exactly as we found it.
+  if (
+    typeof webSocketConstructor === 'function' &&
+    typeof Proxy === 'function' &&
+    typeof Reflect === 'object' &&
+    typeof Reflect.construct === 'function'
+  ) {
+    try {
+      const wrappedWebSocket = new Proxy(webSocketConstructor, {
+        construct(target, args, newTarget) {
+          const socket = Reflect.construct(target, args, newTarget) as WebSocket;
+          const url = String(args[0]);
+          try {
+            // A plain extra listener: additive, so the page's own listeners and
+            // onmessage/onerror/onclose handlers all still run unchanged.
+            socket.addEventListener('message', (event: MessageEvent) => {
+              try {
+                if (!observeWebSocketFrame(url, event?.data)) {
+                  warnUnsupportedTransport('websocket', url);
+                }
+              } catch {
+                // Observation must never surface as a page-visible error.
+              }
+            });
+          } catch {
+            // A socket that refuses listeners is still returned untouched.
+          }
+          return socket;
+        },
+      });
+      // The assignment itself can throw (frozen/read-only global). Catching it
+      // is the difference between "we quietly did not install" and "we threw an
+      // exception into the page at document_start".
+      pageWindow.WebSocket = wrappedWebSocket;
+      webSocketHookInstalled = pageWindow.WebSocket === wrappedWebSocket;
+    } catch {
+      webSocketHookInstalled = false;
+    }
+  }
+  if (wsPlatform && !webSocketHookInstalled) {
+    // The whole point of task C15: a declared-but-unhooked origin is never silent.
+    console.warn(wsUninstalledWarning);
   }
 
   const originalFetch = window.fetch.bind(window);
