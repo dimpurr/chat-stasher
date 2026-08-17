@@ -85,7 +85,7 @@
         "macos": {
           "template": "~/.gemini/tmp/",
           "env_override": "GEMINI_CLI_HOME",
-          "format": "json",
+          "format": "json / jsonl",
           "session_pattern": "session-*",
           "confidence": "源码确认",
           "source": "任务已知事实（macOS 实测）"
@@ -125,7 +125,8 @@
       "display_name": "opencode",
       "paths": {
         "macos": {
-          "template": "~/.local/share/opencode/opencode.db",
+          "template": "$XDG_DATA_HOME/opencode/opencode.db",
+          "env_override": "OPENCODE_HOME",
           "format": "sqlite",
           "confidence": "源码确认",
           "source": "任务已知事实（v1.2.0+）；但注意下方版本差异"

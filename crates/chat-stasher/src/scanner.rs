@@ -344,6 +344,9 @@ pub struct HarnessProbe {
     /// For single-file stores: the store's bytes on disk (`.db` + sidecars for
     /// SQLite). 0 otherwise.
     pub bytes: u64,
+    /// Metadata-only set of files recognised for this harness. The doctor uses
+    /// the same set when it builds its footprint row; it is never printed.
+    pub recognized_files: Vec<PathBuf>,
     pub note: String,
 }
 
@@ -434,6 +437,7 @@ fn probe_harness(
         earliest: None,
         latest: None,
         bytes: 0,
+        recognized_files: Vec::new(),
         note: String::new(),
     };
 
@@ -522,6 +526,7 @@ fn probe_harness(
                     record_count: None,
                     candidate_count: None,
                     note: "单文件存储，只探测存在与大小".to_string(),
+                    recognized_files: vec![root.clone()],
                     ..base
                 };
                 if cell.format == "sqlite" {
@@ -599,6 +604,10 @@ fn probe_harness(
             cell.session_pattern.as_deref(),
         );
         let count = recs.len() as u64;
+        let recognized_files = recs
+            .iter()
+            .map(|record| record.absolute_path.clone())
+            .collect();
         report.records.extend(recs);
         HarnessProbe {
             root: Some(root),
@@ -606,6 +615,7 @@ fn probe_harness(
             state: ProbeState::Scanned,
             record_count: Some(count),
             candidate_count: Some(count),
+            recognized_files,
             note: if count == 0 {
                 "目录在，但没有可枚举的会话文件".to_string()
             } else {
@@ -623,6 +633,9 @@ fn probe_harness(
 fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
     let variable = cell.env_override.as_deref()?;
     let value = env::var_os(variable).filter(|value| !value.is_empty())?;
+    if variable == "OPENCODE_HOME" {
+        return Some((PathBuf::from(value).join("opencode.db"), true));
+    }
     let template = cell.template.replace('\\', "/");
     let marker = if template.contains("Cursor/User/") {
         "Cursor/User/"

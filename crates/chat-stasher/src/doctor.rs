@@ -26,7 +26,6 @@
 
 use crate::config::Config;
 use crate::scanner;
-use crate::sqlite_probe::{probe_sqlite_store, SqliteSessionProbe};
 use crate::store::{self, StoreConfig};
 use std::collections::BTreeMap;
 use std::fs;
@@ -332,6 +331,9 @@ pub struct HarnessFootprint {
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
     pub compressed_count: u64,
+    /// Metadata-only set of files recognised for this harness. This is kept
+    /// private from CLI output and compared with the scanner's set in tests.
+    pub recognized_files: Vec<PathBuf>,
     pub note: String,
 }
 
@@ -361,6 +363,10 @@ pub fn coverage_from_records<'a>(
         earliest,
         latest,
         compressed_count,
+        recognized_files: recs
+            .iter()
+            .map(|record| record.absolute_path.clone())
+            .collect(),
         note: String::new(),
     }
 }
@@ -423,136 +429,6 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
-fn gemini_footprint(home: &Path) -> HarnessFootprint {
-    let root = home.join(".gemini").join("tmp");
-    if !root.is_dir() {
-        return HarnessFootprint {
-            name: "gemini".to_string(),
-            root,
-            installed: false,
-            session_count: None,
-            candidate_count: None,
-            total_bytes: 0,
-            earliest: None,
-            latest: None,
-            compressed_count: 0,
-            note: "not installed (no ~/.gemini/tmp)".to_string(),
-        };
-    }
-    let mut count = 0;
-    let mut total = 0u64;
-    let mut earliest: Option<SystemTime> = None;
-    let mut latest: Option<SystemTime> = None;
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !ft.is_file() {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            // session files (vs logs.json / checkpoint.json / bin/rg)
-            if name.starts_with("session-") && name.ends_with(".json") {
-                if let Ok(md) = fs::metadata(&path) {
-                    count += 1;
-                    total += md.len();
-                    let m = md.modified().unwrap_or(UNIX_EPOCH);
-                    earliest = Some(earliest.map_or(m, |e: SystemTime| e.min(m)));
-                    latest = Some(latest.map_or(m, |l: SystemTime| l.max(m)));
-                }
-            }
-        }
-    }
-    HarnessFootprint {
-        name: "gemini".to_string(),
-        root,
-        installed: true,
-        session_count: Some(count),
-        candidate_count: None,
-        total_bytes: total,
-        earliest,
-        latest,
-        compressed_count: 0,
-        note: format!("{count} session files under ~/.gemini/tmp"),
-    }
-}
-
-fn opencode_footprint(home: &Path) -> HarnessFootprint {
-    let root = home.join(".local").join("share").join("opencode");
-    let db = root.join("opencode.db");
-    if !db.is_file() {
-        return HarnessFootprint {
-            name: "opencode".to_string(),
-            root: root.clone(),
-            installed: db.exists() || root.exists(),
-            session_count: None,
-            candidate_count: None,
-            total_bytes: 0,
-            earliest: None,
-            latest: None,
-            compressed_count: 0,
-            note: "not installed (no opencode.db)".to_string(),
-        };
-    }
-    // Single source of truth for both count *and* bytes: the shared SQLite
-    // probe (`crate::sqlite_probe`) used by the registry scan too.
-    let info = probe_sqlite_store(&db);
-    let (session_count, candidate_count, earliest, latest, note) = match info.sessions {
-        SqliteSessionProbe::Known {
-            candidate_count,
-            count,
-            earliest,
-            latest,
-        } => (
-            Some(count),
-            Some(candidate_count),
-            earliest,
-            latest,
-            "SQLite 只读连接；session(time_created) 已识别（bytes 含 .db+-wal+-shm）".to_string(),
-        ),
-        SqliteSessionProbe::SchemaMismatch { actual } => (
-            None,
-            None,
-            None,
-            None,
-            format!(
-                "检测到 SQLite 但表结构不认识（期望 session(id, time_created, time_updated)，实到 {actual}）"
-            ),
-        ),
-        SqliteSessionProbe::ReadFailed { error } => (
-            None,
-            None,
-            None,
-            None,
-            format!("检测到 SQLite 但只读枚举失败（{error}）"),
-        ),
-    };
-
-    HarnessFootprint {
-        name: "opencode".to_string(),
-        root,
-        installed: true,
-        session_count,
-        candidate_count,
-        total_bytes: info.total_bytes,
-        earliest,
-        latest,
-        compressed_count: 0,
-        note,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // D4 — risk synthesis (the whole value of this command)
 // ---------------------------------------------------------------------------
@@ -573,6 +449,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         earliest: probe.earliest,
         latest: probe.latest,
         compressed_count: 0,
+        recognized_files: probe.recognized_files.clone(),
         note: probe.note.clone(),
     }
 }
@@ -588,6 +465,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         earliest: None,
         latest: None,
         compressed_count: 0,
+        recognized_files: Vec::new(),
         note: "not installed".to_string(),
     }
 }
@@ -749,8 +627,8 @@ pub fn run() -> DoctorReport {
     // D2
     let gemini = inspect_gemini_settings(&home);
 
-    // D3 — reuse the crate's scanner for claude-code & codex session files,
-    // walk gemini/openccde roots directly.
+    // D3 — use the registry-driven scanner for every directory harness. The
+    // doctor no longer has a second Gemini suffix/pattern implementation.
     let config = Config::load();
     let (scan, scan_failed) = match scanner::scan(&config) {
         Ok(s) => (s, false),
@@ -788,24 +666,35 @@ pub fn run() -> DoctorReport {
             .filter(|r| r.source == crate::models::HarnessSource::Codex),
     ));
 
-    footprints.push(gemini_footprint(&home));
-    footprints.push(opencode_footprint(&home));
+    match scan.probes.iter().find(|p| p.id == "gemini-cli") {
+        Some(probe) => footprints.push(coverage_from_records(
+            "gemini",
+            probe.root.clone().unwrap_or_default(),
+            scan.records
+                .iter()
+                .filter(|r| r.source == crate::models::HarnessSource::GeminiCli),
+        )),
+        None => footprints.push(default_footprint(
+            "gemini",
+            home.join(".gemini").join("tmp"),
+        )),
+    }
 
-    // Cursor + Grok are single-SQLite stores driven by the registry: their
+    // opencode, Cursor and Grok are single-SQLite stores driven by the registry: their
     // footprint rows are built straight from the registry probe results, so
     // the two tables can never disagree on count/bytes/times.
-    for id in ["cursor", "grok"] {
+    for id in ["opencode", "cursor", "grok"] {
         match scan.probes.iter().find(|p| p.id == id) {
             Some(probe) => footprints.push(footprint_from_sqlite_probe(probe)),
-            None => footprints.push(default_footprint(
-                id,
-                home.join(match id {
-                    "cursor" => Path::new(
-                        "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
-                    ),
-                    _ => Path::new(".grok/sessions/session_search.sqlite"),
-                }),
-            )),
+            None => {
+                let root = match id {
+                    "opencode" => scanner::xdg_data_home().join("opencode/opencode.db"),
+                    "cursor" => home
+                        .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+                    _ => home.join(".grok/sessions/session_search.sqlite"),
+                };
+                footprints.push(default_footprint(id, root));
+            }
         }
     }
 
