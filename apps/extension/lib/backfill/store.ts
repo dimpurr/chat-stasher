@@ -22,9 +22,33 @@ type LocalArea = {
   set: (values: Record<string, unknown>) => Promise<void>;
 };
 
+type ExtApi = { runtime?: { id?: string }; storage?: { local?: unknown } };
+
+/**
+ * 🔴 C18 实测发现的【第三道生产阻断】（不是本任务引入的，是本任务撞上的）：
+ *
+ * 这里原来只读 `globalThis.browser`。**Chrome MV3 里根本没有 `browser` 这个全局**
+ * —— 只有 `chrome`。所以在 Chrome 构建里 browserLocalStore() 恒为 null，
+ * tickBackfill 第一道闸就是 'no-store'，而 Popup 的开关也【存不下去】。
+ *
+ * 证据：.output/chrome-mv3/background.js 里 WXT 自己的 browser 垫片写的是
+ *   `globalThis.browser?.runtime?.id ? globalThis.browser : globalThis.chrome`
+ * —— lib/badge.ts 用的是 WXT 注入的那个 `browser`（所以 badge 在 Chrome 上是好的），
+ * 唯独本文件绕过了垫片直接读 globalThis，于是只有 Firefox 能用。
+ *
+ * 这里逐字照抄 WXT 的判定，不引入任何 import（本文件要在 node 测试环境里裸跑，
+ * 那里两个全局都不存在 ⇒ 仍然返回 null ⇒ 既有行为不变）。
+ */
+function extensionApi(): ExtApi | null {
+  const g = globalThis as { browser?: ExtApi; chrome?: ExtApi };
+  if (g.browser?.runtime?.id) return g.browser;
+  if (g.chrome?.runtime?.id) return g.chrome;
+  // runtime.id 都拿不到时退回「谁存在用谁」，免得比原来更严。
+  return g.browser ?? g.chrome ?? null;
+}
+
 function localArea(): LocalArea | null {
-  const area = (globalThis as { browser?: { storage?: { local?: unknown } } }).browser?.storage
-    ?.local as LocalArea | undefined;
+  const area = extensionApi()?.storage?.local as LocalArea | undefined;
   if (!area || typeof area.get !== 'function' || typeof area.set !== 'function') return null;
   return area;
 }
@@ -42,6 +66,19 @@ export function browserLocalStore(): BackfillStore | null {
       await area.set({ [key]: value });
     },
   };
+}
+
+/**
+ * 读一份 storage.local 的全量快照。
+ * 只有 Popup 用得到：它不知道用户当前是哪个平台/哪个账号（那些信息只在实时腿
+ * 的那条消息里现成带着），只能把已经存在的欠账集合列出来挑一个显示。
+ * 拿不到存储就返回 null —— 和 browserLocalStore() 一样，让调用方显式处理。
+ */
+export async function browserLocalSnapshot(): Promise<Record<string, unknown> | null> {
+  const area = localArea();
+  if (!area) return null;
+  // 真实 API 里 get(null) = 全量；假实现如果不支持就会抛，交给调用方兜。
+  return await (area.get as unknown as (q: null) => Promise<Record<string, unknown>>)(null);
 }
 
 /** 纯内存实现，只给测试用。 */
