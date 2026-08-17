@@ -237,7 +237,7 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
         };
         for composer in composers {
             candidate_count += 1;
-            if !cursor_composer_is_qualified(composer) {
+            if !cursor_legacy_composer_is_qualified(composer) {
                 continue;
             }
             count += 1;
@@ -470,10 +470,15 @@ fn qualification_where_sql(spec: &SqliteSchemaSpec, candidate_where_sql: &str) -
     )
 }
 
-/// Rust equivalent of the Cursor qualification used by the legacy workspace
-/// fallback. Keeping this beside the SQL rule prevents the two storage paths
-/// from silently acquiring different session definitions.
-fn cursor_composer_is_qualified(value: &Value) -> bool {
+/// Qualification for the legacy `ItemTable`/`allComposers` structure.
+///
+/// This is intentionally *not* the global `cursor_composer` rule above:
+/// legacy composer objects carry their messages in `conversation`, while the
+/// global `cursorDiskKV` rows carry `fullConversationHeadersOnly` and token
+/// breakdown fields. A non-empty conversation is the structure-specific proof
+/// that the legacy composer has content; empty metadata-only composers are not
+/// sessions for the fallback count.
+fn cursor_legacy_composer_is_qualified(value: &Value) -> bool {
     if value
         .get("isArchived")
         .and_then(Value::as_bool)
@@ -481,17 +486,10 @@ fn cursor_composer_is_qualified(value: &Value) -> bool {
     {
         return false;
     }
-    let has_headers = value
-        .get("fullConversationHeadersOnly")
+    value
+        .get("conversation")
         .and_then(Value::as_array)
-        .is_some_and(|headers| !headers.is_empty());
-    let has_tokens = value
-        .get("promptTokenBreakdown")
-        .and_then(|v| v.get("totalUsedTokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        > 0;
-    has_headers || has_tokens
+        .is_some_and(|messages| !messages.is_empty())
 }
 
 /// `min, max` SQL fragment for the schema's time source, or `None` when the
@@ -729,7 +727,7 @@ mod tests {
             "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
             rusqlite::params![
                 "composer.composerData",
-                r#"{"allComposers":[{"createdAt":1751779149032,"fullConversationHeadersOnly":[{}]},{"createdAt":1752849959504,"isArchived":true,"fullConversationHeadersOnly":[{}]},{"createdAt":1753000000000}]}"#
+                r#"{"allComposers":[{"createdAt":1751779149032,"conversation":[{}]},{"createdAt":1752849959504,"isArchived":true,"conversation":[{}]},{"createdAt":1753000000000}]}"#
             ],
         )
         .unwrap();

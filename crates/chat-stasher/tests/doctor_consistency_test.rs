@@ -14,6 +14,7 @@
 use chat_stasher::doctor::{self, HarnessFootprint};
 use chat_stasher::scanner::{self, HarnessProbe};
 use rusqlite::Connection;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -21,7 +22,7 @@ use std::path::Path;
 /// assertion is against known counts, not just "the two numbers are equal".
 const CLAUDE_SESSIONS: u64 = 2;
 const CODEX_SESSIONS: u64 = 1;
-const GEMINI_SESSIONS: u64 = 1;
+const GEMINI_SESSIONS: u64 = 2;
 const OPENCODE_SESSIONS: u64 = 3;
 const CURSOR_SESSIONS: u64 = 2;
 const GROK_SESSIONS: u64 = 1;
@@ -34,9 +35,10 @@ fn write(path: &Path, content: &str) {
 }
 
 /// Plant one real SQLite store (`session(id, time_created, time_updated)`)
-/// with `n` rows — the recognised opencode schema.
+/// with `n` rows — the recognised opencode schema. The test sets
+/// `XDG_DATA_HOME` to `home`, so this is the registry's middle fallback.
 fn plant_opencode_db(home: &Path) {
-    let db = home.join(".local/share/opencode/opencode.db");
+    let db = home.join("opencode/opencode.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
     let conn = Connection::open(&db).unwrap();
     conn.execute_batch(
@@ -71,13 +73,9 @@ fn plant_dir_sessions(home: &Path) {
             "{}\n",
         );
     }
-    for i in 0..GEMINI_SESSIONS {
-        write(
-            &home.join(format!(".gemini/tmp/session-2026-08-16-{i:04}.json")),
-            "{}\n",
-        );
-    }
-    // A non-session JSON that the session_pattern must reject.
+    write(&home.join(".gemini/tmp/session-a.json"), "{}\n");
+    write(&home.join(".gemini/tmp/session-b.jsonl"), "{}\n");
+    // A non-session JSON that the registry session_pattern must reject.
     write(&home.join(".gemini/tmp/settings.json"), "{}\n");
 }
 
@@ -159,9 +157,9 @@ const FOOTPRINT_TO_PROBE_ID: [(&str, &str); 6] = [
     ("grok", "grok"),
 ];
 
-/// The one consistency invariant shared by every harness in both tables:
-/// the two tables must never contradict on session count, and on bytes for
-/// single-file stores.
+/// The consistency invariant shared by every harness in both tables: the two
+/// tables must never contradict on session count, on recognised file identity,
+/// or on bytes for single-file stores.
 fn assert_report_self_consistent(report: &doctor::DoctorReport) {
     for (fp_name, probe_id) in FOOTPRINT_TO_PROBE_ID {
         let fp: &HarnessFootprint = report
@@ -187,6 +185,21 @@ fn assert_report_self_consistent(report: &doctor::DoctorReport) {
             (a, b) => panic!(
                 "harness {fp_name} 对会话数口径不一致: footprint={a:?} registry={b:?}（一个能枚举另一个不能，或反之）"
             ),
+        }
+
+        // Directory harnesses must recognise the same file set, not merely
+        // happen to report the same aggregate count. This catches a `.jsonl`
+        // omission even when another implementation path still reports one
+        // plausible session.
+        if matches!(probe.state, scanner::ProbeState::Scanned) {
+            let doctor_files: BTreeSet<_> = fp.recognized_files.iter().collect();
+            let scanner_files: BTreeSet<_> = probe.recognized_files.iter().collect();
+            assert!(
+                doctor_files == scanner_files,
+                "harness {fp_name} 文件识别口径不一致: doctor={}/scanner={}",
+                doctor_files.len(),
+                scanner_files.len()
+            );
         }
 
         // Bytes: for single-file stores both tables measure the same set
@@ -220,9 +233,28 @@ fn doctor_tables_never_contradict_any_harness() {
     let report = doctor::run();
     assert!(!report.scan_failed, "registry scan must have run");
 
-    // Negative self-check against known ground truth before the join asserts
-    // equality of the two tables (a test that only compares two wrong numbers
-    // to each other could go green by accident).
+    // Run the cross-table invariant before the per-harness ground truths. A
+    // broken doctor-only filter must fail here, rather than being hidden by
+    // two independently wrong counts.
+    assert_report_self_consistent(&report);
+
+    // Negative self-check against known ground truth: a test that only
+    // compares two wrong numbers to each other could go green by accident.
+    let gemini = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "gemini")
+        .unwrap();
+    println!(
+        "gemini_fake_dir_count={} (session-a.json + session-b.jsonl; settings.json excluded)",
+        gemini.session_count.unwrap_or(0)
+    );
+    assert_eq!(
+        gemini.session_count,
+        Some(GEMINI_SESSIONS),
+        "doctor 假目录应同时识别 .json/.jsonl 会话并排除 settings.json"
+    );
+
     let opencode = report
         .footprints
         .iter()
@@ -249,6 +281,4 @@ fn doctor_tables_never_contradict_any_harness() {
         Some(GROK_SESSIONS),
         "footprint 表带着已知真值自校：应认出我们种下的 {GROK_SESSIONS} 个 session_docs 会话"
     );
-
-    assert_report_self_consistent(&report);
 }

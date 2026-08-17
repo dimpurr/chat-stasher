@@ -6,8 +6,12 @@
 use chat_stasher::config::Config;
 use chat_stasher::models::HarnessSource;
 use chat_stasher::scanner::{self, HarnessRegistry, ProbeState};
+use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a registry with just claude-code + codex, every platform cell
 /// populated (so the test passes regardless of which OS it runs on).
@@ -196,4 +200,92 @@ fn gemini_pattern_counts_session_and_rejects_config_json() {
         .unwrap()
         .to_string_lossy()
         .starts_with("session-"));
+}
+
+#[test]
+fn opencode_home_env_override_wins_for_scanner() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let env_home = tempfile::TempDir::new().unwrap();
+    let xdg_data = tempfile::TempDir::new().unwrap();
+    let home_fallback = tempfile::TempDir::new().unwrap();
+    let plant_db = |db: &std::path::Path| {
+        if let Some(parent) = db.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let conn = Connection::open(db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session(id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL); INSERT INTO session VALUES ('fixture', 1760000000000, 1760000000000);",
+        )
+        .unwrap();
+    };
+    let db = env_home.path().join("opencode.db");
+    plant_db(&db);
+
+    std::env::set_var("OPENCODE_HOME", env_home.path());
+    std::env::set_var("XDG_DATA_HOME", xdg_data.path());
+    let cell = json!({
+        "template": "$XDG_DATA_HOME/opencode/opencode.db",
+        "env_override": "OPENCODE_HOME",
+        "format": "sqlite",
+        "confidence": "源码确认",
+        "source": "test",
+        "sql_table": "session",
+        "sql_required_columns": ["id", "time_created", "time_updated"],
+        "sql_time_column": "time_created"
+    });
+    let paths = match scanner::current_platform() {
+        "macos" => json!({ "macos": cell }),
+        "linux" => json!({ "linux": cell }),
+        "windows" => json!({ "windows": cell }),
+        other => panic!("unexpected platform: {other}"),
+    };
+    let registry: HarnessRegistry = serde_json::from_value(json!({
+        "schema_version": 1,
+        "generated": "2026-08-17",
+        "harnesses": [{
+            "id": "opencode",
+            "display_name": "opencode",
+            "paths": paths
+        }]
+    }))
+    .unwrap();
+
+    let report = scanner::scan_with_registry(&Config::default(), &registry).unwrap();
+    let probe = &report.probes[0];
+    println!(
+        "opencode_env_override_selected={} record_count={}",
+        probe.root.as_deref() == Some(db.as_path()),
+        probe.record_count.unwrap_or(0)
+    );
+    assert_eq!(probe.root.as_deref(), Some(db.as_path()));
+    assert_eq!(probe.state, ProbeState::FileTarget);
+    assert_eq!(probe.record_count, Some(1));
+
+    let xdg_db = xdg_data.path().join("opencode/opencode.db");
+    plant_db(&xdg_db);
+    std::env::remove_var("OPENCODE_HOME");
+    let xdg_report = scanner::scan_with_registry(&Config::default(), &registry).unwrap();
+    let xdg_probe = &xdg_report.probes[0];
+    assert_eq!(xdg_probe.root.as_deref(), Some(xdg_db.as_path()));
+    assert_eq!(xdg_probe.record_count, Some(1));
+
+    let home_db = home_fallback
+        .path()
+        .join(".local/share/opencode/opencode.db");
+    plant_db(&home_db);
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::set_var("HOME", home_fallback.path());
+    let home_report = scanner::scan_with_registry(&Config::default(), &registry).unwrap();
+    let home_probe = &home_report.probes[0];
+    println!(
+        "opencode_fallbacks=OPENCODE_HOME:{} XDG_DATA_HOME:{} HOME/.local/share:{}",
+        probe.root.as_deref() == Some(db.as_path()),
+        xdg_probe.root.as_deref() == Some(xdg_db.as_path()),
+        home_probe.root.as_deref() == Some(home_db.as_path())
+    );
+    assert_eq!(home_probe.root.as_deref(), Some(home_db.as_path()));
+    assert_eq!(home_probe.record_count, Some(1));
+
+    std::env::remove_var("OPENCODE_HOME");
+    std::env::remove_var("XDG_DATA_HOME");
 }
