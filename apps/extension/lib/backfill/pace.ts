@@ -54,16 +54,32 @@ export const DEFAULT_PACE: BackfillPace = {
 /**
  * 一段的节流器。第一次请求不等（没有「上一次」可言），之后每次都补足最小间隔。
  * 记录 waits/totalWaitedMs，好让「节流真的生效」是可以被贴出来的数字。
+ *
+ * 🔴 C19 · BUG-3 的修法就在 `seedLastAt` 这一个参数上：
+ *    Pacer 本身是 per-run 的（每次 runBackfill 都 new 一个），而运行时一次 tick
+ *    只清 1 笔账 ⇒ 每次 gate() 都是那个 run 的第一次 ⇒ 恒等 0 ⇒
+ *    pace.ts 写的 20 秒最小间隔【在浏览器里一次都没生效过】(C17-3.B2 实测)。
+ *    这里让调用方把「上一次真实取数的时刻」（存在 BackfillState.lastFetchAt 里、
+ *    跨 tick 跨重启存活）喂进来当种子，间隔就跨 tick 生效了。
+ *    seedLastAt = null ⇒ 行为与 C11 逐字一致（真的从来没取过数）。
  */
 export class Pacer {
-  private lastAt: number | null = null;
+  private last: number | null;
   readonly waits: number[] = [];
 
   constructor(
     readonly plan: PacePlan,
     private readonly clock: Clock,
     readonly label: string,
-  ) {}
+    seedLastAt: number | null = null,
+  ) {
+    this.last = seedLastAt;
+  }
+
+  /** 上一次「放行」的时刻。调用方要把它落盘，才能跨 tick 续上。 */
+  get lastAt(): number | null {
+    return this.last;
+  }
 
   get totalWaitedMs(): number {
     return this.waits.reduce((a, b) => a + b, 0);
@@ -72,15 +88,15 @@ export class Pacer {
   /** 在每次真实请求之前调用。返回实际等待的毫秒数。 */
   async gate(): Promise<number> {
     const now = this.clock.now();
-    if (this.lastAt === null) {
-      this.lastAt = now;
+    if (this.last === null) {
+      this.last = now;
       this.waits.push(0);
       return 0;
     }
-    const elapsed = now - this.lastAt;
+    const elapsed = now - this.last;
     const wait = Math.max(0, this.plan.minIntervalMs - elapsed);
     if (wait > 0) await this.clock.sleep(wait);
-    this.lastAt = this.clock.now();
+    this.last = this.clock.now();
     this.waits.push(wait);
     return wait;
   }

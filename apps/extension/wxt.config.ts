@@ -19,7 +19,21 @@ export default defineConfig({
     // no separate justification beyond "the tool remembers what it still owes".
     // Omitting it risks every persistent thing silently not existing at runtime.
     // The cost is asymmetric, so we declare it.
-    permissions: ['downloads', 'storage'],
+    //
+    // Why 'alarms' is here (C19): the backfill leg used to be kicked only when
+    // the realtime leg captured something. That means a user who installs the
+    // extension and never opens the site again would never finish backfilling
+    // -- the product promise ("quietly finish over several days") cannot be
+    // kept on that heartbeat alone. chrome.alarms gives it a heartbeat of its
+    // own (lib/backfill/alarm.ts documents the 5-minute period and why).
+    // Cost checked against Chrome's permission-warning list (2026-08-17):
+    // 'alarms' shows NO install-time warning, same as 'storage'; the one that
+    // does warn ("Manage your downloads.") is 'downloads', which we already
+    // have. So the user-visible cost of this line is zero.
+    // 🔴 Nothing else is added. No host permissions: the backfill leg fetches
+    // through the content script that is ALREADY injected on these origins,
+    // as a same-origin request in the user's own logged-in page context.
+    permissions: ['downloads', 'storage', 'alarms'],
     browser_specific_settings: {
       gecko: {
         // Not a mailbox. AMO accepts either a GUID or "a string containing 80

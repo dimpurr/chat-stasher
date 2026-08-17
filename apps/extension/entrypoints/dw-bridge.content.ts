@@ -12,6 +12,10 @@ import {
 } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 import {
+  BACKFILL_TAB_HELLO_MESSAGE,
+  handleBackfillMessage,
+} from '../lib/backfill/tab-port';
+import {
   warnIfFallbackHookUnverified,
   FALLBACK_HOOK_VERIFICATION_WARNING,
 } from '../lib/fallback-verification';
@@ -141,6 +145,42 @@ export default defineContentScript({
         console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
       }, MAIN_FALLBACK_TIMEOUT_MS);
     }
+
+    // -----------------------------------------------------------------------
+    // 🔴 C19 · 回溯腿的取数通道就在这里落地。
+    //
+    // 这段代码跑在【用户已登录的那个页面】的上下文里，所以下面这个 fetch 是
+    // **同源**请求，带的就是用户自己那个页面的 cookie —— 与用户手动点开一条
+    // 历史对话时浏览器发出的请求同源同凭据。因此：
+    //   · 不需要任何 host 权限（同源请求本来就不受 host 权限约束）；
+    //   · matches 一个字都不用改（本来就注入在这些平台上）；
+    //   · 取数没有被挪出用户的登录上下文（架构前提保住了）。
+    // 允许代发哪些 URL 由 lib/backfill/tab-port.ts 的三道检查决定
+    //（同源 + 在平台表里 + 只有回溯腿那两条路径），这里不自己判断。
+    // -----------------------------------------------------------------------
+    browser.runtime.onMessage.addListener(
+      (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
+        const pending = handleBackfillMessage(message, pageOrigin, async (url) => {
+          const res = await fetch(url, {
+            credentials: 'same-origin',
+            headers: { accept: 'application/json' },
+          });
+          return { status: res.status, text: () => res.text() };
+        });
+        if (!pending) return;   // 不是给我的消息，让给别的监听器
+        pending
+          .then(sendResponse)
+          .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
+        return true;            // MV3：异步 sendResponse 必须返回 true
+      },
+    );
+
+    // 报到：把 tab id（由浏览器填在 sender 上）留给 background，
+    // 好让【闹钟醒来时】知道该找哪个标签页取数。失败无所谓 —— 实时腿那条路
+    // 用的是当场的 sender，不依赖这张登记表。
+    browser.runtime
+      .sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin })
+      .catch(() => { /* background 没醒/没人接：不打扰页面 */ });
 
     window.addEventListener('message', onMessage);
     // A tokenized probe makes the readiness handshake insensitive to which

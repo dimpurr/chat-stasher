@@ -80,6 +80,18 @@ export interface BackfillState {
   archived: string[];
   /** 今天已经取了多少条正文（跨重启有效）。 */
   detailToday: DailyCounter;
+  /**
+   * 🔴 C19 · 跨 tick 的定速锚点：每一段【上一次真实取数】的时刻（clock.now()，毫秒）。
+   *
+   * 为什么必须落盘：Pacer 是 per-run 的，而运行时一次 tick 只清 1 笔账 ⇒
+   * 每个 run 的第一次 gate() 恒等待 0 ⇒ 「每条 20 秒」在浏览器里一次都没生效过
+   * （C17-3.B2 实测四条正文零间隔）。把时刻存进欠账集合，间隔就能跨 tick、跨 SW
+   * 回收、跨浏览器重启地续上 —— 与 detailToday 的日上限是同一种做法。
+   *
+   * optional：v1 的旧集合里没有这个字段，读回来是 undefined ⇒ 当作「没有上一次」，
+   * 行为与 C11 逐字一致，不需要提版本号，也不会把用户已有的进度作废。
+   */
+  lastFetchAt?: { enumerate: number | null; detail: number | null };
   /** 非 null 表示这条腿已经停下并留痕。 */
   halted: HaltRecord | null;
 }
@@ -95,6 +107,7 @@ export function initialState(platform: string, scope: string): BackfillState {
     pending: [],
     archived: [],
     detailToday: { day: '', count: 0 },
+    lastFetchAt: { enumerate: null, detail: null },
     halted: null,
   };
 }

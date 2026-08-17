@@ -10,8 +10,28 @@ import {
 import { writeCommitted } from '../lib/download';
 import { recordCapture, refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
-import { tickBackfill, type TickResult } from '../lib/backfill/schedule';
-import type { HttpPort } from '../lib/backfill/engine';
+import {
+  isBackfillEnabled,
+  tickBackfill,
+  tickBlockReason,
+  type TickResult,
+} from '../lib/backfill/schedule';
+import type { BackfillOptions, HttpPort } from '../lib/backfill/engine';
+import {
+  BACKFILL_ALARM_NAME,
+  loadTargets,
+  rememberTarget,
+  syncBackfillAlarm,
+  type AlarmsApi,
+} from '../lib/backfill/alarm';
+import {
+  BACKFILL_PING_MESSAGE,
+  isTabHello,
+  pickLiveTab,
+  rememberTab,
+  tabHttpPort,
+  type TabSend,
+} from '../lib/backfill/tab-port';
 import { POPUP_STATUS_MESSAGE, type BackfillRuntimeStatus } from '../lib/popup-view';
 import {
   guardBadge,
@@ -127,31 +147,39 @@ export async function resumeBackfillAfterDownloadGuard(): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// C13 · 回溯腿的接线
+// C13 → C19 · 回溯腿的接线
 //
-// 触发点选的是【实时腿的 onMessage】，不是扩展启动，理由三条：
-//  1. MV3 里 SW 平时是死的。真正会把它叫醒的事件本来就只有实时腿这一个 ——
-//     选它当心跳，等于零成本地拿到一个"用户正在用某个平台"的信号；
-//  2. 目标（platform / origin / 账号 scope）就在这条消息里现成带着。
-//     扩展启动时【没有】这些信息（没有当前 tab、没有账号），只能去猜或去存一份，
-//     那是凭空多出来的状态；
-//  3. 用户正开着那个平台的页面时才慢慢回溯，是最不像爬虫、最温和的时机。
-// 🔴 没有用 chrome.alarms 定时：manifest permissions 只有 ['downloads']，
-//    没有 'alarms'，而本任务不许新增权限（见 wxt.config.ts:9）。
+// C13 的触发点是【实时腿的 onMessage】，理由是 MV3 里 SW 平时是死的、而实时腿
+// 那条消息里现成带着 platform/origin/账号 scope。那些理由今天仍然成立，所以
+// 那一脚【保留】。但它有一个致命推论：
+// 🔴 一个装了之后再也不打开那个网站的用户，永远不会有第二条实时捕获来踢它，
+//    历史就永远补不完。
+// ⇒ C19 加了第二个心跳：chrome.alarms（见 lib/backfill/alarm.ts，周期与理由都在
+//   那里）。两个心跳走的是同一个 tickBackfill，闸门顺序完全一致。
+//   闹钟醒来时 SW 是全新的、什么都不知道 —— 所以实时腿踢那一脚时会顺手把目标
+//   记进 storage（rememberTarget），闹钟直接读它，一个字都不用猜。
 // ---------------------------------------------------------------------------
 
 /**
- * 🔴 回溯腿的网络端口。**默认 null ⇒ 生产构建里回溯腿绝不会发任何请求。**
- * 想让它真的取数，必须有人显式调用 configureBackfillTransport —— 本仓库里
- * 没有任何生产代码这么做（只有 C13 的测试注入合成端口）。这一条是刻意的：
- * 「会不会用登录态去打平台」必须是一处显式决定，不能藏在默认参数里。
+ * 🔴 显式覆盖用的网络端口。默认 null。
+ * C13~C18 期间这是【唯一】的注入口，而生产代码里没人调用它 ⇒ 回溯腿永远
+ * 停在 'no-http-port'。C19 之后它退化成一个测试接缝：真正的生产端口由
+ * resolveHttpPort() 现场从「一个活着的、已登录的平台标签页」上造出来。
  */
 let backfillTransport: HttpPort | null = null;
 let lastTick: TickResult | null = null;
 let pendingTick: Promise<unknown> = Promise.resolve();
+/** 测试接缝：注入假时钟/自定义节奏，免得测试真的睡满 20 秒。生产恒为 null。 */
+let backfillPaceOverride: { pace?: BackfillOptions['pace']; clock?: BackfillOptions['clock'] } | null = null;
 
 export function configureBackfillTransport(http: HttpPort | null): void {
   backfillTransport = http;
+}
+
+export function configureBackfillPace(
+  override: { pace?: BackfillOptions['pace']; clock?: BackfillOptions['clock'] } | null,
+): void {
+  backfillPaceOverride = override;
 }
 
 /** 最近一次 tick 的结果（给测试/排查用，也给 C18 的 Popup 用）。 */
@@ -159,16 +187,58 @@ export function lastBackfillTick(): TickResult | null {
   return lastTick;
 }
 
+function alarmsApi(): AlarmsApi | null {
+  return (browser as unknown as { alarms?: AlarmsApi }).alarms ?? null;
+}
+
+function tabsApi(): { sendMessage: TabSend } | null {
+  const tabs = (browser as unknown as { tabs?: { sendMessage?: TabSend } }).tabs;
+  // 🔴 tabs.sendMessage 不需要 'tabs' 权限（'tabs' 只管 url/title 这些敏感字段），
+  //    而且我们只往【自己注入的内容脚本】发消息。matches 一个字都不用改。
+  return tabs && typeof tabs.sendMessage === 'function'
+    ? { sendMessage: (id, msg) => tabs.sendMessage!(id, msg) }
+    : null;
+}
+
+/**
+ * 🔴 **生产环境里 http 端口就是在这里被造出来的。**
+ *
+ * 顺序：显式覆盖（测试） → 指定的那个标签页 → 登记表里任意一个还活着的同源标签页。
+ * 一个都没有 ⇒ 返回 undefined ⇒ tickBackfill 如实答 'no-http-port'。
+ * 🔴 绝不退化成"由 SW 自己 fetch" —— 那需要 host 权限，也会把取数挪出用户的
+ *    登录上下文。宁可这一次不跑。
+ */
+async function resolveHttpPort(origin: string, senderTabId?: number): Promise<HttpPort | undefined> {
+  if (backfillTransport) return backfillTransport;
+  const tabs = tabsApi();
+  if (!tabs) return undefined;
+  // 实时腿那条路上，发消息的那个标签页【此刻就开着、且刚刚发生过一次真实抓取】
+  // ——它是最可靠的取数通道，不必再去查登记表。
+  if (senderTabId !== undefined) return tabHttpPort(senderTabId, tabs.sendMessage);
+  const live = await pickLiveTab(browserLocalStore(), origin, (id) =>
+    tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
+  return live ? tabHttpPort(live.tabId, tabs.sendMessage) : undefined;
+}
+
 /**
  * C18 · Popup 问 background 要的运行时事实。全部是「我这边真实是什么」，不含推测。
- * 🔴 transportWired 在生产构建里恒为 false —— configureBackfillTransport
- *    在本仓库里【只被测试调用过】。Popup 拿这个值决定要不要说「缺取数通道」。
+ * 🔴 transportWired 不是一个静态标志，而是【现场 ping 一次】的结果：
+ *    有没有一个活着的平台标签页可以替我们取数。没有就是没有，Popup 照实说。
  */
-export function backfillRuntimeStatus(): BackfillRuntimeStatus {
+export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
   return {
-    transportWired: backfillTransport !== null,
+    transportWired: await hasLiveTransport(),
     lastTickReason: lastTick?.reason ?? null,
   };
+}
+
+async function hasLiveTransport(): Promise<boolean> {
+  if (backfillTransport) return true;
+  const tabs = tabsApi();
+  if (!tabs) return false;
+  const live = await pickLiveTab(browserLocalStore(), null, (id) =>
+    tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
+  return live !== null;
 }
 
 /** 等待 fire-and-forget 的那次 tick 结束。回溯腿绝不允许拖慢落盘，所以只能这样等。 */
@@ -201,20 +271,73 @@ export function backfillTargetFor(
  * 实时腿存完一条之后顺带踢一脚回溯腿。全程 best-effort：
  * 任何异常只进日志，绝不影响用户当前这条对话的落盘。
  */
-export async function kickBackfill(captured: CapturedFetch): Promise<TickResult | null> {
+export async function kickBackfill(
+  captured: CapturedFetch,
+  senderTabId?: number,
+): Promise<TickResult | null> {
   const target = backfillTargetFor(captured);
   if (!target) return null;
   const store = browserLocalStore();
+  // 闹钟醒来时用得上：把这个「用户真的用过的」目标记下来，省得以后去猜。
+  // 记不下来也照跑这一次 —— 登记表只影响闹钟那条路。
+  try {
+    await rememberTarget(store, { ...target, at: Date.now() });
+  } catch (err) {
+    console.warn('[chat-stasher] backfill target registry write failed', (err as Error).message);
+  }
   const result = await tickBackfill({
     ...target,
     store,
-    http: backfillTransport ?? undefined,
+    http: await resolveHttpPort(target.origin, senderTabId),
     downloadGuard: isBackfillPausedByDownloadGuard,
     // 归档出口 = 实时腿同一个落盘函数，逻辑不分叉。
     sink: async (c) => { await handleCaptured(c); },
+    ...(backfillPaceOverride ?? {}),
   });
   lastTick = result;
   return result;
+}
+
+/**
+ * 🔴 闹钟那一脚。与 kickBackfill 走【同一个 tickBackfill】，闸门顺序一致。
+ * 与实时腿的唯一区别：目标从 storage 的登记表里读，而不是从一条消息里现取。
+ * 一次闹钟最多清 1 笔账（DEFAULT_TICK_DETAILS），跑成了就收手。
+ */
+export async function runAlarmTick(): Promise<TickResult> {
+  const store = browserLocalStore();
+  const targets = await loadTargets(store);
+
+  if (targets.length === 0) {
+    // 还没有任何目标 ⇒ 用户从没在受支持平台上被抓到过一条。
+    // 仍然把闸门跑一遍，好让 Popup 的 lastTickReason 说得出真话。
+    const blocked = await tickBlockReason({
+      hasStore: store !== null,
+      isEnabled: () => isBackfillEnabled(store),
+      isDownloadPaused: isBackfillPausedByDownloadGuard,
+      hasHttp: false,
+    });
+    lastTick = { ran: false, reason: blocked ?? 'no-http-port', report: null };
+    return lastTick;
+  }
+
+  let last: TickResult = { ran: false, reason: 'no-http-port', report: null };
+  for (const target of targets) {
+    const result = await tickBackfill({
+      platform: target.platform,
+      origin: target.origin,
+      scope: target.scope,
+      store,
+      http: await resolveHttpPort(target.origin),
+      downloadGuard: isBackfillPausedByDownloadGuard,
+      sink: async (c) => { await handleCaptured(c); },
+      ...(backfillPaceOverride ?? {}),
+    });
+    last = result;
+    lastTick = result;
+    // 跑动了就收手；被开关/存储/熔断挡住也没必要再试别的目标（结论一样）。
+    if (result.reason !== 'no-http-port') break;
+  }
+  return last;
 }
 
 function cancelledIdLike(id: string | null): boolean {
@@ -222,21 +345,50 @@ function cancelledIdLike(id: string | null): boolean {
   return id.length < 8 || id === 'unknown';
 }
 
+/** 开关是什么状态，闹钟就该是什么状态。SW 每次醒来都对一次表。 */
+export async function syncAlarmWithSwitch(): Promise<string> {
+  const enabled = await isBackfillEnabled(browserLocalStore());
+  return syncBackfillAlarm(alarmsApi(), enabled);
+}
+
 export default defineBackground(async () => {
   browser.runtime.onMessage.addListener(
-    (message: { type?: string; payload?: CapturedFetch }, _sender, sendResponse) => {
-      // C18：Popup 打开时问一句「取数通道接上没有」。同步答，立刻返回。
+    (message: { type?: string; payload?: CapturedFetch }, sender, sendResponse) => {
+      // C18：Popup 打开时问一句「取数通道接上没有」。
+      // C19 起这个回答要现场 ping 一个标签页 ⇒ 变成异步，仍然 return true。
       if (message?.type === POPUP_STATUS_MESSAGE) {
-        sendResponse(backfillRuntimeStatus());
+        backfillRuntimeStatus()
+          .then(sendResponse)
+          // 问不出来就按最保守的方向答，绝不让 Popup 显示成"在跑"。
+          .catch(() => sendResponse({ transportWired: false, lastTickReason: null }));
+        return true;
+      }
+      // C19：内容脚本报到。tab id 由浏览器填在 sender 上（不需要 'tabs' 权限），
+      // 记进 storage 之后，闹钟醒来才知道该找谁取数。
+      if (isTabHello(message)) {
+        const tabId = (sender as { tab?: { id?: number } })?.tab?.id;
+        if (typeof tabId !== 'number') {
+          sendResponse({ ok: false, error: 'no tab id on sender' });
+          return true;
+        }
+        // 🔴 登记【写完】才回话：回一个 ok 就该意味着"闹钟已经找得到你了"，
+        // 否则紧跟着的一次闹钟/状态查询会读到一张还没落盘的表。
+        rememberTab(browserLocalStore(), { tabId, origin: message.origin, at: Date.now() })
+          .then(() => sendResponse({ ok: true }))
+          .catch((err: Error) => {
+            console.warn('[chat-stasher] tab registry write failed', err.message);
+            sendResponse({ ok: false, error: err.message });
+          });
         return true;
       }
       if (message?.type !== 'chat-captured' || !message.payload) return;
       const payload = message.payload;
+      const senderTabId = (sender as { tab?: { id?: number } })?.tab?.id;
       handleCaptured(payload)
         .then((result) => {
           // C13：实时腿这一脚顺带唤醒回溯腿。fire-and-forget —— 回溯是慢活，
           // 绝不允许它挡住 sendResponse 或拖慢用户当前这条对话的落盘。
-          pendingTick = kickBackfill(payload).catch((err) => {
+          pendingTick = kickBackfill(payload, senderTabId).catch((err) => {
             console.warn('[chat-stasher] backfill tick failed', (err as Error).message);
             return null;
           });
@@ -257,11 +409,30 @@ export default defineBackground(async () => {
     },
   );
 
+  // 🔴 C19 · 闹钟的监听器必须在 SW 顶层【同步】注册：MV3 里 SW 被回收后是由
+  //    事件重新唤醒的，注册晚了就会错过那次唤醒。
+  const alarms = (browser as unknown as {
+    alarms?: AlarmsApi & { onAlarm?: { addListener(fn: (a: { name?: string }) => void): void } };
+  }).alarms;
+  alarms?.onAlarm?.addListener((alarm) => {
+    if (alarm?.name !== BACKFILL_ALARM_NAME) return;
+    pendingTick = runAlarmTick().catch((err) => {
+      console.warn('[chat-stasher] backfill alarm tick failed', (err as Error).message);
+      return null;
+    });
+  });
+
   // Every SW wake (fresh start AND runtime.onStartup) re-asserts the badge's
   // truth, so a dead-worker leftover badge gets cleared once 5 min pass.
   void refreshBadge();
+  // 开关是持久的，闹钟也该是。每次 SW 醒来对一次表：开着就确保有闹钟，
+  // 关着就确保没有 —— 🔴 默认（关）下这里只会 clear，绝不会凭空创建。
+  void syncAlarmWithSwitch().catch((err) => {
+    console.warn('[chat-stasher] backfill alarm sync failed', (err as Error).message);
+  });
   browser.runtime.onStartup.addListener(() => {
     void refreshBadge();
+    void syncAlarmWithSwitch().catch(() => { /* 日志已在上面那条路径覆盖 */ });
   });
 
   console.log('[chat-stasher] background ready, captures go to Downloads/ for explicit platform origins');
