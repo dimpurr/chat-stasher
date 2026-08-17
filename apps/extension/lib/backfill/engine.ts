@@ -57,6 +57,13 @@ export interface BackfillOptions {
   shouldAbort?: () => boolean;
   /** 归档出口：产出与实时腿完全同形的 CapturedFetch，落盘逻辑不分叉。 */
   sink?: (captured: CapturedFetch) => Promise<void> | void;
+  /**
+   * C12 下载停滞守卫的闸门：返回 true 表示「已熔断」，这条腿必须暂停。
+   * 🔴 只暂停回溯腿（慢爬）。实时腿走 entrypoints/background.ts 的
+   *    onMessage → handleCaptured，完全不经过这里，所以不受影响。
+   * 不注入就等于没有守卫 —— 与 C11 的行为逐字一致。
+   */
+  downloadGuard?: () => boolean | Promise<boolean>;
 }
 
 export interface RunReport {
@@ -171,6 +178,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // 上一次已经停下留痕了：要人来看过、清掉 halted 才继续，绝不自己重试打平台。
   if (state.halted) return report('halted');
 
+  /** 熔断态 ⇒ 立刻收手。欠账不动、不落盘任何新状态：暂停不是失败。 */
+  const guardTripped = async (): Promise<boolean> =>
+    opts.downloadGuard ? await opts.downloadGuard() : false;
+  if (await guardTripped()) return report('download-paused');
+
   const platformRow = getPlatformByOrigin(opts.origin);
   if (!platformRow) {
     return halt('shape-changed', `origin ${opts.origin} is not in the platform table`);
@@ -179,6 +191,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // ---- 第一段：枚举（便宜，一次跑完）----
   while (!state.enumCursor.complete) {
     if (opts.shouldAbort?.()) return report('aborted');
+    if (await guardTripped()) return report('download-paused');
     await enumPacer.gate();
     const url = listPageUrl(opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
@@ -234,6 +247,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
   while (state.pending.length > 0) {
     if (opts.shouldAbort?.()) return report('aborted');
+    // 跑到一半才熔断也要立刻收手：每清一笔账都已落盘，停在这里不丢任何进度。
+    if (await guardTripped()) return report('download-paused');
     if (archivedThisRun.length >= budget) return report('budget-exhausted');
     if (dailyCap !== null && state.detailToday.count >= dailyCap) return report('daily-cap');
 

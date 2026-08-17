@@ -1,8 +1,27 @@
 import { INBOX_PREFIX } from './contract';
+import { classifyDelta, stalledResult, DOWNLOAD_TIMEOUT_MS, type DownloadResult } from './download-guard';
 
 export interface PublishResult {
   finalName: string;
   bytes: number;
+}
+
+export interface WriteOptions {
+  /** 一次下载的观测窗口。到点还没终态就判为「停滞」。 */
+  timeoutMs?: number;
+  /**
+   * 每一次下载观测到终态（或判定停滞）都回调一次。
+   * C12：这是守卫唯一的数据来源；失败不阻断落盘路径，回调抛错也不许打断写入。
+   */
+  onOutcome?: (result: DownloadResult) => void | Promise<void>;
+}
+
+/** 携带三态结论的下载错误，让调用方能区分「明确失败」和「停滞」。 */
+export class DownloadFailure extends Error {
+  constructor(readonly result: DownloadResult, message: string) {
+    super(message);
+    this.name = 'DownloadFailure';
+  }
 }
 
 /**
@@ -64,12 +83,34 @@ async function eraseFromShelf(id: number): Promise<void> {
  * On any failure the ".part" from THIS call is best-effort removed too, so we
  * never deliberately leave a ".part" behind; only an unlink refusal does.
  */
-export async function writeCommitted(destSlug: string, dataStr: string): Promise<PublishResult> {
+export async function writeCommitted(
+  destSlug: string,
+  dataStr: string,
+  options: WriteOptions = {},
+): Promise<PublishResult> {
   const finalName = `${INBOX_PREFIX}/${destSlug}.json`;
   const partName = `${finalName}.part`;
   const dataUrl = `data:application/json;charset=utf-8,${encodeURIComponent(dataStr)}`;
 
   const bytes = new TextEncoder().encode(dataStr).length;
+  const timeoutMs = options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+  const observe = async (id: number) => {
+    const result = await waitTerminal(id, timeoutMs);
+    // 观测通报绝不允许把落盘路径带下水。
+    try {
+      await options.onOutcome?.(result);
+    } catch (err) {
+      console.warn('[chat-stasher] download outcome hook failed', (err as Error).message);
+    }
+    if (result.outcome !== 'complete') {
+      throw new DownloadFailure(
+        result,
+        result.outcome === 'stalled'
+          ? `download ${id} did not reach a terminal state within ${timeoutMs}ms`
+          : `download ${id} interrupted (${result.error ?? 'no reason reported'})`,
+      );
+    }
+  };
 
   let partId: number | undefined;
   try {
@@ -79,7 +120,7 @@ export async function writeCommitted(destSlug: string, dataStr: string): Promise
       conflictAction: 'overwrite',
       saveAs: false,
     });
-    await waitComplete(partId);
+    await observe(partId);
   } catch (err) {
     if (partId !== undefined) await bestEffortRemove(partId, partName);
     throw err;
@@ -92,7 +133,7 @@ export async function writeCommitted(destSlug: string, dataStr: string): Promise
       conflictAction: 'overwrite',
       saveAs: false,
     });
-    await waitComplete(finalId);
+    await observe(finalId);
 
     await bestEffortRemove(partId, partName);
     await eraseFromShelf(partId);
@@ -115,7 +156,7 @@ async function bestEffortRemove(id: number, what: string): Promise<void> {
   }
 }
 
-const pending = new Map<number, { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+const pending = new Map<number, { settle: (r: DownloadResult) => void; timer: ReturnType<typeof setTimeout> }>();
 
 let changeListenerRegistered = false;
 
@@ -131,25 +172,31 @@ function ensureChangeListener(): void {
   browser.downloads.onChanged.addListener((delta) => {
     const entry = pending.get(delta.id);
     if (!entry) return;
-    if (delta.state?.current === 'complete') {
-      clearTimeout(entry.timer);
-      pending.delete(delta.id);
-      entry.resolve();
-    } else if (delta.state?.current === 'interrupted') {
-      clearTimeout(entry.timer);
-      pending.delete(delta.id);
-      entry.reject(new Error(`download ${delta.id} interrupted`));
-    }
+    const terminal = classifyDelta(delta);
+    // 非终态事件（filename/paused/bytesReceived …）一律不作数：只有真终态才收摊。
+    if (!terminal) return;
+    clearTimeout(entry.timer);
+    pending.delete(delta.id);
+    entry.settle({ ...terminal, waitedMs: 0 });
   });
 }
 
-function waitComplete(id: number, timeoutMs = 15_000): Promise<void> {
+/**
+ * 观测一次下载直到终态或窗口用尽。
+ * 🔴 三态都以「结果」返回，绝不把停滞和失败混成同一个错误 —— 处置不同：
+ *    失败可重试，停滞重试只会再制造一次同样的打扰。
+ */
+function waitTerminal(id: number, timeoutMs: number): Promise<DownloadResult> {
   ensureChangeListener();
-  return new Promise<void>((resolve, reject) => {
+  const startedAt = Date.now();
+  return new Promise<DownloadResult>((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`download ${id} timed out`));
+      resolve(stalledResult(timeoutMs));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, {
+      settle: (r) => resolve({ ...r, waitedMs: Date.now() - startedAt }),
+      timer,
+    });
   });
 }

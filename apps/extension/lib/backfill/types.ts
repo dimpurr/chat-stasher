@@ -41,6 +41,13 @@ export type StopReason =
   | 'budget-exhausted'
   | 'daily-cap'
   | 'aborted'
+  /**
+   * C12：下载停滞守卫处于熔断态 ⇒ 这条腿暂停。
+   * 与 'halted' 的区别：halted 是这条腿【自己】出了问题需要人看一眼；
+   * download-paused 是落盘出口出了问题，腿本身是健康的，欠账原封不动，
+   * 清掉熔断态（resumeAfterGuard）就能从断点继续。
+   */
+  | 'download-paused'
   | 'halted';
 
 /** total 的来源。只有 'response-total' 才配当进度条的分母。 */
