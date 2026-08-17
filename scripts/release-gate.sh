@@ -194,7 +194,12 @@ seen=0
 for i in "${!SESS_IDS[@]}"; do
   sid="${SESS_IDS[$i]}"
   want="${SESS_SHA[$i]}"
-  got=$(echo "$out" | awk -v s="$sid" '$1=="session" && $2==s {print $NF}' | sed 's/^sha256=//')
+  # B54: `read` prints the *short* session id (`id::short_session_id`), which is
+  # `<first 8 chars>~<6 hex of sha256(full id)>` — a bare 8-char prefix does not
+  # distinguish two sessions of the same platform. Match on the head, not on the
+  # whole field, or this assertion only passes for ids of 8 characters or fewer.
+  got=$(echo "$out" | awk -v s="$sid" \
+    '$1=="session" { split($2, p, "~"); if (p[1]==substr(s,1,8)) print $NF }' | sed 's/^sha256=//')
   if [ -z "$got" ]; then
     echo "[gate] session $sid missing from read --all-machines"; fail_gate
   fi

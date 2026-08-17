@@ -2385,7 +2385,7 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
         );
         for s in &m.sessions {
             println!(
-                "    session {:<8} shards={:<3} bytes={:<10} sha256={}",
+                "    session {:<15} shards={:<3} bytes={:<10} sha256={}",
                 short_session_id(&s.session_id),
                 s.shard_count,
                 s.concat_bytes,
@@ -2587,7 +2587,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn short_session_id(id: &str) -> String {
-    id.chars().take(8).collect()
+    chat_stasher::id::short_session_id(id)
 }
 
 #[cfg(test)]

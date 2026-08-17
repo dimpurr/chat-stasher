@@ -103,6 +103,57 @@ pub fn is_uuid_like(s: &str) -> bool {
     widths == vec![8, 4, 4, 4, 12]
 }
 
+/// Number of leading characters of the id kept verbatim in the short form.
+const SHORT_HEAD_CHARS: usize = 8;
+/// Number of sha256 hex digits appended as the discriminator.
+const SHORT_TAG_CHARS: usize = 6;
+
+/// Privacy-safe short form of a session id, for reports and terminal output.
+///
+/// The short id has exactly one job: let a human tell two sessions apart in a
+/// report **without** printing the full id. Plain `chars().take(8)` did the
+/// second half only. Both id shapes we produce are prefixed, so their first
+/// eight characters are a *constant*, not a discriminator:
+///
+/// ```text
+/// ext    deepseek.<sessionId>                 -> "deepseek"
+/// native codex.<machine>.<uuid>  (see [`SessionIdentity::id`]) -> "codex.di"
+/// ```
+///
+/// So the head is kept — it is the readable part, and for a bare uuid-shaped
+/// id it is genuinely the id's own head — and a short sha256 tag of the
+/// **whole** id is appended to carry the distinguishing bits:
+///
+/// ```text
+/// deepseek.d41f6a2b9c0e47aaaa1111        ->  deepseek~e4009d
+/// 019bf00d-97b6-7eb2-9bf8-eacbacc09765   ->  019bf00d~b0653a
+/// ```
+///
+/// Properties this must keep, all of them load-bearing:
+///   * **deterministic** — sha256 of the id and nothing else; no clock, no rng,
+///     so the same session prints the same short form on every run and on
+///     every machine.
+///   * **non-disclosing** — the head is at most 8 characters and the tag is a
+///     one-way digest, so the full id is never recoverable from a report.
+///   * **short** — 15 characters, fits a table column.
+///
+/// `~` is the separator because it appears in neither shape (`.` and `-` both
+/// occur inside ids), so the tag is always unambiguously the tag.
+pub fn short_session_id(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let head: String = id.chars().take(SHORT_HEAD_CHARS).collect();
+    let digest = Sha256::digest(id.as_bytes());
+    let mut tag = String::with_capacity(SHORT_TAG_CHARS);
+    for byte in digest.iter() {
+        if tag.len() >= SHORT_TAG_CHARS {
+            break;
+        }
+        tag.push_str(&format!("{byte:02x}"));
+    }
+    tag.truncate(SHORT_TAG_CHARS);
+    format!("{head}~{tag}")
+}
+
 /// Pieces of identity needed to build an id from a file path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {
@@ -158,5 +209,53 @@ mod tests {
             "codex.dims-macbook-pro-max-2.019bf00d-97b6-7eb2-9bf8-eacbacc09765"
         );
         assert!(!ident.id().contains(':'));
+    }
+
+    /// B54. The short form exists to distinguish sessions. Ext ids are
+    /// `platform.sessionId`, so anything that only looks at the head is
+    /// printing the platform name, not the session.
+    #[test]
+    fn short_id_distinguishes_ext_ids_that_differ_only_in_the_tail() {
+        let a = short_session_id("deepseek.d41f6a2b9c0e47aaaa1111");
+        let b = short_session_id("deepseek.d41f6a2b9c0e47aaaa2222");
+        assert_ne!(a, b, "same short id for two different sessions: {a}");
+        assert!(a.starts_with("deepseek~"), "{a}");
+        // Pinned against an independent tool, so the doc example above and the
+        // digest choice cannot drift:
+        //   printf '%s' 'deepseek.d41f6a2b9c0e47aaaa1111' | shasum -a 256
+        assert_eq!(a, "deepseek~e4009d");
+    }
+
+    /// Same argument for the native shape, which is `<source>.<machine>.<uuid>`
+    /// and therefore *also* has a constant head.
+    #[test]
+    fn short_id_distinguishes_native_ids_from_the_same_machine() {
+        let a = short_session_id("codex.mbp-2.019bf00d-97b6-7eb2-9bf8-eacbacc09765");
+        let b = short_session_id("codex.mbp-2.019bf00d-97b6-7eb2-9bf8-eacbacc09766");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn short_id_is_stable_short_and_never_the_full_id() {
+        let id = "019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        assert_eq!(
+            short_session_id(id),
+            short_session_id(id),
+            "no rng, no clock"
+        );
+        assert!(
+            short_session_id(id).starts_with("019bf00d"),
+            "readable head"
+        );
+        assert_eq!(short_session_id(id).len(), 15, "fits a table column");
+        assert!(!short_session_id(id).contains("eacbacc09765"));
+    }
+
+    #[test]
+    fn short_id_handles_ids_shorter_than_the_head() {
+        // No panic, and still distinguishing.
+        assert_ne!(short_session_id("a"), short_session_id("b"));
+        assert!(short_session_id("a").starts_with("a~"));
+        assert_eq!(short_session_id(""), short_session_id(""));
     }
 }
