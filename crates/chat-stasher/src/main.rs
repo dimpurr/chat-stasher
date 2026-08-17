@@ -378,6 +378,14 @@ fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> 
         report.scanned_opencode_records
     );
     println!(
+        "[collect] cursor records  : {} (one virtual SessionRecord per qualified composer)",
+        report.scanned_cursor_records
+    );
+    println!(
+        "[collect] grok records    : {} (one virtual SessionRecord per session_docs row)",
+        report.scanned_grok_records
+    );
+    println!(
         "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values",
         report.archive_gaps.len()
     );
@@ -1188,6 +1196,7 @@ mod decision_surface_tests {
             mtime: std::time::SystemTime::UNIX_EPOCH,
             source: chat_stasher::models::HarnessSource::OpenCode,
             compressed: false,
+            sqlite_layout: Some(chat_stasher::models::SqliteSessionLayout::OpenCode),
         });
         let output = render_archive_gap_notice(&report);
         assert!(

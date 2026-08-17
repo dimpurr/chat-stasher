@@ -23,6 +23,18 @@ pub enum HarnessSource {
     Continue,
 }
 
+/// Layout of a virtual session backed by a read-only SQLite source.
+///
+/// File-backed sources leave this as `None`; the scanner sets it only when a
+/// `SessionRecord` represents one logical row/composer inside a SQLite store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteSessionLayout {
+    OpenCode,
+    CursorGlobal,
+    CursorLegacy,
+    Grok,
+}
+
 impl HarnessSource {
     /// Short label used as the `<source>` component of a session id.
     /// Values match the `id` field of `data/harness-registry-v1.json`.
@@ -91,4 +103,6 @@ pub struct SessionRecord {
     pub source: HarnessSource,
     /// True when the file is zst-compressed (`*.jsonl.zst`).
     pub compressed: bool,
+    /// Present for a virtual SQLite session; absent for ordinary files.
+    pub sqlite_layout: Option<SqliteSessionLayout>,
 }

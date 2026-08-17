@@ -34,10 +34,11 @@
 //!   * missing roots are reported, not fatal.
 
 use crate::config::Config;
-use crate::models::{HarnessSource, SessionRecord};
+use crate::models::{HarnessSource, SessionRecord, SqliteSessionLayout};
 use crate::sqlite_probe::{
-    enumerate_opencode_sessions, probe_sqlite_store, sqlite_millis_to_system_time,
-    SqliteSessionProbe,
+    enumerate_cursor_legacy_sessions, enumerate_opencode_sessions, enumerate_sqlite_sessions,
+    probe_sqlite_store, sqlite_millis_to_system_time, CursorLegacySessionRow, SqliteSessionProbe,
+    SqliteSessionRow,
 };
 use serde::Deserialize;
 use std::env;
@@ -250,6 +251,10 @@ pub struct RegistryCell {
     /// Table that holds one row per session (e.g. `cursorDiskKV`).
     #[serde(default)]
     pub sql_table: Option<String>,
+    /// Column that identifies a session row (`key` for Cursor, `session_id`
+    /// for Grok).
+    #[serde(default)]
+    pub sql_id_column: Option<String>,
     /// Columns that must all exist before the store is recognised.
     #[serde(default)]
     pub sql_required_columns: Vec<String>,
@@ -607,14 +612,7 @@ fn probe_harness(
     // Cursor's old layout is a directory of workspace databases, not the
     // global single-file target declared by the current layout.
     if h.id == "cursor" && cell.format == "sqlite" {
-        return probe_cursor_harness(
-            base,
-            confidence,
-            root,
-            env_note,
-            &mut report.missing_roots,
-            cell,
-        );
+        return probe_cursor_harness(base, confidence, root, env_note, cell, machine, report);
     }
 
     // 6. Single-file stores are probed for existence; directory roots are walked.
@@ -645,6 +643,7 @@ fn probe_harness(
                     };
                     probe.bytes = info.total_bytes;
                     let expected = spec
+                        .as_ref()
                         .map(|s| format!("{}表({})", s.table, s.required_columns.join(", ")))
                         .unwrap_or_else(|| "session(id, time_created, time_updated)".to_string());
                     match info.sessions {
@@ -681,6 +680,7 @@ fn probe_harness(
                                                 .unwrap_or(UNIX_EPOCH),
                                                 source,
                                                 compressed: false,
+                                                sqlite_layout: Some(SqliteSessionLayout::OpenCode),
                                             })
                                             .collect();
                                         let record_count = records.len();
@@ -693,6 +693,28 @@ fn probe_harness(
                                         probe.note.push_str(&format!(
                                             "; SessionRecord 枚举失败（{error}）"
                                         ));
+                                    }
+                                }
+                            } else if h.id == "grok" {
+                                if let Some(spec) = spec.as_ref() {
+                                    match enumerate_sqlite_sessions(&root, spec) {
+                                        Ok(rows) => {
+                                            let records = sqlite_records_from_rows(
+                                                rows,
+                                                &root,
+                                                source,
+                                                machine,
+                                                SqliteSessionLayout::Grok,
+                                            );
+                                            let record_count = records.len();
+                                            report.records.extend(records);
+                                            probe.note.push_str(&format!(
+                                                "; SessionRecord={record_count}"
+                                            ));
+                                        }
+                                        Err(error) => probe.note.push_str(&format!(
+                                            "; SessionRecord 枚举失败（{error}）"
+                                        )),
                                     }
                                 }
                             }
@@ -806,6 +828,54 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
     Some((root, is_file))
 }
 
+fn sqlite_records_from_rows(
+    rows: Vec<SqliteSessionRow>,
+    db: &Path,
+    source: HarnessSource,
+    machine: &str,
+    layout: SqliteSessionLayout,
+) -> Vec<SessionRecord> {
+    rows.into_iter()
+        .map(|row| SessionRecord {
+            id: crate::id::SessionIdentity {
+                source_short: source.short(),
+                machine: machine.to_string(),
+                native_id: row.id,
+            }
+            .id(),
+            absolute_path: db.to_path_buf(),
+            byte_size: 0,
+            mtime: row.mtime.unwrap_or(UNIX_EPOCH),
+            source,
+            compressed: false,
+            sqlite_layout: Some(layout),
+        })
+        .collect()
+}
+
+fn cursor_legacy_records_from_rows(
+    rows: Vec<CursorLegacySessionRow>,
+    source: HarnessSource,
+    machine: &str,
+) -> Vec<SessionRecord> {
+    rows.into_iter()
+        .map(|row| SessionRecord {
+            id: crate::id::SessionIdentity {
+                source_short: source.short(),
+                machine: machine.to_string(),
+                native_id: row.id,
+            }
+            .id(),
+            absolute_path: row.db,
+            byte_size: 0,
+            mtime: row.mtime.unwrap_or(UNIX_EPOCH),
+            source,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
+        })
+        .collect()
+}
+
 /// Probe Cursor's current global store and, when it cannot yield a qualified
 /// composer count, its legacy workspaceStorage stores. This keeps the fallback
 /// source visible in doctor output while preserving one Cursor footprint row.
@@ -814,8 +884,9 @@ fn probe_cursor_harness(
     confidence: Confidence,
     global_db: PathBuf,
     env_note: String,
-    missing_roots: &mut Vec<PathBuf>,
     cell: &RegistryCell,
+    machine: &str,
+    report: &mut ScanReport,
 ) -> HarnessProbe {
     let Some(user_dir) = cursor_user_dir_from_global_db(&global_db) else {
         return HarnessProbe {
@@ -868,6 +939,17 @@ fn probe_cursor_harness(
                 latest,
             } = legacy.sessions
             {
+                let records = enumerate_cursor_legacy_sessions(&workspace_storage)
+                    .map(|rows| {
+                        cursor_legacy_records_from_rows(rows, HarnessSource::Cursor, machine)
+                    })
+                    .unwrap_or_default();
+                let record_count = records.len();
+                let recognized_files = records
+                    .iter()
+                    .map(|record| record.absolute_path.clone())
+                    .collect();
+                report.records.extend(records);
                 return HarnessProbe {
                     root: Some(workspace_storage),
                     confidence,
@@ -877,8 +959,9 @@ fn probe_cursor_harness(
                     earliest,
                     latest,
                     bytes: legacy.total_bytes,
+                    recognized_files,
                     note: format!(
-                        "{env_note}来自 legacy workspaceStorage；{global_summary}SQLite 只读枚举 ItemTable；过滤前 {candidate_count} / 过滤后 {count} 会话"
+                        "{env_note}来自 legacy workspaceStorage；{global_summary}SQLite 只读枚举 ItemTable；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}"
                     ),
                     ..base
                 };
@@ -887,7 +970,7 @@ fn probe_cursor_harness(
     }
 
     let Some(info) = global_info else {
-        missing_roots.push(global_db.clone());
+        report.missing_roots.push(global_db.clone());
         return HarnessProbe {
             root: Some(global_db),
             confidence,
@@ -905,20 +988,41 @@ fn probe_cursor_harness(
             count,
             earliest,
             latest,
-        } => HarnessProbe {
-            root: Some(global_db),
-            confidence,
-            state: ProbeState::FileTarget,
-            record_count: Some(count),
-            candidate_count: Some(candidate_count),
-            earliest,
-            latest,
-            bytes: info.total_bytes,
-            note: format!(
-                "{env_note}SQLite 只读枚举 cursorDiskKV表(key, value)；过滤前 {candidate_count} / 过滤后 {count} 会话"
-            ),
-            ..base
-        },
+        } => {
+            let records = crate::sqlite_probe::spec_from_cell(cell)
+                .and_then(|spec| enumerate_sqlite_sessions(&global_db, &spec).ok())
+                .map(|rows| {
+                    sqlite_records_from_rows(
+                        rows,
+                        &global_db,
+                        HarnessSource::Cursor,
+                        machine,
+                        SqliteSessionLayout::CursorGlobal,
+                    )
+                })
+                .unwrap_or_default();
+            let record_count = records.len();
+            let recognized_files = records
+                .iter()
+                .map(|record| record.absolute_path.clone())
+                .collect();
+            report.records.extend(records);
+            HarnessProbe {
+                root: Some(global_db),
+                confidence,
+                state: ProbeState::FileTarget,
+                record_count: Some(count),
+                candidate_count: Some(candidate_count),
+                earliest,
+                latest,
+                bytes: info.total_bytes,
+                recognized_files,
+                note: format!(
+                    "{env_note}SQLite 只读枚举 cursorDiskKV表(key, value)；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}"
+                ),
+                ..base
+            }
+        }
         SqliteSessionProbe::SchemaMismatch { actual } => HarnessProbe {
             root: Some(global_db),
             confidence,
@@ -1226,6 +1330,7 @@ fn build_record(
         mtime,
         source,
         compressed,
+        sqlite_layout: None,
     })
 }
 
