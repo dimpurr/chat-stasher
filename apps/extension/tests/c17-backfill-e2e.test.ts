@@ -415,10 +415,13 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
     expect(mod.lastBackfillTick()!.report!.failedThisRun).toHaveLength(1);
   });
 
-  it('🔴 BUG-2【C20 已修】：两个欠账键塌成同一个文件名 ⇒ 身份对不上，两条都不清账', async () => {
+  it('🔴 BUG-2【C21 治根】：两个欠账键【不可能】再塌成同一个文件名', async () => {
     await enableBackfill();
     // 这两个 id 都以同一段 hex-dash 开头，sessionIdPatterns 的贪婪匹配到此为止：
-    //   'deadbeef01-zzz' 和 'deadbeef01-yyy' 都 ⇒ sessionId 'deadbeef01-'
+    //   'deadbeef01-zzz' 和 'deadbeef01-yyy' 曾经都 ⇒ sessionId 'deadbeef01-'
+    // 🔴 C21 之后落盘那一侧【根本不再从 URL 抠身份】（见 lib/backfill/engine.ts
+    //    的 `sessionId: id` 与 entrypoints/background.ts 的 resolveSessionId），
+    //    所以这条正则怎么贪婪都不再影响文件名。
     const ids = ['deadbeef01-zzz', 'deadbeef01-yyy'];
     const server = makeServer({ ids, total: 2, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
@@ -433,18 +436,21 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
     console.log('[C17-3.A2] 失败清单:', s.failures);
     console.log('[C17-3.A2] 落盘文件名:', files);
     expect(files.length).toBe(2);                         // 写了两次
-    expect(new Set(files).size).toBe(1);                  // 🔴 但仍然是同一个文件名
-
-    // C20 之前：s.archived === ids —— 两条都被划掉，而磁盘上只剩 1 个文件，
-    //           先写的那条对话被后写的覆盖，且没有任何人知道。
-    // C20 之后：sink 报回它【实际用来命名】的身份，engine 当场对账 ⇒ 对不上就不清账。
-    //           🔴 这就是根因「同一个身份被表达了两次、中间没有一致性校验」的那道校验。
-    expect(s.archived).toEqual([]);
-    expect(s.failures.map((f: any) => [f.shortId, f.reason])).toEqual([
-      ['deadbeef', 'identity-mismatch'],
-      ['deadbeef', 'identity-mismatch'],
+    expect(new Set(files).size).toBe(2);                  // 🔴 C21：两个【不同】的文件名
+    expect(files.sort()).toEqual([
+      'chat-stasher/inbox/chatgpt-deadbeef01-yyy.json',
+      'chat-stasher/inbox/chatgpt-deadbeef01-zzz.json',
     ]);
-    // 覆盖仍然会发生（文件名怎么算的没变），但它不再是静默的：用户看得见这两条。
+
+    // 历史：
+    //  · C20 之前：s.archived === ids —— 两条都被划掉，而磁盘上只剩 1 个文件，
+    //    先写的那条对话被后写的覆盖，且没有任何人知道。
+    //  · C20：sink 报回它【实际用来命名】的身份，engine 当场对账 ⇒ 对不上就不清账。
+    //    覆盖仍然发生，只是不再静默 —— 治的是症状。
+    //  · 🔴 C21：身份【只表达一次】⇒ 覆盖本身消失。两条都正常清账，
+    //    identity-mismatch 那条分支在这条路径上已经不可能被触发。
+    expect(s.archived.sort()).toEqual([...ids].sort());
+    expect(s.failures ?? []).toEqual([]);
   });
 });
 

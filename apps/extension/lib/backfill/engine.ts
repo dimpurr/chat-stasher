@@ -356,6 +356,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       text: res.text,
       pageUrl: `${opts.origin}/c/${id}`,
       capturedAt: clock.now(),
+      // 🔴 C21 · 根因治理的落点：**身份只表达一次。**
+      //    这条欠账的 id 就是列表接口给的 items[].id（enumerate.ts:64-68），
+      //    这里原样带下去，落盘那边不再从 URL 里抠第二遍。
+      //    ⇒「两个不同的欠账键塌成同一个文件名」在结构上不再可能：
+      //      文件名片段 = 欠账键本身（恒等映射，见 contract.ts 的 pathSafeSessionId）。
+      sessionId: id,
     };
     // 🔴 C20 · 本次修法的落点：**sink 的结果说了算。**
     //
