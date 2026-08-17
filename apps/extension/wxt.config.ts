@@ -22,7 +22,16 @@ export default defineConfig({
     permissions: ['downloads', 'storage'],
     browser_specific_settings: {
       gecko: {
-        id: 'chat-stasher@local.spike',
+        // Not a mailbox. AMO accepts either a GUID or "a string containing 80
+        // characters or less formatted like an email address", and states that
+        // "while you can use a real email address (remembering that this may
+        // attract spam), any correctly formatted string can be used" —
+        // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json/browser_specific_settings
+        // (checked 2026-08-17). A non-mailbox string is the better choice here:
+        // the id is published in every copy of the extension forever and cannot
+        // be changed after release, so it should not be an address anyone has to
+        // keep alive. Reporting contact lives in SECURITY.md instead.
+        id: 'chat-stasher@team.iopho.com',
         // AMO gate since 2025-11-03 (new extensions): the extension collects
         // no user data, so the truthful declaration is "none".
         data_collection_permissions: { required: ['none'] },
