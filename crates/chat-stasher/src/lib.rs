@@ -5,6 +5,7 @@
 //! deliberately read-only: no session content is ever read or printed in this
 //! spike, except when `read` verifies a session back from the repository.
 
+pub mod collect;
 pub mod config;
 pub mod doctor;
 pub mod id;

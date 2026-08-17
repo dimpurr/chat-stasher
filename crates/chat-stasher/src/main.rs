@@ -154,8 +154,26 @@ enum Command {
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
     },
-    /// Seal one active (live) file by renaming it into the next sealed-shard
-    /// slot, leaving the original path free as the new tail.
+    /// Read every file-backed session returned by `status` into our own stage.
+    ///
+    /// Harness files are opened read-only. JSONL sources use a durable byte
+    /// offset plus committed-prefix SHA-256; only complete newline-terminated
+    /// records are sealed. The cursor state lives under chat-stasher's own
+    /// data directory, not under any harness directory.
+    Collect {
+        /// Stage directory that holds the sealed `sessions/` tree.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Machine partition for `sessions/<machine>/…`.
+        /// Default: this machine's normalised hostname.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+    },
+    /// Seal one file already inside our stage into the next sealed-shard slot.
+    /// This command never renames a harness-owned path.
     ///
     /// Gated by `data/harness-registry-v1.json` (`seal_policy` + `seal_source`
     /// + the platform cell's `confidence`): only a harness whose policy is
@@ -168,8 +186,8 @@ enum Command {
         /// Registry harness id that owns the active file (e.g. `claude-code`).
         #[arg(long)]
         harness: String,
-        /// Path of the live (active) file to seal. After the rename this path
-        /// is free: a reopen-by-path harness starts its new tail there.
+        /// Path of a file already inside --stage to seal. Paths outside the
+        /// stage are rejected and left untouched.
         #[arg(long)]
         active: PathBuf,
         /// Stage directory that holds the sealed `sessions/` tree.
@@ -266,6 +284,11 @@ fn main() -> ExitCode {
             machine,
             shard_bucket_cap,
         } => cmd_ingest(&inbox, &stage, machine.as_deref(), shard_bucket_cap),
+        Command::Collect {
+            stage,
+            machine,
+            shard_bucket_cap,
+        } => cmd_collect(&stage, machine.as_deref(), shard_bucket_cap),
         Command::Seal {
             harness,
             active,
@@ -312,6 +335,69 @@ fn cmd_ingest(
     ExitCode::SUCCESS
 }
 
+fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> ExitCode {
+    let config = Config::load();
+    let machine = machine
+        .map(String::from)
+        .unwrap_or_else(chat_stasher::id::machine_id);
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let report = match chat_stasher::collect::collect(
+        &config,
+        stage,
+        &machine,
+        &state_dir,
+        shard_bucket_cap,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("collect: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("[collect] stage           : {}", stage.display());
+    println!("[collect] state           : {}", state_dir.display());
+    println!("[collect] machine         : {machine}");
+    println!("[collect] scanner records : {}", report.scanned_records);
+    println!(
+        "[collect] changed={} unchanged={} reset={} shards={} lines={}",
+        report.changed_records,
+        report.unchanged_records,
+        report.reset_records,
+        report.shards_written,
+        report.lines_written
+    );
+    println!(
+        "[collect] read bytes      : delta_or_full={} prefix_validated={}",
+        report.delta_bytes_read, report.prefix_bytes_validated
+    );
+    for outcome in &report.outcomes {
+        println!(
+            "  + session={} path_sha256={} source_bytes={} read_bytes={} prefix_bytes={} lines={} shard={} reset={} compressed={}",
+            outcome.session_prefix,
+            outcome.source_path_sha256,
+            outcome.source_bytes,
+            outcome.bytes_read,
+            outcome.prefix_bytes_validated,
+            outcome.lines_written,
+            outcome.shard.as_deref().unwrap_or("none"),
+            outcome.reset,
+            outcome.compressed,
+        );
+    }
+    if !report.errors.is_empty() {
+        println!("[collect] errors          : {}", report.errors.len());
+        for error in &report.errors {
+            println!(
+                "  ! session={} path_sha256={} source_not_collected=true",
+                error.session_prefix, error.source_path_sha256
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 /// `seal` — allowlist-checked rename-sealing of one active file.
 ///
 /// The registry (`data/harness-registry-v1.json`) is the single decision
@@ -327,6 +413,10 @@ fn cmd_seal(
     session: Option<&str>,
     shard_bucket_cap: usize,
 ) -> ExitCode {
+    if let Err(e) = seal::validate_active_in_stage(active, stage) {
+        eprintln!("seal: {e}");
+        return ExitCode::FAILURE;
+    }
     let registry = match scanner::load_registry_from_repo() {
         Ok(r) => r,
         Err(e) => {
@@ -384,9 +474,7 @@ fn cmd_seal(
                 store::shard_bucket_name(seq, shard_bucket_cap),
                 store::shard_filename(seq),
             );
-            println!(
-                "[seal] original path now free: a reopen-by-path harness starts its new tail there"
-            );
+            println!("[seal] source was stage-owned; no harness path was changed");
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -689,8 +777,11 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
         );
         for s in &m.sessions {
             println!(
-                "    session {:<24} shards={:<3} bytes={:<10} sha256={}",
-                s.session_id, s.shard_count, s.concat_bytes, s.sha256
+                "    session {:<8} shards={:<3} bytes={:<10} sha256={}",
+                short_session_id(&s.session_id),
+                s.shard_count,
+                s.concat_bytes,
+                s.sha256
             );
         }
     }
@@ -827,6 +918,7 @@ fn print_reconcile(r: &ReconcileReport) {
         r.duration
     );
     for row in &r.rows {
+        let session = short_session_id(&row.session_id);
         let mark = if row.outcome == SessionOutcome::Match {
             "ok "
         } else {
@@ -835,28 +927,31 @@ fn print_reconcile(r: &ReconcileReport) {
         match &row.outcome {
             SessionOutcome::Match => println!(
                 "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}",
-                row.machine, row.session_id, row.observed_shards, row.observed_bytes, row.observed_sha
+                row.machine, session, row.observed_shards, row.observed_bytes, row.observed_sha
             ),
             SessionOutcome::MissingInArchive => println!(
                 "  {mark} {:<12} {:<20} MISSING IN ARCHIVE",
-                row.machine, row.session_id
+                row.machine, session
             ),
             SessionOutcome::ShardCountMismatch { expected, observed } => println!(
                 "  {mark} {:<12} {:<20} SHARD COUNT expected={expected} observed={observed}",
-                row.machine, row.session_id
+                row.machine, session
             ),
             SessionOutcome::ByteLengthMismatch { expected, observed } => println!(
                 "  {mark} {:<12} {:<20} BYTE LENGTH expected={expected} observed={observed}",
-                row.machine, row.session_id
+                row.machine, session
             ),
             SessionOutcome::ShaMismatch { expected, observed } => println!(
                 "  {mark} {:<12} {:<20} SHA MISMATCH\n      expected={expected}\n      observed={observed}",
-                row.machine, row.session_id
+                row.machine, session
             ),
         }
     }
     for (m, s) in &r.extra_in_archive {
-        println!("  !? {m:<12} {s:<20} in archive but NOT in expected manifest (informational)");
+        println!(
+            "  !? {m:<12} {:<20} in archive but NOT in expected manifest (informational)",
+            short_session_id(s)
+        );
     }
     println!(
         "[verify] L3 verdict       : {}",
@@ -874,9 +969,54 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex_digest(&out)
 }
 
+fn short_session_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod decision_surface_tests {
+    use super::*;
+    use clap::CommandFactory;
+    use std::fs;
+
+    #[test]
+    fn seal_help_and_active_guard_follow_decision() {
+        let mut command = Cli::command();
+        let seal_command = command
+            .find_subcommand_mut("seal")
+            .expect("seal subcommand must remain user-visible");
+        let mut help = Vec::new();
+        seal_command.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert!(
+            !help.contains("reopen-by-path") && !help.contains("original path now free"),
+            "seal help must not describe changing a harness live-file path"
+        );
+        assert!(
+            help.contains("inside --stage"),
+            "seal help must state the stage-only boundary"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let outside = dir.path().join("outside.jsonl");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(&outside, b"fixture\n").unwrap();
+        let err = seal::seal_active_file(&outside, &stage, "m", "s", 20)
+            .expect_err("--active outside --stage must be rejected");
+        assert!(err.to_string().contains("inside --stage"));
+        assert!(outside.exists());
+    }
+}
+
 fn cmd_init() -> ExitCode {
     match Config::init_default(config::DEFAULT_CONFIG_TEMPLATE) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            println!(
+                "next: chat-stasher collect --stage <stage-dir> && chat-stasher push --stage <stage-dir> && chat-stasher verify --stage <stage-dir>"
+            );
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("init: {e}");
             ExitCode::FAILURE
@@ -945,7 +1085,7 @@ fn print_status(report: &scanner::ScanReport) {
             rec.byte_size,
             secs,
             if rec.compressed { "zst" } else { "   " },
-            rec.id,
+            short_session_id(&rec.id),
         );
     }
     println!();

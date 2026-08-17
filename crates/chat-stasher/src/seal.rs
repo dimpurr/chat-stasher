@@ -1,29 +1,10 @@
-//! Fail-safe, per-harness active-file sealing via rename (spike B20).
+//! Sealing for files already owned by chat-stasher's stage.
 //!
-//! A live session file re-pushed along the **same path** every round makes
-//! rustic re-read the whole file each time — measured ≈17.5× the appended
-//! bytes over five rounds (spike A7). Sealing it at push time — renaming it
-//! *into* the next sealed-shard slot and leaving the original path free as the
-//! new tail — collapses that to ≈1.08×.
-//!
-//! The one precondition is the harness's write fd semantics: it must reopen
-//! its file **by path** on every write. A harness that holds the fd across
-//! writes keeps appending to the renamed inode after `rename`, so the original
-//! path silently stops receiving data — undetectable, unrecoverable loss. That
-//! is why the decision direction matters (spike A9):
-//!   * **Claude Code** — measured reopen-per-write ⇒ `rename` allowed,
-//!   * **Gemini CLI** — `fs.appendFileSync` (open→append→close) ⇒ allowed,
-//!   * **Codex** — holds the fd (`recorder.rs` `ensure_writer_open`) ⇒ **no**,
-//!   * **opencode** — single SQLite, no active jsonl ⇒ not-applicable.
-//!
-//! Cost asymmetry: a missed rename re-uploads bytes (paying, measurable,
-//! fixable later); a wrong rename silently drops bytes (invisible and final in
-//! a backup product). The allowlist therefore defaults to **no rename** for
-//! every value that is not an attested `rename` — unknown policy tokens,
-//! unconfirmed confidence cells, missing evidence lines all land on
-//! no-rename. Adding a harness to the rename list means editing BOTH
-//! `seal_policy` and `seal_source` in `data/harness-registry-v1.json`; the
-//! gate below refuses to widen without a `源码确认` cell and a source line.
+//! The collector reads harness files by byte offset and never renames them.
+//! This module remains useful for a stage-local housekeeping operation, but
+//! its first operation is a path-boundary check: `--active` must resolve below
+//! `--stage`, including when the active path is a symlink. A path outside that
+//! boundary is rejected before any stage mutation is possible.
 
 use crate::scanner::{Confidence, HarnessRegistry, RegistryCell, RegistryHarness};
 use anyhow::Context;
@@ -38,7 +19,7 @@ pub const SEAL_NOT_APPLICABLE: &str = "not-applicable";
 /// Resolved per-harness seal policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SealPolicy {
-    /// Verified reopen-by-path harness; renaming the active file is safe.
+    /// Legacy registry token retained for the stage-local command gate.
     Rename,
     /// Known fd-holder, or anything unverified / unconfirmed / unknown.
     NoRename,
@@ -96,16 +77,35 @@ pub fn harness_by_id<'a>(registry: &'a HarnessRegistry, id: &str) -> Option<&'a 
     registry.harnesses.iter().find(|h| h.id == id)
 }
 
-/// Rename the active file into the next sealed-shard slot of a session.
+/// Verify that `active` belongs to our own stage tree.
+///
+/// Existing symlinks are canonicalised, so a link inside the stage that points
+/// into a harness directory is rejected too. Missing active paths are checked
+/// lexically and then rejected by [`seal_active_file`] for non-existence.
+pub fn validate_active_in_stage(active: &Path, stage_root: &Path) -> anyhow::Result<()> {
+    let stage = fs::canonicalize(stage_root).context("resolve --stage")?;
+    let active = fs::canonicalize(active).unwrap_or_else(|_| {
+        if active.is_absolute() {
+            active.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(active))
+                .unwrap_or_else(|_| active.to_path_buf())
+        }
+    });
+    if active == stage || !active.starts_with(&stage) {
+        anyhow::bail!("refusing seal: --active must be inside --stage; source left untouched");
+    }
+    Ok(())
+}
+
+/// Rename an already-stage-owned file into the next sealed-shard slot.
 ///
 /// The active file is moved to
 /// `<stage>/sessions/<machine>/<session-id>/<bucket>/NNNNNN.jsonl`, where
 /// `NNNNNN` is `store::next_shard_seq` and the bucket is derived from the
-/// bucket cap. Because `rename(2)` keeps the inode, the file's size+mtime
-/// survive, so the very next push sees the old shard as `files_unmodified`
-/// (the sealed-shard scheme's core property). The original path is left
-/// vacant — for a reopen-by-path harness the next write there starts a
-/// brand-new tail (which is exactly what `原路径留作新尾片` means).
+/// bucket cap. This is deliberately not a harness-file operation and does not
+/// create a new harness tail.
 ///
 /// Caller must run [`seal_allowed`] first — this function does not re-check.
 /// Refusing to do so for an fd-holding harness silently loses data.
@@ -116,6 +116,7 @@ pub fn seal_active_file(
     session_id: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<u64> {
+    validate_active_in_stage(active, stage_root)?;
     if !active.exists() {
         anyhow::bail!("active file does not exist: {}", active.display());
     }
@@ -317,6 +318,26 @@ mod tests {
         assert!(active.exists());
         assert_eq!(store::next_shard_seq(stage, "m", "s"), 3);
         drop(dir);
+    }
+
+    #[test]
+    fn active_path_outside_stage_is_refused_and_left_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let active = dir.path().join("harness-live.jsonl");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(&active, b"must-remain-at-source\n").unwrap();
+
+        let err = seal_active_file(&active, &stage, "m", "s", 20)
+            .expect_err("a harness path outside our stage must be rejected");
+        assert!(err.to_string().contains("inside --stage"));
+        assert!(active.exists(), "rejected source must remain in place");
+        assert_eq!(fs::read(&active).unwrap(), b"must-remain-at-source\n");
+        assert!(
+            store::sealed_shard_entries(&session_shard_dir(&stage, "m", "s"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// `harness_by_id` resolves the registry the allowlist is read from.
