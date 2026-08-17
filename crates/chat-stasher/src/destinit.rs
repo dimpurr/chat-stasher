@@ -46,6 +46,33 @@
 //! into "it had nothing extra": the run reports the difference set as
 //! **incomplete** and the caller exits non-zero. The local re-collect is still
 //! pushed — refusing to save what we do know would trade one gap for another.
+//!
+//! # ADR-015: but "unknown" is not the only kind of absence, either
+//!
+//! Treating *every* absence as unknown has its own cost. Declare four
+//! destinations and the first three runs each report INCOMPLETE, because the
+//! other three do not exist yet — a warning on the completely normal path,
+//! which is how users are taught to ignore warnings.
+//!
+//! Skipping the ones that are not there is worse, though, because **"no
+//! repository at that location" has two opposite causes**: it was never built,
+//! or it was built and is now gone. Gone may mean the only surviving copy of
+//! some sessions just disappeared. The filesystem cannot tell these apart —
+//! both look like an empty path.
+//!
+//! Our own records can. `state/debts-v2.json` keys its debt sets by
+//! [`crate::collect::destination_id`], so "have we ever collected for this
+//! destination" is a local fact needing no network. That splits the absence in
+//! two, and gives three states in total:
+//!
+//! | state | evidence | effect |
+//! |---|---|---|
+//! | [`SourceStatus::KnownEmpty`] | no record, and definitively nothing there | not part of the union; the run may still COMPLETE |
+//! | [`SourceStatus::SuspectedLoss`] | we have a record, and it cannot be read | reported loudly as possible data loss; non-zero exit |
+//! | [`SourceStatus::Unknown`] | no record, and we cannot tell what is there | INCOMPLETE, as before; non-zero exit |
+//!
+//! The two failing states share an exit code and share nothing else: one says
+//! *go find your archive*, the other says *try again when the network is up*.
 
 use crate::readback::ReadAllReport;
 use crate::store::{self, BackupStore, StoreConfig};
@@ -58,6 +85,44 @@ use std::path::Path;
 pub struct SourceDestination {
     pub name: String,
     pub cfg: StoreConfig,
+    /// Have we ever committed a read *for this destination* on this machine?
+    ///
+    /// ADR-015. "There is no repository at that location" has two opposite
+    /// causes and the filesystem cannot tell them apart: never built, or built
+    /// and since lost. Our own `state/debts-v2.json` can — it is keyed by
+    /// [`crate::collect::destination_id`], so a key that is present is proof we
+    /// once staged reads for this destination. Supplied by the caller precisely
+    /// so this module never guesses from the location itself.
+    pub previously_recorded: bool,
+}
+
+/// How a run was able (or unable) to account for one existing destination.
+///
+/// Three states, not two: an absence we can *explain* and an absence we cannot
+/// must never print the same word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceStatus {
+    /// The archive was opened and read. Its contribution is exact.
+    #[default]
+    Consulted,
+    /// Nothing at the location, and we have no record of ever having dealt
+    /// with it ⇒ it was never built. Contributes nothing, and that nothing is
+    /// a *fact*, so it does not hold the union back.
+    KnownEmpty,
+    /// We have a record of dealing with it, and now it cannot be read. This is
+    /// not "one fewer empty destination" — it is a copy that may be gone.
+    SuspectedLoss,
+    /// No record, and we cannot even establish whether a repository is there
+    /// (backend down, location unreadable). Unknown is not empty.
+    Unknown,
+}
+
+/// Why an archive could not be read.
+enum Absence {
+    /// The location answered, and there is definitively no repository in it.
+    NoRepository,
+    /// We could not establish what is there at all.
+    Indeterminate,
 }
 
 /// What one existing destination contributed — or failed to contribute.
@@ -66,6 +131,8 @@ pub struct SourceOutcome {
     pub name: String,
     /// sha256 of the repository location. The location itself is never printed.
     pub destination_id: String,
+    /// Which of the three states this destination resolved to.
+    pub status: SourceStatus,
     /// Could this destination's archive be consulted at all?
     pub reachable: bool,
     /// Why not, when it could not. Metadata only.
@@ -101,17 +168,96 @@ pub struct DiffReport {
     pub restored_shards: usize,
 }
 
+impl DiffReport {
+    /// Names of destinations we have a record for and can no longer read.
+    pub fn suspected_loss(&self) -> Vec<&str> {
+        self.sources
+            .iter()
+            .filter(|s| s.status == SourceStatus::SuspectedLoss)
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Names of destinations whose existence we could not even establish.
+    pub fn unknown(&self) -> Vec<&str> {
+        self.sources
+            .iter()
+            .filter(|s| s.status == SourceStatus::Unknown)
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Names of destinations that were never built and are therefore empty.
+    pub fn known_empty(&self) -> Vec<&str> {
+        self.sources
+            .iter()
+            .filter(|s| s.status == SourceStatus::KnownEmpty)
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+}
+
 /// Ask one destination's archive what it holds, for our machine partition.
 ///
 /// Every failure path — no repository yet, no key, unreachable backend — is an
 /// `Err`, never an empty report.
 pub fn probe_archive(cfg: &StoreConfig, machine: &str) -> anyhow::Result<ReadAllReport> {
-    let store = BackupStore::new(cfg.clone(), machine.to_string());
-    if !store.repository_exists()? {
-        anyhow::bail!("destination repository is not initialised");
+    probe_classified(cfg, machine).map_err(|(_, reason)| anyhow::anyhow!("{reason}"))
+}
+
+/// "The backend listed no config file" is not by itself proof that no
+/// repository is there.
+///
+/// Measured on this machine: with a *local* repository directory chmod'd to
+/// `000`, `backends().repository().list(FileType::Config)` returns
+/// `Ok(<empty>)` rather than an error — so a directory we simply cannot read
+/// looks exactly like a directory that was never created. For a local path we
+/// can settle it ourselves: a path that is not there is genuinely nothing, and
+/// a path that is there but will not open is *unknown*.
+fn no_repository_or_unreadable(cfg: &StoreConfig) -> (Absence, String) {
+    let definitely_nothing = (
+        Absence::NoRepository,
+        "destination repository is not initialised".to_string(),
+    );
+    // Backend strings are the backend's business; only a plain path can be
+    // second-guessed here.
+    if cfg.repo_root.contains(':') && !Path::new(&cfg.repo_root).exists() {
+        return definitely_nothing;
     }
-    let mk = store::load_key_file(cfg)?;
-    store.read_all_machines(&mk)
+    let root = Path::new(&cfg.repo_root);
+    match std::fs::read_dir(root) {
+        Ok(_) => definitely_nothing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => definitely_nothing,
+        Err(e) => (
+            Absence::Indeterminate,
+            format!(
+                "the destination location exists but cannot be read, so whether a repository \
+                 is in it is unknown: {e}"
+            ),
+        ),
+    }
+}
+
+/// Same probe, but keeping *why* it failed: "the location answered and there is
+/// no repository" and "we could not find out" are the two halves of the
+/// tri-state and collapsing them into one `Err` is what ADR-015 forbids.
+fn probe_classified(cfg: &StoreConfig, machine: &str) -> Result<ReadAllReport, (Absence, String)> {
+    let store = BackupStore::new(cfg.clone(), machine.to_string());
+    match store.repository_exists() {
+        Ok(true) => {}
+        Ok(false) => return Err(no_repository_or_unreadable(cfg)),
+        Err(e) => {
+            return Err((
+                Absence::Indeterminate,
+                format!("cannot establish whether a repository is there: {e:#}"),
+            ));
+        }
+    }
+    let mk = store::load_key_file(cfg)
+        .map_err(|e| (Absence::Indeterminate, format!("key unavailable: {e:#}")))?;
+    store
+        .read_all_machines(&mk)
+        .map_err(|e| (Absence::Indeterminate, format!("archive unreadable: {e:#}")))
 }
 
 /// Does the stage already hold at least one sealed shard for this session?
@@ -155,9 +301,10 @@ pub fn fill_difference(
             destination_id: crate::collect::destination_id(&source.cfg.repo_root),
             ..SourceOutcome::default()
         };
-        match probe_archive(&source.cfg, machine) {
+        match probe_classified(&source.cfg, machine) {
             Ok(observation) => {
                 outcome.reachable = true;
+                outcome.status = SourceStatus::Consulted;
                 let mut wanted: BTreeSet<String> = BTreeSet::new();
                 let mut expected: BTreeMap<String, String> = BTreeMap::new();
                 for merge in &observation.machines {
@@ -196,12 +343,28 @@ pub fn fill_difference(
                     }
                 }
             }
-            Err(e) => {
+            Err((absence, reason)) => {
                 outcome.reachable = false;
-                outcome.unreachable_reason = Some(format!("{e:#}"));
+                outcome.unreachable_reason = Some(reason);
+                // The whole tri-state turns on this line. An absence at the
+                // location is only "it was never built" when *our own record*
+                // agrees we never built it. If we have dealt with this
+                // destination before, the same absence means the opposite
+                // thing, and the opposite thing is a lost copy.
+                outcome.status = match (absence, source.previously_recorded) {
+                    (_, true) => SourceStatus::SuspectedLoss,
+                    (Absence::NoRepository, false) => SourceStatus::KnownEmpty,
+                    (Absence::Indeterminate, false) => SourceStatus::Unknown,
+                };
             }
         }
-        if !outcome.reachable || !outcome.failed_sessions.is_empty() {
+        // Only a *known* empty destination leaves the union provable. Both
+        // other absences leave it unproven — for different reasons, reported
+        // with different words by the caller.
+        if outcome.status == SourceStatus::SuspectedLoss
+            || outcome.status == SourceStatus::Unknown
+            || !outcome.failed_sessions.is_empty()
+        {
             report.diff_complete = false;
         }
         report.restored_sessions += outcome.restored_sessions;
@@ -301,6 +464,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sources = vec![SourceDestination {
             name: "gone".to_string(),
+            // We have collected for it before — so its absence is loss, not
+            // emptiness, and it still holds the union back.
+            previously_recorded: true,
             cfg: StoreConfig {
                 repo_root: dir
                     .path()
@@ -318,6 +484,35 @@ mod tests {
             "an unconsultable destination must make the difference set incomplete"
         );
         assert!(!report.sources[0].reachable);
+        assert_eq!(report.sources[0].status, SourceStatus::SuspectedLoss);
         assert_eq!(report.restored_sessions, 0);
+    }
+
+    /// The same location, the same absence, and the opposite verdict — the
+    /// only thing that changed is whether we have a record of it.
+    #[test]
+    fn the_same_absence_means_never_built_when_we_have_no_record_of_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sources = vec![SourceDestination {
+            name: "never-made".to_string(),
+            previously_recorded: false,
+            cfg: StoreConfig {
+                repo_root: dir
+                    .path()
+                    .join("no-such-repo")
+                    .to_string_lossy()
+                    .into_owned(),
+                key_file: dir.path().join("no-such-key.json"),
+                connections: 1,
+                options: BTreeMap::new(),
+            },
+        }];
+        let report = fill_difference(&dir.path().join("stage"), "fixture-machine", 20, &sources);
+        assert_eq!(report.sources[0].status, SourceStatus::KnownEmpty);
+        assert!(
+            report.diff_complete,
+            "a destination that was never built holds nothing, and that nothing is knowledge — \
+             it must not make every earlier destination's run look incomplete"
+        );
     }
 }

@@ -9,7 +9,11 @@
 //!    from the existing destination, i.e. this is not "re-upload everything,
 //!    every time" wearing a difference set's clothes;
 //! 3. an existing destination that cannot be consulted is reported as an
-//!    *incomplete* difference set, never folded into "it had nothing extra".
+//!    *incomplete* difference set, never folded into "it had nothing extra";
+//! 4. (ADR-015) an absent destination resolves to one of three distinct
+//!    states, and which one it is turns on our own record of having dealt with
+//!    it — never on the filesystem alone, which cannot tell "never built" from
+//!    "built and since lost".
 //!
 //! Only synthetic temp trees are touched; assertions are counts and digests.
 
@@ -17,6 +21,7 @@ use chat_stasher::destinit::{self, SourceDestination};
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const MACHINE: &str = "fixture-machine";
@@ -96,6 +101,7 @@ fn new_destination_gets_the_union_of_local_and_existing_destination() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "a".to_string(),
+            previously_recorded: true,
             cfg: cfg_a.clone(),
         }],
     );
@@ -143,6 +149,7 @@ fn an_intact_local_source_copies_nothing_from_the_existing_destination() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "a".to_string(),
+            previously_recorded: true,
             cfg: cfg_a,
         }],
     );
@@ -186,6 +193,7 @@ fn an_unconsultable_destination_is_reported_not_treated_as_empty() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "a".to_string(),
+            previously_recorded: true,
             cfg: cfg_a,
         }],
     );
@@ -202,25 +210,98 @@ fn an_unconsultable_destination_is_reported_not_treated_as_empty() {
     );
 }
 
-/// A repository path that does not exist at all is the same class of failure
-/// as an unreadable one: unknown, not empty.
+/// Criterion 4 — ADR-015. "No repository at that location" is the *same*
+/// observation in two opposite situations, and the only thing that can tell
+/// them apart is our own record of having dealt with the destination before.
+/// This test runs both halves against an identical missing path, so the record
+/// is provably the deciding input and not some property of the location.
 #[test]
-fn a_missing_repository_is_also_incomplete_not_empty() {
+fn a_missing_repository_is_never_built_or_suspected_loss_depending_on_our_record() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage_b = dir.path().join("stage-b");
     stage_session(&stage_b, SESSION_KEPT, &["{\"k\":1}"]);
+    let missing = cfg_for(
+        &dir.path().join("no-such-repo"),
+        &dir.path().join("no-such-key.json"),
+    );
+
+    // Never recorded: it was never built. Known to be empty, so the union is
+    // still provable and the run must not cry wolf.
+    let never = destinit::fill_difference(
+        &stage_b,
+        MACHINE,
+        store::DEFAULT_SHARD_BUCKET_CAP,
+        &[SourceDestination {
+            name: "never-made".to_string(),
+            previously_recorded: false,
+            cfg: missing.clone(),
+        }],
+    );
+    assert_eq!(never.sources[0].status, destinit::SourceStatus::KnownEmpty);
+    assert!(
+        never.diff_complete,
+        "declaring a destination you have not created yet must not report the earlier ones as \
+         incomplete — that is a warning on the normal path, and it trains the user to ignore \
+         warnings"
+    );
+    assert_eq!(never.known_empty(), vec!["never-made"]);
+    assert!(never.suspected_loss().is_empty());
+
+    // Recorded: we collected for it once, and now it is not there. Same
+    // filesystem observation, opposite meaning.
+    let lost = destinit::fill_difference(
+        &stage_b,
+        MACHINE,
+        store::DEFAULT_SHARD_BUCKET_CAP,
+        &[SourceDestination {
+            name: "was-here".to_string(),
+            previously_recorded: true,
+            cfg: missing,
+        }],
+    );
+    assert_eq!(
+        lost.sources[0].status,
+        destinit::SourceStatus::SuspectedLoss,
+        "a destination we have dealt with before, now gone, may have been holding the only copy"
+    );
+    assert!(!lost.diff_complete);
+    assert_eq!(lost.suspected_loss(), vec!["was-here"]);
+    assert!(lost.known_empty().is_empty());
+}
+
+/// The unreadable middle state: the location is there, we cannot see into it,
+/// and we have no record either way. That is *unknown* — not empty, and not
+/// loss, because claiming loss here would cry wolf on a permissions blip.
+#[test]
+fn a_location_we_cannot_read_is_unknown_not_empty_and_not_loss() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage_b = dir.path().join("stage-b");
+    stage_session(&stage_b, SESSION_KEPT, &["{\"k\":1}"]);
+
+    let repo = dir.path().join("unreadable-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let locked = std::fs::Permissions::from_mode(0o000);
+    std::fs::set_permissions(&repo, locked).unwrap();
+
     let diff = destinit::fill_difference(
         &stage_b,
         MACHINE,
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
-            name: "gone".to_string(),
-            cfg: cfg_for(
-                &dir.path().join("no-such-repo"),
-                &dir.path().join("no-such-key.json"),
-            ),
+            name: "opaque".to_string(),
+            previously_recorded: false,
+            cfg: cfg_for(&repo, &dir.path().join("no-such-key.json")),
         }],
     );
-    assert!(!diff.diff_complete);
-    assert!(!diff.sources[0].reachable);
+    // Restore before asserting, so a failure still leaves a removable tempdir.
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(diff.sources[0].status, destinit::SourceStatus::Unknown);
+    assert!(
+        !diff.diff_complete,
+        "we could not establish whether a repository is there, and unknown is not empty"
+    );
+    assert_eq!(diff.unknown(), vec!["opaque"]);
+    assert!(diff.known_empty().is_empty());
+    assert!(diff.suspected_loss().is_empty());
 }

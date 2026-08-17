@@ -1,6 +1,7 @@
 //! chat-stasher CLI entry point.
 
 use chat_stasher::config::{self, Config};
+use chat_stasher::destinit::SourceStatus;
 use chat_stasher::reap;
 use chat_stasher::scanner;
 use chat_stasher::schedule;
@@ -568,6 +569,25 @@ fn destination_view<'a>(
     )
 }
 
+/// One word per ADR-015 state. Deliberately three *different* words: calling
+/// all three "skipped" is the failure mode this exists to prevent.
+fn source_status_word(status: SourceStatus) -> &'static str {
+    match status {
+        SourceStatus::Consulted => "consulted",
+        SourceStatus::KnownEmpty => "never-built",
+        SourceStatus::SuspectedLoss => "SUSPECTED-LOSS",
+        SourceStatus::Unknown => "unknown",
+    }
+}
+
+fn join_or_none(names: &[&str]) -> String {
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
 /// `dest-init` — ADR-013. Give a new destination the union of the local
 /// sources and every existing destination, in that order.
 ///
@@ -619,6 +639,7 @@ fn cmd_dest_init(
     } else {
         from.to_vec()
     };
+    let state_dir = chat_stasher::collect::default_state_dir();
     let mut sources = Vec::new();
     for name in &source_names {
         if Some(name.as_str()) == destination.as_deref() {
@@ -629,9 +650,17 @@ fn cmd_dest_init(
             eprintln!("dest-init: `--from {name}` is not declared in the config");
             return ExitCode::from(2);
         }
+        let cfg = resolve_store_config(&config, Some(name), None, None, None, &[]);
+        // Read before step 1 runs: step 1 writes this machine's state for the
+        // *target*, and we want the record as it stood before this command.
+        let previously_recorded = chat_stasher::collect::destination_has_record(
+            &state_dir,
+            &chat_stasher::collect::destination_id(&cfg.repo_root),
+        );
         sources.push(chat_stasher::destinit::SourceDestination {
             name: name.clone(),
-            cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+            cfg,
+            previously_recorded,
         });
     }
 
@@ -657,7 +686,6 @@ fn cmd_dest_init(
     // Step 1 — the local sources are the truth, and rereading them costs the
     // existing destinations nothing.
     println!("[dest-init] step 1        : re-collect from the local sources");
-    let state_dir = chat_stasher::collect::default_state_dir();
     let view = destination_view(&target, &machine);
     let report = match chat_stasher::collect::collect(
         &config,
@@ -684,9 +712,10 @@ fn cmd_dest_init(
     let diff = chat_stasher::destinit::fill_difference(stage, &machine, shard_bucket_cap, &sources);
     for source in &diff.sources {
         println!(
-            "  source {:<16} sha256={} reachable={} sessions_here={} other_machines={} missing_locally={} restored={} shards={} failed={}",
+            "  source {:<16} sha256={} state={} reachable={} sessions_here={} other_machines={} missing_locally={} restored={} shards={} failed={}",
             source.name,
             source.destination_id,
+            source_status_word(source.status),
             source.reachable,
             source.sessions_for_this_machine,
             source.sessions_other_machines,
@@ -697,6 +726,25 @@ fn cmd_dest_init(
         );
         if let Some(reason) = &source.unreachable_reason {
             println!("    reason: {reason}");
+        }
+        match source.status {
+            SourceStatus::KnownEmpty => println!(
+                "    NEVER-BUILT: no repository at that location, and this machine has no record of \
+                 ever collecting for it. It was never built, so it holds nothing and cannot be \
+                 holding a copy we need. Not counted against the union."
+            ),
+            SourceStatus::SuspectedLoss => println!(
+                "    !! SUSPECTED DATA LOSS: this machine DOES have a record of collecting for this \
+                 destination, and its archive can no longer be read. This is NOT an empty \
+                 destination — it may have been holding the only remaining copy of some sessions. \
+                 Do not re-create it blank: find the original first."
+            ),
+            SourceStatus::Unknown => println!(
+                "    UNKNOWN: we could not establish whether a repository is there at all, and we \
+                 have no record of collecting for it. Unknown is not empty — this could be a \
+                 destination that was never built, or one that is merely unreachable right now."
+            ),
+            SourceStatus::Consulted => {}
         }
         if source.sessions_other_machines > 0 {
             println!(
@@ -710,6 +758,21 @@ fn cmd_dest_init(
     println!(
         "[dest-init] restored      : sessions={} shards={}",
         diff.restored_sessions, diff.restored_shards
+    );
+    println!(
+        "[dest-init] never built   : {} ({})",
+        diff.known_empty().len(),
+        join_or_none(&diff.known_empty())
+    );
+    println!(
+        "[dest-init] suspect lost  : {} ({})",
+        diff.suspected_loss().len(),
+        join_or_none(&diff.suspected_loss())
+    );
+    println!(
+        "[dest-init] unknown       : {} ({})",
+        diff.unknown().len(),
+        join_or_none(&diff.unknown())
     );
     println!("[dest-init] diff complete : {}", diff.diff_complete);
 
@@ -747,12 +810,30 @@ fn cmd_dest_init(
     }
     reap_remote(&target, no_reap);
 
+    // Suspected loss outranks a merely incomplete difference set: the same
+    // exit code, but a completely different thing to go and do about it.
+    let lost = diff.suspected_loss();
+    if !lost.is_empty() {
+        eprintln!(
+            "dest-init: result: SUSPECTED-DATA-LOSS exit_code=1 — {} destination(s) that this machine has \
+             collected for before can no longer be read: {}. This is NOT \"one fewer destination to copy \
+             from\": each of them may have been the last place some sessions still existed. The new \
+             destination has been given everything else, but it is NOT proven to hold the union. Go find \
+             those archives before you re-create anything.",
+            lost.len(),
+            lost.join(", "),
+        );
+        return ExitCode::FAILURE;
+    }
     if !diff.diff_complete {
+        let unknown = diff.unknown();
         eprintln!(
             "dest-init: result: INCOMPLETE exit_code=1 — the difference set could not be computed in full. \
-             At least one existing destination could not be consulted (or could not be copied from), so it is \
-             UNKNOWN whether this new destination holds the union. Unknown is not empty: re-run once the \
-             destination is reachable."
+             {} destination(s) could not be consulted or copied from ({}), so it is UNKNOWN whether this new \
+             destination holds the union. Unknown is not empty, and it is not loss either — we cannot tell \
+             whether these were ever built. Re-run once they are reachable.",
+            unknown.len().max(1),
+            join_or_none(&unknown),
         );
         return ExitCode::FAILURE;
     }
