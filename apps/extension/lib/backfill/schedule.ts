@@ -38,7 +38,11 @@ export async function isBackfillEnabled(store: BackfillStore | null): Promise<bo
   return raw === true ? true : BACKFILL_DEFAULT_ENABLED;
 }
 
-/** 显式开关（函数即接口，本任务不做 UI）。 */
+/**
+ * 显式开关。
+ * C13 时这里写的是「函数即接口，本任务不做 UI」—— 结果是**没有任何生产代码调用它**，
+ * 用户根本打不开。C18 补上了调用点：entrypoints/popup/main.ts 的那个 checkbox。
+ */
 export async function setBackfillEnabled(store: BackfillStore | null, on: boolean): Promise<boolean> {
   if (!store) return false;
   await store.save(BACKFILL_ENABLED_KEY, on === true);
@@ -70,6 +74,40 @@ export interface TickResult {
   ran: boolean;
   reason: TickReason;
   report: RunReport | null;
+}
+
+/**
+ * 「这一脚为什么踢不动」的四种闸门。
+ * 'already-running' 与 'ran' 不在其中：前者是并发瞬时态，后者不是闸门。
+ */
+export type TickBlockReason = Extract<
+  TickReason,
+  'no-store' | 'disabled' | 'download-paused' | 'no-http-port'
+>;
+
+/**
+ * 🔴 闸门顺序的【唯一权威】。
+ *
+ * 为什么要抽出来：C18 的 Popup 必须告诉用户「现在到底跑不跑得动、卡在哪一道」。
+ * 如果 Popup 自己再写一遍这四个 if，两边就会漂 —— 漂的那一天，Popup 会显示
+ * 「正在归档」而实际上一条都没在取。所以 tickBackfill 和 Popup 共用这一个函数，
+ * 顺序天然一致。
+ *
+ * 取值用 thunk 而不是 boolean：保持 tickBackfill 原有的**惰性**（开关是关的时候
+ * 不去读 download guard 的存储），行为与 C13 逐字一致。
+ */
+export async function tickBlockReason(gate: {
+  hasStore: boolean;
+  isEnabled: () => boolean | Promise<boolean>;
+  isDownloadPaused: () => boolean | Promise<boolean>;
+  hasHttp: boolean;
+}): Promise<TickBlockReason | null> {
+  if (!gate.hasStore) return 'no-store';
+  if (!(await gate.isEnabled())) return 'disabled';
+  // 熔断检查【在】http 端口之前：熔断态下我们连"要不要发请求"都不该问。
+  if (await gate.isDownloadPaused()) return 'download-paused';
+  if (!gate.hasHttp) return 'no-http-port';
+  return null;
 }
 
 export interface TickDeps {
@@ -115,22 +153,24 @@ export async function tickBackfill(deps: TickDeps): Promise<TickResult> {
   if (inFlight) return { ran: false, reason: 'already-running', report: null };
   inFlight = true;
   try {
-    if (!deps.store) return { ran: false, reason: 'no-store', report: null };
-    if (!(await isBackfillEnabled(deps.store))) {
-      return { ran: false, reason: 'disabled', report: null };
-    }
-    if (deps.downloadGuard && (await deps.downloadGuard())) {
-      // 欠账原封不动；清掉熔断态之后下一次 tick 就从断点继续。
-      return { ran: false, reason: 'download-paused', report: null };
-    }
-    if (!deps.http) return { ran: false, reason: 'no-http-port', report: null };
+    // 🔴 四道闸门走 tickBlockReason ——【与 Popup 同一份判断】。
+    // 'download-paused' 时欠账原封不动；清掉熔断态之后下一次 tick 就从断点继续。
+    const blocked = await tickBlockReason({
+      hasStore: deps.store !== null,
+      isEnabled: () => isBackfillEnabled(deps.store),
+      isDownloadPaused: () => (deps.downloadGuard ? deps.downloadGuard() : false),
+      hasHttp: deps.http !== undefined,
+    });
+    if (blocked) return { ran: false, reason: blocked, report: null };
+    const store = deps.store!;
+    const http = deps.http!;
 
     const report = await runBackfill({
       platform: deps.platform,
       origin: deps.origin,
       scope: deps.scope,
-      store: deps.store,
-      http: deps.http,
+      store,
+      http,
       clock: deps.clock,
       pace: deps.pace,
       maxDetails: deps.maxDetails ?? DEFAULT_TICK_DETAILS,

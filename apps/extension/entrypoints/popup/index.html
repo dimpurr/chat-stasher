@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chat Stasher</title>
+    <style>
+      /* 全部内联 —— 不引外部字体/CSS，popup 页面零网络请求。 */
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 14px 16px;
+        width: 340px;
+        font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      h1 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+      .row { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+      .row label { cursor: pointer; user-select: none; }
+      #status { font-weight: 600; }
+      #running { margin: 6px 0; }
+      #missing { margin: 6px 0; opacity: .85; }
+      #progress { margin: 6px 0; }
+      .notes { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid rgba(128,128,128,.35); }
+      .notes p { margin: 8px 0; white-space: pre-wrap; opacity: .8; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Chat Stasher</h1>
+    <div id="status"></div>
+    <div id="running"></div>
+    <div id="missing"></div>
+    <div id="progress"></div>
+    <div class="row">
+      <input type="checkbox" id="toggle" />
+      <label for="toggle" id="toggle-label"></label>
+    </div>
+    <div class="notes" id="notes"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

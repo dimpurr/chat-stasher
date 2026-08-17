@@ -12,6 +12,7 @@ import { recordCapture, refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
 import { tickBackfill, type TickResult } from '../lib/backfill/schedule';
 import type { HttpPort } from '../lib/backfill/engine';
+import { POPUP_STATUS_MESSAGE, type BackfillRuntimeStatus } from '../lib/popup-view';
 import {
   guardBadge,
   isGuardTripped,
@@ -153,9 +154,21 @@ export function configureBackfillTransport(http: HttpPort | null): void {
   backfillTransport = http;
 }
 
-/** 最近一次 tick 的结果（函数即接口：给测试/排查用，不做 UI）。 */
+/** 最近一次 tick 的结果（给测试/排查用，也给 C18 的 Popup 用）。 */
 export function lastBackfillTick(): TickResult | null {
   return lastTick;
+}
+
+/**
+ * C18 · Popup 问 background 要的运行时事实。全部是「我这边真实是什么」，不含推测。
+ * 🔴 transportWired 在生产构建里恒为 false —— configureBackfillTransport
+ *    在本仓库里【只被测试调用过】。Popup 拿这个值决定要不要说「缺取数通道」。
+ */
+export function backfillRuntimeStatus(): BackfillRuntimeStatus {
+  return {
+    transportWired: backfillTransport !== null,
+    lastTickReason: lastTick?.reason ?? null,
+  };
 }
 
 /** 等待 fire-and-forget 的那次 tick 结束。回溯腿绝不允许拖慢落盘，所以只能这样等。 */
@@ -212,6 +225,11 @@ function cancelledIdLike(id: string | null): boolean {
 export default defineBackground(async () => {
   browser.runtime.onMessage.addListener(
     (message: { type?: string; payload?: CapturedFetch }, _sender, sendResponse) => {
+      // C18：Popup 打开时问一句「取数通道接上没有」。同步答，立刻返回。
+      if (message?.type === POPUP_STATUS_MESSAGE) {
+        sendResponse(backfillRuntimeStatus());
+        return true;
+      }
       if (message?.type !== 'chat-captured' || !message.payload) return;
       const payload = message.payload;
       handleCaptured(payload)
