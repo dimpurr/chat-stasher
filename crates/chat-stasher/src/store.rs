@@ -1029,7 +1029,10 @@ mod tests {
         };
         persist_key_file(&cfg, &MasterKey::new()).unwrap();
         let mode = fs::metadata(&cfg.key_file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "masterkey file mode was {mode:o}, expected 600");
+        assert_eq!(
+            mode, 0o600,
+            "masterkey file mode was {mode:o}, expected 600"
+        );
 
         // Rewriting an existing key file must not relax it either.
         persist_key_file(&cfg, &MasterKey::new()).unwrap();
