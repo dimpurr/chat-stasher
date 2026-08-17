@@ -140,7 +140,21 @@ enum Command {
     ///   is the only thing that catches it.
     ///
     /// Never prints session content: counts, timestamps and digests only.
-    Status,
+    ///
+    /// Default output is a handful of lines and nothing more: the verdict
+    /// above, then aggregate scan counts (per-harness session totals, skipped
+    /// roots, unarchivable-session warning). It stays that size whether the
+    /// machine holds three sessions or three thousand, so the verdict never
+    /// scrolls away.
+    ///
+    /// `--sessions` adds the per-session metadata table on top of that —
+    /// one line per session (harness / bytes / mtime / first 8 chars of the
+    /// id). That is the troubleshooting view; it can be hundreds of lines.
+    Status {
+        /// Also print one metadata line per session found (can be hundreds).
+        #[arg(long)]
+        sessions: bool,
+    },
     /// Dump one session back from the repository (sequence-concatenated) and
     /// print its sha256 for verification — or, with `--all-machines`, merge
     /// the newest snapshot of every machine and report per-session digests.
@@ -465,7 +479,7 @@ fn main() -> ExitCode {
             &options,
             no_reap,
         ),
-        Command::Status => cmd_status(),
+        Command::Status { sessions } => cmd_status(sessions),
         Command::Read {
             stage,
             session,
@@ -2373,6 +2387,60 @@ mod decision_surface_tests {
             "the marker must disappear once the harness produces a SessionRecord: {output}"
         );
     }
+
+    /// A scan report carrying `n` synthetic sessions and nothing else.
+    fn report_with_sessions(n: usize) -> scanner::ScanReport {
+        scanner::ScanReport {
+            records: (0..n)
+                .map(|i| chat_stasher::models::SessionRecord {
+                    id: format!("claude-code.fixture.{i:08}"),
+                    absolute_path: PathBuf::from(format!("/fixture/{i}.jsonl")),
+                    byte_size: 1,
+                    mtime: std::time::SystemTime::UNIX_EPOCH,
+                    source: chat_stasher::models::HarnessSource::ClaudeCode,
+                    compressed: false,
+                    sqlite_layout: None,
+                })
+                .collect(),
+            missing_roots: Vec::new(),
+            probes: Vec::new(),
+        }
+    }
+
+    /// `status` is the "is it still working?" entry point for someone who does
+    /// not live in a terminal: the verdict must stay on screen. So the default
+    /// body is fixed-size — 448 local sessions must not scroll it away.
+    #[test]
+    fn default_status_body_does_not_grow_with_session_count() {
+        let baseline = render_status(&report_with_sessions(0), false)
+            .lines()
+            .count();
+        for n in [1usize, 500] {
+            let lines = render_status(&report_with_sessions(n), false)
+                .lines()
+                .count();
+            assert_eq!(
+                lines, baseline,
+                "default status body must not grow with session count \
+                 (0 sessions -> {baseline} lines, {n} sessions -> {lines} lines)"
+            );
+        }
+
+        // Verdict line + body must still fit on a glance: single digit total.
+        let body = render_status(&report_with_sessions(500), false);
+        assert!(
+            body.lines().count() + 1 < 10,
+            "default status must stay under ten lines including the verdict, got:\n{body}"
+        );
+
+        // The detail is not deleted, only moved behind the switch.
+        let detailed = render_status(&report_with_sessions(500), true);
+        assert!(
+            detailed.lines().count() > 500,
+            "--sessions must still print one line per session, got {} lines",
+            detailed.lines().count()
+        );
+    }
 }
 
 fn cmd_init() -> ExitCode {
@@ -2390,7 +2458,7 @@ fn cmd_init() -> ExitCode {
     }
 }
 
-fn cmd_status() -> ExitCode {
+fn cmd_status(sessions: bool) -> ExitCode {
     let config = Config::load();
     let verdict = run_state_verdict(&config);
     println!("[run-once] {}", verdict.line);
@@ -2402,7 +2470,7 @@ fn cmd_status() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    print_status(&report);
+    print!("{}", render_status(&report, sessions));
     if verdict.healthy {
         ExitCode::SUCCESS
     } else {
@@ -2429,59 +2497,115 @@ fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
     runstate::summarize(&read, now, runstate::stale_after_secs(interval))
 }
 
-/// Human-readable summary + one metadata line per record.
+/// The scan half of `status`.
+///
+/// Default (`sessions = false`) is deliberately *fixed-size*: whatever the
+/// scanner found, the body is a handful of aggregate lines, so the run-once
+/// verdict printed above it stays on screen. Several hundred local sessions
+/// used to push that verdict out of the scrollback, which defeats the only
+/// question `status` exists to answer.
+///
+/// `sessions = true` restores the full per-session table — the real thing to
+/// read when troubleshooting, just not the default.
 ///
 /// Only ids, paths, sizes, mtimes and flags ever reach stdout — never the
 /// content of a session.
-fn print_status(report: &scanner::ScanReport) {
-    // One line per source actually found (registry-driven, so any harness
+fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    // One count per source actually found (registry-driven, so any harness
     // id from data/harness-registry-v1.json can appear here).
     let mut per_source: std::collections::BTreeMap<&str, usize> = Default::default();
     for rec in &report.records {
         *per_source.entry(rec.source.short()).or_default() += 1;
     }
     let compressed = report.records.iter().filter(|r| r.compressed).count();
+    let gaps = report.archive_gaps();
 
-    println!();
-    for (src, n) in &per_source {
-        println!("  {src:<22} sessions : {n}");
+    if !sessions {
+        let breakdown = per_source
+            .iter()
+            .map(|(src, n)| format!("{src} {n}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if report.records.is_empty() {
+            writeln!(out, "[scan] 本机没有扫描到任何会话。").unwrap();
+        } else {
+            writeln!(
+                out,
+                "[scan] {} 个会话（{compressed} compressed）：{breakdown}",
+                report.records.len()
+            )
+            .unwrap();
+        }
+        if !report.missing_roots.is_empty() {
+            writeln!(
+                out,
+                "[scan] 跳过 {} 个不存在的来源根目录。",
+                report.missing_roots.len()
+            )
+            .unwrap();
+        }
+        if !gaps.is_empty() {
+            writeln!(
+                out,
+                "⚠ {} 个 harness 有已识别但 collect 不会归档的会话。",
+                gaps.len()
+            )
+            .unwrap();
+        }
+        writeln!(out, "明细（每个会话一行）：chat-stasher status --sessions").unwrap();
+        return out;
     }
-    println!(
+
+    writeln!(out).unwrap();
+    for (src, n) in &per_source {
+        writeln!(out, "  {src:<22} sessions : {n}").unwrap();
+    }
+    writeln!(
+        out,
         "  total                : {}  ({} compressed)",
         report.records.len(),
         compressed
-    );
+    )
+    .unwrap();
     for miss in &report.missing_roots {
-        println!("  (missing root, skipped: {})", miss.display());
+        writeln!(out, "  (missing root, skipped: {})", miss.display()).unwrap();
     }
-    print!("{}", render_archive_gap_notice(report));
-    println!();
+    out.push_str(&render_archive_gap_notice(report));
+    writeln!(out).unwrap();
 
     if report.records.is_empty() {
-        println!("  no sessions found.");
-        return;
+        writeln!(out, "  no sessions found.").unwrap();
+        return out;
     }
 
-    println!(
+    writeln!(
+        out,
         "  {:<14} {:>12} {:>14}  {:<3}  {}",
         "source", "bytes", "mtime(sec)", "zst", "id"
-    );
+    )
+    .unwrap();
     for rec in &report.records {
         let secs = rec
             .mtime
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        println!(
+        writeln!(
+            out,
             "  {:<14} {:>12} {:>14}  {:<3}  {}",
             rec.source.short(),
             rec.byte_size,
             secs,
             if rec.compressed { "zst" } else { "   " },
             short_session_id(&rec.id),
-        );
+        )
+        .unwrap();
     }
-    println!();
+    writeln!(out).unwrap();
+    out
 }
 
 fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
