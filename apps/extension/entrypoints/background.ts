@@ -9,6 +9,14 @@ import {
 } from '../lib/contract';
 import { writeCommitted } from '../lib/download';
 import { recordCapture, refreshBadge } from '../lib/badge';
+import { browserLocalStore } from '../lib/backfill/store';
+import {
+  guardBadge,
+  isGuardTripped,
+  loadGuardState,
+  recordDownloadOutcome,
+  resumeAfterGuard,
+} from '../lib/download-guard';
 
 export interface HandledResult {
   saved: boolean;
@@ -62,12 +70,57 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
 
   const bundle = buildBundle(captured);
   const slug = `${bundle.platform}-${sanitizePathSegment(bundle.sessionId)}`;
-  const { finalName, bytes } = await writeCommitted(slug, JSON.stringify(bundle));
+  const { finalName, bytes } = await writeCommitted(slug, JSON.stringify(bundle), {
+    // C12：实时腿的每一次写入也喂给守卫（观测是共享的），
+    // 但【熔断只暂停回溯腿】—— 这里不做任何阻断，用户当前这条对话照存。
+    onOutcome: (result) => paintGuard(result),
+  });
   // Badge is never allowed to take the save down: fire-and-forget, log-only.
   void recordCapture().catch((err) => {
     console.warn('[chat-stasher] badge update failed', (err as Error).message);
   });
   return { saved: true, finalName, bytes };
+}
+
+/**
+ * C12：记一次下载观测，并在熔断时把角标换成告警态。
+ * 全程 best-effort —— 守卫是保护层，绝不允许它把落盘路径带下水。
+ */
+async function paintGuard(result: import('../lib/download-guard').DownloadResult): Promise<void> {
+  try {
+    const state = await recordDownloadOutcome(browserLocalStore(), result, { now: Date.now() });
+    if (!state) return;
+    const badge = guardBadge(state);
+    if (!badge) return;
+    const action = (browser as {
+      action?: {
+        setBadgeText: (o: { text: string }) => Promise<void>;
+        setTitle?: (o: { title: string }) => Promise<void>;
+      };
+    }).action;
+    if (!action) return;
+    await action.setBadgeText({ text: badge.text });
+    await action.setTitle?.({ title: badge.title });
+  } catch (err) {
+    console.warn('[chat-stasher] download guard update failed', (err as Error).message);
+  }
+}
+
+/** 回溯腿的闸门：给 runBackfill 的 downloadGuard 用。 */
+export async function isBackfillPausedByDownloadGuard(): Promise<boolean> {
+  const store = browserLocalStore();
+  if (!store) return false;
+  return isGuardTripped(await loadGuardState(store));
+}
+
+/** 显式恢复入口（不做 UI，函数即接口）。欠账集合不动 ⇒ 从断点继续。 */
+export async function resumeBackfillAfterDownloadGuard(): Promise<boolean> {
+  const store = browserLocalStore();
+  if (!store) return false;
+  await resumeAfterGuard(store);
+  const action = (browser as { action?: { setBadgeText: (o: { text: string }) => Promise<void> } }).action;
+  await action?.setBadgeText({ text: '' });
+  return true;
 }
 
 function cancelledIdLike(id: string | null): boolean {
