@@ -118,10 +118,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const pace = opts.pace ?? DEFAULT_PACE;
   const http = opts.http ?? notWiredHttp;
   const listLimit = opts.listLimit ?? DEFAULT_LIST_LIMIT;
-  const enumPacer = new Pacer(pace.enumerate, clock, 'enumerate');
-  const detailPacer = new Pacer(pace.detail, clock, 'detail');
 
-  const emptyTrace = { enumerate: enumPacer.waits, detail: detailPacer.waits };
+  // 🔴 C19：Pacer 的构造挪到 loadState 之后 —— 它现在需要 state.lastFetchAt 当种子。
+  // 没有 store 的那一支根本没跑过任何请求，等待序列必然是空的。
+  const emptyTrace = { enumerate: [] as number[], detail: [] as number[] };
 
   if (!opts.store) {
     // 没有持久化 ⇒ 没有可断可续 ⇒ 不许开跑。留痕只能进日志（存不下来）。
@@ -148,6 +148,17 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
   const store = opts.store;
   const state = await loadState(store, opts.platform, opts.scope);
+
+  // 🔴 C19 · BUG-3：用落盘的「上一次取数时刻」给两段定速器播种，间隔于是跨 tick 生效。
+  // 旧集合没有这个字段 ⇒ null ⇒ 与 C11 行为逐字一致。
+  const anchors = state.lastFetchAt ?? { enumerate: null, detail: null };
+  const enumPacer = new Pacer(pace.enumerate, clock, 'enumerate', anchors.enumerate);
+  const detailPacer = new Pacer(pace.detail, clock, 'detail', anchors.detail);
+  /** 把某一段刚刚放行的时刻写回 state（落盘由各自的 persist 负责）。 */
+  const anchor = (segment: 'enumerate' | 'detail', at: number | null): void => {
+    state.lastFetchAt = { ...(state.lastFetchAt ?? { enumerate: null, detail: null }), [segment]: at };
+  };
+
   const archivedThisRun: string[] = [];
   let enumeratedPages = 0;
   let newDebts = 0;
@@ -193,6 +204,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (opts.shouldAbort?.()) return report('aborted');
     if (await guardTripped()) return report('download-paused');
     await enumPacer.gate();
+    anchor('enumerate', enumPacer.lastAt);
     const url = listPageUrl(opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
     try {
@@ -256,6 +268,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (id === null) break;
 
     await detailPacer.gate();
+    // 🔴 在【发请求之前】就把时刻落盘。取正文这一段是真正要温和的那一段：
+    // 万一 SW 在 fetch 中途被回收、或用户关掉浏览器，下一次 tick 也必须知道
+    // 「刚刚已经取过一次了」，否则重启就成了绕过间隔的后门。
+    // 代价是每笔账多一次 storage.local 写（约每 20 秒一次），可以忽略。
+    anchor('detail', detailPacer.lastAt);
+    await persist(store, state);
     const url = detailUrl(opts.origin, id);
     let res: HttpResponse;
     try {

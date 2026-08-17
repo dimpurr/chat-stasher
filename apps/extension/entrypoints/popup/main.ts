@@ -33,6 +33,7 @@ import {
   setBackfillEnabled,
   tickBlockReason,
 } from '../../lib/backfill/schedule';
+import { syncBackfillAlarm, type AlarmsApi } from '../../lib/backfill/alarm';
 import { isGuardTripped, loadGuardState, type GuardState } from '../../lib/download-guard';
 import {
   pickBackfillState,
@@ -137,6 +138,14 @@ async function onToggle(on: boolean): Promise<void> {
   const store = browserLocalStore();
   // 存不住就别假装切成功了：立刻重画，UI 会退回真实取值。
   await setBackfillEnabled(store, on);
+  // 🔴 C19：开关和闹钟必须同时改。以【存下来的真实取值】为准，不是以 `on` 为准 ——
+  // 存储写失败时开关会退回原值，闹钟也必须跟着退回，不许出现"开关是关的但闹钟还在响"。
+  const persisted = await isBackfillEnabled(store);
+  const result = await syncBackfillAlarm(
+    (browser as unknown as { alarms?: AlarmsApi }).alarms ?? null,
+    persisted,
+  );
+  console.log('[chat-stasher] backfill alarm ->', result);
   await refresh();
 }
 

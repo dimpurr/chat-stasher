@@ -118,6 +118,7 @@ function liveCapture(account = 'acct-fixture-1'): CapturedFetch {
 /** 走真实入口：加载 background → 执行 defineBackground 回调 → 派发一条消息。 */
 async function bootAndDispatch(payload: CapturedFetch): Promise<{ mod: any; responded: any }> {
   const mod: any = await import('../entrypoints/background');
+  mod.configureBackfillPace({ clock: fakeClock });
   if (runtimeListeners.length === 0) await mod.default();
   const responded = await new Promise<any>((resolve) => {
     const ret = runtimeListeners[0]!({ type: 'chat-captured', payload }, { id: 's' }, resolve);
@@ -148,12 +149,25 @@ const UUIDS = [
   'b4444444-0000-4000-8000-000000000004',
 ];
 
+/**
+ * 🔴 C19：假时钟。sleep 不真的等，只把 now 往前推。
+ * 为什么现在必须有它：C19 修好了 BUG-3（取正文的最小间隔跨 tick 生效），
+ * 于是本文件里"连着踢好几脚"的用例会真的去睡 20 秒 —— 那是修好了的证据，
+ * 但不该让测试也跟着睡。时钟由 background 的测试接缝注入（configureBackfillPace）。
+ */
+let fakeNow = 1_700_000_000_000;
+const fakeClock = {
+  now: () => fakeNow,
+  sleep: async (ms: number) => { fakeNow += ms; },
+};
+
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
   downloadCalls.length = 0;
   changeListeners.length = 0;
   stallFilenames = [];
+  fakeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', fakeBrowser);
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
@@ -434,7 +448,7 @@ describe('C17 任务 3 · 接缝 B：定速器与熔断谁优先 / 熔断时定�
     expect(mod.lastBackfillTick()?.report).toBeNull();
   });
 
-  it('🔴 BUG-3：Pacer 是 per-run 的，tick 之间不续 ⇒ 取正文的 20s 最小间隔在运行时从未生效', async () => {
+  it('🔴 BUG-3【C19 已修】：取正文的 20s 最小间隔【跨 tick】生效', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
@@ -446,11 +460,17 @@ describe('C17 任务 3 · 接缝 B：定速器与熔断谁优先 / 熔断时定�
       traces.push(mod.lastBackfillTick()!.report!.paceTrace);
     }
     console.log('[C17-3.B2] 每次 tick 的 paceTrace:', traces);
-    // 每次 tick 的 detail 段都只有一次 gate()，而且【等了 0 毫秒】——
-    // 因为 engine 每次 runBackfill 都 new 一个 Pacer，lastAt 从 null 开始。
-    for (const t of traces) expect(t.detail).toEqual([0]);
-    // 也就是说：4 条正文被连续取完，中间没有任何强制间隔。
+    console.log('[C17-3.B2] 4 次 tick 之后假时钟一共走了(ms):', fakeNow - 1_700_000_000_000);
+
+    // C19 之前：每个 trace 都是 [0]（每次 runBackfill 都 new 一个 Pacer，lastAt 从 null 起）
+    //           ⇒ 4 条正文零间隔连着取完。
+    // C19 之后：只有第一次是 0（真的没有"上一次"），之后每次都补足 20 秒 ——
+    //           上次取数的时刻存在 state.lastFetchAt 里，跨 tick 跨重启存活。
+    expect(traces[0]!.detail).toEqual([0]);
+    for (const t of traces.slice(1)) expect(t.detail).toEqual([20_000]);
+    // 4 条正文仍然都取到了，只是被摊开在 60 秒里（3 个间隔 × 20 秒）。
     expect(detailCalls(server.calls).length).toBe(4);
+    expect(fakeNow - 1_700_000_000_000).toBe(60_000);
   });
 });
 

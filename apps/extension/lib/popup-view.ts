@@ -15,6 +15,8 @@
  */
 
 import { formatProgress, computeProgress } from './backfill/progress';
+import { BACKFILL_ALARM_PERIOD_MINUTES } from './backfill/alarm';
+import { DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import { stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
 import { guardAlertDetail, type GuardState } from './download-guard';
@@ -28,7 +30,12 @@ export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
 
 /** background 回给 Popup 的运行时事实。 */
 export interface BackfillRuntimeStatus {
-  /** 🔴 取数通道到底接上没有。生产构建里恒为 false。 */
+  /**
+   * 🔴 取数通道到底接上没有。
+   * C18 时这里恒为 false（没有任何生产代码注入端口）。C19 之后它是
+   * background 【现场 ping 一次】的结果：此刻有没有一个活着的、已登录的
+   * 平台标签页可以替我们取数。仍然是事实，不是推测。
+   */
   transportWired: boolean;
   /** 最近一次 tick 的结论；SW 被回收后会变回 null —— 那本身也是实话。 */
   lastTickReason: string | null;
@@ -111,12 +118,16 @@ function runningLine(model: PopupModel): string {
     case 'download-paused':
       return '运行：未在运行 —— 已经暂停，欠账原封不动地留着。';
     case 'no-http-port':
-      // 🔴 这一条是 C18 的核心：开关打开了，但一条都没有在取。
-      return '运行：未在运行 —— 开关已经打开了，但取数通道没有接上，一条也没有在取。';
+      // 🔴 这一条是 C18 的核心，C19 也没有把它拿掉：开关开着但一条都没在取，
+      //    必须照实说。变的只是原因 —— 现在是「没有开着的平台页面」。
+      return '运行：未在运行 —— 开关已经打开了，但此刻没有可用的取数通道，一条也没有在取。';
     case null:
-      // 四道闸门全过。仍然不说"正在归档"：这条腿是被实时腿唤醒时才动一下的，
-      // 此刻（你正看着 Popup）它多半是静止的。
-      return '运行：已就绪 —— 下一次你在受支持的平台上产生一次抓取时，会顺带清 1 笔账。';
+      // 🔴 四道闸门全过 = 开关开着 + 存储在 + 没熔断 + 【此刻真的有一个活着的、
+      // 已登录的平台标签页可以取数】。闹钟也已经在跑（开关打开时创建）。
+      // 只有到这一步才允许说"在归档"。
+      return `运行：正在归档 —— 每 ${BACKFILL_ALARM_PERIOD_MINUTES} 分钟自动清 1 笔账`
+        + `（每天最多 ${DEFAULT_DETAIL_PACE.maxPerDay} 笔，每笔之间至少隔 `
+        + `${Math.round(DEFAULT_DETAIL_PACE.minIntervalMs / 1000)} 秒）。`;
   }
 }
 
@@ -126,9 +137,12 @@ function missingLine(model: PopupModel): string {
       return '缺：browser.storage.local。没有持久化就没有可断可续，'
         + '与其每次重启都从头爬一遍，不如不跑。';
     case 'no-http-port':
-      return '缺：取历史列表和正文的取数通道（http 端口）。'
-        + '当前版本【没有任何生产代码注入它】，所以这条腿走不到发请求那一步。'
-        + '把开关打开只完成了「你同意了」这一半，另一半还没接上。';
+      // 🔴 C19 改了这条文案的【原因】，因为原因真的变了：端口现在有生产注入了，
+      // 但它必须借用一个开着的、已登录的平台页面。没有页面开着就是没有通道。
+      return '缺：一个开着的、已登录的受支持平台页面 —— 取数通道要借它才能建立。'
+        + '历史对话只在你自己的浏览器页面里取（同源请求，用的是你本来就有的登录态），'
+        + '所以只要没有任何受支持平台的标签页开着，这条腿就取不到数。'
+        + '打开其中任意一个平台的页面并保持开着，它就会自己继续。';
     case 'download-paused':
       return '缺：需要你先确认下面的写入问题，然后手动恢复。';
     case 'disabled':
@@ -156,8 +170,9 @@ function notesFor(model: PopupModel): string[] {
 
   if (!model.enabled) {
     notes.push(
-      '打开之后会做什么：在你打开受支持平台的页面、并产生一次抓取时，'
-      + '顺带把历史对话一笔一笔地慢慢补下来，每次只补一笔。关掉即停。',
+      `打开之后会做什么：只要有一个受支持平台的页面开着，就每 ${BACKFILL_ALARM_PERIOD_MINUTES} 分钟`
+      + '在后台悄悄补一笔历史对话，用的是你自己那个页面的登录态；'
+      + `每天最多 ${DEFAULT_DETAIL_PACE.maxPerDay} 笔，好几天里慢慢补完。关掉即停（定时器也会一并清掉）。`,
     );
   }
 
