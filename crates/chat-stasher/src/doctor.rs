@@ -41,7 +41,7 @@ const CLEANUP_SAFE_DAYS: u64 = 180;
 
 /// Extra harness-like directories we notice but do *not* reason about for
 /// retention (they land in a "detected, out of scope" note, never silently).
-pub const OTHER_HARNESS_DIRS: &[&str] = &[".cursor", ".windsurf", ".kimi-code", ".grok"];
+pub const OTHER_HARNESS_DIRS: &[&str] = &[".cursor", ".windsurf", ".kimi-code"];
 
 // ---------------------------------------------------------------------------
 // D1 — Claude Code `cleanupPeriodDays`
@@ -545,6 +545,25 @@ fn opencode_footprint(home: &Path) -> HarnessFootprint {
 // D4 — risk synthesis (the whole value of this command)
 // ---------------------------------------------------------------------------
 
+/// Build a footprint row straight from a registry probe (single-file SQLite
+/// harnesses: cursor, grok). Because the row *is* the probe, the footprint
+/// table and the registry table share count, bytes and timestamps by
+/// construction — `doctor_tables_never_contradict_any_harness` can never see
+/// them drift apart.
+fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprint {
+    HarnessFootprint {
+        name: probe.id.clone(),
+        root: probe.root.clone().unwrap_or_default(),
+        installed: probe.installed_p(),
+        session_count: probe.record_count,
+        total_bytes: probe.bytes,
+        earliest: probe.earliest,
+        latest: probe.latest,
+        compressed_count: 0,
+        note: probe.note.clone(),
+    }
+}
+
 fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
     HarnessFootprint {
         name: name.to_string(),
@@ -666,14 +685,20 @@ fn build_risks(
         }
     }
 
-    // --- opencode ------------------------------------------------------------
-    if let Some(oc) = footprints.iter().find(|f| f.name == "opencode") {
-        if oc.installed {
-            risks.push(format!(
-                "🟢 opencode: 单一 SQLite（{}，{}）—— v1.2.0 起无按天数轮换；风险来自它自身的 SQLite，而非静默删会话。",
-                oc.root.display(),
-                fmt_bytes(oc.total_bytes)
-            ));
+    // --- opencode / cursor / grok (single-SQLite stores, registry-driven) ----
+    for (fp_name, label) in [
+        ("opencode", "opencode"),
+        ("cursor", "Cursor"),
+        ("grok", "Grok"),
+    ] {
+        if let Some(fp) = footprints.iter().find(|f| f.name == fp_name) {
+            if fp.installed {
+                risks.push(format!(
+                    "🟢 {label}: 单一 SQLite（{}，{}）—— 无按天数轮换；风险来自它自身的 SQLite，而非静默删会话。",
+                    fp.root.display(),
+                    fmt_bytes(fp.total_bytes)
+                ));
+            }
         }
     }
 
@@ -751,6 +776,22 @@ pub fn run() -> DoctorReport {
 
     footprints.push(gemini_footprint(&home));
     footprints.push(opencode_footprint(&home));
+
+    // Cursor + Grok are single-SQLite stores driven by the registry: their
+    // footprint rows are built straight from the registry probe results, so
+    // the two tables can never disagree on count/bytes/times.
+    for id in ["cursor", "grok"] {
+        match scan.probes.iter().find(|p| p.id == id) {
+            Some(probe) => footprints.push(footprint_from_sqlite_probe(probe)),
+            None => footprints.push(default_footprint(
+                id,
+                home.join(match id {
+                    "cursor" => Path::new("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+                    _ => Path::new(".grok/sessions/session_search.sqlite"),
+                }),
+            )),
+        }
+    }
 
     let other_present = OTHER_HARNESS_DIRS
         .iter()
@@ -973,7 +1014,9 @@ fn default_data_root() -> PathBuf {
 fn footprint_count_label(f: &HarnessFootprint) -> String {
     match f.session_count {
         Some(count) => count.to_string(),
-        None if f.installed && f.name == "opencode" => "未知".to_string(),
+        // Installed but the store is not enumerable (schema not recognised):
+        // "unknown", never a fake zero.
+        None if f.installed => "未知".to_string(),
         None => "N/A".to_string(),
     }
 }

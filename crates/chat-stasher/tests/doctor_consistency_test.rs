@@ -23,6 +23,8 @@ const CLAUDE_SESSIONS: u64 = 2;
 const CODEX_SESSIONS: u64 = 1;
 const GEMINI_SESSIONS: u64 = 1;
 const OPENCODE_SESSIONS: u64 = 3;
+const CURSOR_SESSIONS: u64 = 2;
+const GROK_SESSIONS: u64 = 1;
 
 fn write(path: &Path, content: &str) {
     if let Some(p) = path.parent() {
@@ -79,16 +81,82 @@ fn plant_dir_sessions(home: &Path) {
     write(&home.join(".gemini/tmp/settings.json"), "{}\n");
 }
 
+/// Plant a Cursor-shaped store: `cursorDiskKV`, sessions selected by
+/// `composerData:%`, timestamps via `createdAt` inside the JSON value.
+fn plant_cursor_db(home: &Path) {
+    let db = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+    )
+    .unwrap();
+    for i in 0..CURSOR_SESSIONS {
+        let key = format!("composerData:00000000-0000-4000-8000-{i:012}");
+        let value = format!(
+            r#"{{"composerId":"c{i}","createdAt":{}}}"#,
+            1760000000000i64 + i as i64
+        );
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+    drop(conn);
+}
+
+/// Plant a Grok-shaped store: `session_docs`, all rows, `updated_at` seconds.
+/// The store is WAL-mode with its sidecars removed afterwards — the real-world
+/// "app closed cleanly, no -wal/-shm" state — so the probe must fall back to
+/// the immutable read-only path (a plain `mode=ro` open cannot read a WAL
+/// store whose shared-memory file does not exist).
+fn plant_grok_db(home: &Path) {
+    let db = home.join(".grok/sessions/session_search.sqlite");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_docs (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, updated_at INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL, last_indexed_offset INTEGER NOT NULL DEFAULT 0)",
+    )
+    .unwrap();
+    for i in 0..GROK_SESSIONS {
+        conn.execute(
+            "INSERT INTO session_docs (session_id, cwd, updated_at, title, content, content_hash) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![
+                format!("019f95ce-{i:08}-0000-0000-0000-000000000000"),
+                "/tmp/x",
+                1784924765i64 + i as i64,
+                "t",
+                "c",
+                "h"
+            ],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    // The last-close checkpoint normally removes the sidecars; be explicit
+    // about the no-sidecar state so the immutable fallback is what gets tested.
+    let mut wal = db.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = db.as_os_str().to_os_string();
+    shm.push("-shm");
+    let _ = fs::remove_file(Path::new(&wal));
+    let _ = fs::remove_file(Path::new(&shm));
+}
+
 /// Link a footprint table row to its registry probe-table row.
 ///
 /// Footprint names are the map keys; probe ids are registry `id` values — they
 /// differ for gemini (`gemini` vs `gemini-cli`), so the join is explicit
 /// rather than guessed by string equality.
-const FOOTPRINT_TO_PROBE_ID: [(&str, &str); 4] = [
+const FOOTPRINT_TO_PROBE_ID: [(&str, &str); 6] = [
     ("claude-code", "claude-code"),
     ("codex", "codex"),
     ("gemini", "gemini-cli"),
     ("opencode", "opencode"),
+    ("cursor", "cursor"),
+    ("grok", "grok"),
 ];
 
 /// The one consistency invariant shared by every harness in both tables:
@@ -146,6 +214,8 @@ fn doctor_tables_never_contradict_any_harness() {
 
     plant_opencode_db(home.path());
     plant_dir_sessions(home.path());
+    plant_cursor_db(home.path());
+    plant_grok_db(home.path());
 
     let report = doctor::run();
     assert!(!report.scan_failed, "registry scan must have run");
@@ -162,6 +232,22 @@ fn doctor_tables_never_contradict_any_harness() {
         opencode.session_count,
         Some(OPENCODE_SESSIONS),
         "footprint 表带着已知真值自校：应认出我们种下的 {OPENCODE_SESSIONS} 个 SQLite 会话"
+    );
+    let cursor = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "cursor")
+        .unwrap();
+    assert_eq!(
+        cursor.session_count,
+        Some(CURSOR_SESSIONS),
+        "footprint 表带着已知真值自校：应认出我们种下的 {CURSOR_SESSIONS} 个 cursorDiskKV 会话"
+    );
+    let grok = report.footprints.iter().find(|f| f.name == "grok").unwrap();
+    assert_eq!(
+        grok.session_count,
+        Some(GROK_SESSIONS),
+        "footprint 表带着已知真值自校：应认出我们种下的 {GROK_SESSIONS} 个 session_docs 会话"
     );
 
     assert_report_self_consistent(&report);

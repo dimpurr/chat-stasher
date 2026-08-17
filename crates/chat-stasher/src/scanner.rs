@@ -8,6 +8,9 @@
 //!                            produce false negatives/positives),
 //!   - `仅社区说法未核实`   ⇒ scanned, but flagged **low-confidence**, so the
 //!                            report can mark it instead of presenting it as fact,
+//!   - `本机实测`          ⇒ verified empirically on the machine this tool runs
+//!                            on (schema/path measured live) but source not read —
+//!                            scanned, not low-confidence,
 //!   - `源码确认`/`官方文档` ⇒ scanned normally.
 //!
 //! Path templates are expanded before probing (`~`, `$HOME`, `$XDG_*`,
@@ -46,6 +49,7 @@ pub const REGISTRY_REL_PATH: &str = "data/harness-registry-v1.json";
 pub const CONF_CONFIRMED: &str = "源码确认";
 pub const CONF_OFFICIAL: &str = "官方文档";
 pub const CONF_COMMUNITY: &str = "仅社区说法未核实";
+pub const CONF_MEASURED: &str = "本机实测";
 pub const CONF_UNASCERTAINED: &str = "未查明";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +66,11 @@ pub enum Confidence {
     OfficialDocs,
     /// `仅社区说法未核实` — plausible but never verified. Scan, but flag low.
     CommunityClaim,
+    /// `本机实测` — verified empirically on this machine (path + schema read
+    /// live), but the harness source was not read. Scan, not flagged low —
+    /// it is verified, just not source-anchored (so it can drift on an app
+    /// update without any source link to re-check).
+    Measured,
     /// `未查明` — unknown. Do **not** scan (guessing = false pos/neg).
     Unascertained,
 }
@@ -73,6 +82,7 @@ impl Confidence {
             CONF_CONFIRMED => Confidence::Confirmed,
             CONF_OFFICIAL => Confidence::OfficialDocs,
             CONF_COMMUNITY => Confidence::CommunityClaim,
+            CONF_MEASURED => Confidence::Measured,
             _ => Confidence::Unascertained,
         }
     }
@@ -93,6 +103,7 @@ impl Confidence {
             Confidence::Confirmed => CONF_CONFIRMED,
             Confidence::OfficialDocs => CONF_OFFICIAL,
             Confidence::CommunityClaim => CONF_COMMUNITY,
+            Confidence::Measured => CONF_MEASURED,
             Confidence::Unascertained => CONF_UNASCERTAINED,
         }
     }
@@ -210,6 +221,37 @@ pub struct RegistryCell {
     pub confidence: String,
     #[serde(default)]
     pub source: String,
+    // --- SQLite-store schema (B27) ---------------------------------------
+    // These fields let a `format: "sqlite"` cell declare how the store keeps
+    // its sessions, so both the scanner and the doctor run the *same* probe
+    // (`crate::sqlite_probe::spec_from_cell`) instead of each hardcoding a
+    // schema. All optional: a cell without `sql_table` falls back to the
+    // default opencode `session` schema (pre-B27 behaviour).
+    /// Table that holds one row per session (e.g. `cursorDiskKV`).
+    #[serde(default)]
+    pub sql_table: Option<String>,
+    /// Columns that must all exist before the store is recognised.
+    #[serde(default)]
+    pub sql_required_columns: Vec<String>,
+    /// Key/value-store selection: column + LIKE prefix selecting session rows
+    /// (e.g. `key` + `composerData:%`).
+    #[serde(default)]
+    pub sql_key_column: Option<String>,
+    #[serde(default)]
+    pub sql_key_pattern: Option<String>,
+    /// Column holding the JSON that carries a session timestamp (Cursor's
+    /// `value`); combined with `sql_time_json_path`.
+    #[serde(default)]
+    pub sql_value_column: Option<String>,
+    /// Column holding a per-session epoch timestamp.
+    #[serde(default)]
+    pub sql_time_column: Option<String>,
+    /// JSON path (e.g. `$.createdAt`) into `sql_value_column`, epoch millis.
+    #[serde(default)]
+    pub sql_time_json_path: Option<String>,
+    /// True when `sql_time_column` holds Unix seconds instead of millis.
+    #[serde(default)]
+    pub sql_time_value_is_seconds: bool,
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
@@ -285,6 +327,10 @@ pub struct HarnessProbe {
     /// cannot be enumerated at all (missing, skipped, single-file store whose
     /// schema we do not recognise) — never a fabricated zero.
     pub record_count: Option<u64>,
+    /// Earliest / latest session timestamp, for single-file SQLite stores that
+    /// carry one (via the registry-declared schema). `None` when unknown.
+    pub earliest: Option<SystemTime>,
+    pub latest: Option<SystemTime>,
     /// For single-file stores: the store's bytes on disk (`.db` + sidecars for
     /// SQLite). 0 otherwise.
     pub bytes: u64,
@@ -374,6 +420,8 @@ fn probe_harness(
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
         record_count: None,
+        earliest: None,
+        latest: None,
         bytes: 0,
         note: String::new(),
     };
@@ -438,18 +486,41 @@ fn probe_harness(
                     // The registry-driven scan and the doctor footprint table
                     // share ONE SQLite probe (`crate::sqlite_probe`), so the
                     // same harness can never show two different counts again.
-                    let info = probe_sqlite_store(&root);
+                    // The schema spec also comes from the registry cell, so
+                    // the scan and the doctor enumerate with the same query.
+                    let spec = crate::sqlite_probe::spec_from_cell(cell);
+                    let info = match &spec {
+                        Some(spec) => crate::sqlite_probe::probe_sqlite_store_with(&root, spec),
+                        None => probe_sqlite_store(&root),
+                    };
                     probe.bytes = info.total_bytes;
+                    let expected = spec
+                        .map(|s| {
+                            format!(
+                                "{}表({})",
+                                s.table,
+                                s.required_columns.join(", ")
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            "session(id, time_created, time_updated)".to_string()
+                        });
                     match info.sessions {
-                        SqliteSessionProbe::Known { count, .. } => {
+                        SqliteSessionProbe::Known {
+                            count,
+                            earliest,
+                            latest,
+                        } => {
                             probe.record_count = Some(count);
+                            probe.earliest = earliest;
+                            probe.latest = latest;
                             probe.note = format!(
-                                "SQLite 只读枚举 session 表（bytes 含 .db+-wal+-shm）；{count} 会话"
+                                "SQLite 只读枚举 {expected}（bytes 含 .db+-wal+-shm）；{count} 会话"
                             );
                         }
                         SqliteSessionProbe::SchemaMismatch { actual } => {
                             probe.note = format!(
-                                "检测到 SQLite 但表结构不认识（期望 session(id, time_created, time_updated)，实到 {actual}）—— 不是 0，是无法枚举"
+                                "检测到 SQLite 但表结构不认识（期望 {expected}，实到 {actual}）—— 不是 0，是无法枚举"
                             );
                         }
                         SqliteSessionProbe::ReadFailed { error } => {
@@ -919,6 +990,7 @@ mod tests {
             Confidence::classify("仅社区说法未核实"),
             Confidence::CommunityClaim
         );
+        assert_eq!(Confidence::classify("本机实测"), Confidence::Measured);
         assert_eq!(Confidence::classify("未查明"), Confidence::Unascertained);
         assert_eq!(
             Confidence::classify("某未知措辞"),
@@ -928,8 +1000,11 @@ mod tests {
         assert!(!Confidence::Unascertained.scan_allowed());
         assert!(Confidence::Confirmed.scan_allowed());
         assert!(Confidence::CommunityClaim.scan_allowed());
+        assert!(Confidence::Measured.scan_allowed());
         assert!(Confidence::CommunityClaim.is_low_confidence());
+        assert!(!Confidence::Measured.is_low_confidence());
         assert!(!Confidence::Confirmed.is_low_confidence());
+        assert_eq!(Confidence::Measured.label(), CONF_MEASURED);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated": "2026-08-16",
+  "generated": "2026-08-17",
   "harnesses": [
     {
       "id": "claude-code",
@@ -27,7 +27,17 @@
       },
       "notes": "Windows 走 %USERPROFILE%，不是 %APPDATA%\\Claude。Windows 上短路径用可读 slug；长路径(>~200字符)用路径哈希目录(issue #84354)；该哈希 Windows 上仍区分大小写(c:\\ vs C:\\ 产生不同目录→会话消失)。盘符冒号:与反斜杠\\在短路径下的具体 sanitize：未查明，需 Windows 真机实测。CLAUDE_CONFIG_DIR 覆盖整个 base；清理默认 30 天。",
       "seal_policy": "rename",
-      "seal_source": "A9 实测（macOS）：201 采样点跨真实写入窗口（172210→194561 B，11 次 size 变化）全部 lsof=0 ⇒ 每次按路径 reopen，rename 封口安全"
+      "seal_source": "A9 实测（macOS）：201 采样点跨真实写入窗口（172210→194561 B，11 次 size 变化）全部 lsof=0 ⇒ 每次按路径 reopen，rename 封口安全",
+      "reference": {
+        "upstream_project": "Anthropic Claude Code 官方文档",
+        "file_path": "/docs/en/claude-directory",
+        "line_count": 1531,
+        "license": "未查明",
+        "relationship": "参考",
+        "source_url": "https://code.claude.com/docs/en/claude-directory",
+        "license_url": "未查明",
+        "scope": "curl 核实的是渲染文档页，不是公开实现源码。"
+      }
     },
     {
       "id": "codex",
@@ -54,7 +64,16 @@
       },
       "notes": "不 honor XDG_DATA_HOME（home-dir crate 无 XDG 引用）。空闲 rollout 压缩为 .jsonl.zst。session_index.jsonl 在 codex home 根。CODEX_HOME 可覆盖。",
       "seal_policy": "no-rename",
-      "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746（ensure_writer_open 已开则不重开）+ :1928（JsonlWriter 持 tokio::fs::File）⇒ 持 fd，rename 后新增会写进旧 inode"
+      "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746（ensure_writer_open 已开则不重开）+ :1928（JsonlWriter 持 tokio::fs::File）⇒ 持 fd，rename 后新增会写进旧 inode",
+      "reference": {
+        "upstream_project": "openai/codex",
+        "file_path": "codex-rs/utils/home-dir/src/lib.rs",
+        "line_count": 134,
+        "license": "Apache-2.0",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs",
+        "license_url": "https://raw.githubusercontent.com/openai/codex/main/LICENSE"
+      }
     },
     {
       "id": "gemini-cli",
@@ -84,7 +103,16 @@
       },
       "notes": "用 os.homedir()（Windows=%USERPROFILE%），无 APPDATA/XDG 逻辑；不 honor XDG_DATA_HOME。GEMINI_CLI_HOME 环境变量会整体覆盖 home。30 天清理：全局 tmp 目录 sweep。聊天历史在 tmp/<projectId>/chats/（名字叫 tmp 但并非临时）。",
       "seal_policy": "rename",
-      "seal_source": "packages/core/src/services/chatRecordingService.ts:559-564 fs.appendFileSync = 每次调用 open→append→close，不跨调用持 fd ⇒ 每次 reopen，rename 封口安全"
+      "seal_source": "packages/core/src/services/chatRecordingService.ts:559-564 fs.appendFileSync = 每次调用 open→append→close，不跨调用持 fd ⇒ 每次 reopen，rename 封口安全",
+      "reference": {
+        "upstream_project": "google-gemini/gemini-cli",
+        "file_path": "packages/core/src/utils/paths.ts",
+        "line_count": 625,
+        "license": "Apache-2.0",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts",
+        "license_url": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/LICENSE"
+      }
     },
     {
       "id": "opencode",
@@ -111,7 +139,16 @@
       },
       "notes": "⚠️前提修正：opencode 是 Go 项目(github.com/opencode-ai/opencode)，不是 Rust，不用 xdg-basedir crate。当前 main 全仓库 grep 找不到 ~/.local/share/opencode——默认 data.directory 是相对 .opencode。~/.local/share 的绝对化解析在当前源码未找到(未查明，疑为旧版或安装时配置)。xdg-basedir crate 实测 unix-only(lib.rs:1 #![cfg(any(unix,redox))])，Windows 不编译；XDG_DATA_HOME 未设→~/.local/share。config.go:944 的 %LOCALAPPDATA% 只用于读 GitHub Copilot hosts.json，与 opencode.db 无关。",
       "seal_policy": "not-applicable",
-      "seal_source": "单一 SQLite（database.ts path() → opencode.db，WAL 必然长期持 fd，但本身也非 append jsonl）⇒ 没有可 rename 的活跃 jsonl"
+      "seal_source": "单一 SQLite（database.ts path() → opencode.db，WAL 必然长期持 fd，但本身也非 append jsonl）⇒ 没有可 rename 的活跃 jsonl",
+      "reference": {
+        "upstream_project": "opencode-ai/opencode",
+        "file_path": "internal/db/connect.go",
+        "line_count": 68,
+        "license": "MIT",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/opencode-ai/opencode/main/internal/db/connect.go",
+        "license_url": "https://raw.githubusercontent.com/opencode-ai/opencode/main/LICENSE"
+      }
     },
     {
       "id": "cursor",
@@ -120,14 +157,20 @@
         "macos": {
           "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
           "format": "sqlite",
-          "confidence": "仅社区说法未核实",
-          "source": "github.com/Callum-Ward/cursaves/docs/how-cursor-stores-chats.md"
+          "confidence": "本机实测",
+          "source": "本机实测（B27 2026-08-17）：state.vscdb 只读实开，cursorDiskKV 表存在，key LIKE 'composerData:%' 计数=19、value 总字节 28,291；路径来源 cursaves 社区文档（未读 Cursor 源码）",
+          "sql_table": "cursorDiskKV",
+          "sql_required_columns": ["key", "value"],
+          "sql_key_column": "key",
+          "sql_key_pattern": "composerData:%",
+          "sql_value_column": "value",
+          "sql_time_json_path": "$.createdAt"
         },
         "linux": {
           "template": "$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb（默认 ~/.config/Cursor/...）",
           "format": "sqlite",
           "confidence": "仅社区说法未核实",
-          "source": "同上 + forum.cursor.com/t/77295"
+          "source": "github.com/Callum-Ward/cursaves/docs/how-cursor-stores-chats.md + forum.cursor.com/t/77295"
         },
         "windows": {
           "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
@@ -136,9 +179,60 @@
           "source": "同上 + Electron userData 惯例（%APPDATA%\\<name>）"
         }
       },
-      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。",
-      "seal_policy": "no-rename",
-      "seal_source": "（fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename；社区说法 cell 也过不了 源码确认 闸门）"
+      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key，每会话一行)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。⚠️ confidence 说明：macOS cell 是「本机实测但未读源码」——现有取值(源码确认/官方文档/仅社区说法未核实/未查明)都不贴切，故新增取值「本机实测」（B27 发现：这四种证据来源词汇不足以表达『本机实测』这一类）。linux/windows cell 仍为社区说法，未核实。",
+      "seal_policy": "not-applicable",
+      "seal_source": "单 SQLite（state.vscdb，cursorDiskKV 表）——非 append 单文件 jsonl，无活跃文件可 rename；且 ADR-011 已废除 rename 封口方案",
+      "reference": {
+        "upstream_project": "cursor/cursor（公开仓库；会话存储实现文件未找到）",
+        "file_path": "README.md",
+        "line_count": 21,
+        "license": "未查明",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/cursor/cursor/main/README.md",
+        "license_url": "未查明",
+        "scope": "只作上游项目资料参考；不把 README 当作会话存储实现源码。"
+      }
+    },
+    {
+      "id": "grok",
+      "display_name": "Grok (xAI CLI)",
+      "paths": {
+        "macos": {
+          "template": "~/.grok/sessions/session_search.sqlite",
+          "format": "sqlite",
+          "confidence": "本机实测",
+          "source": "本机实测（B27 2026-08-17）：~/.grok/sessions/session_search.sqlite 只读实开，session_docs 表存在，计数=1、updated_at=1784924765（Unix 秒）；会话本体另有 ~/.grok/sessions/<sanitized-cwd>/<uuid>/ 下 JSONL",
+          "sql_table": "session_docs",
+          "sql_required_columns": ["session_id", "updated_at"],
+          "sql_time_column": "updated_at",
+          "sql_time_value_is_seconds": true
+        },
+        "linux": {
+          "template": "$HOME/.grok/sessions/session_search.sqlite",
+          "format": "sqlite",
+          "confidence": "未查明",
+          "source": "未核实：本机未安装 Linux 版，源码未读"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.grok\\sessions\\session_search.sqlite",
+          "format": "sqlite",
+          "confidence": "未查明",
+          "source": "未核实：本机未安装 Windows 版，源码未读"
+        }
+      },
+      "notes": "xAI Grok CLI（目录结构实测与 Claude Code 相似：sessions/<sanitized-cwd>/<uuid>/ 下 chat_history.jsonl + events.jsonl，但「Claude Code 系 fork」未读源码证实）。会话本体在 ~/.grok/sessions/<sanitized-cwd>/<session-uuid>/{chat_history,events}.jsonl（每会话一目录）；session_search.sqlite 是搜索索引，session_docs 每会话一行，updated_at 为 Unix 秒。SQLite 库位于 ~/.grok/sessions/ 下，WAL 模式。macOS cell confidence=本机实测；linux/windows 未核实。",
+      "seal_policy": "not-applicable",
+      "seal_source": "单 SQLite（session_search.sqlite，WAL）+ 会话本体为每会话独立 JSONL 目录——无活跃 append 单文件可 rename；且 ADR-011 已废除 rename 封口方案",
+      "reference": {
+        "upstream_project": "xAI Grok CLI",
+        "file_path": "未找到",
+        "line_count": "未查明",
+        "license": "未查明",
+        "relationship": "无参考",
+        "source_url": "https://github.com/xai-org/grok-cli",
+        "license_url": "未查明",
+        "verification": "候选上游仓库 URL 本轮 curl 返回 HTTP 404；没有把本机实测文件写成上游文件。"
+      }
     },
     {
       "id": "github-copilot-cli",
@@ -165,7 +259,17 @@
       },
       "notes": "会持久化会话（非 ephemeral）：session-store.db SQLite(sessions/turns/... WAL)+每会话 events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir 可覆盖。Linux 若设 XDG_CONFIG_HOME/XDG_STATE_HOME 会一次性迁移 config→XDG_CONFIG_HOME/copilot、state(含 session-store.db)→XDG_STATE_HOME/copilot。Windows 不适用 XDG 迁移。",
       "seal_policy": "no-rename",
-      "seal_source": "（fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）"
+      "seal_source": "（fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）",
+      "reference": {
+        "upstream_project": "github/copilot-cli",
+        "file_path": "README.md",
+        "line_count": 194,
+        "license": "GitHub Copilot CLI 自定义条款（非 SPDX 标准值）",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/github/copilot-cli/main/README.md",
+        "license_url": "https://raw.githubusercontent.com/github/copilot-cli/main/LICENSE.md",
+        "scope": "只作产品/上游资料参考；未找到公开会话存储实现文件。"
+      }
     },
     {
       "id": "aider",
@@ -192,7 +296,16 @@
       },
       "notes": "聊天历史在 CWD，不在 home；~/.aider/ 只放 config/state（installs.json、oauth-keys.env、model settings）。旧的 .aider.history.jsonl 已不存在（改为 .aider.chat.history.md）。不 honor XDG/APPDATA。",
       "seal_policy": "no-rename",
-      "seal_source": "（CWD 相对 store 且 fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）"
+      "seal_source": "（CWD 相对 store 且 fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）",
+      "reference": {
+        "upstream_project": "Aider-AI/aider",
+        "file_path": "aider/args.py",
+        "line_count": 945,
+        "license": "Apache-2.0",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py",
+        "license_url": "https://raw.githubusercontent.com/Aider-AI/aider/main/LICENSE.txt"
+      }
     },
     {
       "id": "crush",
@@ -219,7 +332,16 @@
       },
       "notes": "项目级 SQLite（data_directory 默认 .crush，随项目走）。全局目录只放 config，不放聊天历史。",
       "seal_policy": "no-rename",
-      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）"
+      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）",
+      "reference": {
+        "upstream_project": "charmbracelet/crush",
+        "file_path": "internal/db/connect.go",
+        "line_count": 248,
+        "license": "MIT",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go",
+        "license_url": "https://raw.githubusercontent.com/charmbracelet/crush/main/LICENSE.md"
+      }
     },
     {
       "id": "zed",
@@ -246,7 +368,17 @@
       },
       "notes": "AI 面板/agent 聊天历史在 <data_dir>/threads/threads.db（ThreadStore）。主 app DB 在 <data_dir>/db/0-<channel>/db.sqlite（非聊天）。✅Zed 是 Linux 上真正走 XDG_DATA_HOME 的第二个例子。macOS 分支未逐一核实。",
       "seal_policy": "no-rename",
-      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）"
+      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）",
+      "reference": {
+        "upstream_project": "zed-industries/zed",
+        "file_path": "crates/agent/src/db.rs",
+        "line_count": 1249,
+        "license": "Apache-2.0 OR GPL-family（具体 SPDX 未查明）",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs",
+        "license_url": "https://raw.githubusercontent.com/zed-industries/zed/main/LICENSE-APACHE",
+        "alternate_license_url": "https://raw.githubusercontent.com/zed-industries/zed/main/LICENSE-GPL"
+      }
     },
     {
       "id": "continue",
@@ -273,7 +405,16 @@
       },
       "notes": "每会话一个 JSON + sessions.json 索引。Continue 的 SQLite(dev_data at ~/.continue/dev_data/) 是 analytics，不是聊天历史。CONTINUE_GLOBAL_DIR 可整体覆盖。",
       "seal_policy": "no-rename",
-      "seal_source": "（每会话独立 JSON 文件、覆盖/新建语义，fd 语义未在 B20 前确认 ⇒ 默认 no-rename）"
+      "seal_source": "（每会话独立 JSON 文件、覆盖/新建语义，fd 语义未在 B20 前确认 ⇒ 默认 no-rename）",
+      "reference": {
+        "upstream_project": "continuedev/continue",
+        "file_path": "core/util/paths.ts",
+        "line_count": 513,
+        "license": "Apache-2.0",
+        "relationship": "参考",
+        "source_url": "https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts",
+        "license_url": "https://raw.githubusercontent.com/continuedev/continue/main/LICENSE"
+      }
     }
   ]
 }
