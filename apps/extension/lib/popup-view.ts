@@ -23,6 +23,11 @@ import {
   type FailureEntry,
 } from './backfill/failures';
 import { BACKFILL_ALARM_PERIOD_MINUTES } from './backfill/alarm';
+import {
+  BACKFILL_SUPPORTED_PLATFORMS,
+  BACKFILL_UNSUPPORTED,
+  BACKFILL_UNSUPPORTED_PLATFORMS,
+} from './backfill/enumerate';
 import { DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import { stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
@@ -94,6 +99,18 @@ export interface PopupView {
   missing: string | null;
   /** 第四行：进度（复用 C11）。 */
   progress: string;
+  /**
+   * 🔴 C22 · 第五行：**哪些平台补得回历史、哪些暂时补不回。**
+   *
+   * 为什么这一行必须存在：用户装了扩展、把开关打开了，结果他常用的那个平台
+   * 一条历史都没动 —— 在他眼里这和「坏了」没有任何区别。
+   * 实时腿支持 5 个平台，回溯腿只写了 1 个；不说这件事，就是让用户
+   * 对着一个永远不动的进度条自己猜。
+   *
+   * 🔴 它与 lib/backfill/enumerate.ts 的两张表【同源】：不是在这里手写一份平台名单，
+   *    所以将来谁填上了一个平台，这行文案自己就变了，不会漂。
+   */
+  coverage: string;
   /** 补充说明，可为空。 */
   notes: string[];
   toggle: { label: string; checked: boolean; disabled: boolean };
@@ -123,6 +140,7 @@ export function renderPopup(model: PopupModel): PopupView {
     running,
     missing,
     progress,
+    coverage: coverageLine(),
     notes: notesFor(model),
     clearFailures: { label: CLEAR_FAILURES_LABEL, visible: hasFailures },
     toggle: {
@@ -241,6 +259,39 @@ function progressLine(model: PopupModel): string {
   return `进度：${formatProgress(model.state)}`;
 }
 
+/**
+ * 🔴 C22 · 回溯覆盖那一行。三件事必须说全：
+ *   1. **哪些平台补得回历史**（名单来自 BACKFILL_PLANS，不是手写的）；
+ *   2. **哪些暂时补不回**（名单来自 BACKFILL_UNSUPPORTED）；
+ *   3. **补不回 ≠ 坏了 ≠ 没有历史** —— 这句必须写死在文案里，
+ *      因为「一动不动」在用户眼里默认就是「坏了」。
+ * 🔴 这一行不提任何进度、不提任何时间预估，也不出现百分号。
+ */
+export function coverageLine(): string {
+  const yes = BACKFILL_SUPPORTED_PLATFORMS.join('、');
+  const no = BACKFILL_UNSUPPORTED_PLATFORMS.join('、');
+  if (no.length === 0) {
+    return `回溯覆盖：目前支持的平台（${yes}）都能补历史对话。`;
+  }
+  return `回溯覆盖：现在只有 ${yes} 能补回历史对话；${no} 【还不能】。`
+    + '它们的实时归档照常工作（你正在看的那条对话仍然会被存下来），'
+    + '只是过去的历史暂时补不回来 —— 这不是坏了，也不是你没有历史，是我们还没学会读它们的历史列表。';
+}
+
+/** 逐平台缺什么。放进 notes，给愿意多看一眼的用户 —— 主行只说结论。 */
+function coverageNote(): string {
+  const lines = ['这些平台暂时补不回历史，各自卡在哪一步：'];
+  for (const gap of BACKFILL_UNSUPPORTED) {
+    lines.push(`· ${gap.userNote}`);
+  }
+  lines.push('');
+  lines.push(
+    '🔴 我们不会为了让它「看起来在动」而去猜一个接口地址：猜错的结果不是报错，'
+    + '而是你以为历史在补、实际上一条都没补。宁可在这里明说还不支持。',
+  );
+  return lines.join('\n');
+}
+
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 失败详情排在所有 note 的最前面。有东西丢了就先说这件事。
@@ -267,10 +318,23 @@ function notesFor(model: PopupModel): string[] {
   }
 
   if (model.state?.halted) {
-    notes.push(
-      `这条腿已经停下并留痕：${model.state.halted.reason} —— ${model.state.halted.detail}`,
-    );
+    // 🔴 C22 · 'unsupported-platform' 不是「出故障停下了」，是「这个平台我们还没写」。
+    //    两者都要留痕，但绝不能说成同一句话。
+    if (model.state.halted.reason === 'unsupported-platform') {
+      notes.push(
+        `这个平台（${model.state.platform}）的历史回溯还没有实现，所以这条腿在发出任何请求之前就停住了。`
+        + '这不是平台改版，也不是被限流。技术细节：'
+        + model.state.halted.detail,
+      );
+    } else {
+      notes.push(
+        `这条腿已经停下并留痕：${model.state.halted.reason} —— ${model.state.halted.detail}`,
+      );
+    }
   }
+
+  // 🔴 覆盖说明排在最后：它是长期事实，不是此刻的状态。
+  if (BACKFILL_UNSUPPORTED.length > 0) notes.push(coverageNote());
   return notes;
 }
 
@@ -296,6 +360,7 @@ export function popupText(view: PopupView): string {
   lines.push(view.running);
   if (view.missing) lines.push(view.missing);
   lines.push(view.progress);
+  lines.push(view.coverage);
   for (const n of view.notes) lines.push('', n);
   return lines.join('\n');
 }

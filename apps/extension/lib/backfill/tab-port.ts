@@ -36,7 +36,7 @@
  */
 
 import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
-import { CHATGPT_DETAIL_PATH, CHATGPT_LIST_PATH } from './enumerate';
+import { backfillPlanFor } from './enumerate';
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
 
@@ -81,6 +81,12 @@ export function isTabHello(v: unknown): v is { type: string; origin: string } {
 /**
  * 🔴 内容脚本敢不敢代发这个 URL。三条全过才行（理由见文件头）。
  * 判断是纯函数 ⇒ 可以被单独断言，不依赖浏览器。
+ *
+ * 🔴 C22 · 第 3 条从「ChatGPT 那两条路径」收紧成「**这个平台自己的**那两条路径」。
+ *    以前这里只比对路径、不比对平台，于是一个 DeepSeek 页面会老老实实替我们去发
+ *    `https://chat.deepseek.com/backend-api/conversations` —— 一条我们从来没有出处、
+ *    也从来没打算发的请求。现在没有 plan 的平台一律拒发：**不会写就不发**。
+ *    这只会让允许集变小，不新增任何权限、不改 matches。
  */
 export function isAllowedBackfillUrl(url: string, pageOrigin: string): boolean {
   let u: URL;
@@ -90,9 +96,12 @@ export function isAllowedBackfillUrl(url: string, pageOrigin: string): boolean {
     return false;
   }
   if (u.origin !== pageOrigin) return false;            // 1 · 同源
-  if (!getPlatformByOrigin(u.origin)) return false;     // 2 · 在平台表里
-  return u.pathname === CHATGPT_LIST_PATH               // 3 · 只有这两条路径
-    || u.pathname.startsWith(CHATGPT_DETAIL_PATH);
+  const row = getPlatformByOrigin(u.origin);            // 2 · 在平台表里
+  if (!row) return false;
+  const plan = backfillPlanFor(row.id);                 // 3 · 这个平台真的能回溯
+  if (!plan) return false;
+  return u.pathname === plan.listPath                   // 4 · 只有它自己的这两条路径
+    || u.pathname.startsWith(plan.detailPath);
 }
 
 export type FetchLike = (url: string) => Promise<{ status: number; text: () => Promise<string> }>;
