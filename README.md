@@ -16,7 +16,13 @@ The useful first question is therefore not “is the archive elegant?” It is: 
 
 ## Install and first check
 
-Use your own repository URL and a directory you choose:
+If you are installing this to use it rather than to work on it, read
+**[`docs/install.md`](docs/install.md)** instead: it covers both halves (CLI and
+browser extension), the one-time setup list — including turning off the
+browser's "ask where to save each file before downloading" setting — how to
+confirm the archive is actually running, and what does not exist yet.
+
+The developer path, using your own repository URL and a directory you choose:
 
 ```sh
 git clone <repository-url> <your-directory>
