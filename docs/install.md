@@ -22,16 +22,64 @@ TypeScript，但你需要能打开一个终端窗口、复制粘贴几条命令�
 across harnesses."（`crates/chat-stasher/src/main.rs:22`）。它读的是本机上已经
 存在的会话文件，读的时候是只读的（`crates/chat-stasher/src/main.rs:412-414`）。
 
-**扩展这一边**：它当前支持四个网页平台 —— DeepSeek（`chat.deepseek.com`）、
-ChatGPT（`chatgpt.com` / `chat.openai.com`）、Gemini（`gemini.google.com`）、
-Claude（`claude.ai`）（`apps/extension/lib/contract.ts:69-70,112-113,128-129,144-145`）。
-它申请的权限只有两个：`downloads` 和 `storage`
-（`apps/extension/wxt.config.ts:22`）。它把抓到的会话写成 JSON 文件，路径是
+**扩展这一边**：它当前认识**六个**网页平台 —— DeepSeek（`chat.deepseek.com`）、
+Perplexity（`www.perplexity.ai`）、ChatGPT（`chatgpt.com` / `chat.openai.com`）、
+Gemini（`gemini.google.com`）、Claude（`claude.ai`）、Kimi（`www.kimi.com`）
+（`apps/extension/lib/contract.ts:69-70,112-113,128-129,144-145,160-161,222-231`）。
+它申请的权限只有三个：`downloads`、`storage` 和 `alarms`
+（`apps/extension/wxt.config.ts:35`）。它把抓到的会话写成 JSON 文件，路径是
 下载目录下的 `chat-stasher/inbox/<名字>.json`
-（`apps/extension/lib/contract.ts:224`、`apps/extension/lib/download.ts:91`）。
+（`apps/extension/lib/contract.ts:324`、`apps/extension/lib/download.ts:91`）。
 
 **两边怎么接起来**：扩展只管落盘，CLI 用 `ingest --inbox <你的收件目录>
 --stage <你的暂存目录>` 把这些文件收走（`crates/chat-stasher/src/main.rs:397-410`）。
+
+🔴 **「认识这个平台」不等于「能把你在这个平台上的历史补回来」。** 扩展有两条腿，
+请分开看：
+
+- **实时归档**（默认开着）：你正在看的这条对话，会在页面自己去取数据的时候被顺手
+  存下来。每个平台各自在那张表里登记了「哪条路由、什么方法、什么响应形状才算数」
+  （`apps/extension/lib/contract.ts:69-303`）。
+  🔴 **Perplexity 是个例外，请照实理解**：它那一行只登记了**会话列表**这一条路由，
+  并且没有登记任何「从 URL 里认出会话编号」的规则
+  （`apps/extension/lib/contract.ts:113-122`）。按代码读下来，实时归档在
+  Perplexity 上**认不出会话编号，因此不会保存任何文件**
+  （`apps/extension/lib/contract.ts:517-519`）—— 这是读代码得出的结论，
+  **我们没有在真实的 perplexity.ai 页面上实测过**。
+- **回溯历史**（默认关着，见第 6 节）：把你**过去**的对话翻出来存下来。这条腿
+  **每个平台的能力不一样**，下面第 1.1 节说清楚。
+
+### 1.1 🔴 回溯历史：三档，不是「支持 / 不支持」两档
+
+以下名单直接来自代码里那两张表，不是宣传口径
+（`apps/extension/lib/backfill/enumerate.ts:762`、`:774`、`:643`）：
+
+| 档位 | 平台 | 打开回溯之后，你实际会得到什么 |
+| --- | --- | --- |
+| **能把历史正文补回来** | **ChatGPT** | 会话被逐条列出来，正文也被逐条取回、存成文件。这一档才是「历史被备份了」。 |
+| **🔴 只能列出会话，一条正文都存不下来** | **DeepSeek**、**Perplexity** | 扩展能列出你有哪些历史会话，但**不会去取每条会话的内容**，所以**一个文件都不会落到你的下载目录**。你的 DeepSeek / Perplexity 历史**没有被备份**。 |
+| **还没支持** | **Gemini**、**Claude**、**Kimi** | 回溯这条腿在发出任何一个请求之前就停住了，什么都不会发生。 |
+
+🔴 **中间那一档最容易被误会，所以再说一遍**：DeepSeek 和 Perplexity 打开回溯之后，
+扩展**确实会动**（它在列会话），popup 里也会显示「已经列出 N 条在等着」。
+**但那 N 条一条都没有被保存。** 如果你现在关掉浏览器、格式化硬盘、或者平台把你的
+历史删了，这 N 条对话就没了 —— 扩展手里只有它们的编号，没有它们的内容。
+
+🔴 **Perplexity 还要再多说一句**：按上面那条实时归档的说明，它那一行连实时归档都
+认不出会话编号。也就是说 —— 以代码为准 —— **Perplexity 目前两条腿都不会给你留下
+任何文件**，回溯只列不存，实时也不存。它出现在名单里，表示扩展会在这个站点上运行，
+**不表示你在这里的东西被备份了**。
+
+原因写在代码里，不是我们懒：这两个平台的**会话列表接口**有多个互不相干的开源实现
+可以交叉印证，**取单条对话正文的接口没有**
+（`apps/extension/lib/backfill/enumerate.ts:538-548`、`:603-611`）。我们不会去猜一个
+正文接口地址 —— 猜错的后果不是报错，而是每条对话只存下前几轮，而你以为存全了。
+
+这三档在扩展的 popup 里也会照实显示，措辞与上表一致
+（`apps/extension/lib/popup-view.ts:271`）。
+
+（**实时归档不受这张表影响**：上面六个平台的实时归档判据在
+`apps/extension/lib/contract.ts:69-303` 那张表里各自登记，与回溯是两回事。）
 
 ---
 
@@ -223,12 +271,20 @@ chat-stasher status
   （`apps/extension/lib/backfill/pace.ts:42`，注释见 `:15`）。按这个上限，
   一千个会话至少要 5 天。这是刻意的慢，不是 bug。
 
-- **回溯功能默认是关的，而且目前没有开关界面。** 默认值是关
+- **回溯功能默认是关的。** 默认值是关
   （`apps/extension/lib/backfill/schedule.ts:32`），源码把打开的理由写得很清楚：
   回溯要拿你的登录态把整个账号翻一遍、往下载目录写成百上千个文件，所以必须先
-  有一次明确的「开」。但打开它的接口**目前只是一个函数，没有做 UI**
-  （`apps/extension/lib/backfill/schedule.ts:41`）。也就是说：**普通用户现在
-  没有现成的按钮可以打开回溯。**
+  有一次明确的「开」。
+  ⚠️ **本文早先的版本说「没有开关界面」，那句话已经过时了**：现在点浏览器工具栏上的
+  扩展图标会弹出一个小面板，里面有一个复选框可以打开它
+  （`apps/extension/entrypoints/popup/index.html`、
+  `apps/extension/entrypoints/popup/main.ts`）。默认关这件事没有变。
+
+- **🔴 打开回溯，也不等于所有平台的历史都会被补回来。** 只有 ChatGPT 会真的把历史
+  正文存下来；DeepSeek 与 Perplexity **只会把会话列出来，一条正文都不会存**；
+  Gemini / Claude / Kimi 完全没支持。名单与详细说明见第 1.1 节
+  （名单出自 `apps/extension/lib/backfill/enumerate.ts:762`、`:774`、`:643`）。
+  这一档最容易让人以为「我已经备份了」，所以它单列一条写在这里。
 
 - **扩展还没上架，要手动装。** 仓库里没有任何商店上架物料或商店扩展 ID；
   `package.json` 里标着 `"private": true`（`apps/extension/package.json:4`），
@@ -296,6 +352,8 @@ chat-stasher status
 | 编译 CLI 所需的最低 Rust 版本 | **未查证**（仓库未声明 `rust-version`） |
 | 构建扩展所需的最低 Node / pnpm 版本 | **未查证**（仓库未声明） |
 | launchd / systemd 定时器的实际安装步骤 | **未查证**（`schedule` 只渲染模板，不安装） |
+| 实时归档在 Perplexity 上到底会不会存下东西 | **未查证**（读代码的结论是「认不出会话编号，因此不存」，见第 1 节；我们没有在真实页面上试过） |
+| DeepSeek / Perplexity 的会话列表接口今天是不是还长这样 | **未查证**（出自多个开源实现的交叉印证，不是官方文档，也没有登录态实测；`apps/extension/lib/backfill/enumerate.ts:549-557`、`:612-621`。形状变了会当场停下并留痕，不会变成假进度） |
 
 「未查证」= 我们没测过，不代表它不存在，也不代表它不工作。
 上面第 6 节里那些**没有**的东西，是我们查过代码确认**确实不存在**的 —— 两者

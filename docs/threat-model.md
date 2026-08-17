@@ -149,7 +149,7 @@ We have not implemented, and do not currently plan for phase one: OS keychain
 storage for the key, passphrase-wrapping of the key file, or permission
 tightening on write.
 
-### The chat platforms (ChatGPT, DeepSeek, Gemini, …)
+### The chat platforms (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi)
 
 | | |
 |---|---|
@@ -166,6 +166,24 @@ reading their history. **We have not investigated** whether any platform's terms
 of service prohibit this, nor whether any platform rate-limits or flags such a
 pattern. Using this tool is your decision against your provider's terms; we make
 no claim that it is permitted.
+
+**Which platforms backfill actually touches, and what you get back.** This
+matters to the threat model twice over — it bounds the observable traffic, and
+it bounds what you may safely assume is archived:
+
+| Platform | Requests the platform sees | What lands in your archive |
+|---|---|---|
+| **ChatGPT** | Conversation-list requests **and** one request per conversation | The conversation text (`apps/extension/lib/backfill/enumerate.ts:762`) |
+| **DeepSeek**, **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or written (`apps/extension/lib/backfill/enumerate.ts:774`, `:538-548`, `:603-611`) |
+| **Gemini**, **Claude**, **Kimi** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:643`) |
+
+🔴 The middle row is the dangerous one to misread. On DeepSeek and Perplexity
+the extension *does* work — it enumerates your conversations and reports a
+pending count — while archiving **zero** of them. If you rely on this tool as
+the reason it is safe to delete history upstream, that reasoning does not hold
+for those two platforms. The code declines to guess a conversation-content
+endpoint precisely because a wrong guess fails silently: it would archive a
+truncated version of every chat and still look like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
@@ -322,6 +340,18 @@ a real limitation of the current code.
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
    limits section of `README.md`.
+
+7. **Browser-side history backfill covers one platform, and one tier of it
+   looks like coverage without being coverage.** Backfill recovers past
+   conversation *text* on **ChatGPT** only
+   (`apps/extension/lib/backfill/enumerate.ts:762`). On **DeepSeek** and
+   **Perplexity** it enumerates your conversations and archives **none of
+   them** (`apps/extension/lib/backfill/enumerate.ts:774`); on **Gemini**,
+   **Claude**, and **Kimi** it does nothing
+   (`apps/extension/lib/backfill/enumerate.ts:643`). The user-visible symptom of
+   the middle tier is *activity* — a growing pending count — with an empty
+   result, so "the extension is clearly doing something" is not evidence your
+   history is safe. See the platform table above.
 
 ### Threats we do not model and do not defend against
 
