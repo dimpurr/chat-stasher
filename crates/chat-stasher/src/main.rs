@@ -125,7 +125,21 @@ enum Command {
         #[arg(long)]
         no_reap: bool,
     },
-    /// Report what the local harness scanner finds (read-only).
+    /// Is the scheduled archive actually working? Plus what the local harness
+    /// scanner finds (read-only).
+    ///
+    /// The first line answers the question the timer cannot: it reads the
+    /// `run-state.json` written by the last `run-once` pass. Three distinct
+    /// answers, and only the first is a healthy one:
+    ///
+    /// * last run recent and successful -> exit 0
+    /// * last run FAILED -> exit 1, saying which step failed
+    /// * no run recorded at all, or nothing has run for longer than
+    ///   4x `backup_interval_secs` (minimum 1 hour) -> exit 1. A dead timer
+    ///   usually leaves a *successful* last run behind, so this overdue check
+    ///   is the only thing that catches it.
+    ///
+    /// Never prints session content: counts, timestamps and digests only.
     Status,
     /// Dump one session back from the repository (sequence-concatenated) and
     /// print its sha256 for verification — or, with `--all-machines`, merge
@@ -1201,6 +1215,13 @@ fn print_collect_report(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One scheduled pass. Wraps [`run_once_pass`] with the durable record the
+/// timer-visibility feature needs: whatever happened — success, no-op or
+/// failure — one `run-state.json` is written before we return.
+///
+/// Deliberately silent: a write failure is reported on stderr only, and
+/// nothing about this record is printed on the happy path, so scheduled runs
+/// look exactly as they did before.
 fn cmd_run_once(
     stage: &Path,
     machine: Option<String>,
@@ -1213,8 +1234,47 @@ fn cmd_run_once(
     verify: bool,
     no_reap: bool,
 ) -> ExitCode {
+    let started = std::time::Instant::now();
+    let (code, mut state) = run_once_pass(
+        stage,
+        machine,
+        shard_bucket_cap,
+        destination,
+        repo,
+        key_file,
+        connections,
+        options,
+        verify,
+        no_reap,
+    );
+    state.duration_ms = started.elapsed().as_millis() as u64;
+    let state_dir = chat_stasher::collect::default_state_dir();
+    if let Err(e) = chat_stasher::runstate::save(&state_dir, &state) {
+        eprintln!("[run-once] warning: run-state not recorded: {e:#}");
+    }
+    code
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_once_pass(
+    stage: &Path,
+    machine: Option<String>,
+    shard_bucket_cap: usize,
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    verify: bool,
+    no_reap: bool,
+) -> (ExitCode, chat_stasher::runstate::RunState) {
+    use chat_stasher::runstate::{RunOutcome, RunState};
+
     let config = Config::load();
     let machine_name = machine.clone().unwrap_or_else(chat_stasher::id::machine_id);
+    // Pessimistic starting point: until a step proves otherwise this pass is
+    // recorded as a failure, so an unexpected exit can never be read as "ok".
+    let mut state = RunState::new(RunOutcome::Error, Some("start"), &machine_name, 0);
     let state_dir = chat_stasher::collect::default_state_dir();
     // The destination is resolved from the same overrides this run will push
     // to, so `collect` accrues debt against the repository `push` settles it
@@ -1239,9 +1299,13 @@ fn cmd_run_once(
         Ok(report) => report,
         Err(e) => {
             eprintln!("[run-once] result: ERROR exit_code=1 collect={e:#}");
-            return ExitCode::FAILURE;
+            state.failed_step = Some("collect".to_string());
+            return (ExitCode::FAILURE, state);
         }
     };
+    state.shards_written = report.shards_written;
+    state.collect_errors = report.errors.len();
+    state.archive_gaps = report.archive_gaps.len();
     print_collect_report(&report, stage, &state_dir, &machine_name);
     if !report.errors.is_empty() || !report.archive_gaps.is_empty() {
         eprintln!(
@@ -1249,16 +1313,19 @@ fn cmd_run_once(
             report.errors.len(),
             report.archive_gaps.len()
         );
-        return ExitCode::FAILURE;
+        state.failed_step = Some("collect-incomplete".to_string());
+        return (ExitCode::FAILURE, state);
     }
 
     let stage_shards = match store::sealed_shard_count(stage) {
         Ok(count) => count,
         Err(e) => {
             eprintln!("[run-once] result: ERROR exit_code=1 stage_audit={e:#}");
-            return ExitCode::FAILURE;
+            state.failed_step = Some("stage-audit".to_string());
+            return (ExitCode::FAILURE, state);
         }
     };
+    state.stage_shards = stage_shards;
     let changed = report.changed_records > 0 || report.shards_written > 0;
     let only_if_changed = config.push_only_if_changed.unwrap_or(true);
     let should_push = stage_shards > 0 && (!only_if_changed || changed);
@@ -1292,7 +1359,8 @@ fn cmd_run_once(
                     );
                     if code != ExitCode::SUCCESS {
                         eprintln!("[run-once] result: ERROR exit_code=1 verify=l1");
-                        return ExitCode::FAILURE;
+                        state.failed_step = Some("verify".to_string());
+                        return (ExitCode::FAILURE, state);
                     }
                 }
                 Ok(false) => {
@@ -1300,12 +1368,16 @@ fn cmd_run_once(
                 }
                 Err(e) => {
                     eprintln!("[run-once] result: ERROR exit_code=1 verify_preflight={e:#}");
-                    return ExitCode::FAILURE;
+                    state.failed_step = Some("verify-preflight".to_string());
+                    return (ExitCode::FAILURE, state);
                 }
             }
         }
         println!("[run-once] result: NOOP snapshot=not-created exit_code=0");
-        return ExitCode::SUCCESS;
+        state.outcome = RunOutcome::Noop;
+        state.failed_step = None;
+        state.snapshot_created = false;
+        return (ExitCode::SUCCESS, state);
     }
 
     let push_code = cmd_push(
@@ -1321,7 +1393,8 @@ fn cmd_run_once(
     );
     if push_code != ExitCode::SUCCESS {
         eprintln!("[run-once] result: ERROR exit_code=1 push_failed");
-        return ExitCode::FAILURE;
+        state.failed_step = Some("push".to_string());
+        return (ExitCode::FAILURE, state);
     }
 
     if verify {
@@ -1338,11 +1411,15 @@ fn cmd_run_once(
         );
         if code != ExitCode::SUCCESS {
             eprintln!("[run-once] result: ERROR exit_code=1 verify=l1");
-            return ExitCode::FAILURE;
+            state.failed_step = Some("verify".to_string());
+            return (ExitCode::FAILURE, state);
         }
     }
     println!("[run-once] result: COMPLETED snapshot=created exit_code=0");
-    ExitCode::SUCCESS
+    state.outcome = RunOutcome::Completed;
+    state.failed_step = None;
+    state.snapshot_created = true;
+    (ExitCode::SUCCESS, state)
 }
 
 fn cmd_schedule(
@@ -2315,6 +2392,9 @@ fn cmd_init() -> ExitCode {
 
 fn cmd_status() -> ExitCode {
     let config = Config::load();
+    let verdict = run_state_verdict(&config);
+    println!("[run-once] {}", verdict.line);
+
     let report = match scanner::scan(&config) {
         Ok(r) => r,
         Err(e) => {
@@ -2323,7 +2403,30 @@ fn cmd_status() -> ExitCode {
         }
     };
     print_status(&report);
-    ExitCode::SUCCESS
+    if verdict.healthy {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Read the last `run-once` record and turn it into one sentence.
+///
+/// The cadence comes from the same config the scheduler templates use, so the
+/// overdue threshold tracks whatever the user actually scheduled. If the
+/// cadence is unusable, fall back to the default rather than skipping the
+/// overdue check — silently dropping it is the failure this exists to catch.
+fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
+    use chat_stasher::runstate;
+
+    let interval = schedule::interval_secs(config).unwrap_or(config::DEFAULT_BACKUP_INTERVAL_SECS);
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let read = runstate::load(&state_dir);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    runstate::summarize(&read, now, runstate::stale_after_secs(interval))
 }
 
 /// Human-readable summary + one metadata line per record.
