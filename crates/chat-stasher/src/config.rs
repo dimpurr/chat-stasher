@@ -128,10 +128,24 @@ impl Config {
         match std::fs::read_to_string(config_path()) {
             Ok(raw) => match toml::from_str(&raw) {
                 Ok(cfg) => cfg,
-                Err(e) => {
-                    eprintln!("warning: config is not valid TOML, using defaults: {e}");
-                    Config::default()
-                }
+                Err(e) => match recover_windows_paths(&raw)
+                    .and_then(|fixed| toml::from_str::<Config>(&fixed).ok())
+                {
+                    Some(cfg) => {
+                        eprintln!(
+                            "warning: config 里有未转义的反斜杠路径（Windows 写法），已按字面路径读取: {}",
+                            config_path().display()
+                        );
+                        eprintln!(
+                            "         TOML 里 `\\` 是转义符；写成 'C:\\path' (单引号) 或 \"C:\\\\path\" 可去掉这条警告"
+                        );
+                        cfg
+                    }
+                    None => {
+                        eprintln!("warning: config is not valid TOML, using defaults: {e}");
+                        Config::default()
+                    }
+                },
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // First run — no config yet. That is explicitly fine.
@@ -181,6 +195,163 @@ impl Config {
         eprintln!("wrote default config: {}", path.display());
         Ok(())
     }
+}
+
+/// Characters that may legally follow a backslash inside a TOML basic string,
+/// excluding the two hex escapes (`\uXXXX` / `\UXXXXXXXX`) handled separately.
+const TOML_SIMPLE_ESCAPES: [char; 7] = ['b', 't', 'n', 'f', 'r', '"', '\\'];
+
+/// String-literal state while walking a config file. Only basic (double-quoted)
+/// strings treat `\` as an escape, so only those may be rewritten.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum TomlSpan {
+    Outside,
+    Comment,
+    Literal,
+    MultiLiteral,
+    Basic,
+    MultiBasic,
+}
+
+/// True when `chars[i]` (a backslash) begins an escape TOML actually defines.
+fn is_toml_escape(chars: &[char], i: usize) -> bool {
+    let Some(&next) = chars.get(i + 1) else {
+        return false;
+    };
+    if TOML_SIMPLE_ESCAPES.contains(&next) {
+        return true;
+    }
+    // Line-ending backslash: in a multi-line basic string a backslash followed
+    // by nothing but whitespace-to-end-of-line trims the newline. Doubling that
+    // one would change a string TOML already reads correctly.
+    if next == '\n' || next == '\r' {
+        return true;
+    }
+    if next == ' ' || next == '\t' {
+        return matches!(
+            chars[i + 1..]
+                .iter()
+                .find(|c| **c != ' ' && **c != '\t')
+                .copied(),
+            Some('\n') | Some('\r')
+        );
+    }
+    let digits = match next {
+        'u' => 4,
+        'U' => 8,
+        _ => return false,
+    };
+    chars.len() > i + 1 + digits
+        && chars[i + 2..i + 2 + digits]
+            .iter()
+            .all(|c| c.is_ascii_hexdigit())
+}
+
+/// Second chance for a config whose only problem is a Windows path pasted
+/// verbatim into a basic string.
+///
+/// `cursor = "C:\Users\me\AppData\Roaming\Cursor\...\state.vscdb"` is the way a
+/// Windows user naturally writes a path down — and it is not valid TOML, because
+/// `\U` starts an 8-hex-digit escape. Rejecting the whole file over it means the
+/// tool acts as if the user never stated where their store lives, which is the
+/// same false claim `harness_roots` exists to prevent, one layer earlier.
+///
+/// So: every backslash that does **not** begin an escape TOML defines is doubled
+/// (inside basic strings only — literal `'...'` strings, comments and bare keys
+/// are copied untouched). Returns `None` when there was nothing to rewrite, so
+/// the caller reports the original parse error rather than a misleading one.
+///
+/// This is strictly a *recovery* path: it only runs after a strict parse has
+/// already failed, and it can never change the meaning of an escape sequence
+/// TOML defines, because those are the ones it leaves alone.
+fn recover_windows_paths(raw: &str) -> Option<String> {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len() + 32);
+    let mut span = TomlSpan::Outside;
+    let mut rewrote = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        match span {
+            TomlSpan::Outside => {
+                if c == '#' {
+                    span = TomlSpan::Comment;
+                } else if c == '\'' {
+                    if chars[i + 1..].starts_with(&['\'', '\'']) {
+                        out.push_str("'''");
+                        i += 3;
+                        span = TomlSpan::MultiLiteral;
+                        continue;
+                    }
+                    span = TomlSpan::Literal;
+                } else if c == '"' {
+                    if chars[i + 1..].starts_with(&['"', '"']) {
+                        out.push_str("\"\"\"");
+                        i += 3;
+                        span = TomlSpan::MultiBasic;
+                        continue;
+                    }
+                    span = TomlSpan::Basic;
+                }
+            }
+            TomlSpan::Comment => {
+                if c == '\n' {
+                    span = TomlSpan::Outside;
+                }
+            }
+            // Literal strings keep backslashes verbatim — nothing to fix, and
+            // rewriting one would change its value.
+            TomlSpan::Literal => {
+                if c == '\'' || c == '\n' {
+                    span = TomlSpan::Outside;
+                }
+            }
+            TomlSpan::MultiLiteral => {
+                if c == '\'' && chars[i + 1..].starts_with(&['\'', '\'']) {
+                    out.push_str("'''");
+                    i += 3;
+                    span = TomlSpan::Outside;
+                    continue;
+                }
+            }
+            TomlSpan::Basic | TomlSpan::MultiBasic => {
+                if c == '\\' {
+                    if is_toml_escape(&chars, i) {
+                        // Copy the escape lead-in whole so its payload is never
+                        // re-examined as if it were text.
+                        out.push('\\');
+                        out.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    out.push_str("\\\\");
+                    rewrote = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' {
+                    if span == TomlSpan::MultiBasic {
+                        if chars[i + 1..].starts_with(&['"', '"']) {
+                            out.push_str("\"\"\"");
+                            i += 3;
+                            span = TomlSpan::Outside;
+                            continue;
+                        }
+                    } else {
+                        span = TomlSpan::Outside;
+                    }
+                } else if c == '\n' && span == TomlSpan::Basic {
+                    // Unterminated basic string; the strict error stands.
+                    span = TomlSpan::Outside;
+                }
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+
+    rewrote.then_some(out)
 }
 
 /// Absolute path of the config file.
@@ -255,6 +426,11 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Single-file (SQLite) harnesses want the file itself; directory harnesses want
 # the directory.
 #
+# Windows paths: `\` is TOML's escape character inside "double quotes", so
+# prefer single quotes — 'C:\Users\me\AppData\Roaming\Cursor\User\globalStorage\state.vscdb'
+# (or double every backslash). A path pasted verbatim into double quotes is
+# still read, with a warning, rather than dropping your whole config.
+#
 # [harness_roots]
 # cursor = "~/.config/Cursor/User/globalStorage/state.vscdb"
 # grok = "~/.grok/sessions/session_search.sqlite"
@@ -280,3 +456,80 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # [destinations.storagebox.options]
 # endpoint = "ssh://example:23"
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The exact shape that made `doctor_consistency_test` red on
+    /// `windows-latest`: a Windows path pasted verbatim into a basic string.
+    #[test]
+    fn windows_path_in_basic_string_is_recovered() {
+        let raw = "[harness_roots]\ncursor = \"C:\\Users\\me\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb\"\n";
+        assert!(
+            toml::from_str::<Config>(raw).is_err(),
+            "前提：这份 config 严格解析必须是失败的，否则本恢复路径根本不会跑"
+        );
+        let fixed = recover_windows_paths(raw).expect("应当识别出未转义的反斜杠");
+        let cfg: Config = toml::from_str(&fixed).expect("补转义后应当解析成功");
+        assert_eq!(
+            cfg.explicit_harness_root("cursor"),
+            Some("C:\\Users\\me\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb"),
+            "恢复出来的必须是用户写下的那条字面路径"
+        );
+    }
+
+    /// Recovery must not touch a file that parses: escapes TOML defines keep
+    /// their meaning, and a literal `'...'` string is copied byte for byte.
+    #[test]
+    fn defined_escapes_and_literal_strings_are_left_alone() {
+        let raw = "a = \"line\\nbreak\\tand \\u0041\"\nb = 'C:\\Users\\me'\n# comment C:\\x\n";
+        assert!(
+            recover_windows_paths(raw).is_none(),
+            "没有可修的反斜杠时必须返回 None，好让调用方报原始错误"
+        );
+    }
+
+    /// A config that is broken for some *other* reason must not be silently
+    /// "recovered" into something that parses — the original error stands.
+    #[test]
+    fn unrelated_syntax_error_is_not_recovered() {
+        let raw = "[harness_roots\ncursor = \"C:\\Users\\me\"\n";
+        let recovered = recover_windows_paths(raw)
+            .map(|fixed| toml::from_str::<Config>(&fixed).is_ok())
+            .unwrap_or(false);
+        assert!(!recovered, "括号都没闭合，不该被这条恢复路径救活");
+    }
+
+    /// Recovery is a spelling fix, never a permission slip: a path that does not
+    /// exist is still just a path — nothing here invents a count or a store.
+    #[test]
+    fn recovery_only_changes_spelling_not_meaning() {
+        let raw = "[harness_roots]\ngrok = \"C:\\missing\\store.sqlite\"\n";
+        let fixed = recover_windows_paths(raw).unwrap();
+        let cfg: Config = toml::from_str(&fixed).unwrap();
+        assert_eq!(
+            cfg.explicit_harness_root("grok"),
+            Some("C:\\missing\\store.sqlite")
+        );
+        assert!(!Path::new(cfg.explicit_harness_root("grok").unwrap()).exists());
+    }
+
+    /// The boundary this recovery deliberately does **not** cross: a path whose
+    /// every backslash sequence happens to be a TOML escape (`\n`, `\t`, …) is
+    /// valid TOML already, so the strict parse succeeds and recovery is never
+    /// consulted. `"C:\new"` therefore still means `C:` + newline + `ew`.
+    /// Guessing otherwise would be overriding a file that parsed — the opposite
+    /// of taking the user at their word.
+    #[test]
+    fn a_path_that_is_already_valid_toml_is_not_second_guessed() {
+        let raw = "[harness_roots]\ngrok = \"C:\\new\\temp.sqlite\"\n";
+        let cfg: Config = toml::from_str(raw).expect("这份 config 严格解析本来就成立");
+        assert_eq!(
+            cfg.explicit_harness_root("grok"),
+            Some("C:\new\temp.sqlite")
+        );
+        assert!(recover_windows_paths(raw).is_none());
+    }
+}
