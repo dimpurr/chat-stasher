@@ -1,8 +1,15 @@
 name: CI
 
+# Manual-only for now, on the owner's instruction: while the cross-platform
+# matrix is still red, a run on every push means a failure email on every push,
+# and that noise costs more than the signal is currently worth. The matrix is
+# NOT being weakened or deleted — it has already found four real bugs that only
+# appear off macOS, and it goes back on `push` the moment it is green.
+#
+# Re-enable by restoring `push:` and `pull_request:` below. Run it meanwhile
+# with: gh workflow run CI --ref main
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
