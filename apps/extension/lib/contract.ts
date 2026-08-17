@@ -73,7 +73,23 @@ export const PLATFORMS: readonly ChatPlatform[] = [
       '/chat/session/([0-9a-fA-F-]{8,})',
       '[?&]chat_session_id=([^&]+)',
     ],
-    credibility: 'unverified',
+    // External source evidence checked 2026-08-17 (source code, not README):
+    // deepseek-pp (Apache-2.0; commit 0a02c72b135bf2936e11aa78fd6136931ed65908,
+    // 2026-08-14) uses https://chat.deepseek.com plus
+    // /api/v0/chat/history_messages and /api/v0/chat_session/fetch_page, and
+    // requires chat_sessions/chat_messages in the decoded business data:
+    // https://github.com/zhu1090093659/deepseek-pp/blob/0a02c72b135bf2936e11aa78fd6136931ed65908/core/deepseek/conversation-export.ts#L105-L186
+    // https://github.com/zhu1090093659/deepseek-pp/blob/0a02c72b135bf2936e11aa78fd6136931ed65908/core/export/normalize.ts#L44-L73
+    // better-deepseek (MIT; commit f558441ac616a174119ba434571c1ee0a2b84ddb,
+    // 2026-08-15) independently uses /api/v0/chat/history_messages, /chat/s/<id>,
+    // role/fragments and non-empty content for export:
+    // https://github.com/EdgeTypE/better-deepseek/blob/f558441ac616a174119ba434571c1ee0a2b84ddb/src/content/tools/exporter.js#L23-L127
+    // Context Sync (MIT; commit 66a548840c1e11f4080e0f059783728173494998,
+    // 2026-04-05) independently identifies non-empty DeepSeek DOM message nodes:
+    // https://github.com/Vineetpandey0/context-sync/blob/66a548840c1e11f4080e0f059783728173494998/injectors/deepseek.js#L94-L120
+    // The external API route/shape differences may represent different entry
+    // points or versions; this task changes credibility only, not match data.
+    credibility: 'from-source',
   },
   {
     id: 'chatgpt',
