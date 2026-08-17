@@ -67,6 +67,7 @@
  */
 
 import { PLATFORMS } from '../contract';
+import type { DetailOutcome } from './types';
 
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
 export const CHATGPT_DETAIL_PATH = '/backend-api/conversation/';
@@ -163,6 +164,15 @@ export type DetailPostSpec = BackfillPostSpec<[origin: string, conversationId: s
 export type BackfillSegment = 'list' | 'detail';
 
 /**
+ * 正文解析器的结果。'non-empty' 不是一个要落盘的结局，只是表示继续走现有
+ * sink；两个 detail-empty-* 才是 C28 要求可观察、可落盘的具名值。
+ */
+export type DetailParseResult =
+  | { ok: true; outcome: 'non-empty' }
+  | { ok: true; outcome: DetailOutcome }
+  | { ok: false; detail: string };
+
+/**
  * 🔴 回溯一个平台所需的【最小声明集】。填满这七项就能被回溯；缺一项就不能。
  * 加一个平台 = 加一条这个结构，不需要动 engine 一行。
  */
@@ -205,6 +215,22 @@ export interface BackfillEnumPlan {
   detailUrl: ((origin: string, conversationId: string) => string) | null;
   /** 5b · 🔴 C23 新增（可选）。声明了就代表正文段用 POST 发。 */
   detailPost?: DetailPostSpec;
+  /**
+   * 🔴 C28 · 可选的正文内容判定钩子；不声明就保持现有行为。
+   *
+   * 这不是正文 URL 或白名单声明，生产 plan 目前一个也没有接上。等某个平台的
+   * 正文段真正有出处时，在这里（最终由 engine.ts 的正文循环调用）区分：
+   *   · HTTP 成功但内容为空 ⇒ detail-empty-unverified，停下且不清 pending；
+   *   · 有可靠证据证明合法空会话 ⇒ detail-empty-confirmed，才可按完成处理。
+   *
+   * 🔴 已知有一个来源观察到 DeepSeek「二次访问同一会话时返回空」，但两源对
+   * 那个字段的写法冲突（`cacheControl` / `cache_control`），所以字段名本身
+   * 被判为未找到：这里不读取它，也不把任一拼法写成已知契约。若将来拿到原始
+   * payload，应在这个 parser 的实现处加判断；engine.ts 的接入点是
+   * `runBackfill` 正文循环中 `matchesResponseShape` 之后、构造 `CapturedFetch`
+   * 之前。到那时仍须保留 detailPath/detailUrl 的出处与白名单边界。
+   */
+  parseDetailPage?: (text: string) => DetailParseResult;
   /**
    * 6b · 🔴 C26（可选）· 这条 plan **只覆盖了一半**时，缺的那一半写在这里。
    * 口径与 UnsupportedBackfill 完全一致（missing + 给用户的一句人话），
