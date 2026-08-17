@@ -3,6 +3,7 @@
 use chat_stasher::config::{self, Config};
 use chat_stasher::reap;
 use chat_stasher::scanner;
+use chat_stasher::schedule;
 use chat_stasher::seal;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
@@ -30,6 +31,57 @@ struct Cli {
 enum Command {
     /// Write a commented default config if none exists (non-destructive).
     Init,
+    /// Collect one pass, push only when configured and changed, then exit.
+    ///
+    /// Exit codes are intentionally distinct: 0 = normal no-op, 10 = normal
+    /// completed cycle, 1 = real error. The command is safe to invoke again.
+    RunOnce {
+        /// Stage directory that holds the sealed session shard tree.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Machine partition for the stage and snapshot host.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option key=value, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Do the cheap repository structure check (L1) after the cycle.
+        #[arg(long)]
+        verify: bool,
+        /// Disable ssh connection reaping after this run.
+        #[arg(long)]
+        no_reap: bool,
+    },
+    /// Render a launchd plist or systemd user service/timer; never installs it.
+    Schedule {
+        /// Template format to render.
+        #[arg(long, value_enum, default_value = "launchd")]
+        format: schedule::Format,
+        /// Stage path embedded in the one-shot command.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Write to this plist path, or systemd directory. Without it, print.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Binary path embedded in the template (defaults to this executable).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Add the cheap L1 verify pass after each archive cycle.
+        #[arg(long)]
+        verify: bool,
+    },
     /// Move a batch of sealed session shards into the rustic repository.
     ///
     /// The stage directory is expected to already hold only *sealed* shards at
@@ -223,6 +275,34 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init => cmd_init(),
+        Command::RunOnce {
+            stage,
+            machine,
+            shard_bucket_cap,
+            repo,
+            key_file,
+            connections,
+            options,
+            verify,
+            no_reap,
+        } => cmd_run_once(
+            &stage,
+            machine,
+            shard_bucket_cap,
+            repo,
+            key_file,
+            connections,
+            &options,
+            verify,
+            no_reap,
+        ),
+        Command::Schedule {
+            format,
+            stage,
+            output,
+            binary,
+            verify,
+        } => cmd_schedule(format, &stage, output, binary, verify),
         Command::Push {
             stage,
             inbox,
@@ -366,6 +446,19 @@ fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> 
         }
     };
 
+    print_collect_report(&report, stage, &state_dir, &machine);
+    if !report.errors.is_empty() {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_collect_report(
+    report: &chat_stasher::collect::CollectReport,
+    stage: &Path,
+    state_dir: &Path,
+    machine: &str,
+) {
     println!("[collect] stage           : {}", stage.display());
     println!("[collect] state           : {}", state_dir.display());
     println!("[collect] machine         : {machine}");
@@ -438,11 +531,223 @@ fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> 
                 error.session_prefix, error.source_path_sha256
             );
         }
+    }
+}
+
+const RUN_ONCE_NOOP_CODE: u8 = 0;
+const RUN_ONCE_COMPLETED_CODE: u8 = 10;
+
+fn cmd_run_once(
+    stage: &Path,
+    machine: Option<String>,
+    shard_bucket_cap: usize,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    verify: bool,
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    let machine_name = machine.clone().unwrap_or_else(chat_stasher::id::machine_id);
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let report = match chat_stasher::collect::collect(
+        &config,
+        stage,
+        &machine_name,
+        &state_dir,
+        shard_bucket_cap,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("[run-once] result: ERROR exit_code=1 collect={e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    print_collect_report(&report, stage, &state_dir, &machine_name);
+    if !report.errors.is_empty() || !report.archive_gaps.is_empty() {
+        eprintln!(
+            "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={}",
+            report.errors.len(),
+            report.archive_gaps.len()
+        );
         return ExitCode::FAILURE;
+    }
+
+    let stage_shards = match store::sealed_shard_count(stage) {
+        Ok(count) => count,
+        Err(e) => {
+            eprintln!("[run-once] result: ERROR exit_code=1 stage_audit={e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let changed = report.changed_records > 0 || report.shards_written > 0;
+    let only_if_changed = config.push_only_if_changed.unwrap_or(true);
+    let should_push = stage_shards > 0 && (!only_if_changed || changed);
+    if !should_push {
+        println!(
+            "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}",
+            changed, only_if_changed, stage_shards
+        );
+        if verify {
+            let cfg = store_config_from(
+                &config,
+                repo.clone(),
+                key_file.clone(),
+                connections,
+                options,
+            );
+            let verifier = BackupStore::new(cfg.clone(), machine_name.clone());
+            match verifier.repository_exists() {
+                Ok(true) => {
+                    let code = cmd_verify(
+                        VerifyLevel::L1,
+                        &None,
+                        Some(&machine_name),
+                        repo,
+                        key_file,
+                        connections,
+                        options,
+                        no_reap,
+                    );
+                    if code != ExitCode::SUCCESS {
+                        eprintln!("[run-once] result: ERROR exit_code=1 verify=l1");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                Ok(false) => {
+                    println!("[run-once] verify skipped: no repository exists yet");
+                }
+                Err(e) => {
+                    eprintln!("[run-once] result: ERROR exit_code=1 verify_preflight={e:#}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        println!("[run-once] result: NOOP exit_code={RUN_ONCE_NOOP_CODE} (no new snapshot)");
+        return ExitCode::from(RUN_ONCE_NOOP_CODE);
+    }
+
+    let push_code = cmd_push(
+        &stage.to_path_buf(),
+        None,
+        repo.clone(),
+        key_file.clone(),
+        machine.clone(),
+        connections,
+        options,
+        no_reap,
+    );
+    if push_code != ExitCode::SUCCESS {
+        eprintln!("[run-once] result: ERROR exit_code=1 push_failed");
+        return ExitCode::FAILURE;
+    }
+
+    if verify {
+        let code = cmd_verify(
+            VerifyLevel::L1,
+            &None,
+            Some(&machine_name),
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        );
+        if code != ExitCode::SUCCESS {
+            eprintln!("[run-once] result: ERROR exit_code=1 verify=l1");
+            return ExitCode::FAILURE;
+        }
+    }
+    println!("[run-once] result: COMPLETED exit_code={RUN_ONCE_COMPLETED_CODE} (snapshot created)");
+    ExitCode::from(RUN_ONCE_COMPLETED_CODE)
+}
+
+fn cmd_schedule(
+    format: schedule::Format,
+    stage: &Path,
+    output: Option<PathBuf>,
+    binary: Option<PathBuf>,
+    verify: bool,
+) -> ExitCode {
+    let config = Config::load();
+    let interval = match schedule::interval_secs(&config) {
+        Ok(interval) => interval,
+        Err(e) => {
+            eprintln!("schedule: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let binary = match binary {
+        Some(path) => absolute_path(&path),
+        None => match std::env::current_exe() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("schedule: cannot resolve current executable: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let stage = absolute_path(stage);
+    let files = schedule::render(
+        format,
+        &binary,
+        &stage,
+        interval,
+        verify,
+        &config::home_dir(),
+    );
+    let paths = match output {
+        Some(output) => match schedule::write_templates(format, &output, &files) {
+            Ok(paths) => {
+                for path in &paths {
+                    println!("[schedule] wrote template: {}", path.display());
+                }
+                paths
+            }
+            Err(e) => {
+                eprintln!("schedule: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => {
+            for file in &files {
+                println!("===== {} =====", file.name);
+                print!("{}", file.content);
+            }
+            Vec::new()
+        }
+    };
+    println!("[schedule] interval_secs: {interval}");
+    println!("[schedule] install is NOT automatic.");
+    if paths.is_empty() {
+        match format {
+            schedule::Format::Launchd => println!(
+                "[schedule] save the plist as \"$HOME/Library/LaunchAgents/{label}.plist\" first.",
+                label = schedule::LAUNCHD_LABEL
+            ),
+            schedule::Format::Systemd => {
+                println!("[schedule] save both units under \"$HOME/.config/systemd/user/\" first.")
+            }
+        }
+        println!("[schedule] installation requires you to execute this command yourself:");
+        println!("{}", schedule::install_command_for_saved(format));
+    } else {
+        println!("[schedule] you must execute this command yourself to install:");
+        println!("{}", schedule::install_command(format, &paths));
     }
     ExitCode::SUCCESS
 }
 
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
 /// `seal` — allowlist-checked rename-sealing of one active file.
 ///
 /// The registry (`data/harness-registry-v1.json`) is the single decision

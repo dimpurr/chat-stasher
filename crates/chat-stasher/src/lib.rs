@@ -14,6 +14,7 @@ pub mod models;
 pub mod readback;
 pub mod reap;
 pub mod scanner;
+pub mod schedule;
 pub mod seal;
 pub mod sqlite_probe;
 pub mod store;

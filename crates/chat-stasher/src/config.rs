@@ -22,7 +22,7 @@ pub const CONFIG_RELATIVE_PATH: &str = "chat-stasher/config.toml";
 #[serde(default)]
 pub struct Config {
     /// Where archived snapshots will live once `push` is implemented.
-    /// Currently unused; kept so the config schema is stable.
+    /// Kept so the config schema is stable.
     pub archive_root: Option<String>,
     /// Root directory that holds Claude Code session JSONL files.
     pub claude_projects_dir: Option<String>,
@@ -49,8 +49,8 @@ pub struct Config {
     /// How often an unattended run should archive, in seconds.
     ///
     /// Default `DEFAULT_BACKUP_INTERVAL_SECS` (hourly). The scheduling
-    /// mechanism itself is **not implemented yet** — this knob records the
-    /// decided default so the number lives in one place when it is.
+    /// The schedule command reads this value when rendering launchd/systemd
+    /// templates; the scheduler itself remains an external one-shot runner.
     ///
     /// Why hourly: it bounds worst-case loss to one hour, and G7/B18 measured
     /// the cost of that cadence directly. With shards bucketed
@@ -162,7 +162,7 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # rustic_connections = 4
 
 # How often an unattended run should archive, in seconds. Default 3600 (hourly).
-# NOTE: the scheduler itself is not implemented yet; this records the default.
+# The scheduler template reads this value; it is not installed automatically.
 # backup_interval_secs = 3600
 
 # Skip the run when nothing changed since the last one. Default true.
