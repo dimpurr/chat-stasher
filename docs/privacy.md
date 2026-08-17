@@ -27,8 +27,15 @@ that document is the honest one.
 - **We receive nothing.** Not your conversations, not your email, not your IP
   address, not usage statistics, not crash reports, not even the fact that you
   installed this.
-- **The extension runs on five chat sites and nowhere else** — a fixed list
-  compiled into the code, not a wildcard.
+- **The extension runs on six chat platforms and nowhere else** — a fixed list
+  compiled into the code, not a wildcard. See
+  [section 5](#5-where-the-extension-runs) for the exact origins.
+- **Running on a site is not the same as backing up your history there.** The
+  optional backfill feature can actually recover past conversation text on
+  **ChatGPT only**. On **DeepSeek** and **Perplexity** it lists your
+  conversations and saves **none of their content**; on Gemini, Claude, and Kimi
+  it does nothing at all. See
+  [section 5](#5-where-the-extension-runs).
 - **Everything is stored on your machine or at a destination you configure**
   (a local disk, or a remote store whose credentials only you hold).
 - **There is a known plaintext window.** Captured conversations sit
@@ -185,7 +192,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Gemini, Claude, Kimi) | Your conversations — they host them; they always could. The passive capture adds no traffic of its own. | `apps/extension/lib/page-hook.ts:332`, `:356-373` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi) | Your conversations — they host them; they always could. The passive capture adds no traffic of its own. | `apps/extension/lib/page-hook.ts:332`, `:356-373` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | Download-history entries containing platform names and session ids, *if* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/download.ts:138-139` |
 | **Anything else running on your computer as you** | The plaintext inbox files, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -202,19 +209,30 @@ this, or whether it triggers rate-limiting. Backfill is off unless you enable it
 code refuses to fetch at all rather than defaulting to a live one
 (`apps/extension/lib/backfill/engine.ts:39-41`, `:119`).
 
+Which platforms actually see those extra requests, stated exactly:
+**ChatGPT** (conversation list *and* each conversation's content), and
+**DeepSeek** and **Perplexity** (**conversation list only** — the extension
+never requests the content of a DeepSeek or Perplexity conversation, and
+therefore never saves one). On **Gemini**, **Claude**, and **Kimi** backfill
+issues no requests at all. (`apps/extension/lib/backfill/enumerate.ts:762`,
+`:774`, `:643`.) The practical reading for you: enabling backfill on DeepSeek or
+Perplexity produces list traffic the platform can see, and produces **no backup
+whatsoever** on your side.
+
 ## 5. Where the extension runs
 
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:71`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:113`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:129`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:145`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:215`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:70`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:113`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:129`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:145`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:161`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:231`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:292-294`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:307-310`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -225,10 +243,27 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:370-390`, `:467-479`), and bodies over 4 MB are
-skipped as streamed media (`apps/extension/lib/contract.ts:306`). No shipped
+(`apps/extension/lib/contract.ts:380-400`, `:502-516`), and bodies over 4 MB are
+skipped as streamed media (`apps/extension/lib/contract.ts:322`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
-explicitly (`apps/extension/lib/contract.ts:109`, `:125`, `:141`, `:203`, `:287`).
+explicitly (`apps/extension/lib/contract.ts:109`, `:125`, `:141`, `:157`, `:219`,
+`:303`).
+
+**What running on a site does *not* mean.** Being on this list means the
+extension's content script is injected there. It does not mean your history on
+that site gets archived. The optional backfill feature — the only part that goes
+looking for *past* conversations — is limited to a shorter list, and the middle
+tier of that list is easy to misread:
+
+| Platform | What backfill does when you enable it |
+|---|---|
+| **ChatGPT** | Lists your conversations **and saves their content** (`apps/extension/lib/backfill/enumerate.ts:762`). |
+| **DeepSeek**, **Perplexity** | Lists your conversations and **saves none of their content** — **no file is written, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:774`, `:538-548`, `:603-611`). |
+| **Gemini**, **Claude**, **Kimi** | Nothing; the leg stops before issuing any request (`apps/extension/lib/backfill/enumerate.ts:643`). |
+
+We state this in a privacy policy because the failure mode is a privacy
+expectation, not just a feature gap: a user who believes their DeepSeek or
+Perplexity history is archived may delete it upstream. It is not archived.
 
 Only `fetch` responses are read. The hook also wraps `XMLHttpRequest` and
 `EventSource` on these sites, but **solely to print a console warning** that a
