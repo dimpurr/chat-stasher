@@ -987,14 +987,14 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
 }
 
 pub fn print_report(r: &DoctorReport) {
-    println!();
-    println!("doctor — “你的 harness 正在偷偷删你的数据吗？”");
-    println!("      只读探测；只打印路径 / 计数 / 字节 / 时间戳，绝不打印会话正文。");
-    println!();
+    eprintln!();
+    eprintln!("doctor — “你的 harness 正在偷偷删你的数据吗？”");
+    eprintln!("      只读探测；只打印路径 / 计数 / 字节 / 时间戳，绝不打印会话正文。");
+    eprintln!();
 
     // D1
-    println!("D1 · Claude Code 的轮转设置");
-    println!(
+    eprintln!("D1 · Claude Code 的轮转设置");
+    eprintln!(
         "  cleanupPeriodDays：{} （{}）",
         r.claude.verdict.label(),
         match &r.claude.verdict {
@@ -1013,13 +1013,13 @@ pub fn print_report(r: &DoctorReport) {
         }
     );
     for (path, v) in &r.claude.layers {
-        println!("    {:<52} {}", path.display(), v.label());
+        eprintln!("    {:<52} {}", path.display(), v.label());
     }
-    println!();
+    eprintln!();
 
     // D2
-    println!("D2 · Gemini CLI 的保留策略");
-    println!("  sessionRetention：{}", r.gemini.summarize());
+    eprintln!("D2 · Gemini CLI 的保留策略");
+    eprintln!("  sessionRetention：{}", r.gemini.summarize());
     let home = crate::config::home_dir();
     let present: Vec<String> = [".gemini/config.json", ".gemini/settings.json"]
         .iter()
@@ -1027,25 +1027,25 @@ pub fn print_report(r: &DoctorReport) {
         .map(|p| home.join(p).display().to_string())
         .collect();
     if present.is_empty() {
-        println!("  配置文件都不存在 → 使用 CLI 内置默认值（enabled=true, maxAge=30d）。");
+        eprintln!("  配置文件都不存在 → 使用 CLI 内置默认值（enabled=true, maxAge=30d）。");
     } else {
-        println!("  来源文件：{}", present.join(", "));
+        eprintln!("  来源文件：{}", present.join(", "));
     }
-    println!();
+    eprintln!();
 
     // D3
     if r.scan_failed {
-        println!("D3 · 覆盖率 —— 🔴 registry 缺失/无法解析，会话覆盖未知。");
-        println!(
+        eprintln!("D3 · 覆盖率 —— 🔴 registry 缺失/无法解析，会话覆盖未知。");
+        eprintln!(
             "    拒绝用硬编码路径假装扫全（stderr 上方已有 “Refusing to scan with hardcoded roots”）。"
         );
-        println!("    仅列出与本 registry 无关、来自独立只读探测的条目：",);
+        eprintln!("    仅列出与本 registry 无关、来自独立只读探测的条目：",);
         for f in &r.footprints {
             if f.name != "gemini" && f.name != "opencode" {
                 continue;
             }
             if !f.installed {
-                println!("  {:<10} 未安装（{}）", f.name, f.root.display());
+                eprintln!("  {:<10} 未安装（{}）", f.name, f.root.display());
                 continue;
             }
             let count = footprint_count_label(f);
@@ -1058,7 +1058,7 @@ pub fn print_report(r: &DoctorReport) {
                 .latest
                 .map(format_timestamp)
                 .unwrap_or_else(|| "-".to_string());
-            println!(
+            eprintln!(
                 "  {:<10} 会话 {:<6}{} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
                 f.name,
                 count,
@@ -1067,19 +1067,19 @@ pub fn print_report(r: &DoctorReport) {
                 f.total_bytes
             );
             if !f.note.is_empty() {
-                println!("             ({})", f.note);
+                eprintln!("             ({})", f.note);
             }
         }
-        println!();
-        println!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
+        eprintln!();
+        eprintln!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
         for (i, risk) in r.risks.iter().enumerate() {
-            println!("  {}. {risk}", i + 1);
+            eprintln!("  {}. {risk}", i + 1);
         }
-        println!();
-        println!("D5 · 仓库里有多少可回收的垃圾？");
-        println!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
+        eprintln!();
+        eprintln!("D5 · 仓库里有多少可回收的垃圾？");
+        eprintln!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
         print_reclaim(&r.reclaim);
-        println!();
+        eprintln!();
         return;
     }
 
@@ -1087,12 +1087,12 @@ pub fn print_report(r: &DoctorReport) {
         r.probes.len(),
         r.probes.iter().filter(|p| p.installed_p()).count(),
     );
-    println!(
+    eprintln!(
         "D3 · 覆盖率 —— 本机 {installed}/{known} 个已知 harness 命中（registry v1 驱动）；轮转分析对象如下：",
     );
     for f in &r.footprints {
         if !f.installed {
-            println!("  {:<10} 未安装（{}）", f.name, f.root.display());
+            eprintln!("  {:<10} 未安装（{}）", f.name, f.root.display());
             continue;
         }
         let count = footprint_count_label(f);
@@ -1105,7 +1105,7 @@ pub fn print_report(r: &DoctorReport) {
             .latest
             .map(format_timestamp)
             .unwrap_or_else(|| "-".to_string());
-        println!(
+        eprintln!(
             "  {:<10} 会话 {:<6}{} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
             f.name,
             count,
@@ -1114,7 +1114,7 @@ pub fn print_report(r: &DoctorReport) {
             f.total_bytes
         );
         if !f.note.is_empty() {
-            println!("             ({})", f.note);
+            eprintln!("             ({})", f.note);
         }
     }
     if !r.other_present.is_empty() {
@@ -1123,50 +1123,50 @@ pub fn print_report(r: &DoctorReport) {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        println!(
+        eprintln!(
             "  已装但不在本命令范围（仅探测，不分析轮转）：{}",
             others.join(", ")
         );
     }
     print_archive_gaps(&r.archive_gaps);
     print_probes(&r.probes);
-    println!();
+    eprintln!();
 
     // D4
-    println!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
+    eprintln!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
     if r.risks.is_empty() {
-        println!("  （没有可合成的判断）");
+        eprintln!("  （没有可合成的判断）");
     }
     for (i, risk) in r.risks.iter().enumerate() {
-        println!("  {}. {risk}", i + 1);
+        eprintln!("  {}. {risk}", i + 1);
     }
-    println!();
+    eprintln!();
 
     // D5 — reclaimable garbage in the archive repository (prune_plan, read-only)
-    println!("D5 · 仓库里有多少可回收的垃圾？");
-    println!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
+    eprintln!("D5 · 仓库里有多少可回收的垃圾？");
+    eprintln!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
     print_reclaim(&r.reclaim);
-    println!();
+    eprintln!();
 }
 
 /// D5 printing — shared by the normal path and the scan-failed early return.
 fn print_reclaim(r: &ReclaimCheck) {
     match r {
         ReclaimCheck::NoRepo { repo_root } => {
-            println!(
+            eprintln!(
                 "  （跳过）没有仓库目录：{} —— 没仓库就没有垃圾，也不用诊断。",
                 repo_root.display()
             );
         }
         ReclaimCheck::NoKey { key_file, error } => {
-            println!(
+            eprintln!(
                 "  （跳过）仓库目录在，但 masterkey 读不了（{}）：{error}—— \
                  打不开就无可规划，先确认 key 文件没丢。",
                 key_file.display()
             );
         }
         ReclaimCheck::OpenFailed { repo_root, error } => {
-            println!(
+            eprintln!(
                 "  （跳过）仓库打不开 / 算不出计划：{} —— {error}",
                 repo_root.display()
             );
@@ -1178,62 +1178,62 @@ fn print_reclaim(r: &ReclaimCheck) {
             size_repack,
             append_only,
         } => {
-            println!(
+            eprintln!(
                 "  未被引用的 pack    : {packs_unref} 个 · {}（`packs_unref`/`size_unref`）",
                 fmt_bytes(*size_unref)
             );
-            println!(
+            eprintln!(
                 "  需要 repack 的量   : {packs_repack} 个 pack · {}（`packs.repack`/`size.repack`）",
                 fmt_bytes(*size_repack)
             );
             if *packs_unref > 0 || *size_unref > 0 || *packs_repack > 0 || *size_repack > 0 {
-                println!("  🔴 这些垃圾现在清不掉 —— 本仓库是 append_only（{append_only}）。");
-                println!(
+                eprintln!("  🔴 这些垃圾现在清不掉 —— 本仓库是 append_only（{append_only}）。");
+                eprintln!(
                     "     `prune`/`repair`/`rewrite --forget` 都被 append_only 挡死（源码 `commands/prune.rs`）。"
                 );
-                println!(
+                eprintln!(
                     "     要清的标准流程：临时关掉 append_only → 跑一次 `rustic prune --instant-delete` → 再开回 append_only。"
                 );
-                println!(
+                eprintln!(
                     "     ⚠️ 必须带 `--instant-delete`：普通 `prune` 的默认 `--keep-delete 23h` 只把 pack 标记为待删、"
                 );
-                println!(
+                eprintln!(
                     "        23 小时宽限期后才真删 —— 实测即使关掉 append_only 也会停在 nothing to do!，垃圾根本没走。"
                 );
-                println!(
+                eprintln!(
                     "     ⚠️ 代价：`--instant-delete` 跳过这 23 小时宽限期 —— 删了就没了，没有反悔窗口；执行前先确认上面两个数字确实是垃圾。"
                 );
-                println!(
+                eprintln!(
                     "     ⚠️ 这要求临时关掉 append_only —— 那是你的安全设置：关掉到再开回之间仓库失去“防误删”的保险网，"
                 );
-                println!("        只在这个窗口期内操作、先做一次备份，操作完立刻开回。");
-                println!(
+                eprintln!("        只在这个窗口期内操作、先做一次备份，操作完立刻开回。");
+                eprintln!(
                     "     doctor 是只读诊断：它只报告数字和操作步骤，绝不会替你执行 prune 或切换 append_only。"
                 );
             } else {
-                println!("  ✅ 没有任何可回收的垃圾 —— 不用清。");
+                eprintln!("  ✅ 没有任何可回收的垃圾 —— 不用清。");
                 if *append_only {
-                    println!(
+                    eprintln!(
                         "     （append_only=true，即便有垃圾也只会被挡下，不会自动发生误删。）"
                     );
                 }
             }
         }
     }
-    println!();
+    eprintln!();
 }
 
 fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
     if gaps.is_empty() {
         return;
     }
-    println!(
+    eprintln!(
         "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。"
     );
     for gap in gaps {
-        println!("{}", scanner::format_archive_gap(gap));
+        eprintln!("{}", scanner::format_archive_gap(gap));
     }
-    println!(
+    eprintln!(
         "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。"
     );
 }
@@ -1244,12 +1244,12 @@ fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
 /// platform, template not statically resolvable).
 fn print_probes(probes: &[scanner::HarnessProbe]) {
     if probes.is_empty() {
-        println!("  （registry 探测为空 —— 扫描未运行，或没有候选 harness。）");
+        eprintln!("  （registry 探测为空 —— 扫描未运行，或没有候选 harness。）");
         return;
     }
     let platform = scanner::current_platform();
     let hit = probes.iter().filter(|p| p.installed_p()).count();
-    println!(
+    eprintln!(
         "  [registry] 驱动表 —— 平台={platform} · 本机命中/扫描成功 {hit}/{n} 个 harness",
         n = probes.len()
     );
@@ -1291,7 +1291,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         } else {
             format!("  ({})", p.note)
         };
-        println!(
+        eprintln!(
             "    {mark} {:<16} {conf:<26} 会话={:<4}{bytes:<0} {root}{extra}",
             p.display_name, count
         );
@@ -1303,7 +1303,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         .collect::<Vec<_>>()
         .join(", ");
     if !flagged.is_empty() {
-        println!("    低置信（仅社区说法未核实，扫了但不可当作核实）：{flagged}");
+        eprintln!("    低置信（仅社区说法未核实，扫了但不可当作核实）：{flagged}");
     }
 }
 

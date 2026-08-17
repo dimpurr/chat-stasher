@@ -2727,7 +2727,7 @@ mod decision_surface_tests {
 fn cmd_init() -> ExitCode {
     match Config::init_default(config::DEFAULT_CONFIG_TEMPLATE) {
         Ok(()) => {
-            println!(
+            eprintln!(
                 "next: chat-stasher collect --stage <stage-dir> && chat-stasher push --stage <stage-dir> && chat-stasher verify --stage <stage-dir>"
             );
             ExitCode::SUCCESS
@@ -2742,7 +2742,7 @@ fn cmd_init() -> ExitCode {
 fn cmd_status(sessions: bool) -> ExitCode {
     let config = Config::load();
     let verdict = run_state_verdict(&config);
-    println!("[run-once] {}", verdict.line);
+    eprintln!("[run-once] {}", verdict.line);
 
     let report = match scanner::scan(&config) {
         Ok(r) => r,
@@ -2751,7 +2751,7 @@ fn cmd_status(sessions: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    print!("{}", render_status(&report, sessions));
+    eprint!("{}", render_status(&report, sessions));
     if verdict.healthy {
         ExitCode::SUCCESS
     } else {
