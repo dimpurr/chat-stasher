@@ -6,14 +6,16 @@ which states plainly who can see what — including the parts we do not defend.
 
 ## Reporting a vulnerability
 
-**Contact channel: `TODO(owner)`.** The maintainer has not yet published a
-reporting address or enabled GitHub private vulnerability reporting. Until that
-placeholder is replaced, there is no private channel, and you should assume any
-report filed in a public issue is public from the moment you file it.
+**Contact: `work@team.iopho.com`.** Mail that address directly rather than
+opening a public issue — an issue is public from the moment you file it, and a
+backup tool's weaknesses are worth a private window first.
 
-If you must report before the channel exists, please avoid including your own
-conversation content, repository paths, hostnames, or key material in the
-report. A minimal reproduction against synthetic data is enough.
+Please avoid including your own conversation content, repository paths,
+hostnames, or key material in the report. A minimal reproduction against
+synthetic data is enough, and it is easier for us to act on.
+
+GitHub private vulnerability reporting is not enabled yet; the mailbox above is
+the channel.
 
 When the channel is set up, we would like reports to include:
 

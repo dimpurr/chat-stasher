@@ -88,8 +88,8 @@ cannot recreate:
   other browser extensions can observe. It also lists the weaknesses and the
   threats we do **not** defend against.
 - **[`SECURITY.md`](SECURITY.md)** — how to report a vulnerability, what is in
-  scope, and what response you can and cannot expect. The reporting contact is
-  still a `TODO(owner)` placeholder; there is no private channel yet.
+  scope, and what response you can and cannot expect. Reports go to
+  `work@team.iopho.com` rather than a public issue.
 
 Three things worth knowing before reading either:
 
