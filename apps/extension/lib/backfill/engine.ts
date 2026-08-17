@@ -31,6 +31,7 @@ import {
   initialState,
   stateKey,
   type BackfillState,
+  type DetailOutcomeRecord,
   type EnumTruncation,
   type HaltReason,
   type HaltRecord,
@@ -166,6 +167,11 @@ export interface RunReport {
   skippedAlreadyArchived: number;
   /** 枚举时已经在欠账里、无需重复入队的条数。 */
   skippedAlreadyPending: number;
+  /**
+   * 🔴 C28：正文返回空时的具名收据。未证实为空与已证实合法为空不能共用
+   * queue-empty；每一条还带正文这一笔自己的 complete，前者必须为 false。
+   */
+  detailOutcomes: DetailOutcomeRecord[];
   progress: string;
   halted: HaltRecord | null;
   /**
@@ -197,7 +203,11 @@ export async function loadState(
 ): Promise<BackfillState> {
   const raw = await store.load(stateKey(platform, scope));
   // 版本对不上就重开一个空集合，而不是拿旧结构硬凑。
-  return isBackfillState(raw) ? raw : initialState(platform, scope);
+  if (!isBackfillState(raw)) return initialState(platform, scope);
+  // C28：v1 旧状态没有这栏；读回来即补空数组，之后每次写回都能把正文空结局
+  // 与 pending 一起留住。optional 只为兼容旧状态的 TypeScript 形状。
+  raw.detailOutcomes ??= [];
+  return raw;
 }
 
 async function persist(store: BackfillStore, state: BackfillState): Promise<void> {
@@ -237,6 +247,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       failedThisRun: [],
       skippedAlreadyArchived: 0,
       skippedAlreadyPending: 0,
+      detailOutcomes: state.detailOutcomes ?? [],
       progress: formatProgress(state),
       halted: state.halted,
       enumTruncated: null,
@@ -265,6 +276,20 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   let skippedAlreadyArchived = 0;
   let skippedAlreadyPending = 0;
   let enumTruncated: EnumTruncation | null = state.enumCursor.truncated ?? null;
+  const detailOutcomes = state.detailOutcomes ?? (state.detailOutcomes = []);
+
+  /** C28：正文空结局先写同一本账，再决定是否停下或按确认结果清账。 */
+  const recordDetailOutcome = (
+    id: string,
+    outcome: DetailOutcomeRecord['outcome'],
+    at: number,
+  ): DetailOutcomeRecord => {
+    const entry: DetailOutcomeRecord = outcome === 'detail-empty-unverified'
+      ? { sessionId: id, outcome, complete: false, at }
+      : { sessionId: id, outcome, complete: true, at };
+    detailOutcomes.push(entry);
+    return entry;
+  };
 
   /**
    * 🔴 C26 · 「枚举读不下去了」的唯一出口。
@@ -305,6 +330,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     failedThisRun,
     skippedAlreadyArchived,
     skippedAlreadyPending,
+    detailOutcomes,
     progress: formatProgress(state),
     halted: state.halted,
     enumTruncated,
@@ -505,6 +531,37 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // 用实时腿同一个形状校验器：接口改了这里第一个知道。
     if (!matchesResponseShape(platformRow, res.text)) {
       return halt('shape-changed', `detail body does not match the ${platformRow.id} response shape`);
+    }
+
+    /**
+     * 🔴 C28 · 这是未来正文解析器的唯一护栏落点：形状是好的之后、sink 之前。
+     *
+     * 当前生产 plan 没有 parseDetailPage，所以本分支不会改变任何现有平台行为，
+     * 更不会替 DeepSeek 猜正文字段。等拿到原始 payload 后，应在 plan 的 parser
+     * 实现里把「成功但空」返回为 detail-empty-unverified；本分支会立刻落账并
+     * halt，绝不让下面的 sinkVerdict/settleDebt 把它冒充成成功。只有 parser
+     * 明确返回 detail-empty-confirmed，才允许把合法空会话作为正文这一笔完成。
+     */
+    const detailParsed = plan.parseDetailPage?.(res.text);
+    if (detailParsed?.ok === false) {
+      return halt('shape-changed', `detail body: ${detailParsed.detail}`);
+    }
+    if (detailParsed?.ok === true && detailParsed.outcome === 'detail-empty-unverified') {
+      const entry = recordDetailOutcome(id, detailParsed.outcome, clock.now());
+      return halt(
+        'detail-empty-unverified',
+        `detail returned HTTP ${res.status} with empty content for a pending conversation;`
+        + ` recorded ${entry.outcome} with complete=false`,
+      );
+    }
+    if (detailParsed?.ok === true && detailParsed.outcome === 'detail-empty-confirmed') {
+      recordDetailOutcome(id, detailParsed.outcome, clock.now());
+      // 合法空会话不是丢失：它可以清账，但必须与上面的未证实空值分开留痕。
+      settleDebt(state, id);
+      archivedThisRun.push(id);
+      state.detailToday.count += 1;
+      await persist(store, state);
+      continue;
     }
 
     const captured: CapturedFetch = {

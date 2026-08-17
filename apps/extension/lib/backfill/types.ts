@@ -50,8 +50,46 @@ export type HaltReason =
    *
    * 它在【发出任何一条正文请求之前】成立：欠账集合已经落盘，
    * 等正文段有了出处，接着这批欠账往下清即可。
+  */
+  | 'detail-unsupported'
+  /**
+   * 🔴 C28 · 正文接口成功，但返回的内容为空；这不是「会话确实没有内容」。
+   *
+   * 这条必须独立于 'shape-changed'：响应形状可以完全正确，错的是把一个
+   * 暂时读到的空当成了确定事实。也必须独立于 'detail-empty-confirmed'：
+   * 后者只有未来拿到明确证据时才能使用。
+   *
+   * 它在正文循环里、sink 之前成立；这条路不清 pending、不进 archived，
+   * 并以 complete=false 的 DetailOutcomeRecord 落盘。
    */
-  | 'detail-unsupported';
+  | 'detail-empty-unverified';
+
+/**
+ * 🔴 C28 · 正文「空」的两种可观察结局。
+ *
+ * 'detail-empty-unverified' = HTTP 成功且形状认识，但本次内容为空；不能据此
+ * 断言会话本来就是空的。'detail-empty-confirmed' = 将来只有在原始 payload 或
+ * 其它可靠契约明确证明「合法空会话」时才可使用。
+ *
+ * 两个值都会进入 RunReport.detailOutcomes 与 BackfillState.detailOutcomes，
+ * 不许把它们折叠成 queue-empty 或 shape-changed。
+ */
+export type DetailOutcome = 'detail-empty-unverified' | 'detail-empty-confirmed';
+
+/** 正文空结局的账本收据；complete 是正文这一笔的完成标记，不是枚举游标。 */
+export type DetailOutcomeRecord =
+  | {
+      sessionId: string;
+      outcome: 'detail-empty-unverified';
+      complete: false;
+      at: number;
+    }
+  | {
+      sessionId: string;
+      outcome: 'detail-empty-confirmed';
+      complete: true;
+      at: number;
+    };
 
 /**
  * 🔴 C26 · 枚举「没能走完」的具名理由。
@@ -133,6 +171,12 @@ export interface BackfillState {
   pending: string[];
   /** 已清：已经归档过的会话 id，永不再入队。 */
   archived: string[];
+  /**
+   * 🔴 C28 · 正文空结局的逐会话收据。optional 以兼容 C27 以前的 v1 旧状态；
+   * 新建/写回的状态都会初始化为 []。未证实为空的那一笔必须带 complete:false，
+   * 并且仍同时出现在 pending 里，不能只靠 UI 的一瞬间报告记住它。
+   */
+  detailOutcomes?: DetailOutcomeRecord[];
   /** 今天已经取了多少条正文（跨重启有效）。 */
   detailToday: DailyCounter;
   /**
@@ -174,6 +218,7 @@ export function initialState(platform: string, scope: string): BackfillState {
     enumCursor: { offset: 0, complete: false },
     pending: [],
     archived: [],
+    detailOutcomes: [],
     detailToday: { day: '', count: 0 },
     lastFetchAt: { enumerate: null, detail: null },
     failures: [],
