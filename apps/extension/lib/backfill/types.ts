@@ -25,7 +25,20 @@ export type HaltReason =
   /** 网络/传输层直接抛错 */
   | 'transport-error'
   /** 没有可用的持久化存储 ⇒ 无法可断可续 ⇒ 宁可不爬 */
-  | 'storage-unavailable';
+  | 'storage-unavailable'
+  /**
+   * 🔴 C22 · 这个平台的**回溯枚举还没有实现**（lib/backfill/enumerate.ts 的
+   * BACKFILL_UNSUPPORTED 里有它，并写明缺哪几项）。
+   *
+   * 为什么必须是**独立**的一种理由，而不是复用 'shape-changed'：
+   * 'shape-changed' 的含义是「我们认识这个接口，但它变了」——
+   * 对用户就是「平台改版了，等修」。而这里的真相是「我们从来就没读过你这个平台的历史」。
+   * 以前没有这一条，非 ChatGPT 平台会被拿 ChatGPT 的路径去打，拿回 404 之后
+   * 记成 'shape-changed'：一句**准确的谎话**。
+   *
+   * 🔴 它在【发出任何请求之前】就成立 —— 见 engine.ts 的 plan 查表。
+   */
+  | 'unsupported-platform';
 
 export interface HaltRecord {
   reason: HaltReason;

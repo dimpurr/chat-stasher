@@ -151,6 +151,9 @@ function paint(view: PopupView): void {
   text('running', view.running);
   text('missing', view.missing ?? '');
   text('progress', view.progress);
+  // 🔴 C22：哪些平台补得回历史、哪些暂时补不回。永远显示 —— 它不是错误提示，
+  //    而是「你那个平台一动不动是为什么」的答案，必须在用户想问之前就在那儿。
+  text('coverage', view.coverage);
   text('toggle-label', view.toggle.label);
 
   const toggle = document.getElementById('toggle') as HTMLInputElement | null;

@@ -14,7 +14,7 @@
 import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
-import { detailUrl, listPageUrl, parseConversationListPage, DEFAULT_LIST_LIMIT } from './enumerate';
+import { backfillPlanFor, unsupportedBackfillFor, DEFAULT_LIST_LIMIT } from './enumerate';
 import { formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, systemClock, type BackfillPace, type Clock } from './pace';
 import type { BackfillStore } from './store';
@@ -259,13 +259,30 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt('shape-changed', `origin ${opts.origin} is not in the platform table`);
   }
 
+  // 🔴 C22 · 在【发出任何请求之前】问一句：这个平台的枚举我们到底写没写过。
+  //
+  // 以前这里没有这一问，engine 直接用 ChatGPT 的 listPageUrl(origin) 拼 URL ——
+  // 于是 DeepSeek 用户会被拿 `https://chat.deepseek.com/backend-api/conversations`
+  // 去打自己的账号，拿回 404，然后账本上留下一条 'shape-changed'。
+  // 那条留痕是**准确的谎话**：接口没变，是我们从来没写过它。
+  const plan = backfillPlanFor(platformRow.id);
+  if (!plan) {
+    const gap = unsupportedBackfillFor(platformRow.id);
+    // 平台表里有、但两张表都没登记 ⇒ 这是接线漏了，同样必须说得出口。
+    const detail = gap
+      ? `platform ${platformRow.id} has no backfill enumeration yet; missing: ${gap.missing.join(' | ')}`
+      : `platform ${platformRow.id} is in the platform table but is registered in neither`
+        + ' BACKFILL_PLANS nor BACKFILL_UNSUPPORTED (lib/backfill/enumerate.ts)';
+    return halt('unsupported-platform', detail);
+  }
+
   // ---- 第一段：枚举（便宜，一次跑完）----
   while (!state.enumCursor.complete) {
     if (opts.shouldAbort?.()) return report('aborted');
     if (await guardTripped()) return report('download-paused');
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
-    const url = listPageUrl(opts.origin, state.enumCursor.offset, listLimit);
+    const url = plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
     try {
       res = await http(url);
@@ -278,7 +295,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         `list offset=${state.enumCursor.offset} returned HTTP ${res.status}`,
       );
     }
-    const parsed = parseConversationListPage(res.text);
+    const parsed = plan.parseListPage(res.text);
     if (!parsed.ok) {
       return halt('shape-changed', `list offset=${state.enumCursor.offset}: ${parsed.detail}`);
     }
@@ -334,7 +351,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // 代价是每笔账多一次 storage.local 写（约每 20 秒一次），可以忽略。
     anchor('detail', detailPacer.lastAt);
     await persist(store, state);
-    const url = detailUrl(opts.origin, id);
+    const url = plan.detailUrl(opts.origin, id);
     let res: HttpResponse;
     try {
       res = await http(url);
