@@ -821,13 +821,51 @@ pub fn parse_key(raw: &str) -> anyhow::Result<MasterKey> {
     Ok(serde_json::from_str(raw)?)
 }
 
-/// Write the masterkey to `cfg.key_file`.
+/// Write the masterkey to `cfg.key_file`, owner-readable only where the
+/// platform can express that.
+///
+/// The mode is set *when the file is created*, not afterwards: a `write` then
+/// `set_permissions` pair leaves a window in which the only key to the whole
+/// archive is world-readable, and that window is exactly what an unprivileged
+/// process on a shared machine would wait for. On platforms without unix modes
+/// the file inherits whatever the filesystem gives it, and
+/// `docs/threat-model.md` says so rather than implying protection we do not
+/// provide.
 pub fn persist_key_file(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<()> {
     if let Some(parent) = cfg.key_file.parent() {
         fs::create_dir_all(parent)?;
+        // The directory listing alone reveals nothing secret, but a 0700 parent
+        // keeps the key out of reach even if a later write forgets its own mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        }
     }
-    fs::write(&cfg.key_file, serialize_key(mk)?)?;
-    Ok(())
+    let body = serialize_key(mk)?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&cfg.key_file)
+            .with_context(|| format!("create masterkey file {}", cfg.key_file.display()))?;
+        f.write_all(body.as_bytes())?;
+        // An existing file keeps its old mode when reopened, so tighten it too.
+        fs::set_permissions(&cfg.key_file, fs::Permissions::from_mode(0o600))?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(&cfg.key_file, body)?;
+        Ok(())
+    }
 }
 
 /// Load the masterkey from `cfg.key_file` (error when missing).
@@ -958,5 +996,46 @@ mod tests {
             "machine validation must run before repository initialisation"
         );
         let _ = fs::remove_dir_all(repo);
+    }
+
+    /// The masterkey is the only thing standing between another process running
+    /// as you and the whole archive, so it must not land with the umask's
+    /// default mode. The control assertion matters as much as the subject: a
+    /// plain `fs::write` in the same directory is checked first, so a test that
+    /// passes because the filesystem hands out 0600 anyway would be caught.
+    #[cfg(unix)]
+    #[test]
+    fn masterkey_file_is_owner_only_and_a_plain_write_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("cs-keyperm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Control: prove the instrument can see a *loose* mode here.
+        let loose = dir.join("control.txt");
+        fs::write(&loose, b"x").unwrap();
+        let loose_mode = fs::metadata(&loose).unwrap().permissions().mode() & 0o777;
+        assert_ne!(
+            loose_mode, 0o600,
+            "control file came out 0600 on its own; this test could not tell a fix from the default"
+        );
+
+        let cfg = StoreConfig {
+            repo_root: dir.join("repo").display().to_string(),
+            key_file: dir.join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+        };
+        persist_key_file(&cfg, &MasterKey::new()).unwrap();
+        let mode = fs::metadata(&cfg.key_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "masterkey file mode was {mode:o}, expected 600");
+
+        // Rewriting an existing key file must not relax it either.
+        persist_key_file(&cfg, &MasterKey::new()).unwrap();
+        let again = fs::metadata(&cfg.key_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(again, 0o600, "rewrite left mode {again:o}, expected 600");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
