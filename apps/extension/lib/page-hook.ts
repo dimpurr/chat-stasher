@@ -10,6 +10,10 @@ import {
   type ChatPlatform,
 } from './contract';
 
+/** Fixed, metadata-only signal for a supported-origin transport we do not capture. */
+export const UNSUPPORTED_TRANSPORT_WARNING =
+  '[chat-stasher] unsupported transport candidate detected; capture not attempted';
+
 /** Values are serialized into the fallback <script>; no extension API belongs here. */
 export interface PageHookOptions {
   captureMessage: string;
@@ -54,6 +58,8 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
  */
 export function installPageFetchHook(options: PageHookOptions): void {
   const pageWindow = window as typeof window & Record<string, unknown>;
+  const unsupportedTransportWarning =
+    '[chat-stasher] unsupported transport candidate detected; capture not attempted';
   const currentFetch = window.fetch as typeof window.fetch & Record<string, unknown>;
   if (
     pageWindow[options.stateKey] === options.version ||
@@ -70,6 +76,38 @@ export function installPageFetchHook(options: PageHookOptions): void {
     } catch {
       return null;
     }
+  };
+
+  const baseUrl = typeof pageWindow.location.href === 'string'
+    ? pageWindow.location.href
+    : `${pageOrigin}/`;
+  const warnedUnsupportedTransports = new Set<string>();
+  const getCandidatePlatform = (url: string): ChatPlatform | null => {
+    try {
+      const parsed = new URL(url, baseUrl);
+      const candidateOrigin = parsed.protocol === 'wss:'
+        ? `https://${parsed.host}`
+        : parsed.protocol === 'ws:'
+          ? `http://${parsed.host}`
+          : parsed.origin;
+      const platform = options.platforms.find((item) => item.origins.includes(candidateOrigin));
+      const pageTransportOrigin = pageOrigin;
+      const samePageOrigin = candidateOrigin === pageTransportOrigin;
+      if (!platform || !samePageOrigin || !platform.pathHints.some((hint) => parsed.pathname.includes(hint))) {
+        return null;
+      }
+      return platform;
+    } catch {
+      return null;
+    }
+  };
+  const warnUnsupportedTransport = (transport: string, url: string): void => {
+    const platform = getCandidatePlatform(url);
+    if (!platform) return;
+    const key = `${platform.id}:${transport}`;
+    if (warnedUnsupportedTransports.has(key)) return;
+    warnedUnsupportedTransports.add(key);
+    console.warn(unsupportedTransportWarning);
   };
 
   const getJsonPath = (value: unknown, path: string): unknown => {
@@ -119,6 +157,63 @@ export function installPageFetchHook(options: PageHookOptions): void {
     post({ type: options.readyMessage, version: options.version, token: record.token });
   });
 
+  const xhrConstructor = pageWindow.XMLHttpRequest;
+  if (typeof xhrConstructor === 'function') {
+    const originalOpen = xhrConstructor.prototype.open;
+    const originalSend = xhrConstructor.prototype.send;
+    const xhrUrls = new WeakMap<object, string>();
+
+    xhrConstructor.prototype.open = function (
+      this: XMLHttpRequest,
+      method: string,
+      url: string | URL,
+      ...rest: unknown[]
+    ): void {
+      xhrUrls.set(this, String(url));
+      originalOpen.apply(this, [method, url, ...rest] as never);
+    };
+    xhrConstructor.prototype.send = function (
+      this: XMLHttpRequest,
+      body?: Document | XMLHttpRequestBodyInit | null,
+    ): void {
+      const url = xhrUrls.get(this);
+      if (url) {
+        this.addEventListener('load', () => {
+          if (this.status >= 200 && this.status < 300) warnUnsupportedTransport('xhr', url);
+        }, { once: true });
+      }
+      originalSend.call(this, body);
+    };
+  }
+
+  const eventSourceConstructor = pageWindow.EventSource;
+  if (typeof eventSourceConstructor === 'function') {
+    pageWindow.EventSource = new Proxy(eventSourceConstructor, {
+      construct(target, args, newTarget) {
+        const source = Reflect.construct(target, args, newTarget) as EventSource;
+        const url = String(args[0]);
+        const warn = () => warnUnsupportedTransport('sse', url);
+        source.addEventListener('open', warn, { once: true });
+        source.addEventListener('message', warn, { once: true });
+        return source;
+      },
+    });
+  }
+
+  const webSocketConstructor = pageWindow.WebSocket;
+  if (typeof webSocketConstructor === 'function') {
+    pageWindow.WebSocket = new Proxy(webSocketConstructor, {
+      construct(target, args, newTarget) {
+        const socket = Reflect.construct(target, args, newTarget) as WebSocket;
+        const url = String(args[0]);
+        socket.addEventListener('message', () => {
+          warnUnsupportedTransport('websocket', url);
+        }, { once: true });
+        return socket;
+      },
+    });
+  }
+
   const originalFetch = window.fetch.bind(window);
   const maybeCapture = async (
     input: RequestInfo | URL,
@@ -131,9 +226,6 @@ export function installPageFetchHook(options: PageHookOptions): void {
       else if (input instanceof URL) url = input.href;
       else url = input.url;
 
-      const baseUrl = typeof pageWindow.location.href === 'string'
-        ? pageWindow.location.href
-        : `${pageOrigin}/`;
       const parsed = new URL(url, baseUrl);
       const platform = getPlatform(parsed.href);
       const normalizedMethod = method.toUpperCase();
