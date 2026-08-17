@@ -9,9 +9,20 @@ permissions:
 
 jobs:
   rust:
-    # release-gate.sh uses BSD stat/shasum conventions, so keep this job on a
-    # macOS runner until the script is made portable.
-    runs-on: macos-latest
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Do not cancel the other OSes when one fails: a Windows-only failure is
+      # information we want, not a reason to hide the Linux result.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            release_gate: true
+          - os: ubuntu-latest
+            release_gate: false
+          - os: windows-latest
+            release_gate: false
 
     steps:
       - name: Check out repository
@@ -29,7 +40,25 @@ jobs:
       - name: Test
         run: cargo test
 
+      # ---------------------------------------------------------------------
+      # COVERAGE HOLE (deliberate, not masked): scripts/release-gate.sh runs
+      # only on macOS.
+      #
+      #   * Windows: it is a `#!/usr/bin/env bash` script that shells out to
+      #     `target/debug/chat-stasher` (release-gate.sh:25) — no `.exe`
+      #     suffix — plus `find`/`dd`/`od`. Not run here.
+      #   * Linux: it uses BSD `stat -f` (release-gate.sh:87 and :258). Both
+      #     call sites sit on the `--real-data` and `--selftest` branches,
+      #     which this workflow does not take, so the synthetic happy path
+      #     *may* work under GNU coreutils — but that has never been executed
+      #     on Linux and is therefore unverified. Not run here.
+      #
+      # Making the gate portable means editing scripts/, which is out of scope
+      # for this workflow change. Until then these two cells are honestly
+      # uncovered — they are NOT marked continue-on-error and NOT faked green.
+      # ---------------------------------------------------------------------
       - name: Create synthetic release-gate input
+        if: matrix.release_gate
         shell: bash
         run: |
           set -euo pipefail
@@ -44,7 +73,58 @@ jobs:
           done
 
       - name: Run release gate
+        if: matrix.release_gate
         shell: bash
         env:
           CLAUDE_PROJECTS_DIR: ${{ runner.temp }}/chat-stasher-claude-projects
         run: bash scripts/release-gate.sh
+
+  extension:
+    # COVERAGE HOLE (deliberate): the extension is built and tested on Linux
+    # only. WXT/vitest on macOS and Windows runners are NOT covered by CI.
+    name: extension (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: apps/extension
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # apps/extension/package.json declares neither `engines` nor
+      # `packageManager`, so there is no version to inherit. These two pins are
+      # the exact toolchain the change was verified against locally
+      # (`pnpm -v` -> 9.15.4, `node -v` -> v23.10.0); bump them deliberately,
+      # not by accident.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23.10.0
+          cache: pnpm
+          cache-dependency-path: apps/extension/pnpm-lock.yaml
+
+      # --frozen-lockfile is load-bearing: apps/extension/pnpm-lock.yaml pins
+      # wxt 0.21.4 (pnpm-lock.yaml:23-25) and this must never resolve upward.
+      # It also runs the `postinstall` hook (`wxt prepare`), which generates
+      # .wxt/ types that `pnpm compile` needs.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm compile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build (chrome)
+        run: pnpm build
+
+      - name: Build (firefox)
+        run: pnpm build -b firefox
