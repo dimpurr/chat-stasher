@@ -154,6 +154,16 @@ pub fn new_token() -> std::io::Result<String> {
 /// `127.0.0.1` and port `0`, both non-negotiable: `0.0.0.0` would expose the
 /// archive index to the network, and a fixed port would be squattable by
 /// another local program between launches.
+///
+/// `::1` is deliberately *not* bound as well. It was measured (B52 task 2):
+/// a client asked for `http://localhost:<port>` against an IPv4-only listener
+/// tries `[::1]` first, takes one `Connection refused`, and falls back to
+/// `127.0.0.1` — it connects. And the caller never prints a `localhost` URL
+/// anyway: it formats `listener.local_addr()`, which is the literal
+/// `127.0.0.1:<port>`, so no name resolution happens at all. A second listener
+/// would mean a second socket in a single-threaded accept loop for a problem
+/// that does not exist. If the printed URL ever changes to `localhost`, the
+/// cost is one wasted failed connection per launch — revisit then.
 pub fn bind_ephemeral() -> std::io::Result<TcpListener> {
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     TcpListener::bind(addr)
@@ -186,18 +196,93 @@ fn path_and_token(target: &str) -> (&str, Option<&str>) {
     (path, token)
 }
 
+/// Is this request addressed to *us*, under a name that can only mean this
+/// machine and this socket?
+///
+/// **This is defence in depth, not the only defence.** The primary defence is
+/// the per-launch token. Worked through: a DNS-rebinding page on `evil.com`
+/// re-resolves its own name to `127.0.0.1`, so the browser treats
+/// `http://evil.com:<port>/` as same-origin and lets the attacker's JavaScript
+/// *read* the response. But reading anything here still needs the token, which
+/// is 256 bits of `/dev/urandom` ([`new_token`]) on a port the OS picked at
+/// random. So rebinding alone does not get the archive index; without the token
+/// it gets a 403.
+///
+/// It is implemented anyway, because "the token holds" is a claim about things
+/// that are one edit away from changing:
+///
+/// * The token travels in the URL. Today [`render_html`] loads no off-host
+///   asset and links nowhere, so it never leaves in a `Referer` — but that is
+///   an invariant of the page, not of the server, and pages get edited.
+/// * URLs leak by other routes entirely: history sync, a shoulder-surfed
+///   terminal, a pasted screenshot, a shell history file.
+///
+/// In every one of those, this check is the second lock and costs a dozen
+/// lines. That trade is why it is here: arguing that a lock is *secondary* is
+/// cheap and this comment does it; arguing that a lock is *unnecessary* is a
+/// conclusion we cannot afford to have wrong once.
+///
+/// What it does **not** buy: a rebinding page with no token still learns
+/// "something answered on this port" from the 403, so `view`'s presence is not
+/// hidden from a local-port scan. That is unchanged, and not claimed.
+///
+/// Rules, and why each is strict rather than lenient:
+/// * Exactly one `Host`. Zero is rejected — HTTP/1.1 requires it, and omitting
+///   it is the first thing you try against a Host allowlist. Two or more is
+///   rejected rather than resolved, because picking one is what smuggling is for.
+/// * The port must be *our* port, matched numerically, so `:{port}extra` and
+///   a bare name with no port both fail.
+/// * The name must equal `127.0.0.1` or `localhost` outright. Never a suffix or
+///   substring match: `localhost.evil.example` and `127.0.0.1.evil.example` are
+///   names an attacker can register.
+/// * `[::1]` is absent on purpose — [`bind_ephemeral`] does not bind `::1`, so
+///   nothing can legitimately arrive under that name. The allowlist lists only
+///   what is actually served.
+pub fn host_is_local(hosts: &[String], port: u16) -> bool {
+    let [host] = hosts else {
+        return false;
+    };
+    let Some((name, given_port)) = host.rsplit_once(':') else {
+        return false;
+    };
+    if given_port.parse::<u16>() != Ok(port) {
+        return false;
+    }
+    name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost")
+}
+
 /// Route one request. Pure: no socket, no repository, no clock.
 ///
 /// Order matters. Method is checked before the token so that a `POST` is
-/// rejected as a method error even when it carries a valid token; the token is
-/// checked before the path so that an unauthorised caller cannot use 404-vs-200
-/// to learn which routes exist.
-pub fn route(method: &str, target: &str, token: &str, data: &ViewData) -> Response {
+/// rejected as a method error even when it carries a valid token; `Host` is
+/// checked next, because a request addressed to someone else is not a request
+/// to this server at all and should not reach the token comparison; the token
+/// is checked before the path so that an unauthorised caller cannot use
+/// 404-vs-200 to learn which routes exist. `Host` may safely precede the token
+/// because it carries no secret — the attacker chose its value.
+pub fn route(
+    method: &str,
+    target: &str,
+    hosts: &[String],
+    token: &str,
+    port: u16,
+    data: &ViewData,
+) -> Response {
     if method != "GET" {
         return Response::text(
             405,
             "Method Not Allowed",
             "view: only GET is accepted; there is nothing here to mutate\n",
+        );
+    }
+    if !host_is_local(hosts, port) {
+        return Response::text(
+            403,
+            "Forbidden",
+            "view: bad Host header. This server answers only requests addressed to \
+             127.0.0.1 or localhost on its own port; a request arriving under another \
+             name is a DNS-rebinding attempt. This is a second lock — the token is the \
+             first.\n",
         );
     }
     let (path, given) = path_and_token(target);
@@ -370,8 +455,46 @@ pub fn render_json(data: &ViewData) -> String {
     s
 }
 
-/// Read the request head (up to the blank line) and return `(method, target)`.
-fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<(String, String)>> {
+/// The only three things [`route`] needs off the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestHead {
+    method: String,
+    target: String,
+    /// Every `Host` header seen, in order — *not* collapsed to the first.
+    /// Two `Host` headers is a request-smuggling smell, and a check that reads
+    /// only the first one is exactly what such a request is built to fool.
+    hosts: Vec<String>,
+}
+
+/// Pull the request line and the `Host` header(s) out of a request head.
+/// Split out from [`read_head`] so the parsing is testable without a socket.
+fn parse_head(text: &str) -> Option<RequestHead> {
+    let mut lines = text.lines();
+    let mut parts = lines.next().unwrap_or("").split_whitespace();
+    let (method, target) = match (parts.next(), parts.next()) {
+        (Some(m), Some(t)) => (m.to_string(), t.to_string()),
+        _ => return None,
+    };
+    let mut hosts = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            if k.eq_ignore_ascii_case("host") {
+                hosts.push(v.trim().to_string());
+            }
+        }
+    }
+    Some(RequestHead {
+        method,
+        target,
+        hosts,
+    })
+}
+
+/// Read the request head (up to the blank line) and parse it.
+fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<RequestHead>> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 512];
@@ -388,13 +511,7 @@ fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<(String, String)>
             return Ok(None);
         }
     }
-    let text = String::from_utf8_lossy(&buf);
-    let line = text.lines().next().unwrap_or("");
-    let mut parts = line.split_whitespace();
-    match (parts.next(), parts.next()) {
-        (Some(m), Some(t)) => Ok(Some((m.to_string(), t.to_string()))),
-        _ => Ok(None),
-    }
+    Ok(parse_head(&String::from_utf8_lossy(&buf)))
 }
 
 /// Outcome of a serve loop, for the caller's summary line. Counts only — a
@@ -420,6 +537,9 @@ pub fn serve(
     idle: Duration,
 ) -> std::io::Result<ServeStats> {
     listener.set_nonblocking(true)?;
+    // Read once: the `Host` allowlist is "our own address", and our own port is
+    // whatever the OS handed out at bind time.
+    let port = listener.local_addr()?.port();
     let mut stats = ServeStats::default();
     let mut last = Instant::now();
     loop {
@@ -434,7 +554,7 @@ pub fn serve(
                     continue;
                 }
                 let resp = match read_head(&mut stream) {
-                    Ok(Some((method, target))) => route(&method, &target, token, data),
+                    Ok(Some(h)) => route(&h.method, &h.target, &h.hosts, token, port, data),
                     Ok(None) => Response::text(400, "Bad Request", "view: malformed request\n"),
                     Err(_) => continue,
                 };
@@ -506,17 +626,43 @@ mod tests {
         }
     }
 
+    /// The port every test pretends the OS handed us.
+    const P: u16 = 51234;
+
+    /// A `Host` a real browser would send for our own URL, so that tests about
+    /// *other* things are not silently passing on the Host rejection path.
+    fn ok_host() -> Vec<String> {
+        vec![format!("127.0.0.1:{P}")]
+    }
+
     #[test]
     fn token_is_required_on_every_route() {
         let d = data();
+        let h = ok_host();
         for target in ["/", "/api/sessions"] {
-            assert_eq!(route("GET", target, "goodtoken", &d).status, 403);
+            assert_eq!(route("GET", target, &h, "goodtoken", P, &d).status, 403);
             assert_eq!(
-                route("GET", &format!("{target}?token=wrong"), "goodtoken", &d).status,
+                route(
+                    "GET",
+                    &format!("{target}?token=wrong"),
+                    &h,
+                    "goodtoken",
+                    P,
+                    &d
+                )
+                .status,
                 403
             );
             assert_eq!(
-                route("GET", &format!("{target}?token=goodtoken"), "goodtoken", &d).status,
+                route(
+                    "GET",
+                    &format!("{target}?token=goodtoken"),
+                    &h,
+                    "goodtoken",
+                    P,
+                    &d
+                )
+                .status,
                 200,
                 "instrument check: the correct token must actually pass"
             );
@@ -526,18 +672,121 @@ mod tests {
     #[test]
     fn only_get_is_accepted_even_with_a_valid_token() {
         let d = data();
+        let h = ok_host();
         for m in ["POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"] {
-            assert_eq!(route(m, "/?token=t", "t", &d).status, 405, "method {m}");
+            assert_eq!(
+                route(m, "/?token=t", &h, "t", P, &d).status,
+                405,
+                "method {m}"
+            );
         }
-        assert_eq!(route("GET", "/?token=t", "t", &d).status, 200);
+        assert_eq!(route("GET", "/?token=t", &h, "t", P, &d).status, 200);
+    }
+
+    /// Method must be rejected before Host, so a `POST` from a rebinding page
+    /// is still reported as a method error rather than leaking which check
+    /// happens to run first.
+    #[test]
+    fn method_is_checked_before_host() {
+        let d = data();
+        let evil = vec![format!("evil.example:{P}")];
+        assert_eq!(route("POST", "/?token=t", &evil, "t", P, &d).status, 405);
     }
 
     /// An unauthorised caller must not be able to map the route table.
     #[test]
     fn unknown_routes_are_indistinguishable_from_known_ones_without_a_token() {
         let d = data();
-        assert_eq!(route("GET", "/secret", "t", &d).status, 403);
-        assert_eq!(route("GET", "/secret?token=t", "t", &d).status, 404);
+        let h = ok_host();
+        assert_eq!(route("GET", "/secret", &h, "t", P, &d).status, 403);
+        assert_eq!(route("GET", "/secret?token=t", &h, "t", P, &d).status, 404);
+    }
+
+    /// DNS rebinding: `evil.com` re-resolves to `127.0.0.1`, and the browser
+    /// sends our port with *its* name in `Host`. The token already stops this
+    /// from reading anything, but the Host allowlist must stop it too — and it
+    /// must stop it even when the token is correct, which is the whole point of
+    /// a second lock.
+    #[test]
+    fn rebinding_hosts_are_rejected_even_with_the_right_token() {
+        let d = data();
+        let cases: Vec<Vec<String>> = vec![
+            // no Host at all — what you send to slip past a Host allowlist
+            vec![],
+            // attacker-controlled name, our port
+            vec![format!("evil.example:{P}")],
+            // a name that merely contains an allowed one
+            vec![format!("127.0.0.1.evil.example:{P}")],
+            vec![format!("localhost.evil.example:{P}")],
+            vec![format!("evil.example.localhost:{P}")],
+            // right name, wrong port — not the socket we are serving
+            vec![format!("127.0.0.1:{}", P + 1)],
+            // no port: cannot be our OS-assigned ephemeral port
+            vec!["127.0.0.1".to_string()],
+            vec!["localhost".to_string()],
+            // ::1 is not bound (see bind_ephemeral), so it is not on the list
+            vec![format!("[::1]:{P}")],
+            // two Host headers: a check reading only the first would pass this
+            vec![format!("127.0.0.1:{P}"), format!("evil.example:{P}")],
+            vec![format!("evil.example:{P}"), format!("127.0.0.1:{P}")],
+            // garbage
+            vec![String::new()],
+            vec![format!("127.0.0.1:{P}extra")],
+        ];
+        for hosts in &cases {
+            assert_eq!(
+                route("GET", "/?token=t", hosts, "t", P, &d).status,
+                403,
+                "Host {hosts:?} must be refused"
+            );
+            assert_eq!(
+                route("GET", "/api/sessions?token=t", hosts, "t", P, &d).status,
+                403,
+                "Host {hosts:?} must be refused on the JSON route too"
+            );
+        }
+    }
+
+    /// The negative test above is worthless unless the instrument can say yes.
+    #[test]
+    fn legitimate_hosts_are_accepted() {
+        let d = data();
+        for host in [
+            format!("127.0.0.1:{P}"),
+            format!("localhost:{P}"),
+            // hostnames are case-insensitive
+            format!("LocalHost:{P}"),
+        ] {
+            let hosts = vec![host.clone()];
+            assert_eq!(
+                route("GET", "/?token=t", &hosts, "t", P, &d).status,
+                200,
+                "instrument check: Host {host} must actually pass"
+            );
+        }
+    }
+
+    #[test]
+    fn host_header_is_parsed_case_insensitively_and_not_collapsed() {
+        let h = parse_head("GET /?token=x HTTP/1.1\r\nhost: 127.0.0.1:9\r\nAccept: */*\r\n\r\n")
+            .expect("well-formed head");
+        assert_eq!(h.method, "GET");
+        assert_eq!(h.target, "/?token=x");
+        assert_eq!(h.hosts, vec!["127.0.0.1:9".to_string()]);
+
+        let dup = parse_head("GET / HTTP/1.1\r\nHost: a:1\r\nHOST: b:1\r\n\r\n").expect("head");
+        assert_eq!(
+            dup.hosts,
+            vec!["a:1".to_string(), "b:1".to_string()],
+            "both Host headers must survive parsing so the check can refuse them"
+        );
+
+        // Headers after the blank line are body, not headers.
+        let body = parse_head("GET / HTTP/1.1\r\nHost: a:1\r\n\r\nHost: b:1\r\n").expect("head");
+        assert_eq!(body.hosts, vec!["a:1".to_string()]);
+
+        assert_eq!(parse_head(""), None);
+        assert_eq!(parse_head("GET\r\n\r\n"), None);
     }
 
     #[test]
@@ -610,6 +859,39 @@ mod tests {
             "must never bind a routable address"
         );
         assert_ne!(addr.port(), 0, "port must be assigned by the OS");
+    }
+
+    /// A non-loopback bind must never happen. `is_loopback()` alone would still
+    /// pass if someone "fixed" a bug by switching to `0.0.0.0` and then to some
+    /// other address, so this pins the exact string and rejects the two
+    /// mistakes that would actually expose the archive index to the network:
+    /// the unspecified address, and a port that is not the OS's to give.
+    ///
+    /// It also pins IPv4: `::1` is intentionally not bound (B52 task 2 —
+    /// `curl http://localhost:<port>` falls back to IPv4, and the printed URL
+    /// is the `127.0.0.1` literal). If this assertion is ever relaxed to allow
+    /// a second socket, the `Host` allowlist in [`host_is_local`] has to grow
+    /// `[::1]` in the same commit.
+    #[test]
+    fn bind_is_never_non_loopback() {
+        for _ in 0..8 {
+            let l = bind_ephemeral().expect("bind loopback");
+            let addr = l.local_addr().unwrap();
+            assert_eq!(
+                addr.ip().to_string(),
+                "127.0.0.1",
+                "view must bind the IPv4 loopback literal and nothing else"
+            );
+            assert!(addr.is_ipv4(), "::1 is not bound; see bind_ephemeral");
+            match addr.ip() {
+                std::net::IpAddr::V4(v4) => {
+                    assert!(!v4.is_unspecified(), "0.0.0.0 would expose the index");
+                    assert!(!v4.is_private() && !v4.is_multicast() && !v4.is_broadcast());
+                }
+                std::net::IpAddr::V6(_) => unreachable!("asserted ipv4 above"),
+            }
+            assert_ne!(addr.port(), 0, "port must be assigned by the OS");
+        }
     }
 
     #[test]
