@@ -104,6 +104,67 @@ pub fn default_state_dir() -> PathBuf {
     }
 }
 
+/// Metadata-only evidence used by `push` before it decides what an empty
+/// stage means. A committed read is an offset entry whose durable offset is
+/// greater than zero; zero-byte sources do not count as read content.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PushStageCheck {
+    pub stage_shards: usize,
+    pub scanner_records: usize,
+    pub scanner_sqlite_sessions: u64,
+    pub scanner_sqlite_unknown: usize,
+    pub committed_reads: usize,
+}
+
+impl PushStageCheck {
+    /// An empty stage is a normal no-op only when every metadata source agrees
+    /// that there is nothing to archive. Any positive signal is conservative:
+    /// the caller must keep the existing failure path instead of creating an
+    /// empty snapshot.
+    pub fn empty_stage_is_safe(&self) -> bool {
+        self.stage_shards == 0
+            && self.scanner_records == 0
+            && self.scanner_sqlite_sessions == 0
+            && self.scanner_sqlite_unknown == 0
+            && self.committed_reads == 0
+    }
+}
+
+/// Collect the metadata needed to distinguish a genuinely new/empty machine
+/// from a stage that disappeared after collection. This reads registry
+/// metadata and the collector cursor only; it never reads session bodies.
+pub fn inspect_stage_for_push(
+    config: &Config,
+    stage: &Path,
+    state_dir: &Path,
+) -> anyhow::Result<PushStageCheck> {
+    let scan = scanner::scan(config).context("scan harness sessions for empty-stage guard")?;
+    let state = load_state(&state_dir.join(STATE_FILE))?;
+    let scanner_sqlite_sessions = scan
+        .probes
+        .iter()
+        .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
+        .filter_map(|probe| probe.record_count)
+        .sum();
+    let scanner_sqlite_unknown = scan
+        .probes
+        .iter()
+        .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
+        .filter(|probe| probe.record_count.is_none())
+        .count();
+    Ok(PushStageCheck {
+        stage_shards: store::sealed_shard_count(stage)?,
+        scanner_records: scan.records.len(),
+        scanner_sqlite_sessions,
+        scanner_sqlite_unknown,
+        committed_reads: state
+            .files
+            .values()
+            .filter(|entry| entry.offset > 0)
+            .count(),
+    })
+}
+
 /// Scan every registry record and incrementally stage it.
 pub fn collect(
     config: &Config,

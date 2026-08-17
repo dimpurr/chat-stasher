@@ -126,35 +126,37 @@
       "paths": {
         "macos": {
           "template": "$XDG_DATA_HOME/opencode/opencode.db",
-          "env_override": "OPENCODE_HOME",
+          "env_override": "OPENCODE_DB",
           "format": "sqlite",
           "confidence": "源码确认",
-          "source": "任务已知事实（v1.2.0+）；但注意下方版本差异"
+          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         },
         "linux": {
-          "template": "$CWD/.opencode/opencode.db（当前 main 默认，相对路径）",
+          "template": "$XDG_DATA_HOME/opencode/opencode.db",
+          "env_override": "OPENCODE_DB",
           "format": "sqlite",
           "confidence": "源码确认",
-          "source": "internal/db/connect.go:26 + internal/config/config.go:101,231"
+          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         },
         "windows": {
-          "template": ".\\opencode\\opencode.db（当前 main 默认，相对 CWD）",
+          "template": "$XDG_DATA_HOME/opencode/opencode.db",
+          "env_override": "OPENCODE_DB",
           "format": "sqlite",
           "confidence": "源码确认",
-          "source": "同上（无 %APPDATA%/%LOCALAPPDATA% 分支存放 db）"
+          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         }
       },
-      "notes": "⚠️前提修正：opencode 是 Go 项目(github.com/opencode-ai/opencode)，不是 Rust，不用 xdg-basedir crate。当前 main 全仓库 grep 找不到 ~/.local/share/opencode——默认 data.directory 是相对 .opencode。~/.local/share 的绝对化解析在当前源码未找到(未查明，疑为旧版或安装时配置)。xdg-basedir crate 实测 unix-only(lib.rs:1 #![cfg(any(unix,redox))])，Windows 不编译；XDG_DATA_HOME 未设→~/.local/share。config.go:944 的 %LOCALAPPDATA% 只用于读 GitHub Copilot hosts.json，与 opencode.db 无关。",
+      "notes": "上游是 TypeScript 项目 anomalyco/opencode（原 sst/opencode），不是 Go 项目。v1.18.4 的 packages/core/src/global.ts:10-14 从 xdg-basedir 的 xdgData 计算 Global.Path.data；xdg-basedir v5.1.0 的 index.js:7-8 只取 XDG_DATA_HOME，否则一律回退到 homedir/.local/share，因此 macOS/Linux/Windows 的默认结构都是 $HOME/.local/share/opencode/opencode.db（registry 用 $XDG_DATA_HOME 表示该可覆盖基目录）。packages/core/src/database/database.ts:43-54 使用 OPENCODE_DB，packages/core/src/flag/flag.ts:47 从环境读取它：:memory: 或绝对路径直用，相对值挂在 Global.Path.data 下；发布 channel latest/beta/prod 或禁用 channel db 时文件名为 opencode.db，其他 channel 可能带 channel 后缀。源码出处：https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/flag/flag.ts；https://raw.githubusercontent.com/sindresorhus/xdg-basedir/v5.1.0/index.js。与本机 ~/.local/share/opencode/opencode.db 存在的实测一致。",
       "seal_policy": "not-applicable",
       "seal_source": "单一 SQLite（database.ts path() → opencode.db，WAL 必然长期持 fd，但本身也非 append jsonl）⇒ 没有可 rename 的活跃 jsonl",
       "reference": {
-        "upstream_project": "opencode-ai/opencode",
-        "file_path": "internal/db/connect.go",
-        "line_count": 68,
+        "upstream_project": "anomalyco/opencode",
+        "file_path": "packages/core/src/database/database.ts",
+        "line_count": 57,
         "license": "MIT",
         "relationship": "参考",
-        "source_url": "https://raw.githubusercontent.com/opencode-ai/opencode/main/internal/db/connect.go",
-        "license_url": "https://raw.githubusercontent.com/opencode-ai/opencode/main/LICENSE"
+        "source_url": "https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts",
+        "license_url": "https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/LICENSE"
       }
     },
     {

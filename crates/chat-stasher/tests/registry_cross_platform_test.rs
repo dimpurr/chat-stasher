@@ -116,10 +116,6 @@ fn whitelisted_structure_reasons() -> &'static [(&'static str, &'static str)] {
             "macOS cell writes the expanded default `~/.codex/sessions/` while linux/windows write the `$CODEX_HOME`/`%CODEX_HOME%` override variable — whose default *is* `~/.codex`. Both resolve to `<codex-home>/sessions/`; only the notation differs (the `.codex` segment is inlined on macOS but baked into the variable elsewhere). Not a missing layer.",
         ),
         (
-            "opencode",
-            "registry notes document a version/config discrepancy: the macOS cell records the v1.2.0+ `$XDG_DATA_HOME/opencode/opencode.db` config while linux/windows record current-main `$CWD/.opencode/opencode.db` (CWD-relative). Both reduce to one `opencode.db` under one harness dir; only the base differs (`opencode/` vs `.opencode/`). Documented in the cell notes, not a per-cell typo.",
-        ),
-        (
             "cursor",
             "macOS stores app data under `~/Library/Application Support/Cursor/User/…` (extra `Library/Application Support` base segments), Linux under `$XDG_CONFIG_HOME/Cursor/User/…` (~/.config), Windows under `%APPDATA%\\Cursor\\User\\…`. A genuine per-OS app-data base-directory convention (the task's own example), not a missing layer.",
         ),
@@ -178,6 +174,14 @@ fn every_harness_os_cells_structurally_consistent() {
             continue; // all declared OS cells are structurally identical
         }
         if let Some(reason) = whitelist.get(h.id.as_str()) {
+            // A version/version difference is configuration drift, not a
+            // platform-specific directory convention; it must never excuse
+            // structurally inconsistent registry cells.
+            assert!(
+                !reason.contains("版本") && !reason.to_ascii_lowercase().contains("version"),
+                "whitelist reason for {} mentions version/version; fix the template instead",
+                h.id
+            );
             whitelisted += 1;
             println!(
                 "[whitelisted] {id}: {reason} — structs: {structs}",

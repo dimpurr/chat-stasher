@@ -203,7 +203,7 @@ fn gemini_pattern_counts_session_and_rejects_config_json() {
 }
 
 #[test]
-fn opencode_home_env_override_wins_for_scanner() {
+fn opencode_db_env_override_wins_for_scanner() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let env_home = tempfile::TempDir::new().unwrap();
     let xdg_data = tempfile::TempDir::new().unwrap();
@@ -221,11 +221,11 @@ fn opencode_home_env_override_wins_for_scanner() {
     let db = env_home.path().join("opencode.db");
     plant_db(&db);
 
-    std::env::set_var("OPENCODE_HOME", env_home.path());
+    std::env::set_var("OPENCODE_DB", &db);
     std::env::set_var("XDG_DATA_HOME", xdg_data.path());
     let cell = json!({
         "template": "$XDG_DATA_HOME/opencode/opencode.db",
-        "env_override": "OPENCODE_HOME",
+        "env_override": "OPENCODE_DB",
         "format": "sqlite",
         "confidence": "源码确认",
         "source": "test",
@@ -263,7 +263,7 @@ fn opencode_home_env_override_wins_for_scanner() {
 
     let xdg_db = xdg_data.path().join("opencode/opencode.db");
     plant_db(&xdg_db);
-    std::env::remove_var("OPENCODE_HOME");
+    std::env::remove_var("OPENCODE_DB");
     let xdg_report = scanner::scan_with_registry(&Config::default(), &registry).unwrap();
     let xdg_probe = &xdg_report.probes[0];
     assert_eq!(xdg_probe.root.as_deref(), Some(xdg_db.as_path()));
@@ -278,7 +278,7 @@ fn opencode_home_env_override_wins_for_scanner() {
     let home_report = scanner::scan_with_registry(&Config::default(), &registry).unwrap();
     let home_probe = &home_report.probes[0];
     println!(
-        "opencode_fallbacks=OPENCODE_HOME:{} XDG_DATA_HOME:{} HOME/.local/share:{}",
+        "opencode_fallbacks=OPENCODE_DB:{} XDG_DATA_HOME:{} HOME/.local/share:{}",
         probe.root.as_deref() == Some(db.as_path()),
         xdg_probe.root.as_deref() == Some(xdg_db.as_path()),
         home_probe.root.as_deref() == Some(home_db.as_path())
@@ -286,6 +286,6 @@ fn opencode_home_env_override_wins_for_scanner() {
     assert_eq!(home_probe.root.as_deref(), Some(home_db.as_path()));
     assert_eq!(home_probe.record_count, Some(1));
 
-    std::env::remove_var("OPENCODE_HOME");
+    std::env::remove_var("OPENCODE_DB");
     std::env::remove_var("XDG_DATA_HOME");
 }
