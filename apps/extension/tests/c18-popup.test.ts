@@ -113,7 +113,7 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     const { setBackfillEnabled, isBackfillEnabled, tickBlockReason } =
       await import('../lib/backfill/schedule');
     const { loadGuardState, isGuardTripped } = await import('../lib/download-guard');
-    const { renderPopup, popupText, pickBackfillState } = await import('../lib/popup-view');
+    const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
 
     // 用户在 Popup 上把开关打开了。
     await setBackfillEnabled(browserLocalStore(), true);
@@ -128,13 +128,16 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     });
     expect(block).toBe('no-http-port');
 
-    const state = pickBackfillState(await browserLocalSnapshot());
+    const snapshot = await browserLocalSnapshot();
+    const state = pickBackfillState(snapshot);
     const view = renderPopup({
       enabled: true,
       block,
       guard,
       state,
       target: state ? { platform: state.platform, scope: state.scope } : null,
+      // C20：走真实的汇总函数，不写死 —— 本用例的夹具里没有失败项，所以它是空的。
+      failures: collectFailures(snapshot),
     });
     const out = popupText(view);
 
@@ -173,7 +176,7 @@ describe('C18-2 · 开着但取数通道没接上', () => {
 
   it('开关是关的时候，文案说的是「开关没有打开」而不是缺端口', async () => {
     const { tickBlockReason } = await import('../lib/backfill/schedule');
-    const { renderPopup, popupText } = await import('../lib/popup-view');
+    const { renderPopup, popupText, NO_FAILURES } = await import('../lib/popup-view');
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => false,
@@ -182,7 +185,7 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     });
     expect(block).toBe('disabled');
     const out = popupText(renderPopup({
-      enabled: false, block, guard: null, state: null, target: null,
+      enabled: false, block, guard: null, state: null, target: null, failures: NO_FAILURES,
     }));
     expect(out).toContain('未在运行');
     expect(out).toContain('开关没有打开');
@@ -201,7 +204,7 @@ describe('C18-3 · 熔断态', () => {
       await import('../lib/backfill/schedule');
     const { recordDownloadOutcome, stalledResult, loadGuardState, isGuardTripped } =
       await import('../lib/download-guard');
-    const { renderPopup, popupText, pickBackfillState } = await import('../lib/popup-view');
+    const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
 
     await setBackfillEnabled(browserLocalStore(), true);
     // 真把守卫打到熔断：连续 3 次停滞。
@@ -219,10 +222,12 @@ describe('C18-3 · 熔断态', () => {
     });
     expect(block).toBe('download-paused');
 
-    const state = pickBackfillState(await browserLocalSnapshot());
+    const snapshot = await browserLocalSnapshot();
+    const state = pickBackfillState(snapshot);
     const view = renderPopup({
       enabled: true, block, guard, state,
       target: state ? { platform: state.platform, scope: state.scope } : null,
+      failures: collectFailures(snapshot),
     });
     const out = popupText(view);
 
@@ -242,7 +247,7 @@ describe('C18-3 · 熔断态', () => {
 // ---------------------------------------------------------------------------
 describe('C18-4 · 进度文案守 C11 的规矩', () => {
   it('分母可信时才出现百分比，且与 formatProgress 逐字一致', async () => {
-    const { renderPopup } = await import('../lib/popup-view');
+    const { renderPopup, NO_FAILURES } = await import('../lib/popup-view');
     const { formatProgress } = await import('../lib/backfill/progress');
     const trusted: BackfillState = {
       v: 1, platform: 'chatgpt', scope: 'acct-1',
@@ -253,14 +258,14 @@ describe('C18-4 · 进度文案守 C11 的规矩', () => {
     };
     const view = renderPopup({
       enabled: true, block: 'no-http-port', guard: null, state: trusted,
-      target: { platform: 'chatgpt', scope: 'acct-1' },
+      target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
     expect(view.progress).toBe(`进度：${formatProgress(trusted)}`);
     expect(view.progress).toContain('30%');
   });
 
   it('分母不可信时 progress 行不含百分号', async () => {
-    const { renderPopup } = await import('../lib/popup-view');
+    const { renderPopup, NO_FAILURES } = await import('../lib/popup-view');
     const untrusted: BackfillState = {
       v: 1, platform: 'chatgpt', scope: 'acct-1',
       totalKnown: null, totalSource: 'unknown',
@@ -270,7 +275,7 @@ describe('C18-4 · 进度文案守 C11 的规矩', () => {
     };
     const view = renderPopup({
       enabled: true, block: 'no-http-port', guard: null, state: untrusted,
-      target: { platform: 'chatgpt', scope: 'acct-1' },
+      target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
     expect(view.progress).not.toContain('%');
     expect(view.progress).toContain('总数未知');

@@ -12,7 +12,8 @@
  */
 
 import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
-import { enqueueDebts, nextDebt, settleDebt } from './debts';
+import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
+import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import { detailUrl, listPageUrl, parseConversationListPage, DEFAULT_LIST_LIMIT } from './enumerate';
 import { formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, systemClock, type BackfillPace, type Clock } from './pace';
@@ -40,6 +41,54 @@ export const notWiredHttp: HttpPort = async (url: string) => {
   throw new Error(`[chat-stasher] backfill http port is not wired (refused to fetch ${new URL(url).pathname})`);
 };
 
+/**
+ * 🔴 C20 · sink 回答的那件事：**到底存下来了没有。**
+ * 与 entrypoints/background.ts 的 HandledResult 结构相容（那边就是原样 return 回来）。
+ */
+export interface SinkOutcome {
+  saved: boolean;
+  /** 没存下来时的技术理由。只进日志和失败清单，绝不含正文。 */
+  reason?: string;
+  /**
+   * 🔴 落盘时【实际用来命名】的那个身份。根因治理的另一半：
+   * 欠账键来自列表接口的 items[].id，文件名来自「从 URL 再抠一次」——
+   * 以前中间没有任何一致性校验。把它带回来，engine 就能当场对一次账。
+   * 出口不报这个字段（undefined）⇒ 不做这项校验，行为与 C19 逐字一致。
+   */
+  sessionId?: string;
+}
+
+/**
+ * 把 sink 的返回值判成「存下来了 / 没存下来」。
+ *
+ * 🔴 **`undefined` 判成成功**，这是一个必须写清楚的妥协：
+ *    老的 `sink: async (c) => { ... }`（返回 void）在类型上仍然合法，
+ *    engine 拿不到任何异议 ⇒ 只能当它成功。
+ *    换句话说：**一个不报告结果的出口，仍然可以静默清账。**
+ *    生产接线（entrypoints/background.ts 两处）已经改成 return handleCaptured 的结果，
+ *    所以生产路径上不存在这个洞；但如果以后有人新接一个不 return 的 sink，
+ *    这个洞会重新出现。要彻底堵死就得让 sink 的返回类型变成必填 —— 那会一次性
+ *    弄红全部既有测试夹具，超出本任务的范围，所以这里选择【写明】而不是【偷偷收紧】。
+ */
+function sinkVerdict(
+  outcome: SinkOutcome | void | undefined,
+  debtId: string,
+): { ok: true } | { ok: false; reason: FailureReason; detail: string } {
+  if (!outcome) return { ok: true };
+  if (outcome.saved !== true) {
+    return { ok: false, reason: 'not-saved', detail: outcome.reason ?? 'sink reported saved:false' };
+  }
+  if (outcome.sessionId !== undefined && outcome.sessionId !== debtId) {
+    return {
+      ok: false,
+      reason: 'identity-mismatch',
+      // 只放长度，不放两个 id 本身：完整会话 id 不进任何日志。
+      detail: `debt key (len ${debtId.length}) != file identity (len ${outcome.sessionId.length})`,
+    };
+  }
+  return { ok: true };
+}
+
 export interface BackfillOptions {
   platform: string;
   /** 平台源，例如 https://chatgpt.com。必须命中 lib/contract.ts 的平台表。 */
@@ -55,8 +104,14 @@ export interface BackfillOptions {
   maxDetails?: number;
   /** 每步之前问一次要不要中断（模拟浏览器关掉 / SW 被回收）。 */
   shouldAbort?: () => boolean;
-  /** 归档出口：产出与实时腿完全同形的 CapturedFetch，落盘逻辑不分叉。 */
-  sink?: (captured: CapturedFetch) => Promise<void> | void;
+  /**
+   * 归档出口：产出与实时腿完全同形的 CapturedFetch，落盘逻辑不分叉。
+   *
+   * 🔴 C20：返回值现在【说了算】—— 见 SinkOutcome 和 sinkVerdict()。
+   *    以前这里是 `=> Promise<void> | void`，接线处 `await handleCaptured(c)` 之后
+   *    把 HandledResult 丢在地上，于是「没落盘」和「落盘了」在欠账账本上是同一个结果。
+   */
+  sink?: (captured: CapturedFetch) => Promise<SinkOutcome | void> | SinkOutcome | void;
   /**
    * C12 下载停滞守卫的闸门：返回 true 表示「已熔断」，这条腿必须暂停。
    * 🔴 只暂停回溯腿（慢爬）。实时腿走 entrypoints/background.ts 的
@@ -71,6 +126,8 @@ export interface RunReport {
   enumeratedPages: number;
   newDebts: number;
   archivedThisRun: string[];
+  /** 🔴 C20：本次 run 里「取到了正文但没能落盘」的那几条，已进失败清单、不会重试。 */
+  failedThisRun: FailureEntry[];
   /** 枚举时被「已归档 ⇒ 不再入队」挡掉的条数。 */
   skippedAlreadyArchived: number;
   /** 枚举时已经在欠账里、无需重复入队的条数。 */
@@ -137,6 +194,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       enumeratedPages: 0,
       newDebts: 0,
       archivedThisRun: [],
+      failedThisRun: [],
       skippedAlreadyArchived: 0,
       skippedAlreadyPending: 0,
       progress: formatProgress(state),
@@ -160,6 +218,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   };
 
   const archivedThisRun: string[] = [];
+  const failedThisRun: FailureEntry[] = [];
   let enumeratedPages = 0;
   let newDebts = 0;
   let skippedAlreadyArchived = 0;
@@ -178,6 +237,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     enumeratedPages,
     newDebts,
     archivedThisRun,
+    failedThisRun,
     skippedAlreadyArchived,
     skippedAlreadyPending,
     progress: formatProgress(state),
@@ -297,12 +357,34 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       pageUrl: `${opts.origin}/c/${id}`,
       capturedAt: clock.now(),
     };
-    await opts.sink?.(captured);
+    // 🔴 C20 · 本次修法的落点：**sink 的结果说了算。**
+    //
+    // 产品主人的原话：「丢了」和「丢了但你知道」是完全不同的两件事，
+    // 而这个项目的立身之本就是后者。
+    //
+    // 以前这里是 `await opts.sink?.(captured); settleDebt(state, id);` ——
+    // 不看出口有没有真的把文件存下来，欠账照样被划掉，那条对话从此永不再试、
+    // 也永远不会有人知道它丢了。现在分两条路：
+    //   存下来了 ⇒ settleDebt（清账，进 archived）
+    //   没存下来 ⇒ recordFailure（进失败清单，🔴 不清账、不进 archived、不重试）
+    const verdict = sinkVerdict(await opts.sink?.(captured), id);
 
-    settleDebt(state, id);
+    if (verdict.ok) {
+      settleDebt(state, id);
+      archivedThisRun.push(id);
+    } else {
+      // 🔴 从 pending 里拿掉但【不】进 archived：不重试是产品决定，
+      //    冒充已归档则会让进度分子说谎 —— 两件事都不许发生。
+      dropDebt(state, id);
+      failedThisRun.push(recordFailure(state, { id, reason: verdict.reason, at: clock.now() }));
+      // 只打技术细节，绝不打对话正文，也绝不打完整 URL / 完整会话 id。
+      console.warn(`[chat-stasher] backfill sink did not save: ${verdict.reason} — ${verdict.detail}`);
+    }
+
+    // 无论成败都算一次「今天取过的正文」：请求已经真的发出去了，
+    // 不计数就等于给失败开了一条绕过每日配额的后门。
     state.detailToday.count += 1;
-    archivedThisRun.push(id);
-    // 每清一笔账立刻落盘 —— 可断可续的全部秘密就在这一行。
+    // 每清一笔账（或记一条失败）立刻落盘 —— 可断可续的全部秘密就在这一行。
     await persist(store, state);
   }
 

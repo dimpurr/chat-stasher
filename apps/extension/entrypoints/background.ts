@@ -46,6 +46,14 @@ export interface HandledResult {
   reason?: string;
   finalName?: string;
   bytes?: number;
+  /**
+   * 🔴 C20：落盘时【实际用来命名】的那个身份。
+   * 根因是「同一个身份被表达了两次」—— 欠账键来自列表接口的 items[].id，
+   * 文件名来自「用正则从 URL 里再抠一次」，中间没有任何一致性校验。
+   * 把这一位如实报出来，回溯腿才有可能当场对一次账（见 engine.ts 的 sinkVerdict）。
+   * saved:false 时为 undefined（根本没有命名过）。
+   */
+  sessionId?: string;
 }
 
 /**
@@ -102,7 +110,9 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   void recordCapture().catch((err) => {
     console.warn('[chat-stasher] badge update failed', (err as Error).message);
   });
-  return { saved: true, finalName, bytes };
+  // 🔴 sessionId 报的是 bundle 里那个【真的用来拼文件名】的值，不是上面那个局部变量：
+  // 中间隔着 buildBundle 的一次重新抽取，报错了那一位才有意义。
+  return { saved: true, finalName, bytes, sessionId: bundle.sessionId };
 }
 
 /**
@@ -291,7 +301,9 @@ export async function kickBackfill(
     http: await resolveHttpPort(target.origin, senderTabId),
     downloadGuard: isBackfillPausedByDownloadGuard,
     // 归档出口 = 实时腿同一个落盘函数，逻辑不分叉。
-    sink: async (c) => { await handleCaptured(c); },
+    // 🔴 C20：**必须 return**。以前这里是 `{ await handleCaptured(c); }` —— 花括号
+    //    把 HandledResult 吃掉了，于是 engine 拿不到任何异议，没落盘也照样清账。
+    sink: (c) => handleCaptured(c),
     ...(backfillPaceOverride ?? {}),
   });
   lastTick = result;
@@ -329,7 +341,8 @@ export async function runAlarmTick(): Promise<TickResult> {
       store,
       http: await resolveHttpPort(target.origin),
       downloadGuard: isBackfillPausedByDownloadGuard,
-      sink: async (c) => { await handleCaptured(c); },
+      // 🔴 C20：闹钟那一脚同样必须 return（两条心跳走同一个出口，不许一条报一条不报）。
+      sink: (c) => handleCaptured(c),
       ...(backfillPaceOverride ?? {}),
     });
     last = result;

@@ -36,6 +36,8 @@ import {
 import { syncBackfillAlarm, type AlarmsApi } from '../../lib/backfill/alarm';
 import { isGuardTripped, loadGuardState, type GuardState } from '../../lib/download-guard';
 import {
+  backfillStateEntries,
+  collectFailures,
   pickBackfillState,
   renderPopup,
   POPUP_STATUS_MESSAGE,
@@ -43,6 +45,7 @@ import {
   type PopupModel,
   type PopupView,
 } from '../../lib/popup-view';
+import { clearFailures } from '../../lib/backfill/failures';
 
 /**
  * 问 background 要运行时事实。问不到（SW 起不来 / 消息没人接）时
@@ -97,7 +100,33 @@ async function collect(): Promise<PopupModel> {
     guard,
     state,
     target: state ? { platform: state.platform, scope: state.scope } : null,
+    // 🔴 C20：跨所有平台/账号汇总。读不到快照 ⇒ 空清单（那时候我们确实什么都不知道）。
+    failures: collectFailures(snapshot),
   };
+}
+
+/**
+ * 🔴 C20 · 「我知道了，清空这份清单」。
+ * 遍历快照里每一份欠账集合，把 failures / failuresDropped 清零后写回去。
+ * **不触发任何重新抓取** —— 这是产品拍板的「不重试」，按钮只表示「我看到了」。
+ * 清完之后那几条会话既不在 pending 也不在 archived，所以它们不会再被自动碰到。
+ */
+async function onClearFailures(): Promise<void> {
+  const store = browserLocalStore();
+  if (!store) return;
+  let snapshot: Record<string, unknown> | null = null;
+  try {
+    snapshot = await browserLocalSnapshot();
+  } catch (err) {
+    console.warn('[chat-stasher] popup snapshot read failed', (err as Error).message);
+    return;
+  }
+  for (const { key, state } of backfillStateEntries(snapshot)) {
+    if (state.failures === undefined && !state.failuresDropped) continue;
+    clearFailures(state);
+    await store.save(key, state);
+  }
+  await refresh();
 }
 
 function text(id: string, value: string): void {
@@ -107,6 +136,18 @@ function text(id: string, value: string): void {
 
 function paint(view: PopupView): void {
   text('status', view.status);
+  // 🔴 C20：有失败项时这一行必须出现在最显眼的位置；没有时整块隐藏，
+  //    绝不留一个空壳让用户以为「这里本来就该是空的」。
+  text('failures', view.failures ?? '');
+  const failBox = document.getElementById('failures');
+  if (failBox) failBox.hidden = view.failures === null;
+
+  const clearBtn = document.getElementById('clear-failures') as HTMLButtonElement | null;
+  if (clearBtn) {
+    clearBtn.textContent = view.clearFailures.label;
+    clearBtn.hidden = !view.clearFailures.visible;
+  }
+
   text('running', view.running);
   text('missing', view.missing ?? '');
   text('progress', view.progress);
@@ -153,6 +194,13 @@ document.getElementById('toggle')?.addEventListener('change', (ev) => {
   const on = (ev.target as HTMLInputElement).checked;
   void onToggle(on).catch((err) => {
     console.warn('[chat-stasher] popup toggle failed', (err as Error).message);
+    void refresh();
+  });
+});
+
+document.getElementById('clear-failures')?.addEventListener('click', () => {
+  void onClearFailures().catch((err) => {
+    console.warn('[chat-stasher] popup clear-failures failed', (err as Error).message);
     void refresh();
   });
 });

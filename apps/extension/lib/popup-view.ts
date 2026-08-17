@@ -15,6 +15,13 @@
  */
 
 import { formatProgress, computeProgress } from './backfill/progress';
+import {
+  describeFailureReason,
+  droppedOf,
+  failuresOf,
+  MAX_FAILURES,
+  type FailureEntry,
+} from './backfill/failures';
 import { BACKFILL_ALARM_PERIOD_MINUTES } from './backfill/alarm';
 import { DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
@@ -56,12 +63,32 @@ export interface PopupModel {
   state: BackfillState | null;
   /** 这份进度是哪个平台/哪个账号的。认不出来就是 null。 */
   target: { platform: string; scope: string } | null;
+  /**
+   * 🔴 C20 · 落盘失败清单（**跨所有平台/账号汇总**）。
+   * 为什么要汇总而不是只看 model.state：进度那一栏只挑一份集合显示（挑已归档最多的），
+   * 失败要是也只看那一份，另一个账号下丢掉的东西就会在 UI 上凭空消失 ——
+   * 那正是「显示成一切正常」。
+   */
+  failures: FailureSummary;
+}
+
+/** 汇总后的失败清单。entries 已按时间从新到旧排好。 */
+export interface FailureSummary {
+  entries: FailureEntry[];
+  /** 因超过上限被丢掉的更早的失败条数。🔴 绝不静默截断。 */
+  dropped: number;
 }
 
 export interface PopupView {
   /** 第一行：开关本身处在什么状态。 */
   status: string;
-  /** 第二行：🔴 到底在不在跑。 */
+  /**
+   * 🔴 C20 · 第二行：**有东西没存下来的时候，这一行必须出现。**
+   * 没有失败项时是 null（那时候「一切正常」才是实话）。
+   * 位置刻意排在「在不在跑」之前：一条腿跑得再顺，也不该盖过「有东西丢了」。
+   */
+  failures: string | null;
+  /** 第三行：🔴 到底在不在跑。 */
   running: string;
   /** 第三行：卡在哪一道、缺什么。不缺就是 null。 */
   missing: string | null;
@@ -70,23 +97,34 @@ export interface PopupView {
   /** 补充说明，可为空。 */
   notes: string[];
   toggle: { label: string; checked: boolean; disabled: boolean };
+  /** 🔴 C20 · 「我知道了 / 清空失败清单」按钮。没有失败项时不显示。 */
+  clearFailures: { label: string; visible: boolean };
 }
 
 /** 开关那一行的固定措辞。开关只表示「用户同意了」，不表示「它在跑」。 */
 export const TOGGLE_LABEL = '自动回溯历史对话';
+
+/** 清空按钮的固定措辞。「我知道了」而不是「重试」—— 按下去什么都不会被重抓。 */
+export const CLEAR_FAILURES_LABEL = '我知道了，清空这份清单';
+
+/** 空清单。给 model 用的常量，省得各处手拼。 */
+export const NO_FAILURES: FailureSummary = { entries: [], dropped: 0 };
 
 export function renderPopup(model: PopupModel): PopupView {
   const status = statusLine(model);
   const running = runningLine(model);
   const missing = missingLine(model) || null;
   const progress = progressLine(model);
+  const hasFailures = model.failures.entries.length > 0 || model.failures.dropped > 0;
 
   return {
     status,
+    failures: hasFailures ? failuresLine(model.failures) : null,
     running,
     missing,
     progress,
     notes: notesFor(model),
+    clearFailures: { label: CLEAR_FAILURES_LABEL, visible: hasFailures },
     toggle: {
       label: TOGGLE_LABEL,
       checked: model.enabled,
@@ -151,6 +189,49 @@ function missingLine(model: PopupModel): string {
   }
 }
 
+/**
+ * 🔴 C20 · 失败清单那一行。三件事必须说全，一件都不许少：
+ *   1. **几条没存下来**（数字来自真实条目，不估）；
+ *   2. **不会自动再试**（这是产品拍板的行为，用户必须知道，否则他会以为等一等就好了）；
+ *   3. 被上限丢掉的更早的条数（有就说，🔴 绝不静默截断）。
+ * 🔴 这一行【不猜原因】（C12 那条规矩）—— 具体理由码在下面的 notes 里逐条列，
+ *    每一条也只陈述我们自己观测到的事实。
+ */
+function failuresLine(summary: FailureSummary): string {
+  const n = summary.entries.length;
+  const head = `🔴 失败：有 ${n} 条历史对话取到了正文、但【没有存下来】，而且【不会自动再试】。`;
+  if (summary.dropped > 0) {
+    return head
+      + `（清单最多留 ${MAX_FAILURES} 条，另有更早的 ${summary.dropped} 条已经不在清单里。）`;
+  }
+  return head;
+}
+
+/** 时间戳 → 本地时间字符串。拿到的不是有限数就照实说「时间不详」，绝不编一个。 */
+function stampOf(at: number): string {
+  if (!Number.isFinite(at)) return '时间不详';
+  try {
+    return new Date(at).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  } catch {
+    return '时间不详';
+  }
+}
+
+function failureNote(summary: FailureSummary): string {
+  const lines = [
+    '这几条没有存下来（按时间从新到旧）：',
+    ...summary.entries.map(
+      (e) => `· ${e.platform} · 会话 ${e.shortId}… · ${describeFailureReason(e.reason)} · ${stampOf(e.at)}`,
+    ),
+    '',
+    '🔴 它们不会被自动重试 —— 这是刻意的：同一个出口刚刚已经失败过一次，'
+    + '闷头再试一遍只会把同一个失败重复一遍，还会让你以为它已经好了。',
+    '欠账账本上它们既不算「已归档」也不再排队，所以进度里的数字没有把它们冒充成成功。',
+    '清空这份清单只是「我知道了」，不会触发任何重新抓取。',
+  ];
+  return lines.join('\n');
+}
+
 function progressLine(model: PopupModel): string {
   // 🔴 唯一的进度文案来源。本文件不参与任何百分比计算。
   if (!model.state) {
@@ -162,6 +243,9 @@ function progressLine(model: PopupModel): string {
 
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
+  // 🔴 失败详情排在所有 note 的最前面。有东西丢了就先说这件事。
+  if (model.failures.entries.length > 0) notes.push(failureNote(model.failures));
+
   if (model.target) {
     notes.push(`这份进度对应：平台 ${model.target.platform} · 归档范围 ${model.target.scope}`);
   } else if (model.state === null) {
@@ -207,7 +291,9 @@ function emptyStateFor(model: PopupModel): BackfillState {
 
 /** 把一份 view 拍平成纯文本 —— 测试断言和「贴出完整文案」都用它。 */
 export function popupText(view: PopupView): string {
-  const lines = [view.status, view.running];
+  const lines = [view.status];
+  if (view.failures) lines.push(view.failures);
+  lines.push(view.running);
   if (view.missing) lines.push(view.missing);
   lines.push(view.progress);
   for (const n of view.notes) lines.push('', n);
@@ -244,4 +330,36 @@ export function pickBackfillState(snapshot: Record<string, unknown> | null): Bac
     if (!best || value.archived.length > best.archived.length) best = value;
   }
   return best;
+}
+
+/** 快照里所有合法的欠账集合（键值一致的那些）。失败汇总和清空都要遍历它。 */
+export function backfillStateEntries(
+  snapshot: Record<string, unknown> | null,
+): Array<{ key: string; state: BackfillState }> {
+  if (!snapshot) return [];
+  const out: Array<{ key: string; state: BackfillState }> = [];
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (!key.startsWith(STATE_KEY_PREFIX)) continue;
+    if (!looksLikeState(value)) continue;
+    if (stateKey(value.platform, value.scope) !== key) continue;
+    out.push({ key, state: value });
+  }
+  return out;
+}
+
+/**
+ * 🔴 C20 · 把【所有】平台/账号的失败清单汇总成一份。
+ * 进度那一栏只挑一份集合显示；失败要是也只看那一份，另一个账号下丢掉的东西
+ * 就会在 UI 上凭空消失 —— 那正是「把有失败项显示成一切正常」。
+ * 排序：时间从新到旧（最近发生的最有诊断价值）。
+ */
+export function collectFailures(snapshot: Record<string, unknown> | null): FailureSummary {
+  const entries: FailureEntry[] = [];
+  let dropped = 0;
+  for (const { state } of backfillStateEntries(snapshot)) {
+    entries.push(...failuresOf(state));
+    dropped += droppedOf(state);
+  }
+  entries.sort((a, b) => b.at - a.at);
+  return { entries, dropped };
 }
