@@ -46,6 +46,10 @@ enum Command {
         /// Maximum sealed shards per bucket (default: 20).
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
+        /// Named destination from the config. Required once the config
+        /// declares any destination; there is no default.
+        #[arg(long)]
+        destination: Option<String>,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -96,6 +100,10 @@ enum Command {
         /// is empty. If omitted, the most recent CLI ingest inboxes are used.
         #[arg(long)]
         inbox: Option<PathBuf>,
+        /// Named destination from the config. Required once the config
+        /// declares any destination; there is no default.
+        #[arg(long)]
+        destination: Option<String>,
         /// Repository path override (default: config `rustic_repo` / data dir).
         #[arg(long)]
         repo: Option<String>,
@@ -139,6 +147,10 @@ enum Command {
         /// (unused by `--all-machines`, which reads every machine).
         #[arg(long)]
         machine: Option<String>,
+        /// Named destination from the config. Required once the config
+        /// declares any destination; there is no default.
+        #[arg(long)]
+        destination: Option<String>,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -173,6 +185,10 @@ enum Command {
         /// Machine partition (default: this machine's normalised hostname).
         #[arg(long)]
         machine: Option<String>,
+        /// Named destination from the config. Required once the config
+        /// declares any destination; there is no default.
+        #[arg(long)]
+        destination: Option<String>,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -186,6 +202,51 @@ enum Command {
         #[arg(long = "option")]
         options: Vec<String>,
         /// Disable ssh connection reaping after this run (for troubleshooting).
+        #[arg(long)]
+        no_reap: bool,
+    },
+    /// Initialise a new destination as a *full extra copy* (ADR-013).
+    ///
+    /// Order is fixed: re-collect from the local sources first (they are the
+    /// truth, and rereading them puts no load on an existing destination),
+    /// then copy back only what an existing destination holds and the local
+    /// source no longer does, then push the result. The new destination ends
+    /// up with `local ∪ existing destinations`.
+    ///
+    /// A source destination that cannot be consulted makes the difference set
+    /// *incomplete*: that is reported and the command exits non-zero. It is
+    /// never treated as "that destination had nothing extra".
+    DestInit {
+        /// Destination to initialise. Must be declared in the config, unless
+        /// an explicit `--repo` is given instead.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Stage directory that holds the sealed `sessions/` tree.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Machine partition for `sessions/<machine>/…`.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+        /// Existing destination to compute the difference set against,
+        /// repeatable. Default: every other destination in the config.
+        #[arg(long = "from")]
+        from: Vec<String>,
+        /// Repository path override for the destination being initialised.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override for the destination being initialised.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Disable ssh connection reaping after this run.
         #[arg(long)]
         no_reap: bool,
     },
@@ -228,6 +289,10 @@ enum Command {
         /// Maximum sealed shards per bucket (default: 20).
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
+        /// Named destination from the config. Read state is kept per
+        /// destination, so a different destination is a different debt set.
+        #[arg(long)]
+        destination: Option<String>,
         /// Destination repository this pass collects *for*. Read state is kept
         /// per destination, so a different value is a different debt set.
         #[arg(long)]
@@ -287,6 +352,7 @@ fn main() -> ExitCode {
             stage,
             machine,
             shard_bucket_cap,
+            destination,
             repo,
             key_file,
             connections,
@@ -297,6 +363,7 @@ fn main() -> ExitCode {
             &stage,
             machine,
             shard_bucket_cap,
+            destination,
             repo,
             key_file,
             connections,
@@ -314,6 +381,7 @@ fn main() -> ExitCode {
         Command::Push {
             stage,
             inbox,
+            destination,
             repo,
             key_file,
             machine,
@@ -323,6 +391,7 @@ fn main() -> ExitCode {
         } => cmd_push(
             &stage,
             inbox,
+            destination,
             repo,
             key_file,
             machine,
@@ -336,6 +405,7 @@ fn main() -> ExitCode {
             session,
             all_machines,
             machine,
+            destination,
             repo,
             key_file,
             connections,
@@ -346,6 +416,7 @@ fn main() -> ExitCode {
             &session,
             all_machines,
             machine.as_deref(),
+            destination,
             repo,
             key_file,
             connections,
@@ -357,6 +428,7 @@ fn main() -> ExitCode {
             level,
             stage,
             machine,
+            destination,
             repo,
             key_file,
             connections,
@@ -366,6 +438,7 @@ fn main() -> ExitCode {
             level,
             &stage,
             machine.as_deref(),
+            destination,
             repo,
             key_file,
             connections,
@@ -382,9 +455,40 @@ fn main() -> ExitCode {
             stage,
             machine,
             shard_bucket_cap,
+            destination,
             repo,
             key_file,
-        } => cmd_collect(&stage, machine.as_deref(), shard_bucket_cap, repo, key_file),
+        } => cmd_collect(
+            &stage,
+            machine.as_deref(),
+            shard_bucket_cap,
+            destination,
+            repo,
+            key_file,
+        ),
+        Command::DestInit {
+            destination,
+            stage,
+            machine,
+            shard_bucket_cap,
+            from,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_dest_init(
+            destination,
+            &stage,
+            machine.as_deref(),
+            shard_bucket_cap,
+            &from,
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
+        ),
         Command::Seal {
             harness,
             active,
@@ -464,10 +568,207 @@ fn destination_view<'a>(
     )
 }
 
+/// `dest-init` — ADR-013. Give a new destination the union of the local
+/// sources and every existing destination, in that order.
+///
+/// Exit code is non-zero when the difference set could not be computed in
+/// full, even if the local part pushed fine: a destination that is initialised
+/// from an incomplete union must not look like a finished one.
+#[allow(clippy::too_many_arguments)]
+fn cmd_dest_init(
+    destination: Option<String>,
+    stage: &Path,
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+    from: &[String],
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    if destination.is_none() && repo.is_none() {
+        eprintln!(
+            "dest-init: name the destination being initialised (`--destination <name>`, or an explicit `--repo`)"
+        );
+        return ExitCode::from(2);
+    }
+    let machine = machine
+        .map(String::from)
+        .unwrap_or_else(chat_stasher::id::machine_id);
+    let target = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+
+    // Which existing destinations the difference set is computed against.
+    // Default = every *other* declared destination; naming them explicitly is
+    // always allowed, naming one that does not exist never is.
+    let source_names: Vec<String> = if from.is_empty() {
+        config
+            .destinations
+            .keys()
+            .filter(|name| Some(name.as_str()) != destination.as_deref())
+            .cloned()
+            .collect()
+    } else {
+        from.to_vec()
+    };
+    let mut sources = Vec::new();
+    for name in &source_names {
+        if Some(name.as_str()) == destination.as_deref() {
+            eprintln!("dest-init: `--from {name}` is the destination being initialised");
+            return ExitCode::from(2);
+        }
+        if !config.destinations.contains_key(name) {
+            eprintln!("dest-init: `--from {name}` is not declared in the config");
+            return ExitCode::from(2);
+        }
+        sources.push(chat_stasher::destinit::SourceDestination {
+            name: name.clone(),
+            cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+        });
+    }
+
+    println!(
+        "[dest-init] destination   : sha256={} (new copy)",
+        chat_stasher::collect::destination_id(&target.repo_root)
+    );
+    println!(
+        "[dest-init] machine       : sha256={}",
+        store::machine_fingerprint(&machine)
+    );
+    println!("[dest-init] stage         : {}", stage.display());
+    println!(
+        "[dest-init] sources       : {} ({})",
+        sources.len(),
+        if source_names.is_empty() {
+            "no existing destination declared".to_string()
+        } else {
+            source_names.join(", ")
+        }
+    );
+
+    // Step 1 — the local sources are the truth, and rereading them costs the
+    // existing destinations nothing.
+    println!("[dest-init] step 1        : re-collect from the local sources");
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let view = destination_view(&target, &machine);
+    let report = match chat_stasher::collect::collect(
+        &config,
+        stage,
+        &machine,
+        &state_dir,
+        shard_bucket_cap,
+        &view,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("dest-init: local re-collect failed: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    print_collect_report(&report, stage, &state_dir, &machine);
+    let local_failed = !report.errors.is_empty();
+
+    // Step 2 — only what an existing destination has and the local source no
+    // longer produced.
+    println!(
+        "[dest-init] step 2        : difference set (existing destination has it, local re-collect did not produce it)"
+    );
+    let diff = chat_stasher::destinit::fill_difference(stage, &machine, shard_bucket_cap, &sources);
+    for source in &diff.sources {
+        println!(
+            "  source {:<16} sha256={} reachable={} sessions_here={} other_machines={} missing_locally={} restored={} shards={} failed={}",
+            source.name,
+            source.destination_id,
+            source.reachable,
+            source.sessions_for_this_machine,
+            source.sessions_other_machines,
+            source.missing_locally,
+            source.restored_sessions,
+            source.restored_shards,
+            source.failed_sessions.len(),
+        );
+        if let Some(reason) = &source.unreachable_reason {
+            println!("    reason: {reason}");
+        }
+        if source.sessions_other_machines > 0 {
+            println!(
+                "    WARNING: {} session(s) belong to another machine partition and were NOT copied \
+                 (the stage is single-partition by construction; copying them would re-attribute \
+                 another machine's history to this one). They remain only in the source destination.",
+                source.sessions_other_machines
+            );
+        }
+    }
+    println!(
+        "[dest-init] restored      : sessions={} shards={}",
+        diff.restored_sessions, diff.restored_shards
+    );
+    println!("[dest-init] diff complete : {}", diff.diff_complete);
+
+    // Step 3 — push whatever is now on the stage. This runs even when the
+    // difference set is incomplete: keeping what we do know is strictly better
+    // than dropping it, and the non-zero exit still says the union is unproven.
+    let stage_shards = match store::sealed_shard_count(stage) {
+        Ok(count) => count,
+        Err(e) => {
+            eprintln!("dest-init: cannot audit stage: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut push_failed = false;
+    if stage_shards == 0 {
+        println!("[dest-init] step 3        : nothing on the stage, no snapshot created");
+    } else {
+        println!("[dest-init] step 3        : push the union to the new destination");
+        let (mk, _) = masterkey(&target);
+        let store = BackupStore::new(target.clone(), machine.clone());
+        match store.push(stage, &mk) {
+            Ok(summary) => println!(
+                "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
+                summary.stage_shards,
+                summary.files_new,
+                summary.files_unmodified,
+                summary.data_added,
+                summary.snapshots_in_repo,
+            ),
+            Err(e) => {
+                eprintln!("dest-init: push failed: {e:#}");
+                push_failed = true;
+            }
+        }
+    }
+    reap_remote(&target, no_reap);
+
+    if !diff.diff_complete {
+        eprintln!(
+            "dest-init: result: INCOMPLETE exit_code=1 — the difference set could not be computed in full. \
+             At least one existing destination could not be consulted (or could not be copied from), so it is \
+             UNKNOWN whether this new destination holds the union. Unknown is not empty: re-run once the \
+             destination is reachable."
+        );
+        return ExitCode::FAILURE;
+    }
+    if local_failed || push_failed {
+        eprintln!("[dest-init] result: ERROR exit_code=1 local_errors={local_failed} push_failed={push_failed}");
+        return ExitCode::FAILURE;
+    }
+    println!("[dest-init] result: COMPLETED exit_code=0 union=local+existing-destinations");
+    ExitCode::SUCCESS
+}
+
 fn cmd_collect(
     stage: &Path,
     machine: Option<&str>,
     shard_bucket_cap: usize,
+    destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
 ) -> ExitCode {
@@ -476,15 +777,16 @@ fn cmd_collect(
         .map(String::from)
         .unwrap_or_else(chat_stasher::id::machine_id);
     let state_dir = chat_stasher::collect::default_state_dir();
-    let store_cfg = store_config_from(&config, repo, key_file, None, &[]);
-    let destination = destination_view(&store_cfg, &machine);
+    let store_cfg =
+        resolve_store_config(&config, destination.as_deref(), repo, key_file, None, &[]);
+    let view = destination_view(&store_cfg, &machine);
     let report = match chat_stasher::collect::collect(
         &config,
         stage,
         &machine,
         &state_dir,
         shard_bucket_cap,
-        &destination,
+        &view,
     ) {
         Ok(report) => report,
         Err(e) => {
@@ -593,10 +895,12 @@ fn print_collect_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run_once(
     stage: &Path,
     machine: Option<String>,
     shard_bucket_cap: usize,
+    destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -610,21 +914,22 @@ fn cmd_run_once(
     // The destination is resolved from the same overrides this run will push
     // to, so `collect` accrues debt against the repository `push` settles it
     // against — not against whatever the config happens to default to.
-    let collect_cfg = store_config_from(
+    let collect_cfg = resolve_store_config(
         &config,
+        destination.as_deref(),
         repo.clone(),
         key_file.clone(),
         connections,
         options,
     );
-    let destination = destination_view(&collect_cfg, &machine_name);
+    let view = destination_view(&collect_cfg, &machine_name);
     let report = match chat_stasher::collect::collect(
         &config,
         stage,
         &machine_name,
         &state_dir,
         shard_bucket_cap,
-        &destination,
+        &view,
     ) {
         Ok(report) => report,
         Err(e) => {
@@ -658,8 +963,9 @@ fn cmd_run_once(
             changed, only_if_changed, stage_shards
         );
         if verify {
-            let cfg = store_config_from(
+            let cfg = resolve_store_config(
                 &config,
+                destination.as_deref(),
                 repo.clone(),
                 key_file.clone(),
                 connections,
@@ -672,6 +978,7 @@ fn cmd_run_once(
                         VerifyLevel::L1,
                         &None,
                         Some(&machine_name),
+                        destination.clone(),
                         repo,
                         key_file,
                         connections,
@@ -699,6 +1006,7 @@ fn cmd_run_once(
     let push_code = cmd_push(
         &stage.to_path_buf(),
         None,
+        destination.clone(),
         repo.clone(),
         key_file.clone(),
         machine.clone(),
@@ -716,6 +1024,7 @@ fn cmd_run_once(
             VerifyLevel::L1,
             &None,
             Some(&machine_name),
+            destination,
             repo,
             key_file,
             connections,
@@ -954,6 +1263,86 @@ fn data_root() -> PathBuf {
         .join("chat-stasher")
 }
 
+/// Resolve which destination a command operates on.
+///
+/// ADR-013 product rule: **there is no default destination.** Once the config
+/// declares any named destination, a command that reaches a repository has to
+/// say which one — no "there is only one, use it" convenience, because that is
+/// precisely the shortcut that later reads the wrong copy. The only implicit
+/// path left is the pre-ADR-013 single-destination mode (`rustic_repo`, or its
+/// data-dir default) and it exists only while the `destinations` table is
+/// empty, i.e. while there is nothing to choose *between*.
+///
+/// Errors exit with code 2 (usage), like clap's own argument errors.
+#[allow(clippy::too_many_arguments)]
+fn resolve_store_config(
+    config: &Config,
+    destination: Option<&str>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+) -> StoreConfig {
+    let Some(name) = destination else {
+        if repo.is_none() && !config.destinations.is_empty() {
+            let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            eprintln!(
+                "destination: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}",
+                names.len(),
+                names.join(", ")
+            );
+            std::process::exit(2);
+        }
+        return store_config_from(config, repo, key_file, connections, options);
+    };
+    let Some(entry) = config.destinations.get(name) else {
+        let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        eprintln!(
+            "destination: `{name}` is not declared in the config. Declared: {}",
+            if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            }
+        );
+        std::process::exit(2);
+    };
+    let Some(repo_root) = repo.or_else(|| entry.repo.clone()) else {
+        eprintln!("destination: `{name}` has no `repo` set (and no --repo was given)");
+        std::process::exit(2);
+    };
+    let mut merged: BTreeMap<String, String> = entry.options.clone();
+    for kv in options {
+        match kv.split_once('=') {
+            Some((k, v)) => {
+                merged.insert(k.to_string(), v.to_string());
+            }
+            None => {
+                eprintln!("option: option must be key=value, got `{kv}`");
+                std::process::exit(2);
+            }
+        }
+    }
+    StoreConfig {
+        repo_root,
+        key_file: key_file
+            .map(PathBuf::from)
+            .or_else(|| entry.key_file.as_deref().map(PathBuf::from))
+            // Per-destination default: one key file per destination, so a new
+            // destination never silently adopts another one's key.
+            .unwrap_or_else(|| data_root().join(format!("masterkey-{name}.json"))),
+        connections: 0,
+        options: merged,
+    }
+    .with_capped_connections(
+        connections
+            .or(entry.connections)
+            .or(config.rustic_connections),
+    )
+}
+
 fn store_config_from(
     config: &Config,
     repo: Option<String>,
@@ -1030,6 +1419,7 @@ fn reap_remote(cfg: &StoreConfig, no_reap: bool) {
 fn cmd_push(
     stage: &PathBuf,
     inbox: Option<PathBuf>,
+    destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
     machine: Option<String>,
@@ -1040,7 +1430,14 @@ fn cmd_push(
     let config = Config::load();
     let machine = machine.unwrap_or_else(chat_stasher::id::machine_id);
     let state_dir = chat_stasher::collect::default_state_dir();
-    let cfg = store_config_from(&config, repo, key_file, connections, options);
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
     let stage_check =
         match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir) {
             Ok(check) => check,
@@ -1199,6 +1596,7 @@ fn cmd_read(
     session: &Option<String>,
     all_machines: bool,
     machine: Option<&str>,
+    destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -1209,7 +1607,14 @@ fn cmd_read(
     let machine = machine
         .map(String::from)
         .unwrap_or_else(chat_stasher::id::machine_id);
-    let cfg = store_config_from(&config, repo, key_file, connections, options);
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
     let store = BackupStore::new(cfg.clone(), machine.clone());
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
@@ -1319,10 +1724,12 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
 
 /// `verify` — prove the archive is intact, level by level. Each level prints
 /// its own verdict; the exit code is FAILURE if any requested level failed.
+#[allow(clippy::too_many_arguments)]
 fn cmd_verify(
     level: VerifyLevel,
     stage: &Option<PathBuf>,
     machine: Option<&str>,
+    destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -1333,7 +1740,14 @@ fn cmd_verify(
     let machine = machine
         .map(String::from)
         .unwrap_or_else(chat_stasher::id::machine_id);
-    let cfg = store_config_from(&config, repo, key_file, connections, options);
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
     let store = BackupStore::new(cfg.clone(), machine.clone());
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
