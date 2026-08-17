@@ -1501,6 +1501,13 @@ mod tests {
         assert_eq!(Confidence::Measured.label(), CONF_MEASURED);
     }
 
+    /// All three platform cells carry the same unascertained entry on purpose.
+    /// The subject here is what the scanner does with an unascertained cell, not
+    /// which platform it is running on — and a registry that only fills in
+    /// `macos` makes the assertion pass on a developer's Mac while producing
+    /// zero probes anywhere else. That is not a weaker test, it is a test that
+    /// silently stops testing, which is how it reached CI green on macOS and red
+    /// on Linux.
     #[test]
     fn unascertained_cell_is_skipped_not_scanned() {
         let home = tempfile::TempDir::new().unwrap();
@@ -1510,8 +1517,14 @@ mod tests {
               "generated": "2026-08-16",
               "harnesses": [
                 {{ "id": "claude-code", "display_name": "Claude Code",
-                   "paths": {{ "macos": {{ "template": "~/whatever/", "format": "jsonl",
-                   "confidence": "{CONF_UNASCERTAINED}", "source": "x" }} }} }}
+                   "paths": {{
+                     "macos": {{ "template": "~/whatever/", "format": "jsonl",
+                       "confidence": "{CONF_UNASCERTAINED}", "source": "x" }},
+                     "linux": {{ "template": "~/whatever/", "format": "jsonl",
+                       "confidence": "{CONF_UNASCERTAINED}", "source": "x" }},
+                     "windows": {{ "template": "~/whatever/", "format": "jsonl",
+                       "confidence": "{CONF_UNASCERTAINED}", "source": "x" }}
+                   }} }}
               ]
             }}"#
         ))

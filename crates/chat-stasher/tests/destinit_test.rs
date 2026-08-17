@@ -21,6 +21,7 @@ use chat_stasher::destinit::{self, SourceDestination};
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -272,6 +273,11 @@ fn a_missing_repository_is_never_built_or_suspected_loss_depending_on_our_record
 /// The unreadable middle state: the location is there, we cannot see into it,
 /// and we have no record either way. That is *unknown* — not empty, and not
 /// loss, because claiming loss here would cry wolf on a permissions blip.
+/// Unix-only: the situation under test is "the directory is there but we cannot
+/// read it", and `chmod 000` is how that is produced. Windows has no equivalent
+/// through this API, so the test is gated rather than faked — a Windows run that
+/// silently skips it is honest; one that pretends to cover it is not.
+#[cfg(unix)]
 #[test]
 fn a_location_we_cannot_read_is_unknown_not_empty_and_not_loss() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -317,6 +323,11 @@ fn a_location_we_cannot_read_is_unknown_not_empty_and_not_loss() {
 /// Measured in B46: bare → `Unknown` / `diff_complete=false`;
 /// `local:` → `KnownEmpty` / `diff_complete=true`. Same directory, opposite
 /// verdict, no other input changed.
+/// Unix-only: the situation under test is "the directory is there but we cannot
+/// read it", and `chmod 000` is how that is produced. Windows has no equivalent
+/// through this API, so the test is gated rather than faked — a Windows run that
+/// silently skips it is honest; one that pretends to cover it is not.
+#[cfg(unix)]
 #[test]
 fn a_local_prefixed_unreadable_destination_is_unknown_not_empty() {
     let dir = tempfile::TempDir::new().unwrap();
