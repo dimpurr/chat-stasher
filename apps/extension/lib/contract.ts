@@ -3,8 +3,19 @@
  * because the MAIN-world script is bundled without extension APIs.
  */
 
-/** CustomEvent name used by the MAIN-world fetch hook to talk to the ISOLATED bridge. */
-export const CAPTURE_EVENT = '__chat_stasher_captured__';
+/** Message names used by the page-world hook and the isolated bridge. */
+export const CAPTURE_MESSAGE = '__chat_stasher_capture__';
+export const MAIN_READY_MESSAGE = '__chat_stasher_main_ready__';
+export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
+export const MAIN_VERIFY_RESULT_MESSAGE = '__chat_stasher_main_verify_result__';
+
+/** Shared page-world marker: both injection paths consult the same state. */
+export const PAGE_HOOK_VERSION = 'v1';
+export const PAGE_HOOK_STATE_KEY = '__chat_stasher_fetch_hook_state__';
+export const PAGE_HOOK_FETCH_MARKER = '__chat_stasher_fetch_hook_marker__';
+
+/** Capability wait: short enough to precede normal app traffic, no browser sniffing. */
+export const MAIN_FALLBACK_TIMEOUT_MS = 100;
 
 /** Only DeepSeek web chat. Deliberately not <all_urls>. */
 export const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
@@ -25,6 +36,59 @@ export interface CapturedFetch {
   /** Raw response text, passed through untouched so nothing is lost. */
   text: string;
   capturedAt: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object';
+}
+
+/** Validate page-originated capture payloads before they reach extension APIs. */
+export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
+  if (!isRecord(value)) return false;
+  if (typeof value.url !== 'string' || typeof value.method !== 'string') return false;
+  if (!isChatTraffic(value.url, value.method)) return false;
+  if (
+    typeof value.status !== 'number' ||
+    !Number.isInteger(value.status) ||
+    value.status < 0 ||
+    value.status > 599
+  ) return false;
+  if (typeof value.text !== 'string' || value.text.length === 0) return false;
+  if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
+    return false;
+  }
+  return new TextEncoder().encode(value.text).byteLength <= MAX_RAW_BYTES;
+}
+
+export function isCaptureMessage(
+  value: unknown,
+): value is { type: typeof CAPTURE_MESSAGE; payload: CapturedFetch } {
+  return isRecord(value) && value.type === CAPTURE_MESSAGE && isCapturedFetchShape(value.payload);
+}
+
+export function isMainReadyMessage(
+  value: unknown,
+): value is { type: typeof MAIN_READY_MESSAGE; version: string; token: string } {
+  return (
+    isRecord(value) &&
+    value.type === MAIN_READY_MESSAGE &&
+    value.version === PAGE_HOOK_VERSION &&
+    typeof value.token === 'string' &&
+    value.token.length >= 8
+  );
+}
+
+export function isMainVerifyResultMessage(
+  value: unknown,
+): value is { type: typeof MAIN_VERIFY_RESULT_MESSAGE; version: string; token: string; installed: boolean } {
+  return (
+    isRecord(value) &&
+    value.type === MAIN_VERIFY_RESULT_MESSAGE &&
+    value.version === PAGE_HOOK_VERSION &&
+    typeof value.token === 'string' &&
+    value.token.length >= 8 &&
+    typeof value.installed === 'boolean'
+  );
 }
 
 /** v1 kept only so the CLI can recognise legacy bundles; producers write @2. */
