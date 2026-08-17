@@ -148,7 +148,12 @@ export function installPageFetchHook(options: PageHookOptions): void {
 
       const text = await response.clone().text();
       const bytes = new TextEncoder().encode(text).byteLength;
-      if (bytes > options.maxRawBytes || !matchesShape(platform, text)) return;
+      if (bytes > options.maxRawBytes) return;
+      if (!matchesShape(platform, text)) {
+        // Keep the signal metadata-only: never print URL, body, or identifiers.
+        console.warn('[chat-stasher] capture skipped: response shape mismatch');
+        return;
+      }
       post({
         type: options.captureMessage,
         payload: {
