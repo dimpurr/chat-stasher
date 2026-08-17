@@ -2,6 +2,7 @@
 //! Assertions inspect bytes/counts, while test output stays metadata-only.
 
 use chat_stasher::collect;
+use chat_stasher::collect::DestinationView;
 use chat_stasher::config::Config;
 use chat_stasher::scanner::{self, HarnessRegistry};
 use chat_stasher::store;
@@ -34,6 +35,13 @@ fn registry() -> HarnessRegistry {
     .unwrap()
 }
 
+/// These tests only exercise the local read path, so the destination archive
+/// is deliberately not reachable: a debt still owed on the stage must be
+/// provable without ever asking it.
+fn dest<'a>() -> DestinationView<'a> {
+    DestinationView::unreachable("fixture-destination")
+}
+
 fn scan(root: &Path) -> scanner::ScanReport {
     let config = Config {
         claude_projects_dir: Some(root.to_string_lossy().into_owned()),
@@ -52,9 +60,15 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
     let stage = dir.path().join("stage");
     let state = dir.path().join("state");
 
-    let first =
-        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
-            .unwrap();
+    let first = collect::collect_scan_report(
+        &scan(&source_root),
+        &stage,
+        "fixture-machine",
+        &state,
+        20,
+        &dest(),
+    )
+    .unwrap();
     let id = scan(&source_root).records[0].id.clone();
     fs::OpenOptions::new()
         .append(true)
@@ -62,9 +76,15 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
         .unwrap()
         .write_all(b"four\nfive\n")
         .unwrap();
-    let second =
-        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
-            .unwrap();
+    let second = collect::collect_scan_report(
+        &scan(&source_root),
+        &stage,
+        "fixture-machine",
+        &state,
+        20,
+        &dest(),
+    )
+    .unwrap();
     let after_append = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
     assert_eq!(after_append, b"one\ntwo\nthree\nfour\nfive\n");
     assert_eq!(first.lines_written, 3);
@@ -80,9 +100,15 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
         second.outcomes[0].source_bytes as usize
     );
     fs::write(&source, same_length_rewrite).unwrap();
-    let third =
-        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
-            .unwrap();
+    let third = collect::collect_scan_report(
+        &scan(&source_root),
+        &stage,
+        "fixture-machine",
+        &state,
+        20,
+        &dest(),
+    )
+    .unwrap();
     let after_reset = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
     assert_eq!(third.reset_records, 1);
     assert_eq!(third.lines_written, 5);
@@ -95,9 +121,15 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
     // A shorter rewrite takes the other reset branch.
     let shorter_rewrite = b"short\n";
     fs::write(&source, shorter_rewrite).unwrap();
-    let fourth =
-        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
-            .unwrap();
+    let fourth = collect::collect_scan_report(
+        &scan(&source_root),
+        &stage,
+        "fixture-machine",
+        &state,
+        20,
+        &dest(),
+    )
+    .unwrap();
     let after_truncate = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
     assert_eq!(fourth.reset_records, 1);
     assert_eq!(fourth.lines_written, 1);
@@ -132,7 +164,8 @@ fn missing_stage_shard_reconciles_state_and_rereads() {
     let id = scan_report.records[0].id.clone();
 
     let first =
-        collect::collect_scan_report(&scan_report, &stage, "fixture-machine", &state, 20).unwrap();
+        collect::collect_scan_report(&scan_report, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
     assert_eq!(first.lines_written, 2);
     assert_eq!(
         store::concat_shards(&stage, "fixture-machine", &id).unwrap(),
@@ -140,9 +173,15 @@ fn missing_stage_shard_reconciles_state_and_rereads() {
     );
 
     fs::remove_dir_all(&stage).unwrap();
-    let second =
-        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
-            .unwrap();
+    let second = collect::collect_scan_report(
+        &scan(&source_root),
+        &stage,
+        "fixture-machine",
+        &state,
+        20,
+        &dest(),
+    )
+    .unwrap();
     let restored = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
     assert_eq!(second.reset_records, 1);
     assert_eq!(second.unchanged_records, 0);
@@ -163,7 +202,8 @@ fn incomplete_tail_is_left_for_the_next_read() {
     let id = first_scan.records[0].id.clone();
 
     let first =
-        collect::collect_scan_report(&first_scan, &stage, "fixture-machine", &state, 20).unwrap();
+        collect::collect_scan_report(&first_scan, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
     let first_stage = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
     assert_eq!(first.lines_written, 1);
     assert_eq!(first_stage, b"complete\n");
@@ -174,9 +214,15 @@ fn incomplete_tail_is_left_for_the_next_read() {
         .unwrap()
         .write_all(b"\n")
         .unwrap();
-    let second =
-        collect::collect_scan_report(&scan(&source_root), &stage, "fixture-machine", &state, 20)
-            .unwrap();
+    let second = collect::collect_scan_report(
+        &scan(&source_root),
+        &stage,
+        "fixture-machine",
+        &state,
+        20,
+        &dest(),
+    )
+    .unwrap();
     let second_stage = store::concat_shards(&stage, "fixture-machine", &id).unwrap();
     assert_eq!(second.lines_written, 1);
     // The cursor stays at the last complete newline, so the old partial tail

@@ -228,6 +228,13 @@ enum Command {
         /// Maximum sealed shards per bucket (default: 20).
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
+        /// Destination repository this pass collects *for*. Read state is kept
+        /// per destination, so a different value is a different debt set.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override for the destination above.
+        #[arg(long)]
+        key_file: Option<String>,
     },
     /// Seal one file already inside our stage into the next sealed-shard slot.
     /// This command never renames a harness-owned path.
@@ -375,7 +382,9 @@ fn main() -> ExitCode {
             stage,
             machine,
             shard_bucket_cap,
-        } => cmd_collect(&stage, machine.as_deref(), shard_bucket_cap),
+            repo,
+            key_file,
+        } => cmd_collect(&stage, machine.as_deref(), shard_bucket_cap, repo, key_file),
         Command::Seal {
             harness,
             active,
@@ -427,18 +436,55 @@ fn cmd_ingest(
     ExitCode::SUCCESS
 }
 
-fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> ExitCode {
+/// Build the destination this pass collects for.
+///
+/// The archive probe is deliberately lazy: opening the repository and reading
+/// every snapshot back is expensive, and a run whose debts are all still owed
+/// on the stage never has to ask. Every failure path — no repository yet, no
+/// persisted key, an unreachable backend — returns `Err`, which the collector
+/// reads as "cannot be verified" and therefore as "unread". It must never
+/// create a masterkey as a side effect of collecting.
+fn destination_view<'a>(
+    cfg: &'a StoreConfig,
+    machine: &'a str,
+) -> chat_stasher::collect::DestinationView<'a> {
+    chat_stasher::collect::DestinationView::new(
+        chat_stasher::collect::destination_id(&cfg.repo_root),
+        move || {
+            let store = BackupStore::new(cfg.clone(), machine.to_string());
+            if !store.repository_exists()? {
+                anyhow::bail!("destination repository is not initialised");
+            }
+            let mk = store::load_key_file(cfg)?;
+            let observation = store.read_all_machines(&mk)?;
+            Ok(chat_stasher::collect::archive_facts_from_readback(
+                &observation,
+            ))
+        },
+    )
+}
+
+fn cmd_collect(
+    stage: &Path,
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+    repo: Option<String>,
+    key_file: Option<String>,
+) -> ExitCode {
     let config = Config::load();
     let machine = machine
         .map(String::from)
         .unwrap_or_else(chat_stasher::id::machine_id);
     let state_dir = chat_stasher::collect::default_state_dir();
+    let store_cfg = store_config_from(&config, repo, key_file, None, &[]);
+    let destination = destination_view(&store_cfg, &machine);
     let report = match chat_stasher::collect::collect(
         &config,
         stage,
         &machine,
         &state_dir,
         shard_bucket_cap,
+        &destination,
     ) {
         Ok(report) => report,
         Err(e) => {
@@ -463,6 +509,18 @@ fn print_collect_report(
     println!("[collect] stage           : {}", stage.display());
     println!("[collect] state           : {}", state_dir.display());
     println!("[collect] machine         : {machine}");
+    println!(
+        "[collect] destination     : sha256={} (read state is kept per destination)",
+        report.destination_id
+    );
+    println!(
+        "[collect] legacy state    : ignored={} (a pre-destination state file proves nothing to any destination)",
+        report.legacy_state_ignored
+    );
+    println!(
+        "[collect] unverified      : {} cursor(s) could not prove themselves and were reread",
+        report.unverified_cursors
+    );
     println!(
         "[collect] scanner records : {} (only SessionRecord values; not the full recognised-session count)",
         report.scanned_records
@@ -549,12 +607,24 @@ fn cmd_run_once(
     let config = Config::load();
     let machine_name = machine.clone().unwrap_or_else(chat_stasher::id::machine_id);
     let state_dir = chat_stasher::collect::default_state_dir();
+    // The destination is resolved from the same overrides this run will push
+    // to, so `collect` accrues debt against the repository `push` settles it
+    // against — not against whatever the config happens to default to.
+    let collect_cfg = store_config_from(
+        &config,
+        repo.clone(),
+        key_file.clone(),
+        connections,
+        options,
+    );
+    let destination = destination_view(&collect_cfg, &machine_name);
     let report = match chat_stasher::collect::collect(
         &config,
         stage,
         &machine_name,
         &state_dir,
         shard_bucket_cap,
+        &destination,
     ) {
         Ok(report) => report,
         Err(e) => {
