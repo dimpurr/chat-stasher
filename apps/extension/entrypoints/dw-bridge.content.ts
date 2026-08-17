@@ -160,11 +160,25 @@ export default defineContentScript({
     // -----------------------------------------------------------------------
     browser.runtime.onMessage.addListener(
       (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
-        const pending = handleBackfillMessage(message, pageOrigin, async (url) => {
-          const res = await fetch(url, {
-            credentials: 'same-origin',
-            headers: { accept: 'application/json' },
-          });
+        const pending = handleBackfillMessage(message, pageOrigin, async (url, init) => {
+          // 🔴 C23：method / body / Content-Type 都已经被 checkBackfillRequest 过完闭集
+          //    才会走到这里（handleBackfillMessage → serveBackfillFetch）。
+          //    这里不再做任何判断，也【不许】做 —— 判断只有一处，就是那个白名单。
+          //    init 省略（GET 段）⇒ 下面这个 fetch 的实参与 C19/C22 逐字相同。
+          const res = init && init.method === 'POST'
+            ? await fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                  accept: 'application/json',
+                  ...(init.contentType ? { 'content-type': init.contentType } : {}),
+                },
+                body: init.body,
+              })
+            : await fetch(url, {
+                credentials: 'same-origin',
+                headers: { accept: 'application/json' },
+              });
           return { status: res.status, text: () => res.text() };
         });
         if (!pending) return;   // 不是给我的消息，让给别的监听器

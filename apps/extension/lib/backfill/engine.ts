@@ -14,7 +14,14 @@
 import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
-import { backfillPlanFor, unsupportedBackfillFor, DEFAULT_LIST_LIMIT } from './enumerate';
+import {
+  backfillPlanFor,
+  detailRequestInit,
+  listRequestInit,
+  unsupportedBackfillFor,
+  DEFAULT_LIST_LIMIT,
+  type BackfillRequestInit,
+} from './enumerate';
 import { formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, systemClock, type BackfillPace, type Clock } from './pace';
 import type { BackfillStore } from './store';
@@ -34,7 +41,25 @@ export interface HttpResponse {
   text: string;
 }
 
-export type HttpPort = (url: string) => Promise<HttpResponse>;
+/**
+ * 🔴 C23 · 通道现在能表达 POST。
+ *
+ * 改动只有一处：多了一个**可选**的第二参数。为什么这样改而不是换个新类型：
+ *  · 既有的所有实现（测试夹具、tabHttpPort）都是 `(url) => ...`，
+ *    在 TypeScript 里少写参数依然可赋值 ⇒ **一行都不用改就还能用**；
+ *  · engine 在 GET 段【逐字仍然调用 `http(url)`】，一个参数都不多传
+ *    （见 sendVia），所以 ChatGPT 那条路上连实参个数都没变。
+ *
+ * init 省略 ⇒ GET 且无 body。方法/Content-Type/body 顶层键三样都是闭集，
+ * 声明在 lib/backfill/enumerate.ts，强制在 lib/backfill/tab-port.ts。
+ */
+export type HttpPort = (url: string, init?: BackfillRequestInit) => Promise<HttpResponse>;
+
+/** 🔴 GET 且无 body ⇒ 逐字退回旧调用 `http(url)`。向后兼容的落点就是这一行。 */
+async function sendVia(http: HttpPort, url: string, init: BackfillRequestInit): Promise<HttpResponse> {
+  if (init.method === 'GET' && init.body === undefined) return http(url);
+  return http(url, init);
+}
 
 /** 默认端口：故意会炸。没接线就绝不会有网络行为。 */
 export const notWiredHttp: HttpPort = async (url: string) => {
@@ -97,6 +122,14 @@ export interface BackfillOptions {
   scope: string;
   store: BackfillStore | null;
   http?: HttpPort;
+  /**
+   * 🔴 测试接缝，与 http/clock/pace 同类：换一张 plan 表。
+   * **生产代码从不设置它** —— background.ts 的两处调用（kickBackfill / runAlarmTick）
+   * 都没有这个字段，所以线上恒为 backfillPlanFor，允许集一点没变大。
+   * 存在的唯一理由：C23 要证明「通道能发 POST」，而生产表里【故意】还没有任何
+   * POST 平台（kimi/gemini 的参数仍然没有出处，填了就是编）。
+   */
+  plans?: (platform: string) => import('./enumerate').BackfillEnumPlan | null;
   clock?: Clock;
   pace?: BackfillPace;
   listLimit?: number;
@@ -265,7 +298,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // 于是 DeepSeek 用户会被拿 `https://chat.deepseek.com/backend-api/conversations`
   // 去打自己的账号，拿回 404，然后账本上留下一条 'shape-changed'。
   // 那条留痕是**准确的谎话**：接口没变，是我们从来没写过它。
-  const plan = backfillPlanFor(platformRow.id);
+  const plan = (opts.plans ?? backfillPlanFor)(platformRow.id);
   if (!plan) {
     const gap = unsupportedBackfillFor(platformRow.id);
     // 平台表里有、但两张表都没登记 ⇒ 这是接线漏了，同样必须说得出口。
@@ -283,9 +316,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
     const url = plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
+    // 🔴 C23：body 只可能出自 plan 自己的构造器（listRequestInit → spec.body）。
+    //    没有任何一条路径能让页面侧或消息侧决定这里发什么。
+    const init = listRequestInit(plan, opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
     try {
-      res = await http(url);
+      res = await sendVia(http, url, init);
     } catch (err) {
       return halt('transport-error', `list offset=${state.enumCursor.offset}: ${(err as Error).message}`);
     }
@@ -352,10 +388,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     anchor('detail', detailPacer.lastAt);
     await persist(store, state);
     const url = plan.detailUrl(opts.origin, id);
+    const init = detailRequestInit(plan, opts.origin, id);
     let res: HttpResponse;
     try {
-      res = await http(url);
+      res = await sendVia(http, url, init);
     } catch (err) {
+      // 🔴 POST 的失败与 GET 的失败走【同一行】：halt('transport-error') + 落盘留痕。
+      //    没有为 POST 新开任何一条静默路径。
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
@@ -368,7 +407,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
     const captured: CapturedFetch = {
       url,
-      method: 'GET',
+      // 🔴 C23：如实写实际发出的方法。GET 段仍然逐字是 'GET'（init.method 默认就是它）。
+      method: init.method,
       status: res.status,
       text: res.text,
       pageUrl: `${opts.origin}/c/${id}`,
