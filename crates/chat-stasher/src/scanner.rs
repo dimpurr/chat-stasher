@@ -20,9 +20,10 @@
 //! than the current one, and templates that cannot be reduced to a static
 //! root (e.g. CWD-relative stores), are skipped with an explicit reason.
 //!
-//! If the registry file is missing or unparseable the scan **fails loudly** —
-//! silently falling back to hardcoded paths would make a user believe
-//! everything was scanned when it was not.
+//! Registry source precedence is explicit runtime override, repository file,
+//! then the exact registry JSON embedded at compile time. An explicit
+//! override that is missing or invalid **fails loudly** — silently using the
+//! embedded copy would make a user believe their edited registry was active.
 //!
 //! Hard guarantees:
 //!   * read-only — nothing is opened for writing and file bodies are never
@@ -44,6 +45,18 @@ use std::time::SystemTime;
 
 /// Registry file, relative to the repo root, that drives the scan.
 pub const REGISTRY_REL_PATH: &str = "data/harness-registry-v1.json";
+
+/// Optional runtime registry override. This is intentionally checked before
+/// both the repository copy and the embedded fallback.
+pub const REGISTRY_ENV: &str = "CHAT_STASHER_REGISTRY";
+
+/// The shipped registry is the data file itself, not a second hand-written
+/// Rust representation. The repository path is resolved from the crate
+/// manifest at compile time, so an installed binary can scan outside the repo.
+const EMBEDDED_REGISTRY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../data/harness-registry-v1.json"
+));
 
 /// Confidence values used by the registry (`harnesses[].paths.*.confidence`).
 pub const CONF_CONFIRMED: &str = "源码确认";
@@ -262,14 +275,23 @@ pub struct RegistryCell {
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
-/// failure (missing file, bad JSON, wrong shape) — the caller must treat this
-/// as a **loud failure**, never fall back to hardcoded roots.
+/// failure (missing file, bad JSON, wrong shape).
 pub fn load_registry(path: &Path) -> io::Result<HarnessRegistry> {
-    let raw = fs::read_to_string(path)?;
-    serde_json::from_str(&raw).map_err(|e| {
+    let raw = fs::read_to_string(path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("harness registry {} could not be read: {e}", path.display()),
+        )
+    })?;
+    let source = path.display().to_string();
+    parse_registry(&raw, &source)
+}
+
+fn parse_registry(raw: &str, source: &str) -> io::Result<HarnessRegistry> {
+    serde_json::from_str(raw).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("harness registry {} is not valid JSON: {e}", path.display()),
+            format!("harness registry {source} is not valid JSON: {e}"),
         )
     })
 }
@@ -379,27 +401,29 @@ pub struct ScanReport {
 /// Walk every registry harness that applies to this platform and collect
 /// metadata-only records.
 ///
-/// The registry is located by walking up from the cwd / package manifest dir.
-/// If it is missing or unparseable this **errors** — no silent fallback. Any
-/// harness whose cell is confidence `未查明` is skipped; `仅社区说法未核实`
-/// cells are scanned but the probe is flagged low-confidence.
+/// The registry uses the precedence documented by [`load_registry_from_repo`].
+/// An explicit override that is missing or unparseable **errors** — no silent
+/// fallback. Any harness whose cell is confidence `未查明` is skipped;
+/// `仅社区说法未核实` cells are scanned but the probe is flagged
+/// low-confidence.
 pub fn scan(config: &Config) -> io::Result<ScanReport> {
     let registry = load_registry_from_repo()?;
     scan_with_registry(config, &registry)
 }
 
-/// Resolve + parse the registry from the repo layout (walking up from the cwd
-/// and `CARGO_MANIFEST_DIR`). Shared by the scanner and the sealing allowlist
-/// (`crate::seal`) so both read the exact same file.
+/// Resolve + parse the registry. An explicit `CHAT_STASHER_REGISTRY` path is
+/// authoritative and any read/parse error is returned without fallback. When
+/// it is unset, the repository copy remains the development-time override;
+/// outside a checkout the exact compile-time embedded data file is used.
+/// Shared by the scanner and the sealing allowlist (`crate::seal`) so both
+/// read the exact same registry source.
 pub fn load_registry_from_repo() -> io::Result<HarnessRegistry> {
+    if let Some(path) = env::var_os(REGISTRY_ENV) {
+        return load_registry(Path::new(&path));
+    }
     let Some(path) = resolve_registry_path() else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "harness registry not found: {REGISTRY_REL_PATH} (searched from cwd \
-                 and CARGO_MANIFEST_DIR upward). Refusing to scan with hardcoded roots."
-            ),
-        ));
+        let source = format!("embedded {REGISTRY_REL_PATH}");
+        return parse_registry(EMBEDDED_REGISTRY, &source);
     };
     load_registry(&path)
 }
@@ -1283,6 +1307,37 @@ mod tests {
         assert!(
             err.to_string().contains("harness-registry") || err.kind() == io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn explicit_registry_override_is_authoritative() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = env::var_os(REGISTRY_ENV);
+        let dir = tempfile::TempDir::new().unwrap();
+        let override_path = dir.path().join("registry.json");
+        fs::write(
+            &override_path,
+            br#"{"schema_version":1,"generated":"test","harnesses":[]}"#,
+        )
+        .unwrap();
+
+        env::set_var(REGISTRY_ENV, &override_path);
+        let loaded = load_registry_from_repo().unwrap();
+        assert!(loaded.harnesses.is_empty());
+
+        env::set_var(REGISTRY_ENV, dir.path().join("missing.json"));
+        let missing = load_registry_from_repo().unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+
+        fs::write(&override_path, b"not json").unwrap();
+        env::set_var(REGISTRY_ENV, &override_path);
+        let invalid = load_registry_from_repo().unwrap_err();
+        assert_eq!(invalid.kind(), io::ErrorKind::InvalidData);
+
+        match previous {
+            Some(value) => env::set_var(REGISTRY_ENV, value),
+            None => env::remove_var(REGISTRY_ENV),
+        }
     }
 
     #[test]
