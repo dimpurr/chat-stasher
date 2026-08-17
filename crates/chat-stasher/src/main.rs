@@ -358,7 +358,17 @@ fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> 
     println!("[collect] stage           : {}", stage.display());
     println!("[collect] state           : {}", state_dir.display());
     println!("[collect] machine         : {machine}");
-    println!("[collect] scanner records : {}", report.scanned_records);
+    println!(
+        "[collect] scanner records : {} (only SessionRecord values; not the full recognised-session count)",
+        report.scanned_records
+    );
+    println!(
+        "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values",
+        report.archive_gaps.len()
+    );
+    for gap in &report.archive_gaps {
+        println!("{}", scanner::format_archive_gap(gap));
+    }
     println!(
         "[collect] changed={} unchanged={} reset={} shards={} lines={}",
         report.changed_records,
@@ -1049,6 +1059,49 @@ mod decision_surface_tests {
         assert!(err.to_string().contains("inside --stage"));
         assert!(outside.exists());
     }
+
+    #[test]
+    fn status_marks_harness_sessions_without_session_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = scanner::ScanReport {
+            records: Vec::new(),
+            missing_roots: Vec::new(),
+            probes: vec![scanner::HarnessProbe {
+                id: "opencode".to_string(),
+                display_name: "fixture harness".to_string(),
+                root: Some(dir.path().join("store.db")),
+                confidence: scanner::Confidence::Confirmed,
+                state: scanner::ProbeState::FileTarget,
+                record_count: Some(1),
+                candidate_count: Some(1),
+                earliest: None,
+                latest: None,
+                bytes: 1,
+                recognized_files: Vec::new(),
+                note: String::new(),
+            }],
+        };
+
+        let output = render_archive_gap_notice(&report);
+        assert!(
+            output.contains("不可归档"),
+            "status must mark recognised sessions that have no SessionRecord: {output}"
+        );
+
+        report.records.push(chat_stasher::models::SessionRecord {
+            id: "opencode.fixture.session".to_string(),
+            absolute_path: dir.path().join("exported.jsonl"),
+            byte_size: 1,
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            source: chat_stasher::models::HarnessSource::OpenCode,
+            compressed: false,
+        });
+        let output = render_archive_gap_notice(&report);
+        assert!(
+            !output.contains("不可归档"),
+            "the marker must disappear once the harness produces a SessionRecord: {output}"
+        );
+    }
 }
 
 fn cmd_init() -> ExitCode {
@@ -1104,6 +1157,7 @@ fn print_status(report: &scanner::ScanReport) {
     for miss in &report.missing_roots {
         println!("  (missing root, skipped: {})", miss.display());
     }
+    print!("{}", render_archive_gap_notice(report));
     println!();
 
     if report.records.is_empty() {
@@ -1131,4 +1185,28 @@ fn print_status(report: &scanner::ScanReport) {
         );
     }
     println!();
+}
+
+fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
+    use std::fmt::Write as _;
+
+    let gaps = report.archive_gaps();
+    if gaps.is_empty() {
+        return String::new();
+    }
+    let mut output = String::new();
+    writeln!(
+        output,
+        "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。"
+    )
+    .unwrap();
+    for gap in &gaps {
+        writeln!(output, "{}", scanner::format_archive_gap(gap)).unwrap();
+    }
+    writeln!(
+        output,
+        "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。"
+    )
+    .unwrap();
+    output
 }
