@@ -143,6 +143,32 @@ fn plant_grok_db(home: &Path) {
     let _ = fs::remove_file(Path::new(&shm));
 }
 
+/// Tell the tool where the test planted the two single-file stores.
+///
+/// The fixture above plants Cursor and Grok at paths *it* chose, so the shipped
+/// registry's per-platform template is not what should decide whether they are
+/// found: on linux the Cursor cell points at `$XDG_CONFIG_HOME/Cursor/...` and
+/// the Grok cell is `未查明` (correctly refused as a guess). Writing the paths
+/// into `[harness_roots]` is the test stating what it did — the same thing a
+/// user with a non-default install does — so the fixture resolves identically
+/// on every platform. The known-count assertions below are unchanged: the
+/// tool still has to open the stores and count the rows itself.
+fn declare_planted_roots(home: &Path) {
+    let cursor = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    let grok = home.join(".grok/sessions/session_search.sqlite");
+    let config = home.join(".config/chat-stasher/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "[harness_roots]\ncursor = \"{}\"\ngrok = \"{}\"\n",
+            cursor.display(),
+            grok.display()
+        ),
+    )
+    .unwrap();
+}
+
 /// Link a footprint table row to its registry probe-table row.
 ///
 /// Footprint names are the map keys; probe ids are registry `id` values — they
@@ -229,6 +255,7 @@ fn doctor_tables_never_contradict_any_harness() {
     plant_dir_sessions(home.path());
     plant_cursor_db(home.path());
     plant_grok_db(home.path());
+    declare_planted_roots(home.path());
 
     let report = doctor::run();
     assert!(!report.scan_failed, "registry scan must have run");

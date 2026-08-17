@@ -222,6 +222,19 @@ impl RegistryPaths {
             _ => None,
         }
     }
+
+    /// Any declared cell, in a fixed order.
+    ///
+    /// Only ever used to read the **platform-independent** half of a cell —
+    /// `format` and the `sql_*` schema — when the user supplied the path
+    /// themselves and this platform has no cell to supply it. A store's schema
+    /// does not change across operating systems; its location does.
+    pub fn any_cell(&self) -> Option<&RegistryCell> {
+        self.macos
+            .as_ref()
+            .or(self.linux.as_ref())
+            .or(self.windows.as_ref())
+    }
 }
 
 /// One harness × platform cell.
@@ -549,17 +562,34 @@ fn probe_harness(
         note: String::new(),
     };
 
-    // 1. Current-platform cell must exist.
-    let Some(cell) = h.paths.cell_for(platform) else {
-        return HarnessProbe {
-            note: format!("无 {platform} 平台条目"),
-            ..base
-        };
+    // 0. A configured root is the *user stating* where this harness lives. The
+    // registry's template and its confidence gate both exist to keep us from
+    // walking a path **we** guessed; neither has anything to say about a path
+    // the user wrote down. So this is resolved first and outranks both.
+    let explicit_root = config.explicit_harness_root(&h.id).map(expand_tilde);
+
+    // 1. Current-platform cell must exist — unless the user supplied the path,
+    // in which case any cell still describes the platform-independent half
+    // (format + SQL schema) and only the location was missing.
+    let cell = match h.paths.cell_for(platform) {
+        Some(cell) => cell,
+        None => match explicit_root.as_ref().and_then(|_| h.paths.any_cell()) {
+            Some(cell) => cell,
+            None => {
+                return HarnessProbe {
+                    note: format!("无 {platform} 平台条目"),
+                    ..base
+                }
+            }
+        },
     };
 
-    // 2. Confidence decides whether we scan at all.
+    // 2. Confidence decides whether we scan a *guessed* path at all. A
+    // configured path is not a guess, so `未查明` does not gate it: refusing to
+    // count a store the user pointed us at, opened, and enumerated would be its
+    // own false claim ("I could not determine"), just in the other direction.
     let confidence = Confidence::classify(&cell.confidence);
-    if !confidence.scan_allowed() {
+    if !confidence.scan_allowed() && explicit_root.is_none() {
         return HarnessProbe {
             confidence,
             state: ProbeState::SkipUnascertained,
@@ -568,29 +598,30 @@ fn probe_harness(
         };
     }
 
-    // 3. Resolve the registry-declared environment override first. The
-    // template is the fallback when the override is unset or has no usable
-    // suffix mapping.
-    let (mut root, is_file, used_env_override) = match root_from_env_override(cell) {
-        Some((root, is_file)) => (root, is_file, true),
-        None => match static_prefix_root(&cell.template) {
-            Some((root, is_file)) => (root, is_file, false),
-            None => {
-                return HarnessProbe {
-                    confidence,
-                    state: ProbeState::SkipUnresolvable,
-                    note: format!("模板无法静态解析为根路径：{}", cell.template),
-                    ..base
-                }
+    // 3. Resolve the registry-declared environment override first — an
+    // explicitly exported variable is at least as explicit as the config file,
+    // and this order predates the config table. Then the configured root, then
+    // the template.
+    let (root, is_file, used_env_override, used_config_root) = match root_from_env_override(cell) {
+        Some((root, is_file)) => (root, is_file, true, false),
+        None => match explicit_root {
+            Some(root) => {
+                let is_file = explicit_root_is_file(&root);
+                (root, is_file, false, true)
             }
+            None => match static_prefix_root(&cell.template) {
+                Some((root, is_file)) => (root, is_file, false, false),
+                None => {
+                    return HarnessProbe {
+                        confidence,
+                        state: ProbeState::SkipUnresolvable,
+                        note: format!("模板无法静态解析为根路径：{}", cell.template),
+                        ..base
+                    }
+                }
+            },
         },
     };
-
-    // 4. Config overrides remain available when no registry env override was
-    // applied. An explicitly set environment variable wins over config.
-    if !used_env_override {
-        root = root_for_id(&h.id, root, config);
-    }
 
     // 5. This build must know the harness, or we refuse to label its files.
     let Some(source) = HarnessSource::from_id(&h.id) else {
@@ -602,17 +633,22 @@ fn probe_harness(
         };
     };
 
-    let env_note = cell
-        .env_override
-        .as_deref()
-        .filter(|_| used_env_override)
-        .map(|name| format!("env_override=${name}; "))
-        .unwrap_or_default();
+    let env_note = if used_config_root {
+        format!("config harness_roots.{}; ", h.id)
+    } else {
+        cell.env_override
+            .as_deref()
+            .filter(|_| used_env_override)
+            .map(|name| format!("env_override=${name}; "))
+            .unwrap_or_default()
+    };
+
+    let schema = schema_cell(h, cell);
 
     // Cursor's old layout is a directory of workspace databases, not the
     // global single-file target declared by the current layout.
     if h.id == "cursor" && cell.format == "sqlite" {
-        return probe_cursor_harness(base, confidence, root, env_note, cell, machine, report);
+        return probe_cursor_harness(base, confidence, root, env_note, schema, machine, report);
     }
 
     // 6. Single-file stores are probed for existence; directory roots are walked.
@@ -636,7 +672,7 @@ fn probe_harness(
                     // same harness can never show two different counts again.
                     // The schema spec also comes from the registry cell, so
                     // the scan and the doctor enumerate with the same query.
-                    let spec = crate::sqlite_probe::spec_from_cell(cell);
+                    let spec = crate::sqlite_probe::spec_from_cell(schema);
                     let info = match &spec {
                         Some(spec) => crate::sqlite_probe::probe_sqlite_store_with(&root, spec),
                         None => probe_sqlite_store(&root),
@@ -1054,15 +1090,36 @@ fn cursor_user_dir_from_global_db(global_db: &Path) -> Option<PathBuf> {
     Some(global_storage.parent()?.to_path_buf())
 }
 
-/// Config overrides for claude-code / codex keep working on top of the
-/// registry's default template.
-fn root_for_id(id: &str, registry_root: PathBuf, config: &Config) -> PathBuf {
-    let override_path = match id {
-        "claude-code" => config.claude_projects_dir.as_deref(),
-        "codex" => config.codex_sessions_dir.as_deref(),
-        _ => None,
-    };
-    override_path.map(expand_tilde).unwrap_or(registry_root)
+/// The cell that declares this harness's SQLite schema.
+///
+/// A store's table layout does not change across operating systems; only its
+/// location does. So a platform cell that omits `sql_table` is a gap in *that
+/// row*, not a claim that the schema differs — borrow the declaration from
+/// whichever cell carries one instead of falling back to opencode's default
+/// `session` schema and then reporting "表结构不认识" about a store we can
+/// perfectly well read. A borrowed schema that genuinely does not fit still
+/// reports `SchemaMismatch` (unknown), never a count.
+fn schema_cell<'a>(h: &'a RegistryHarness, cell: &'a RegistryCell) -> &'a RegistryCell {
+    if cell.sql_table.is_some() {
+        return cell;
+    }
+    [&h.paths.macos, &h.paths.linux, &h.paths.windows]
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.sql_table.is_some())
+        .unwrap_or(cell)
+}
+
+/// Is a configured root a single-file store or a directory to walk?
+///
+/// What is on disk decides, because that is the thing we are about to probe.
+/// When nothing is there the basename shape decides — and either answer then
+/// lands on `Missing`/`目录不存在`, i.e. an unknown count, never a fake `0`.
+fn explicit_root_is_file(root: &Path) -> bool {
+    match fs::metadata(root) {
+        Ok(md) => md.is_file(),
+        Err(_) => looks_like_file_path(&root.to_string_lossy()),
+    }
 }
 
 /// Expand `~`, `$HOME`, `$XDG_*`, `%USERPROFILE%` per the XDG fallback rules,
@@ -1508,10 +1565,8 @@ mod tests {
     /// zero probes anywhere else. That is not a weaker test, it is a test that
     /// silently stops testing, which is how it reached CI green on macOS and red
     /// on Linux.
-    #[test]
-    fn unascertained_cell_is_skipped_not_scanned() {
-        let home = tempfile::TempDir::new().unwrap();
-        let registry: HarnessRegistry = serde_json::from_str(&format!(
+    fn unascertained_registry() -> HarnessRegistry {
+        serde_json::from_str(&format!(
             r#"{{
               "schema_version": 1,
               "generated": "2026-08-16",
@@ -1528,17 +1583,61 @@ mod tests {
               ]
             }}"#
         ))
-        .unwrap();
-        let config = Config {
-            claude_projects_dir: Some(home.path().join("whatever").to_string_lossy().into()),
-            ..Default::default()
-        };
-        let report = scan_with_registry(&config, &registry).unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn unascertained_cell_is_skipped_not_scanned() {
+        // Nothing tells the scanner where this harness lives, so the only path
+        // available is the one the registry itself calls unverified: skip it.
+        let report = scan_with_registry(&Config::default(), &unascertained_registry()).unwrap();
         assert!(report.records.is_empty());
         assert_eq!(report.probes.len(), 1);
         assert_eq!(report.probes[0].state, ProbeState::SkipUnascertained);
         assert!(!report.probes[0].installed_p());
-        let _ = home;
+    }
+
+    /// The other side of the same gate: `未查明` says *we* could not verify a
+    /// path, which has nothing to say about a path the **user** wrote down. A
+    /// configured root is walked, and its real count reported — refusing to
+    /// count a store we opened would be its own false claim.
+    #[test]
+    fn configured_root_is_scanned_even_when_the_cell_is_unascertained() {
+        let home = tempfile::TempDir::new().unwrap();
+        let root = home.path().join("elsewhere");
+        fs::create_dir_all(root.join("repo-abc")).unwrap();
+        fs::write(root.join("repo-abc/019bf00d-0000.jsonl"), "{}\n").unwrap();
+
+        let config = Config {
+            harness_roots: [("claude-code".to_string(), root.to_string_lossy().into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let report = scan_with_registry(&config, &unascertained_registry()).unwrap();
+        assert_eq!(report.probes.len(), 1);
+        assert_eq!(report.probes[0].state, ProbeState::Scanned);
+        assert_eq!(report.probes[0].root.as_deref(), Some(root.as_path()));
+        assert_eq!(report.probes[0].record_count, Some(1));
+        assert_eq!(report.records.len(), 1);
+    }
+
+    /// …and a configured root that is **not there** stays unknown. The gate
+    /// moved; "unknown is not empty" did not.
+    #[test]
+    fn configured_root_that_does_not_exist_is_unknown_not_zero() {
+        let home = tempfile::TempDir::new().unwrap();
+        let root = home.path().join("never-created");
+        let config = Config {
+            harness_roots: [("claude-code".to_string(), root.to_string_lossy().into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let report = scan_with_registry(&config, &unascertained_registry()).unwrap();
+        assert_eq!(report.probes[0].state, ProbeState::Missing);
+        assert_eq!(report.probes[0].record_count, None);
+        assert!(!report.probes[0].installed_p());
     }
 
     #[test]
