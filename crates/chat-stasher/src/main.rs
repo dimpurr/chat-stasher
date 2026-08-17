@@ -251,6 +251,57 @@ enum Command {
         #[arg(long)]
         no_reap: bool,
     },
+    /// Search one destination's archive by session metadata.
+    ///
+    /// Metadata tier only: this walks snapshot/index/tree objects and never
+    /// fetches or decrypts a data blob, which is why it is cheap. On a local
+    /// three-session fixture the metadata walk read 11,761 bytes against
+    /// 1,206,285 bytes of data packs — two orders of magnitude apart. Use
+    /// `--cost` to see what a full-text pass over the current hits *would*
+    /// cost before asking for one; full-text matching is not implemented.
+    ///
+    /// One destination per run, always named: there is no automatic merge
+    /// across destinations, and no default destination to search "everything".
+    ///
+    /// Exit codes distinguish the three answers, because two of them look the
+    /// same and mean opposite things: `0` matched something, `1` read the whole
+    /// destination and nothing matched, `3` could not finish reading it — so
+    /// "nothing matched" is unproven. `2` is a usage error, as elsewhere.
+    Search {
+        /// Destination to search. Required unless an explicit `--repo` is given.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Match sessions whose id starts with this prefix.
+        #[arg(long)]
+        session: Option<String>,
+        /// Match one machine partition exactly.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Lower bound (inclusive) on session activity time, unix seconds.
+        #[arg(long)]
+        since_unix: Option<i64>,
+        /// Upper bound (inclusive) on session activity time, unix seconds.
+        #[arg(long)]
+        until_unix: Option<i64>,
+        /// Also report what a full-text pass over the hits would cost.
+        #[arg(long)]
+        cost: bool,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Disable ssh connection reaping after this run.
+        #[arg(long)]
+        no_reap: bool,
+    },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -490,6 +541,31 @@ fn main() -> ExitCode {
             &options,
             no_reap,
         ),
+        Command::Search {
+            destination,
+            session,
+            machine,
+            since_unix,
+            until_unix,
+            cost,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_search(
+            destination,
+            session,
+            machine,
+            since_unix,
+            until_unix,
+            cost,
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
+        ),
         Command::Seal {
             harness,
             active,
@@ -506,6 +582,154 @@ fn main() -> ExitCode {
             shard_bucket_cap,
         ),
     }
+}
+
+/// `search` — metadata-tier query against exactly one named destination.
+///
+/// Three things this deliberately does not do. It does not pick a destination
+/// for you: searching "everywhere" would have to merge answers from archives
+/// that are not required to agree, so the destination is always named. It does
+/// not read payload: the walk stays on snapshot/index/tree objects, and
+/// `--cost` reports what payload *would* cost instead of quietly fetching it.
+/// And it does not collapse "nothing is here" into "I could not look" — those
+/// get different sentences and different exit codes, because a backup tool that
+/// answers "not found" when it means "unreadable" is worse than one that fails.
+///
+/// Privacy line, same as `read`: ids, counts, byte lengths and times only —
+/// never session content.
+#[allow(clippy::too_many_arguments)]
+fn cmd_search(
+    destination: Option<String>,
+    session: Option<String>,
+    machine: Option<String>,
+    since_unix: Option<i64>,
+    until_unix: Option<i64>,
+    cost: bool,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    if destination.is_none() && repo.is_none() {
+        eprintln!(
+            "search: name the destination to search (`--destination <name>`, or an explicit `--repo`)"
+        );
+        eprintln!(
+            "search: there is no default destination and no cross-destination merge — archives are not required to agree"
+        );
+        return ExitCode::from(2);
+    }
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+    // The machine filter is a *query* over `sessions/<machine>/`, not this
+    // machine's identity: searching an archive for another machine's sessions
+    // is the normal case, so this must not default to the local machine id.
+    let store = BackupStore::new(cfg.clone(), chat_stasher::id::machine_id());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!("search: {e}");
+            eprintln!("search: without the key nothing was read — this is not an empty result");
+            reap_remote(&cfg, no_reap);
+            // Deliberately 3, not 1. A missing key means the archive was never
+            // consulted, which belongs with "could not finish reading", not
+            // with "read it all and nothing matched". Reusing 1 here would make
+            // a lost key indistinguishable from a genuine empty answer.
+            return ExitCode::from(3);
+        }
+    };
+
+    let mut filter = chat_stasher::search::SearchFilter::default();
+    if let Some(p) = session {
+        filter = filter.session_id_prefix(p);
+    }
+    if let Some(m) = machine {
+        filter = filter.machine(m);
+    }
+    if let Some(t) = since_unix {
+        filter = filter.since_unix(t);
+    }
+    if let Some(t) = until_unix {
+        filter = filter.until_unix(t);
+    }
+
+    let report = match chat_stasher::search::search_sessions(&store, &mk, &filter) {
+        Ok(r) => r,
+        Err(e) => {
+            // Could not open the repository at all. This is the case that must
+            // never be rendered as "nothing matched".
+            eprintln!("search: cannot read `{}`: {e}", cfg.repo_root);
+            eprintln!("search: this is not an empty destination — the archive was not read");
+            reap_remote(&cfg, no_reap);
+            return ExitCode::from(3);
+        }
+    };
+
+    println!("[search] destination  : {}", report.destination);
+    println!(
+        "[search] snapshots    : {} scanned / {} in repo",
+        report.snapshots_scanned, report.snapshots_in_repo
+    );
+    println!("[search] sessions seen: {}", report.sessions_seen);
+    println!("[search] data blobs read: {}", report.data_blobs_read);
+    for path in &report.unreadable {
+        println!("  !! unreadable: {path}");
+    }
+
+    let code = if report.hits.is_empty() {
+        println!("{}", report.no_hit_line());
+        if report.complete() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::from(3)
+        }
+    } else {
+        println!("[search] matched      : {}", report.hits.len());
+        for hit in &report.hits {
+            println!(
+                "  {}  machine={}  shards={}  bytes={}  snapshot={}  activity_unix={}",
+                hit.short_id(),
+                hit.machine,
+                hit.shard_count,
+                hit.bytes,
+                hit.short_snapshot(),
+                hit.activity_unix
+            );
+        }
+        if !report.complete() {
+            // Hits *and* unreadable parts: the hits are real, the absence of
+            // further hits is not established. Say so, and do not exit 0.
+            println!(
+                "search: PARTIAL — the matches above are real, but `{}` could not be read in full ({} unreadable), so there may be more",
+                report.destination,
+                report.unreadable.len()
+            );
+            ExitCode::from(3)
+        } else {
+            ExitCode::SUCCESS
+        }
+    };
+
+    if cost {
+        let c = report.fulltext_cost();
+        println!("[search] full-text pass over these hits would need:");
+        println!(
+            "  sessions={}  shards={}  data_blobs={}  plaintext_bytes={}",
+            c.sessions, c.shards, c.data_blobs, c.plaintext_bytes
+        );
+        println!("  (not performed — full-text matching is not implemented)");
+    }
+
+    reap_remote(&cfg, no_reap);
+    code
 }
 
 fn cmd_doctor() -> ExitCode {
