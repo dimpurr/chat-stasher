@@ -20,8 +20,8 @@
  *  1. listPath      列表入口的路径
  *  2. listUrl       分页方式（怎么把 offset/limit 变成一个【GET】URL）
  *  3. parseListPage 列表响应的形状判据：从哪儿取 ids、从哪儿取 total
- *  4. detailPath    正文入口的路径前缀
- *  5. detailUrl     会话 id → 正文 URL
+ *  4. detailPath    正文入口的路径前缀（🔴 C26：允许 null = 正文段还没有出处）
+ *  5. detailUrl     会话 id → 正文 URL（同上，允许 null）
  *  6. 正文形状判据  —— 不在这张表里：直接复用 lib/contract.ts 的 responseShape
  *                     （engine.ts:348 的 matchesResponseShape），实时腿与回溯腿同一把尺。
  *  7. provenance    出处，口径与 contract.ts 的 credibility 一致（源码 · 仓库/文件行 · license · 日期）
@@ -43,6 +43,27 @@
  *    假设错了会立刻变成一条留痕的停机记录，不会变成静默爬不动，也不会变成假进度。
  *  · lib/contract.ts:114 登记的 chatgpt pathHints 是 '/backend-api/conversation/'
  *    （单数，取正文用）；列表是 '/backend-api/conversations'（复数），两者不同。
+ *
+ * ## C26 · DeepSeek 那一格从「未知」变成「有出处」，并顺手长出两样新东西
+ *
+ *  1. **游标式翻页**（listCursorUrl / EnumPage.nextCursor / EnumPage.hasMore）。
+ *     C22 的 plan 只会 offset 翻页，因为当时表里只有 ChatGPT。DeepSeek 是
+ *     `count` + `before_seq_id`（游标 = 上一页里最小的 seq_id），offset 那套在它身上
+ *     压根不成立（page/offset/limit 在五个来源里一次都没出现）。
+ *     🔴 这条分支的每一处「读不到」都落在具名结局上，见 types.ts 的 EnumTruncation：
+ *     读不到 seq_id ⇒ 'cursor-missing'（只回溯到这一页，**不是**枚举完）；
+ *     读不到 has_more ⇒ 'has-more-missing'（**不许**当成没有下一页）。
+ *
+ *  2. **半条腿是可以被写出来的**（detailPath/detailUrl 允许 null + partial）。
+ *     DeepSeek 的列表段有四源交叉的出处，正文段没有。以前这种情况只能二选一：
+ *     要么整个平台继续记成「不支持」（明明列表已经会读了），
+ *     要么编一个正文路由把 plan 填满（那才是真正危险的那种谎）。
+ *     现在它有第三种写法，并且对应一个独立的 halt 理由 'detail-unsupported'——
+ *     它与 'unsupported-platform' 的差别是：后者一个请求都没发过。
+ *
+ *  🔴 与 C22 一样，本任务同样【没有联网、没有登录态、没有对 deepseek.com 发过任何请求】。
+ *     DeepSeek 那格的出处来自 R25 调研单的**多源交叉**，不是官方文档，也未经实测复核 ——
+ *     完整的「知道什么 / 不知道什么 / 时效风险」写在 DEEPSEEK_PLAN 头上，不许只留结论。
  */
 
 import { PLATFORMS } from '../contract';
@@ -57,6 +78,25 @@ export interface EnumPage {
   ids: string[];
   /** 接口直给的总数；拿不到就是 null。 */
   total: number | null;
+  /**
+   * 🔴 C26 · 游标式翻页专用：下一页的游标。
+   * `null` = **本页没能给出游标**（记录里没有游标字段）⇒ engine 只能停在这一页，
+   * 并把 enumCursor.truncated 记成 'cursor-missing'。
+   * `undefined` = 这个平台压根不是游标翻页（ChatGPT），engine 不看这一项。
+   */
+  nextCursor?: number | null;
+  /**
+   * 🔴 C26 · 接口自报「还有没有下一页」。
+   * `undefined` = 响应里没有这个信号 ⇒ engine **不许当成 false**，
+   * 只能停下并记 'has-more-missing'。
+   */
+  hasMore?: boolean;
+  /**
+   * 🔴 C26 · 本页里最新的一条更新时间戳，**原样的数值**，不做任何时区/格式转换。
+   * 拿不到就是 null。写在这里是为了让「updated_at 是数值不是 ISO 串」这件事
+   * 有一个可断言的落点 —— 见 parseDeepSeekListPage 的说明。
+   */
+  newestUpdatedAt?: number | null;
 }
 
 export type ParseResult =
@@ -140,16 +180,48 @@ export interface BackfillEnumPlan {
   listUrl(origin: string, offset: number, limit: number): string;
   /** 2b · 🔴 C23 新增（可选）。声明了就代表列表段用 POST 发。 */
   listPost?: ListPostSpec;
+  /**
+   * 2c · 🔴 C26 新增（可选）· **游标式翻页**。
+   *
+   * 声明了它就代表这个平台【不是 offset 翻页】：下一页要从上一页的内容里读出一个游标
+   * （DeepSeek 是 `before_seq_id` = 上一页里最小的 `seq_id`）。engine 于是走游标那条分支，
+   * listUrl 在这条分支上【一次都不会被调用】—— 但接口仍然要求填 listUrl，
+   * 因为它同时是「offset 语义下这个平台长什么样」的书面记录，也是 back-compat 的落点。
+   *
+   * cursor === null ⇒ 第一页（还没有游标）。
+   */
+  listCursorUrl?(origin: string, cursor: number | null, limit: number): string;
   /** 3 · 列表响应的形状判据。不认识就返回 {ok:false}，engine 会 halt 留痕。 */
   parseListPage(text: string): ParseResult;
-  /** 4 · 正文入口（路径前缀）。 */
-  detailPath: string;
-  /** 5 · 会话 id → 正文 URL。 */
-  detailUrl(origin: string, conversationId: string): string;
+  /**
+   * 4 · 正文入口（路径前缀）。
+   * 🔴 C26：允许为 **null** —— 「列表段有出处、正文段还没有」是一个真实存在的中间态
+   *    （DeepSeek 就是），它必须能被写出来，而不是逼着人去编一个正文路由。
+   *    null ⇒ 内容脚本不会为这个平台放行任何正文 URL（tab-port.ts 的第 4 条），
+   *    engine 也会在发出任何一条正文请求【之前】halt('detail-unsupported')。
+   */
+  detailPath: string | null;
+  /** 5 · 会话 id → 正文 URL。🔴 C26：与 detailPath 同生共死，要么都有，要么都是 null。 */
+  detailUrl: ((origin: string, conversationId: string) => string) | null;
   /** 5b · 🔴 C23 新增（可选）。声明了就代表正文段用 POST 发。 */
   detailPost?: DetailPostSpec;
+  /**
+   * 6b · 🔴 C26（可选）· 这条 plan **只覆盖了一半**时，缺的那一半写在这里。
+   * 口径与 UnsupportedBackfill 完全一致（missing + 给用户的一句人话），
+   * 因为它回答的是同一个问题：「你到底还有哪儿不会」。
+   * 没有这个字段 = 这条 plan 是完整的（列表 + 正文都能走）。
+   */
+  partial?: PartialBackfill;
   /** 7 · 出处。口径与 contract.ts 的 credibility 注释一致。 */
   provenance: string;
+}
+
+/** 🔴 C26 · 「列表能列、正文还取不到」这种半条腿的显式记录。 */
+export interface PartialBackfill {
+  /** 还缺哪几项（对应上面那七项之一）。 */
+  missing: readonly string[];
+  /** 给用户看的一句话。不含技术黑话，也不许暗示「它在补」。 */
+  userNote: string;
 }
 
 /**
@@ -211,9 +283,115 @@ export function parseConversationListPage(text: string): ParseResult {
   return { ok: true, page: { ids, total } };
 }
 
+/**
+ * 解析一页 DeepSeek 会话列表。
+ *
+ * ## 🔴 这个函数是「带着『它可能是错的』去写」的落点
+ * 下面认的那几个字段名不是官方文档，是 R25 从**四个互不相干的开源实现**里交叉出来的
+ * （出处见 DEEPSEEK_PLAN.provenance）。逆向来的形状随时可能被平台改掉。
+ * 所以每一处「读不到」都必须落到一个**具名的、不同于「空」的**结局上：
+ *
+ *  · 读不到 `data.biz_data.chat_sessions` ⇒ `{ok:false}` ⇒ engine halt('shape-changed')。
+ *    🔴 **绝不返回 `{ok:true, ids:[]}`** —— 那会让回溯腿以为「这个用户没有会话」，
+ *    把 enumCursor 标成 complete，然后安安静静地宣布自己干完了。
+ *    「接口变了」和「你没有历史」对用户是完全不同的两句话。
+ *  · 读不到 `seq_id` ⇒ 形状还认得，只是**翻不了页** ⇒ nextCursor=null，
+ *    engine 停在这一页并记 truncated='cursor-missing'（≠ 枚举完）。
+ *  · 读不到 `has_more` ⇒ hasMore=undefined，engine 记 'has-more-missing' 后停，
+ *    同样【不许】当成「没有下一页」。
+ *
+ * ## `updated_at` 是**数值**，不是 ISO 串
+ * 三个源都显示它是数值型时间戳。所以这里：
+ *  · 是有限数值 ⇒ 原样收下（不 new Date、不换算单位、不猜秒还是毫秒）；
+ *  · **存在但不是数值**（例如变成了 ISO 串）⇒ 直接判 `{ok:false}`。
+ *    这一条是故意的：字段类型变了就是 wire 形状变了，与其用 `new Date(string)`
+ *    把它「宽容」过去，不如当场停下留痕。
+ *  · 整个字段缺席 ⇒ 容忍（枚举并不需要它），newestUpdatedAt=null。
+ */
+export function parseDeepSeekListPage(text: string): ParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'deepseek list response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'deepseek list response is not a JSON object' };
+  }
+  // 信封：data.biz_data（5 源一致）。🔴 顶层业务码（code / biz_code）两源打架，**不看它**。
+  const data = (body as Record<string, unknown>).data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, detail: 'deepseek list response has no `data` object (envelope changed?)' };
+  }
+  const biz = (data as Record<string, unknown>).biz_data;
+  if (!biz || typeof biz !== 'object' || Array.isArray(biz)) {
+    return { ok: false, detail: 'deepseek list response has no `data.biz_data` object (envelope changed?)' };
+  }
+  const bizRecord = biz as Record<string, unknown>;
+  const sessions = bizRecord.chat_sessions;
+  if (!Array.isArray(sessions)) {
+    // 🔴 就是这一行在守「不能把未知当成空」：没有这个数组 = 形状变了，不是没有会话。
+    return { ok: false, detail: 'deepseek list response has no `data.biz_data.chat_sessions` array (shape changed?)' };
+  }
+
+  const ids: string[] = [];
+  let minSeqId: number | null = null;
+  let seqIdMissing = false;
+  let newestUpdatedAt: number | null = null;
+
+  for (const item of sessions) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, detail: 'deepseek chat_sessions item is not an object' };
+    }
+    const record = item as Record<string, unknown>;
+    const id = record.id;
+    if (typeof id !== 'string' || id.length === 0) {
+      return { ok: false, detail: 'deepseek chat_sessions item has no string `id`' };
+    }
+    ids.push(id);
+
+    const seqId = record.seq_id;
+    if (typeof seqId === 'number' && Number.isFinite(seqId)) {
+      minSeqId = minSeqId === null ? seqId : Math.min(minSeqId, seqId);
+    } else {
+      // 🔴 有一条读不出游标，整页的游标就不可信了：宁可停，不许翻错页漏掉会话。
+      seqIdMissing = true;
+    }
+
+    const updatedAt = record.updated_at;
+    if (updatedAt !== undefined && updatedAt !== null) {
+      if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) {
+        return {
+          ok: false,
+          detail: 'deepseek chat_sessions item has a non-numeric `updated_at` (wire shape changed?)',
+        };
+      }
+      newestUpdatedAt = newestUpdatedAt === null ? updatedAt : Math.max(newestUpdatedAt, updatedAt);
+    }
+  }
+
+  const rawHasMore = bizRecord.has_more;
+  return {
+    ok: true,
+    page: {
+      ids,
+      // 🔴 DeepSeek 的列表响应里**没有**总数字段的出处 ⇒ total 恒 null ⇒
+      //    进度那边走「总数未知」分支，绝不显示百分比。不许拿 ids.length 冒充分母。
+      total: null,
+      nextCursor: seqIdMissing ? null : minSeqId,
+      hasMore: typeof rawHasMore === 'boolean' ? rawHasMore : undefined,
+      newestUpdatedAt,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 能回溯的平台
 // ---------------------------------------------------------------------------
+
+/** ChatGPT 的正文 URL 构造器。抽成常量只是为了 back-compat 的 detailUrl() 能复用它。 */
+const chatgptDetailUrl = (origin: string, id: string): string =>
+  `${origin}${CHATGPT_DETAIL_PATH}${encodeURIComponent(id)}`;
 
 export const CHATGPT_PLAN: BackfillEnumPlan = {
   platform: 'chatgpt',
@@ -222,7 +400,7 @@ export const CHATGPT_PLAN: BackfillEnumPlan = {
     `${origin}${CHATGPT_LIST_PATH}?offset=${offset}&limit=${limit}`,
   parseListPage: parseConversationListPage,
   detailPath: CHATGPT_DETAIL_PATH,
-  detailUrl: (origin, id) => `${origin}${CHATGPT_DETAIL_PATH}${encodeURIComponent(id)}`,
+  detailUrl: chatgptDetailUrl,
   // 出处：**没有外部出处**。这一套是 C11 交给上一位 worker 的「已查到的事实」，
   // 当时就没有复核，本任务也没有复核（禁止联网、无登录态）。
   // 所以它的可信度等级是【待验证假设】，不是 'from-source'。
@@ -233,7 +411,89 @@ export const CHATGPT_PLAN: BackfillEnumPlan = {
     + ' 无外部源码出处，未做真实端到端验证（本任务禁止联网与登录态）',
 };
 
-const PLANS: readonly BackfillEnumPlan[] = [CHATGPT_PLAN];
+export const DEEPSEEK_LIST_PATH = '/api/v0/chat_session/fetch_page';
+
+/**
+ * 🔴 C26 · DeepSeek 的会话列表。**只有列表段**；正文段仍然没有出处（见 partial）。
+ *
+ * ## 这一格是怎么从「未知」变成「有出处」的
+ * C22 时这里写着「分页参数名与请求方法未知，我没有出处」。R25 调研单（2026-08-17）
+ * 把出处补上了，且**每一项都是多源交叉**、不是单源孤证：
+ *
+ *   列表接口   GET https://chat.deepseek.com/api/v0/chat_session/fetch_page  · 4 源
+ *   每页条数   count                                                          · 2 源
+ *   翻页游标   before_seq_id，值 = 上一页里【最小】的 seq_id                   · 2 源（取法一致）
+ *   响应信封   data.biz_data                                                  · 5 源
+ *   列表数组   biz_data.chat_sessions                                         · 4 源
+ *   还有下页   biz_data.has_more（boolean，与数组同级）                        · 3 源
+ *   记录·id    id                                                             · 3 源
+ *   记录·标题  title                                                          · 2 源
+ *   记录·时间  updated_at 🔴 数值型时间戳，不是 ISO 串                          · 3 源
+ *   记录·游标  seq_id（数值）                                                  · 2 源
+ *
+ * 其中路由这一条与本仓库 lib/contract.ts:90-96 已登记的 from-source 证据
+ *（deepseek-pp，Apache-2.0，commit 0a02c72b…，2026-08-14）互相印证。
+ *
+ * ## 🔴 同样重要：**没有**出处的东西一个都没写进来
+ *  · `count` 的服务端上限/默认值 —— 未找到 ⇒ 这里只发我们自己选的 DEFAULT_LIST_LIMIT，
+ *    **绝不把 200 之类的数字当成上限写死**，也绝不假设「返回条数 < count ⇒ 最后一页」
+ *    （那是拿未知当已知）。是不是最后一页只认 has_more。
+ *  · 完整响应字段清单 —— 没有任何一份公开的完整 JSON 样例 ⇒ 解析器只认它用得上的那几个键，
+ *    多出来的键一律不管（不当成形状变了）。
+ *  · pinned / inserted_at / title_type / model_type —— 单源或防御式写法 ⇒ 不读。
+ *  · 顶层业务码叫 code 还是 biz_code —— 两源打架 ⇒ **不依赖**（parseDeepSeekListPage 里
+ *    一次都没有读过它）。
+ *  · lte_cursor.updated_at / lte_cursor.pinned —— 一源且与另两源矛盾 ⇒ 排除。
+ *  · page / offset / cursor / limit / page_size —— 五个来源里一次都没出现 ⇒ 排除。
+ *
+ * ## ⚠️ 时效与风险（照实写，不许粉饰）
+ * 响应形状有 2026-08-17 的旁证；但**分页参数的实测证据最新只到 2025-12**，
+ * 且那位作者提到 DeepSeek 已上线原生会话搜索 ⇒ 这个接口最近很可能动过。
+ * 因此本 plan 的可信度是【多源交叉的逆向结论】，不是官方契约：
+ * 猜错的后果被压在 parseDeepSeekListPage 的三条具名结局里
+ *（shape-changed / cursor-missing / has-more-missing），不会变成假进度。
+ */
+export const DEEPSEEK_PLAN: BackfillEnumPlan = {
+  platform: 'deepseek',
+  listPath: DEEPSEEK_LIST_PATH,
+  // 🔴 offset 语义在 DeepSeek 上【不成立】（page/offset/limit 五源皆无）。
+  //    这里仍然给出一个 listUrl 是因为接口要求它必填，但 engine 走的是 listCursorUrl
+  //    那条分支（声明了 listCursorUrl ⇒ 游标翻页），listUrl 一次都不会被调用。
+  //    它只发第一页 —— 万一将来有人误用，拿到的也是「第一页」这个安全的东西，
+  //    而不是一个我们编出来的 offset 参数。
+  listUrl: (origin, _offset, limit) => `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}`,
+  listCursorUrl: (origin, cursor, limit) =>
+    cursor === null
+      ? `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}`
+      : `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}&before_seq_id=${cursor}`,
+  parseListPage: parseDeepSeekListPage,
+  // 🔴 正文段：**没有出处，所以是 null**，不是「先随便填一个」。
+  //    详见 partial.missing。
+  detailPath: null,
+  detailUrl: null,
+  partial: {
+    missing: [
+      'detailPath / detailUrl：取【单条会话正文】的路由与参数没有多源出处。'
+      + '仓库内 lib/contract.ts:90-96 记过 /api/v0/chat/history_messages 这个名字，'
+      + '但它要哪些参数、正文是不是也要翻页（翻页参数又叫什么）都没有出处 —— '
+      + '猜一个的后果不是报错，而是每条对话只存下前几轮、用户还以为存全了。',
+    ],
+    userNote:
+      'DeepSeek：还不能回溯历史正文。已经能列出你的历史会话了，'
+      + '但还不会去取每条会话的内容，所以暂时一条也不会存下来。',
+  },
+  provenance:
+    'cross-source reverse-engineering (R25 调研单, 2026-08-17；四个互不相干的开源实现交叉一致) · '
+    + 'GET /api/v0/chat_session/fetch_page?count=&before_seq_id= · 4 源；'
+    + 'count 2 源；before_seq_id(=上一页最小 seq_id) 2 源；data.biz_data 5 源；'
+    + 'chat_sessions 4 源；has_more 3 源；id 3 源；seq_id 2 源；updated_at(数值) 3 源。'
+    + '路由与 lib/contract.ts:90-96 的 from-source 证据（deepseek-pp, Apache-2.0, '
+    + 'commit 0a02c72b135bf2936e11aa78fd6136931ed65908, 2026-08-14）互相印证。'
+    + '🔴 非官方文档；分页参数的实测证据最新只到 2025-12，接口可能已改动。'
+    + '本任务未做任何真实端到端验证（禁止联网与登录态）。',
+};
+
+const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, CHATGPT_PLAN];
 
 // ---------------------------------------------------------------------------
 // 🔴 填不了 / 只能填一半的平台 —— 逐条写明缺什么
@@ -247,21 +507,12 @@ const PLANS: readonly BackfillEnumPlan[] = [CHATGPT_PLAN];
 //    而不是「不存在」—— 这两件事必须分开写。
 // ---------------------------------------------------------------------------
 
+// 🔴 C26 · deepseek 这一条【被移走了】，不是被删掉不管了：
+//    R25 调研单补齐了列表段的多源出处，所以它现在是 DEEPSEEK_PLAN 的一条 plan
+//    （列表段完整 + partial 里写明正文段仍然缺什么）。
+//    C22 定下的规矩没有松：平台表里每一行仍然恰好落在「有 plan」或「登记为暂时不能」
+//    其中一侧，tests/c22-enumplat.test.ts 仍然盯着。
 export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
-  {
-    platform: 'deepseek',
-    known: [
-      // 列表入口有出处：lib/contract.ts:90-96 记录 deepseek-pp（Apache-2.0，
-      // commit 0a02c72b135bf2936e11aa78fd6136931ed65908，2026-08-14）用到
-      // /api/v0/chat_session/fetch_page，那正是「翻会话列表」的路由。
-      'listPath 有出处：/api/v0/chat_session/fetch_page（lib/contract.ts:90-96 转引 deepseek-pp，Apache-2.0，2026-08-14）',
-    ],
-    missing: [
-      'listUrl：分页参数名与请求方法未知（仓库内的引用只记了路由，没记 query/body 形状；fetch_page 这个名字暗示是分页，但参数名我没有出处）',
-      'parseListPage：列表响应里会话数组与 total 的字段名未知（仓库内只记了 normalize 阶段要求 chat_sessions/chat_messages，那是导出器【规整之后】的形状，不是 wire 形状）',
-    ],
-    userNote: 'DeepSeek：还不能回溯历史。已经知道列表接口在哪，但不知道怎么翻页、也不知道返回里哪个字段是会话列表。',
-  },
   {
     platform: 'claude',
     known: [
@@ -366,15 +617,52 @@ export function unsupportedBackfillFor(platform: string): UnsupportedBackfill | 
   return BACKFILL_UNSUPPORTED.find((u) => u.platform === platform) ?? null;
 }
 
-/** 能回溯的平台 id（按平台表顺序）。 */
+/**
+ * 🔴 C26 · 「这条 plan 能不能真的把历史【正文】补回来」。
+ * 只有列表段的 plan（DeepSeek）在这一问上必须回答 false —— 它列得出会话，
+ * 但一条正文都取不到，对用户而言历史仍然没补回来。
+ */
+export function canBackfillDetail(plan: BackfillEnumPlan): boolean {
+  return plan.detailPath !== null && plan.detailUrl !== null;
+}
+
+/**
+ * 能把历史**补回来**的平台 id（按平台表顺序）。
+ * 🔴 判据是「列表 + 正文都能走」，不是「有没有 plan」——
+ *    只能列出会话、取不到正文的平台【不算】能补回历史，否则 Popup 那一行会说谎。
+ */
 export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[] = PLATFORMS
   .map((p) => p.id)
-  .filter((id) => backfillPlanFor(id) !== null);
+  .filter((id) => {
+    const plan = backfillPlanFor(id);
+    return plan !== null && canBackfillDetail(plan);
+  });
 
-/** 暂时回溯不了的平台 id（按平台表顺序）。 */
+/**
+ * 🔴 C26 新增 · **只列得出会话、还取不到正文**的平台 id。
+ * 它既不属于「能补回历史」，也不等于「什么都不会」——
+ * 中间态必须有自己的名字，否则只能被四舍五入成其中一边。
+ */
+export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[] = PLATFORMS
+  .map((p) => p.id)
+  .filter((id) => {
+    const plan = backfillPlanFor(id);
+    return plan !== null && !canBackfillDetail(plan);
+  });
+
+/** 暂时补不回历史的平台 id（按平台表顺序）。🔴 含上面那些「只能列出」的。 */
 export const BACKFILL_UNSUPPORTED_PLATFORMS: readonly string[] = PLATFORMS
   .map((p) => p.id)
-  .filter((id) => backfillPlanFor(id) === null);
+  .filter((id) => !BACKFILL_SUPPORTED_PLATFORMS.includes(id));
+
+/** 只有一半的 plan 的那半条腿缺什么（按平台表顺序）。给 Popup 用。 */
+export const BACKFILL_PARTIAL: readonly (PartialBackfill & { platform: string })[] =
+  BACKFILL_LIST_ONLY_PLATFORMS
+    .map((id) => {
+      const plan = backfillPlanFor(id)!;
+      return plan.partial ? { platform: id, ...plan.partial } : null;
+    })
+    .filter((x): x is PartialBackfill & { platform: string } => x !== null);
 
 // ---------------------------------------------------------------------------
 // back-compat：ChatGPT 的两个 URL 构造器。既有测试与接线仍在用。
@@ -385,5 +673,5 @@ export function listPageUrl(origin: string, offset: number, limit = DEFAULT_LIST
 }
 
 export function detailUrl(origin: string, conversationId: string): string {
-  return CHATGPT_PLAN.detailUrl(origin, conversationId);
+  return chatgptDetailUrl(origin, conversationId);
 }

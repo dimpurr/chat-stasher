@@ -31,6 +31,7 @@ import {
   initialState,
   stateKey,
   type BackfillState,
+  type EnumTruncation,
   type HaltReason,
   type HaltRecord,
   type StopReason,
@@ -167,6 +168,12 @@ export interface RunReport {
   skippedAlreadyPending: number;
   progress: string;
   halted: HaltRecord | null;
+  /**
+   * 🔴 C26 · 枚举**没能走完**的具名理由；null = 没有这回事。
+   * 非 null 时 state.enumCursor.complete 虽然是 true，但它的意思是「停在这里了」，
+   * 不是「已经全部列完」。见 lib/backfill/types.ts 的 EnumTruncation。
+   */
+  enumTruncated: EnumTruncation | null;
   /** 每次 gate() 实际等待的毫秒数，两段分开记。 */
   paceTrace: { enumerate: number[]; detail: number[] };
   state: BackfillState;
@@ -232,6 +239,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       skippedAlreadyPending: 0,
       progress: formatProgress(state),
       halted: state.halted,
+      enumTruncated: null,
       paceTrace: emptyTrace,
       state,
     };
@@ -256,6 +264,25 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   let newDebts = 0;
   let skippedAlreadyArchived = 0;
   let skippedAlreadyPending = 0;
+  let enumTruncated: EnumTruncation | null = state.enumCursor.truncated ?? null;
+
+  /**
+   * 🔴 C26 · 「枚举读不下去了」的唯一出口。
+   *
+   * 它做三件事，一件都不能少：把游标停下（complete=true，别再空转打平台）、
+   * 在**落盘的账本上**留一个具名标记（enumCursor.truncated）、并在本次 RunReport 里报出来。
+   * complete=true 在这里【不是】「全部列完了」的意思 —— truncated 就是用来区分这两者的。
+   * 少了它，「只回溯到第一页」和「一共就这一页」在账本上会长得一模一样。
+   */
+  const stopEnumerating = (why: EnumTruncation): void => {
+    state.enumCursor.complete = true;
+    state.enumCursor.truncated = why;
+    enumTruncated = why;
+    console.warn(
+      `[chat-stasher] backfill enumeration stopped early: ${why} —`
+      + ` enumerated ${state.enumCursor.offset} conversation(s) so far; this is NOT "no more history"`,
+    );
+  };
 
   const halt = async (reason: HaltReason, detail: string): Promise<RunReport> => {
     state.halted = { reason, at: clock.now(), detail };
@@ -275,6 +302,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     skippedAlreadyPending,
     progress: formatProgress(state),
     halted: state.halted,
+    enumTruncated,
     paceTrace: { enumerate: enumPacer.waits, detail: detailPacer.waits },
     state,
   });
@@ -310,12 +338,25 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   }
 
   // ---- 第一段：枚举（便宜，一次跑完）----
+  //
+  // 🔴 C26：这里有两种翻页方式，**由 plan 说了算**，不是由响应内容临时决定的：
+  //   · 声明了 listCursorUrl ⇒ 游标翻页（DeepSeek：count + before_seq_id）；
+  //   · 没声明             ⇒ offset 翻页（ChatGPT，行为与 C22 逐字一致）。
+  const cursorMode = plan.listCursorUrl !== undefined;
+  // 留痕里说清「停在哪一页」。游标模式下 offset 是【已枚举条数】而不是请求参数，
+  // 所以两种模式的说法必须不一样 —— 一句读起来对、其实指错东西的留痕，比没有更糟。
+  const listWhere = (): string =>
+    cursorMode
+      ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
+      : `list offset=${state.enumCursor.offset}`;
   while (!state.enumCursor.complete) {
     if (opts.shouldAbort?.()) return report('aborted');
     if (await guardTripped()) return report('download-paused');
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
-    const url = plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
+    const url = cursorMode
+      ? plan.listCursorUrl!(opts.origin, state.enumCursor.cursor ?? null, listLimit)
+      : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
     // 🔴 C23：body 只可能出自 plan 自己的构造器（listRequestInit → spec.body）。
     //    没有任何一条路径能让页面侧或消息侧决定这里发什么。
     const init = listRequestInit(plan, opts.origin, state.enumCursor.offset, listLimit);
@@ -323,17 +364,17 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     try {
       res = await sendVia(http, url, init);
     } catch (err) {
-      return halt('transport-error', `list offset=${state.enumCursor.offset}: ${(err as Error).message}`);
+      return halt('transport-error', `${listWhere()}: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
       return halt(
         haltReasonForStatus(res.status),
-        `list offset=${state.enumCursor.offset} returned HTTP ${res.status}`,
+        `${listWhere()} returned HTTP ${res.status}`,
       );
     }
     const parsed = plan.parseListPage(res.text);
     if (!parsed.ok) {
-      return halt('shape-changed', `list offset=${state.enumCursor.offset}: ${parsed.detail}`);
+      return halt('shape-changed', `${listWhere()}: ${parsed.detail}`);
     }
     enumeratedPages += 1;
 
@@ -352,15 +393,55 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     newDebts += enqueueDebts(state, parsed.page.ids).length;
 
+    // offset 在两种模式下都往前走：offset 模式它【就是】下一页的参数，
+    // 游标模式它只是「已经枚举过多少条」的计数（进度那边在用）。
     state.enumCursor.offset += parsed.page.ids.length;
-    if (
-      parsed.page.ids.length === 0 ||
-      (state.totalKnown !== null && state.enumCursor.offset >= state.totalKnown)
-    ) {
+    if (parsed.page.ids.length === 0) {
+      state.enumCursor.complete = true;
+    } else if (cursorMode) {
+      // 🔴 游标翻页的终止判断【只认 has_more】。
+      //    绝不用「这一页比 count 少 ⇒ 到底了」去推断 —— 那是拿未知当已知。
+      if (parsed.page.hasMore === undefined) {
+        // 响应里没有这个布尔信号 ⇒ 我们【不知道】后面还有没有。停，并具名留痕。
+        stopEnumerating('has-more-missing');
+      } else if (parsed.page.hasMore === false) {
+        state.enumCursor.complete = true;
+      } else if (parsed.page.nextCursor === null || parsed.page.nextCursor === undefined) {
+        // 接口说还有下一页，但这一页没能给出游标 ⇒ 翻不过去。
+        // 🔴 只回溯到了这一页，必须说出来，不许假装抓全了。
+        stopEnumerating('cursor-missing');
+      } else {
+        state.enumCursor.cursor = parsed.page.nextCursor;
+      }
+    } else if (state.totalKnown !== null && state.enumCursor.offset >= state.totalKnown) {
       state.enumCursor.complete = true;
     }
     await persist(store, state);
   }
+
+  // 🔴 C26 · 在发出【任何一条正文请求之前】问一句：这个平台的正文段我们写没写过。
+  //
+  // DeepSeek 就是这个中间态：列表段有四源交叉的出处（会话已经列出来、欠账已经落盘），
+  // 正文段没有出处。这时候：
+  //  · 绝不能继续往下跑 —— plan.detailUrl 是 null，硬跑就得现编一个正文路由；
+  //  · 也绝不能悄悄 return 'queue-empty' —— 那等于说「补完了」，而一条正文都没取。
+  // 所以它是一条**独立的、会落盘的** halt：欠账原封不动地留着，
+  // 等正文段有了出处，接着这批欠账往下清就行。
+  //
+  // 🔴 只在【真的有欠账等着】时才 halt。一条欠账都没有（用户真的没有历史）时
+  //    没有任何东西被这半条腿挡住，那就该走正常的 'queue-empty' ——
+  //    否则「你没有历史」又会被写成一条停机记录，正是本仓库最想避免的那种混淆。
+  if (!plan.detailUrl || !plan.detailPath) {
+    if (state.pending.length === 0) return report('queue-empty');
+    const gap = plan.partial?.missing.join(' | ') ?? 'detailPath / detailUrl';
+    return halt(
+      'detail-unsupported',
+      `platform ${platformRow.id} can enumerate its conversation list`
+      + ` (${state.pending.length} pending, ${state.archived.length} archived)`
+      + ` but has no backfill detail route yet; missing: ${gap}`,
+    );
+  }
+  const detailUrlOf = plan.detailUrl;
 
   // ---- 第二段：逐条取正文（贵，必须温和）----
   const today = dayKeyOf(clock.now());
@@ -387,7 +468,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // 代价是每笔账多一次 storage.local 写（约每 20 秒一次），可以忽略。
     anchor('detail', detailPacer.lastAt);
     await persist(store, state);
-    const url = plan.detailUrl(opts.origin, id);
+    const url = detailUrlOf(opts.origin, id);
     const init = detailRequestInit(plan, opts.origin, id);
     let res: HttpResponse;
     try {

@@ -28,6 +28,7 @@ import type { Clock } from '../lib/backfill/pace';
 
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
+const CLAUDE_ORIGIN = 'https://claude.ai';
 
 function fakeClock(): Clock {
   let t = Date.parse('2026-08-17T00:00:00.000Z');
@@ -103,7 +104,10 @@ describe('C22-1 · 能回溯的平台真的枚举得出来', () => {
     expect(plan!.detailPath).toBe('/backend-api/conversation/');
     expect(plan!.listUrl(CHATGPT_ORIGIN, 20, 50))
       .toBe(`${CHATGPT_ORIGIN}/backend-api/conversations?offset=20&limit=50`);
-    expect(plan!.detailUrl(CHATGPT_ORIGIN, 'a b')).toBe(`${CHATGPT_ORIGIN}/backend-api/conversation/a%20b`);
+    // detailUrl 的类型在 C26 之后是 `(...) => string | null`（null = 正文段还没有出处），
+    // ChatGPT 这条 plan 两段都齐，所以这里断言它不是 null 再调用。
+    expect(plan!.detailUrl).not.toBeNull();
+    expect(plan!.detailUrl!(CHATGPT_ORIGIN, 'a b')).toBe(`${CHATGPT_ORIGIN}/backend-api/conversation/a%20b`);
     expect(typeof plan!.parseListPage).toBe('function');
     // 出处这一项也是【必填】——「没有外部出处」也必须写出来，不许留空。
     expect(plan!.provenance.length).toBeGreaterThan(0);
@@ -146,14 +150,20 @@ describe('C22-2 · 形状不合必须留痕', () => {
 // 判据 3 · 🔴 不支持的平台 = 明确的「不支持」，而不是「枚举出 0 条」
 // ---------------------------------------------------------------------------
 describe('C22-3 · 「还不会读你的历史」与「你没有历史」必须分开', () => {
+  // 🔴 C26 改了这条用例的**主角**（deepseek → claude），判据一个字没改。
+  //    原因：C26 给 DeepSeek 填上了会话列表那一格（多源交叉出处，见 DEEPSEEK_PLAN），
+  //    它不再是「还没支持的平台」，拿它当主角就测不到这条判据了。
+  //    claude 仍然停在「列表接口地址里那段组织编号拿不到」上，是现在的合适主角。
+  //    DeepSeek 自己的新结局（列表列得出、正文段没有出处 ⇒ halt('detail-unsupported')）
+  //    在 tests/c26-dslist.test.ts 里单独盯着。
   it('还没支持的平台 ⇒ halt(unsupported-platform)，且一个请求都没发', async () => {
     const store = memoryStore();
     const be = backend([]);
 
     const report = await runBackfill({
-      platform: 'deepseek',
-      origin: DEEPSEEK_ORIGIN,
-      scope: 'acct-ds',
+      platform: 'claude',
+      origin: CLAUDE_ORIGIN,
+      scope: 'acct-cl',
       store,
       http: be.http,
       clock: fakeClock(),
@@ -195,7 +205,20 @@ describe('C22-3 · 「还不会读你的历史」与「你没有历史」必须�
     expect(isAllowedBackfillUrl(`${CHATGPT_ORIGIN}/backend-api/conversation/abc`, CHATGPT_ORIGIN)).toBe(true);
     // 🔴 还没支持的平台：即使路径长得像，也一律拒发。
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/backend-api/conversations`, DEEPSEEK_ORIGIN)).toBe(false);
-    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 C26 · 这一条从 false 变成了 true，变的是【事实】，不是判据。
+    //    C22 时 DeepSeek 在 BACKFILL_UNSUPPORTED 里（没有 plan），所以第 3 条检查
+    //    「这个平台真的能回溯」直接拒掉了它的所有 URL。
+    //    C26 给它填上了会话列表那一格（R25 多源交叉出处 ⇒ DEEPSEEK_PLAN），
+    //    于是它的 listPath 成了 plan 自己【逐字写下来】的那条路径，白名单照原样放行。
+    //    🔴 放行的机制一个字都没改：仍然是 checkBackfillRequest 的同源 + 平台表 +
+    //    有 plan + 路径逐字相等这四条，没有绕过、也没有放宽成前缀通配 ——
+    //    下面两条反例就是这句话的证据。
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page`, DEEPSEEK_ORIGIN)).toBe(true);
+    // 🔴 但 DeepSeek 的【正文】段仍然没有出处（DEEPSEEK_PLAN.detailPath === null），
+    //    所以它一条正文 URL 都没有被放行 —— 半条腿就是半条腿，不许顺手放宽。
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages?chat_session_id=x`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 前缀像、但不逐字相等的路径照样拒（证明没有变成前缀通配）。
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page/extra`, DEEPSEEK_ORIGIN)).toBe(false);
   });
 });
 

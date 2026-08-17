@@ -206,7 +206,10 @@ export function checkBackfillRequest(
   // 4 · 只有它自己的那两条路径 —— 顺便定下这是哪一段（决定了允许的方法/body）。
   let segment: BackfillSegment;
   if (u.pathname === plan.listPath) segment = 'list';
-  else if (u.pathname.startsWith(plan.detailPath)) segment = 'detail';
+  // 🔴 C26：detailPath 可以是 null（列表段有出处、正文段还没有，DeepSeek 就是）。
+  //    null ⇒ 这个平台【没有】被放行的正文 URL。白名单不放宽，也不做前缀通配：
+  //    放行的仍然只有 plan 自己逐字写下来的那条路径。
+  else if (plan.detailPath !== null && u.pathname.startsWith(plan.detailPath)) segment = 'detail';
   else return refuseUrl('path is not a backfill endpoint');
 
   // 5 · method：先过闭集，再必须逐字等于 plan 为这一段声明的那一个。

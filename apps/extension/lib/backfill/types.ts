@@ -38,7 +38,33 @@ export type HaltReason =
    *
    * 🔴 它在【发出任何请求之前】就成立 —— 见 engine.ts 的 plan 查表。
    */
-  | 'unsupported-platform';
+  | 'unsupported-platform'
+  /**
+   * 🔴 C26 · 这个平台的**列表段写得出来、正文段还没有出处**（plan.detailUrl === null）。
+   *
+   * 为什么必须与 'unsupported-platform' 分开：后者的含义是「一个请求都没发过，
+   * 我们连你的会话列表都不会列」；而这一条的真相是「已经把你的历史会话【列出来了】、
+   * 也已经真的发过列表请求，只是还不会去取每条对话的正文」。
+   * 如果复用 'unsupported-platform'，Popup 那句「在发出任何请求之前就停住了」
+   * 就会变成一句**准确措辞的谎话** —— 请求确实发了。
+   *
+   * 它在【发出任何一条正文请求之前】成立：欠账集合已经落盘，
+   * 等正文段有了出处，接着这批欠账往下清即可。
+   */
+  | 'detail-unsupported';
+
+/**
+ * 🔴 C26 · 枚举「没能走完」的具名理由。
+ *
+ * 存在的唯一目的：**不许把「我们读不下去了」记成「已经全部列完了」。**
+ * 游标式翻页（DeepSeek）的每一页都要从上一页里读出下一页的游标；
+ * 读不到就只能停在这一页。停是可以的，装作列完了不可以。
+ */
+export type EnumTruncation =
+  /** 记录里没有游标字段（DeepSeek 的 seq_id）⇒ 只枚举到了当前这一页。 */
+  | 'cursor-missing'
+  /** 响应里没有「还有没有下一页」这个布尔信号 ⇒ 不知道后面还有没有，停。 */
+  | 'has-more-missing';
 
 export interface HaltRecord {
   reason: HaltReason;
@@ -85,8 +111,18 @@ export interface BackfillState {
   /** 接口直给的会话总数；拿不到就是 null。 */
   totalKnown: number | null;
   totalSource: TotalSource;
-  /** 枚举游标：offset + 是否枚举完。 */
-  enumCursor: { offset: number; complete: boolean };
+  /**
+   * 枚举游标：offset + 是否枚举完。
+   *
+   * 🔴 C26 新增两个**可选**字段（旧集合读回来都是 undefined ⇒ 行为与 C22 逐字一致）：
+   *  · cursor    游标式翻页的下一页游标（DeepSeek 的 before_seq_id）。
+   *              null / undefined = 还没有游标 = 请求第一页。
+   *              offset 式翻页（ChatGPT）永远不写它。
+   *  · truncated 🔴 **枚举是「读完了」还是「读不下去了」**。非空表示后者，
+   *              complete 虽然是 true，但它【不是】「全部列完」的意思。
+   *              没有这个字段，两种结局在账本上会长得一模一样。
+   */
+  enumCursor: { offset: number; complete: boolean; cursor?: number | null; truncated?: EnumTruncation };
   /** 欠账：已枚举出来、但还没取到正文的会话 id。 */
   pending: string[];
   /** 已清：已经归档过的会话 id，永不再入队。 */

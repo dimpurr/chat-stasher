@@ -24,6 +24,7 @@ import {
 } from './backfill/failures';
 import { BACKFILL_ALARM_PERIOD_MINUTES } from './backfill/alarm';
 import {
+  BACKFILL_PARTIAL,
   BACKFILL_SUPPORTED_PLATFORMS,
   BACKFILL_UNSUPPORTED,
   BACKFILL_UNSUPPORTED_PLATFORMS,
@@ -281,6 +282,12 @@ export function coverageLine(): string {
 /** 逐平台缺什么。放进 notes，给愿意多看一眼的用户 —— 主行只说结论。 */
 function coverageNote(): string {
   const lines = ['这些平台暂时补不回历史，各自卡在哪一步：'];
+  // 🔴 C26 · 「只列得出会话、还取不到正文」的平台也要出现在这里。
+  //    它离「能补历史」更近，但对用户的结果仍然是【一条都没补回来】——
+  //    所以它属于这一段，不许被写成一句听起来像已经支持了的话。
+  for (const half of BACKFILL_PARTIAL) {
+    lines.push(`· ${half.userNote}`);
+  }
   for (const gap of BACKFILL_UNSUPPORTED) {
     lines.push(`· ${gap.userNote}`);
   }
@@ -326,6 +333,16 @@ function notesFor(model: PopupModel): string[] {
         + '这不是平台改版，也不是被限流。技术细节：'
         + model.state.halted.detail,
       );
+    } else if (model.state.halted.reason === 'detail-unsupported') {
+      // 🔴 C26 · 这一条【不能】说成「在发出任何请求之前就停住了」—— 列表请求真的发过，
+      //    会话也真的列出来了。半路停下和一步没走，对用户是两件事。
+      notes.push(
+        `这个平台（${model.state.platform}）的历史会话【已经列出来了】（${model.state.pending.length} 条在等着），`
+        + '但取每条对话正文的那一步还没有实现，所以这条腿在取第一条正文之前就停住了，'
+        + '目前一条也没有存下来。这不是平台改版，也不是被限流；列出来的这些会一直留着，'
+        + '等那一步补上就接着往下清。技术细节：'
+        + model.state.halted.detail,
+      );
     } else {
       notes.push(
         `这条腿已经停下并留痕：${model.state.halted.reason} —— ${model.state.halted.detail}`,
@@ -334,7 +351,7 @@ function notesFor(model: PopupModel): string[] {
   }
 
   // 🔴 覆盖说明排在最后：它是长期事实，不是此刻的状态。
-  if (BACKFILL_UNSUPPORTED.length > 0) notes.push(coverageNote());
+  if (BACKFILL_UNSUPPORTED.length > 0 || BACKFILL_PARTIAL.length > 0) notes.push(coverageNote());
   return notes;
 }
 
