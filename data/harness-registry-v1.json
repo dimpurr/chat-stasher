@@ -170,6 +170,7 @@
           "confidence": "本机实测",
           "source": "本机实测（B27 2026-08-17）：state.vscdb 只读实开，cursorDiskKV 表存在，key LIKE 'composerData:%' 计数=19、value 总字节 28,291；路径来源 cursaves 社区文档（未读 Cursor 源码）",
           "sql_table": "cursorDiskKV",
+          "sql_id_column": "key",
           "sql_required_columns": ["key", "value"],
           "sql_key_column": "key",
           "sql_key_pattern": "composerData:%",
@@ -216,6 +217,7 @@
           "confidence": "本机实测",
           "source": "本机实测（B27 2026-08-17）：~/.grok/sessions/session_search.sqlite 只读实开，session_docs 表存在，计数=1、updated_at=1784924765（Unix 秒）；会话本体另有 ~/.grok/sessions/<sanitized-cwd>/<uuid>/ 下 JSONL",
           "sql_table": "session_docs",
+          "sql_id_column": "session_id",
           "sql_required_columns": ["session_id", "updated_at"],
           "sql_time_column": "updated_at",
           "sql_time_value_is_seconds": true

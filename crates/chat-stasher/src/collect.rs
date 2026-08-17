@@ -10,9 +10,12 @@
 //! measurable duplicate over a silent omission.
 
 use crate::config::Config;
-use crate::models::SessionRecord;
+use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
-use crate::sqlite_probe::{opencode_session_cursor, read_opencode_session, OpenCodeCursor};
+use crate::sqlite_probe::{
+    cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
+    read_opencode_session, read_sqlite_session, sqlite_session_cursor, OpenCodeCursor,
+};
 use crate::store;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -35,9 +38,9 @@ pub struct OffsetEntry {
     pub prefix_len: u64,
     pub prefix_sha256: String,
     pub compressed: bool,
-    /// Present only for a virtual opencode SQLite record. This is the logical
-    /// cursor replacing a file byte offset; the legacy fields remain useful to
-    /// the stage-reconciliation guard and to old state files.
+    /// Present only for a virtual SQLite record. This is the logical cursor
+    /// replacing a file byte offset; the field name remains `opencode` for
+    /// compatibility with the state file written by the previous worker.
     #[serde(default)]
     pub opencode: Option<OpenCodeCursor>,
 }
@@ -85,6 +88,8 @@ pub struct ReconcileNotice {
 pub struct CollectReport {
     pub scanned_records: usize,
     pub scanned_opencode_records: usize,
+    pub scanned_cursor_records: usize,
+    pub scanned_grok_records: usize,
     /// Harnesses with recognised sessions that produced fewer
     /// `SessionRecord`s; these sessions were not consumed by this pass.
     pub archive_gaps: Vec<scanner::ArchiveGap>,
@@ -210,6 +215,16 @@ pub fn collect_scan_report(
             .iter()
             .filter(|record| record.source == crate::models::HarnessSource::OpenCode)
             .count(),
+        scanned_cursor_records: scan
+            .records
+            .iter()
+            .filter(|record| record.source == crate::models::HarnessSource::Cursor)
+            .count(),
+        scanned_grok_records: scan
+            .records
+            .iter()
+            .filter(|record| record.source == crate::models::HarnessSource::Grok)
+            .count(),
         archive_gaps: scan.archive_gaps(),
         ..CollectReport::default()
     };
@@ -296,8 +311,8 @@ fn collect_one(
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<Processed> {
-    if record.source == crate::models::HarnessSource::OpenCode {
-        process_opencode(record, old, force_reset, stage, machine, bucket_cap)
+    if let Some(layout) = record.sqlite_layout {
+        process_sqlite(record, layout, old, force_reset, stage, machine, bucket_cap)
     } else if record.compressed || is_zstd_path(&record.absolute_path) {
         Ok(process_compressed(
             record,
@@ -326,6 +341,151 @@ fn collect_one(
             bucket_cap,
         )?)
     }
+}
+
+fn process_sqlite(
+    record: &SessionRecord,
+    layout: SqliteSessionLayout,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+) -> anyhow::Result<Processed> {
+    match layout {
+        SqliteSessionLayout::OpenCode => {
+            process_opencode(record, old, force_reset, stage, machine, bucket_cap)
+        }
+        SqliteSessionLayout::CursorLegacy => {
+            let session_id = native_session_id(record, "Cursor legacy")?;
+            let snapshot = read_cursor_legacy_session(&record.absolute_path, &session_id)
+                .map_err(|error| anyhow!("读取 Cursor legacy 会话快照失败: {error}"))?;
+            process_sqlite_snapshot(
+                record,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                snapshot.cursor,
+                snapshot.json_line,
+            )
+        }
+        SqliteSessionLayout::CursorGlobal => {
+            let session_id = native_session_id(record, "Cursor global")?;
+            let spec = cursor_global_schema();
+            let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
+                .map_err(|error| anyhow!("读取 Cursor 会话游标失败: {error}"))?;
+            if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
+                return Ok(unchanged_sqlite(record, old.expect("checked above")));
+            }
+            let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
+                .map_err(|error| anyhow!("读取 Cursor 会话快照失败: {error}"))?;
+            process_sqlite_snapshot(
+                record,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                snapshot.cursor,
+                snapshot.json_line,
+            )
+        }
+        SqliteSessionLayout::Grok => {
+            let session_id = native_session_id(record, "Grok")?;
+            let spec = grok_schema();
+            let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
+                .map_err(|error| anyhow!("读取 Grok 会话游标失败: {error}"))?;
+            if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
+                return Ok(unchanged_sqlite(record, old.expect("checked above")));
+            }
+            let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
+                .map_err(|error| anyhow!("读取 Grok 会话快照失败: {error}"))?;
+            process_sqlite_snapshot(
+                record,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                snapshot.cursor,
+                snapshot.json_line,
+            )
+        }
+    }
+}
+
+fn process_sqlite_snapshot(
+    record: &SessionRecord,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+    cursor: OpenCodeCursor,
+    json_line: Vec<u8>,
+) -> anyhow::Result<Processed> {
+    if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
+        return Ok(unchanged_sqlite(record, old.expect("checked above")));
+    }
+    let source_bytes = json_line.len() as u64;
+    let digest = sha256_hex(&json_line);
+    let shard = Some(store::write_sealed_shard_bytes_with_cap(
+        store::StageWriter::Collect,
+        stage,
+        machine,
+        &record.id,
+        &[json_line],
+        bucket_cap,
+    )?);
+    Ok(Processed {
+        state: OffsetEntry {
+            offset: source_bytes,
+            prefix_len: source_bytes,
+            prefix_sha256: digest,
+            compressed: false,
+            opencode: Some(cursor),
+        },
+        outcome: CollectOutcome {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+            source_bytes,
+            bytes_read: source_bytes,
+            prefix_bytes_validated: 0,
+            lines_written: 1,
+            shard,
+            reset: old.is_some() || force_reset,
+            compressed: false,
+        },
+    })
+}
+
+fn unchanged_sqlite(record: &SessionRecord, old: &OffsetEntry) -> Processed {
+    Processed {
+        state: old.clone(),
+        outcome: CollectOutcome {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+            source_bytes: old.offset,
+            bytes_read: 0,
+            prefix_bytes_validated: 0,
+            lines_written: 0,
+            shard: None,
+            reset: false,
+            compressed: false,
+        },
+    }
+}
+
+fn native_session_id(record: &SessionRecord, label: &str) -> anyhow::Result<String> {
+    record
+        .id
+        .splitn(3, '.')
+        .nth(2)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("invalid {label} session id"))
 }
 
 fn process_jsonl(
@@ -730,7 +890,7 @@ fn source_key(path: &Path) -> String {
 
 fn state_key(record: &SessionRecord) -> String {
     let path = source_key(&record.absolute_path);
-    if record.source == crate::models::HarnessSource::OpenCode {
+    if record.sqlite_layout.is_some() {
         format!("{path}\0{}", record.id)
     } else {
         path

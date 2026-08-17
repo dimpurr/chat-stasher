@@ -49,6 +49,9 @@ pub const EXPECTED_SESSION_COLUMNS: [&str; 3] = ["id", "time_created", "time_upd
 pub struct SqliteSchemaSpec<'a> {
     /// Table that holds one row per session.
     pub table: &'a str,
+    /// Column that identifies one session row. Cursor uses `key`; Grok uses
+    /// `session_id`. OpenCode uses its dedicated three-table path instead.
+    pub id_column: Option<&'a str>,
     /// Columns that must all exist before we claim we can enumerate sessions.
     pub required_columns: Vec<&'a str>,
     /// Key/value-store selection: count only rows where `key_column` matches
@@ -75,6 +78,7 @@ pub struct SqliteSchemaSpec<'a> {
 pub fn opencode_schema() -> SqliteSchemaSpec<'static> {
     SqliteSchemaSpec {
         table: "session",
+        id_column: None,
         required_columns: EXPECTED_SESSION_COLUMNS.to_vec(),
         key_column: None,
         key_prefix: None,
@@ -82,6 +86,40 @@ pub fn opencode_schema() -> SqliteSchemaSpec<'static> {
         json_value_column: None,
         json_time_path: None,
         time_is_seconds: false,
+        qualification: None,
+    }
+}
+
+/// Export-side schema for Cursor's global store. The scanner still obtains its
+/// probe spec from the registry; this immutable layout is used only after a
+/// `SessionRecord` has already been emitted for one qualified row.
+pub fn cursor_global_schema() -> SqliteSchemaSpec<'static> {
+    SqliteSchemaSpec {
+        table: "cursorDiskKV",
+        id_column: Some("key"),
+        required_columns: vec!["key", "value"],
+        key_column: Some("key"),
+        key_prefix: Some("composerData:%"),
+        time_column: None,
+        json_value_column: Some("value"),
+        json_time_path: Some("$.createdAt"),
+        time_is_seconds: false,
+        qualification: Some("cursor_composer"),
+    }
+}
+
+/// Export-side schema for Grok's locally measured `session_docs` store.
+pub fn grok_schema() -> SqliteSchemaSpec<'static> {
+    SqliteSchemaSpec {
+        table: "session_docs",
+        id_column: Some("session_id"),
+        required_columns: vec!["session_id", "updated_at"],
+        key_column: None,
+        key_prefix: None,
+        time_column: Some("updated_at"),
+        json_value_column: None,
+        json_time_path: None,
+        time_is_seconds: true,
         qualification: None,
     }
 }
@@ -115,6 +153,7 @@ pub fn spec_from_cell(cell: &crate::scanner::RegistryCell) -> Option<SqliteSchem
     };
     Some(SqliteSchemaSpec {
         table,
+        id_column: cell.sql_id_column.as_deref(),
         required_columns,
         key_column: cell.sql_key_column.as_deref(),
         key_prefix: cell.sql_key_pattern.as_deref(),
@@ -181,6 +220,13 @@ pub struct OpenCodeHighWater {
 pub struct OpenCodeCursor {
     pub store_fingerprint: String,
     pub session_time_updated: i64,
+    /// Generic logical high-water data for one-row SQLite stores such as
+    /// Cursor/Grok. For opencode these remain at their default values and the
+    /// message/part fields below carry the existing three-table cursor.
+    #[serde(default)]
+    pub row_count: u64,
+    #[serde(default)]
+    pub row_high_water: Option<OpenCodeHighWater>,
     pub message_count: u64,
     pub message_high_water: Option<OpenCodeHighWater>,
     pub part_count: u64,
@@ -193,6 +239,25 @@ pub struct OpenCodeCursor {
 pub struct OpenCodeSessionSnapshot {
     pub cursor: OpenCodeCursor,
     pub json_line: Vec<u8>,
+}
+
+/// Metadata-only row returned by a registry-declared SQLite session table.
+/// The row body is not carried during scanning; it is loaded only after
+/// `collect` has decided that this session's logical cursor changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteSessionRow {
+    pub id: String,
+    pub time_value: Option<i64>,
+    pub mtime: Option<SystemTime>,
+}
+
+/// One legacy Cursor composer and the database that contains it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorLegacySessionRow {
+    pub db: PathBuf,
+    pub id: String,
+    pub created_at: Option<i64>,
+    pub mtime: Option<SystemTime>,
 }
 
 /// Probe one SQLite store, read-only (`mode=ro`, never a write-capable
@@ -470,6 +535,360 @@ pub fn read_opencode_session(
     Ok(OpenCodeSessionSnapshot { cursor, json_line })
 }
 
+/// Enumerate one-row sessions using the registry-declared SQLite schema.
+/// Cursor's key suffix is exposed as the native session id; ordinary tables
+/// expose the declared id column unchanged. Bodies are never read here.
+pub fn enumerate_sqlite_sessions(
+    db: &Path,
+    spec: &SqliteSchemaSpec<'_>,
+) -> Result<Vec<SqliteSessionRow>, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    ensure_registry_schema(&conn, spec)?;
+    let id_column = spec
+        .id_column
+        .ok_or_else(|| "SQLite schema 未声明会话 id 列".to_string())?;
+    let candidate_where = candidate_where_sql(spec);
+    let where_sql = qualification_where_sql(spec, &candidate_where);
+    let time_sql = session_time_expression(spec).unwrap_or_else(|| "NULL".to_string());
+    let sql = format!(
+        "SELECT \"{}\", {time_sql} FROM \"{}\"{where_sql} ORDER BY \"{}\"",
+        quote_identifier(id_column),
+        quote_identifier(spec.table),
+        quote_identifier(id_column),
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("读取 {} 会话行失败: {error}", spec.table))?;
+    let rows = statement
+        .query_map([], |row| {
+            let raw_id: String = row.get(0)?;
+            let time_value: Option<i64> = row.get(1)?;
+            Ok((raw_id, time_value))
+        })
+        .map_err(|error| format!("枚举 {} 会话行失败: {error}", spec.table))?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (raw_id, time_value) = row.map_err(|error| format!("读取会话行失败: {error}"))?;
+        let id = native_session_id(spec, &raw_id);
+        if id.is_empty() {
+            continue;
+        }
+        result.push(SqliteSessionRow {
+            id,
+            time_value,
+            mtime: time_value.and_then(|value| convert_epoch(value, spec.time_is_seconds)),
+        });
+    }
+    Ok(result)
+}
+
+/// Read the logical high-water cursor for one registry-declared SQLite row.
+/// The fingerprint is metadata-only and intentionally excludes the `-shm`
+/// mtime; the row count and greatest `(time,id)` pair make the cursor
+/// session-specific even when several sessions share one database.
+pub fn sqlite_session_cursor(
+    db: &Path,
+    spec: &SqliteSchemaSpec<'_>,
+    session_id: &str,
+) -> Result<OpenCodeCursor, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    ensure_registry_schema(&conn, spec)?;
+    let id_column = spec
+        .id_column
+        .ok_or_else(|| "SQLite schema 未声明会话 id 列".to_string())?;
+    let storage_id = storage_session_id(spec, session_id);
+    let id_where = format!("\"{}\" = ?1", quote_identifier(id_column));
+    let where_sql = qualification_where_sql(spec, &format!(" WHERE {id_where}"));
+    let count_sql = format!(
+        "SELECT count(*) FROM \"{}\"{where_sql}",
+        quote_identifier(spec.table)
+    );
+    let count: i64 = conn
+        .query_row(&count_sql, [&storage_id], |row| row.get(0))
+        .map_err(|error| format!("读取 {} 会话行数失败: {error}", spec.table))?;
+    if count <= 0 {
+        return Err("session 行不存在或未通过会话过滤".to_string());
+    }
+    let time_value = session_time_expression(spec)
+        .map(|expr| {
+            let sql = format!(
+                "SELECT {expr} FROM \"{}\"{where_sql} LIMIT 1",
+                quote_identifier(spec.table)
+            );
+            conn.query_row(&sql, [&storage_id], |row| row.get::<_, Option<i64>>(0))
+                .map_err(|error| format!("读取 {} 会话时间失败: {error}", spec.table))
+        })
+        .transpose()?
+        .flatten();
+    let high_water = Some(OpenCodeHighWater {
+        time_updated: time_value.unwrap_or_default(),
+        id: session_id.to_string(),
+    });
+    Ok(OpenCodeCursor {
+        store_fingerprint: sqlite_store_fingerprint(db),
+        session_time_updated: time_value.unwrap_or_default(),
+        row_count: count as u64,
+        row_high_water: high_water,
+        message_count: 0,
+        message_high_water: None,
+        part_count: 0,
+        part_high_water: None,
+    })
+}
+
+/// Export one registry-declared SQLite session as one JSON line. The body is
+/// returned to the private stage writer and is never printed by this module.
+pub fn read_sqlite_session(
+    db: &Path,
+    spec: &SqliteSchemaSpec<'_>,
+    session_id: &str,
+) -> Result<OpenCodeSessionSnapshot, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    ensure_registry_schema(&conn, spec)?;
+    let id_column = spec
+        .id_column
+        .ok_or_else(|| "SQLite schema 未声明会话 id 列".to_string())?;
+    let storage_id = storage_session_id(spec, session_id);
+    let id_where = format!("\"{}\" = ?1", quote_identifier(id_column));
+    let where_sql = qualification_where_sql(spec, &format!(" WHERE {id_where}"));
+    let sql = format!(
+        "SELECT * FROM \"{}\"{where_sql} LIMIT 1",
+        quote_identifier(spec.table)
+    );
+    let row = conn
+        .query_row(&sql, [&storage_id], |row| row_to_json_object(row, true))
+        .map_err(|error| format!("读取 {} 会话行失败: {error}", spec.table))?;
+    let cursor = sqlite_session_cursor(db, spec, session_id)?;
+    let envelope = serde_json::json!({
+        "schema": "chat-stasher.sqlite.session.v1",
+        "table": spec.table,
+        "session": row,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("序列化 SQLite 会话失败: {error}"))?;
+    Ok(OpenCodeSessionSnapshot { cursor, json_line })
+}
+
+/// Enumerate qualified composers in Cursor's legacy workspaceStorage. Each
+/// workspace database is read independently and remains untouched.
+pub fn enumerate_cursor_legacy_sessions(
+    workspace_storage: &Path,
+) -> Result<Vec<CursorLegacySessionRow>, String> {
+    if !workspace_storage.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut result = Vec::new();
+    for entry in fs::read_dir(workspace_storage)
+        .map_err(|error| format!("读取 Cursor workspaceStorage 失败: {error}"))?
+        .flatten()
+    {
+        let workspace = entry.path();
+        if !entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let db = workspace.join("state.vscdb");
+        if !db.is_file() {
+            continue;
+        }
+        let conn = match open_readonly(&db) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        let value = match legacy_composer_value(&conn) {
+            Ok(Some(value)) => value,
+            Ok(None) | Err(_) => continue,
+        };
+        let composers = match legacy_composer_array(&value) {
+            Some(composers) => composers,
+            None => continue,
+        };
+        for composer in composers {
+            if !cursor_legacy_composer_is_qualified(composer) {
+                continue;
+            }
+            let Some(id) = cursor_legacy_composer_id(composer) else {
+                continue;
+            };
+            let created_at = composer.get("createdAt").and_then(Value::as_i64);
+            result.push(CursorLegacySessionRow {
+                db: db.clone(),
+                id,
+                created_at,
+                mtime: created_at.and_then(sqlite_millis_to_system_time),
+            });
+        }
+    }
+    result.sort_by(|a, b| a.db.cmp(&b.db).then_with(|| a.id.cmp(&b.id)));
+    Ok(result)
+}
+
+/// Read one qualified legacy Cursor composer and wrap it as one JSON line.
+pub fn read_cursor_legacy_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<OpenCodeSessionSnapshot, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    let value = legacy_composer_value(&conn)
+        .map_err(|error| format!("读取 Cursor composer 数据失败: {error}"))?
+        .ok_or_else(|| "Cursor composer 数据不存在".to_string())?;
+    let composers =
+        legacy_composer_array(&value).ok_or_else(|| "Cursor composer 数组不存在".to_string())?;
+    let composer = composers
+        .iter()
+        .find(|composer| {
+            cursor_legacy_composer_is_qualified(composer)
+                && cursor_legacy_composer_id(composer).as_deref() == Some(session_id)
+        })
+        .ok_or_else(|| "Cursor composer 行不存在或未通过会话过滤".to_string())?;
+    let created_at = composer.get("createdAt").and_then(Value::as_i64);
+    let cursor = OpenCodeCursor {
+        store_fingerprint: sqlite_store_fingerprint(db),
+        session_time_updated: created_at.unwrap_or_default(),
+        row_count: 1,
+        row_high_water: Some(OpenCodeHighWater {
+            time_updated: created_at.unwrap_or_default(),
+            id: session_id.to_string(),
+        }),
+        message_count: 0,
+        message_high_water: None,
+        part_count: 0,
+        part_high_water: None,
+    };
+    let envelope = serde_json::json!({
+        "schema": "chat-stasher.cursor.legacy.session.v1",
+        "session": composer,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("序列化 Cursor 会话失败: {error}"))?;
+    Ok(OpenCodeSessionSnapshot { cursor, json_line })
+}
+
+fn ensure_registry_schema(conn: &Connection, spec: &SqliteSchemaSpec<'_>) -> Result<(), String> {
+    let columns = sqlite_table_columns(conn, spec.table)
+        .map_err(|error| format!("读取 {} 表 schema 失败: {error}", spec.table))?;
+    if !spec
+        .required_columns
+        .iter()
+        .all(|required| columns.iter().any(|actual| actual == required))
+    {
+        return Err(format!(
+            "SQLite schema 不匹配: table={} columns={}",
+            spec.table,
+            columns.join(",")
+        ));
+    }
+    Ok(())
+}
+
+fn candidate_where_sql(spec: &SqliteSchemaSpec<'_>) -> String {
+    match (spec.key_column, spec.key_prefix) {
+        (Some(column), Some(prefix)) => format!(
+            " WHERE \"{}\" LIKE '{}'",
+            quote_identifier(column),
+            prefix.replace('\'', "''")
+        ),
+        _ => String::new(),
+    }
+}
+
+fn session_time_expression(spec: &SqliteSchemaSpec<'_>) -> Option<String> {
+    if let Some(column) = spec.time_column {
+        Some(format!("\"{}\"", quote_identifier(column)))
+    } else if let (Some(value_column), Some(path)) = (spec.json_value_column, spec.json_time_path) {
+        Some(format!(
+            "json_extract(\"{}\", '{}')",
+            quote_identifier(value_column),
+            path.replace('\'', "''")
+        ))
+    } else {
+        None
+    }
+}
+
+fn native_session_id(spec: &SqliteSchemaSpec<'_>, raw_id: &str) -> String {
+    let Some(prefix) = spec.key_prefix else {
+        return raw_id.to_string();
+    };
+    let prefix = prefix.strip_suffix('%').unwrap_or(prefix);
+    raw_id.strip_prefix(prefix).unwrap_or(raw_id).to_string()
+}
+
+fn storage_session_id(spec: &SqliteSchemaSpec<'_>, session_id: &str) -> String {
+    match spec.key_prefix {
+        Some(prefix) => format!(
+            "{}{}",
+            prefix.strip_suffix('%').unwrap_or(prefix),
+            session_id
+        ),
+        None => session_id.to_string(),
+    }
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    identifier.replace('"', "\"\"")
+}
+
+fn legacy_composer_value(conn: &Connection) -> rusqlite::Result<Option<Value>> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key IN ('composer.composerData', 'allComposers') ORDER BY CASE key WHEN 'composer.composerData' THEN 0 ELSE 1 END LIMIT 1",
+            [],
+            |row| match row.get_ref(0)? {
+                ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(bytes.to_vec()),
+                ValueRef::Null => Ok(Vec::new()),
+                _ => Err(rusqlite::Error::InvalidColumnType(
+                    0,
+                    "value".to_string(),
+                    rusqlite::types::Type::Integer,
+                )),
+            },
+        )
+        .optional()?;
+    value
+        .filter(|bytes| !bytes.is_empty())
+        .map(|bytes| {
+            serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Cursor composer JSON 无效",
+                    )),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn legacy_composer_array(value: &Value) -> Option<&[Value]> {
+    value
+        .get("allComposers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .or_else(|| value.as_array().map(Vec::as_slice))
+}
+
+fn cursor_legacy_composer_id(value: &Value) -> Option<String> {
+    ["composerId", "id", "conversationId"]
+        .into_iter()
+        .find_map(|field| value.get(field).and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 fn ensure_opencode_schema(conn: &Connection) -> Result<(), String> {
     for (table, required) in [
         ("session", ["id", "time_created", "time_updated"].as_slice()),
@@ -526,6 +945,8 @@ fn opencode_session_cursor_with_conn(
     Ok(OpenCodeCursor {
         store_fingerprint: sqlite_store_fingerprint(db),
         session_time_updated,
+        row_count: 0,
+        row_high_water: None,
         message_count,
         message_high_water,
         part_count,
@@ -567,7 +988,7 @@ fn row_to_json_object(row: &rusqlite::Row<'_>, parse_data: bool) -> rusqlite::Re
         let value = row.get_ref(index)?;
         object.insert(
             name.clone(),
-            sqlite_value_to_json(value, parse_data && name == "data"),
+            sqlite_value_to_json(value, parse_data && (name == "data" || name == "value")),
         );
     }
     Ok(Value::Object(object))
@@ -587,6 +1008,11 @@ fn sqlite_value_to_json(value: ValueRef<'_>, parse_json: bool) -> Value {
             } else {
                 Value::String(text)
             }
+        }
+        ValueRef::Blob(bytes) if parse_json => {
+            let text = String::from_utf8_lossy(bytes);
+            serde_json::from_str(&text)
+                .unwrap_or_else(|_| Value::String(format!("hex:{}", hex_digest(bytes))))
         }
         ValueRef::Blob(bytes) => Value::String(format!("hex:{}", hex_digest(bytes))),
     }
@@ -1046,6 +1472,10 @@ mod tests {
                 "composerData:cccccccc-3333",
                 r#"{"composerId":"c","createdAt":1753000000000}"#,
             ), // empty composer
+            (
+                "composerData:dddddddd-4444",
+                r#"{"createdAt":1753000000001}"#,
+            ), // missing conversation proof and composer id
         ];
         for (key, value) in &sessions {
             conn.execute(
@@ -1058,6 +1488,7 @@ mod tests {
 
         let spec = SqliteSchemaSpec {
             table: "cursorDiskKV",
+            id_column: Some("key"),
             required_columns: vec!["key", "value"],
             key_column: Some("key"),
             key_prefix: Some("composerData:%"),
@@ -1071,11 +1502,18 @@ mod tests {
         assert_eq!(
             info.sessions,
             SqliteSessionProbe::Known {
-                candidate_count: 3,
+                candidate_count: 4,
                 count: 1,
                 earliest: sqlite_millis_to_system_time(1751779149032),
                 latest: sqlite_millis_to_system_time(1751779149032),
             }
+        );
+        let rows = enumerate_sqlite_sessions(&db, &spec).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "aaaaaaaa-1111");
+        println!(
+            "cursor_global_fixture candidate_count=4 qualified_count={} empty_conversation=excluded archived=excluded missing_id=excluded",
+            rows.len()
         );
     }
 
@@ -1092,7 +1530,7 @@ mod tests {
             "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
             rusqlite::params![
                 "composer.composerData",
-                r#"{"allComposers":[{"createdAt":1751779149032,"conversation":[{}]},{"createdAt":1752849959504,"isArchived":true,"conversation":[{}]},{"createdAt":1753000000000}]}"#
+                r#"{"allComposers":[{"composerId":"legacy-ok","createdAt":1751779149032,"conversation":[{}]},{"composerId":"legacy-archived","createdAt":1752849959504,"isArchived":true,"conversation":[{}]},{"composerId":"legacy-empty","createdAt":1753000000000,"conversation":[]},{"createdAt":1753000000001}]}"#
             ],
         )
         .unwrap();
@@ -1103,11 +1541,18 @@ mod tests {
         assert_eq!(
             info.sessions,
             SqliteSessionProbe::Known {
-                candidate_count: 3,
+                candidate_count: 4,
                 count: 1,
                 earliest: sqlite_millis_to_system_time(1751779149032),
                 latest: sqlite_millis_to_system_time(1751779149032),
             }
+        );
+        let rows = enumerate_cursor_legacy_sessions(&dir.path().join("workspaceStorage")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "legacy-ok");
+        println!(
+            "cursor_legacy_fixture candidate_count=4 qualified_count={} empty_conversation=excluded archived=excluded missing_id=excluded",
+            rows.len()
         );
     }
 
@@ -1130,6 +1575,7 @@ mod tests {
 
         let spec = SqliteSchemaSpec {
             table: "session_docs",
+            id_column: Some("session_id"),
             required_columns: vec!["session_id", "updated_at"],
             key_column: None,
             key_prefix: None,
@@ -1148,6 +1594,27 @@ mod tests {
                 earliest: UNIX_EPOCH.checked_add(Duration::from_secs(1784924765)),
                 latest: UNIX_EPOCH.checked_add(Duration::from_secs(1784924765)),
             }
+        );
+        let rows = enumerate_sqlite_sessions(&db, &spec).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "s1");
+        let snapshot = read_sqlite_session(&db, &spec, "s1").unwrap();
+        let json: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(json["session"]["session_id"], "s1");
+        assert_eq!(snapshot.cursor.row_count, 1);
+        assert_eq!(
+            snapshot
+                .cursor
+                .row_high_water
+                .as_ref()
+                .unwrap()
+                .time_updated,
+            1784924765
+        );
+        println!(
+            "grok_fixture candidate_count=1 qualified_count={} exported_lines=1 row_count={} time_unit=seconds",
+            rows.len(),
+            snapshot.cursor.row_count
         );
     }
 
@@ -1180,6 +1647,7 @@ mod tests {
 
         let spec = SqliteSchemaSpec {
             table: "session_docs",
+            id_column: Some("session_id"),
             required_columns: vec!["session_id", "updated_at"],
             key_column: None,
             key_prefix: None,
