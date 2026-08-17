@@ -22,3 +22,4 @@ pub mod search;
 pub mod sqlite_probe;
 pub mod store;
 pub mod verify;
+pub mod view;

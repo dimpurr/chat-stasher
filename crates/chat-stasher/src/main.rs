@@ -13,6 +13,7 @@ use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -330,6 +331,62 @@ enum Command {
         #[arg(long)]
         no_reap: bool,
     },
+    /// Open an ephemeral local web view of one destination's session list.
+    ///
+    /// Binds a short-lived HTTP server on `127.0.0.1` with an OS-assigned port
+    /// (never `0.0.0.0`, never a fixed port), prints the URL, optionally opens
+    /// your browser, and exits when idle or on Ctrl+C. Nothing is installed:
+    /// no launchd, no systemd, no background process, no resident daemon.
+    ///
+    /// THREAT, stated plainly: loopback is NOT a security boundary. Every other
+    /// program running on this machine can connect to `127.0.0.1`, so this is
+    /// not "safe because it's local". Access is gated by a random token that is
+    /// generated fresh on every launch and appears only in the printed URL —
+    /// never in a file, never in a log. Requests without that exact token are
+    /// refused (403), and any method other than GET is refused (405). Treat the
+    /// URL as a secret for the lifetime of the process.
+    ///
+    /// Metadata tier only, same as `search`: machine, first 8 chars of the
+    /// session id, shard count, byte length, activity time. Conversation text is
+    /// NOT loaded and there is no full-text search; the page says so and prints
+    /// what loading it would cost. Exit codes match `search`: 0 listed
+    /// something, 1 read it all and there was nothing, 3 could not finish
+    /// reading (or no key), 2 usage error.
+    View {
+        /// Destination to view. Required unless an explicit `--repo` is given:
+        /// there is no default destination and no cross-destination merge.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Restrict the listing to one machine partition.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Restrict the listing to session ids with this prefix.
+        #[arg(long)]
+        session: Option<String>,
+        /// Do NOT launch a browser; just print the URL. Correct on headless or
+        /// remote machines, where opening a browser is meaningless or wrong.
+        #[arg(long)]
+        no_open: bool,
+        /// Exit after this many seconds with no request (0 = never idle out,
+        /// still exits on Ctrl+C).
+        #[arg(long, default_value_t = chat_stasher::view::DEFAULT_IDLE_SECS)]
+        idle_timeout: u64,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Disable ssh connection reaping after this run.
+        #[arg(long)]
+        no_reap: bool,
+    },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -594,6 +651,29 @@ fn main() -> ExitCode {
             &options,
             no_reap,
         ),
+        Command::View {
+            destination,
+            machine,
+            session,
+            no_open,
+            idle_timeout,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_view(
+            destination,
+            machine,
+            session,
+            no_open,
+            idle_timeout,
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
+        ),
         Command::Seal {
             harness,
             active,
@@ -758,6 +838,186 @@ fn cmd_search(
 
     reap_remote(&cfg, no_reap);
     code
+}
+
+/// `view` — an ephemeral loopback web view of one destination's session list.
+///
+/// Structure worth noting: the whole metadata read happens *before* the socket
+/// is bound, and the server is handed an immutable snapshot of it. That is why
+/// no request can reach the repository, and therefore why no request can be
+/// coaxed into fetching payload. It also means the exit code is decided from the
+/// read, exactly like `search`, and stays honest whether or not anyone ever
+/// opens the page.
+///
+/// Loopback is not a boundary: any local program can connect. See the `--help`
+/// text — the token is the only thing gating access, and it lives only in the
+/// printed URL.
+#[allow(clippy::too_many_arguments)]
+fn cmd_view(
+    destination: Option<String>,
+    machine: Option<String>,
+    session: Option<String>,
+    no_open: bool,
+    idle_timeout: u64,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    if destination.is_none() && repo.is_none() {
+        eprintln!(
+            "view: name the destination to view (`--destination <name>`, or an explicit `--repo`)"
+        );
+        eprintln!(
+            "view: there is no default destination and no cross-destination merge — archives are not required to agree"
+        );
+        return ExitCode::from(2);
+    }
+    let label = destination
+        .clone()
+        .unwrap_or_else(|| "(explicit --repo)".to_string());
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+    let store = BackupStore::new(cfg.clone(), chat_stasher::id::machine_id());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!("view: {e}");
+            eprintln!("view: without the key nothing was read — this is not an empty result");
+            reap_remote(&cfg, no_reap);
+            // 3, not 1: the archive was never consulted. Same reasoning as
+            // `search` — a lost key must not be indistinguishable from an
+            // archive that genuinely holds nothing.
+            return ExitCode::from(3);
+        }
+    };
+
+    let mut filter = chat_stasher::search::SearchFilter::default();
+    if let Some(m) = machine {
+        filter = filter.machine(m);
+    }
+    if let Some(p) = session {
+        filter = filter.session_id_prefix(p);
+    }
+    let report = match chat_stasher::search::search_sessions(&store, &mk, &filter) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("view: cannot read `{}`: {e}", cfg.repo_root);
+            eprintln!("view: this is not an empty destination — the archive was not read");
+            reap_remote(&cfg, no_reap);
+            return ExitCode::from(3);
+        }
+    };
+    // ssh masters are reaped before the server starts, not after: the serve loop
+    // can sit idle for minutes, and there is nothing left to read by then.
+    reap_remote(&cfg, no_reap);
+
+    for path in &report.unreadable {
+        println!("  !! unreadable: {path}");
+    }
+    if report.hits.is_empty() {
+        println!("{}", report.no_hit_line());
+        println!("view: nothing to show, so no server was started");
+        return if report.complete() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::from(3)
+        };
+    }
+
+    let data = chat_stasher::view::ViewData::from_report(&report, label);
+    let token = match chat_stasher::view::new_token() {
+        Ok(t) => t,
+        Err(e) => {
+            // No weaker fallback on purpose: a guessable token on a socket every
+            // local program can reach is worse than refusing to serve.
+            eprintln!("view: cannot read OS randomness for the access token: {e}");
+            eprintln!("view: refusing to serve without a strong token");
+            return ExitCode::from(3);
+        }
+    };
+    let listener = match chat_stasher::view::bind_ephemeral() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("view: cannot bind 127.0.0.1:0 — {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let addr = match listener.local_addr() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("view: bound but cannot read local address — {e}");
+            return ExitCode::from(3);
+        }
+    };
+
+    let idle = if idle_timeout == 0 {
+        Duration::from_secs(u64::MAX / 2)
+    } else {
+        Duration::from_secs(idle_timeout)
+    };
+    let url = format!("http://{addr}/?token={token}");
+    println!("[view] destination  : {}", data.destination_label);
+    println!(
+        "[view] snapshots    : {} scanned / {} in repo",
+        data.snapshots_scanned, data.snapshots_in_repo
+    );
+    println!(
+        "[view] sessions     : {} listed / {} seen",
+        data.sessions.len(),
+        data.sessions_seen
+    );
+    println!("[view] data blobs read: {}", data.data_blobs_read);
+    println!("[view] bound        : {addr} (loopback only, OS-assigned port)");
+    println!(
+        "[view] idle timeout : {}",
+        if idle_timeout == 0 {
+            "none (Ctrl+C to exit)".to_string()
+        } else {
+            format!("{idle_timeout}s")
+        }
+    );
+    println!("[view] payload      : NOT loaded — metadata tier only, no full-text search");
+    println!("[view] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it.");
+    println!("{url}");
+
+    if no_open {
+        println!("[view] browser      : not opened (--no-open)");
+    } else if let Err(e) = chat_stasher::view::open_in_browser(&url) {
+        eprintln!("[view] browser      : could not open ({e}) — use the URL above, or --no-open");
+    } else {
+        println!("[view] browser      : opened");
+    }
+
+    let stats = match chat_stasher::view::serve(&listener, &token, &data, idle) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("view: serve loop failed: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    println!(
+        "[view] exiting      : idle for {}s · requests served={} rejected={}",
+        idle_timeout, stats.served, stats.rejected
+    );
+
+    if !report.complete() {
+        println!(
+            "view: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more",
+            data.destination_label,
+            report.unreadable.len()
+        );
+        return ExitCode::from(3);
+    }
+    ExitCode::SUCCESS
 }
 
 fn cmd_doctor() -> ExitCode {
