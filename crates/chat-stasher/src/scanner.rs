@@ -35,13 +35,16 @@
 
 use crate::config::Config;
 use crate::models::{HarnessSource, SessionRecord};
-use crate::sqlite_probe::{probe_sqlite_store, SqliteSessionProbe};
+use crate::sqlite_probe::{
+    enumerate_opencode_sessions, probe_sqlite_store, sqlite_millis_to_system_time,
+    SqliteSessionProbe,
+};
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Registry file, relative to the repo root, that drives the scan.
 pub const REGISTRY_REL_PATH: &str = "data/harness-registry-v1.json";
@@ -658,6 +661,41 @@ fn probe_harness(
                             probe.note = format!(
                                 "{env_note}SQLite 只读枚举 {expected}（bytes 含 .db+-wal+-shm）；过滤前 {candidate_count} / 过滤后 {count} 会话"
                             );
+                            if h.id == "opencode" {
+                                match enumerate_opencode_sessions(&root) {
+                                    Ok(rows) => {
+                                        let records: Vec<SessionRecord> = rows
+                                            .into_iter()
+                                            .map(|row| SessionRecord {
+                                                id: crate::id::SessionIdentity {
+                                                    source_short: source.short(),
+                                                    machine: machine.to_string(),
+                                                    native_id: row.id,
+                                                }
+                                                .id(),
+                                                absolute_path: root.clone(),
+                                                byte_size: 0,
+                                                mtime: sqlite_millis_to_system_time(
+                                                    row.time_updated,
+                                                )
+                                                .unwrap_or(UNIX_EPOCH),
+                                                source,
+                                                compressed: false,
+                                            })
+                                            .collect();
+                                        let record_count = records.len();
+                                        report.records.extend(records);
+                                        probe
+                                            .note
+                                            .push_str(&format!("; SessionRecord={record_count}"));
+                                    }
+                                    Err(error) => {
+                                        probe.note.push_str(&format!(
+                                            "; SessionRecord 枚举失败（{error}）"
+                                        ));
+                                    }
+                                }
+                            }
                         }
                         SqliteSessionProbe::SchemaMismatch { actual } => {
                             probe.note = format!(

@@ -158,12 +158,12 @@ enum Command {
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
     },
-    /// Read every file-backed session returned by `status` into our own stage.
+    /// Read every scanner session returned by `status` into our own stage.
     ///
-    /// Harness files are opened read-only. JSONL sources use a durable byte
-    /// offset plus committed-prefix SHA-256; only complete newline-terminated
-    /// records are sealed. The cursor state lives under chat-stasher's own
-    /// data directory, not under any harness directory.
+    /// Harness sources are opened read-only. File-backed JSONL sources use a
+    /// durable byte offset plus committed-prefix SHA-256; opencode SQLite
+    /// sessions use a durable logical high-water cursor. The cursor state lives
+    /// under chat-stasher's own data directory, not under any harness directory.
     Collect {
         /// Stage directory that holds the sealed `sessions/` tree.
         #[arg(long)]
@@ -372,6 +372,10 @@ fn cmd_collect(stage: &Path, machine: Option<&str>, shard_bucket_cap: usize) -> 
     println!(
         "[collect] scanner records : {} (only SessionRecord values; not the full recognised-session count)",
         report.scanned_records
+    );
+    println!(
+        "[collect] opencode records: {} (one virtual SessionRecord per SQLite session)",
+        report.scanned_opencode_records
     );
     println!(
         "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values",
