@@ -152,8 +152,7 @@ fn describe(by_struct: &BTreeMap<Vec<String>, Vec<&str>>) -> String {
 #[test]
 fn every_harness_os_cells_structurally_consistent() {
     let registry = scanner::load_registry_from_repo().expect("registry must load");
-    let whitelist: HashMap<&str, &str> =
-        whitelisted_structure_reasons().iter().copied().collect();
+    let whitelist: HashMap<&str, &str> = whitelisted_structure_reasons().iter().copied().collect();
 
     let mut checked = 0usize;
     let mut whitelisted = 0usize;
@@ -194,7 +193,10 @@ fn every_harness_os_cells_structurally_consistent() {
         );
     }
     // Sanity: we must actually have exercised the loop, or the test is a no-op.
-    assert!(checked >= 10, "expected to check >=10 harnesses, checked {checked}");
+    assert!(
+        checked >= 10,
+        "expected to check >=10 harnesses, checked {checked}"
+    );
     println!(
         "checked {checked} harnesses (whitelisted {whitelisted} for genuine platform differences)"
     );
