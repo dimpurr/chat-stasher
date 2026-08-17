@@ -15,20 +15,29 @@
 # Real conversation payloads are read as opaque fixture bytes and never shown.
 #
 # Usage:
-#   bash scripts/release-gate.sh            # happy path, must end GATE: PASS
-#   bash scripts/release-gate.sh --selftest # negative path, must end GATE: FAIL
+#   bash scripts/release-gate.sh                   # synthetic happy path
+#   bash scripts/release-gate.sh --selftest        # synthetic negative path
+#   bash scripts/release-gate.sh --real-data       # explicit real-data opt-in
 
 set -euo pipefail
 
 # --------------------------------------------------------------------- config
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/debug/chat-stasher"
-SRC_ROOT="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 MACHINE="gate-mbp"        # fixed path partition + snapshot host
-N_SESSIONS=3              # real sessions to archive
+N_SESSIONS=3              # sessions to archive in either fixture mode
 SHARDS=4                  # sealed shards per session
 TARGET_BYTES=$((1500 * 1024))   # ~1.5 MiB cap per session -> ~4.5 MiB total
+SYNTH_LINES=20000         # deterministic JSONL source; cap still leaves >16 KiB shards
 
-SELFTEST="${1:-}"
+SELFTEST=0
+REAL_DATA=0
+for arg in "$@"; do
+  case "$arg" in
+    --selftest) SELFTEST=1 ;;
+    --real-data) REAL_DATA=1 ;;
+    *) echo "[gate] unknown argument: $arg"; exit 2 ;;
+  esac
+done
 
 START=$(date +%s)
 TMP="$(mktemp -d)"
@@ -64,16 +73,37 @@ shard_count() {
 }
 
 # ------------------------------------------------------------------- step 1
-gate "step 1/7 · build fixtures (cp real jsonl -> sealed shards)"
+gate "step 1/7 · build fixtures (JSONL -> sealed shards)"
 mkdir -p "$STAGE"
 sources=()
-while IFS= read -r p; do sources+=("$p"); done < <(
-  find "$SRC_ROOT" -name '*.jsonl' -type f -exec stat -f '%z %N' {} \; 2>/dev/null \
-    | sort -rn | head -n "$N_SESSIONS" | awk '{print $2}'
-)
-if [ "${#sources[@]}" -lt "$N_SESSIONS" ]; then
-  echo "[gate] only ${#sources[@]} candidate sessions found under $SRC_ROOT"
-  fail_gate
+if [ "$REAL_DATA" -eq 1 ]; then
+  SRC_ROOT="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+  if [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
+    SRC_LABEL="CLAUDE_PROJECTS_DIR override"
+  else
+    SRC_LABEL='$HOME/.claude/projects'
+  fi
+  while IFS= read -r p; do sources+=("$p"); done < <(
+    find "$SRC_ROOT" -name '*.jsonl' -type f -exec stat -f '%z %N' {} \; 2>/dev/null \
+      | sort -rn | head -n "$N_SESSIONS" | awk '{print $2}'
+  )
+  if [ "${#sources[@]}" -lt "$N_SESSIONS" ]; then
+    echo "[gate] only ${#sources[@]} candidate sessions found under $SRC_LABEL"
+    fail_gate
+  fi
+  gate "!!! REAL DATA OPT-IN: cp ${#sources[@]} files from $SRC_LABEL (cp only; no mv) !!!"
+else
+  SYNTH_ROOT="$TMP/synthetic-sources"
+  mkdir -p "$SYNTH_ROOT"
+  for ((n = 1; n <= N_SESSIONS; n++)); do
+    synth="$SYNTH_ROOT/synthetic-$n.jsonl"
+    awk -v sid="$n" -v count="$SYNTH_LINES" 'BEGIN {
+      for (i = 1; i <= count; i++)
+        printf "{\"session\":\"synthetic-%d\",\"seq\":%d,\"text\":\"B25 synthetic payload %06d\"}\n", sid, i, i
+    }' > "$synth"
+    sources+=("$synth")
+  done
+  gate "synthetic mode: generated ${#sources[@]} deterministic JSONL sessions; no real-data directory access"
 fi
 
 # session metadata: (id, shard_count, bytes, sha) — the golden manifest.
@@ -85,9 +115,13 @@ for src in "${sources[@]}"; do
   sdir="$STAGE/sessions/$MACHINE/$sid"
   mkdir -p "$sdir"
 
-  # cap the real session to TARGET_BYTES, keeping whole lines.
+  # Copy the selected source into scratch, then cap to TARGET_BYTES, keeping whole lines.
   cap="$TMP/cap.$n"
-  head -c "$TARGET_BYTES" "$src" > "$cap"
+  cp "$src" "$cap"
+  if [ "$(wc -c < "$cap")" -gt "$TARGET_BYTES" ]; then
+    head -c "$TARGET_BYTES" "$cap" > "$cap.truncated"
+    cp "$cap.truncated" "$cap"
+  fi
   lines=$(wc -l < "$cap")
   per=$(( (lines + SHARDS - 1) / SHARDS ))
   if [ "$per" -lt 1 ]; then per=1; fi
@@ -109,7 +143,20 @@ for src in "${sources[@]}"; do
   shards=$(shard_count "$sdir")
   gate "  fixture $sid  shards=$shards  bytes=$bytes  sha256=${sha:0:12}"
 done
-gate "step 1 OK · ${#sources[@]} real sessions, ~$(du -sk "$STAGE" | awk '{print $1}') KiB staging"
+if [ "$REAL_DATA" -eq 0 ]; then
+  max_shard_bytes=0
+  for sid in "${SESS_IDS[@]}"; do
+    sdir="$STAGE/sessions/$MACHINE/$sid"
+    shards=$(shard_count "$sdir")
+    [ "$shards" -ge 3 ] || { echo "[gate] synthetic $sid has $shards shards (expected >= 3)"; fail_gate; }
+    session_max=$(find "$sdir" -name '*.jsonl' -type f -exec wc -c {} \; | awk 'max < $1 { max = $1 } END { print max + 0 }')
+    [ "$session_max" -gt "$max_shard_bytes" ] && max_shard_bytes="$session_max"
+    gate "  synthetic shape $sid  shards=$shards  max_shard_bytes=$session_max"
+  done
+  [ "$max_shard_bytes" -gt 16384 ] || { echo "[gate] synthetic max shard is $max_shard_bytes bytes (expected > 16384)"; fail_gate; }
+  gate "synthetic shape OK · every session has >=3 shards; max shard >16 KiB"
+fi
+gate "step 1 OK · ${#sources[@]} sessions, ~$(du -sk "$STAGE" | awk '{print $1}') KiB staging"
 
 # ------------------------------------------------------------------- step 2
 gate "step 2/7 · push -> fresh local repo"
@@ -181,14 +228,23 @@ echo "$out" | grep -q 'L3 verdict       : OK' || { echo "[gate] verify l3 not OK
 gate "step 6 OK · l3 reconcile: archived content == sealed originals"
 
 # ------------------------------------------------------------------- step 7
-gate "step 7/7 · doctor (runs without error)"
-if ! out=$("$BIN" doctor 2>&1); then
-  echo "$out"; echo "[gate] doctor errored"; fail_gate
+if [ "$REAL_DATA" -eq 0 ]; then
+  DOCTOR_HOME="$TMP/doctor-home"
+  mkdir -p "$DOCTOR_HOME"
+  gate "step 7/7 · doctor (synthetic mode, isolated HOME)"
+  if ! out=$(HOME="$DOCTOR_HOME" "$BIN" doctor 2>&1); then
+    echo "$out"; echo "[gate] doctor errored"; fail_gate
+  fi
+else
+  gate "step 7/7 · doctor (real-data opt-in)"
+  if ! out=$("$BIN" doctor 2>&1); then
+    echo "$out"; echo "[gate] doctor errored"; fail_gate
+  fi
 fi
 gate "step 7 OK · doctor ran clean"
 
 # ---------------------------------------------------------------- selftest
-if [ "$SELFTEST" = "--selftest" ]; then
+if [ "$SELFTEST" -eq 1 ]; then
   echo
   gate "SELFTEST · injecting 1 byte into a sealed shard (staging SOURCE, not pack)"
   # Snapshot the pristine staging tree as the ORIGINAL golden manifest.
