@@ -87,6 +87,10 @@ cannot recreate:
   file), the chat platforms, and one row we honestly could not resolve: what
   other browser extensions can observe. It also lists the weaknesses and the
   threats we do **not** defend against.
+- **[`docs/privacy.md`](docs/privacy.md)** — the store-listing privacy policy:
+  what is collected (nothing, and how you can verify that yourself), where data
+  is stored, who it is shared with, how long it is kept, how to delete it, and
+  the known plaintext window. Written for outside readers and store reviewers.
 - **[`SECURITY.md`](SECURITY.md)** — how to report a vulnerability, what is in
   scope, and what response you can and cannot expect. Reports go to
   `work@team.iopho.com` rather than a public issue.
