@@ -1165,9 +1165,20 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
                 break;
             }
             '~' => {
+                // `~` means "home" only as the *leading* token of the template
+                // — the same rule [`expand_tilde`] applies to a configured
+                // path. Anywhere else it is an ordinary filename character:
+                // Windows spells a long user name's 8.3 short name `RUNNER~1`,
+                // so `C:\Users\RUNNER~1\...` is a perfectly resolvable absolute
+                // path and must not be mistaken for an unknown `~something`.
+                if !out.is_empty() {
+                    out.push('~');
+                    rest = &rest[1..];
+                    continue;
+                }
                 if rest == "~" {
                     // Template is exactly `~`.
-                    return Some((PathBuf::from(out).join(home_dir()), false));
+                    return Some((home_dir(), false));
                 }
                 if let Some(tail) = rest.strip_prefix("~/") {
                     out.push_str(&home_dir().to_string_lossy());
@@ -1175,7 +1186,7 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
                     rest = tail;
                     continue;
                 }
-                return None; // `~something` — not a shape we know.
+                return None; // leading `~something` — not a shape we know.
             }
             '$' => {
                 let name_len = rest[1..]
@@ -1526,6 +1537,47 @@ mod tests {
             root,
             home.path().join(".local/share/zed/threads/threads.db")
         );
+    }
+
+    /// A `~` inside a path component is a filename character, not a home
+    /// marker — Windows 8.3 short names (`RUNNER~1`) are the everyday case.
+    /// A *leading* `~something` is still refused: unknown stays unknown.
+    #[test]
+    fn tilde_inside_a_component_is_a_literal_not_home() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", dir.path());
+
+        let (root, is_file) =
+            static_prefix_root(r"C:\Users\RUNNER~1\AppData\Local\Temp\gemini\chats").unwrap();
+        assert_eq!(
+            root,
+            PathBuf::from(r"C:\Users\RUNNER~1\AppData\Local\Temp\gemini\chats")
+        );
+        assert!(!is_file);
+
+        let (root, _) = static_prefix_root("/var/folders/a~b/T/.tmpX/chats").unwrap();
+        assert_eq!(root, PathBuf::from("/var/folders/a~b/T/.tmpX/chats"));
+
+        // `%USERPROFILE%` expansion still happens, and a short name after it is
+        // still literal.
+        let (root, _) = static_prefix_root(r"%USERPROFILE%\PROGRA~1\x").unwrap();
+        assert_eq!(
+            root,
+            PathBuf::from(format!("{}\\PROGRA~1\\x", dir.path().display()))
+        );
+
+        // Leading forms are untouched.
+        assert_eq!(static_prefix_root("~").unwrap().0, dir.path());
+        assert_eq!(
+            static_prefix_root("~/.claude/projects").unwrap().0,
+            dir.path().join(".claude/projects")
+        );
+        assert!(
+            static_prefix_root("~foo/bar").is_none(),
+            "开头的 `~something` 依然锚不住：未知不能当成空"
+        );
+        let _ = dir;
     }
 
     #[test]
