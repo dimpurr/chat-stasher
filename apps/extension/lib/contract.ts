@@ -109,6 +109,22 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     webSocketCapture: false,
   },
   {
+    id: 'perplexity',
+    origins: ['https://www.perplexity.ai'],
+    // 🔴 C27 · 只登记会话列表这一条精确路径；正文路径没有出处，不能放宽成前缀。
+    pathHints: ['/rest/thread/list_ask_threads'],
+    methods: ['POST'],
+    status: { min: 200, max: 299 },
+    // 回溯枚举器会对列表形状做更严格的顶层数组 + thread_id 检查。
+    // 这里的通用 capture gate 只负责不把非 JSON 当作这个平台的流量。
+    responseShape: { encoding: 'json' },
+    // 列表响应不是正文捕获；本单也没有单条正文 URL 的出处，因此不猜 URL id。
+    sessionIdPatterns: [],
+    // R26 三源交叉（2026-08-17）；未做真实端到端验证。
+    credibility: 'from-source',
+    webSocketCapture: false,
+  },
+  {
     id: 'chatgpt',
     origins: ['https://chatgpt.com', 'https://chat.openai.com'],
     pathHints: ['/backend-api/conversation/'],

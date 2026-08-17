@@ -64,7 +64,11 @@ export type EnumTruncation =
   /** 记录里没有游标字段（DeepSeek 的 seq_id）⇒ 只枚举到了当前这一页。 */
   | 'cursor-missing'
   /** 响应里没有「还有没有下一页」这个布尔信号 ⇒ 不知道后面还有没有，停。 */
-  | 'has-more-missing';
+  | 'has-more-missing'
+  /** Perplexity 返回空页；接口没有明确终止字段，这是客户端推断的停点。 */
+  | 'empty-page-inferred'
+  /** Perplexity 返回短页；接口没有明确终止字段，这是客户端推断的停点。 */
+  | 'short-page-inferred';
 
 export interface HaltRecord {
   reason: HaltReason;
@@ -120,6 +124,8 @@ export interface BackfillState {
    *              offset 式翻页（ChatGPT）永远不写它。
    *  · truncated 🔴 **枚举是「读完了」还是「读不下去了」**。非空表示后者，
    *              complete 虽然是 true，但它【不是】「全部列完」的意思。
+   *              例外是 Perplexity 的空页/短页推断：它们没有接口终止信号，
+   *              因此 truncated 非空但 complete 保持 false，避免把推断冒充确定完成。
    *              没有这个字段，两种结局在账本上会长得一模一样。
    */
   enumCursor: { offset: number; complete: boolean; cursor?: number | null; truncated?: EnumTruncation };
