@@ -8,6 +8,12 @@ export const CAPTURE_MESSAGE = '__chat_stasher_capture__';
 export const MAIN_READY_MESSAGE = '__chat_stasher_main_ready__';
 export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
 export const MAIN_VERIFY_RESULT_MESSAGE = '__chat_stasher_main_verify_result__';
+/**
+ * Page-world signal for an OBSERVED WebSocket frame. Deliberately a separate
+ * name from CAPTURE_MESSAGE: observation is not capture, nothing downstream
+ * saves it yet, and the bridge must not mistake one for the other.
+ */
+export const WS_OBSERVED_MESSAGE = '__chat_stasher_ws_observed__';
 
 /** Shared page-world marker: both injection paths consult the same state. */
 export const PAGE_HOOK_VERSION = 'v1';
@@ -44,6 +50,14 @@ export interface ChatPlatform {
   sessionIdPatterns: readonly string[];
   /** Source-backed is not the same as live verified. */
   credibility: CaptureConfidence;
+  /**
+   * Opt-in, per row: "this platform carries conversation data over WebSocket".
+   * Absent/false (the default for every row shipped today) means the MAIN-world
+   * WebSocket wrapper observes NOTHING on that origin. Turning it on is how a
+   * future task onboards a WS platform; it is not something to flip casually,
+   * because it is the only switch that makes us read frame payloads at all.
+   */
+  webSocketCapture?: boolean;
 }
 
 /**
@@ -90,6 +104,9 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // The external API route/shape differences may represent different entry
     // points or versions; this task changes credibility only, not match data.
     credibility: 'from-source',
+    // No shipped row observes WebSocket frames. Stated explicitly, not left to
+    // the default, so that "did anyone turn this on?" is one grep away.
+    webSocketCapture: false,
   },
   {
     id: 'chatgpt',
@@ -103,6 +120,9 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     },
     sessionIdPatterns: ['/backend-api/conversation/([0-9a-fA-F-]{8,})'],
     credibility: 'from-source',
+    // No shipped row observes WebSocket frames. Stated explicitly, not left to
+    // the default, so that "did anyone turn this on?" is one grep away.
+    webSocketCapture: false,
   },
   {
     id: 'gemini',
@@ -116,6 +136,9 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     },
     sessionIdPatterns: ['/app/([A-Za-z0-9_-]{8,})'],
     credibility: 'from-source',
+    // No shipped row observes WebSocket frames. Stated explicitly, not left to
+    // the default, so that "did anyone turn this on?" is one grep away.
+    webSocketCapture: false,
   },
   {
     id: 'claude',
@@ -175,6 +198,9 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // but ships NO LICENSE, so it was read for architecture only and no code
     // from it was used.
     credibility: 'from-source',
+    // No shipped row observes WebSocket frames. Stated explicitly, not left to
+    // the default, so that "did anyone turn this on?" is one grep away.
+    webSocketCapture: false,
   },
 ];
 
