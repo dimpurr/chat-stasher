@@ -28,8 +28,10 @@
 //! creates or touches `-wal`/`-shm`, so the user's live Cursor/Grok stores
 //! stay byte-identical.
 
-use rusqlite::{types::ValueRef, Connection, OpenFlags};
-use serde_json::Value;
+use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -154,6 +156,45 @@ pub struct SqliteStoreProbe {
     pub sessions: SqliteSessionProbe,
 }
 
+/// Metadata for one opencode session row. The scanner only materialises these
+/// fields; message and part bodies are loaded later by `collect`, never during
+/// the metadata-only scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCodeSessionRow {
+    pub id: String,
+    pub time_created: i64,
+    pub time_updated: i64,
+}
+
+/// A deterministic high-water mark for one opencode session. SQLite has no
+/// file offset for logical rows, so the collector persists the database
+/// fingerprint plus row counts and the greatest `(time_updated, id)` key for
+/// both message tables. Any mismatch causes a complete session re-export,
+/// deliberately preferring a measurable duplicate over a silent omission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCodeHighWater {
+    pub time_updated: i64,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCodeCursor {
+    pub store_fingerprint: String,
+    pub session_time_updated: i64,
+    pub message_count: u64,
+    pub message_high_water: Option<OpenCodeHighWater>,
+    pub part_count: u64,
+    pub part_high_water: Option<OpenCodeHighWater>,
+}
+
+/// One complete, private-to-the-stage export unit. The JSON line is never
+/// printed by the CLI; only its byte count and SHA-256 are reported.
+#[derive(Debug, Clone)]
+pub struct OpenCodeSessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+}
+
 /// Probe one SQLite store, read-only (`mode=ro`, never a write-capable
 /// connection), using the default opencode schema. Shared by the doctor
 /// footprint walk and the scanner so both tables report the same count *and*
@@ -274,6 +315,281 @@ pub fn sqlite_store_bytes(db: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Fingerprint only SQLite file metadata, never application rows. A changed
+/// `.db` or `-wal`, or a changed-size `-shm`, makes every previously committed
+/// opencode cursor conservative: the next collect re-exports the affected
+/// session. The `-shm` mtime is excluded because read-only SQLite locking may
+/// update it without changing application data.
+pub fn sqlite_store_fingerprint(db: &Path) -> String {
+    let mut digest = Sha256::new();
+    for (label, path) in [
+        ("db", db.to_path_buf()),
+        ("wal", sidecar(db, "-wal")),
+        ("shm", sidecar(db, "-shm")),
+    ] {
+        digest.update(label.as_bytes());
+        match fs::metadata(path) {
+            Ok(metadata) => {
+                digest.update(b"present");
+                digest.update(metadata.len().to_le_bytes());
+                // SQLite read-only connections may update the shared-memory
+                // lock area while doing no database write. Its mtime is
+                // therefore deliberately excluded; the sidecar size still
+                // distinguishes the presence/shape of the live WAL store.
+                if label != "shm" {
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default();
+                    digest.update(modified.to_le_bytes());
+                }
+            }
+            Err(_) => digest.update(b"missing"),
+        }
+    }
+    hex_digest(&digest.finalize())
+}
+
+/// Enumerate opencode session rows without touching message or part bodies.
+/// Every connection is opened through the same `mode=ro` path as the generic
+/// SQLite probe.
+pub fn enumerate_opencode_sessions(db: &Path) -> Result<Vec<OpenCodeSessionRow>, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    ensure_opencode_schema(&conn)?;
+    let mut statement = conn
+        .prepare("SELECT id, time_created, time_updated FROM session ORDER BY time_created, id")
+        .map_err(|error| format!("读取 session 行失败: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(OpenCodeSessionRow {
+                id: row.get(0)?,
+                time_created: row.get(1)?,
+                time_updated: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("枚举 session 行失败: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取 session 行失败: {error}"))
+}
+
+/// Read the logical cursor for one session. This is the cheap second-pass
+/// check used by collect before it decides whether to load any message body.
+pub fn opencode_session_cursor(db: &Path, session_id: &str) -> Result<OpenCodeCursor, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    ensure_opencode_schema(&conn)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("开始只读事务失败: {error}"))?;
+    opencode_session_cursor_with_conn(&conn, db, session_id)
+}
+
+/// Export exactly one session as exactly one JSON line. The line is returned
+/// to collect as bytes and is never printed. Session, message, and part rows
+/// are read from one SQLite snapshot so a concurrent writer cannot combine
+/// rows from two logical database versions.
+pub fn read_opencode_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<OpenCodeSessionSnapshot, String> {
+    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+    ensure_opencode_schema(&conn)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("开始只读事务失败: {error}"))?;
+    let cursor = opencode_session_cursor_with_conn(&conn, db, session_id)?;
+
+    let session = conn
+        .query_row("SELECT * FROM session WHERE id = ?1", [session_id], |row| {
+            row_to_json_object(row, false)
+        })
+        .map_err(|error| format!("读取 session 行失败: {error}"))?;
+
+    let mut messages = Vec::new();
+    {
+        let mut statement = conn
+            .prepare("SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created, id")
+            .map_err(|error| format!("读取 message 行失败: {error}"))?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                let id: String = row.get("id")?;
+                Ok((id, row_to_json_object(row, true)?))
+            })
+            .map_err(|error| format!("枚举 message 行失败: {error}"))?;
+        for row in rows {
+            messages.push(row.map_err(|error| format!("读取 message 行失败: {error}"))?);
+        }
+    }
+
+    let mut parts_by_message: std::collections::BTreeMap<String, Vec<Value>> =
+        std::collections::BTreeMap::new();
+    {
+        let mut statement = conn
+            .prepare(
+                "SELECT * FROM part WHERE session_id = ?1 ORDER BY message_id, time_created, id",
+            )
+            .map_err(|error| format!("读取 part 行失败: {error}"))?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                let message_id: String = row.get("message_id")?;
+                Ok((message_id, row_to_json_object(row, true)?))
+            })
+            .map_err(|error| format!("枚举 part 行失败: {error}"))?;
+        for row in rows {
+            let (message_id, part) = row.map_err(|error| format!("读取 part 行失败: {error}"))?;
+            parts_by_message.entry(message_id).or_default().push(part);
+        }
+    }
+
+    let messages: Vec<Value> = messages
+        .into_iter()
+        .map(|(id, mut message)| {
+            if let Value::Object(object) = &mut message {
+                let parts = parts_by_message.remove(&id).unwrap_or_default();
+                object.insert("parts".to_string(), Value::Array(parts));
+            }
+            message
+        })
+        .collect();
+    let orphan_parts: Vec<Value> = parts_by_message.into_values().flatten().collect();
+    let envelope = serde_json::json!({
+        "schema": "chat-stasher.opencode.session.v1",
+        "session": session,
+        "messages": messages,
+        "orphan_parts": orphan_parts,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("序列化 opencode 会话失败: {error}"))?;
+    Ok(OpenCodeSessionSnapshot { cursor, json_line })
+}
+
+fn ensure_opencode_schema(conn: &Connection) -> Result<(), String> {
+    for (table, required) in [
+        ("session", ["id", "time_created", "time_updated"].as_slice()),
+        (
+            "message",
+            ["id", "session_id", "time_created", "time_updated", "data"].as_slice(),
+        ),
+        (
+            "part",
+            [
+                "id",
+                "message_id",
+                "session_id",
+                "time_created",
+                "time_updated",
+                "data",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        let columns = sqlite_table_columns(conn, table)
+            .map_err(|error| format!("读取 {table} 表 schema 失败: {error}"))?;
+        if !required
+            .iter()
+            .all(|column| columns.iter().any(|actual| actual == column))
+        {
+            return Err(format!(
+                "opencode schema 不匹配: table={table} columns={}",
+                columns.join(",")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn opencode_session_cursor_with_conn(
+    conn: &Connection,
+    db: &Path,
+    session_id: &str,
+) -> Result<OpenCodeCursor, String> {
+    let session_time_updated = conn
+        .query_row(
+            "SELECT time_updated FROM session WHERE id = ?1",
+            [session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取 session 时间失败: {error}"))?
+        .ok_or_else(|| "session 行不存在".to_string())?;
+    let message_count = count_rows(conn, "message", session_id)?;
+    let message_high_water = high_water(conn, "message", session_id)?;
+    let part_count = count_rows(conn, "part", session_id)?;
+    let part_high_water = high_water(conn, "part", session_id)?;
+    Ok(OpenCodeCursor {
+        store_fingerprint: sqlite_store_fingerprint(db),
+        session_time_updated,
+        message_count,
+        message_high_water,
+        part_count,
+        part_high_water,
+    })
+}
+
+fn count_rows(conn: &Connection, table: &str, session_id: &str) -> Result<u64, String> {
+    let sql = format!("SELECT count(*) FROM \"{table}\" WHERE session_id = ?1");
+    let count = conn
+        .query_row(&sql, [session_id], |row| row.get::<_, i64>(0))
+        .map_err(|error| format!("读取 {table} 行数失败: {error}"))?;
+    u64::try_from(count).map_err(|_| format!("{table} 行数为负数"))
+}
+
+fn high_water(
+    conn: &Connection,
+    table: &str,
+    session_id: &str,
+) -> Result<Option<OpenCodeHighWater>, String> {
+    let sql = format!(
+        "SELECT time_updated, id FROM \"{table}\" WHERE session_id = ?1 ORDER BY time_updated DESC, id DESC LIMIT 1"
+    );
+    conn.query_row(&sql, [session_id], |row| {
+        Ok(OpenCodeHighWater {
+            time_updated: row.get(0)?,
+            id: row.get(1)?,
+        })
+    })
+    .optional()
+    .map_err(|error| format!("读取 {table} 高水位失败: {error}"))
+}
+
+fn row_to_json_object(row: &rusqlite::Row<'_>, parse_data: bool) -> rusqlite::Result<Value> {
+    let mut object = Map::new();
+    let statement = row.as_ref();
+    for index in 0..statement.column_count() {
+        let name = statement.column_name(index)?.to_string();
+        let value = row.get_ref(index)?;
+        object.insert(
+            name.clone(),
+            sqlite_value_to_json(value, parse_data && name == "data"),
+        );
+    }
+    Ok(Value::Object(object))
+}
+
+fn sqlite_value_to_json(value: ValueRef<'_>, parse_json: bool) -> Value {
+    match value {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(value) => Value::Number(value.into()),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ValueRef::Text(bytes) => {
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            if parse_json {
+                serde_json::from_str(&text).unwrap_or(Value::String(text))
+            } else {
+                Value::String(text)
+            }
+        }
+        ValueRef::Blob(bytes) => Value::String(format!("hex:{}", hex_digest(bytes))),
+    }
 }
 
 /// The files that make up one SQLite store: `.db`, `.db-wal`, `.db-shm`.
@@ -555,13 +871,17 @@ pub fn sqlite_schema_summary(conn: &Connection) -> String {
         .join("; ")
 }
 
-fn sqlite_millis_to_system_time(millis: i64) -> Option<SystemTime> {
+pub fn sqlite_millis_to_system_time(millis: i64) -> Option<SystemTime> {
     let duration = Duration::from_millis(millis.unsigned_abs());
     if millis >= 0 {
         UNIX_EPOCH.checked_add(duration)
     } else {
         UNIX_EPOCH.checked_sub(duration)
     }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -627,6 +947,51 @@ mod tests {
                 latest: sqlite_millis_to_system_time(2),
             }
         );
+    }
+
+    #[test]
+    fn opencode_export_is_one_session_line_with_nested_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session(id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session VALUES (?1, ?2, ?3)",
+            rusqlite::params!["session-1", 10i64, 20i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["message-1", "session-1", 11i64, 21i64, r#"{"role":"user"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "part-1",
+                "message-1",
+                "session-1",
+                12i64,
+                22i64,
+                r#"{"type":"text"}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let rows = enumerate_opencode_sessions(&db).unwrap();
+        assert_eq!(rows.len(), 1);
+        let snapshot = read_opencode_session(&db, "session-1").unwrap();
+        assert_eq!(snapshot.cursor.message_count, 1);
+        assert_eq!(snapshot.cursor.part_count, 1);
+        let json: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(json["messages"][0]["parts"].as_array().unwrap().len(), 1);
     }
 
     /// Unrecognised schema must be a loud `SchemaMismatch`, never a fake 0.

@@ -1,16 +1,18 @@
 //! Read-only collection of scanner records into sealed local stage shards.
 //!
 //! A harness file is never renamed, opened for writing, or marked in the
-//! harness directory. The collector keeps its byte offset and a SHA-256 of
-//! the committed prefix in a state file under chat-stasher's own data
-//! directory. Only bytes after a matching prefix are considered new. A
-//! mismatch (shorter file or changed committed prefix) resets the read to
-//! byte zero: that deliberately prefers measurable duplicate reads over a
-//! silent omission.
+//! harness directory. File sources keep a byte offset and a SHA-256 of the
+//! committed prefix in a state file under chat-stasher's own data directory.
+//! The opencode SQLite source keeps a logical high-water cursor instead: the
+//! store fingerprint, session update time, row counts, and greatest
+//! `(time_updated, id)` key for message and part rows. Any mismatch resets the
+//! logical read to a complete session export, deliberately preferring a
+//! measurable duplicate over a silent omission.
 
 use crate::config::Config;
 use crate::models::SessionRecord;
 use crate::scanner;
+use crate::sqlite_probe::{opencode_session_cursor, read_opencode_session, OpenCodeCursor};
 use crate::store;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,11 @@ pub struct OffsetEntry {
     pub prefix_len: u64,
     pub prefix_sha256: String,
     pub compressed: bool,
+    /// Present only for a virtual opencode SQLite record. This is the logical
+    /// cursor replacing a file byte offset; the legacy fields remain useful to
+    /// the stage-reconciliation guard and to old state files.
+    #[serde(default)]
+    pub opencode: Option<OpenCodeCursor>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +84,7 @@ pub struct ReconcileNotice {
 #[derive(Debug, Clone, Default)]
 pub struct CollectReport {
     pub scanned_records: usize,
+    pub scanned_opencode_records: usize,
     /// Harnesses with recognised sessions that produced fewer
     /// `SessionRecord`s; these sessions were not consumed by this pass.
     pub archive_gaps: Vec<scanner::ArchiveGap>,
@@ -197,6 +205,11 @@ pub fn collect_scan_report(
     let mut state = load_state(&state_path)?;
     let mut report = CollectReport {
         scanned_records: scan.records.len(),
+        scanned_opencode_records: scan
+            .records
+            .iter()
+            .filter(|record| record.source == crate::models::HarnessSource::OpenCode)
+            .count(),
         archive_gaps: scan.archive_gaps(),
         ..CollectReport::default()
     };
@@ -204,9 +217,11 @@ pub fn collect_scan_report(
     let mut records = scan.records.clone();
     records.sort_by(|a, b| a.absolute_path.cmp(&b.absolute_path));
     for record in records {
-        let key = source_key(&record.absolute_path);
+        let key = state_key(&record);
         let old = state.files.get(&key).cloned();
-        let missing_stage_shard = old.as_ref().is_some_and(|entry| entry.offset > 0)
+        let missing_stage_shard = old
+            .as_ref()
+            .is_some_and(|entry| entry.offset > 0 || entry.opencode.is_some())
             && store::sealed_shard_entries(&store::session_shard_dir(stage, machine, &record.id))?
                 .is_empty();
         if missing_stage_shard {
@@ -281,7 +296,9 @@ fn collect_one(
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<Processed> {
-    if record.compressed || is_zstd_path(&record.absolute_path) {
+    if record.source == crate::models::HarnessSource::OpenCode {
+        process_opencode(record, old, force_reset, stage, machine, bucket_cap)
+    } else if record.compressed || is_zstd_path(&record.absolute_path) {
         Ok(process_compressed(
             record,
             old,
@@ -328,6 +345,7 @@ fn process_jsonl(
             prefix_len: 0,
             prefix_sha256: sha256_hex(&[]),
             compressed: false,
+            opencode: None,
         })
     } else {
         plain_state(&record.absolute_path, new_offset)?
@@ -355,6 +373,74 @@ fn process_jsonl(
             lines_written: lines.len(),
             shard,
             reset: data.reset,
+            compressed: false,
+        },
+    })
+}
+
+fn process_opencode(
+    record: &SessionRecord,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+) -> anyhow::Result<Processed> {
+    let session_id = record
+        .id
+        .splitn(3, '.')
+        .nth(2)
+        .ok_or_else(|| anyhow!("invalid opencode session id"))?;
+    let cursor = opencode_session_cursor(&record.absolute_path, session_id)
+        .map_err(|error| anyhow!("读取 opencode 会话游标失败: {error}"))?;
+    if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
+        let source_bytes = old.map(|entry| entry.offset).unwrap_or(0);
+        return Ok(Processed {
+            state: old.expect("checked above").clone(),
+            outcome: CollectOutcome {
+                session_prefix: id_prefix(&record.id),
+                source_path_sha256: path_digest(&record.absolute_path),
+                source_bytes,
+                bytes_read: 0,
+                prefix_bytes_validated: 0,
+                lines_written: 0,
+                shard: None,
+                reset: false,
+                compressed: false,
+            },
+        });
+    }
+
+    let snapshot = read_opencode_session(&record.absolute_path, session_id)
+        .map_err(|error| anyhow!("读取 opencode 会话快照失败: {error}"))?;
+    let source_bytes = snapshot.json_line.len() as u64;
+    let digest = sha256_hex(&snapshot.json_line);
+    let lines = vec![snapshot.json_line];
+    let shard = Some(store::write_sealed_shard_bytes_with_cap(
+        store::StageWriter::Collect,
+        stage,
+        machine,
+        &record.id,
+        &lines,
+        bucket_cap,
+    )?);
+    Ok(Processed {
+        state: OffsetEntry {
+            offset: source_bytes,
+            prefix_len: source_bytes,
+            prefix_sha256: digest,
+            compressed: false,
+            opencode: Some(snapshot.cursor),
+        },
+        outcome: CollectOutcome {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+            source_bytes,
+            bytes_read: source_bytes,
+            prefix_bytes_validated: 0,
+            lines_written: 1,
+            shard,
+            reset: old.is_some() || force_reset,
             compressed: false,
         },
     })
@@ -409,6 +495,7 @@ fn process_whole_file(
             prefix_len: source_len,
             prefix_sha256: digest,
             compressed: false,
+            opencode: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -473,6 +560,7 @@ fn process_compressed(
             prefix_len: 0,
             prefix_sha256: sha256_hex(&[]),
             compressed: true,
+            opencode: None,
         }
     } else {
         OffsetEntry {
@@ -480,6 +568,7 @@ fn process_compressed(
             prefix_len: source_len,
             prefix_sha256: digest,
             compressed: true,
+            opencode: None,
         }
     };
     Ok(Processed {
@@ -596,6 +685,7 @@ fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
         prefix_len: offset,
         prefix_sha256: sha256_hex(&prefix),
         compressed: false,
+        opencode: None,
     })
 }
 
@@ -636,6 +726,15 @@ fn source_key(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+fn state_key(record: &SessionRecord) -> String {
+    let path = source_key(&record.absolute_path);
+    if record.source == crate::models::HarnessSource::OpenCode {
+        format!("{path}\0{}", record.id)
+    } else {
+        path
+    }
 }
 
 fn path_digest(path: &Path) -> String {
