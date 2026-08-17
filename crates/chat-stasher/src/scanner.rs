@@ -170,6 +170,65 @@ pub fn local_appdata_dir() -> PathBuf {
     xdg_base_with("LOCALAPPDATA", &crate::config::home_dir(), "AppData/Local")
 }
 
+/// Where a `dirs`-based tool keeps its per-user cache, spelled the way
+/// `platform` spells it. Ordered most-specific first.
+///
+/// The three spellings are `dirs`' own (dirs-6.0.0 `src/mac.rs:9`,
+/// `src/lin.rs:8`, `src/win.rs:10`). The Windows one is the reason this
+/// function exists: there the cache is `%LOCALAPPDATA%`, which is **not** a
+/// child of `$HOME`, so a `$HOME`-derived guess does not merely land in the
+/// wrong place — it lands nowhere, and a caller that clears "the cache" clears
+/// nothing while reporting success.
+///
+/// More than one candidate is returned so that a platform whose spelling cannot
+/// be exercised from here still gets a second chance: callers match on content,
+/// and a directory that does not exist costs nothing to skip.
+///
+/// Pure on purpose: every input is an argument, so the Windows spelling can be
+/// asserted from a Mac. Same reason `static_prefix_root` is pure.
+pub fn user_cache_dirs_on(
+    platform: &str,
+    home: &Path,
+    xdg_cache_home: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut out = match platform {
+        // `dirs::cache_dir()` = `known_folder_local_app_data()`, falling back to
+        // the documented `%USERPROFILE%\AppData\Local` — same shape as
+        // `local_appdata_dir`.
+        "windows" => vec![local_app_data
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join("AppData/Local"))],
+        "macos" => vec![home.join("Library/Caches")],
+        // `$XDG_CACHE_HOME` first: a Linux box that sets it breaks a
+        // `~/.cache` guess in exactly the way Windows does.
+        _ => vec![xdg_cache_home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".cache"))],
+    };
+    // Second chance for the one spelling that cannot be exercised from the
+    // other platforms: `dirs` reads the Windows path from the Known Folder API
+    // rather than from `%LOCALAPPDATA%`, and the two are only *documented* to
+    // agree.
+    let documented_default = home.join("AppData/Local");
+    if platform == "windows" && !out.contains(&documented_default) {
+        out.push(documented_default);
+    }
+    out
+}
+
+/// [`user_cache_dirs_on`] for the running platform and environment.
+pub fn user_cache_dirs() -> Vec<PathBuf> {
+    let home = crate::config::home_dir();
+    let xdg = env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let local = env::var_os("LOCALAPPDATA")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    user_cache_dirs_on(current_platform(), &home, xdg.as_deref(), local.as_deref())
+}
+
 /// Currently running platform's registry key.
 pub fn current_platform() -> &'static str {
     if cfg!(target_os = "macos") {

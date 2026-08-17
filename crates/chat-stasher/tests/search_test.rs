@@ -306,9 +306,20 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
         .iter()
         .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
+    let cleared = clear_rustic_cache(&pack_names);
     println!(
         "[B48] rustic metadata cache cleared: {} dir(s)",
-        clear_rustic_cache(&pack_names).len()
+        cleared.len()
+    );
+    // Say so *here* if the cache was not found. Without this, a lookup that
+    // silently clears nothing resurfaces far below as "the search is broken"
+    // (step 6) — which is precisely how this test read on `windows-latest`.
+    assert_eq!(
+        cleared.len(),
+        1,
+        "rustic 一定建了缓存；这里清到 {} 个 = 没找到它。roots={:?}",
+        cleared.len(),
+        store::rustic_cache_roots()
     );
 
     let quarantine = root.join("quarantine-data-packs");
@@ -352,9 +363,17 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     move_back(&quarantine, &repo);
 
     // ---- 6. UNKNOWN, not empty: break the metadata the search needs ---------
+    let cleared_again = clear_rustic_cache(&pack_names);
     println!(
         "[B48] rustic metadata cache cleared again: {} dir(s)",
-        clear_rustic_cache(&pack_names).len()
+        cleared_again.len()
+    );
+    assert_eq!(
+        cleared_again.len(),
+        1,
+        "同上：清到 {} 个缓存目录 = 下面那条断言测的是缓存，不是仓库。roots={:?}",
+        cleared_again.len(),
+        store::rustic_cache_roots()
     );
     let meta_paths: Vec<PathBuf> = meta_packs.iter().map(|(p, _)| p.clone()).collect();
     let quarantine2 = root.join("quarantine-tree-packs");
@@ -395,13 +414,17 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
 /// cannot compute without opening the repo, so the cache is instead identified
 /// by content: the cache dir that holds one of this repository's pack ids.
 /// Returns the directories that were actually removed.
+///
+/// *Where* to look is not guessed here: `store::rustic_cache_roots` spells it
+/// the way each platform spells it. This used to be a hand-written
+/// `$HOME/Library/Caches` + `$HOME/.cache` pair, which is wrong on Windows
+/// (the cache lives under `%LOCALAPPDATA%`, not under `$HOME`) — the cache
+/// then survived, step 6 below read the tree packs out of it, and a repository
+/// that could not be read looked complete. See
+/// `search_cache_windows_shape_test.rs`.
 fn clear_rustic_cache(pack_names: &[String]) -> Vec<PathBuf> {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let mut removed = Vec::new();
-    for base in [
-        home.join("Library/Caches/rustic"),
-        home.join(".cache/rustic"),
-    ] {
+    for base in store::rustic_cache_roots() {
         let Ok(entries) = fs::read_dir(&base) else {
             continue;
         };
