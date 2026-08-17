@@ -453,7 +453,7 @@ describe('C19 任务 4 · Popup 说的话与实际状态一致', () => {
     const { tickBlockReason, setBackfillEnabled, isBackfillEnabled } =
       await import('../lib/backfill/schedule');
     const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
-    const { renderPopup, popupText, pickBackfillState } = await import('../lib/popup-view');
+    const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
     await setBackfillEnabled(browserLocalStore(), opts.enabled);
     const block = await tickBlockReason({
       hasStore: true,
@@ -461,10 +461,12 @@ describe('C19 任务 4 · Popup 说的话与实际状态一致', () => {
       isDownloadPaused: () => false,
       hasHttp: opts.transportWired,
     });
-    const state = pickBackfillState(await browserLocalSnapshot());
+    const snapshot = await browserLocalSnapshot();
+    const state = pickBackfillState(snapshot);
     const view = renderPopup({
       enabled: opts.enabled, block, guard: null, state,
       target: state ? { platform: state.platform, scope: state.scope } : null,
+      failures: collectFailures(snapshot),
     });
     return { view, text: popupText(view) };
   }

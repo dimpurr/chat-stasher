@@ -92,6 +92,19 @@ export interface BackfillState {
    * 行为与 C11 逐字一致，不需要提版本号，也不会把用户已有的进度作废。
    */
   lastFetchAt?: { enumerate: number | null; detail: number | null };
+  /**
+   * 🔴 C20 · 落盘失败清单。**同一本账上的第三栏**（另外两栏是 pending / archived）。
+   *
+   * 为什么在这里而不是另开一个存储键：本次缺陷的根因是「同一个身份被表达了两次」，
+   * 再造第二份「这条会话怎么样了」的账本就是同一个错误再犯一遍。
+   * 结构、上限、为什么不重试，全在 lib/backfill/failures.ts。
+   *
+   * optional：C19 及更早的旧集合里没有这两个字段，读回来 undefined ⇒ 当作空清单，
+   * 行为与 C19 逐字一致，不需要提版本号，也不会把用户已有的进度作废。
+   */
+  failures?: import('./failures').FailureEntry[];
+  /** 因为超过上限而被丢掉的历史失败条数。🔴 绝不静默截断。 */
+  failuresDropped?: number;
   /** 非 null 表示这条腿已经停下并留痕。 */
   halted: HaltRecord | null;
 }
@@ -108,6 +121,8 @@ export function initialState(platform: string, scope: string): BackfillState {
     archived: [],
     detailToday: { day: '', count: 0 },
     lastFetchAt: { enumerate: null, detail: null },
+    failures: [],
+    failuresDropped: 0,
     halted: null,
   };
 }

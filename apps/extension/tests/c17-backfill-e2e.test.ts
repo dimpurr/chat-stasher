@@ -380,7 +380,7 @@ describe('C17 任务 2 · 反面 4：同一个会话被枚举两次', () => {
 // 任务 3 · 接缝 bug（这些用例【钉住当前的真实行为】，包括错误的行为）
 // ===========================================================================
 describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一个身份', () => {
-  it('🔴 BUG-1：落盘被跳过（拿不到 sessionId），欠账照样被清 ⇒ 静默丢数据', async () => {
+  it('🔴 BUG-1【C20 已修】：落盘被跳过（拿不到 sessionId）⇒ 欠账【不清】、进失败清单', async () => {
     await enableBackfill();
     // 'shortid' 是合法的欠账键（enumerate 只要求非空 string），
     // 但 chatgpt 的 sessionIdPatterns 是 /backend-api/conversation/([0-9a-fA-F-]{8,})，
@@ -396,16 +396,26 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
     console.log('[C17-3.A] detail 请求:', detailCalls(server.calls));
     console.log('[C17-3.A] 落盘的文件里跟 shortid 有关的:', files);
     console.log('[C17-3.A] 欠账状态:', { pending: s.pending, archived: s.archived });
+    console.log('[C17-3.A] 失败清单:', s.failures);
     console.log('[C17-3.A] 进度文案:', mod.lastBackfillTick()!.report!.progress);
 
     expect(detailCalls(server.calls).length).toBe(1);   // 确实取了正文
-    expect(files.length).toBe(0);                       // 🔴 但一个字节都没落盘
-    expect(s.archived).toEqual(['shortid']);            // 🔴 欠账却被清了（永不再入队）
-    // 进度还会说"已归档 1 条 / 共 1 条（100%）" —— 分子是假的。
-    expect(mod.lastBackfillTick()!.report!.progress).toContain('100%');
+    expect(files.length).toBe(0);                       // 一个字节都没落盘
+
+    // C20 之前：s.archived === ['shortid'] —— 没落盘却被划掉，进度还会说 100%。
+    // C20 之后：sink 说 saved:false ⇒ 不清账、不冒充已归档、进失败清单、不重试。
+    expect(s.archived).toEqual([]);
+    expect(s.pending).toEqual([]);                      // 也不留在队首原地打转
+    expect(s.failures).toEqual([
+      { shortId: 'shortid', platform: 'chatgpt', reason: 'not-saved', at: expect.any(Number) },
+    ]);
+    // 🔴 进度分子不再说谎：0 条已归档，不是 100%。
+    expect(mod.lastBackfillTick()!.report!.progress).not.toContain('100%');
+    expect(mod.lastBackfillTick()!.report!.progress).toContain('已归档 0');
+    expect(mod.lastBackfillTick()!.report!.failedThisRun).toHaveLength(1);
   });
 
-  it('🔴 BUG-2：两个不同的欠账键塌成同一个文件名 ⇒ 后写的覆盖先写的', async () => {
+  it('🔴 BUG-2【C20 已修】：两个欠账键塌成同一个文件名 ⇒ 身份对不上，两条都不清账', async () => {
     await enableBackfill();
     // 这两个 id 都以同一段 hex-dash 开头，sessionIdPatterns 的贪婪匹配到此为止：
     //   'deadbeef01-zzz' 和 'deadbeef01-yyy' 都 ⇒ sessionId 'deadbeef01-'
@@ -419,12 +429,22 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
 
     const s = stateOf();
     const files = finalWrites().filter((f) => f.includes('deadbeef01'));
-    console.log('[C17-3.A2] 欠账键:', s.archived);
+    console.log('[C17-3.A2] 已归档:', s.archived);
+    console.log('[C17-3.A2] 失败清单:', s.failures);
     console.log('[C17-3.A2] 落盘文件名:', files);
-    expect(s.archived).toEqual(ids);                      // 两个不同的欠账都清了
     expect(files.length).toBe(2);                         // 写了两次
-    expect(new Set(files).size).toBe(1);                  // 🔴 但是同一个文件名
-    // 先写的那条对话在磁盘上被后写的覆盖 ⇒ 2 个会话只剩 1 个文件。
+    expect(new Set(files).size).toBe(1);                  // 🔴 但仍然是同一个文件名
+
+    // C20 之前：s.archived === ids —— 两条都被划掉，而磁盘上只剩 1 个文件，
+    //           先写的那条对话被后写的覆盖，且没有任何人知道。
+    // C20 之后：sink 报回它【实际用来命名】的身份，engine 当场对账 ⇒ 对不上就不清账。
+    //           🔴 这就是根因「同一个身份被表达了两次、中间没有一致性校验」的那道校验。
+    expect(s.archived).toEqual([]);
+    expect(s.failures.map((f: any) => [f.shortId, f.reason])).toEqual([
+      ['deadbeef', 'identity-mismatch'],
+      ['deadbeef', 'identity-mismatch'],
+    ]);
+    // 覆盖仍然会发生（文件名怎么算的没变），但它不再是静默的：用户看得见这两条。
   });
 });
 
