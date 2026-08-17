@@ -305,3 +305,136 @@ fn a_location_we_cannot_read_is_unknown_not_empty_and_not_loss() {
     assert!(diff.known_empty().is_empty());
     assert!(diff.suspected_loss().is_empty());
 }
+
+/// B46: the *same* unreadable directory, spelled the other way rustic accepts.
+///
+/// `rustic_backend` resolves a bare path and the explicit `local:<path>` form to
+/// the same `SupportedBackend::Local` location. `destinit` only second-guessed
+/// the bare form — it read the colon as "this is a backend string, not my
+/// business" — so the prefixed spelling of an unreadable directory came out
+/// `KnownEmpty`, the one absence that exits 0 and lets the run continue.
+///
+/// Measured in B46: bare → `Unknown` / `diff_complete=false`;
+/// `local:` → `KnownEmpty` / `diff_complete=true`. Same directory, opposite
+/// verdict, no other input changed.
+#[test]
+fn a_local_prefixed_unreadable_destination_is_unknown_not_empty() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage_b = dir.path().join("stage-b");
+    stage_session(&stage_b, SESSION_KEPT, &["{\"k\":1}"]);
+
+    let repo = dir.path().join("unreadable-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut cfg = cfg_for(&repo, &dir.path().join("no-such-key.json"));
+    cfg.repo_root = format!("local:{}", cfg.repo_root);
+
+    let diff = destinit::fill_difference(
+        &stage_b,
+        MACHINE,
+        store::DEFAULT_SHARD_BUCKET_CAP,
+        &[SourceDestination {
+            name: "prefixed".to_string(),
+            previously_recorded: false,
+            cfg,
+        }],
+    );
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        diff.sources[0].status,
+        destinit::SourceStatus::Unknown,
+        "`local:<path>` is the same local path as `<path>`; how the user spelled \
+         the location must not decide whether an unreadable copy is reported"
+    );
+    assert!(!diff.diff_complete);
+    assert_eq!(diff.unknown(), vec!["prefixed"]);
+    assert!(diff.known_empty().is_empty());
+}
+
+/// B46: a genuinely absent `local:`-spelled destination must still be
+/// `KnownEmpty`.
+///
+/// The guard above must not be paid for by making every not-yet-created
+/// destination report INCOMPLETE — that is the warning-on-the-normal-path
+/// failure ADR-015 exists to avoid. So the prefix has to be resolved, not
+/// treated as "suspicious".
+#[test]
+fn a_local_prefixed_destination_that_was_never_built_is_still_known_empty() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage_b = dir.path().join("stage-b");
+    stage_session(&stage_b, SESSION_KEPT, &["{\"k\":1}"]);
+
+    let mut cfg = cfg_for(
+        &dir.path().join("never-built"),
+        &dir.path().join("no-such-key.json"),
+    );
+    cfg.repo_root = format!("local:{}", cfg.repo_root);
+
+    let diff = destinit::fill_difference(
+        &stage_b,
+        MACHINE,
+        store::DEFAULT_SHARD_BUCKET_CAP,
+        &[SourceDestination {
+            name: "not-yet".to_string(),
+            previously_recorded: false,
+            cfg,
+        }],
+    );
+    assert_eq!(diff.sources[0].status, destinit::SourceStatus::KnownEmpty);
+    assert!(diff.diff_complete);
+}
+
+/// B46: pin the measured backend fact that the tri-state relies on.
+///
+/// A remote backend that cannot be reached must answer `Err`, never `Ok(empty)`
+/// — because `destinit` cannot second-guess a remote location the way it can a
+/// local path, so an `Ok(empty)` from an unreachable endpoint would land in
+/// `KnownEmpty` and exit 0. Measured for `opendal:sftp` (connection refused and
+/// wrong credentials), `opendal:s3` (refused, 403) and `opendal:http` (401);
+/// all three answered `Err`. This test is the alarm for a backend version that
+/// changes its mind.
+///
+/// The endpoint is a closed port on loopback: no service, real or otherwise, is
+/// contacted.
+#[test]
+fn an_unreachable_remote_destination_is_unknown_not_empty() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage_b = dir.path().join("stage-b");
+    stage_session(&stage_b, SESSION_KEPT, &["{\"k\":1}"]);
+
+    let mut cfg = cfg_for(dir.path(), &dir.path().join("no-such-key.json"));
+    cfg.repo_root = "opendal:sftp".to_string();
+    cfg.options.insert(
+        "endpoint".to_string(),
+        // Port 1 on loopback: nothing listens there.
+        "ssh://127.0.0.1:1".to_string(),
+    );
+    cfg.options
+        .insert("user".to_string(), "b46-nobody".to_string());
+    cfg.options
+        .insert("known_hosts_strategy".to_string(), "accept".to_string());
+    cfg.options
+        .insert("root".to_string(), "/chat-stasher-test/b46".to_string());
+    // Do not spend the backend's default retry budget on a port we know is shut.
+    cfg.options.insert("retry".to_string(), "off".to_string());
+
+    let diff = destinit::fill_difference(
+        &stage_b,
+        MACHINE,
+        store::DEFAULT_SHARD_BUCKET_CAP,
+        &[SourceDestination {
+            name: "offline".to_string(),
+            previously_recorded: false,
+            cfg,
+        }],
+    );
+    assert_eq!(
+        diff.sources[0].status,
+        destinit::SourceStatus::Unknown,
+        "an unreachable remote must never resolve to `never built` — that is the \
+         only branch that exits 0"
+    );
+    assert!(!diff.diff_complete);
+}
