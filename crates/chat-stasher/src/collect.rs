@@ -402,8 +402,10 @@ pub fn inspect_stage_for_push(
     config: &Config,
     stage: &Path,
     state_dir: &Path,
+    machine: &str,
 ) -> anyhow::Result<PushStageCheck> {
-    let scan = scanner::scan(config).context("scan harness sessions for empty-stage guard")?;
+    let scan = scanner::scan_with_machine(config, machine)
+        .context("scan harness sessions for empty-stage guard")?;
     let state = load_state(&state_dir.join(STATE_FILE))?;
     let scanner_sqlite_sessions = scan
         .probes
@@ -449,7 +451,7 @@ pub fn collect(
     bucket_cap: usize,
     destination: &DestinationView<'_>,
 ) -> anyhow::Result<CollectReport> {
-    let scan = scanner::scan(config).context("scan harness sessions")?;
+    let scan = scanner::scan_with_machine(config, machine).context("scan harness sessions")?;
     collect_scan_report(&scan, stage, machine, state_dir, bucket_cap, destination)
 }
 

@@ -63,19 +63,27 @@ pub fn normalize_machine(raw: &str) -> String {
 ///
 /// Shelling out to `hostname -s` (not `scutil --get ComputerName`, which on
 /// macOS returns a display name with spaces / typographic quotes that would
-/// need a wholly different kind of cleaning). Falls back to `$HOSTNAME`, then
-/// to `localhost`, rather than failing the whole scan.
-pub fn machine_id() -> String {
+/// need a wholly different kind of cleaning). Falls back to `$HOSTNAME` when
+/// the command cannot provide a usable UTF-8 value. There is deliberately no
+/// invented fallback: `None` means that a caller must either report the
+/// unresolved identity or require an explicit `--machine`.
+pub fn machine_id() -> Option<String> {
     let raw = std::process::Command::new("hostname")
         .arg("-s")
         .output()
         .ok()
+        .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .unwrap_or_else(|| "localhost".to_string());
-    normalize_machine(&raw)
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    raw.map(|raw| normalize_machine(&raw))
+        .filter(|machine| !machine.is_empty())
 }
 
 /// True when `s` looks like a UUID (8-4-4-4-12 groups of lowercase hex).
