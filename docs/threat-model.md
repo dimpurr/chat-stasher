@@ -320,8 +320,8 @@ a real limitation of the current code.
 
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
-   `dest-init`, `search`, `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:34-366`); **a bulk restore-to-disk command
+   `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`
+   (`crates/chat-stasher/src/main.rs:36-490`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
    (`crates/chat-stasher/src/main.rs:130-133`), and note that `read` therefore
