@@ -327,6 +327,9 @@ pub struct HarnessFootprint {
     /// Raw candidate rows before any store-specific qualification rule.
     /// Cursor's doctor line prints this beside `session_count`.
     pub candidate_count: Option<u64>,
+    /// Sessions this harness knows about but could not hand over. Printed
+    /// only when non-zero, so an all-good run's line is unchanged.
+    pub unreadable_count: Option<u64>,
     pub total_bytes: u64,
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
@@ -359,6 +362,7 @@ pub fn coverage_from_records<'a>(
             None
         },
         candidate_count: None,
+        unreadable_count: None,
         total_bytes,
         earliest,
         latest,
@@ -445,6 +449,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         installed: probe.installed_p(),
         session_count: probe.record_count,
         candidate_count: probe.candidate_count,
+        unreadable_count: probe.unreadable_count,
         total_bytes: probe.bytes,
         earliest: probe.earliest,
         latest: probe.latest,
@@ -510,6 +515,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         installed: false,
         session_count: None,
         candidate_count: None,
+        unreadable_count: None,
         total_bytes: 0,
         earliest: None,
         latest: None,
@@ -980,12 +986,23 @@ fn footprint_count_label(f: &HarnessFootprint) -> String {
 }
 
 fn footprint_count_detail(f: &HarnessFootprint) -> String {
+    let mut parts: Vec<String> = Vec::new();
     if f.name == "cursor" {
         if let (Some(before), Some(after)) = (f.candidate_count, f.session_count) {
-            return format!("（过滤前 {before} / 过滤后 {after}）");
+            parts.push(format!("过滤前 {before} / 过滤后 {after}"));
         }
     }
-    String::new()
+    // B68: the number that used to be invisible. "Filtered out" and "could not
+    // be read" are different answers to "where did my sessions go", so the
+    // second one gets its own count instead of hiding inside the first.
+    // Silent when zero: an all-good line is byte-for-byte what it was.
+    if let Some(unreadable) = f.unreadable_count.filter(|n| *n > 0) {
+        parts.push(format!("{unreadable} 条读不出来"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("（{}）", parts.join("，"))
 }
 
 pub fn print_report(r: &DoctorReport) {

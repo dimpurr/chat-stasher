@@ -2789,6 +2789,7 @@ mod decision_surface_tests {
                 state: scanner::ProbeState::FileTarget,
                 record_count: Some(1),
                 candidate_count: Some(1),
+                unreadable_count: Some(0),
                 earliest: None,
                 latest: None,
                 bytes: 1,

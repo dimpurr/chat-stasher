@@ -193,6 +193,19 @@ pub struct SqliteStoreProbe {
     /// `.db` + `.db-wal` + `.db-shm` bytes when present.
     pub total_bytes: u64,
     pub sessions: SqliteSessionProbe,
+    /// Candidate rows that are **not** "filtered out" but "could not be read":
+    /// the value is NULL / not decodable JSON, or the row is a metadata-only
+    /// index entry whose body lives somewhere this build cannot reach.
+    ///
+    /// This is the third bucket the repository keeps separate from the other
+    /// two: `candidate_count - count - unreadable_count` is "we looked and it
+    /// really has nothing", `unreadable_count` is "it says it has something
+    /// and we could not get at it". Never merge them.
+    pub unreadable_count: u64,
+    /// Sibling databases (Cursor's per-workspace `state.vscdb`) that could not
+    /// be opened or decoded at all, so their composers were never even
+    /// counted as candidates. A count of stores, not of sessions.
+    pub unreadable_stores: u64,
 }
 
 /// Metadata for one opencode session row. The scanner only materialises these
@@ -270,10 +283,54 @@ pub fn probe_sqlite_store(db: &Path) -> SqliteStoreProbe {
 
 /// [`probe_sqlite_store`] with an explicit schema spec (registry-declared).
 pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStoreProbe {
+    let sessions = probe_sqlite_sessions_with(db, spec);
+    // Only ask "how many candidates were unreadable" once the candidates were
+    // actually counted; a ReadFailed/SchemaMismatch store has no candidates to
+    // classify and its own variant already says so.
+    let unreadable_count = match sessions {
+        SqliteSessionProbe::Known { .. } => unreadable_candidate_count(db, spec),
+        _ => 0,
+    };
     SqliteStoreProbe {
         total_bytes: sqlite_store_bytes(db),
-        sessions: probe_sqlite_sessions_with(db, spec),
+        sessions,
+        unreadable_count,
+        unreadable_stores: 0,
     }
+}
+
+/// Candidate rows whose value cannot be decoded at all (NULL or not JSON).
+///
+/// The qualification predicate drops these with `json_valid(value)=1`, which
+/// makes them indistinguishable from rows that were *examined and rejected*.
+/// Counting them separately is the whole point: an undecodable row is not
+/// evidence that the session is empty.
+fn unreadable_candidate_count(db: &Path, spec: &SqliteSchemaSpec<'_>) -> u64 {
+    let Some(value_column) = spec.json_value_column else {
+        return 0;
+    };
+    if spec.qualification != Some("cursor_composer") {
+        return 0;
+    }
+    let Ok(conn) = open_readonly(db) else {
+        return 0;
+    };
+    let candidate_where = candidate_where_sql(spec);
+    // The candidate predicate is empty when the schema declares no key prefix,
+    // so the undecodable-row predicate has to open the WHERE clause itself.
+    let joiner = if candidate_where.is_empty() {
+        " WHERE"
+    } else {
+        " AND"
+    };
+    let sql = format!(
+        "SELECT count(*) FROM \"{}\"{candidate_where}{joiner} COALESCE(json_valid(\"{}\"), 0) <> 1",
+        quote_identifier(spec.table),
+        quote_identifier(value_column),
+    );
+    conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+        .map(|count| count.max(0) as u64)
+        .unwrap_or(0)
 }
 
 /// Probe Cursor's pre-global-storage layout. Each immediate workspace directory
@@ -291,6 +348,8 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
     let mut total_bytes = 0u64;
     let mut candidate_count = 0u64;
     let mut count = 0u64;
+    let mut unreadable_count = 0u64;
+    let mut unreadable_stores = 0u64;
     let mut earliest: Option<SystemTime> = None;
     let mut latest: Option<SystemTime> = None;
 
@@ -310,6 +369,8 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
         saw_database = true;
         total_bytes += sqlite_store_bytes(&db);
         let Ok(conn) = open_readonly(&db) else {
+            // Not "this workspace has no sessions" — we never got to look.
+            unreadable_stores += 1;
             continue;
         };
         let value = conn
@@ -332,6 +393,9 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
         };
         saw_composer_value = true;
         let Ok(json) = serde_json::from_slice::<Value>(&value) else {
+            // The store holds a composer value we cannot decode: unknown how
+            // many sessions hide in it, so it counts as one unreadable store.
+            unreadable_stores += 1;
             continue;
         };
         let Some(composers) = json
@@ -339,12 +403,18 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
             .and_then(Value::as_array)
             .or_else(|| json.as_array())
         else {
+            unreadable_stores += 1;
             continue;
         };
         for composer in composers {
             candidate_count += 1;
-            if !cursor_legacy_composer_is_qualified(composer) {
-                continue;
+            match cursor_legacy_composer_verdict(composer) {
+                LegacyComposerVerdict::Qualified => {}
+                LegacyComposerVerdict::Empty => continue,
+                LegacyComposerVerdict::BodyElsewhere => {
+                    unreadable_count += 1;
+                    continue;
+                }
             }
             count += 1;
             if let Some(created_at) = composer.get("createdAt").and_then(Value::as_i64) {
@@ -367,6 +437,8 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
             earliest,
             latest,
         },
+        unreadable_count,
+        unreadable_stores,
     })
 }
 
@@ -1221,17 +1293,44 @@ fn qualification_where_sql(spec: &SqliteSchemaSpec, candidate_where_sql: &str) -
 /// that the legacy composer has content; empty metadata-only composers are not
 /// sessions for the fallback count.
 fn cursor_legacy_composer_is_qualified(value: &Value) -> bool {
+    matches!(
+        cursor_legacy_composer_verdict(value),
+        LegacyComposerVerdict::Qualified
+    )
+}
+
+/// Why one legacy composer did or did not become a session.
+///
+/// The boolean this replaces collapsed two very different answers into one
+/// `false`, which is exactly the confusion B68 exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyComposerVerdict {
+    /// Archived, or an inline conversation that is present and empty:
+    /// we looked at the body and it really has nothing.
+    Empty,
+    /// No inline `conversation` at all — a metadata-only index entry
+    /// (`type`/`composerId`/`createdAt`/`name`/`lastUpdatedAt`). Modern Cursor
+    /// keeps these bodies outside workspaceStorage, so this is "we could not
+    /// read it", not "it is empty".
+    BodyElsewhere,
+    Qualified,
+}
+
+fn cursor_legacy_composer_verdict(value: &Value) -> LegacyComposerVerdict {
     if value
         .get("isArchived")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return false;
+        return LegacyComposerVerdict::Empty;
     }
-    value
-        .get("conversation")
-        .and_then(Value::as_array)
-        .is_some_and(|messages| !messages.is_empty())
+    match value.get("conversation") {
+        None => LegacyComposerVerdict::BodyElsewhere,
+        Some(Value::Array(messages)) if messages.is_empty() => LegacyComposerVerdict::Empty,
+        Some(Value::Array(_)) => LegacyComposerVerdict::Qualified,
+        // Present but not an array: the shape is not one we can read.
+        Some(_) => LegacyComposerVerdict::BodyElsewhere,
+    }
 }
 
 /// `min, max` SQL fragment for the schema's time source, or `None` when the
