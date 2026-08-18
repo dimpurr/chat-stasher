@@ -456,6 +456,17 @@ pub struct HarnessProbe {
     /// Candidate rows before a store-specific qualification rule. For Cursor
     /// this is the raw `composerData:%` count shown beside `record_count`.
     pub candidate_count: Option<u64>,
+    /// Sessions this harness *knows about* but that never became a
+    /// `SessionRecord`: undecodable rows, metadata-only index entries whose
+    /// body lives somewhere unreachable, and rows the probe counted but
+    /// enumeration failed to return. `None` when nothing was enumerated at
+    /// all (the state already says so); `Some(0)` means "known == handed out".
+    ///
+    /// This is deliberately *not* folded into `candidate_count - record_count`:
+    /// that difference is the filter ("we looked, it really has nothing"),
+    /// this field is the failure ("it says it has something, we could not get
+    /// at it"). Merging them is the lie B68 removes.
+    pub unreadable_count: Option<u64>,
     /// Earliest / latest session timestamp, for single-file SQLite stores that
     /// carry one (via the registry-declared schema). `None` when unknown.
     pub earliest: Option<SystemTime>,
@@ -652,6 +663,7 @@ fn probe_harness(
         state: ProbeState::SkipUnresolvable,
         record_count: None,
         candidate_count: None,
+        unreadable_count: None,
         earliest: None,
         latest: None,
         bytes: 0,
@@ -759,6 +771,7 @@ fn probe_harness(
                     bytes: md.len(),
                     record_count: None,
                     candidate_count: None,
+                    unreadable_count: None,
                     note: "单文件存储，只探测存在与大小".to_string(),
                     recognized_files: vec![root.clone()],
                     ..base
@@ -818,11 +831,21 @@ fn probe_harness(
                                             .collect();
                                         let record_count = records.len();
                                         report.records.extend(records);
+                                        probe.unreadable_count = Some(enumeration_gap(
+                                            count,
+                                            record_count,
+                                            info.unreadable_count,
+                                        ));
                                         probe
                                             .note
                                             .push_str(&format!("; SessionRecord={record_count}"));
                                     }
                                     Err(error) => {
+                                        // A failed enumeration is not zero
+                                        // sessions: every known row is now a
+                                        // session we cannot hand out.
+                                        probe.unreadable_count =
+                                            Some(enumeration_gap(count, 0, info.unreadable_count));
                                         probe.note.push_str(&format!(
                                             "; SessionRecord 枚举失败（{error}）"
                                         ));
@@ -841,13 +864,25 @@ fn probe_harness(
                                             );
                                             let record_count = records.len();
                                             report.records.extend(records);
+                                            probe.unreadable_count = Some(enumeration_gap(
+                                                count,
+                                                record_count,
+                                                info.unreadable_count,
+                                            ));
                                             probe.note.push_str(&format!(
                                                 "; SessionRecord={record_count}"
                                             ));
                                         }
-                                        Err(error) => probe.note.push_str(&format!(
-                                            "; SessionRecord 枚举失败（{error}）"
-                                        )),
+                                        Err(error) => {
+                                            probe.unreadable_count = Some(enumeration_gap(
+                                                count,
+                                                0,
+                                                info.unreadable_count,
+                                            ));
+                                            probe.note.push_str(&format!(
+                                                "; SessionRecord 枚举失败（{error}）"
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -885,6 +920,7 @@ fn probe_harness(
             state: ProbeState::Missing,
             record_count: None,
             candidate_count: None,
+            unreadable_count: None,
             note: "目录不存在".to_string(),
             ..base
         }
@@ -986,6 +1022,40 @@ fn sqlite_records_from_rows(
         .collect()
 }
 
+/// Sessions a probe knew about but never handed out as `SessionRecord`s.
+///
+/// `known` is the probe's post-filter count, `emitted` the records actually
+/// produced, `unreadable_rows` the candidates the probe itself already
+/// classified as undecodable. The sum is the answer to "已知 N 条，取回 M 条,
+/// K 条读不出来" — it never includes rows the qualification filter rejected
+/// after reading them, because those are not failures.
+fn enumeration_gap(known: u64, emitted: usize, unreadable_rows: u64) -> u64 {
+    unreadable_rows + known.saturating_sub(emitted as u64)
+}
+
+/// The one-clause note appended when — and only when — something was in fact
+/// unreadable. An all-good scan appends nothing, so the "一切正常" output and
+/// its exit code are byte-for-byte what they were.
+fn unreadable_note(
+    unreadable: u64,
+    unreadable_stores: u64,
+    enumerate_error: Option<&str>,
+) -> String {
+    let mut note = String::new();
+    if unreadable > 0 {
+        note.push_str(&format!(
+            "；{unreadable} 条读不出来（不是空，是取不到正文）"
+        ));
+    }
+    if unreadable_stores > 0 {
+        note.push_str(&format!("；{unreadable_stores} 个库打不开/读不懂"));
+    }
+    if let Some(error) = enumerate_error {
+        note.push_str(&format!("；枚举失败（{error}）"));
+    }
+    note
+}
+
 fn cursor_legacy_records_from_rows(
     rows: Vec<CursorLegacySessionRow>,
     source: HarnessSource,
@@ -1072,12 +1142,26 @@ fn probe_cursor_harness(
                 latest,
             } = legacy.sessions
             {
-                let records = enumerate_cursor_legacy_sessions(&workspace_storage)
-                    .map(|rows| {
-                        cursor_legacy_records_from_rows(rows, HarnessSource::Cursor, machine)
-                    })
-                    .unwrap_or_default();
+                // B68: `.ok().unwrap_or_default()` used to turn a failed
+                // enumeration into an empty Vec while `record_count` kept the
+                // probe's count — "known 414, handed out 0" with nothing said.
+                // The failure now travels into both the note and the counted
+                // gap below.
+                let (records, enumerate_error) =
+                    match enumerate_cursor_legacy_sessions(&workspace_storage) {
+                        Ok(rows) => (
+                            cursor_legacy_records_from_rows(rows, HarnessSource::Cursor, machine),
+                            None,
+                        ),
+                        Err(error) => (Vec::new(), Some(error)),
+                    };
                 let record_count = records.len();
+                let unreadable = enumeration_gap(count, record_count, legacy.unreadable_count);
+                let gap_note = unreadable_note(
+                    unreadable,
+                    legacy.unreadable_stores,
+                    enumerate_error.as_deref(),
+                );
                 let recognized_files = records
                     .iter()
                     .map(|record| record.absolute_path.clone())
@@ -1089,12 +1173,13 @@ fn probe_cursor_harness(
                     state: ProbeState::FileTarget,
                     record_count: Some(count),
                     candidate_count: Some(candidate_count),
+                    unreadable_count: Some(unreadable),
                     earliest,
                     latest,
                     bytes: legacy.total_bytes,
                     recognized_files,
                     note: format!(
-                        "{env_note}来自 legacy workspaceStorage；{global_summary}SQLite 只读枚举 ItemTable；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}"
+                        "{env_note}来自 legacy workspaceStorage；{global_summary}SQLite 只读枚举 ItemTable；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}{gap_note}"
                     ),
                     ..base
                 };
@@ -1122,19 +1207,34 @@ fn probe_cursor_harness(
             earliest,
             latest,
         } => {
-            let records = crate::sqlite_probe::spec_from_cell(cell)
-                .and_then(|spec| enumerate_sqlite_sessions(&global_db, &spec).ok())
-                .map(|rows| {
-                    sqlite_records_from_rows(
-                        rows,
-                        &global_db,
-                        HarnessSource::Cursor,
-                        machine,
-                        SqliteSessionLayout::CursorGlobal,
-                    )
-                })
-                .unwrap_or_default();
+            // B68: the `.ok()` here silently produced an empty record set
+            // while `record_count` still reported the probe's count.
+            let (records, enumerate_error) = match crate::sqlite_probe::spec_from_cell(cell) {
+                Some(spec) => match enumerate_sqlite_sessions(&global_db, &spec) {
+                    Ok(rows) => (
+                        sqlite_records_from_rows(
+                            rows,
+                            &global_db,
+                            HarnessSource::Cursor,
+                            machine,
+                            SqliteSessionLayout::CursorGlobal,
+                        ),
+                        None,
+                    ),
+                    Err(error) => (Vec::new(), Some(error)),
+                },
+                None => (
+                    Vec::new(),
+                    Some("registry cell 未声明 SQLite schema".to_string()),
+                ),
+            };
             let record_count = records.len();
+            let unreadable = enumeration_gap(count, record_count, info.unreadable_count);
+            let gap_note = unreadable_note(
+                unreadable,
+                info.unreadable_stores,
+                enumerate_error.as_deref(),
+            );
             let recognized_files = records
                 .iter()
                 .map(|record| record.absolute_path.clone())
@@ -1146,12 +1246,13 @@ fn probe_cursor_harness(
                 state: ProbeState::FileTarget,
                 record_count: Some(count),
                 candidate_count: Some(candidate_count),
+                unreadable_count: Some(unreadable),
                 earliest,
                 latest,
                 bytes: info.total_bytes,
                 recognized_files,
                 note: format!(
-                    "{env_note}SQLite 只读枚举 cursorDiskKV表(key, value)；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}"
+                    "{env_note}SQLite 只读枚举 cursorDiskKV表(key, value)；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}{gap_note}"
                 ),
                 ..base
             }
