@@ -210,6 +210,18 @@ impl BackupStore {
         BackupStore { cfg, machine }
     }
 
+    /// Construct a store for operations that inspect repository metadata across
+    /// every machine and never select a local partition. The empty field is an
+    /// internal sentinel, not a machine name; partition-aware methods remain
+    /// available only through [`BackupStore::new`].
+    pub fn for_metadata_query(cfg: StoreConfig) -> Self {
+        Self::limit_parallelism(cfg.connections);
+        BackupStore {
+            cfg,
+            machine: String::new(),
+        }
+    }
+
     /// Build the backend handles.
     ///
     /// Local paths use rustic_backend's `LocalBackend` directly. When a remote

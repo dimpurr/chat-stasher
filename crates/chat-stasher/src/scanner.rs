@@ -605,7 +605,28 @@ pub fn load_registry_from_repo() -> io::Result<HarnessRegistry> {
 /// separate entry so tests can feed it a scratch registry without touching
 /// the user's HOME or the repo's `data/` file.
 pub fn scan_with_registry(config: &Config, registry: &HarnessRegistry) -> io::Result<ScanReport> {
-    let machine = crate::id::machine_id();
+    let machine = crate::id::machine_id().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "machine identity unavailable; supply --machine <name>",
+        )
+    })?;
+    scan_with_registry_and_machine(config, registry, &machine)
+}
+
+/// Registry-driven scan with a caller-selected machine partition. Archive
+/// commands use this after resolving their explicit `--machine` or the local
+/// hostname, so a missing local hostname cannot block the explicit route.
+pub fn scan_with_machine(config: &Config, machine: &str) -> io::Result<ScanReport> {
+    let registry = load_registry_from_repo()?;
+    scan_with_registry_and_machine(config, &registry, machine)
+}
+
+fn scan_with_registry_and_machine(
+    config: &Config,
+    registry: &HarnessRegistry,
+    machine: &str,
+) -> io::Result<ScanReport> {
     let platform = current_platform();
     let mut report = ScanReport::default();
 

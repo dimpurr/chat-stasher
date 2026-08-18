@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+const UNRESOLVED_MACHINE: &str = "<machine-identity-unavailable>";
+
 #[derive(Parser)]
 #[command(
     name = "chat-stasher",
@@ -113,7 +115,8 @@ enum Command {
         #[arg(long)]
         key_file: Option<String>,
         /// Machine name for the path partition + snapshot host.
-        /// Default: this machine's normalised hostname.
+        /// Default: this machine's normalised hostname; if unavailable, use
+        /// `--machine` explicitly and the command exits 3 without archiving.
         #[arg(long)]
         machine: Option<String>,
         /// Concurrency cap override (default: config `rustic_connections` = 10).
@@ -173,8 +176,9 @@ enum Command {
         /// hashed. Prints ids / shard counts / byte lengths / sha256 only.
         #[arg(long)]
         all_machines: bool,
-        /// Machine partition to read. Defaults to this machine's id
-        /// (unused by `--all-machines`, which reads every machine).
+        /// Machine partition to read. Uses this machine's id when available;
+        /// if it is unavailable, use `--machine` explicitly. Unused by
+        /// `--all-machines`, which reads every machine.
         #[arg(long)]
         machine: Option<String>,
         /// Named destination from the config. Required once the config
@@ -212,7 +216,8 @@ enum Command {
         /// Stage directory holding the sealed shard tree (required by l3 / all).
         #[arg(long)]
         stage: Option<PathBuf>,
-        /// Machine partition (default: this machine's normalised hostname).
+        /// Machine partition (default: this machine's normalised hostname;
+        /// use `--machine` explicitly if that identity is unavailable).
         #[arg(long)]
         machine: Option<String>,
         /// Named destination from the config. Required once the config
@@ -402,7 +407,8 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname.
+        /// Default: this machine's normalised hostname; use `--machine`
+        /// explicitly if that identity is unavailable.
         #[arg(long)]
         machine: Option<String>,
         /// Maximum sealed shards per bucket (default: 20).
@@ -426,7 +432,8 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname.
+        /// Default: this machine's normalised hostname; use `--machine`
+        /// explicitly if that identity is unavailable.
         #[arg(long)]
         machine: Option<String>,
         /// Maximum sealed shards per bucket (default: 20).
@@ -466,7 +473,8 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname.
+        /// Default: this machine's normalised hostname; use `--machine`
+        /// explicitly if that identity is unavailable.
         #[arg(long)]
         machine: Option<String>,
         /// Session id to seal into. Default: the active file's stem.
@@ -698,6 +706,34 @@ fn main() -> ExitCode {
     }
 }
 
+/// Resolve the archive partition without ever inventing a hostname. A missing
+/// identity means the machine-specific operation did not start, so callers use
+/// exit code 3: the archive was not read or written and the user can retry
+/// with the existing `--machine` override.
+fn resolve_machine(command: &str, explicit: Option<&str>) -> Result<String, ExitCode> {
+    if let Some(machine) = explicit {
+        return Ok(machine.to_string());
+    }
+    chat_stasher::id::machine_id().ok_or_else(|| {
+        eprintln!(
+            "{command}: machine identity unavailable; hostname and HOSTNAME did not provide a usable value"
+        );
+        eprintln!(
+            "{command}: nothing was read or written; supply --machine <name> to choose the archive partition"
+        );
+        ExitCode::from(3)
+    })
+}
+
+/// A metadata-only query can inspect every machine in a repository without
+/// selecting this machine's partition. Keep that distinction explicit in the
+/// store API; it never creates a path or snapshot host.
+fn query_machine(explicit: Option<&str>) -> Option<String> {
+    explicit
+        .map(str::to_string)
+        .or_else(chat_stasher::id::machine_id)
+}
+
 /// `search` — metadata-tier query against exactly one named destination.
 ///
 /// Three things this deliberately does not do. It does not pick a destination
@@ -746,7 +782,7 @@ fn cmd_search(
     // The machine filter is a *query* over `sessions/<machine>/`, not this
     // machine's identity: searching an archive for another machine's sessions
     // is the normal case, so this must not default to the local machine id.
-    let store = BackupStore::new(cfg.clone(), chat_stasher::id::machine_id());
+    let store = BackupStore::for_metadata_query(cfg.clone());
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -892,7 +928,7 @@ fn cmd_view(
         connections,
         options,
     );
-    let store = BackupStore::new(cfg.clone(), chat_stasher::id::machine_id());
+    let store = BackupStore::for_metadata_query(cfg.clone());
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -1038,9 +1074,10 @@ fn cmd_ingest(
     machine: Option<&str>,
     shard_bucket_cap: usize,
 ) -> ExitCode {
-    let machine = machine
-        .map(String::from)
-        .unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = match resolve_machine("ingest", machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
     let report =
         match chat_stasher::inbox::ingest_with_cap(inbox, stage, &machine, shard_bucket_cap) {
             Ok(r) => r,
@@ -1132,9 +1169,10 @@ fn cmd_dest_init(
         );
         return ExitCode::from(2);
     }
-    let machine = machine
-        .map(String::from)
-        .unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = match resolve_machine("dest-init", machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
     let target = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -1372,9 +1410,10 @@ fn cmd_collect(
     key_file: Option<String>,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = machine
-        .map(String::from)
-        .unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = match resolve_machine("collect", machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
     let state_dir = chat_stasher::collect::default_state_dir();
     let store_cfg =
         resolve_store_config(&config, destination.as_deref(), repo, key_file, None, &[]);
@@ -1573,7 +1612,18 @@ fn run_once_pass(
     use chat_stasher::runstate::{RunOutcome, RunState};
 
     let config = Config::load();
-    let machine_name = machine.clone().unwrap_or_else(chat_stasher::id::machine_id);
+    let machine_name = match resolve_machine("run-once", machine.as_deref()) {
+        Ok(machine) => machine,
+        Err(code) => {
+            let state = RunState::new(
+                RunOutcome::Error,
+                Some("machine-identity"),
+                UNRESOLVED_MACHINE,
+                0,
+            );
+            return (code, state);
+        }
+    };
     // Pessimistic starting point: until a step proves otherwise this pass is
     // recorded as a failure, so an unexpected exit can never be read as "ok".
     let mut state = RunState::new(RunOutcome::Error, Some("start"), &machine_name, 0);
@@ -1867,9 +1917,10 @@ fn cmd_seal(
         println!("[seal] active untouched : {}", active.display());
         return ExitCode::FAILURE;
     }
-    let machine = machine
-        .map(String::from)
-        .unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = match resolve_machine("seal", machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
     let session = session
         .map(String::from)
         .or_else(|| active.file_stem().map(|s| s.to_string_lossy().into_owned()))
@@ -2133,7 +2184,10 @@ fn cmd_push(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = machine.unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = match resolve_machine("push", machine.as_deref()) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
     let state_dir = chat_stasher::collect::default_state_dir();
     let cfg = resolve_store_config(
         &config,
@@ -2144,7 +2198,7 @@ fn cmd_push(
         options,
     );
     let stage_check =
-        match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir) {
+        match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir, &machine) {
             Ok(check) => check,
             Err(e) => {
                 eprintln!("push: cannot establish empty-stage safety: {e:#}");
@@ -2310,9 +2364,14 @@ fn cmd_read(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = machine
-        .map(String::from)
-        .unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = if all_machines {
+        query_machine(machine)
+    } else {
+        match resolve_machine("read", machine) {
+            Ok(machine) => Some(machine),
+            Err(code) => return code,
+        }
+    };
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -2321,7 +2380,10 @@ fn cmd_read(
         connections,
         options,
     );
-    let store = BackupStore::new(cfg.clone(), machine.clone());
+    let store = match machine.as_deref() {
+        Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
+        None => BackupStore::for_metadata_query(cfg.clone()),
+    };
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -2334,6 +2396,11 @@ fn cmd_read(
     let code = if all_machines {
         cmd_read_all_machines(&store, &mk)
     } else {
+        let Some(machine) = machine.as_deref() else {
+            eprintln!("read: local machine identity is required unless --all-machines is set");
+            reap_remote(&cfg, no_reap);
+            return ExitCode::from(3);
+        };
         let stage = match stage {
             Some(s) => s,
             None => {
@@ -2443,9 +2510,7 @@ fn cmd_verify(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = machine
-        .map(String::from)
-        .unwrap_or_else(chat_stasher::id::machine_id);
+    let machine = query_machine(machine);
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -2454,7 +2519,10 @@ fn cmd_verify(
         connections,
         options,
     );
-    let store = BackupStore::new(cfg.clone(), machine.clone());
+    let store = match machine.as_deref() {
+        Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
+        None => BackupStore::for_metadata_query(cfg.clone()),
+    };
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -2475,7 +2543,10 @@ fn cmd_verify(
     };
 
     println!("[verify] repo           : {}", store.cfg.repo_root);
-    println!("[verify] machine        : {machine}");
+    println!(
+        "[verify] machine        : {}",
+        machine.as_deref().unwrap_or(UNRESOLVED_MACHINE)
+    );
     println!(
         "[verify] reap           : {}",
         if no_reap { "OFF (--no-reap)" } else { "ON" }
