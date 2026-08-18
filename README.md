@@ -1,6 +1,6 @@
 # chat-stasher
 
-`chat-stasher` continuously archives conversation history from AI coding harnesses—Claude Code, Codex CLI, Gemini CLI, opencode, and other registered sources—to storage that you control. It is an append-only archive. (Project description and append-only design: `crates/chat-stasher/src/main.rs:15-19`.)
+`chat-stasher` continuously archives conversation history from AI coding harnesses—Claude Code, Codex CLI, Gemini CLI, opencode, and other registered sources—to storage that you control. It is an append-only archive. (Project description and append-only design: `crates/chat-stasher/src/main.rs:25`.)
 
 
 ## Why this exists
@@ -29,7 +29,7 @@ cd <your-directory>
 cargo run -- doctor
 ```
 
-`doctor` is the smallest useful path: it is read-only and reports paths, counts, bytes, and timestamps rather than session text. (`crates/chat-stasher/src/main.rs:101-103`.)
+`doctor` is the smallest useful path: it is read-only and reports paths, counts, bytes, and timestamps rather than session text. (`crates/chat-stasher/src/main.rs:208-209`.)
 
 **Verification status:** `cargo run -- --help` and `cargo run -- doctor` were both run successfully against this checkout. The `doctor` output is not reproduced here because it contains local paths.
 
@@ -58,15 +58,15 @@ There is no `scan` subcommand in the current source; `status` is the scanner-fac
 
 The paths below are placeholders on purpose. Do not paste real account names, hostnames, or keys into examples.
 
-- `status` reads the local harness locations known to the registry and prints IDs, paths, sizes, mtimes, and flags; it does not print session content. (`main.rs:900-903`.)
-- `doctor` reads local harness metadata for its diagnostic report; its declared output is paths, counts, bytes, and timestamps. (`main.rs:101-103`.)
-- `ingest` reads complete export files from the `--inbox` you provide and writes sealed shards beneath the `--stage` you provide; consumed inputs are moved under `<your-inbox>/consumed/`. It prints paths, counts, and SHA-256 values, not conversation text. (`main.rs:135-155`; `main.rs:399-429`.)
-- `seal` reads the registry and the active file you name, then may rename that file into the stage tree. The registry policy and confidence gate are part of the decision. (`main.rs:315-321`.)
-- `push`, `read`, and `verify` read the repository and key file selected by config or flags. They can use a backend you explicitly configure with repository options; do not assume those three commands are offline. (`main.rs:33-61`; `main.rs:64-100`; `main.rs:104-133`.)
+- `status` reads the local harness locations known to the registry and prints IDs, paths, sizes, mtimes, and flags; it does not print session content. (`main.rs:147-154`.)
+- `doctor` reads local harness metadata for its diagnostic report; its declared output is paths, counts, bytes, and timestamps. (`main.rs:208-209`.)
+- `ingest` reads complete export files from the `--inbox` you provide and writes sealed shards beneath the `--stage` you provide; consumed inputs are moved under `<your-inbox>/consumed/`. It prints paths, counts, and SHA-256 values, not conversation text. (`main.rs:402-424`.)
+- `seal` reads the registry and the active file you name, then may rename that file into the stage tree. The registry policy and confidence gate are part of the decision. (`main.rs:461-470`.)
+- `push`, `read`, and `verify` read the repository and key file selected by config or flags. They can use a backend you explicitly configure with repository options; do not assume those three commands are offline. (`main.rs:95-132`; `main.rs:163-207`; `main.rs:211-249`.)
 
-What does not leave the process through the metadata-only paths: `status`, `doctor`, and `ingest` do not print conversation bodies, and the ingest summary is explicitly metadata-only. (`main.rs:399-400`; `main.rs:900-903`.) `read` is intentionally different: its single-session mode dumps session data to your stdout, so treat that command as payload output. (`main.rs:64-78`.)
+What does not leave the process through the metadata-only paths: `status`, `doctor`, and `ingest` do not print conversation bodies, and the ingest summary is explicitly metadata-only. (`main.rs:408`; `main.rs:147-154`.) `read` is intentionally different: its single-session mode dumps session data to your stdout, so treat that command as payload output. (`main.rs:163-165,2700-2735`.)
 
-The destination is selected by your config and flags: local stage/repository paths or a backend you configure. The source exposes repository, key-file, and backend-option inputs rather than a hard-coded destination. (`main.rs:42-60`; `main.rs:85-99`.)
+The destination is selected by your config and flags: local stage/repository paths or a backend you configure. The source exposes repository, key-file, and backend-option inputs rather than a hard-coded destination. (`main.rs:44-76`; `main.rs:95-132`.)
 
 ## What this does not do / current limits
 
@@ -74,15 +74,15 @@ This section is intentionally blunt:
 
 - **Zed and Cursor session enumeration is not implemented in this version.** Their registry entries are path research, not a promise that `status` can enumerate their conversations; Cursor’s registry evidence is explicitly community-only, and Zed’s macOS path is not individually verified. (`data/harness-registry-v1.json:117-139`; `data/harness-registry-v1.json:225-247`.)
 - **Claude Code on Windows has an unresolved path-sanitize detail.** The registry says the exact handling of the drive-letter colon and backslash in the short-path form is not determined and needs a real Windows test. (`data/harness-registry-v1.json:28`.)
-- **`ingest` is not a generic import API.** Its documented input is complete `deepseek-<sessionId>.json` exports; `.part` files are skipped, and the source notes that bundles carry no account field. (`main.rs:135-155`; `main.rs:426-429`.)
+- **`ingest` is not a generic import API.** Its documented input is complete `deepseek-<sessionId>.json` exports; `.part` files are skipped, and the source notes that bundles carry no account field. (`main.rs:402-424`.)
 - **The browser extension's history backfill works on exactly one platform, and "lists your conversations" is not the same as "saves them."** There are three tiers, and the middle one is the easy one to misread:
   - **Backfill can recover the actual conversation text: ChatGPT only.** (`apps/extension/lib/backfill/enumerate.ts:762`.)
   - **Backfill can list your conversations but saves none of their content: DeepSeek and Perplexity.** (`apps/extension/lib/backfill/enumerate.ts:774`.) With backfill enabled on these two, the extension enumerates your existing conversations and shows a pending count — **and then writes nothing to disk.** No file lands in your download directory, so **your DeepSeek and Perplexity history is not backed up.** The reason is recorded in the code: the *list* endpoint for each has cross-checked open-source provenance, the *single-conversation* endpoint has none, and we will not guess one — a wrong guess would not error, it would silently archive the first few turns of every chat while you believed it had them all (`apps/extension/lib/backfill/enumerate.ts:538-548`, `:603-611`).
   - **Backfill is not implemented at all: Gemini, Claude, Kimi.** The leg halts before issuing any request (`apps/extension/lib/backfill/enumerate.ts:643`).
   The extension's popup states the same three tiers in the same terms (`apps/extension/lib/popup-view.ts:271`). This limit is about **backfill of past conversations**; passive capture of the conversation currently open in your browser is a separate leg with its own per-platform table (`apps/extension/lib/contract.ts:69-303`).
-- **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:157-166`; `data/harness-registry-v1.json:55-57`.)
+- **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:461-470`; `data/harness-registry-v1.json:55-57`.)
 - **The release gate is not a substitute for installation.** `scripts/release-gate.sh` expects a built `target/debug/chat-stasher`, generates synthetic opaque fixtures by default (with `--real-data` for optional local Claude sessions), and exercises push/read/verify/doctor. (`scripts/release-gate.sh:3-21`.)
-- **License.** The project is licensed under the Apache License 2.0 (`LICENSE:2-3`; `Cargo.toml:7`).
+- **License.** The project is licensed under the Apache License 2.0 (`LICENSE:2-3`; `crates/chat-stasher/Cargo.toml:5`).
 
 ## Security and privacy
 
@@ -111,7 +111,7 @@ Three things worth knowing before reading either:
   unreadable forever, with no recovery path of any kind
   (`crates/chat-stasher/src/store.rs:813-815`, `:834-841`).
 - **There is no restore command.** `read` returns one session at a time to
-  stdout (`crates/chat-stasher/src/main.rs:130-133`); bulk restore is not
+  stdout (`crates/chat-stasher/src/main.rs:163-165,2700-2735`); bulk restore is not
   implemented.
 - **Captured conversations are plaintext on disk** in your download directory
   until `ingest` consumes them (`apps/extension/lib/download.ts:91-93`).

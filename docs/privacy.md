@@ -83,10 +83,10 @@ the sentence.
    browser's own download API (`apps/extension/lib/download.ts:117-135`).
 3. **Ingest.** The `chat-stasher` CLI, which you run yourself on your own
    machine, reads those files and turns them into sealed shards in a staging
-   directory (`crates/chat-stasher/src/main.rs:397-417`).
+   directory (`crates/chat-stasher/src/main.rs:402-424`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:97-120`;
+   (`crates/chat-stasher/src/main.rs:95-132`;
    `crates/chat-stasher/src/store.rs:271`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
@@ -163,7 +163,7 @@ What is kept there:
 | `cs_count`, `cs_last_capture_at` | A capture counter and a timestamp, for the toolbar badge | `apps/extension/lib/badge.ts:22-23` |
 | `cs_download_guard_v…` | Recent download outcomes, so a stalled download pauses the tool | `apps/extension/lib/download-guard.ts:37` |
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:24` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:88`; `apps/extension/lib/backfill/tab-port.ts:51` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:16-17`; `apps/extension/lib/backfill/tab-port.ts:51` |
 | `cs_backfill_v1:<platform>:<scope>` | The backfill progress set: **conversation/session ids** already archived and still pending, plus counters | `apps/extension/lib/backfill/types.ts:67-96`, `:116-118` |
 
 Two things in that table deserve to be called out rather than buried:
@@ -204,7 +204,7 @@ The parties who *do* see something, stated plainly:
 One further disclosure about the optional **backfill** feature, which walks your
 conversation history to archive older chats. When you turn it on, it issues
 additional requests to the chat platform, from your own logged-in session
-(`apps/extension/lib/backfill/engine.ts:197`). That produces a request pattern
+(`apps/extension/lib/backfill/engine.ts:199`). That produces a request pattern
 the platform can see and which does not look like a human reading their history.
 **We have not investigated** whether any platform's terms of service prohibit
 this, or whether it triggers rate-limiting. Backfill is off unless you enable it
@@ -325,11 +325,11 @@ Retention on **your** machine is under your control:
 
 | Where | How long it stays | How to delete it |
 |---|---|---|
-| Inbox files in your download directory | Until the CLI's `ingest` consumes them, which moves each file to `<inbox>/consumed/` (`crates/chat-stasher/src/main.rs:395`). **If you never run `ingest`, they stay indefinitely, in plaintext.** | Delete the files in `chat-stasher/inbox/` (and `consumed/`) with your file manager. Nothing else depends on them once ingested. |
+| Inbox files in your download directory | Until the CLI's `ingest` consumes them, which moves each file to `<inbox>/consumed/` (`crates/chat-stasher/src/main.rs:402-408`). **If you never run `ingest`, they stay indefinitely, in plaintext.** | Delete the files in `chat-stasher/inbox/` (and `consumed/`) with your file manager. Nothing else depends on them once ingested. |
 | Browser download history entries | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (badge, guard, backfill progress) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `view`, `ingest`, `collect`, `seal` (`crates/chat-stasher/src/main.rs:35-451`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `view`, `ingest`, `collect`, `seal` (`crates/chat-stasher/src/main.rs:36-490`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension stops all capture immediately** and removes its
 local storage. It does not delete files already written to your download
