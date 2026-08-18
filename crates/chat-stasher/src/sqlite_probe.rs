@@ -190,8 +190,9 @@ pub enum SqliteSessionProbe {
 /// session enumeration result. One call, one source of truth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteStoreProbe {
-    /// `.db` + `.db-wal` + `.db-shm` bytes when present.
-    pub total_bytes: u64,
+    /// `.db` + `.db-wal` + `.db-shm` bytes when present. `None` means a
+    /// sidecar stat failed; it is not an empty store.
+    pub total_bytes: Option<u64>,
     pub sessions: SqliteSessionProbe,
     /// Candidate rows that are **not** "filtered out" but "could not be read":
     /// the value is NULL / not decodable JSON, or the row is a metadata-only
@@ -299,11 +300,11 @@ pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStor
         _ => Some(0),
     };
     let (total_bytes, unreadable_stores) = match sqlite_store_bytes(db) {
-        Ok(bytes) => (bytes, 0),
+        Ok(bytes) => (Some(bytes), 0),
         Err(_) => {
             // Rows may still be readable, but an incomplete sidecar stat must
             // remain visible as unknown store metadata rather than zero bytes.
-            (0, 1)
+            (None, 1)
         }
     };
     SqliteStoreProbe {
@@ -436,7 +437,7 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
 
     let mut saw_database = false;
     let mut saw_composer_value = false;
-    let mut total_bytes = 0u64;
+    let mut total_bytes = Some(0u64);
     let mut candidate_count = 0u64;
     let mut count = 0u64;
     let mut unreadable_count = 0u64;
@@ -489,10 +490,15 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
         }
         saw_database = true;
         match sqlite_store_bytes(&db) {
-            Ok(bytes) => total_bytes += bytes,
+            Ok(bytes) => {
+                if let Some(total) = &mut total_bytes {
+                    *total += bytes;
+                }
+            }
             Err(_) => {
                 // Keep readable rows separate from an incomplete byte stat;
                 // a failed sidecar stat is not evidence of zero bytes.
+                total_bytes = None;
                 unreadable_stores += 1;
             }
         }

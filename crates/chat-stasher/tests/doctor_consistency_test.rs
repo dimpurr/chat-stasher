@@ -241,7 +241,7 @@ fn assert_report_self_consistent(report: &doctor::DoctorReport) {
         if matches!(probe.state, scanner::ProbeState::FileTarget) {
             assert_eq!(
                 fp.total_bytes, probe.bytes,
-                "harness {fp_name} 字节口径不一致: footprint={} B vs registry={} B",
+                "harness {fp_name} 字节口径不一致: footprint={:?} B vs registry={:?} B",
                 fp.total_bytes, probe.bytes
             );
         }
