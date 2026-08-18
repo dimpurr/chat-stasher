@@ -22,7 +22,10 @@ import {
   MAX_FAILURES,
   type FailureEntry,
 } from './backfill/failures';
-import { BACKFILL_ALARM_PERIOD_MINUTES } from './backfill/alarm';
+import {
+  BACKFILL_ALARM_PERIOD_MINUTES,
+  type BackfillTickRecord,
+} from './backfill/alarm';
 import {
   BACKFILL_PARTIAL,
   BACKFILL_SUPPORTED_PLATFORMS,
@@ -76,6 +79,12 @@ export interface PopupModel {
    * 那正是「显示成一切正常」。
    */
   failures: FailureSummary;
+  /**
+   * 🔴 C30 · 闹钟最近一跳的留痕（存储里读的，不是内存）。
+   * null = 存储里还没有这条记录 —— 那本身也是实话（闹钟还没醒过一次，
+   * 或者刚装上还没到点），照实说，绝不编一条。
+   */
+  lastTick?: BackfillTickRecord | null;
 }
 
 /** 汇总后的失败清单。entries 已按时间从新到旧排好。 */
@@ -174,6 +183,12 @@ function runningLine(model: PopupModel): string {
       return '运行：未在运行 —— 开关没有打开。';
     case 'download-paused':
       return '运行：未在运行 —— 已经暂停，欠账原封不动地留着。';
+    case 'no-targets':
+      // 🔴 C30 · 这一条与 'no-http-port' 是【两件事】，必须说成两句话：
+      //    通道可能好端端地接着（平台页面就开着），但我们连"从哪个账号、
+      //    哪个平台开始补"都还不知道 —— 登记表是空的。
+      return '运行：未在运行 —— 开关已经打开了，但还没有任何回溯目标，'
+        + '所以闹钟每次醒来都无事可做，一条也没有在取。';
     case 'no-http-port':
       // 🔴 这一条是 C18 的核心，C19 也没有把它拿掉：开关开着但一条都没在取，
       //    必须照实说。变的只是原因 —— 现在是「没有开着的平台页面」。
@@ -200,6 +215,13 @@ function missingLine(model: PopupModel): string {
         + '历史对话只在你自己的浏览器页面里取（同源请求，用的是你本来就有的登录态），'
         + '所以只要没有任何受支持平台的标签页开着，这条腿就取不到数。'
         + '打开其中任意一个平台的页面并保持开着，它就会自己继续。';
+    case 'no-targets':
+      // 🔴 必须回答用户的下一个问题：「那我要做什么才会开始？」
+      return '缺：一次真实归档过的对话 —— 回溯要从它身上才知道补哪个平台、哪个账号的历史。'
+        + '目前的做法是：只有当这个平台上有一次对话被【实时归档】过（你打开一条对话、'
+        + '它被存进下载目录），我们才会记下这个平台和账号，回溯才知道从哪儿开始补。'
+        + '所以请在这个平台上正常聊一次（或打开一条已有的对话让它被存一次），之后回溯会自己接着往下走。'
+        + '🔴 在那之前，我们不会去猜一个账号，也不会把整个平台的会话都翻一遍。';
     case 'download-paused':
       return '缺：需要你先确认下面的写入问题，然后手动恢复。';
     case 'disabled':
@@ -249,6 +271,50 @@ function failureNote(summary: FailureSummary): string {
     '清空这份清单只是「我知道了」，不会触发任何重新抓取。',
   ];
   return lines.join('\n');
+}
+
+/**
+ * 🔴 C30 · 「闹钟到底醒过没有、那一跳做了什么」。
+ *
+ * 为什么这一段必须存在：状态行说的是【此刻】的闸门，而用户真正的疑问是
+ * 「这几个小时里它一直在做什么」。C30 之前那个答案不存在于任何地方 ——
+ * 闹钟每 5 分钟醒一次、每次静默跳过，既不报错也不留痕。
+ * 🔴 这里只复述存储里那条记录，一个字都不推断。
+ */
+function lastTickNote(rec: BackfillTickRecord | null): string | null {
+  if (!rec) {
+    return '闹钟：存储里还没有任何一次闹钟跳动的记录 —— 可能它还没醒过第一次。'
+      + '（这一条是照实说"我不知道"，不是"它没在跑"。）';
+  }
+  const when = stampOf(rec.at);
+  if (rec.ran) {
+    return `闹钟：最近一次醒来是 ${when}，那一跳真的跑了（登记表里有 ${rec.targets} 个回溯目标）。`;
+  }
+  return `闹钟：最近一次醒来是 ${when}，那一跳【什么都没做】——`
+    + `${describeTickReason(rec.reason)}（当时登记表里有 ${rec.targets} 个回溯目标）。`;
+}
+
+/** 具名结局 → 一句人话。🔴 每一种都必须说得不一样，否则具名就白具了。 */
+export function describeTickReason(reason: string): string {
+  switch (reason) {
+    case 'no-targets':
+      return '还没有任何回溯目标，不知道该补哪个平台、哪个账号的历史';
+    case 'no-http-port':
+      return '没有可用的取数通道（当时没有一个开着的受支持平台页面）';
+    case 'disabled':
+      return '开关当时是关的';
+    case 'no-store':
+      return '浏览器存储当时不可用';
+    case 'download-paused':
+      return '归档写入连续停滞，这条腿已被自动暂停';
+    case 'already-running':
+      return '上一跳还没结束，这一跳直接让路了';
+    case 'ran':
+      return '它跑了';
+    default:
+      // 🔴 认不出来就照原样报出去，绝不吞掉一个我们没见过的结局。
+      return `结局码：${reason}`;
+  }
 }
 
 function progressLine(model: PopupModel): string {
@@ -303,6 +369,9 @@ function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 失败详情排在所有 note 的最前面。有东西丢了就先说这件事。
   if (model.failures.entries.length > 0) notes.push(failureNote(model.failures));
+
+  const tickNote = lastTickNote(model.lastTick ?? null);
+  if (tickNote) notes.push(tickNote);
 
   if (model.target) {
     notes.push(`这份进度对应：平台 ${model.target.platform} · 归档范围 ${model.target.scope}`);

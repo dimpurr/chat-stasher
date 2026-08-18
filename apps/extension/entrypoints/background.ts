@@ -22,6 +22,7 @@ import {
   BACKFILL_ALARM_NAME,
   loadTargets,
   rememberTarget,
+  saveLastTick,
   syncBackfillAlarm,
   type AlarmsApi,
 } from '../lib/backfill/alarm';
@@ -351,9 +352,14 @@ export async function runAlarmTick(): Promise<TickResult> {
       hasStore: store !== null,
       isEnabled: () => isBackfillEnabled(store),
       isDownloadPaused: isBackfillPausedByDownloadGuard,
+      // 🔴 C30：这两个值都是【事实】。以前这里把 hasHttp 写死成 false 再兜底成
+      //    'no-http-port'，于是「通道好端端接着、只是没有目标」被报成了端口坏了 ——
+      //    排查的人顺着那句话去查端口，而端口根本没坏。
       hasHttp: false,
+      hasTargets: false,
     });
-    lastTick = { ran: false, reason: blocked ?? 'no-http-port', report: null };
+    lastTick = { ran: false, reason: blocked ?? 'no-targets', report: null };
+    await recordAlarmTick(store, lastTick, 0);
     return lastTick;
   }
 
@@ -375,7 +381,29 @@ export async function runAlarmTick(): Promise<TickResult> {
     // 跑动了就收手；被开关/存储/熔断挡住也没必要再试别的目标（结论一样）。
     if (result.reason !== 'no-http-port') break;
   }
+  await recordAlarmTick(store, last, targets.length);
   return last;
+}
+
+/**
+ * 🔴 C30 · 把闹钟这一跳的结论写进存储。
+ *
+ * 为什么必须落盘而不是只留在 lastTick 变量里：MV3 的 SW 干完这一跳就会被回收，
+ * 用户过一会儿点开 Popup 时内存里什么都不剩 —— 真机上看到的正是这个：
+ * 闹钟一直在醒、一直什么都没做，而任何地方都查不到它醒过。
+ * 写失败只 warn，绝不让「留痕」反过来变成挡住这条腿的新理由。
+ */
+async function recordAlarmTick(
+  store: ReturnType<typeof browserLocalStore>,
+  result: TickResult,
+  targets: number,
+): Promise<void> {
+  await saveLastTick(store, {
+    at: Date.now(),
+    ran: result.ran,
+    reason: result.reason,
+    targets,
+  });
 }
 
 function cancelledIdLike(id: string | null): boolean {

@@ -33,7 +33,12 @@ import {
   setBackfillEnabled,
   tickBlockReason,
 } from '../../lib/backfill/schedule';
-import { syncBackfillAlarm, type AlarmsApi } from '../../lib/backfill/alarm';
+import {
+  loadLastTick,
+  loadTargets,
+  syncBackfillAlarm,
+  type AlarmsApi,
+} from '../../lib/backfill/alarm';
 import { isGuardTripped, loadGuardState, type GuardState } from '../../lib/download-guard';
 import {
   backfillStateEntries,
@@ -86,12 +91,21 @@ async function collect(): Promise<PopupModel> {
   }
   const state = pickBackfillState(snapshot);
 
+  // 🔴 C30 · 回溯目标登记表。这是闹钟那条路【唯一】的目标来源，
+  //    所以 Popup 必须读它 —— 只看 transportWired 就等于拿"通道通不通"
+  //    去回答"有没有活要干"，而那两件事根本不是一回事。
+  //    真机上正是这一处让 Popup 宣称「正在归档」，而闹钟每次都无事可做。
+  const targets = await loadTargets(store);
+  // 闹钟最近一跳做了什么（存储里读的；SW 被回收也还在）。
+  const lastTick = await loadLastTick(store);
+
   // 🔴 与 tickBackfill 共用的那一个判断，顺序天然一致。
   const block = await tickBlockReason({
     hasStore: store !== null,
     isEnabled: () => enabled,
     isDownloadPaused: () => (guard ? isGuardTripped(guard) : false),
     hasHttp: runtime.transportWired,
+    hasTargets: targets.length > 0,
   });
 
   return {
@@ -102,6 +116,7 @@ async function collect(): Promise<PopupModel> {
     target: state ? { platform: state.platform, scope: state.scope } : null,
     // 🔴 C20：跨所有平台/账号汇总。读不到快照 ⇒ 空清单（那时候我们确实什么都不知道）。
     failures: collectFailures(snapshot),
+    lastTick,
   };
 }
 
