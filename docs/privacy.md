@@ -124,10 +124,13 @@ taking our word for it:
   `amplitude` returns **zero matches** in `apps/extension/lib`,
   `apps/extension/entrypoints`, and `crates/chat-stasher/src`. There is no
   analytics SDK to configure, disable, or trust.
-- **Check the Firefox listing.** The add-on declares Mozilla's data-collection
-  field as `none` (`apps/extension/wxt.config.ts:51`). That declaration is
-  published alongside the add-on and is binding on us; if it were false, it
-  would be a policy violation you could report.
+- **Check the Firefox data-collection declaration.** The add-on declares
+  Mozilla's data-collection field as `none` (`apps/extension/wxt.config.ts:51`).
+  The extension is not listed on addons.mozilla.org yet, so today you read that
+  declaration in the source or in the manifest of a build you made yourself.
+  Once it is listed, AMO publishes the declaration alongside the add-on and it
+  is binding on us; if it were false, that would be a policy violation you
+  could report.
 
 The honest limit on all four checks: they tell you about **this** version, built
 from **this** source. They say nothing about a future version, and nothing about

@@ -105,13 +105,13 @@ Concretely, four separate plaintext exposures:
    long the window is depends entirely on how often you run `ingest`; if you
    never run it, the plaintext stays indefinitely.
 
-2. **The master key file.** It is written as plaintext JSON with `fs::write`
-   and no permission tightening (`crates/chat-stasher/src/store.rs:825-831`).
-   We searched for a `set_permissions` call on this path in `crates/*/src` and
-   **found none** — the only occurrences in the crate are inside a test file.
-   The file therefore lands with whatever your umask gives it, typically
-   `0644`. Any process running as you can read it and, combined with access to
-   your destination, decrypt the entire archive.
+2. **The master key file.** It is written as plaintext JSON. On Unix it is
+   created `0600` — the mode is set when the file is created, not afterwards —
+   inside a parent directory tightened to `0700`
+   (`crates/chat-stasher/src/store.rs:917-983`); on platforms without Unix
+   modes it inherits whatever the filesystem gives it. That keeps it away from
+   *other* users, not from you: any process running as you can read it and,
+   combined with access to your destination, decrypt the entire archive.
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
@@ -146,8 +146,7 @@ you protection against the *storage provider*, not against the person holding
 your laptop, because the key sits next to the config.
 
 We have not implemented, and do not currently plan for phase one: OS keychain
-storage for the key, passphrase-wrapping of the key file, or permission
-tightening on write.
+storage for the key, or passphrase-wrapping of the key file.
 
 ### The chat platforms (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi)
 
@@ -304,9 +303,11 @@ a real limitation of the current code.
    Mitigation available to you today: run `ingest` promptly, and put your
    download directory on an encrypted volume.
 
-2. **The master key file is plaintext with default permissions.** No
-   `set_permissions` call exists on the write path in `crates/*/src`; the write
-   is a plain `fs::write` (`crates/chat-stasher/src/store.rs:825-831`).
+2. **The master key file is plaintext on disk.** It is not passphrase-wrapped
+   and not kept in an OS keychain. On Unix it is created `0600` in a `0700`
+   parent (`crates/chat-stasher/src/store.rs:917-983`), which keeps it from
+   other users but not from anything running as you; on platforms without Unix
+   modes it inherits the filesystem's defaults.
 
 3. **Lose the key file and the data is gone. We have no recovery mechanism of
    any kind.** The master key is the repository's only key
@@ -411,7 +412,8 @@ Not a promise, just the honest best case with the current code:
    `ingest` often to shorten the plaintext window.
 3. Store the **key file somewhere other than the repository**, and back it up —
    losing it is unrecoverable (weakness 3).
-4. Tighten the key file's permissions yourself after first run; the tool will
-   not do it for you (weakness 2).
+4. On a platform without Unix file modes, check the key file's permissions
+   yourself after first run — the tool can only set them where the platform can
+   express them (weakness 2).
 5. Run `verify` (`crates/chat-stasher/src/main.rs:174-179`) rather than assuming
    the archive is intact.

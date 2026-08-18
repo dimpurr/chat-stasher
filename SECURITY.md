@@ -53,7 +53,7 @@ checkout of `main`, and the fix path is "pull and rebuild".
 
 ## Scope
 
-**In scope** — anything that breaks one of the three properties the project
+**In scope** — anything that breaks one of the four properties the project
 actually claims (each is derived from code in `docs/threat-model.md`):
 
 1. Conversation content reaching a network destination the user did not
