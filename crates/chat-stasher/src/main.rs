@@ -2248,8 +2248,29 @@ fn cmd_push(
         let inboxes = match inbox {
             Some(inbox) => vec![inbox],
             None => match chat_stasher::inbox::remembered_inboxes(&state_dir) {
-                Ok(inboxes) => inboxes,
-                Err(_) => Vec::new(),
+                Ok(chat_stasher::inbox::RememberedInboxes::Known(inboxes)) => inboxes,
+                // No record was ever written: this machine has genuinely never
+                // ingested from an inbox, so `inboxes=0` below is a real
+                // answer and the audit that follows is a real audit.
+                Ok(chat_stasher::inbox::RememberedInboxes::Unrecorded) => Vec::new(),
+                Err(e) => {
+                    eprintln!("push: cannot read the remembered inbox list: {e:#}");
+                    eprintln!(
+                        "push: nothing was archived. On this line `inboxes=0` means \"this \
+                         machine has no inbox\" — but the record could not be read, so the \
+                         number is unknown, not zero. Auditing an empty stage against a list we \
+                         failed to read would clear a run that may well have inbox content \
+                         waiting, and an audit that passes because it read nothing is worse \
+                         than no audit at all. Fix the collector state directory ({}) and \
+                         re-run; the stage is untouched.",
+                        state_dir.display()
+                    );
+                    // 3, not 1: same family as `cmd_search`, `cmd_collect` and
+                    // the masterkey path above. The audit never started — its
+                    // input was never read — so this is "did not finish", not
+                    // "finished and failed".
+                    return ExitCode::from(3);
+                }
             },
         };
         let consumed =
