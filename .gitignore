@@ -17,3 +17,6 @@ apps/extension/.wxt/
 
 # D15: python bytecode cache from the citation checker
 scripts/__pycache__/
+
+# release artifacts produced by scripts/release-artifacts.sh
+dist/
