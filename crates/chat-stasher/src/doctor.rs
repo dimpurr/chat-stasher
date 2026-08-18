@@ -616,7 +616,7 @@ fn build_risks(
     if !scan_failed {
         if let Some(cx) = footprints.iter().find(|f| f.name == "codex") {
             if cx.installed {
-                let count = cx.session_count.unwrap_or(0);
+                let count = footprint_count_label(cx);
                 risks.push(if cx.compressed_count > 0 {
                     format!(
                         "🟡 Codex: 源码没有按天数自动删除的机制，但 {n} 个空闲 rollout 已被压成 .jsonl.zst —— \
