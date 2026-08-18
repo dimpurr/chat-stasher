@@ -458,11 +458,19 @@ fn format_timestamp(t: SystemTime) -> String {
     )
 }
 
-fn days_since(t: SystemTime) -> f64 {
-    match SystemTime::now().duration_since(t) {
-        Ok(d) => d.as_secs_f64() / 86400.0,
-        Err(_) => 0.0,
-    }
+/// Days between `t` and now, or `None` when `t` is in the future.
+///
+/// B94: this used to answer `0.0` for a future timestamp, which is reachable —
+/// a file whose mtime sits ahead of the clock (skew, a restored archive, a
+/// `touch -t`) is enough. The `0.0` then reached a sentence that reads
+/// "your earliest session is 2026-08-19 (about 0 days ago, today 2026-08-18)
+/// — your history has about 0 days left": a false alarm that contradicts
+/// itself inside one line. `None` says the one true thing instead.
+fn days_since(t: SystemTime) -> Option<f64> {
+    SystemTime::now()
+        .duration_since(t)
+        .ok()
+        .map(|d| d.as_secs_f64() / 86400.0)
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -634,9 +642,8 @@ fn build_risks(
                 // is on disk — so the line is kept and only the fabricated
                 // number is removed. Dropping the whole risk instead would
                 // trade a false alarm for a missing one.
-                risks.push(match claude_fp.earliest {
-                    Some(earliest) => {
-                        let days_old = days_since(earliest);
+                risks.push(match claude_fp.earliest.and_then(|e| days_since(e).map(|d| (e, d))) {
+                    Some((earliest, days_old)) => {
                         format!(
                             "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。你最早的会话是 {}（约 {days_old:.0} 天前，今天 {today}）。\
                              \n    —— 下一次清理触发时会删掉早于 30 天的第一批；你的历史只还剩约 {days_old:.0} 天。",
@@ -644,7 +651,7 @@ fn build_risks(
                         )
                     }
                     None => format!(
-                        "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。最早会话时间未知（本机没扫到 claude-code 会话，或其时间戳读不出来），因此还剩多少天无法估算（今天 {today}）。\
+                        "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。最早会话时间未知（本机没扫到 claude-code 会话，其时间戳读不出来，或它落在未来），因此还剩多少天无法估算（今天 {today}）。\
                          \n    —— 风险不因此消失：下一次清理触发时仍会删掉早于 30 天的第一批。"
                     ),
                 });
@@ -676,7 +683,7 @@ fn build_risks(
     // --- Gemini -----------------------------------------------------------
     let gem_fp = footprints.iter().find(|f| f.name == "gemini");
     let gem_earliest = gem_fp.and_then(|f| f.earliest).map(format_date);
-    let gem_days = gem_fp.and_then(|f| f.earliest).map(days_since);
+    let gem_days = gem_fp.and_then(|f| f.earliest).and_then(days_since);
     if let Some(error) = &gemini.unreadable {
         // A failed settings read is a policy unknown, even when the session
         // directory happens to be absent; defaulting here would bless a
