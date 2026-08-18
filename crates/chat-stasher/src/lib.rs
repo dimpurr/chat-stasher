@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod id;
 pub mod inbox;
 pub mod models;
+pub mod nativehost;
 pub mod readback;
 pub mod reap;
 pub mod runstate;

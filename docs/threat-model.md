@@ -32,10 +32,10 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/download.ts:28-32`).
 3. The Rust CLI reads those files (`ingest`) and/or reads local coding-harness
    session stores (`collect`, `status`), and produces *sealed shards* in a stage
-   directory (`crates/chat-stasher/src/main.rs:312-333`).
+   directory (`crates/chat-stasher/src/main.rs:313-334`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:95-132`).
+   (`crates/chat-stasher/src/main.rs:96-133`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary, and it is also the only step that can involve a network.
@@ -72,7 +72,7 @@ build you did not compile yourself, or a dependency (see
 provider learns your **backup rhythm and volume**: how often you archive, how
 much you produced each time, and therefore roughly when you were and were not
 having conversations. If you archive on a schedule
-(`crates/chat-stasher/src/main.rs:77-94`), the schedule itself is visible to
+(`crates/chat-stasher/src/main.rs:78-95`), the schedule itself is visible to
 them as a pattern of writes. If you archive manually, the write times are a
 usage log.
 
@@ -97,7 +97,7 @@ Concretely, four separate plaintext exposures:
    `chat-stasher/inbox/<platform>-<sessionId>.json`
    (`apps/extension/lib/contract.ts:139`;
    `apps/extension/lib/download.ts:91-93`;
-   `apps/extension/entrypoints/background.ts:74-75`). The file contains the raw
+   `apps/extension/entrypoints/background.ts:79-80`). The file contains the raw
    response body — the conversation itself
    (`apps/extension/lib/contract.ts:282-291`). It sits there, world-readable to
    anything running as you, until the CLI consumes it. **We do not encrypt it,
@@ -115,13 +115,13 @@ Concretely, four separate plaintext exposures:
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:98-99,2542-2545`).
+   (`crates/chat-stasher/src/main.rs:99-100,2885-2888`).
 
 4. **Browser download history.** The two-phase write erases only the `.part`
    entry from the download shelf; the final file's entry is not erased
    (`apps/extension/lib/download.ts:129-141`). Your browser therefore retains a
    history record whose filename embeds the platform name and the session id
-   (`apps/extension/entrypoints/background.ts:106-109`). That is metadata, not
+   (`apps/extension/entrypoints/background.ts:111-114`). That is metadata, not
    content, but it is metadata about which conversations you archived, and it
    may be synced by your browser to your browser vendor. **We have not
    investigated** whether any particular browser syncs download history by
@@ -249,12 +249,12 @@ machine:
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
   asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:1621-1625`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:136-146`, `:3213-3260`).
+  (`crates/chat-stasher/src/main.rs:137-147`, `:3213-3260`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:428-430`).
+  the old inode (`crates/chat-stasher/src/main.rs:429-431`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -270,9 +270,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:2801-2818`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:3144-3161`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:211-215`).
+  (`crates/chat-stasher/src/main.rs:212-216`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -283,7 +283,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:1080-1095`).
+  as many words (`crates/chat-stasher/src/main.rs:1423-1438`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -322,10 +322,10 @@ a real limitation of the current code.
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:36-490`); **a bulk restore-to-disk command
+   (`crates/chat-stasher/src/main.rs:37-569`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:163-165,2700-2735`), and note that `read` therefore
+   (`crates/chat-stasher/src/main.rs:164-166,3043-3078`), and note that `read` therefore
    *is* a payload-output command — it prints conversation content. Restoring a
    whole archive is not something you can currently do with one command. If
    getting everything back in bulk matters to you, this is not ready for you
@@ -333,10 +333,10 @@ a real limitation of the current code.
 
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
    never fetches or decrypts a data blob; full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:250-260,1198-1240`). It also distinguishes "nothing
+   (`crates/chat-stasher/src/main.rs:251-261,1541-1583`). It also distinguishes "nothing
    matched" from "could not finish reading", which is the same
    unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:258-260,1430-1440`).
+   (`crates/chat-stasher/src/main.rs:259-261,1773-1783`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -415,5 +415,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:211-215,2804-2818`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:212-216,3147-3161`) rather than assuming
    the archive is intact.

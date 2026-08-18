@@ -3,6 +3,7 @@
 use anyhow::Context;
 use chat_stasher::config::{self, Config};
 use chat_stasher::destinit::SourceStatus;
+use chat_stasher::nativehost;
 use chat_stasher::reap;
 use chat_stasher::scanner;
 use chat_stasher::schedule;
@@ -491,6 +492,81 @@ enum Command {
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
     },
+    /// Register this executable as the browsers' Native Messaging host
+    /// (ADR-014 step 2) — or, with `--uninstall`, remove that registration.
+    ///
+    /// ADR-014 exists because `chrome.downloads` with `saveAs: false` is
+    /// overridden by the browser-level "ask where to save each file before
+    /// downloading" preference, which no extension flag can suppress. At up to
+    /// 200 backfilled conversations a day that is 200 modal dialogs.
+    ///
+    /// This is one command instead of the five physical actions Native
+    /// Messaging otherwise costs: it renders the host manifest (`name` /
+    /// `description` / the absolute `path` of *this* executable / `type:
+    /// stdio` / the pinned extension allowlist) and drops it into each
+    /// installed browser's discovery directory. No elevation: everything is
+    /// per-user.
+    ///
+    /// Every path written, left alone, skipped or removed is printed
+    /// absolutely. "No error" is not the same claim as "a file landed".
+    ///
+    /// Idempotent: run it twice and there is exactly one manifest per browser,
+    /// byte-identical, exit 0 both times. Exit codes: 0 = at least one manifest
+    /// is in place (or, for `--uninstall`, removal finished), 3 = nothing was
+    /// written because no known browser was found, 2 = usage error (bad host
+    /// name / extension id / relative binary path), 1 = an action failed.
+    InstallNativeHost {
+        /// Browser to register with, repeatable. Default: every browser whose
+        /// data directory exists on this machine. Naming one explicitly writes
+        /// it even when that directory is absent.
+        #[arg(long = "browser", value_enum)]
+        browsers: Vec<nativehost::Browser>,
+        /// Discovery root override (macOS default: `~/Library/Application
+        /// Support`). This is what makes the command testable without writing
+        /// into a real browser directory.
+        #[arg(long)]
+        target_root: Option<PathBuf>,
+        /// Which OS path layout to use. Default: this platform.
+        #[arg(long, value_enum)]
+        platform: Option<nativehost::Platform>,
+        /// Host binary recorded in the manifest. Default: this executable
+        /// (`std::env::current_exe()`), which is the only value that stays
+        /// correct after `cargo install --force`.
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Host name override. Chromium's grammar is `[a-z0-9_.]` only.
+        #[arg(long, default_value = nativehost::HOST_NAME)]
+        host_name: String,
+        /// Chrome/Chromium/Edge/Brave/Vivaldi extension id.
+        #[arg(long, default_value = nativehost::CHROME_EXTENSION_ID)]
+        extension_id: String,
+        /// Firefox add-on id (`browser_specific_settings.gecko.id`).
+        #[arg(long, default_value = nativehost::FIREFOX_EXTENSION_ID)]
+        firefox_extension_id: String,
+        /// Remove the manifests this command writes — and nothing else.
+        #[arg(long)]
+        uninstall: bool,
+        /// Windows only: skip the `reg.exe` step and only write the JSON.
+        #[arg(long)]
+        no_registry: bool,
+    },
+    /// The Native Messaging host process itself.
+    ///
+    /// The framed stdio message loop is NOT implemented in this build. This
+    /// subcommand exists so that the registration above points at something
+    /// verifiable: `--self-test` prints one line of JSON on stdout and exits 0,
+    /// which is how "does the host actually start?" is answered on a real
+    /// machine and in later tickets. Without `--self-test` it exits 2 rather
+    /// than pretending to serve a connection.
+    ///
+    /// Nothing but that one line may ever reach stdout: Chromium reads stdout
+    /// as a `u32` frame length, so a stray log line is read as a multi-gigabyte
+    /// frame and kills the pipe. Diagnostics go to stderr.
+    NativeHost {
+        /// Print one line of JSON describing this host, then exit 0.
+        #[arg(long)]
+        self_test: bool,
+    },
 }
 
 /// verify `--level` selector.
@@ -714,7 +790,288 @@ fn main() -> ExitCode {
             session.as_deref(),
             shard_bucket_cap,
         ),
+        Command::InstallNativeHost {
+            browsers,
+            target_root,
+            platform,
+            binary,
+            host_name,
+            extension_id,
+            firefox_extension_id,
+            uninstall,
+            no_registry,
+        } => cmd_install_native_host(
+            &browsers,
+            target_root,
+            platform,
+            binary,
+            &host_name,
+            &extension_id,
+            &firefox_extension_id,
+            uninstall,
+            no_registry,
+        ),
+        Command::NativeHost { self_test } => cmd_native_host(self_test),
     }
+}
+
+/// `install-native-host` — ADR-014 step 2.
+///
+/// The shape of this function is dictated by one house rule: nothing is
+/// written silently. Every target is printed with what happened to it and
+/// where, including the ones that were skipped and why, and the summary line
+/// counts them. A caller that reads only the exit code still gets the truth,
+/// but a human reading the output gets the paths.
+#[allow(clippy::too_many_arguments)]
+fn cmd_install_native_host(
+    browsers: &[nativehost::Browser],
+    target_root: Option<PathBuf>,
+    platform: Option<nativehost::Platform>,
+    binary: Option<PathBuf>,
+    host_name: &str,
+    extension_id: &str,
+    firefox_extension_id: &str,
+    uninstall: bool,
+    no_registry: bool,
+) -> ExitCode {
+    const TAG: &str = "[install-native-host]";
+    let platform = platform.unwrap_or_else(nativehost::Platform::current);
+    let root = match target_root {
+        Some(root) => absolute_path(&root),
+        None => nativehost::default_root(platform, &config::home_dir()),
+    };
+    let binary = match binary {
+        Some(path) => absolute_path(&path),
+        None => match std::env::current_exe() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("install-native-host: cannot resolve current executable: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    // Explicitly named browsers are written even when their data directory is
+    // absent; the default set is "whatever is actually installed here".
+    let explicit = !browsers.is_empty();
+    let selection: Vec<nativehost::Browser> = if explicit {
+        let mut chosen = browsers.to_vec();
+        chosen.sort();
+        chosen.dedup();
+        chosen
+    } else {
+        nativehost::Browser::ALL.to_vec()
+    };
+
+    // Render both dialects up front: a bad host name or extension id is a
+    // usage error, and it must not be discovered halfway through writing.
+    let chromium_manifest = match nativehost::render_manifest(
+        nativehost::Family::Chromium,
+        host_name,
+        &binary,
+        extension_id,
+        firefox_extension_id,
+    ) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("install-native-host: {e:#}");
+            return ExitCode::from(2);
+        }
+    };
+    let gecko_manifest = match nativehost::render_manifest(
+        nativehost::Family::Gecko,
+        host_name,
+        &binary,
+        extension_id,
+        firefox_extension_id,
+    ) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("install-native-host: {e:#}");
+            return ExitCode::from(2);
+        }
+    };
+
+    println!(
+        "{TAG} mode: {}",
+        if uninstall { "uninstall" } else { "install" }
+    );
+    println!("{TAG} host name: {host_name}");
+    println!("{TAG} host binary: {}", binary.display());
+    println!("{TAG} platform: {}", platform.id());
+    println!("{TAG} discovery root: {}", root.display());
+    if !uninstall {
+        println!("{TAG} chromium allowlist: chrome-extension://{extension_id}/");
+        println!("{TAG} gecko allowlist: {firefox_extension_id}");
+    }
+
+    let mut wrote = 0usize;
+    let mut updated = 0usize;
+    let mut unchanged = 0usize;
+    let mut skipped = 0usize;
+    let mut removed = 0usize;
+    let mut absent = 0usize;
+    let mut unsupported = 0usize;
+    let mut failed = 0usize;
+    let mut registered: Vec<nativehost::Target> = Vec::new();
+
+    for browser in selection {
+        let Some(target) = nativehost::target(platform, &root, browser, host_name) else {
+            unsupported += 1;
+            println!(
+                "{TAG} {}: no discovery path known for {} in this build — nothing written",
+                browser.id(),
+                platform.id()
+            );
+            continue;
+        };
+        if uninstall {
+            match nativehost::remove_one(&target) {
+                Ok(nativehost::RemoveOutcome::Removed) => {
+                    removed += 1;
+                    println!(
+                        "{TAG} {}: removed {}",
+                        browser.id(),
+                        target.manifest.display()
+                    );
+                    registered.push(target);
+                }
+                Ok(nativehost::RemoveOutcome::Absent) => {
+                    absent += 1;
+                    println!(
+                        "{TAG} {}: absent (nothing to remove) {}",
+                        browser.id(),
+                        target.manifest.display()
+                    );
+                    registered.push(target);
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("install-native-host: {}: {e:#}", browser.id());
+                }
+            }
+            continue;
+        }
+        let content = match browser.family() {
+            nativehost::Family::Chromium => &chromium_manifest,
+            nativehost::Family::Gecko => &gecko_manifest,
+        };
+        match nativehost::install_one(&target, content, explicit) {
+            Ok(nativehost::InstallOutcome::SkippedBrowserAbsent) => {
+                skipped += 1;
+                let probe = target
+                    .profile_root
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                println!(
+                    "{TAG} {}: skipped, browser not installed (no {}) — pass --browser {} to write anyway",
+                    browser.id(),
+                    probe,
+                    browser.id()
+                );
+            }
+            Ok(outcome) => {
+                match outcome {
+                    nativehost::InstallOutcome::Written => wrote += 1,
+                    nativehost::InstallOutcome::Updated => updated += 1,
+                    _ => unchanged += 1,
+                }
+                println!(
+                    "{TAG} {}: {} {}",
+                    browser.id(),
+                    outcome.id(),
+                    target.manifest.display()
+                );
+                registered.push(target);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("install-native-host: {}: {e:#}", browser.id());
+            }
+        }
+    }
+
+    // Windows registration. The manifest file alone is not discoverable there:
+    // the browser reads a per-user registry value that points at it. UNVERIFIED
+    // on real hardware — no Windows machine was available — so when this is not
+    // Windows the commands are printed rather than claimed.
+    if matches!(platform, nativehost::Platform::Windows) && !no_registry {
+        for target in &registered {
+            let Some(command) = nativehost::registry_command(
+                target.browser,
+                host_name,
+                &target.manifest,
+                uninstall,
+            ) else {
+                println!(
+                    "{TAG} {}: no registry key known in this build — manifest written but NOT discoverable",
+                    target.browser.id()
+                );
+                continue;
+            };
+            if cfg!(target_os = "windows") {
+                match nativehost::apply_registry(&command) {
+                    Ok(()) => println!(
+                        "{TAG} {}: registry {}",
+                        target.browser.id(),
+                        command.display()
+                    ),
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("install-native-host: {}: {e:#}", target.browser.id());
+                    }
+                }
+            } else {
+                println!(
+                    "{TAG} {}: registry NOT applied (not running on Windows), would run: {}",
+                    target.browser.id(),
+                    command.display()
+                );
+            }
+        }
+    }
+
+    if uninstall {
+        println!("{TAG} summary: removed {removed}, already absent {absent}, unsupported {unsupported}, failed {failed}");
+        println!("{TAG} directories themselves were left in place; no other vendor's manifest was touched.");
+        if failed > 0 {
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let live = wrote + updated + unchanged;
+    println!("{TAG} summary: wrote {wrote}, updated {updated}, unchanged {unchanged}, skipped {skipped}, unsupported {unsupported}, failed {failed}");
+    if failed > 0 {
+        return ExitCode::FAILURE;
+    }
+    if live == 0 {
+        eprintln!(
+            "install-native-host: nothing was written — no known browser directory under {}",
+            root.display()
+        );
+        return ExitCode::from(3);
+    }
+    println!("{TAG} next: reload the extension, then connect to {host_name}.");
+    ExitCode::SUCCESS
+}
+
+/// `native-host` — the host process. B98 ships the self-test stub only.
+fn cmd_native_host(self_test: bool) -> ExitCode {
+    if !self_test {
+        eprintln!(
+            "native-host: the stdio message loop is not implemented in this build; \
+             run `native-host --self-test` to check that the host starts."
+        );
+        return ExitCode::from(2);
+    }
+    // Exactly one line, on stdout, and nothing else ever.
+    println!(
+        "{}",
+        nativehost::self_test_line(nativehost::HOST_NAME, env!("CARGO_PKG_VERSION"))
+    );
+    ExitCode::SUCCESS
 }
 
 /// Resolve the archive partition without ever inventing a hostname. A missing
