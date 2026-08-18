@@ -45,6 +45,7 @@ import {
   collectFailures,
   pickBackfillState,
   renderPopup,
+  POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
   type BackfillRuntimeStatus,
   type PopupModel,
@@ -65,7 +66,7 @@ async function askBackground(): Promise<BackfillRuntimeStatus> {
   } catch (err) {
     console.warn('[chat-stasher] popup status query failed', (err as Error).message);
   }
-  return { transportWired: false, lastTickReason: null };
+  return { transportWired: false, lastTickReason: null, liveTarget: null };
 }
 
 async function collect(): Promise<PopupModel> {
@@ -117,6 +118,10 @@ async function collect(): Promise<PopupModel> {
     // 🔴 C20：跨所有平台/账号汇总。读不到快照 ⇒ 空清单（那时候我们确实什么都不知道）。
     failures: collectFailures(snapshot),
     lastTick,
+    // 🔴 C33 · 「开始回溯这个平台」那个按钮的两个前提，都是【事实】，不是推断：
+    //    liveTarget 来自 background 现场 ping 的那一次；targetCount 是登记表的真实长度。
+    liveTarget: runtime.liveTarget ?? null,
+    targetCount: targets.length,
   };
 }
 
@@ -144,6 +149,31 @@ async function onClearFailures(): Promise<void> {
   await refresh();
 }
 
+/**
+ * 🔴 C33 · 用户按下「开始回溯这个平台」。
+ *
+ * 登记这件事交给 background 做，不在这里直接写 storage：只有它能现场 ping 出
+ * 「此刻活着的那个通道是谁」。Popup 手里那份 liveTarget 是打开时的快照，
+ * 用它去登记就等于拿一份可能已经过期的事实当真 —— 那正是「猜」。
+ *
+ * 回来之后【立刻】重画：变化不需要用户手动刷新才看得见。
+ * 登记失败就照实说一句，绝不假装成功（也绝不用 setTimeout 装作在生效）。
+ */
+async function onStartBackfill(): Promise<void> {
+  let reply: unknown = null;
+  try {
+    reply = await browser.runtime.sendMessage({ type: POPUP_START_BACKFILL_MESSAGE });
+  } catch (err) {
+    console.warn('[chat-stasher] popup start-backfill failed', (err as Error).message);
+  }
+  const ok = !!reply && (reply as { ok?: boolean }).ok === true;
+  if (!ok) {
+    console.warn('[chat-stasher] backfill target not registered:',
+      (reply as { reason?: string } | null)?.reason ?? 'no reply');
+  }
+  await refresh();
+}
+
 function text(id: string, value: string): void {
   const el = document.getElementById(id);
   if (el) el.textContent = value;
@@ -161,6 +191,12 @@ function paint(view: PopupView): void {
   if (clearBtn) {
     clearBtn.textContent = view.clearFailures.label;
     clearBtn.hidden = !view.clearFailures.visible;
+  }
+
+  const startBtn = document.getElementById('start-backfill') as HTMLButtonElement | null;
+  if (startBtn) {
+    startBtn.textContent = view.startBackfill.label;
+    startBtn.hidden = !view.startBackfill.visible;
   }
 
   text('running', view.running);
@@ -212,6 +248,13 @@ document.getElementById('toggle')?.addEventListener('change', (ev) => {
   const on = (ev.target as HTMLInputElement).checked;
   void onToggle(on).catch((err) => {
     console.warn('[chat-stasher] popup toggle failed', (err as Error).message);
+    void refresh();
+  });
+});
+
+document.getElementById('start-backfill')?.addEventListener('click', () => {
+  void onStartBackfill().catch((err) => {
+    console.warn('[chat-stasher] popup start-backfill failed', (err as Error).message);
     void refresh();
   });
 });
