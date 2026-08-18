@@ -2460,7 +2460,12 @@ fn cmd_read(
         Err(e) => {
             eprintln!("read: {e}");
             reap_remote(&cfg, no_reap);
-            return ExitCode::FAILURE;
+            // Deliberately 3, not 1. A missing key means the archive was never
+            // consulted, which is "did not finish / never started", not
+            // "read it all and failed". Keep `read` aligned with `search` and
+            // `collect`: 3 means the archive was not read; 1 means reading
+            // completed and the result itself failed.
+            return ExitCode::from(3);
         }
     };
 
@@ -2477,7 +2482,10 @@ fn cmd_read(
             None => {
                 eprintln!("read: `--stage` is required unless `--all-machines` is set");
                 reap_remote(&cfg, no_reap);
-                return ExitCode::FAILURE;
+                // Deliberately 2, not 1 or 3. The command is missing required
+                // syntax, so this is a usage error before any archive read;
+                // repository semantics reserve 2 for usage errors.
+                return ExitCode::from(2);
             }
         };
         let session = match session {
@@ -2485,7 +2493,10 @@ fn cmd_read(
             None => {
                 eprintln!("read: `--session` is required unless `--all-machines` is set");
                 reap_remote(&cfg, no_reap);
-                return ExitCode::FAILURE;
+                // Deliberately 2, not 1 or 3. The command is missing required
+                // syntax, so this is a usage error before any archive read;
+                // repository semantics reserve 2 for usage errors.
+                return ExitCode::from(2);
             }
         };
         println!("[read] machine        : {machine}");
@@ -2499,7 +2510,11 @@ fn cmd_read(
             Err(e) => {
                 eprintln!("read: {e}");
                 reap_remote(&cfg, no_reap);
-                return ExitCode::FAILURE;
+                // Deliberately 3, not 1. A session readback that does not
+                // finish cannot claim a complete result; this is the same
+                // "did not finish" family as `search` and `collect`, while 1
+                // is reserved for a read that completed and then failed.
+                return ExitCode::from(3);
             }
         };
         println!("[read] shards (seq order):");
@@ -2533,7 +2548,10 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             eprintln!("read: {e}");
-            return ExitCode::FAILURE;
+            // Deliberately 3, not 1. `read_all_machines` failed before it
+            // produced a complete archive report, so the archive was not read
+            // to completion; 1 is for a completed read whose result failed.
+            return ExitCode::from(3);
         }
     };
     println!(
