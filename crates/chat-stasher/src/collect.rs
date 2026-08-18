@@ -397,6 +397,10 @@ pub struct CollectReport {
     /// not hand over. The latter is not a session count: an inaccessible
     /// subtree may contain any number of sessions.
     pub scanner_unreadable_count: u64,
+    /// B90: harnesses that *were* enumerated but whose unreadable tally could
+    /// not be taken. `scanner_unreadable_count` sums only the tallies that
+    /// exist, so without this the sum reads as complete when it is a floor.
+    pub scanner_unreadable_unknown: u64,
     pub scanner_unreadable_entry_count: u64,
     /// B82: harnesses this pass never got to look at (root un-stattable, wrong
     /// type, template unresolvable, confidence `未查明`). They contribute no
@@ -569,6 +573,11 @@ pub fn collect_scan_report(
             .iter()
             .filter_map(|probe| probe.unreadable_count)
             .sum(),
+        scanner_unreadable_unknown: scan
+            .probes
+            .iter()
+            .filter(|probe| probe.record_count.is_some() && probe.unreadable_count.is_none())
+            .count() as u64,
         scanner_unreadable_entry_count: scan
             .probes
             .iter()

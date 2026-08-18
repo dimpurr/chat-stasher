@@ -240,13 +240,16 @@ fn legacy_probe_separates_a_missing_body_from_an_empty_one() {
     assert_eq!(candidate_count, 4, "四个 composer 都应被计为候选");
     assert_eq!(count, 1, "只有带非空 conversation 的那一个是合格会话");
     assert_eq!(
-        probe.unreadable_count, 1,
+        probe.unreadable_count,
+        // B90: 这个字段现在是三态 —— `Some(1)` 是「数过了，是 1」，
+        // `None` 才是「这一项本身没数出来」。
+        Some(1),
         "只有 metadata-only 那一个属于「读不出来」"
     );
     // The two genuine filters — empty conversation, archived — must not be
     // reported as failures. A false positive is its own kind of lie.
     assert_eq!(
-        candidate_count - count - probe.unreadable_count,
+        candidate_count - count - probe.unreadable_count.expect("fixture 的计数是数得出来的"),
         2,
         "空 conversation 与 archived 是「确实没有」，不许算成失败"
     );
@@ -281,11 +284,12 @@ fn global_probe_counts_an_undecodable_row_as_unreadable_not_as_empty() {
     assert_eq!(candidate_count, 4, "四行 composerData 都是候选");
     assert_eq!(count, 2, "两行带非空 header 的行通过过滤");
     assert_eq!(
-        probe.unreadable_count, 1,
+        probe.unreadable_count,
+        Some(1),
         "value 为 NULL 的那行是「读不出来」，不是「读了发现是空的」"
     );
     assert_eq!(
-        candidate_count - count - probe.unreadable_count,
+        candidate_count - count - probe.unreadable_count.expect("fixture 的计数是数得出来的"),
         1,
         "header 为空的那行是「确实没有」，不许算成失败"
     );

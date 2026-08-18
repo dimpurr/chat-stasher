@@ -360,6 +360,11 @@ pub struct HarnessFootprint {
     pub candidate_count: Option<u64>,
     /// Sessions this harness knows about but could not hand over. Printed
     /// only when non-zero, so an all-good run's line is unchanged.
+    ///
+    /// B90: `None` means the tally was not taken — either nothing was
+    /// enumerated at all (`session_count` is `None` too) or enumeration
+    /// worked and only this count failed (`session_count` is `Some`). The
+    /// second one gets printed as 未知; see [`footprint_count_detail`].
     pub unreadable_count: Option<u64>,
     /// Directory entries/subtrees that could not be inspected. The number of
     /// sessions behind them is unknown, so this is not folded into
@@ -602,15 +607,33 @@ fn build_risks(
     } else {
         match &claude.verdict {
             ClaudeRetention::UnsetDefault => {
-                let earliest = claude_fp
-                    .earliest
-                    .map(format_date)
-                    .unwrap_or_else(|| "n/a".to_string());
-                let days_old = claude_fp.earliest.map(days_since).unwrap_or(0.0);
-                risks.push(format!(
-                "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。你最早的会话是 {earliest}（约 {days_old:.0} 天前，今天 {today}）。\
-                 \n    —— 下一次清理触发时会删掉早于 30 天的第一批；你的历史只还剩约 {days_old:.0} 天。"
-            ));
+                // B90: these two values used to be read from the *same*
+                // `Option` and disagree about whether it was known — the date
+                // printed an honest `n/a` while the day count quietly became
+                // `0`. The result was one sentence, half of it measured and
+                // half of it invented, and the invented half ("你的历史只还剩约
+                // 0 天") is the kind that makes a reader act *now*: it reads as
+                // "your archive is deleted tomorrow".
+                //
+                // The risk itself does not depend on the earliest session —
+                // cleanupPeriodDays being unset means 30-day rotation whatever
+                // is on disk — so the line is kept and only the fabricated
+                // number is removed. Dropping the whole risk instead would
+                // trade a false alarm for a missing one.
+                risks.push(match claude_fp.earliest {
+                    Some(earliest) => {
+                        let days_old = days_since(earliest);
+                        format!(
+                            "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。你最早的会话是 {}（约 {days_old:.0} 天前，今天 {today}）。\
+                             \n    —— 下一次清理触发时会删掉早于 30 天的第一批；你的历史只还剩约 {days_old:.0} 天。",
+                            format_date(earliest)
+                        )
+                    }
+                    None => format!(
+                        "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。最早会话时间未知（本机没扫到 claude-code 会话，或其时间戳读不出来），因此还剩多少天无法估算（今天 {today}）。\
+                         \n    —— 风险不因此消失：下一次清理触发时仍会删掉早于 30 天的第一批。"
+                    ),
+                });
             }
             ClaudeRetention::Safe { days, source } => {
                 risks.push(format!(
@@ -650,16 +673,20 @@ fn build_risks(
     } else if !gem_fp.map_or(true, |f| f.installed) {
         // nothing to clean: skip silently to not cry wolf
     } else if gemini.is_dangerous() {
-        risks.push(match gem_earliest {
-            Some(date) => {
-                let over = gem_days.unwrap_or(0.0) - 30.0;
+        // B90: `(gem_earliest, gem_days)` are two `map`s over one `Option`, so
+        // the `unwrap_or(0.0)` that used to sit in the `Some(date)` arm was
+        // unreachable today — and was exactly the shape of the Claude bug
+        // above, one refactor away from printing an invented "0 天前". Matched
+        // as a pair, the fabricated default has nowhere left to live.
+        risks.push(match (gem_earliest, gem_days) {
+            (Some(date), Some(days)) => {
+                let over = days - 30.0;
                 format!(
-                    "🔴 Gemini: sessionRetention 未配置（默认 30 天、enabled=true）。你最早的会话是 {date}（约 {:.0} 天前，今天 {today}）——已经越过 30 天门槛约 {over:.0} 天。\
+                    "🔴 Gemini: sessionRetention 未配置（默认 30 天、enabled=true）。你最早的会话是 {date}（约 {days:.0} 天前，今天 {today}）——已经越过 30 天门槛约 {over:.0} 天。\
                      \n    —— 清理当前尚未触发（或未执行），但下一次运行会删掉最早那批。会话就在 ~/.gemini/tmp（目录名就叫 tmp）。",
-                    gem_days.unwrap_or(0.0),
                 )
             }
-            None => format!(
+            _ => format!(
                 "🔴 Gemini: sessionRetention 未配置（默认 30 天、enabled=true），但没有发现 session-*.json 文件可判定最早会话。\
                  \n    —— 一旦开始跑，30 天后就会开始删。"
             ),
@@ -1068,8 +1095,21 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
     // be read" are different answers to "where did my sessions go", so the
     // second one gets its own count instead of hiding inside the first.
     // Silent when zero: an all-good line is byte-for-byte what it was.
-    if let Some(unreadable) = f.unreadable_count.filter(|n| *n > 0) {
-        parts.push(format!("{unreadable} 条读不出来"));
+    match f.unreadable_count {
+        Some(unreadable) if unreadable > 0 => parts.push(format!("{unreadable} 条读不出来")),
+        // Counted, and it is zero: silence, byte-for-byte as before.
+        Some(_) => {}
+        // B90: this row *was* enumerated (`session_count` is `Some`) and only
+        // the unreadable tally failed. Saying nothing here is byte-identical
+        // to the counted-zero line above, i.e. it reads as "nothing missed" —
+        // which is precisely the claim that was never earned. Rows that were
+        // never enumerated at all keep quiet: `installed`/`session_count`
+        // already say so, and repeating it would put 未知 on every
+        // not-installed harness of a healthy machine.
+        None if f.session_count.is_some() => {
+            parts.push("有多少条读不出来 未知（这一项本身没数出来）".to_string())
+        }
+        None => {}
     }
     if let Some(entries) = f.unreadable_entry_count.filter(|n| *n > 0) {
         parts.push(format!("{entries} 个不可读目录项（会话数未知）"));
@@ -1388,7 +1428,14 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
                 Some(c) => c.to_string(),
                 None => "未知".to_string(),
             },
-            scanner::ProbeState::Scanned => p.record_count.unwrap_or(0).to_string(),
+            // B90: `unwrap_or(0)` here is unreachable today (a Scanned probe
+            // always carries a count) — which is exactly why it was worth
+            // removing: it is a fallback that would print the B82 lie again
+            // the moment the invariant moves. Same shape as FileTarget above.
+            scanner::ProbeState::Scanned => match p.record_count {
+                Some(c) => c.to_string(),
+                None => "未知".to_string(),
+            },
             scanner::ProbeState::Missing => "0".to_string(),
             scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
             scanner::ProbeState::Indeterminate
@@ -1531,5 +1578,62 @@ mod tests {
     fn date_formatting() {
         let t = UNIX_EPOCH + std::time::Duration::from_secs(1752105600); // 2025-07-10
         assert_eq!(format_date(t), "2025-07-10");
+    }
+}
+
+#[cfg(test)]
+mod b90_unknown_count_tests {
+    use super::*;
+
+    fn footprint(unreadable: Option<u64>) -> HarnessFootprint {
+        HarnessFootprint {
+            name: "opencode".to_string(),
+            root: Some(PathBuf::from("/nowhere/store.db")),
+            installed: true,
+            session_count: Some(3),
+            candidate_count: Some(414),
+            unreadable_count: unreadable,
+            unreadable_entry_count: Some(0),
+            total_bytes: 0,
+            earliest: None,
+            latest: None,
+            compressed_count: 0,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        }
+    }
+
+    /// **B90 / A 的显示端反证。** 会话枚举成功（`session_count` 有值），
+    /// 但「有多少条读不出来」这一项本身没数出来。旧代码在这里一声不吭，
+    /// 和「数过了，是 0」的输出逐字相同 —— 读的人分不出来。
+    #[test]
+    fn an_uncounted_unreadable_tally_shows_up_as_unknown() {
+        let detail = footprint_count_detail(&footprint(None));
+        assert!(
+            detail.contains("未知"),
+            "数不出来就要显示成「未知」，不许沉默地等同于 0；实际：{detail:?}"
+        );
+    }
+
+    /// 健康机器上「它不响」：数过了、就是 0 时，这一格逐字为空。
+    #[test]
+    fn a_counted_zero_stays_silent() {
+        assert_eq!(footprint_count_detail(&footprint(Some(0))), "");
+    }
+
+    /// 数过了、非 0 时，照旧印那个数字。
+    #[test]
+    fn a_counted_number_still_prints_itself() {
+        assert!(footprint_count_detail(&footprint(Some(411))).contains("411 条读不出来"));
+    }
+
+    /// 压根没枚举过的行（`session_count` 也是 `None`）不该被这条新规则
+    /// 拖出一句「未知」：它的状态字段已经说过了，这里多说一遍就是噪音。
+    #[test]
+    fn a_row_that_was_never_enumerated_stays_quiet() {
+        let mut f = footprint(None);
+        f.session_count = None;
+        f.candidate_count = None;
+        assert_eq!(footprint_count_detail(&f), "");
     }
 }

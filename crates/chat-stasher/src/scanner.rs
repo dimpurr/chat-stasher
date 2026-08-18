@@ -475,6 +475,12 @@ pub struct HarnessProbe {
     /// that difference is the filter ("we looked, it really has nothing"),
     /// this field is the failure ("it says it has something, we could not get
     /// at it"). Merging them is the lie B68 removes.
+    ///
+    /// B90: `None` therefore covers two shapes of not-knowing — "nothing was
+    /// enumerated" (`record_count` is `None` too, and `state` says why) and
+    /// "enumeration worked but the unreadable tally itself could not be taken"
+    /// (`record_count` is `Some`). Display code must tell them apart by
+    /// `record_count`, and must never render either as `0`.
     pub unreadable_count: Option<u64>,
     /// Directory entries whose type or contents could not be inspected. This
     /// is separate from `unreadable_count`: an inaccessible directory may
@@ -865,11 +871,11 @@ fn probe_harness(
                                             .collect();
                                         let record_count = records.len();
                                         report.records.extend(records);
-                                        probe.unreadable_count = Some(enumeration_gap(
+                                        probe.unreadable_count = enumeration_gap(
                                             count,
                                             record_count,
                                             info.unreadable_count,
-                                        ));
+                                        );
                                         probe
                                             .note
                                             .push_str(&format!("; SessionRecord={record_count}"));
@@ -879,7 +885,7 @@ fn probe_harness(
                                         // sessions: every known row is now a
                                         // session we cannot hand out.
                                         probe.unreadable_count =
-                                            Some(enumeration_gap(count, 0, info.unreadable_count));
+                                            enumeration_gap(count, 0, info.unreadable_count);
                                         probe.note.push_str(&format!(
                                             "; SessionRecord 枚举失败（{error}）"
                                         ));
@@ -898,21 +904,18 @@ fn probe_harness(
                                             );
                                             let record_count = records.len();
                                             report.records.extend(records);
-                                            probe.unreadable_count = Some(enumeration_gap(
+                                            probe.unreadable_count = enumeration_gap(
                                                 count,
                                                 record_count,
                                                 info.unreadable_count,
-                                            ));
+                                            );
                                             probe.note.push_str(&format!(
                                                 "; SessionRecord={record_count}"
                                             ));
                                         }
                                         Err(error) => {
-                                            probe.unreadable_count = Some(enumeration_gap(
-                                                count,
-                                                0,
-                                                info.unreadable_count,
-                                            ));
+                                            probe.unreadable_count =
+                                                enumeration_gap(count, 0, info.unreadable_count);
                                             probe.note.push_str(&format!(
                                                 "; SessionRecord 枚举失败（{error}）"
                                             ));
@@ -1060,6 +1063,7 @@ fn probe_harness(
             state: ProbeState::Scanned,
             record_count: Some(count),
             candidate_count: Some(count + recs.unreadable_count),
+            // Counted entry by entry by the directory walk: a real number.
             unreadable_count: Some(recs.unreadable_count),
             unreadable_entry_count: Some(recs.unreadable_entry_count),
             recognized_files,
@@ -1159,23 +1163,33 @@ fn sqlite_records_from_rows(
 /// classified as undecodable. The sum is the answer to "已知 N 条，取回 M 条,
 /// K 条读不出来" — it never includes rows the qualification filter rejected
 /// after reading them, because those are not failures.
-fn enumeration_gap(known: u64, emitted: usize, unreadable_rows: u64) -> u64 {
-    unreadable_rows + known.saturating_sub(emitted as u64)
+///
+/// B90: `unreadable_rows` is now itself three-state. When the probe could not
+/// take that tally (`None`), the sum has no honest value — a gap of "however
+/// many rows enumeration dropped, plus an unknown number" is unknown, not the
+/// first half. Returning `Some(known - emitted)` there would print a number
+/// that is provably too small while looking exact.
+fn enumeration_gap(known: u64, emitted: usize, unreadable_rows: Option<u64>) -> Option<u64> {
+    Some(unreadable_rows? + known.saturating_sub(emitted as u64))
 }
 
 /// The one-clause note appended when — and only when — something was in fact
 /// unreadable. An all-good scan appends nothing, so the "一切正常" output and
 /// its exit code are byte-for-byte what they were.
 fn unreadable_note(
-    unreadable: u64,
+    unreadable: Option<u64>,
     unreadable_stores: u64,
     enumerate_error: Option<&str>,
 ) -> String {
     let mut note = String::new();
-    if unreadable > 0 {
-        note.push_str(&format!(
-            "；{unreadable} 条读不出来（不是空，是取不到正文）"
-        ));
+    match unreadable {
+        Some(n) if n > 0 => note.push_str(&format!("；{n} 条读不出来（不是空，是取不到正文）")),
+        // Counted, and the count is zero: the clean machine's note keeps its
+        // pre-B68 bytes.
+        Some(_) => {}
+        // B90: the tally itself failed. Silence here would be byte-identical
+        // to "counted, zero" — the exact confusion this ticket removes.
+        None => note.push_str("；读不出来的条数未知（这一项本身没数出来）"),
     }
     if unreadable_stores > 0 {
         note.push_str(&format!("；{unreadable_stores} 个库打不开/读不懂"));
@@ -1361,7 +1375,7 @@ fn probe_cursor_harness(
                     state: ProbeState::FileTarget,
                     record_count: Some(count),
                     candidate_count: Some(candidate_count),
-                    unreadable_count: Some(unreadable),
+                    unreadable_count: unreadable,
                     earliest,
                     latest,
                     bytes: legacy.total_bytes,
@@ -1451,7 +1465,7 @@ fn probe_cursor_harness(
                 state: ProbeState::FileTarget,
                 record_count: Some(count),
                 candidate_count: Some(candidate_count),
-                unreadable_count: Some(unreadable),
+                unreadable_count: unreadable,
                 earliest,
                 latest,
                 bytes: info.total_bytes,
