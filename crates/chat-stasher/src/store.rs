@@ -861,7 +861,8 @@ pub fn parse_key(raw: &str) -> anyhow::Result<MasterKey> {
 }
 
 /// Write the masterkey to `cfg.key_file`, owner-readable only where the
-/// platform can express that.
+/// platform can express that, and **do not return `Ok` until it is on the
+/// disk**.
 ///
 /// The mode is set *when the file is created*, not afterwards: a `write` then
 /// `set_permissions` pair leaves a window in which the only key to the whole
@@ -870,41 +871,76 @@ pub fn parse_key(raw: &str) -> anyhow::Result<MasterKey> {
 /// the file inherits whatever the filesystem gives it, and
 /// `docs/threat-model.md` says so rather than implying protection we do not
 /// provide.
+///
+/// Durability is part of the contract, not a bonus: this function's `Ok` is
+/// what the CLI turns into the words "masterkey created+persisted", and the
+/// caller then writes an archive that *only this key can ever open*. A plain
+/// `write` that is still in the page cache would make those words a lie after a
+/// power cut — the archive would survive and the key would not. So the key goes
+/// down the same route as a sealed shard (`seal_shard`): temp file -> fsync ->
+/// rename, plus an fsync of the directory so the rename itself is durable.
 pub fn persist_key_file(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<()> {
-    if let Some(parent) = cfg.key_file.parent() {
-        fs::create_dir_all(parent)?;
-        // The directory listing alone reveals nothing secret, but a 0700 parent
-        // keeps the key out of reach even if a later write forgets its own mode.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-        }
-    }
-    let body = serialize_key(mk)?;
-
+    let parent = cfg
+        .key_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let name = cfg
+        .key_file
+        .file_name()
+        .with_context(|| {
+            format!(
+                "masterkey path has no file name: {}",
+                cfg.key_file.display()
+            )
+        })?
+        .to_owned();
+    fs::create_dir_all(&parent)
+        .with_context(|| format!("create masterkey directory {}", parent.display()))?;
+    // The directory listing alone reveals nothing secret, but a 0700 parent
+    // keeps the key out of reach even if a later write forgets its own mode.
     #[cfg(unix)]
     {
-        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o700));
+    }
+    let body = serialize_key(mk)?;
+    let tmp = parent.join(format!(".{}.tmp", name.to_string_lossy()));
+
+    {
+        #[cfg(unix)]
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&cfg.key_file)
-            .with_context(|| format!("create masterkey file {}", cfg.key_file.display()))?;
-        f.write_all(body.as_bytes())?;
-        // An existing file keeps its old mode when reopened, so tighten it too.
-        fs::set_permissions(&cfg.key_file, fs::Permissions::from_mode(0o600))?;
-        return Ok(());
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut f = options
+            .open(&tmp)
+            .with_context(|| format!("create masterkey file {}", tmp.display()))?;
+        // A leftover temp file keeps its old mode when reopened, so tighten it
+        // before any key material is written into it.
+        #[cfg(unix)]
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+        f.write_all(body.as_bytes())
+            .with_context(|| format!("write masterkey file {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync masterkey file {}", tmp.display()))?;
     }
 
-    #[cfg(not(unix))]
-    {
-        fs::write(&cfg.key_file, body)?;
-        Ok(())
-    }
+    fs::rename(&tmp, &cfg.key_file)
+        .with_context(|| format!("move masterkey into place {}", cfg.key_file.display()))?;
+
+    // Without this the rename can still be lost on a power cut, i.e. the key
+    // file would simply not exist next boot. Failing here is deliberate: an
+    // unproven key is not a persisted key.
+    #[cfg(unix)]
+    fs::File::open(&parent)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("fsync masterkey directory {}", parent.display()))?;
+
+    Ok(())
 }
 
 /// Load the masterkey from `cfg.key_file` (error when missing).

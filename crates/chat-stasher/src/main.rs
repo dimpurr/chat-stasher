@@ -1,5 +1,6 @@
 //! chat-stasher CLI entry point.
 
+use anyhow::Context;
 use chat_stasher::config::{self, Config};
 use chat_stasher::destinit::SourceStatus;
 use chat_stasher::reap;
@@ -1347,20 +1348,34 @@ fn cmd_dest_init(
         println!("[dest-init] step 3        : nothing on the stage, no snapshot created");
     } else {
         println!("[dest-init] step 3        : push the union to the new destination");
-        let (mk, _) = masterkey(&target);
-        let store = BackupStore::new(target.clone(), machine.clone());
-        match store.push(stage, &mk) {
-            Ok(summary) => println!(
-                "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
-                summary.stage_shards,
-                summary.files_new,
-                summary.files_unmodified,
-                summary.data_added,
-                summary.snapshots_in_repo,
-            ),
+        // Same order as `cmd_push`: no archive is written to a destination
+        // whose key is not on the disk, because that archive could never be
+        // opened again.
+        match masterkey(&target) {
             Err(e) => {
-                eprintln!("dest-init: push failed: {e:#}");
+                eprintln!("dest-init: cannot put a new masterkey on the disk: {e:#}");
+                eprintln!(
+                    "dest-init: nothing was pushed to the new destination — an archive written \
+                     under a key that is not on the disk could never be opened again."
+                );
                 push_failed = true;
+            }
+            Ok((mk, _)) => {
+                let store = BackupStore::new(target.clone(), machine.clone());
+                match store.push(stage, &mk) {
+                    Ok(summary) => println!(
+                        "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
+                        summary.stage_shards,
+                        summary.files_new,
+                        summary.files_unmodified,
+                        summary.data_added,
+                        summary.snapshots_in_repo,
+                    ),
+                    Err(e) => {
+                        eprintln!("dest-init: push failed: {e:#}");
+                        push_failed = true;
+                    }
+                }
             }
         }
     }
@@ -2137,20 +2152,35 @@ fn store_config_from(
 }
 
 /// Load persisted masterkey or create+persist a fresh one (repo init path).
-fn masterkey(config: &StoreConfig) -> (MasterKey, bool) {
-    match store::load_key_file(config) {
-        Ok(mk) => (mk, false),
-        Err(_) => {
-            let mk = MasterKey::new();
-            match store::persist_key_file(config, &mk) {
-                Ok(()) => (mk, true),
-                Err(e) => {
-                    eprintln!("warning: could not persist masterkey: {e}");
-                    (mk, true)
-                }
-            }
-        }
+///
+/// The `bool` is "this key is new". A new key that could not be written to the
+/// disk is an **error**, never a warning: this repository is encrypted and
+/// deduplicated, so the masterkey is the only thing that can ever re-open it.
+/// Continuing past a failed key write and then archiving under that key builds
+/// a repository nobody can read again — worse than not archiving at all,
+/// because it also reports success. Callers must therefore ask for the key
+/// *before* they write anything, and stop here if it fails.
+///
+/// The "key already existed" path is untouched: it neither writes nor verifies.
+fn masterkey(config: &StoreConfig) -> anyhow::Result<(MasterKey, bool)> {
+    if let Ok(mk) = store::load_key_file(config) {
+        return Ok((mk, false));
     }
+    let mk = MasterKey::new();
+    store::persist_key_file(config, &mk)?;
+    // Read it back rather than trusting the write: "persisted" is a claim about
+    // what is on the disk, and this is the one file where being wrong is
+    // unrecoverable. Only the serialised forms are compared — no key material
+    // is printed either way.
+    let written = store::load_key_file(config)
+        .with_context(|| format!("re-read new masterkey {}", config.key_file.display()))?;
+    if store::serialize_key(&written)? != store::serialize_key(&mk)? {
+        anyhow::bail!(
+            "new masterkey {} does not read back as written",
+            config.key_file.display()
+        );
+    }
+    Ok((mk, true))
 }
 
 /// Reap the ssh ControlPersist masters left behind for the backend `endpoint`
@@ -2287,7 +2317,27 @@ fn cmd_push(
         );
         return ExitCode::FAILURE;
     }
-    let (mk, key_was_new) = masterkey(&cfg);
+    // Deliberately before the first archive byte: a repository written under a
+    // key that is not on the disk can never be opened again, so the only safe
+    // order is "prove we can re-open it, then write into it".
+    let (mk, key_was_new) = match masterkey(&cfg) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("push: cannot put a new masterkey on the disk: {e:#}");
+            eprintln!(
+                "push: nothing was archived. This repository is encrypted — an archive written \
+                 under a key that is not on the disk could never be opened again, so the run stops \
+                 here instead of producing one. Fix the key file location (--key-file) and re-run; \
+                 the stage is untouched."
+            );
+            reap_remote(&cfg, no_reap);
+            // Deliberately 3, not 1, and certainly not 0. Same family as
+            // `cmd_search` and `cmd_collect`: 3 == did not finish / never
+            // started, 1 == finished and failed. Nothing was pushed and nothing
+            // was even attempted, so this is the "never started" case.
+            return ExitCode::from(3);
+        }
+    };
     let store = BackupStore::new(cfg.clone(), machine.clone());
     println!(
         "[push] machine        : sha256={}",
