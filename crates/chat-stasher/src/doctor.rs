@@ -330,6 +330,10 @@ pub struct HarnessFootprint {
     /// Sessions this harness knows about but could not hand over. Printed
     /// only when non-zero, so an all-good run's line is unchanged.
     pub unreadable_count: Option<u64>,
+    /// Directory entries/subtrees that could not be inspected. The number of
+    /// sessions behind them is unknown, so this is not folded into
+    /// `unreadable_count`.
+    pub unreadable_entry_count: Option<u64>,
     pub total_bytes: u64,
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
@@ -363,6 +367,7 @@ pub fn coverage_from_records<'a>(
         },
         candidate_count: None,
         unreadable_count: None,
+        unreadable_entry_count: None,
         total_bytes,
         earliest,
         latest,
@@ -450,6 +455,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         session_count: probe.record_count,
         candidate_count: probe.candidate_count,
         unreadable_count: probe.unreadable_count,
+        unreadable_entry_count: probe.unreadable_entry_count,
         total_bytes: probe.bytes,
         earliest: probe.earliest,
         latest: probe.latest,
@@ -500,12 +506,15 @@ fn footprint_from_dir_probe<'a>(
             ..default_footprint(name, root)
         };
     }
-    HarnessFootprint {
-        // The probe walked this root; `installed` is its verdict, never a
-        // second independent `is_dir()` that could disagree with it.
-        installed: true,
-        ..coverage_from_records(name, root, recs)
+    let mut footprint = coverage_from_records(name, root, recs);
+    footprint.installed = true;
+    footprint.candidate_count = probe.candidate_count;
+    footprint.unreadable_count = probe.unreadable_count;
+    footprint.unreadable_entry_count = probe.unreadable_entry_count;
+    if probe.unreadable_count.unwrap_or(0) > 0 || probe.unreadable_entry_count.unwrap_or(0) > 0 {
+        footprint.note = probe.note.clone();
     }
+    footprint
 }
 
 fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
@@ -516,6 +525,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         session_count: None,
         candidate_count: None,
         unreadable_count: None,
+        unreadable_entry_count: None,
         total_bytes: 0,
         earliest: None,
         latest: None,
@@ -998,6 +1008,9 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
     // Silent when zero: an all-good line is byte-for-byte what it was.
     if let Some(unreadable) = f.unreadable_count.filter(|n| *n > 0) {
         parts.push(format!("{unreadable} 条读不出来"));
+    }
+    if let Some(entries) = f.unreadable_entry_count.filter(|n| *n > 0) {
+        parts.push(format!("{entries} 个不可读目录项（会话数未知）"));
     }
     if parts.is_empty() {
         return String::new();
