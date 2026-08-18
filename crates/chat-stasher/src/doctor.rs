@@ -321,15 +321,27 @@ impl GeminiRetention {
         if !self.enabled {
             "disabled (enabled=false) — safe".to_string()
         } else {
+            // B95: the dangerous arm used to end in
+            // `parse_duration_days(&self.max_age).unwrap_or(30.0)`. That default
+            // was only ever reached when the parse had *already* failed, so the
+            // one case it served was the one case it lied about: a `maxAge` this
+            // build cannot read was printed as `(30.0 days)` — a duration nothing
+            // parsed — right next to the user's own literal string. Same shape as
+            // the `now_unix() -> 0` and `days_since -> 0` defaults already removed.
+            // `is_dangerous()` still treats an unparseable window as dangerous;
+            // only the fabricated number is gone.
             match parse_duration_days(&self.max_age) {
                 Some(d) if d > 30.0 => format!(
                     "enabled, maxAge={} (~{d:.0}d) — large, safe-ish",
                     self.max_age
                 ),
-                _ => format!(
-                    "enabled, maxAge={} ({:.1} days) — DEFAULT-ish, dangerous",
-                    self.max_age,
-                    parse_duration_days(&self.max_age).unwrap_or(30.0)
+                Some(d) => format!(
+                    "enabled, maxAge={} ({d:.1} days) — DEFAULT-ish, dangerous",
+                    self.max_age
+                ),
+                None => format!(
+                    "enabled, maxAge={} (这个 build 解析不出时长，按危险处理) — dangerous",
+                    self.max_age
                 ),
             }
         }

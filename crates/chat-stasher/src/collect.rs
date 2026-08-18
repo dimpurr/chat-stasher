@@ -1221,8 +1221,17 @@ fn read_jsonl_delta(
             base_offset: 0,
             bytes: full,
             bytes_read: before,
-            // reason: reusable 为 None 表示没有已校验的前缀，已校验前缀字节数自然为 0
-            prefix_bytes_validated: reusable.map(|entry| entry.offset).unwrap_or(0),
+            // B95: the old expression was `reusable.map(|e| e.offset).unwrap_or(0)`
+            // with the reason "reusable is None, so nothing was validated". That
+            // reason described only half the paths that land here. The other half
+            // is `reusable == Some(entry)` whose recorded prefix hash *failed* the
+            // check above — and there the expression handed back `entry.offset` as
+            // "validated bytes" for a prefix just proven wrong, which `collect`
+            // prints as `prefix_validated=N`. Whichever way we arrive, the code
+            // below re-reads the file whole from offset 0 and validates no prefix.
+            // reason: 走到这里意味着没有任何前缀通过校验——要么本就没有可复用条目，
+            //         要么可复用条目的前缀哈希刚刚校验失败；两种情况下已校验前缀字节数都是 0
+            prefix_bytes_validated: 0,
             reset: old.is_some(),
         });
     }
