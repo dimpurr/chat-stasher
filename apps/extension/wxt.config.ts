@@ -33,7 +33,7 @@ export default defineConfig({
     // 🔴 Nothing else is added. No host permissions: the backfill leg fetches
     // through the content script that is ALREADY injected on these origins,
     // as a same-origin request in the user's own logged-in page context.
-    permissions: ['downloads', 'storage', 'alarms'],
+    permissions: ['downloads', 'storage', 'alarms', 'nativeMessaging'],
     // 🔴 ADR-014: this pins the Chrome extension ID to
     // gihmdkkmmmkeiagjjiimacmgkdilofhi on every machine and every unpacked
     // install. Without it Chrome derives the id from the install *path*, so it

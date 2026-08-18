@@ -48,6 +48,11 @@ import {
   resumeAfterGuard,
 } from '../lib/download-guard';
 
+import {
+  deliverToNativeHost,
+  probeNativeHost,
+} from '../lib/native-host';
+
 export interface HandledResult {
   saved: boolean;
   reason?: string;
@@ -61,6 +66,7 @@ export interface HandledResult {
    * saved:false 时为 undefined（根本没有命名过）。
    */
   sessionId?: string;
+  channel?: 'native-messaging' | 'downloads';
 }
 
 /**
@@ -132,7 +138,25 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     return { saved: false, reason: 'session id is not usable as a file name (refused, not collapsed)' };
   }
   const slug = `${bundle.platform}-${named}`;
-  const { finalName, bytes } = await writeCommitted(slug, JSON.stringify(bundle), {
+  const dataStr = JSON.stringify(bundle);
+
+  // ADR-014 主通道：优先尝试 Native Messaging 直接交由本地 CLI 归档
+  const nmResult = await deliverToNativeHost(bundle);
+  if (nmResult.ok) {
+    void recordCapture().catch((err) => {
+      console.warn('[chat-stasher] badge update failed', (err as Error).message);
+    });
+    return {
+      saved: true,
+      finalName: `nm://${slug}.json`,
+      bytes: nmResult.bytes,
+      sessionId: bundle.sessionId,
+      channel: 'native-messaging',
+    };
+  }
+
+  // 降级通道：NM 不可用时走原来的 chrome.downloads
+  const { finalName, bytes } = await writeCommitted(slug, dataStr, {
     // C12：实时腿的每一次写入也喂给守卫（观测是共享的），
     // 但【熔断只暂停回溯腿】—— 这里不做任何阻断，用户当前这条对话照存。
     onOutcome: (result) => paintGuard(result),
@@ -143,7 +167,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   });
   // 🔴 sessionId 报的是 bundle 里那个【真的用来拼文件名】的值，不是上面那个局部变量：
   // 中间隔着 buildBundle 的一次重新抽取，报错了那一位才有意义。
-  return { saved: true, finalName, bytes, sessionId: bundle.sessionId };
+  return { saved: true, finalName, bytes, sessionId: bundle.sessionId, channel: 'downloads' };
 }
 
 /**

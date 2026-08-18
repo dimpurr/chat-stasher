@@ -52,6 +52,7 @@ import {
   type PopupView,
 } from '../../lib/popup-view';
 import { clearFailures } from '../../lib/backfill/failures';
+import { probeNativeHost } from '../../lib/native-host';
 
 /**
  * 问 background 要运行时事实。问不到（SW 起不来 / 消息没人接）时
@@ -100,6 +101,15 @@ async function collect(): Promise<PopupModel> {
   // 闹钟最近一跳做了什么（存储里读的；SW 被回收也还在）。
   const lastTick = await loadLastTick(store);
 
+  // 探测本机 Native Messaging Host 状态（主通道 vs 下载降级）
+  let nativeHost: { connected: boolean; reason?: string } | null = null;
+  try {
+    const nm = await probeNativeHost();
+    nativeHost = { connected: nm.ok, reason: nm.reason };
+  } catch {
+    nativeHost = { connected: false, reason: 'probe-failed' };
+  }
+
   // 🔴 与 tickBackfill 共用的那一个判断，顺序天然一致。
   const block = await tickBlockReason({
     hasStore: store !== null,
@@ -122,6 +132,7 @@ async function collect(): Promise<PopupModel> {
     //    liveTarget 来自 background 现场 ping 的那一次；targetCount 是登记表的真实长度。
     liveTarget: runtime.liveTarget ?? null,
     targetCount: targets.length,
+    nativeHost,
   };
 }
 
@@ -181,6 +192,7 @@ function text(id: string, value: string): void {
 
 function paint(view: PopupView): void {
   text('status', view.status);
+  text('channel', view.channel);
   // 🔴 C20：有失败项时这一行必须出现在最显眼的位置；没有时整块隐藏，
   //    绝不留一个空壳让用户以为「这里本来就该是空的」。
   text('failures', view.failures ?? '');
