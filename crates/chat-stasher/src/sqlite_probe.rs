@@ -747,6 +747,7 @@ pub fn read_opencode_session(
         .into_iter()
         .map(|(id, mut message)| {
             if let Value::Object(object) = &mut message {
+                // reason: 消息在 part 表中无对应条目时，parts 数组本身即为空列表 []
                 let parts = parts_by_message.remove(&id).unwrap_or_default();
                 object.insert("parts".to_string(), Value::Array(parts));
             }
@@ -926,6 +927,7 @@ pub fn enumerate_cursor_legacy_sessions(
         if !entry
             .file_type()
             .map(|file_type| file_type.is_dir())
+            // reason: 无法获取 entry 文件类型时跳过该 entry，视为非目录（CursorLegacyScan 在 probe 侧另有 unreadable_entries 计数）
             .unwrap_or(false)
         {
             continue;
@@ -1485,6 +1487,7 @@ fn cursor_legacy_composer_verdict(value: &Value) -> LegacyComposerVerdict {
     if value
         .get("isArchived")
         .and_then(Value::as_bool)
+        // reason: isArchived 字段缺失或非 bool 时默认未归档（即处于活跃状态）
         .unwrap_or(false)
     {
         return LegacyComposerVerdict::Empty;

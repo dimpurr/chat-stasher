@@ -22,7 +22,8 @@
 set -euo pipefail
 
 # --------------------------------------------------------------------- config
-BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/debug/chat-stasher"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$ROOT/target/debug/chat-stasher"
 MACHINE="gate-mbp"        # fixed path partition + snapshot host
 N_SESSIONS=3              # sessions to archive in either fixture mode
 SHARDS=4                  # sealed shards per session
@@ -73,7 +74,7 @@ shard_count() {
 }
 
 # ------------------------------------------------------------------- step 1
-gate "step 1/7 · build fixtures (JSONL -> sealed shards)"
+gate "step 1/8 · build fixtures (JSONL -> sealed shards)"
 mkdir -p "$STAGE"
 sources=()
 if [ "$REAL_DATA" -eq 1 ]; then
@@ -159,7 +160,7 @@ fi
 gate "step 1 OK · ${#sources[@]} sessions, ~$(du -sk "$STAGE" | awk '{print $1}') KiB staging"
 
 # ------------------------------------------------------------------- step 2
-gate "step 2/7 · push -> fresh local repo"
+gate "step 2/8 · push -> fresh local repo"
 if ! out=$("$BIN" push --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
               --machine "$MACHINE" --no-reap 2>&1); then
   echo "$out"; echo "[gate] push failed"; fail_gate
@@ -171,7 +172,7 @@ fi
 gate "step 2 OK · repo created, masterkey persisted"
 
 # ------------------------------------------------------------------- step 3
-gate "step 3/7 · repeat push -> assert data_added == 0 (idempotent)"
+gate "step 3/8 · repeat push -> assert data_added == 0 (idempotent)"
 if ! out=$("$BIN" push --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
               --machine "$MACHINE" --no-reap 2>&1); then
   echo "$out"; echo "[gate] repeat push failed"; fail_gate
@@ -185,7 +186,7 @@ fi
 gate "step 3 OK · data_added=0"
 
 # ------------------------------------------------------------------- step 4
-gate "step 4/7 · read --all-machines -> assert per-session sha == source"
+gate "step 4/8 · read --all-machines -> assert per-session sha == source"
 if ! out=$("$BIN" read --all-machines --repo "$REPO" --key-file "$KEY" --no-reap 2>&1); then
   echo "$out"; echo "[gate] read --all-machines failed"; fail_gate
 fi
@@ -213,7 +214,7 @@ done
 gate "step 4 OK · ${seen}/${N_SESSIONS} sessions sha256 match source"
 
 # ------------------------------------------------------------------- step 5
-gate "step 5/7 · verify --level l1"
+gate "step 5/8 · verify --level l1"
 if ! out=$("$BIN" verify --level l1 --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
               --machine "$MACHINE" --no-reap 2>&1); then
   echo "$out"; echo "[gate] verify l1 FAILED"; fail_gate
@@ -223,7 +224,7 @@ echo "$out" | grep -q 'RESULT         : OK' || { echo "[gate] verify l1 not OK";
 gate "step 5 OK · l1 structure check passed"
 
 # ------------------------------------------------------------------- step 6
-gate "step 6/7 · verify --level l3"
+gate "step 6/8 · verify --level l3"
 if ! out=$("$BIN" verify --level l3 --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
               --machine "$MACHINE" --no-reap 2>&1); then
   echo "$out"; echo "[gate] verify l3 FAILED"; fail_gate
@@ -236,17 +237,109 @@ gate "step 6 OK · l3 reconcile: archived content == sealed originals"
 if [ "$REAL_DATA" -eq 0 ]; then
   DOCTOR_HOME="$TMP/doctor-home"
   mkdir -p "$DOCTOR_HOME"
-  gate "step 7/7 · doctor (synthetic mode, isolated HOME)"
+  gate "step 7/8 · doctor (synthetic mode, isolated HOME)"
   if ! out=$(HOME="$DOCTOR_HOME" "$BIN" doctor 2>&1); then
     echo "$out"; echo "[gate] doctor errored"; fail_gate
   fi
 else
-  gate "step 7/7 · doctor (real-data opt-in)"
+  gate "step 7/8 · doctor (real-data opt-in)"
   if ! out=$("$BIN" doctor 2>&1); then
     echo "$out"; echo "[gate] doctor errored"; fail_gate
   fi
 fi
 gate "step 7 OK · doctor ran clean"
+
+# ------------------------------------------------------------------- step 8
+gate "step 8/8 · check semantic defaults in production code"
+SEMANTIC_CHECK=$(python3 -c '
+import glob, os, re, sys
+
+root = "'"$ROOT"'"
+src_pattern = os.path.join(root, "crates", "chat-stasher", "src", "**", "*.rs")
+files = sorted(glob.glob(src_pattern, recursive=True))
+
+all_violations = []
+for f in files:
+    with open(f, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    # B92 fix: the first version set `in_test = True` and never reset it, so
+    # everything after the first `#[cfg(test)]` went unchecked — which is
+    # the test module AND every line after it. A gate with a blind
+    # spot is worse than no gate: it reports OK over the exact region nobody
+    # looked at. Track brace depth so the skip ends with the module.
+    in_test = False
+    test_depth = 0
+    pending_test = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not in_test and (stripped == "#[cfg(test)]" or stripped.startswith("#[cfg(test)]")):
+            pending_test = True
+            continue
+        if pending_test:
+            in_test = True
+            pending_test = False
+            test_depth = line.count("{") - line.count("}")
+            if test_depth <= 0 and "{" in line:
+                in_test = False
+            continue
+        if in_test:
+            test_depth += line.count("{") - line.count("}")
+            if test_depth <= 0:
+                in_test = False
+            continue
+        if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+            continue
+
+        m1 = re.search(r"\.unwrap_or\s*\(\s*0[a-zA-Z0-9_.]*\s*\)", line)
+        m2 = re.search(r"\.unwrap_or\s*\(\s*false\s*\)", line)
+        m3 = re.search(r"\.unwrap_or_default\s*\(\s*\)", line)
+
+        if m1 or m2 or m3:
+            rule_name = "unwrap_or(0)" if m1 else ("unwrap_or(false)" if m2 else "unwrap_or_default()")
+            # B92 fix 2: scan the whole contiguous comment block above, not just
+            # the single line directly above. Accepting only a one-liner pushes
+            # authors toward one-line reasons, and a one-line reason is exactly
+            # the shape a rationalisation takes. A real explanation needs room.
+            has_reason = False
+            reason_text = ""
+            if "// reason:" in line:
+                reason_text = line.split("// reason:", 1)[1].strip()
+            else:
+                j = idx - 1
+                while j >= 0:
+                    prev = lines[j].strip()
+                    if not prev.startswith("//"):
+                        break
+                    if "// reason:" in prev:
+                        reason_text = prev.split("// reason:", 1)[1].strip()
+                        break
+                    j -= 1
+
+            if reason_text and len(reason_text) > 5 and reason_text.lower() != "ok":
+                has_reason = True
+
+            if not has_reason:
+                rel_path = os.path.relpath(f, root)
+                all_violations.append((rel_path, idx + 1, rule_name, stripped))
+
+if all_violations:
+    print(f"FAILED:{len(all_violations)}")
+    for rel_path, line_no, rule, code in all_violations:
+        print(f"  ! {rel_path}:{line_no} [{rule}] -> {code}")
+else:
+    print("OK")
+')
+
+if [[ "$SEMANTIC_CHECK" == FAILED:* ]]; then
+  count=$(echo "$SEMANTIC_CHECK" | head -n 1 | cut -d: -f2)
+  echo "[gate] step 8 FAILED · 发现 $count 处未注明理由的语义默认值！"
+  echo "[gate] 规则说明：你在这里把未知变成了一个具体值（0 / false / 空列表），如果这是有意的，请在上一行写："
+  echo "[gate]   // reason: <为什么这个默认值是诚实的>"
+  echo "$SEMANTIC_CHECK" | tail -n +2
+  fail_gate
+fi
+gate "step 8 OK · semantic defaults in production code carry reason annotations"
 
 # ---------------------------------------------------------------- selftest
 if [ "$SELFTEST" -eq 1 ]; then

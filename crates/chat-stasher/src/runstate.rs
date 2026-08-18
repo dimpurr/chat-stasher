@@ -111,6 +111,13 @@ fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        // reason: NOT an honest default — recorded as (a)-fragile, unreachable today.
+        // A clock before 1970 makes this 0, which lands in `finished_at_unix`; then
+        // `summarize` computes `now - 0` and states "55 years since the last run" —
+        // a confidently wrong sentence, which is the failure mode this repo cares
+        // about most. It is left as-is only because the branch needs a pre-1970
+        // system clock to reach. Do not copy this shape; if it ever becomes
+        // reachable, make it Option and say "unknown".
         .unwrap_or(0)
 }
 
