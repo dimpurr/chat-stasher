@@ -34,6 +34,14 @@ export default defineConfig({
     // through the content script that is ALREADY injected on these origins,
     // as a same-origin request in the user's own logged-in page context.
     permissions: ['downloads', 'storage', 'alarms'],
+    // 🔴 ADR-014: this pins the Chrome extension ID to
+    // gihmdkkmmmkeiagjjiimacmgkdilofhi on every machine and every unpacked
+    // install. Without it Chrome derives the id from the install *path*, so it
+    // differs per machine — and a Native Messaging host manifest cannot list an
+    // id it cannot predict. This is the PUBLIC half of the keypair; publishing
+    // it is what pins the id and gives away nothing. The private half is not in
+    // this repository and is not needed to build.
+    key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsBmAYgiVnBWzfija5tHUF69h8xsqiKpPe66WD8yGxRVyfJA27WZR37p/yTvqIJpWLf4HB68JuYhfvs97UY4umw1qX8/f/xsNkTjCkQAkIyrAKdvN7VoYtXtRYDIgtAgyCGjJL9/mzCYUPp2bAx/8om8M6FDN7KfUJ76fRADj6u3ajRdRLBmyZCeenA5/Eh9uqCWmNMnQt5EgIuHjaUaYGbpevjz53+9rZ3zitlUNbv6ZXA5A5QlUNv0ggA940UCdCa1C7ca3YPBqIOUSFIZZ1ezsI8klzi/A1zNpR4pSrSDYbVIfY2Qb1kaFVP/pMz4qhyMADwHrP/0pdLGFeMAdMwIDAQAB',
     browser_specific_settings: {
       gecko: {
         // Not a mailbox. AMO accepts either a GUID or "a string containing 80
