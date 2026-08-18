@@ -26,6 +26,20 @@ use std::process::{Command, Output};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+/// The process environment is process-global, and `cargo test` runs the tests
+/// in this file as threads of one process. Two fixtures here *write* it
+/// (`d4` blanks `PATH`, `d6` unsets `HOME`), and every fixture *reads* it —
+/// either directly, or by spawning the binary, which snapshots the parent
+/// environment at spawn time. A read that races a write gets the other
+/// fixture's environment.
+///
+/// B97: that race was real and it was silent. `d4`'s blanked `PATH` reached a
+/// concurrently spawned child; with no `PATH`, `id::machine_id()` cannot run
+/// `hostname -s`, `scanner::scan` fails with "machine identity unavailable",
+/// and `status` exits **3** instead of **1** — a red
+/// `clean_status_output_is_byte_identical` that goes green on a rerun.
+/// So *every* test in this file takes this lock, readers included. Writers
+/// alone is not enough: the reader is the one that gets lied to.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 const CLEAN_STATUS_BODY_SHA256: &str =
@@ -51,9 +65,27 @@ fn write_empty_registry(sandbox: &Path) -> PathBuf {
 fn isolated_command(sandbox: &Path, args: &[&str], registry: &Path) -> Command {
     let home = sandbox.join("home");
     fs::create_dir_all(&home).expect("create isolated HOME");
+    // B97: `PATH` and the machine name used to be inherited, which made every
+    // spawn here depend on whatever the rest of the process had done to the
+    // environment (and on which tools the host happens to ship). Both are now
+    // pinned to sandbox-owned values, so the child's answer is a function of
+    // this fixture alone:
+    //   * `PATH` points at an empty sandbox directory — the child looks up no
+    //     host tool at all, so no other fixture's `PATH` can change what it
+    //     finds.
+    //   * `HOSTNAME` is therefore the source `id::machine_id()` falls back to,
+    //     and it is a literal. Without it the empty `PATH` would leave the
+    //     machine identity unresolvable and `status` would exit 3.
+    // This is belt-and-braces with `ENV_LOCK`: the lock closes the race for
+    // variables nobody thought to pin, these two close it for the variables
+    // that actually reached the child.
+    let no_tools = sandbox.join("no-host-tools");
+    fs::create_dir_all(&no_tools).expect("create empty PATH directory");
     let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
         .args(args)
+        .env("PATH", &no_tools)
+        .env("HOSTNAME", "b85-fixture")
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
@@ -80,6 +112,10 @@ fn status_body(output: &Output) -> String {
 /// `probe.root == None` branch that used to build an empty `PathBuf`.
 #[test]
 fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let registry = sandbox.path().join("registry.json");
     fs::write(
@@ -105,6 +141,10 @@ fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
 /// removed before aggregation, but the record itself was already obtained.
 #[test]
 fn b1_records_survive_a_racing_root_removal() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let root = sandbox.path().join("removed-after-scan");
     let record = SessionRecord {
@@ -125,6 +165,10 @@ fn b1_records_survive_a_racing_root_removal() {
 
 #[test]
 fn a7_wrong_shaped_repository_is_not_reported_as_missing() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let repo = sandbox.path().join("repo-file");
     fs::write(&repo, b"synthetic repository shape").expect("write wrong-shaped repo fixture");
@@ -140,6 +184,10 @@ fn a7_wrong_shaped_repository_is_not_reported_as_missing() {
 
 #[test]
 fn a8_failed_sqlite_stat_cannot_form_a_fingerprint() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let parent = sandbox.path().join("not-a-directory");
     fs::write(&parent, b"synthetic path blocker").expect("write stat blocker");
@@ -153,6 +201,10 @@ fn a8_failed_sqlite_stat_cannot_form_a_fingerprint() {
 #[cfg(unix)]
 #[test]
 fn c6_inbox_metadata_failure_is_an_ingest_error() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::os::unix::fs::symlink;
 
     let sandbox = tempfile::tempdir().expect("create sandbox");
@@ -174,6 +226,10 @@ fn c6_inbox_metadata_failure_is_an_ingest_error() {
 
 #[test]
 fn d2_malformed_gemini_settings_are_unknown_not_default_dangerous() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let settings = sandbox.path().join(".gemini/settings.json");
     fs::create_dir_all(settings.parent().expect("settings parent")).expect("create Gemini dir");
@@ -187,7 +243,9 @@ fn d2_malformed_gemini_settings_are_unknown_not_default_dangerous() {
 
 #[test]
 fn d4_unavailable_ps_returns_unknown_reap_count() {
-    let _guard = ENV_LOCK.lock().expect("lock process environment");
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let old_path = std::env::var_os("PATH");
     let sandbox = tempfile::tempdir().expect("create sandbox");
     std::env::set_var("PATH", sandbox.path());
@@ -204,7 +262,9 @@ fn d4_unavailable_ps_returns_unknown_reap_count() {
 
 #[test]
 fn d6_missing_home_and_invalid_interval_are_not_silently_replaced() {
-    let _guard = ENV_LOCK.lock().expect("lock process environment");
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let old_home = std::env::var_os("HOME");
     let old_profile = std::env::var_os("USERPROFILE");
     let sandbox = tempfile::tempdir().expect("create sandbox");
@@ -243,6 +303,10 @@ fn d6_missing_home_and_invalid_interval_are_not_silently_replaced() {
 
 #[test]
 fn clean_status_output_is_byte_identical() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let root = sandbox.path().join("source");
     fs::create_dir_all(&root).expect("create clean synthetic source");
