@@ -18,7 +18,9 @@
       .row label { cursor: pointer; user-select: none; }
       #status { font-weight: 600; }
       #running { margin: 6px 0; }
-      #missing { margin: 6px 0; opacity: .85; }
+      /* C32：这一行现在会分几段说（缺什么 / 你要做什么 / 为什么），
+         不保留换行的话三件事会挤成一坨，用户读不出「要我做的那一件事」在哪。 */
+      #missing { margin: 6px 0; opacity: .85; white-space: pre-wrap; }
       #progress { margin: 6px 0; }
       /* C22：回溯覆盖那一行。不是错误提示，所以不做成红框；但也不许弱到看不见。 */
       #coverage { margin: 8px 0; padding: 6px 8px; font-size: 12px;
