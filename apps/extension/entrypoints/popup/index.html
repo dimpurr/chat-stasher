@@ -17,6 +17,7 @@
       .row { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
       .row label { cursor: pointer; user-select: none; }
       #status { font-weight: 600; }
+      #channel { margin: 6px 0; font-size: 12px; opacity: .9; }
       #running { margin: 6px 0; }
       /* C32：这一行现在会分几段说（缺什么 / 你要做什么 / 为什么），
          不保留换行的话三件事会挤成一坨，用户读不出「要我做的那一件事」在哪。 */
@@ -46,6 +47,7 @@
   <body>
     <h1>Chat Stasher</h1>
     <div id="status"></div>
+    <div id="channel"></div>
     <div id="failures" hidden></div>
     <button type="button" id="clear-failures" hidden></button>
     <div id="running"></div>

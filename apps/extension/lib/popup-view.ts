@@ -36,6 +36,9 @@ import { DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import { stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
 import { guardAlertDetail, type GuardState } from './download-guard';
+import { POPUP_CHANNEL_NM, POPUP_CHANNEL_FALLBACK } from './native-host';
+
+export { POPUP_CHANNEL_NM, POPUP_CHANNEL_FALLBACK };
 
 /**
  * Popup ↔ background 的消息类型。
@@ -74,6 +77,8 @@ export interface BackfillRuntimeStatus {
    * null = 没有活着的通道，或者拿到的源不在平台表里 —— 两种情况下都不许显示按钮。
    */
   liveTarget?: { platform: string; origin: string } | null;
+  /** ADR-014: Native Messaging host 状态 */
+  nativeHost?: { connected: boolean; reason?: string } | null;
 }
 
 export interface PopupModel {
@@ -115,6 +120,8 @@ export interface PopupModel {
    * 于是按钮不出现 —— 老调用点（含既有测试）一个字都不用改，也不会凭空多一个按钮。
    */
   targetCount?: number;
+  /** ADR-014: NM vs downloads 通道事实 */
+  nativeHost?: { connected: boolean; reason?: string } | null;
 }
 
 /** 汇总后的失败清单。entries 已按时间从新到旧排好。 */
@@ -127,6 +134,8 @@ export interface FailureSummary {
 export interface PopupView {
   /** 第一行：开关本身处在什么状态。 */
   status: string;
+  /** ADR-014：落盘通道状态（NM 主通道 vs downloads 降级）。 */
+  channel: string;
   /**
    * 🔴 C20 · 第二行：**有东西没存下来的时候，这一行必须出现。**
    * 没有失败项时是 null（那时候「一切正常」才是实话）。
@@ -190,8 +199,16 @@ export function canStartBackfillHere(model: PopupModel): boolean {
   return model.targetCount === 0;
 }
 
+export function channelLine(model: PopupModel): string {
+  if (model.nativeHost?.connected) {
+    return POPUP_CHANNEL_NM;
+  }
+  return POPUP_CHANNEL_FALLBACK;
+}
+
 export function renderPopup(model: PopupModel): PopupView {
   const status = statusLine(model);
+  const channel = channelLine(model);
   const running = runningLine(model);
   const missing = missingLine(model) || null;
   const progress = progressLine(model);
@@ -199,6 +216,7 @@ export function renderPopup(model: PopupModel): PopupView {
 
   return {
     status,
+    channel,
     failures: hasFailures ? failuresLine(model.failures) : null,
     running,
     missing,
@@ -526,6 +544,7 @@ function emptyStateFor(model: PopupModel): BackfillState {
 /** 把一份 view 拍平成纯文本 —— 测试断言和「贴出完整文案」都用它。 */
 export function popupText(view: PopupView): string {
   const lines = [view.status];
+  if (view.channel) lines.push(view.channel);
   if (view.failures) lines.push(view.failures);
   lines.push(view.running);
   if (view.missing) lines.push(view.missing);
