@@ -93,8 +93,26 @@ pub struct ReadAllReport {
     pub snapshots_in_repo: usize,
     /// One [`MachineMerge`] per hostname seen in the repository.
     pub machines: Vec<MachineMerge>,
-    /// Non-fatal notes (e.g. a snapshot without a `sessions/` subtree).
+    /// Notes about parts of the archive this read could not reach (e.g. a
+    /// snapshot whose tree root would not open). Non-fatal for the *rest* of
+    /// the report, but each one is a machine whose sessions are missing from
+    /// it — see [`ReadAllReport::complete`].
     pub warnings: Vec<String>,
+}
+
+impl ReadAllReport {
+    /// Whether every snapshot this read picked was actually walked.
+    ///
+    /// Deliberately the same shape and the same meaning as
+    /// [`crate::search::SearchReport::complete`]: `false` == the listing below
+    /// is real but is not the whole archive, so its absences prove nothing.
+    /// A `warning` here is never cosmetic — it is one hostname whose newest
+    /// snapshot contributed an empty session list because it could not be
+    /// opened, which is indistinguishable from "that machine backed nothing
+    /// up" unless the caller is told.
+    pub fn complete(&self) -> bool {
+        self.warnings.is_empty()
+    }
 }
 
 /// Newest snapshot per hostname group.
