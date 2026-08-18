@@ -1076,6 +1076,24 @@ fn cmd_view(
 fn cmd_doctor() -> ExitCode {
     let report = chat_stasher::doctor::run();
     chat_stasher::doctor::print_report(&report);
+    if report.scan_failed {
+        eprintln!(
+            "doctor: INCOMPLETE exit_code=3 — the registry-driven scan did not run, so the coverage \
+             numbers above are UNKNOWN, not zero. The retention verdicts that depend on a session \
+             count were omitted rather than fabricated; nothing here proves your harnesses are safe."
+        );
+        // Deliberately 3, not 1, and no longer 0. Same family as `cmd_search`,
+        // `cmd_collect` and `cmd_push`: 3 == did not finish / never started,
+        // 1 == finished and failed. `doctor` could not perform the diagnosis at
+        // all, which is the "never started" case — reusing 1 would make an
+        // unreadable registry indistinguishable from a completed diagnosis.
+        //
+        // Note the boundary this does NOT cross: a 🔴 line in `risks` is a
+        // *successful* diagnosis with a bad finding, and keeps exit 0. `doctor`
+        // reports on the machine; it does not fail because the machine is
+        // unhealthy. Only "I could not look" is non-zero.
+        return ExitCode::from(3);
+    }
     ExitCode::SUCCESS
 }
 
@@ -1104,6 +1122,22 @@ fn cmd_ingest(
     }
     println!("[ingest] shard bucket cap : {shard_bucket_cap}");
     print_ingest(&report, &machine);
+    if !report.errors.is_empty() {
+        eprintln!(
+            "ingest: FAILED exit_code=1 — {} inbox file(s) were opened and could not be turned into \
+             a sealed shard. They were NOT retired, so they are still in the inbox in plaintext and \
+             a re-run will try them again. The shards listed above are real; the inbox is not empty.",
+            report.errors.len()
+        );
+        // Deliberately 1, not 3. Each entry in `report.errors` is one candidate
+        // this pass actually opened and then failed on — a completed read whose
+        // result failed, which is exactly what `cmd_collect` spends 1 on for
+        // `report.errors`. 3 is reserved for "did not finish / never started",
+        // and ingest has no such case here: the inbox was enumerated in full,
+        // every candidate got its turn. Keeping the two apart is what lets a
+        // caller tell "one bundle is malformed" from "the inbox was unreadable".
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 
@@ -2653,6 +2687,21 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) ->
     for w in &report.warnings {
         println!("  WARN: {w}");
     }
+    if !report.complete() {
+        println!(
+            "read: PARTIAL exit_code=3 — the sessions listed above are real, but {} snapshot(s) \
+             could not be opened, so the machines they belong to are listed with an empty session \
+             set they did not earn. Absence below is not proof of absence in the archive.",
+            report.warnings.len()
+        );
+        // Deliberately 3, not 1. Same judgement as `cmd_search`'s PARTIAL and
+        // `cmd_read`'s repository failure: the archive was not read to
+        // completion, so this is "did not finish", not "read it all and the
+        // result failed". Until now this was the one surface in the family that
+        // printed `WARN:` lines and still exited 0 — a scripted read-back could
+        // not tell a machine that backed nothing up from one we could not open.
+        return ExitCode::from(3);
+    }
     ExitCode::SUCCESS
 }
 
@@ -3025,10 +3074,37 @@ fn cmd_status(sessions: bool) -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             eprintln!("status: scan failed: {e}");
-            return ExitCode::FAILURE;
+            // Deliberately 3, not 1. Nothing was scanned, so `status` has no
+            // answer to give about this machine at all — "did not finish /
+            // never started", the same call `doctor` makes on the same failure.
+            // It used to be 1, which is the code this command spends on "the
+            // timer is not running"; a caller could not tell an unreadable
+            // registry from a dead scheduler. Both are still non-zero, which is
+            // all `docs/install.md` promises.
+            return ExitCode::from(3);
         }
     };
     eprint!("{}", render_status(&report, sessions));
+    // Deliberately *not* folded in here: `report.probes` with a non-zero
+    // `unreadable_count`, i.e. a scan that succeeded but could not read every
+    // session a harness claims. It is real and it is reported — B78 put it on
+    // the `[scan]` line ("另有 N 条读不出来 …… 尚未归档") precisely because that
+    // is its channel. Two reasons it must not also move the exit code:
+    //
+    //   * This code already means one thing — "is the scheduled run healthy?"
+    //     (`run_state_verdict`, the `[run-once]` line above, documented in
+    //     `docs/install.md`). A second meaning on the same integer does not add
+    //     information, it destroys the first: a non-zero `status` would no
+    //     longer tell you whether to go look at your timer.
+    //   * Unreadable sessions are a *steady state*, not an event. A Cursor
+    //     store this build cannot decode reports the same count every run,
+    //     forever. Wiring that to the exit code makes `status` permanently
+    //     non-zero on a machine whose timer is fine — which is how users are
+    //     taught to ignore the code (see the same argument in `destinit.rs`).
+    //
+    // A partial scan is a fact about coverage; the exit code here is a verdict
+    // about the scheduler. Saying it in words is the fix; overloading the
+    // integer would be the regression.
     if verdict.healthy {
         ExitCode::SUCCESS
     } else {
