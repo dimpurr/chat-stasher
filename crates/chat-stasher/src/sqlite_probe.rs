@@ -333,14 +333,65 @@ fn unreadable_candidate_count(db: &Path, spec: &SqliteSchemaSpec<'_>) -> u64 {
         .unwrap_or(0)
 }
 
+/// One walk of Cursor's legacy `workspaceStorage`, carrying **both** what was
+/// read and what could not be.
+///
+/// B82: the walk always counted its own ignorance (`unreadable_stores`), and
+/// then threw it away at the return — every failure path ended in
+/// `continue`/`None`, so a `workspaceStorage` whose every database refused to
+/// open came back indistinguishable from one that holds nothing, and the
+/// scanner printed "未找到可读 composer 数据". "I could not look" is not
+/// "there is nothing there"; the counts now leave the function so the display
+/// layer can say which one it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CursorLegacyScan {
+    /// Present only when at least one workspace yielded a decodable composer
+    /// value. `None` keeps its old meaning — nothing enumerable was found —
+    /// but it is now paired with the ignorance counts below.
+    pub probe: Option<SqliteStoreProbe>,
+    /// Sibling databases that could not be opened or decoded. A count of
+    /// stores, not of sessions: how many composers hide in them is unknown.
+    pub unreadable_stores: u64,
+    /// Directory entries whose type could not be inspected, so we never even
+    /// learned whether they were workspaces. Session cardinality unknown.
+    pub unreadable_entries: u64,
+    /// The `workspaceStorage` directory itself could not be enumerated. Every
+    /// workspace under it is unknown, not absent.
+    pub enumerate_error: Option<String>,
+}
+
+impl CursorLegacyScan {
+    /// Did this walk hit anything it could not look into? Used by the caller
+    /// to decide between "not there" and "could not tell".
+    pub fn saw_ignorance(&self) -> bool {
+        self.unreadable_stores > 0 || self.unreadable_entries > 0 || self.enumerate_error.is_some()
+    }
+}
+
 /// Probe Cursor's pre-global-storage layout. Each immediate workspace directory
 /// may contain `state.vscdb`; its `ItemTable` stores either the
 /// `composer.composerData` object (usually with an `allComposers` array) or an
 /// `allComposers` value directly. Every database is opened through the same
 /// strict read-only URI as the global probe.
-pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option<SqliteStoreProbe> {
+///
+/// The enumeration logic is unchanged; only the *reporting* of its failures is
+/// new (see [`CursorLegacyScan`]).
+pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> CursorLegacyScan {
     if !workspace_storage.is_dir() {
-        return None;
+        // Not a directory here has two causes, and only one of them is
+        // "absent": report the other as an enumeration failure rather than as
+        // an empty walk.
+        return match fs::metadata(workspace_storage) {
+            Ok(_) => CursorLegacyScan {
+                enumerate_error: Some("workspaceStorage 存在但不是目录".to_string()),
+                ..CursorLegacyScan::default()
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => CursorLegacyScan::default(),
+            Err(e) => CursorLegacyScan {
+                enumerate_error: Some(format!("workspaceStorage 无法确认（{e}）")),
+                ..CursorLegacyScan::default()
+            },
+        };
     }
 
     let mut saw_database = false;
@@ -353,10 +404,29 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
     let mut earliest: Option<SystemTime> = None;
     let mut latest: Option<SystemTime> = None;
 
-    let entries = fs::read_dir(workspace_storage).ok()?;
-    for entry in entries.flatten() {
+    let mut unreadable_entries = 0u64;
+    let entries = match fs::read_dir(workspace_storage) {
+        Ok(entries) => entries,
+        // The directory is there and will not open: every workspace under it
+        // is unknown. Returning "nothing found" here was the worst of the
+        // `continue`s, because it hid *all* of them at once.
+        Err(e) => {
+            return CursorLegacyScan {
+                enumerate_error: Some(format!("workspaceStorage 无法枚举（{e}）")),
+                ..CursorLegacyScan::default()
+            };
+        }
+    };
+    for entry in entries {
+        // A directory entry we cannot even name may be a workspace holding any
+        // number of composers; it is not zero of them.
+        let Ok(entry) = entry else {
+            unreadable_entries += 1;
+            continue;
+        };
         let workspace = entry.path();
         let Ok(file_type) = entry.file_type() else {
+            unreadable_entries += 1;
             continue;
         };
         if !file_type.is_dir() {
@@ -386,10 +456,16 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
                         rusqlite::types::Type::Integer,
                     )),
                 },
-            )
-            .ok();
-        let Some(value) = value else {
-            continue;
+            );
+        let value = match value {
+            Ok(value) => value,
+            // "This workspace declares no composer key" is a real answer; a
+            // query that *failed* is not. Only the first one is silence.
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(_) => {
+                unreadable_stores += 1;
+                continue;
+            }
         };
         saw_composer_value = true;
         let Ok(json) = serde_json::from_slice::<Value>(&value) else {
@@ -427,9 +503,17 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
     }
 
     if !saw_database || !saw_composer_value {
-        return None;
+        // Still not a bare `None`: whatever we failed to read travels with the
+        // verdict, so the caller can tell "no legacy composer data here" from
+        // "we could not find out".
+        return CursorLegacyScan {
+            probe: None,
+            unreadable_stores,
+            unreadable_entries,
+            enumerate_error: None,
+        };
     }
-    Some(SqliteStoreProbe {
+    let probe = Some(SqliteStoreProbe {
         total_bytes,
         sessions: SqliteSessionProbe::Known {
             candidate_count,
@@ -439,7 +523,13 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Option
         },
         unreadable_count,
         unreadable_stores,
-    })
+    });
+    CursorLegacyScan {
+        probe,
+        unreadable_stores,
+        unreadable_entries,
+        enumerate_error: None,
+    }
 }
 
 /// Total on-disk bytes of a SQLite store: the main file plus `-wal` and
@@ -1635,8 +1725,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let info =
-            probe_cursor_legacy_workspace_storage(&dir.path().join("workspaceStorage")).unwrap();
+        let info = probe_cursor_legacy_workspace_storage(&dir.path().join("workspaceStorage"))
+            .probe
+            .unwrap();
         assert_eq!(
             info.sessions,
             SqliteSessionProbe::Known {

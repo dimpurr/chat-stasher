@@ -1294,6 +1294,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             scanner::ProbeState::Scanned => "已扫    ",
             scanner::ProbeState::FileTarget => "单文件  ",
             scanner::ProbeState::Missing => "不存在  ",
+            scanner::ProbeState::Indeterminate => "查不出来",
             scanner::ProbeState::SkipUnascertained => "跳过(未查明) ",
             scanner::ProbeState::SkipWrongPlatform => "跨平台  ",
             scanner::ProbeState::SkipUnresolvable => "跳过(模板)   ",
@@ -1312,15 +1313,25 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             scanner::ProbeState::FileTarget => format!(" bytes={}", fmt_bytes(p.bytes)),
             _ => String::new(),
         };
-        // 会话数：单文件 SQLite 无法枚举时打印 未知（绝不伪装成 0）；
-        // 其余状态沿用旧的 0 占位（那些行与 footprint 表没有并列对照）。
+        // 会话数，三态（与本文件其它表同一套词汇）：
+        //   数字   —— 枚举成功，这就是数
+        //   未知   —— 有理由认为可能有，但这次没能枚举出来
+        //   N/A    —— 这台机器上不适用（registry 没有本平台的 cell）
+        // B82: 以前除 Scanned/FileTarget 外一律印 "0"。跳过(未查明)、
+        // 跳过(模板)、查不出来 三种都是「我没看」，印 0 就是把没查过说成
+        // 查过且为空 —— 这正是本单要消灭的那句谎。「不存在」保留 0，因为
+        // 那是真的查过：路径不在。
         let count = match p.state {
             scanner::ProbeState::FileTarget => match p.record_count {
                 Some(c) => c.to_string(),
                 None => "未知".to_string(),
             },
             scanner::ProbeState::Scanned => p.record_count.unwrap_or(0).to_string(),
-            _ => "0".to_string(),
+            scanner::ProbeState::Missing => "0".to_string(),
+            scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
+            scanner::ProbeState::Indeterminate
+            | scanner::ProbeState::SkipUnascertained
+            | scanner::ProbeState::SkipUnresolvable => "未知".to_string(),
         };
         let extra = if p.note.is_empty() {
             String::new()

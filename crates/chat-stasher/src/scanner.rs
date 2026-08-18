@@ -428,8 +428,17 @@ pub enum ProbeState {
     Scanned,
     /// Single-file store (sqlite.db) probed for existence + size.
     FileTarget,
-    /// Scanned but the root / file does not exist here.
+    /// Scanned but the root / file does not exist here. Reserved for a
+    /// *measured* absence: the path was looked up and is genuinely not there.
     Missing,
+    /// B82: we could not establish whether this harness's store is here at
+    /// all — the metadata call failed (permissions, I/O), the path exists but
+    /// is not the kind of thing the registry declares, or the store's own
+    /// walk could not enumerate. This used to collapse into [`Self::Missing`]
+    /// and print `不存在` / `0`, which turns "I could not confirm" into
+    /// "confirmed nothing". The word `Indeterminate` is the one already used
+    /// for the same distinction in `destinit.rs`.
+    Indeterminate,
     /// Skipped: confidence `未查明` — scanning a guessed path is forbidden.
     SkipUnascertained,
     /// Skipped: no registry cell for this platform.
@@ -501,8 +510,14 @@ impl HarnessProbe {
 #[derive(Debug, Default)]
 pub struct ScanReport {
     pub records: Vec<SessionRecord>,
-    /// Roots (as resolved) that did not exist on this machine.
+    /// Roots (as resolved) that did not exist on this machine. Measured
+    /// absence only — a root we could not look at goes in
+    /// [`Self::indeterminate_roots`], because "跳过 N 个不存在的来源根目录"
+    /// must not count paths whose existence was never established.
     pub missing_roots: Vec<PathBuf>,
+    /// Roots whose existence or type could not be established (permissions,
+    /// I/O error, wrong file type, un-enumerable store).
+    pub indeterminate_roots: Vec<PathBuf>,
     /// Per-harness fate, in registry order.
     pub probes: Vec<HarnessProbe>,
 }
@@ -691,10 +706,18 @@ fn probe_harness(
         None => match explicit_root.as_ref().and_then(|_| h.paths.any_cell()) {
             Some(cell) => cell,
             None => {
+                // B82: this fell through to `base`'s `SkipUnresolvable`, so
+                // "the registry lists no cell for this platform" was reported
+                // with the same word as "the template would not resolve" —
+                // and, once the doctor stopped printing 0 for everything, it
+                // would have been counted as a look we failed to make. There
+                // is nothing here to have missed: `SkipWrongPlatform` is the
+                // state that says so, and `N/A` is its column.
                 return HarnessProbe {
+                    state: ProbeState::SkipWrongPlatform,
                     note: format!("无 {platform} 平台条目"),
                     ..base
-                }
+                };
             }
         },
     };
@@ -905,7 +928,11 @@ fn probe_harness(
                 }
                 probe
             }
-            _ => {
+            // B82: this arm used to be a bare `_ => Missing("单文件不存在")`,
+            // so a `metadata` call that failed on permissions, and a path that
+            // exists but is a directory, both reported the store as absent.
+            // Only `NotFound` is an absence we measured.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 report.missing_roots.push(root.clone());
                 HarnessProbe {
                     root: Some(root),
@@ -917,18 +944,80 @@ fn probe_harness(
                     ..base
                 }
             }
+            Err(e) => {
+                report.indeterminate_roots.push(root.clone());
+                HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Indeterminate,
+                    bytes: 0,
+                    record_count: None,
+                    note: format!("路径读不了，存在与否未知（{e}）—— 不是「不存在」"),
+                    ..base
+                }
+            }
+            Ok(md) => {
+                report.indeterminate_roots.push(root.clone());
+                HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Indeterminate,
+                    bytes: 0,
+                    record_count: None,
+                    note: format!(
+                        "路径存在但不是文件（{}）—— 会话数未知，不是 0",
+                        path_kind(&md)
+                    ),
+                    ..base
+                }
+            }
         }
     } else if !root.is_dir() {
-        report.missing_roots.push(root.clone());
-        HarnessProbe {
-            root: Some(root),
-            confidence,
-            state: ProbeState::Missing,
-            record_count: None,
-            candidate_count: None,
-            unreadable_count: None,
-            note: "目录不存在".to_string(),
-            ..base
+        // Same split for directory roots: `is_dir()` is false both for a path
+        // that is not there and for one we are not allowed to stat.
+        match fs::metadata(&root) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                report.missing_roots.push(root.clone());
+                HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Missing,
+                    record_count: None,
+                    candidate_count: None,
+                    unreadable_count: None,
+                    note: "目录不存在".to_string(),
+                    ..base
+                }
+            }
+            Err(e) => {
+                report.indeterminate_roots.push(root.clone());
+                HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Indeterminate,
+                    record_count: None,
+                    candidate_count: None,
+                    unreadable_count: None,
+                    note: format!("目录读不了，存在与否未知（{e}）—— 不是「不存在」"),
+                    ..base
+                }
+            }
+            Ok(md) => {
+                report.indeterminate_roots.push(root.clone());
+                HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Indeterminate,
+                    record_count: None,
+                    candidate_count: None,
+                    unreadable_count: None,
+                    note: format!(
+                        "路径存在但不是目录（{}）—— 会话数未知，不是 0",
+                        path_kind(&md)
+                    ),
+                    ..base
+                }
+            }
         }
     } else {
         let recs = collect_records(
@@ -972,6 +1061,18 @@ fn probe_harness(
             note,
             ..base
         }
+    }
+}
+
+/// Name the kind of thing a path turned out to be, for the one message that
+/// has to say "this is not what the registry declared".
+fn path_kind(md: &fs::Metadata) -> &'static str {
+    if md.is_dir() {
+        "目录"
+    } else if md.is_file() {
+        "文件"
+    } else {
+        "既不是文件也不是目录"
     }
 }
 
@@ -1076,6 +1177,52 @@ fn unreadable_note(
     note
 }
 
+/// The one clause appended when Cursor's legacy walk hit something it could
+/// not read. Empty string when the walk was complete — a clean machine's
+/// output does not grow a word (the same contract as [`unreadable_note`]).
+fn legacy_ignorance_note(scan: &crate::sqlite_probe::CursorLegacyScan) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(error) = &scan.enumerate_error {
+        parts.push(format!("枚举失败（{error}），会话数未知"));
+    }
+    if scan.unreadable_stores > 0 {
+        parts.push(format!(
+            "{} 个库打不开/读不懂（会话数未知）",
+            scan.unreadable_stores
+        ));
+    }
+    if scan.unreadable_entries > 0 {
+        parts.push(format!(
+            "{} 个不可读目录项（会话数未知）",
+            scan.unreadable_entries
+        ));
+    }
+    parts.join("；")
+}
+
+/// Legacy workspaces we could not look into, as a count of *entries* whose
+/// session cardinality is unknown — never as a count of sessions. An
+/// un-enumerable `workspaceStorage` is one such entry: the whole subtree.
+fn legacy_unknown_entries(scan: &crate::sqlite_probe::CursorLegacyScan) -> u64 {
+    scan.unreadable_stores + scan.unreadable_entries + u64::from(scan.enumerate_error.is_some())
+}
+
+/// `None` when the legacy walk was clean, so probes that never had this field
+/// keep printing exactly what they printed before.
+fn legacy_entry_count_field(scan: &crate::sqlite_probe::CursorLegacyScan) -> Option<u64> {
+    scan.saw_ignorance().then(|| legacy_unknown_entries(scan))
+}
+
+/// Either the established "nothing there" sentence or the list of things we
+/// could not read — never both.
+fn legacy_tail_note(ignorance: &str) -> String {
+    if ignorance.is_empty() {
+        " 未找到可读 composer 数据".to_string()
+    } else {
+        format!(" 没看完：{ignorance} —— 不能据此说没有")
+    }
+}
+
 fn cursor_legacy_records_from_rows(
     rows: Vec<CursorLegacySessionRow>,
     source: HarnessSource,
@@ -1151,10 +1298,18 @@ fn probe_cursor_harness(
         }
         None => "global cursorDiskKV 不存在；".to_string(),
     };
+    // B82: the legacy walk now hands back what it could *not* read as well as
+    // what it could. `legacy_scan` is consulted twice: once for the probe it
+    // produced, and once at the bottom, where "no legacy composer data" must
+    // not be printed if the walk in fact never got to look.
+    let legacy_scan = if global_needs_fallback {
+        crate::sqlite_probe::probe_cursor_legacy_workspace_storage(&workspace_storage)
+    } else {
+        crate::sqlite_probe::CursorLegacyScan::default()
+    };
+    let legacy_ignorance_note = legacy_ignorance_note(&legacy_scan);
     if global_needs_fallback {
-        if let Some(legacy) =
-            crate::sqlite_probe::probe_cursor_legacy_workspace_storage(&workspace_storage)
-        {
+        if let Some(legacy) = legacy_scan.probe.clone() {
             if let SqliteSessionProbe::Known {
                 candidate_count,
                 count,
@@ -1208,6 +1363,23 @@ fn probe_cursor_harness(
     }
 
     let Some(info) = global_info else {
+        // B82: "globalStorage 不存在 + legacy 未找到" was printed even when the
+        // legacy walk had been refused entry. An absence we could not verify
+        // is not an absence; it is `Indeterminate`, and it keeps its unreadable
+        // entry count so `status` can say "会话数未知".
+        if legacy_scan.saw_ignorance() {
+            report.indeterminate_roots.push(workspace_storage.clone());
+            return HarnessProbe {
+                root: Some(workspace_storage),
+                confidence,
+                state: ProbeState::Indeterminate,
+                unreadable_entry_count: Some(legacy_unknown_entries(&legacy_scan)),
+                note: format!(
+                    "{env_note}globalStorage/state.vscdb 不存在；legacy workspaceStorage 没看完：{legacy_ignorance_note} —— 不能据此说没有"
+                ),
+                ..base
+            };
+        }
         report.missing_roots.push(global_db.clone());
         return HarnessProbe {
             root: Some(global_db),
@@ -1277,13 +1449,18 @@ fn probe_cursor_harness(
                 ..base
             }
         }
+        // Both tails end in "legacy workspaceStorage 未找到可读 composer
+        // 数据". B82: that sentence is only allowed when the legacy walk
+        // actually completed; otherwise it says what it could not read.
         SqliteSessionProbe::SchemaMismatch { actual } => HarnessProbe {
             root: Some(global_db),
             confidence,
             state: ProbeState::FileTarget,
             bytes: info.total_bytes,
+            unreadable_entry_count: legacy_entry_count_field(&legacy_scan),
             note: format!(
-                "{env_note}检测到 SQLite 但表结构不认识（期望 cursorDiskKV(key, value)，实到 {actual}）；legacy workspaceStorage 未找到可读 composer 数据"
+                "{env_note}检测到 SQLite 但表结构不认识（期望 cursorDiskKV(key, value)，实到 {actual}）；legacy workspaceStorage{}",
+                legacy_tail_note(&legacy_ignorance_note)
             ),
             ..base
         },
@@ -1292,8 +1469,10 @@ fn probe_cursor_harness(
             confidence,
             state: ProbeState::FileTarget,
             bytes: info.total_bytes,
+            unreadable_entry_count: legacy_entry_count_field(&legacy_scan),
             note: format!(
-                "{env_note}检测到 SQLite 但只读枚举失败（{error}）；legacy workspaceStorage 未找到可读 composer 数据"
+                "{env_note}检测到 SQLite 但只读枚举失败（{error}）；legacy workspaceStorage{}",
+                legacy_tail_note(&legacy_ignorance_note)
             ),
             ..base
         },
