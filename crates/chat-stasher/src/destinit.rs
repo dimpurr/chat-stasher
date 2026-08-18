@@ -326,11 +326,11 @@ fn probe_classified(cfg: &StoreConfig, machine: &str) -> Result<ReadAllReport, (
 }
 
 /// Does the stage already hold at least one sealed shard for this session?
-fn stage_has(stage: &Path, machine: &str, session_id: &str) -> bool {
+fn stage_has(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<bool> {
     let dir = store::session_shard_dir(stage, machine, session_id);
-    store::sealed_shard_entries(&dir)
-        .map(|entries| !entries.is_empty())
-        .unwrap_or(false)
+    // A missing directory is known empty; a failed walk is unknown and must
+    // remain an error for the caller to surface.
+    store::sealed_shard_entries(&dir).map(|entries| !entries.is_empty())
 }
 
 /// A session id coming out of an archive path is untrusted input: it becomes a
@@ -383,8 +383,19 @@ pub fn fill_difference(
                             outcome.failed_sessions.push("<unsafe-id>".to_string());
                             continue;
                         }
-                        if stage_has(stage, machine, &session.session_id) {
-                            continue;
+                        match stage_has(stage, machine, &session.session_id) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(error) => {
+                                // A failed shard walk is unknown, not an empty
+                                // stage. Do not turn it into a restore decision;
+                                // mark the difference incomplete instead.
+                                outcome.failed_sessions.push(id_prefix(&session.session_id));
+                                outcome.unreachable_reason.get_or_insert_with(|| {
+                                    format!("local stage shard inventory unreadable: {error:#}")
+                                });
+                                continue;
+                            }
                         }
                         outcome.missing_locally += 1;
                         wanted.insert(session.session_id.clone());
