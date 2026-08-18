@@ -785,14 +785,18 @@ pub fn sqlite_session_cursor(
                 .map_err(|error| format!("读取 {} 会话时间失败: {error}", spec.table))
         })
         .transpose()?
-        .flatten();
+        .flatten()
+        // A cursor timestamp is part of the change key. Turning NULL into 0
+        // makes an unknown time indistinguishable from the real Unix epoch and
+        // can make both cursor reuse and summaries claim a concrete value.
+        .ok_or_else(|| format!("{} 会话时间缺失，无法建立 cursor", spec.table))?;
     let high_water = Some(OpenCodeHighWater {
-        time_updated: time_value.unwrap_or_default(),
+        time_updated: time_value,
         id: session_id.to_string(),
     });
     Ok(OpenCodeCursor {
         store_fingerprint: sqlite_store_fingerprint(db),
-        session_time_updated: time_value.unwrap_or_default(),
+        session_time_updated: time_value,
         row_count: count as u64,
         row_high_water: high_water,
         message_count: 0,
@@ -914,13 +918,16 @@ pub fn read_cursor_legacy_session(
                 && cursor_legacy_composer_id(composer).as_deref() == Some(session_id)
         })
         .ok_or_else(|| "Cursor composer 行不存在或未通过会话过滤".to_string())?;
-    let created_at = composer.get("createdAt").and_then(Value::as_i64);
+    let created_at = composer
+        .get("createdAt")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Cursor composer createdAt 缺失，无法建立 cursor".to_string())?;
     let cursor = OpenCodeCursor {
         store_fingerprint: sqlite_store_fingerprint(db),
-        session_time_updated: created_at.unwrap_or_default(),
+        session_time_updated: created_at,
         row_count: 1,
         row_high_water: Some(OpenCodeHighWater {
-            time_updated: created_at.unwrap_or_default(),
+            time_updated: created_at,
             id: session_id.to_string(),
         }),
         message_count: 0,

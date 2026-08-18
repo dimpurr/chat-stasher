@@ -45,7 +45,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// Registry file, relative to the repo root, that drives the scan.
 pub const REGISTRY_REL_PATH: &str = "data/harness-registry-v1.json";
@@ -840,22 +840,27 @@ fn probe_harness(
                                     Ok(rows) => {
                                         let records: Vec<SessionRecord> = rows
                                             .into_iter()
-                                            .map(|row| SessionRecord {
-                                                id: crate::id::SessionIdentity {
-                                                    source_short: source.short(),
-                                                    machine: machine.to_string(),
-                                                    native_id: row.id,
-                                                }
-                                                .id(),
-                                                absolute_path: root.clone(),
-                                                byte_size: 0,
-                                                mtime: sqlite_millis_to_system_time(
-                                                    row.time_updated,
-                                                )
-                                                .unwrap_or(UNIX_EPOCH),
-                                                source,
-                                                compressed: false,
-                                                sqlite_layout: Some(SqliteSessionLayout::OpenCode),
+                                            .filter_map(|row| {
+                                                // An unrepresentable SQLite time is an
+                                                // unreadable row, not a license to label it 1970.
+                                                let mtime =
+                                                    sqlite_millis_to_system_time(row.time_updated)?;
+                                                Some(SessionRecord {
+                                                    id: crate::id::SessionIdentity {
+                                                        source_short: source.short(),
+                                                        machine: machine.to_string(),
+                                                        native_id: row.id,
+                                                    }
+                                                    .id(),
+                                                    absolute_path: root.clone(),
+                                                    byte_size: 0,
+                                                    mtime,
+                                                    source,
+                                                    compressed: false,
+                                                    sqlite_layout: Some(
+                                                        SqliteSessionLayout::OpenCode,
+                                                    ),
+                                                })
                                             })
                                             .collect();
                                         let record_count = records.len();
@@ -1126,19 +1131,23 @@ fn sqlite_records_from_rows(
     layout: SqliteSessionLayout,
 ) -> Vec<SessionRecord> {
     rows.into_iter()
-        .map(|row| SessionRecord {
-            id: crate::id::SessionIdentity {
-                source_short: source.short(),
-                machine: machine.to_string(),
-                native_id: row.id,
-            }
-            .id(),
-            absolute_path: db.to_path_buf(),
-            byte_size: 0,
-            mtime: row.mtime.unwrap_or(UNIX_EPOCH),
-            source,
-            compressed: false,
-            sqlite_layout: Some(layout),
+        .filter_map(|row| {
+            // Missing SQLite time is carried as a row gap, never as a fake epoch.
+            let mtime = row.mtime?;
+            Some(SessionRecord {
+                id: crate::id::SessionIdentity {
+                    source_short: source.short(),
+                    machine: machine.to_string(),
+                    native_id: row.id,
+                }
+                .id(),
+                absolute_path: db.to_path_buf(),
+                byte_size: 0,
+                mtime,
+                source,
+                compressed: false,
+                sqlite_layout: Some(layout),
+            })
         })
         .collect()
 }
@@ -1229,19 +1238,23 @@ fn cursor_legacy_records_from_rows(
     machine: &str,
 ) -> Vec<SessionRecord> {
     rows.into_iter()
-        .map(|row| SessionRecord {
-            id: crate::id::SessionIdentity {
-                source_short: source.short(),
-                machine: machine.to_string(),
-                native_id: row.id,
-            }
-            .id(),
-            absolute_path: row.db,
-            byte_size: 0,
-            mtime: row.mtime.unwrap_or(UNIX_EPOCH),
-            source,
-            compressed: false,
-            sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
+        .filter_map(|row| {
+            // Legacy Cursor's optional createdAt has the same unknown state.
+            let mtime = row.mtime?;
+            Some(SessionRecord {
+                id: crate::id::SessionIdentity {
+                    source_short: source.short(),
+                    machine: machine.to_string(),
+                    native_id: row.id,
+                }
+                .id(),
+                absolute_path: row.db,
+                byte_size: 0,
+                mtime,
+                source,
+                compressed: false,
+                sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
+            })
         })
         .collect()
 }

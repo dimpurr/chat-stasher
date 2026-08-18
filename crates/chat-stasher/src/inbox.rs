@@ -351,6 +351,10 @@ struct Bundle {
     capturedAt: Option<String>,
     parsed: Option<serde_json::Value>,
     raw: Option<serde_json::Value>,
+    /// Legacy `inbox@1` exports carried `messages` instead of the current
+    /// authoritative `raw` envelope. This marker lets the compatibility path
+    /// preserve the whole bundle bytes rather than inventing an empty body.
+    messages: Option<serde_json::Value>,
     /// `inbox@2` only. Not part of `raw`, so dropping it here loses it for
     /// good — `raw.text` cannot re-derive it.
     identity: Option<serde_json::Value>,
@@ -368,7 +372,10 @@ struct ShardRecord {
     file_sha256: String,
     file_bytes: u64,
     captured_at: Option<String>,
-    parsed: ParsedEnvelope,
+    /// `None` means the bundle omitted the best-effort parsed envelope. It is
+    /// not the same as a parsed envelope whose values are false/empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parsed: Option<ParsedEnvelope>,
     raw: RawEnvelope,
     /// The `inbox@2` identity axis, preserved verbatim when the bundle carried
     /// one. Omitted entirely for `@1` bundles, so `@1` shard lines keep their
@@ -390,8 +397,12 @@ struct IdentityEnvelope {
 /// The `parsed` envelope — best-effort, re-derivable from `raw`.
 #[derive(Debug, Serialize)]
 struct ParsedEnvelope {
-    has_json: bool,
-    keys: Vec<String>,
+    /// Missing analysis stays absent; explicit `false` remains distinguishable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_json: Option<bool>,
+    /// Missing key metadata stays absent instead of becoming an empty list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keys: Option<Vec<String>>,
 }
 
 /// The `raw` envelope — authoritative by contract.
@@ -486,7 +497,7 @@ fn consume_one(
     let file_sha256 = sha256_hex(&bytes);
     let file_bytes = bytes.len() as u64;
 
-    let parsed = parse_bundle(name, &bytes);
+    let parsed = parse_bundle(name, &bytes)?;
     let session_dir = store::session_shard_dir(stage, machine, &parsed.id);
 
     // Content-addressed idempotency: identical raw bytes already archived?
@@ -512,7 +523,9 @@ fn consume_one(
         file_bytes,
         captured_at: parsed.captured_at,
         parsed: parsed.parsed,
-        raw: parsed.raw,
+        raw: parsed
+            .raw
+            .ok_or_else(|| anyhow::anyhow!("bundle raw envelope is missing"))?,
         identity: parsed.identity,
     };
     let line = serde_json::to_string(&record).context("serialise shard record")?;
@@ -682,14 +695,14 @@ struct ParseOutcome {
     session_id: String,
     captured_at: Option<String>,
     kind: &'static str,
-    parsed: ParsedEnvelope,
-    raw: RawEnvelope,
+    parsed: Option<ParsedEnvelope>,
+    raw: Option<RawEnvelope>,
     identity: Option<IdentityEnvelope>,
 }
 
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
 /// holds the whole file — `raw.text` is authoritative, never dropped.
-fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
+fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     let fallback_id = sanitize_component(&native_id_from_name(name));
     let default_platform = "deepseek".to_string();
 
@@ -699,14 +712,14 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
         session_id: fallback_id,
         captured_at: None,
         kind: "raw",
-        parsed: ParsedEnvelope {
-            has_json: false,
-            keys: Vec::new(),
-        },
-        raw: RawEnvelope {
-            text: String::new(),
-            bytes: 0,
-        },
+        // A wholly unparseable file keeps the established raw-only fallback;
+        // its platform/id come from the documented filename convention, not a
+        // claim that an absent bundle field was observed.
+        parsed: Some(ParsedEnvelope {
+            has_json: Some(false),
+            keys: Some(Vec::new()),
+        }),
+        raw: None,
         identity: None,
     };
 
@@ -714,50 +727,76 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
         Ok(b) => b,
         Err(_) => {
             // Degrade: raw = whole file, re-derivable from the archived record.
-            out.raw.text = String::from_utf8_lossy(bytes).into_owned();
-            out.raw.bytes = bytes.len() as u64;
-            return out;
+            out.raw = Some(RawEnvelope {
+                text: String::from_utf8_lossy(bytes).into_owned(),
+                bytes: bytes.len() as u64,
+            });
+            return Ok(out);
         }
     };
 
-    let platform = sanitize_component(bundle.platform.as_deref().unwrap_or("deepseek"));
-    let session = sanitize_component(
-        bundle
-            .sessionId
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(out.session_id.as_str()),
-    );
+    // These are required identity axes. Falling back here changes both the
+    // partition directory and the shard-local dedup scope, so an absent axis
+    // must remain an ingest error instead of becoming a plausible id.
+    let platform_raw = bundle
+        .platform
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bundle platform is missing"))?;
+    let session_raw = bundle
+        .sessionId
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bundle sessionId is missing"))?;
+    let platform = sanitize_component(platform_raw);
+    let session = sanitize_component(session_raw);
     out.kind = "bundle";
     out.platform = platform.clone();
     out.session_id = session.clone();
     out.id = format!("{platform}.{session}");
     out.captured_at = bundle.capturedAt.filter(|s| !s.is_empty());
 
-    if let Some(v) = bundle.parsed.as_ref() {
-        out.parsed.has_json = v.get("hasJson").and_then(|x| x.as_bool()).unwrap_or(false);
-        out.parsed.keys = v
-            .get("keys")
-            .and_then(|x| x.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|k| k.as_str().map(String::from))
-                    .collect()
+    // `parsed` is explicitly best-effort in the contract. Preserve absence
+    // as absence so a missing analysis envelope is not serialized as false/[];
+    // complete envelopes still serialize byte-for-byte as before.
+    out.parsed = bundle.parsed.as_ref().map(|v| ParsedEnvelope {
+        has_json: v.get("hasJson").and_then(|x| x.as_bool()),
+        keys: v.get("keys").and_then(|x| x.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect()
+        }),
+    });
+    // `raw` is authoritative and required. A missing raw object must not be
+    // archived as an apparently valid empty body or zero-byte record.
+    out.raw = match bundle.raw.as_ref() {
+        Some(raw) => {
+            let raw_text = raw
+                .get("text")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("bundle raw.text is missing"))?;
+            let raw_bytes = raw
+                .get("bytes")
+                .and_then(|x| x.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("bundle raw.bytes is missing"))?;
+            Some(RawEnvelope {
+                text: raw_text.to_string(),
+                bytes: raw_bytes,
             })
-            .unwrap_or_default();
-    }
-    if let Some(v) = bundle.raw.as_ref() {
-        out.raw.text = v
-            .get("text")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        out.raw.bytes = v
-            .get("bytes")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(out.raw.text.len() as u64);
-    }
+        }
+        None if bundle.messages.is_some() => {
+            // Compatibility for the old messages-shaped export: the complete
+            // input bytes are known, so preserve them instead of manufacturing
+            // `raw.text=""` and `raw.bytes=0`.
+            Some(RawEnvelope {
+                text: String::from_utf8_lossy(bytes).into_owned(),
+                bytes: bytes.len() as u64,
+            })
+        }
+        None => return Err(anyhow::anyhow!("bundle raw envelope is missing")),
+    };
     // `inbox@2` identity. A `level` of `default` means the axis is explicitly
     // unreliable (contract), so it is kept verbatim rather than normalised —
     // the reader has to see the difference between "absent" and "default".
@@ -772,7 +811,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> ParseOutcome {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// `deepseek-<sessionId>.json` -> `<sessionId>` (best-effort fallback id).
