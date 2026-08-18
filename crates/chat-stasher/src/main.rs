@@ -3058,11 +3058,18 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             .map(|(src, n)| format!("{src} {n}"))
             .collect::<Vec<_>>()
             .join(" · ");
+        // B78: the count `doctor` prints and `status` used to swallow. It
+        // rides on the `[scan]` line it qualifies — `status`'s default body
+        // was cut from 463 lines to a handful and does not get to grow back,
+        // and an empty string here means a clean machine sees the byte-for-
+        // byte output it saw before.
+        let unreadable = unreadable_notice(report);
         if report.records.is_empty() {
-            out.push_str("[scan] 本机没有扫描到任何会话。\n");
+            out.push_str(&format!("[scan] 本机没有扫描到任何会话。{unreadable}"));
+            out.push('\n');
         } else {
             out.push_str(&format!(
-                "[scan] {} 个会话（{compressed} compressed）：{breakdown}",
+                "[scan] {} 个会话（{compressed} compressed）：{breakdown}{unreadable}",
                 report.records.len()
             ));
             out.push('\n');
@@ -3129,6 +3136,47 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
     }
     out.push('\n');
     out
+}
+
+/// The tail `status` appends to its `[scan]` line when some harness knows
+/// about sessions it could not read (`HarnessProbe::unreadable_count`, one
+/// count per harness, set by the probe in `scanner.rs`).
+///
+/// Three things this wording is doing on purpose:
+///
+///   * **`另有`** — these are *not* inside the number printed to their left.
+///     `cursor 3(+411)` would have been shorter and would have been read as
+///     414; a count that can be mistaken for a total is worse than silence.
+///   * **`尚未归档`** — the failure mode to avoid is a reader concluding the
+///     unreadable sessions are safely in the archive. They are not in it.
+///   * **empty string when every count is zero** — silence is the whole
+///     contract with the "4 line status" work; nothing to say, nothing said.
+fn unreadable_notice(report: &scanner::ScanReport) -> String {
+    let per_harness: Vec<(&str, u64)> = report
+        .probes
+        .iter()
+        .filter_map(|p| {
+            p.unreadable_count
+                .filter(|n| *n > 0)
+                .map(|n| (p.id.as_str(), n))
+        })
+        .collect();
+    if per_harness.is_empty() {
+        return String::new();
+    }
+    let total: u64 = per_harness.iter().map(|(_, n)| n).sum();
+    // With a single culprit the per-harness count would just repeat the total,
+    // so name it and stop.
+    let who = if per_harness.len() == 1 {
+        per_harness[0].0.to_string()
+    } else {
+        per_harness
+            .iter()
+            .map(|(id, n)| format!("{id} {n}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    format!("  ⚠ 另有 {total} 条读不出来、尚未归档（{who}）；详见 chat-stasher doctor")
 }
 
 fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
