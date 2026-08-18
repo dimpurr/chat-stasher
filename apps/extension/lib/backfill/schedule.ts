@@ -65,6 +65,15 @@ export type TickReason =
   | 'disabled'
   /** C12 熔断态：落盘出口有问题，这条腿必须暂停。 */
   | 'download-paused'
+  /**
+   * 🔴 C30 · 一个回溯目标都没有 ⇒ 我们连"从哪儿开始补"都不知道。
+   * 这【不是】端口问题：通道可能好端端地接着（平台页面开着、ping 得通），
+   * 但登记表(cs_backfill_targets_v1)是空的 —— 只有实时腿真的归档过一次对话，
+   * 才会写下 platform/origin/账号 scope。C30 之前这一种结局被混报成
+   * 'no-http-port'，于是排查的人去查端口，而端口根本没坏。
+   * 📌 一个错的原因比没有原因更难查。
+   */
+  | 'no-targets'
   /** 没有注入 http 端口 ⇒ 绝不会有网络行为（见下方大段说明）。 */
   | 'no-http-port'
   /** 真的调用了 runBackfill。 */
@@ -82,7 +91,7 @@ export interface TickResult {
  */
 export type TickBlockReason = Extract<
   TickReason,
-  'no-store' | 'disabled' | 'download-paused' | 'no-http-port'
+  'no-store' | 'disabled' | 'download-paused' | 'no-targets' | 'no-http-port'
 >;
 
 /**
@@ -101,11 +110,21 @@ export async function tickBlockReason(gate: {
   isEnabled: () => boolean | Promise<boolean>;
   isDownloadPaused: () => boolean | Promise<boolean>;
   hasHttp: boolean;
+  /**
+   * 🔴 C30 · 有没有【回溯目标】。
+   * 省略 ⇒ 视为「有」，这是实时腿那条路的真实情况：它手里现成攥着一个目标，
+   * 根本不查登记表。所以老调用点一个字都不用改，行为逐字不变。
+   * 闹钟那条路与 Popup 必须显式传 —— 它们的目标只能来自登记表。
+   */
+  hasTargets?: boolean;
 }): Promise<TickBlockReason | null> {
   if (!gate.hasStore) return 'no-store';
   if (!(await gate.isEnabled())) return 'disabled';
   // 熔断检查【在】http 端口之前：熔断态下我们连"要不要发请求"都不该问。
   if (await gate.isDownloadPaused()) return 'download-paused';
+  // 🔴 顺序与 runAlarmTick 真实执行的顺序一致：先读登记表拿目标，再去建通道。
+  //    没有目标时连"该向哪个源建通道"都答不上来，所以这一道排在端口之前。
+  if (gate.hasTargets === false) return 'no-targets';
   if (!gate.hasHttp) return 'no-http-port';
   return null;
 }

@@ -21,6 +21,7 @@
  */
 
 import type { BackfillStore } from './store';
+import type { TickReason } from './schedule';
 
 /** 闹钟名。同一个名字重复 create 会覆盖，天然幂等。 */
 export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
@@ -123,4 +124,63 @@ export async function rememberTarget(
   const next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
   await store.save(BACKFILL_TARGETS_KEY, next);
   return next;
+}
+
+// ---------------------------------------------------------------------------
+// C30 · 闹钟这一跳的【留痕】
+//
+// 缺陷现场（C29 复现、真机实测）：闹钟每 5 分钟醒一次，每次都因为登记表是空的
+// 而【什么都没做】—— 没有报错、没有日志、存储里没有任何痕迹。用户看到的是
+// 「正在归档」+「一条都还没有枚举过」，两句话互相打架，而没有任何东西能告诉他
+// 到底发生了什么。
+//
+// 🔴 所以：**每一次闹钟醒来，无论跑没跑，都要把「做了什么、为什么」写下来。**
+//    写进 storage 而不是内存：MV3 的 SW 一空闲就被回收，内存里的 lastTick
+//    在用户点开 Popup 之前早就没了 —— 那正是真机上看到的「什么都查不到」。
+// ---------------------------------------------------------------------------
+
+/** 最近一次闹钟跳动的留痕。cs_* 前缀同族，不新增权限。 */
+export const BACKFILL_LAST_TICK_KEY = 'cs_backfill_lasttick_v1';
+
+export interface BackfillTickRecord {
+  /** 这一跳发生在什么时候（Date.now()）。 */
+  at: number;
+  /** 有没有真的跑起来（reason === 'ran'）。 */
+  ran: boolean;
+  /** 具名结局。与 tickBackfill / Popup 用的是同一套取值。 */
+  reason: TickReason;
+  /** 这一跳醒来时登记表里有几个回溯目标。0 就是 0，不修饰。 */
+  targets: number;
+}
+
+function isTickRecord(v: unknown): v is BackfillTickRecord {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Partial<BackfillTickRecord>;
+  return typeof r.at === 'number'
+    && typeof r.ran === 'boolean'
+    && typeof r.reason === 'string'
+    && typeof r.targets === 'number';
+}
+
+/** 读留痕。读不出来 / 结构不对 ⇒ null（「我不知道」也是实话，不编一条）。 */
+export async function loadLastTick(store: BackfillStore | null): Promise<BackfillTickRecord | null> {
+  if (!store) return null;
+  const raw = await store.load(BACKFILL_LAST_TICK_KEY);
+  return isTickRecord(raw) ? raw : null;
+}
+
+/**
+ * 写留痕。**best-effort**：写不下去只进 console.warn ——
+ * 留痕是为了让人看得见，它自己绝不能成为挡住这条腿的新理由。
+ */
+export async function saveLastTick(
+  store: BackfillStore | null,
+  record: BackfillTickRecord,
+): Promise<void> {
+  if (!store) return;
+  try {
+    await store.save(BACKFILL_LAST_TICK_KEY, record);
+  } catch (err) {
+    console.warn('[chat-stasher] backfill tick record write failed', (err as Error).message);
+  }
 }

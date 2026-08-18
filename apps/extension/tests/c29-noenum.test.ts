@@ -8,10 +8,14 @@
  * 3. 但用户尚未在页面上触发任何实时对话抓取（即没有 chat-captured 消息），
  *    因此 rememberTarget 从未被调用，cs_backfill_targets_v1 保持为空；
  * 4. 此时 Popup 查 transportWired 为 true，渲染显示「正在归档 —— 每 5 分钟自动清 1 笔账」；
+ *    ⚠️ C30 已修：Popup 现在还会读目标登记表，这一步改说「未在运行 —— 还没有任何回溯目标」；
  * 5. 闹钟 cs-backfill-tick 触发，SW 唤醒并执行 runAlarmTick()；
  * 6. runAlarmTick() 读取 loadTargets() 为空，命中 targets.length === 0 分支，
- *    静默返回 { ran: false, reason: 'no-http-port', report: null }，
+ *    返回 { ran: false, reason: ... , report: null }，
  *    没有任何枚举请求发出，存储里永远不会创建欠账集合。
+ *    ⚠️ C30 已修两件事：结局具名成 'no-targets'（端口没坏，是没目标），
+ *       并且每一跳都会把「什么都没做以及为什么」写进 cs_backfill_lasttick_v1。
+ *    🔴 行为（跳过、不枚举）一个字都没改 —— 本文件下半段的断言仍然逐字有效。
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -158,14 +162,25 @@ describe('C29-NOENUM · 仅打开标签页但未发生过实时对话时，闹�
     const statusReply: BackfillRuntimeStatus = await dispatch({ type: 'cs-backfill-status' });
     expect(statusReply.transportWired).toBe(true);
 
-    // Popup 计算闸门与渲染
+    // Popup 计算闸门与渲染。
+    // 🔴 C30 修正：这里【原来】只传 hasHttp —— 那正是缺陷本体的一半：
+    //    拿"通道通不通"去回答"有没有活要干"。现在 Popup（entrypoints/popup/main.ts）
+    //    会一并读回溯目标登记表，所以这一段照着生产路径写。
+    const { loadTargets } = await import('../lib/backfill/alarm');
+    const { browserLocalStore: storeFn } = await import('../lib/backfill/store');
+    const targets = await loadTargets(storeFn());
+    expect(targets).toEqual([]);      // 时序没变：登记表就是空的
+
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => true,
       isDownloadPaused: () => false,
       hasHttp: statusReply.transportWired,
+      hasTargets: targets.length > 0,
     });
-    expect(block).toBeNull(); // 闸门全过！
+    // 🔴 C30 之前这里是 toBeNull()（闸门全过 ⇒ Popup 宣称正在归档）。
+    //    时序一个字没改，改的是它现在【说得出】卡在哪一道。
+    expect(block).toBe('no-targets');
 
     const snapshot = await browserLocalSnapshot();
     const view = renderPopup({
@@ -177,8 +192,10 @@ describe('C29-NOENUM · 仅打开标签页但未发生过实时对话时，闹�
       failures: collectFailures(snapshot),
     });
 
-    // 🔴 复现 Popup 假象：running 宣称正在归档，progress 显示还未开始
-    expect(view.running).toContain('正在归档 —— 每 5 分钟自动清 1 笔账');
+    // 🔴 C30 之后：progress 说的还是同一句实话（一条都没枚举过），
+    //    而 running 不再与它自相矛盾 —— 它现在说「未在运行」并说清用户要做什么。
+    expect(view.running).not.toContain('正在归档');
+    expect(view.running).toContain('未在运行');
     expect(view.progress).toBe(
       '进度：还没有开始 —— 存储里还没有这个平台的欠账集合，也就是说一条都还没有枚举过。',
     );
@@ -188,11 +205,17 @@ describe('C29-NOENUM · 仅打开标签页但未发生过实时对话时，闹�
     alarmListeners[0]!({ name: 'cs-backfill-tick' });
     await mod.backfillTickSettled();
 
-    // 🔴 核心断言：runAlarmTick 因 targets.length === 0 静默返回
+    // 🔴 核心断言：runAlarmTick 因 targets.length === 0 跳过。
+    //    C30 之前这里报的是 'no-http-port' —— 端口根本没坏，那句话把排查带偏了。
     expect(mod.lastBackfillTick()).toEqual({
       ran: false,
-      reason: 'no-http-port',
+      reason: 'no-targets',
       report: null,
+    });
+    // 🔴 C30 · 这一跳什么都没做，但它【留下了痕迹】（不再是静默跳过）。
+    const { loadLastTick } = await import('../lib/backfill/alarm');
+    expect(await loadLastTick(storeFn())).toMatchObject({
+      ran: false, reason: 'no-targets', targets: 0,
     });
 
     // 🔴 没有发任何枚举请求
