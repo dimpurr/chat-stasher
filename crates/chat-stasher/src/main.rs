@@ -177,6 +177,9 @@ enum Command {
         /// hashed. Prints ids / shard counts / byte lengths / sha256 only.
         #[arg(long)]
         all_machines: bool,
+        /// Print full session ids in per-session rows (default: privacy-safe short ids).
+        #[arg(long)]
+        full_ids: bool,
         /// Machine partition to read. Uses this machine's id when available;
         /// if it is unavailable, use `--machine` explicitly. Unused by
         /// `--all-machines`, which reads every machine.
@@ -217,6 +220,9 @@ enum Command {
         /// Stage directory holding the sealed shard tree (required by l3 / all).
         #[arg(long)]
         stage: Option<PathBuf>,
+        /// Print full session ids in L3 rows (default: privacy-safe short ids).
+        #[arg(long)]
+        full_ids: bool,
         /// Machine partition (default: this machine's normalised hostname;
         /// use `--machine` explicitly if that identity is unavailable).
         #[arg(long)]
@@ -556,6 +562,7 @@ fn main() -> ExitCode {
             stage,
             session,
             all_machines,
+            full_ids,
             machine,
             destination,
             repo,
@@ -567,6 +574,7 @@ fn main() -> ExitCode {
             &stage,
             &session,
             all_machines,
+            full_ids,
             machine.as_deref(),
             destination,
             repo,
@@ -579,6 +587,7 @@ fn main() -> ExitCode {
         Command::Verify {
             level,
             stage,
+            full_ids,
             machine,
             destination,
             repo,
@@ -589,6 +598,7 @@ fn main() -> ExitCode {
         } => cmd_verify(
             level,
             &stage,
+            full_ids,
             machine.as_deref(),
             destination,
             repo,
@@ -1775,6 +1785,7 @@ fn run_once_pass(
                     let code = cmd_verify(
                         VerifyLevel::L1,
                         &None,
+                        false,
                         Some(&machine_name),
                         destination.clone(),
                         repo,
@@ -1827,6 +1838,7 @@ fn run_once_pass(
         let code = cmd_verify(
             VerifyLevel::L1,
             &None,
+            false,
             Some(&machine_name),
             destination,
             repo,
@@ -2485,6 +2497,7 @@ fn cmd_read(
     stage: &Option<PathBuf>,
     session: &Option<String>,
     all_machines: bool,
+    full_ids: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -2529,7 +2542,7 @@ fn cmd_read(
     };
 
     let code = if all_machines {
-        cmd_read_all_machines(&store, &mk)
+        cmd_read_all_machines(&store, &mk, full_ids)
     } else {
         let Some(machine) = machine.as_deref() else {
             eprintln!("read: local machine identity is required unless --all-machines is set");
@@ -2600,7 +2613,7 @@ fn cmd_read(
 /// hostname's newest snapshot, walk its `sessions/<machine>/` subtree, and
 /// report per-session shard count / byte length / sha256. Privacy line: only
 /// ids, counts, lengths and digests are printed — never session content.
-fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
+fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
     println!("[read] mode           : all-machines (newest snapshot per hostname)");
     println!("[read] repo           : {}", store.cfg.repo_root);
     let report = match store.read_all_machines(mk) {
@@ -2630,7 +2643,7 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
         for s in &m.sessions {
             println!(
                 "    session {:<15} shards={:<3} bytes={:<10} sha256={}",
-                short_session_id(&s.session_id),
+                display_session_id(&s.session_id, full_ids),
                 s.shard_count,
                 s.concat_bytes,
                 s.sha256
@@ -2649,6 +2662,7 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey) -> ExitCode {
 fn cmd_verify(
     level: VerifyLevel,
     stage: &Option<PathBuf>,
+    full_ids: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -2706,13 +2720,13 @@ fn cmd_verify(
         VerifyLevel::L2 => run_check(&store, &mk, true, "L2 content", &mut failed),
         VerifyLevel::L3 => {
             println!("[verify] stage          : {}", stage.display());
-            run_reconcile(&store, &mk, &stage, &mut failed);
+            run_reconcile(&store, &mk, &stage, full_ids, &mut failed);
         }
         VerifyLevel::All => {
             run_check(&store, &mk, false, "L1 structure", &mut failed);
             run_check(&store, &mk, true, "L2 content", &mut failed);
             println!("[verify] stage          : {}", stage.display());
-            run_reconcile(&store, &mk, &stage, &mut failed);
+            run_reconcile(&store, &mk, &stage, full_ids, &mut failed);
         }
     }
 
@@ -2760,10 +2774,16 @@ fn print_check_summary(s: &CheckSummary, name: &str) {
     }
 }
 
-fn run_reconcile(store: &BackupStore, mk: &MasterKey, stage: &Path, failed: &mut usize) {
+fn run_reconcile(
+    store: &BackupStore,
+    mk: &MasterKey,
+    stage: &Path,
+    full_ids: bool,
+    failed: &mut usize,
+) {
     match store.reconcile_manifest(mk, stage) {
         Ok(report) => {
-            print_reconcile(&report);
+            print_reconcile(&report, full_ids);
             if !report.ok() {
                 *failed += 1;
             }
@@ -2775,7 +2795,7 @@ fn run_reconcile(store: &BackupStore, mk: &MasterKey, stage: &Path, failed: &mut
     }
 }
 
-fn print_reconcile(r: &ReconcileReport) {
+fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     println!(
         "[verify] L3 reconcile     : machines={} expected={} took {:?}",
         r.machines,
@@ -2783,7 +2803,7 @@ fn print_reconcile(r: &ReconcileReport) {
         r.duration
     );
     for row in &r.rows {
-        let session = short_session_id(&row.session_id);
+        let session = display_session_id(&row.session_id, full_ids);
         let mark = if row.outcome == SessionOutcome::Match {
             "ok "
         } else {
@@ -2815,7 +2835,7 @@ fn print_reconcile(r: &ReconcileReport) {
     for (m, s) in &r.extra_in_archive {
         println!(
             "  !? {m:<12} {:<20} in archive but NOT in expected manifest (informational)",
-            short_session_id(s)
+            display_session_id(s, full_ids)
         );
     }
     println!(
@@ -2836,6 +2856,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn short_session_id(id: &str) -> String {
     chat_stasher::id::short_session_id(id)
+}
+
+fn display_session_id(id: &str, full_ids: bool) -> String {
+    if full_ids {
+        id.to_string()
+    } else {
+        short_session_id(id)
+    }
 }
 
 #[cfg(test)]
