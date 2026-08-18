@@ -13,9 +13,20 @@ name: CI
 #
 # If it goes red again and the noise is a problem, switch back to
 # `workflow_dispatch:` only — never to a green-by-suppression config.
+# 🔴 2026-08-18 01:5x — back to manual-only, and the reason is NOT the one from
+# the red-matrix stretch. GitHub refused to start ANY job:
+#
+#   "The job was not started because recent account payments have failed or your
+#    spending limit needs to be increased."
+#
+# All four jobs died in 3-5 seconds without running a single step. Leaving
+# `push:` on buys no information at all — it only mails the owner one failure
+# notice per push. That is a different situation from a matrix that is red
+# because it found something, and it is still not a green-by-suppression
+# config: no job was removed, no assertion weakened, no `continue-on-error`.
+#
+# Put `push:` and `pull_request:` back the moment the billing issue is fixed.
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -47,6 +58,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --check
+
+      - name: Clippy failure-handling gate
+        run: cargo clippy --all-targets -- -D clippy::let_underscore_must_use
 
       - name: Build
         run: cargo build

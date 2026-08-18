@@ -348,6 +348,10 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
     }
 
     for d in cache_dirs_for(&pack_names) {
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "The integration test removes its temporary cache directories on a best-effort basis after assertions."
+        )]
         let _ = fs::remove_dir_all(d);
     }
 }

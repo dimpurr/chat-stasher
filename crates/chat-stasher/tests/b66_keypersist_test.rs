@@ -82,6 +82,10 @@ fn lock_directory(dir: &Path) -> bool {
 #[cfg(unix)]
 fn unlock_directory(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "The test only needs to restore permissions before teardown; failure is not part of the assertion."
+    )]
     let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
 }
 

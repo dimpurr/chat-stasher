@@ -609,7 +609,15 @@ pub fn serve(
                 } else {
                     stats.rejected += 1;
                 }
+                #[allow(
+                    clippy::let_underscore_must_use,
+                    reason = "A client may disconnect while its response is written; the server intentionally treats this response as best-effort."
+                )]
                 let _ = stream.write_all(&resp.to_bytes());
+                #[allow(
+                    clippy::let_underscore_must_use,
+                    reason = "A client may disconnect before flush; the server intentionally treats this response as best-effort."
+                )]
                 let _ = stream.flush();
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
