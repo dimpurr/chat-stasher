@@ -1137,6 +1137,10 @@ pub fn print_report(r: &DoctorReport) {
         }
     }
     if !r.other_present.is_empty() {
+        #[allow(
+            clippy::unwrap_used,
+            reason = "Every element of `other_present` is `home.join(d)` for a non-empty literal `d` from OTHER_HARNESS_DIRS (doctor.rs:43), so the final component is that literal and `file_name()` is always `Some`. Falling back to a placeholder here would print a directory that is not the one probed."
+        )]
         let others: Vec<String> = r
             .other_present
             .iter()

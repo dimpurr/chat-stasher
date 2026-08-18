@@ -62,6 +62,27 @@ jobs:
       - name: Clippy failure-handling gate
         run: cargo clippy --all-targets -- -D clippy::let_underscore_must_use
 
+      # Second, narrower gate. Scope and lint choice are both deliberate:
+      #
+      #   * `--lib`, not `--all-targets`. Tests SHOULD panic when a premise
+      #     fails, so `unwrap` in a test is correct, not debt. Measured
+      #     2026-08-18: `--all-targets` has 670 `unwrap` sites, `--lib` has 1.
+      #     Denying it repo-wide would mean ~670 suppressions, which teaches
+      #     `#[allow]` as a reflex instead of catching anything.
+      #   * `unwrap_used` only, NOT `expect_used`. `expect` forces the author
+      #     to write down why the value cannot be absent, and prints that
+      #     reason if it ever is. `unwrap` records nothing. The 8 `expect`
+      #     sites in the lib each carry a real justification; banning them
+      #     would buy a suppression per site and no information.
+      #
+      # One suppression exists today (doctor.rs, with a `reason`). Extending
+      # this to `--bins` needs the 17 `writeln!(String, ..).unwrap()` sites in
+      # main.rs `render_status`/`render_archive_gap_notice` resolved first —
+      # `fmt::Write` into a `String` is infallible, so those are provably safe
+      # but still tripped by the lint.
+      - name: Clippy unwrap gate (production lib)
+        run: cargo clippy --lib -- -D clippy::unwrap_used
+
       - name: Build
         run: cargo build
 
