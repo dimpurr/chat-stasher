@@ -546,6 +546,7 @@ pub fn collect_scan_report(
         .destinations
         .get(&destination_id)
         .cloned()
+        // reason: 新目标仓库首次归档时 runstate 中无该 destination 记录，欠债集合天然为空集合
         .unwrap_or_default()
         .files;
     let legacy_state_ignored = state_dir.join(LEGACY_STATE_FILE).exists();
@@ -960,6 +961,7 @@ fn process_opencode(
     let cursor = opencode_session_cursor(&record.absolute_path, session_id)
         .map_err(|error| anyhow!("读取 opencode 会话游标失败: {error}"))?;
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
+        // reason: 前提是 old.is_some() 为 true，此处 unwrap_or(0) 仅为类型解包保底，实际必有 offset
         let source_bytes = old.map(|entry| entry.offset).unwrap_or(0);
         return Ok(Processed {
             state: old.expect("checked above").clone(),
@@ -1219,6 +1221,7 @@ fn read_jsonl_delta(
             base_offset: 0,
             bytes: full,
             bytes_read: before,
+            // reason: reusable 为 None 表示没有已校验的前缀，已校验前缀字节数自然为 0
             prefix_bytes_validated: reusable.map(|entry| entry.offset).unwrap_or(0),
             reset: old.is_some(),
         });

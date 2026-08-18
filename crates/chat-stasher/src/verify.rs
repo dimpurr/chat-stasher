@@ -219,11 +219,14 @@ impl BackupStore {
                 machine: exp.machine.clone(),
                 session_id: exp.session_id.clone(),
                 outcome,
+                // reason: 远端归档中未找到对应会话时，观测到的分片数与字节数即为 0，sha 为空字符串
                 observed_shards: obs_map.get(&key).map(|o| o.shard_count).unwrap_or(0),
+                // reason: 远端归档中未找到对应会话时，观测到的分片数与字节数即为 0，sha 为空字符串
                 observed_bytes: obs_map.get(&key).map(|o| o.concat_bytes).unwrap_or(0),
                 observed_sha: obs_map
                     .get(&key)
                     .map(|o| o.sha256.clone())
+                    // reason: 远端归档中未找到对应会话时，观测到的分片数与字节数即为 0，sha 为空字符串
                     .unwrap_or_default(),
             });
         }

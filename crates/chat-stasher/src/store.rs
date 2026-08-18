@@ -695,6 +695,7 @@ pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> any
         .into_iter()
         .map(|(seq, _)| seq)
         .max()
+        // reason: session 目录下尚无任何 sealed shard 时序列号从 0 起算（+1 得首个分片序号 1）
         .unwrap_or(0)
         + 1)
 }

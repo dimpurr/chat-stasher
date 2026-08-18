@@ -784,6 +784,7 @@ fn probe_harness(
             .as_deref()
             .filter(|_| used_env_override)
             .map(|name| format!("env_override=${name}; "))
+            // reason: 未使用环境变量覆盖时无额外备注，为空字符串
             .unwrap_or_default()
     };
 
@@ -1785,6 +1786,7 @@ fn matches_session_pattern(name: &str, pattern: Option<&str>) -> bool {
         };
         cursor += offset + part.len();
     }
+    // reason: 前提已判断 parts.len() >= 2，parts.last() 必为 Some，unwrap_or_default 仅为类型保底
     name[cursor..].ends_with(parts.last().copied().unwrap_or_default())
 }
 
