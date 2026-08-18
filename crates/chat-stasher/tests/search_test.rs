@@ -169,14 +169,14 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     );
     for h in &all.hits {
         println!(
-            "[B48] hit machine={} session={} shards={} bytes={} data_blobs={} snapshot={} activity_unix={}",
+            "[B48] hit machine={} session={} shards={} bytes={} data_blobs={} snapshot={} archive_time_unix={}",
             h.machine,
             h.short_id(),
             h.shard_count,
             h.bytes,
             h.data_blobs,
             h.short_snapshot(),
-            h.activity_unix
+            h.archive_time_unix
         );
     }
     assert_eq!(all.hits.len(), 3);
@@ -218,7 +218,7 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     );
     assert_eq!(by_machine.hits.len(), 1);
 
-    let now = all.hits[0].activity_unix;
+    let now = all.hits[0].archive_time_unix;
     let in_window = search_sessions(
         &store,
         &mk,

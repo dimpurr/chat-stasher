@@ -14,6 +14,38 @@ use std::path::PathBuf;
 /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
 pub const CONFIG_RELATIVE_PATH: &str = "chat-stasher/config.toml";
 
+/// Where the effective configuration came from.  A missing file is the normal
+/// first-run default; the two error variants mean defaults were used after a
+/// config read/parse failure and must remain visible to machine consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigSource {
+    File,
+    FileAfterWindowsPathRepair,
+    #[default]
+    DefaultsMissing,
+    DefaultsAfterReadError,
+    DefaultsAfterParseError,
+}
+
+impl ConfigSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::FileAfterWindowsPathRepair => "file_after_windows_path_repair",
+            Self::DefaultsMissing => "defaults_missing",
+            Self::DefaultsAfterReadError => "defaults_after_read_error",
+            Self::DefaultsAfterParseError => "defaults_after_parse_error",
+        }
+    }
+
+    pub fn is_error_fallback(self) -> bool {
+        matches!(
+            self,
+            Self::DefaultsAfterReadError | Self::DefaultsAfterParseError
+        )
+    }
+}
+
 /// Everything the tool knows how to configure today.
 ///
 /// All fields are optional on purpose: `None` means "use the default for this
@@ -22,6 +54,10 @@ pub const CONFIG_RELATIVE_PATH: &str = "chat-stasher/config.toml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Provenance of this effective configuration. It is runtime metadata, not
+    /// part of the TOML schema.
+    #[serde(skip)]
+    pub source: ConfigSource,
     /// Where archived snapshots will live once `push` is implemented.
     /// Kept so the config schema is stable.
     pub archive_root: Option<String>,
@@ -126,12 +162,15 @@ impl Config {
     /// blocked by a config typo.
     pub fn load() -> Self {
         match std::fs::read_to_string(config_path()) {
-            Ok(raw) => match toml::from_str(&raw) {
-                Ok(cfg) => cfg,
+            Ok(raw) => match toml::from_str::<Config>(&raw) {
+                Ok(mut cfg) => {
+                    cfg.source = ConfigSource::File;
+                    cfg
+                }
                 Err(e) => match recover_windows_paths(&raw)
                     .and_then(|fixed| toml::from_str::<Config>(&fixed).ok())
                 {
-                    Some(cfg) => {
+                    Some(mut cfg) => {
                         eprintln!(
                             "warning: config 里有未转义的反斜杠路径（Windows 写法），已按字面路径读取: {}",
                             config_path().display()
@@ -139,11 +178,15 @@ impl Config {
                         eprintln!(
                             "         TOML 里 `\\` 是转义符；写成 'C:\\path' (单引号) 或 \"C:\\\\path\" 可去掉这条警告"
                         );
+                        cfg.source = ConfigSource::FileAfterWindowsPathRepair;
                         cfg
                     }
                     None => {
                         eprintln!("warning: config is not valid TOML, using defaults: {e}");
-                        Config::default()
+                        Config {
+                            source: ConfigSource::DefaultsAfterParseError,
+                            ..Config::default()
+                        }
                     }
                 },
             },
@@ -153,7 +196,10 @@ impl Config {
             }
             Err(e) => {
                 eprintln!("warning: could not read config, using defaults: {e}");
-                Config::default()
+                Config {
+                    source: ConfigSource::DefaultsAfterReadError,
+                    ..Config::default()
+                }
             }
         }
     }

@@ -318,10 +318,10 @@ enum Command {
         /// Match one machine partition exactly.
         #[arg(long)]
         machine: Option<String>,
-        /// Lower bound (inclusive) on session activity time, unix seconds.
+        /// Lower bound (inclusive) on archive time (rustic snapshot time), unix seconds.
         #[arg(long)]
         since_unix: Option<i64>,
-        /// Upper bound (inclusive) on session activity time, unix seconds.
+        /// Upper bound (inclusive) on archive time (rustic snapshot time), unix seconds.
         #[arg(long)]
         until_unix: Option<i64>,
         /// Also report what a full-text pass over the hits would cost.
@@ -359,7 +359,7 @@ enum Command {
     /// URL as a secret for the lifetime of the process.
     ///
     /// Metadata tier only, same as `search`: machine, first 8 chars of the
-    /// session id, shard count, byte length, activity time. Conversation text is
+    /// session id, shard count, byte length, archive time. Conversation text is
     /// NOT loaded and there is no full-text search; the page says so and prints
     /// what loading it would cost. Exit codes match `search`: 0 listed
     /// something, 1 read it all and there was nothing, 3 could not finish
@@ -856,13 +856,13 @@ fn cmd_search(
         println!("[search] matched      : {}", report.hits.len());
         for hit in &report.hits {
             println!(
-                "  {}  machine={}  shards={}  bytes={}  snapshot={}  activity_unix={}",
+                "  {}  machine={}  shards={}  bytes={}  snapshot={}  archive_time_unix={}",
                 hit.short_id(),
                 hit.machine,
                 hit.shard_count,
                 hit.bytes,
                 hit.short_snapshot(),
-                hit.activity_unix
+                hit.archive_time_unix
             );
         }
         if !report.complete() {
@@ -3062,7 +3062,7 @@ mod decision_surface_tests {
                 unreadable_entry_count: Some(0),
                 earliest: None,
                 latest: None,
-                bytes: 1,
+                bytes: Some(1),
                 recognized_files: Vec::new(),
                 note: String::new(),
             }],
@@ -3212,6 +3212,9 @@ fn cmd_init() -> ExitCode {
 
 fn cmd_status(sessions: bool) -> ExitCode {
     let config = Config::load();
+    if config.source.is_error_fallback() {
+        eprintln!("config_source={}", config.source.label());
+    }
     let verdict = run_state_verdict(&config);
     eprintln!("[run-once] {}", verdict.line);
 

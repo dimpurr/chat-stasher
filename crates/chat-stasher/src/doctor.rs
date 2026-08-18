@@ -370,7 +370,8 @@ pub struct HarnessFootprint {
     /// sessions behind them is unknown, so this is not folded into
     /// `unreadable_count`.
     pub unreadable_entry_count: Option<u64>,
-    pub total_bytes: u64,
+    /// `None` means the footprint was not measured; it is not an empty store.
+    pub total_bytes: Option<u64>,
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
     pub compressed_count: u64,
@@ -390,7 +391,7 @@ pub fn coverage_from_records<'a>(
     // Records are stronger evidence than a second racy directory stat: once
     // this pass produced records, a concurrent removal cannot erase them.
     let installed = root.is_dir() || !recs.is_empty();
-    let total_bytes = recs.iter().map(|r| r.byte_size).sum();
+    let total_bytes = Some(recs.iter().map(|r| r.byte_size).sum());
     let earliest = recs.iter().map(|r| r.mtime).min();
     let latest = recs.iter().map(|r| r.mtime).max();
     let compressed_count = recs.iter().filter(|r| r.compressed).count() as u64;
@@ -476,6 +477,17 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
+/// Byte measurements use the same three-state vocabulary as session counts:
+/// a number when measured, `未知` when this installed store could not be
+/// measured, and `N/A` when the harness does not apply on this machine.
+fn footprint_bytes_label(f: &HarnessFootprint) -> String {
+    match f.total_bytes {
+        Some(bytes) => format!("{} ({} B)", fmt_bytes(bytes), bytes),
+        None if f.installed => "未知".to_string(),
+        None => "N/A".to_string(),
+    }
+}
+
 fn footprint_root_label(f: &HarnessFootprint) -> String {
     f.root
         .as_ref()
@@ -556,7 +568,9 @@ fn footprint_from_dir_probe<'a>(
     footprint.candidate_count = probe.candidate_count;
     footprint.unreadable_count = probe.unreadable_count;
     footprint.unreadable_entry_count = probe.unreadable_entry_count;
-    if probe.unreadable_count.unwrap_or(0) > 0 || probe.unreadable_entry_count.unwrap_or(0) > 0 {
+    if probe.unreadable_count.is_some_and(|count| count > 0)
+        || probe.unreadable_entry_count.is_some_and(|count| count > 0)
+    {
         footprint.note = probe.note.clone();
     }
     footprint
@@ -571,7 +585,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         candidate_count: None,
         unreadable_count: None,
         unreadable_entry_count: None,
-        total_bytes: 0,
+        total_bytes: None,
         earliest: None,
         latest: None,
         compressed_count: 0,
@@ -727,7 +741,7 @@ fn build_risks(
                 risks.push(format!(
                     "🟢 {label}: 单一 SQLite（{}，{}）—— 无按天数轮换；风险来自它自身的 SQLite，而非静默删会话。",
                     footprint_root_label(fp),
-                    fmt_bytes(fp.total_bytes)
+                    footprint_bytes_label(fp)
                 ));
             }
         }
@@ -743,6 +757,7 @@ fn build_risks(
 /// Result of one full `doctor` run.
 #[derive(Debug)]
 pub struct DoctorReport {
+    pub config_source: crate::config::ConfigSource,
     pub claude: ClaudeCheck,
     pub gemini: GeminiRetention,
     pub footprints: Vec<HarnessFootprint>,
@@ -854,6 +869,7 @@ pub fn run() -> DoctorReport {
 
     let probes = scan.probes;
     DoctorReport {
+        config_source: config.source,
         claude,
         gemini,
         footprints,
@@ -1124,6 +1140,9 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
     eprintln!("doctor — “你的 harness 正在偷偷删你的数据吗？”");
     eprintln!("      只读探测；只打印路径 / 计数 / 字节 / 时间戳，绝不打印会话正文。");
+    if r.config_source.is_error_fallback() {
+        eprintln!("config_source={}", r.config_source.label());
+    }
     eprintln!();
 
     // D1
@@ -1193,12 +1212,11 @@ pub fn print_report(r: &DoctorReport) {
                 .map(format_timestamp)
                 .unwrap_or_else(|| "-".to_string());
             eprintln!(
-                "  {:<10} 会话 {:<6}{} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
+                "  {:<10} 会话 {:<6}{} · {} · 最早 {earliest} · 最晚 {latest}",
                 f.name,
                 count,
                 count_detail,
-                fmt_bytes(f.total_bytes),
-                f.total_bytes
+                footprint_bytes_label(f)
             );
             if !f.note.is_empty() {
                 eprintln!("             ({})", f.note);
@@ -1240,12 +1258,11 @@ pub fn print_report(r: &DoctorReport) {
             .map(format_timestamp)
             .unwrap_or_else(|| "-".to_string());
         eprintln!(
-            "  {:<10} 会话 {:<6}{} · {} ({} B) · 最早 {earliest} · 最晚 {latest}",
+            "  {:<10} 会话 {:<6}{} · {} · 最早 {earliest} · 最晚 {latest}",
             f.name,
             count,
             count_detail,
-            fmt_bytes(f.total_bytes),
-            f.total_bytes
+            footprint_bytes_label(f)
         );
         if !f.note.is_empty() {
             eprintln!("             ({})", f.note);
@@ -1412,7 +1429,10 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             .map(|r| r.display().to_string())
             .unwrap_or_else(|| "-".to_string());
         let bytes = match p.state {
-            scanner::ProbeState::FileTarget => format!(" bytes={}", fmt_bytes(p.bytes)),
+            scanner::ProbeState::FileTarget => format!(
+                " bytes={}",
+                p.bytes.map(fmt_bytes).unwrap_or_else(|| "未知".to_string())
+            ),
             _ => String::new(),
         };
         // 会话数，三态（与本文件其它表同一套词汇）：
@@ -1594,7 +1614,7 @@ mod b90_unknown_count_tests {
             candidate_count: Some(414),
             unreadable_count: unreadable,
             unreadable_entry_count: Some(0),
-            total_bytes: 0,
+            total_bytes: None,
             earliest: None,
             latest: None,
             compressed_count: 0,
@@ -1613,6 +1633,13 @@ mod b90_unknown_count_tests {
             detail.contains("未知"),
             "数不出来就要显示成「未知」，不许沉默地等同于 0；实际：{detail:?}"
         );
+    }
+
+    #[test]
+    fn an_unavailable_footprint_bytes_stay_unknown() {
+        let f = default_footprint("fixture", PathBuf::from("/nowhere"));
+        assert_eq!(footprint_bytes_label(&f), "N/A");
+        assert_eq!(footprint_bytes_label(&footprint(None)), "未知");
     }
 
     /// 健康机器上「它不响」：数过了、就是 0 时，这一格逐字为空。
@@ -1635,5 +1662,15 @@ mod b90_unknown_count_tests {
         f.session_count = None;
         f.candidate_count = None;
         assert_eq!(footprint_count_detail(&f), "");
+    }
+
+    /// B91/C old-behaviour counterexample: the default row uses `0` for bytes
+    /// even though this row means "the harness was not inspected".  Zero is a
+    /// measured empty footprint, not an unknown one.
+    #[test]
+    fn an_unavailable_footprint_must_not_collapse_bytes_to_zero() {
+        let f = default_footprint("fixture", PathBuf::from("/nowhere"));
+        assert_eq!(f.total_bytes, None);
+        assert_eq!(footprint_bytes_label(&f), "N/A");
     }
 }

@@ -51,7 +51,7 @@ pub struct ViewSession {
     pub short_id: String,
     pub shard_count: usize,
     pub bytes: u64,
-    pub activity_unix: i64,
+    pub archive_time_unix: i64,
 }
 
 /// Everything the two routes render, computed once before the socket is bound.
@@ -87,7 +87,7 @@ impl ViewData {
                     short_id: h.short_id(),
                     shard_count: h.shard_count,
                     bytes: h.bytes,
-                    activity_unix: h.activity_unix,
+                    archive_time_unix: h.archive_time_unix,
                 })
                 .collect(),
             unreadable: report.unreadable.len(),
@@ -390,7 +390,7 @@ pub fn render_html(data: &ViewData) -> String {
             esc(&s.short_id),
             s.shard_count,
             s.bytes,
-            s.activity_unix
+            s.archive_time_unix
         ));
     }
     if data.sessions.is_empty() {
@@ -439,7 +439,7 @@ pub fn render_html(data: &ViewData) -> String {
  The server exits by itself when idle.
 </div>
 <table>
-<thead><tr><th>machine</th><th>session (first 8)</th><th class=n>shards</th><th class=n>bytes</th><th class=n>activity (unix s)</th></tr></thead>
+<thead><tr><th>machine</th><th>session (first 8)</th><th class=n>shards</th><th class=n>bytes</th><th class=n>archive time (unix s)</th></tr></thead>
 <tbody>
 {rows}</tbody></table>
 <footer>Metadata tier only · ephemeral loopback server · same JSON at <code>/api/sessions</code> (token required)</footer>
@@ -472,7 +472,7 @@ pub fn render_json(data: &ViewData) -> String {
                 "session_short_id": s.short_id,
                 "shards": s.shard_count,
                 "bytes": s.bytes,
-                "activity_unix": s.activity_unix,
+                "archive_time_unix": s.archive_time_unix,
             })
         })
         .collect();
@@ -667,7 +667,7 @@ mod tests {
                 short_id: "01234567".into(),
                 shard_count: 2,
                 bytes: 100,
-                activity_unix: 42,
+                archive_time_unix: 42,
             }],
             unreadable: 0,
             data_blobs_read: 0,

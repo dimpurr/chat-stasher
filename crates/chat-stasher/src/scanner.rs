@@ -492,8 +492,8 @@ pub struct HarnessProbe {
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
     /// For single-file stores: the store's bytes on disk (`.db` + sidecars for
-    /// SQLite). 0 otherwise.
-    pub bytes: u64,
+    /// SQLite). `None` means the byte probe did not finish; it is not zero.
+    pub bytes: Option<u64>,
     /// Metadata-only set of files recognised for this harness. The doctor uses
     /// the same set when it builds its footprint row; it is never printed.
     pub recognized_files: Vec<PathBuf>,
@@ -693,7 +693,7 @@ fn probe_harness(
         unreadable_entry_count: None,
         earliest: None,
         latest: None,
-        bytes: 0,
+        bytes: None,
         recognized_files: Vec::new(),
         note: String::new(),
     };
@@ -803,7 +803,7 @@ fn probe_harness(
                     root: Some(root.clone()),
                     confidence,
                     state: ProbeState::FileTarget,
-                    bytes: md.len(),
+                    bytes: Some(md.len()),
                     record_count: None,
                     candidate_count: None,
                     unreadable_count: None,
@@ -946,7 +946,7 @@ fn probe_harness(
                     root: Some(root),
                     confidence,
                     state: ProbeState::Missing,
-                    bytes: 0,
+                    bytes: None,
                     record_count: None,
                     note: "单文件不存在".to_string(),
                     ..base
@@ -958,7 +958,7 @@ fn probe_harness(
                     root: Some(root),
                     confidence,
                     state: ProbeState::Indeterminate,
-                    bytes: 0,
+                    bytes: None,
                     record_count: None,
                     note: format!("路径读不了，存在与否未知（{e}）—— 不是「不存在」"),
                     ..base
@@ -970,7 +970,7 @@ fn probe_harness(
                     root: Some(root),
                     confidence,
                     state: ProbeState::Indeterminate,
-                    bytes: 0,
+                    bytes: None,
                     record_count: None,
                     note: format!(
                         "路径存在但不是文件（{}）—— 会话数未知，不是 0",

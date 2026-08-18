@@ -51,9 +51,11 @@ pub struct SearchFilter {
     pub session_id_prefix: Option<String>,
     /// Match one machine partition exactly (`sessions/<machine>/…`).
     pub machine: Option<String>,
-    /// Lower bound (inclusive) on the session's activity time, unix seconds.
+    /// Lower bound (inclusive) on archive time, unix seconds. This is the
+    /// rustic snapshot time, not the source session's last-activity time.
     pub since_unix: Option<i64>,
-    /// Upper bound (inclusive) on the session's activity time, unix seconds.
+    /// Upper bound (inclusive) on archive time, unix seconds. This is the
+    /// rustic snapshot time, not the source session's last-activity time.
     pub until_unix: Option<i64>,
 }
 
@@ -89,12 +91,12 @@ pub struct SessionHit {
     pub bytes: u64,
     /// Full hex id of the snapshot the session was found in.
     pub snapshot_id: String,
-    /// Snapshot time, unix seconds.
+    /// Snapshot creation time, unix seconds.
     pub snapshot_time_unix: i64,
-    /// Newest shard mtime in the tree, unix seconds; falls back to the
-    /// snapshot time when the tree carries no mtime. This is the value the
-    /// time filter is applied to.
-    pub activity_unix: i64,
+    /// Archive time used by the time filter, unix seconds. This is explicitly
+    /// not a source session activity timestamp: the archive metadata contains
+    /// the rustic snapshot time, while sealed shards carry no source mtime.
+    pub archive_time_unix: i64,
     /// Number of data blobs the shards are made of (from `node.content`).
     /// This is what a full-text pass would have to fetch — it is *counted*
     /// here, never fetched.
@@ -253,9 +255,10 @@ pub fn search_sessions(
             }
         };
 
-        // (machine, session) -> (shards, bytes, data blobs, newest mtime)
-        let mut sessions: BTreeMap<(String, String), (usize, u64, usize, Option<i64>)> =
-            BTreeMap::new();
+        // (machine, session) -> (shards, bytes, data blobs). The archive time
+        // is the rustic snapshot time below; a sealed shard mtime is its
+        // archive-side creation time, not source session activity.
+        let mut sessions: BTreeMap<(String, String), (usize, u64, usize)> = BTreeMap::new();
         for (path, node) in &entries {
             if node.node_type != NodeType::File {
                 continue;
@@ -263,23 +266,16 @@ pub fn search_sessions(
             let Some((machine, session, _shard)) = bucket_shard_path(path) else {
                 continue;
             };
-            let entry = sessions
-                .entry((machine, session))
-                .or_insert((0, 0, 0, None));
+            let entry = sessions.entry((machine, session)).or_insert((0, 0, 0));
             entry.0 += 1;
             entry.1 += node.meta.size;
             entry.2 += node.content.as_ref().map_or(0, Vec::len);
-            let mtime = node.meta.mtime.map(|t| t.as_second());
-            entry.3 = match (entry.3, mtime) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            };
         }
 
-        for ((machine, session_id), (shard_count, bytes, data_blobs, mtime)) in sessions {
+        for ((machine, session_id), (shard_count, bytes, data_blobs)) in sessions {
             report.sessions_seen += 1;
-            let activity_unix = mtime.unwrap_or(snapshot_time_unix);
-            if !matches(filter, &machine, &session_id, activity_unix) {
+            let archive_time_unix = snapshot_time_unix;
+            if !matches(filter, &machine, &session_id, archive_time_unix) {
                 continue;
             }
             report.hits.push(SessionHit {
@@ -289,7 +285,7 @@ pub fn search_sessions(
                 bytes,
                 snapshot_id: snapshot_id.clone(),
                 snapshot_time_unix,
-                activity_unix,
+                archive_time_unix,
                 data_blobs,
             });
         }
@@ -301,7 +297,7 @@ pub fn search_sessions(
     Ok(report)
 }
 
-fn matches(filter: &SearchFilter, machine: &str, session_id: &str, activity_unix: i64) -> bool {
+fn matches(filter: &SearchFilter, machine: &str, session_id: &str, archive_time_unix: i64) -> bool {
     if let Some(want) = &filter.machine {
         if machine != want {
             return false;
@@ -313,12 +309,12 @@ fn matches(filter: &SearchFilter, machine: &str, session_id: &str, activity_unix
         }
     }
     if let Some(since) = filter.since_unix {
-        if activity_unix < since {
+        if archive_time_unix < since {
             return false;
         }
     }
     if let Some(until) = filter.until_unix {
-        if activity_unix > until {
+        if archive_time_unix > until {
             return false;
         }
     }
@@ -329,15 +325,15 @@ fn matches(filter: &SearchFilter, machine: &str, session_id: &str, activity_unix
 mod tests {
     use super::*;
 
-    fn hit(machine: &str, session: &str, activity: i64) -> SessionHit {
+    fn hit(machine: &str, session: &str, archive_time: i64) -> SessionHit {
         SessionHit {
             machine: machine.into(),
             session_id: session.into(),
             shard_count: 2,
             bytes: 100,
             snapshot_id: "abcdef0123456789".into(),
-            snapshot_time_unix: activity,
-            activity_unix: activity,
+            snapshot_time_unix: archive_time,
+            archive_time_unix: archive_time,
             data_blobs: 2,
         }
     }
