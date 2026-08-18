@@ -1255,11 +1255,20 @@ fn cmd_dest_init(
         Ok(report) => report,
         Err(e) => {
             eprintln!("dest-init: local re-collect failed: {e:#}");
-            return ExitCode::FAILURE;
+            // 3, not 1: the re-collect did not produce a complete report, so
+            // this pass did not finish reading the local sources. A returned
+            // report with `errors` below is the separate "read and failed"
+            // case that belongs to 1.
+            return ExitCode::from(3);
         }
     };
     print_collect_report(&report, stage, &state_dir, &machine);
+    // An error is a recognised source that collection tried to read and could
+    // not process: read-completed-but-failed, exit 1. An archive gap is a
+    // recognised source for which this build did not produce all records:
+    // unread/incomplete, exit 3. Keep these independent for final precedence.
     let local_failed = !report.errors.is_empty();
+    let local_incomplete = !report.archive_gaps.is_empty();
 
     // Step 2 — only what an existing destination has and the local source no
     // longer produced.
@@ -1340,10 +1349,13 @@ fn cmd_dest_init(
         Ok(count) => count,
         Err(e) => {
             eprintln!("dest-init: cannot audit stage: {e:#}");
-            return ExitCode::FAILURE;
+            // 3, not 1: without a completed stage audit we cannot establish
+            // what would be pushed, so the operation did not finish.
+            return ExitCode::from(3);
         }
     };
     let mut push_failed = false;
+    let mut push_not_started = false;
     if stage_shards == 0 {
         println!("[dest-init] step 3        : nothing on the stage, no snapshot created");
     } else {
@@ -1358,7 +1370,9 @@ fn cmd_dest_init(
                     "dest-init: nothing was pushed to the new destination — an archive written \
                      under a key that is not on the disk could never be opened again."
                 );
-                push_failed = true;
+                // The archive write never began. Keep this separate from a
+                // failed `store.push`: the former is exit 3, the latter 1.
+                push_not_started = true;
             }
             Ok((mk, _)) => {
                 let store = BackupStore::new(target.clone(), machine.clone());
@@ -1381,12 +1395,51 @@ fn cmd_dest_init(
     }
     reap_remote(&target, no_reap);
 
-    // Suspected loss outranks a merely incomplete difference set: the same
-    // exit code, but a completely different thing to go and do about it.
+    // `diff_complete` is an aggregate bit, not an exit-code meaning. Its
+    // false cases split into sources we could not read (`Unknown` or
+    // `SuspectedLoss`, exit 3) and sources we read but could not restore fully
+    // (`failed_sessions`, exit 1).
+    let diff_not_read = !diff.diff_complete
+        && diff.sources.iter().any(|source| {
+            matches!(
+                source.status,
+                SourceStatus::SuspectedLoss | SourceStatus::Unknown
+            )
+        });
+    let diff_read_failed = !diff.diff_complete
+        && diff
+            .sources
+            .iter()
+            .any(|source| !source.failed_sessions.is_empty());
+
+    // A completed read/attempted operation (1) outranks a part that was never
+    // read (3), matching `cmd_collect`: the former says this pass failed, the
+    // latter says its answer is unproven. The data-loss wording remains the
+    // highest-priority explanation within the unread (3) family.
+    if local_failed || diff_read_failed || push_failed {
+        if diff_read_failed && !local_failed && !push_failed {
+            let failed_sessions: usize = diff
+                .sources
+                .iter()
+                .map(|source| source.failed_sessions.len())
+                .sum();
+            eprintln!(
+                "dest-init: result: ERROR exit_code=1 — the difference set was read, but {failed_sessions} session(s) could not be restored. The new destination is not proven to hold the union."
+            );
+        } else {
+            eprintln!(
+                "[dest-init] result: ERROR exit_code=1 local_errors={local_failed} push_failed={push_failed}"
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+
+    // Suspected loss outranks a merely unknown difference set: the same exit
+    // code, but a completely different thing to go and do about it.
     let lost = diff.suspected_loss();
     if !lost.is_empty() {
         eprintln!(
-            "dest-init: result: SUSPECTED-DATA-LOSS exit_code=1 — {} destination(s) that this machine has \
+            "dest-init: result: SUSPECTED-DATA-LOSS exit_code=3 — {} destination(s) that this machine has \
              collected for before can no longer be read: {}. This is NOT \"one fewer destination to copy \
              from\": each of them may have been the last place some sessions still existed. The new \
              destination has been given everything else, but it is NOT proven to hold the union. Go find \
@@ -1394,23 +1447,29 @@ fn cmd_dest_init(
             lost.len(),
             lost.join(", "),
         );
-        return ExitCode::FAILURE;
+        return ExitCode::from(3);
     }
-    if !diff.diff_complete {
+    if diff_not_read {
         let unknown = diff.unknown();
         eprintln!(
-            "dest-init: result: INCOMPLETE exit_code=1 — the difference set could not be computed in full. \
-             {} destination(s) could not be consulted or copied from ({}), so it is UNKNOWN whether this new \
+            "dest-init: result: INCOMPLETE exit_code=3 — the difference set could not be computed in full. \
+             {} destination(s) could not be consulted ({}), so it is UNKNOWN whether this new \
              destination holds the union. Unknown is not empty, and it is not loss either — we cannot tell \
              whether these were ever built. Re-run once they are reachable.",
             unknown.len().max(1),
             join_or_none(&unknown),
         );
-        return ExitCode::FAILURE;
+        return ExitCode::from(3);
     }
-    if local_failed || push_failed {
-        eprintln!("[dest-init] result: ERROR exit_code=1 local_errors={local_failed} push_failed={push_failed}");
-        return ExitCode::FAILURE;
+    if local_incomplete || push_not_started {
+        // Keep the established result line shape; the detailed collect/key
+        // lines above identify whether this was an archive gap or a push that
+        // never began. Exit 3 says the union was not proven, not that it was a
+        // completed read/push which failed.
+        eprintln!(
+            "[dest-init] result: ERROR exit_code=3 local_errors={local_failed} push_failed={push_failed}"
+        );
+        return ExitCode::from(3);
     }
     println!("[dest-init] result: COMPLETED exit_code=0 union=local+existing-destinations");
     ExitCode::SUCCESS
