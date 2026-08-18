@@ -121,7 +121,7 @@ pub fn seal_active_file(
     if !active.exists() {
         anyhow::bail!("active file does not exist: {}", active.display());
     }
-    let seq = crate::store::next_shard_seq(stage_root, machine, session_id);
+    let seq = crate::store::next_shard_seq(stage_root, machine, session_id)?;
     let dest = crate::store::shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -324,7 +324,7 @@ mod tests {
         // Original path as the new tail: a fresh active file can start there.
         fs::write(&active, b"new-tail-1\n").unwrap();
         assert!(active.exists());
-        assert_eq!(store::next_shard_seq(stage, "m", "s"), 3);
+        assert_eq!(store::next_shard_seq(stage, "m", "s").unwrap(), 3);
         drop(dir);
     }
 

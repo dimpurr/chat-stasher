@@ -689,15 +689,14 @@ pub fn parse_shard_seq(name: &str) -> Option<u64> {
 }
 
 /// Next sequence number for a sealed session shard set (1 + highest existing).
-pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> u64 {
+pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<u64> {
     let dir = session_shard_dir(stage_root, machine, session_id);
-    sealed_shard_entries(&dir)
-        .unwrap_or_default()
+    Ok(sealed_shard_entries(&dir)?
         .into_iter()
         .map(|(seq, _)| seq)
         .max()
         .unwrap_or(0)
-        + 1
+        + 1)
 }
 
 /// Append a batch of lines as a new sealed shard. Returns the shard's file
@@ -770,7 +769,7 @@ pub fn write_sealed_shard_raw_with_cap(
     assert_stage_writer_audited(writer)?;
     let dir = session_shard_dir(stage_root, machine, session_id);
     fs::create_dir_all(&dir)?;
-    let seq = next_shard_seq(stage_root, machine, session_id);
+    let seq = next_shard_seq(stage_root, machine, session_id)?;
     let path = shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
     fs::create_dir_all(path.parent().expect("shard path has bucket parent"))?;
     let tmp = path.with_file_name(format!(".{}tmp", shard_filename(seq)));
@@ -864,6 +863,37 @@ pub fn parse_key(raw: &str) -> anyhow::Result<MasterKey> {
     Ok(serde_json::from_str(raw)?)
 }
 
+/// The three semantic outcomes of opening the key path.
+///
+/// This is deliberately not folded into anyhow::Result: adding context to a
+/// plain error makes it unsafe for the repo-init caller to distinguish
+/// NotFound from an existing file that could not be read or parsed. Missing
+/// is the only outcome that permits key creation; Unusable keeps read and
+/// parse failures separate so the user gets the right repair instruction.
+#[derive(Debug)]
+pub enum KeyFileState {
+    /// The key path does not exist (io::ErrorKind::NotFound).
+    Missing,
+    /// The key was read and parsed successfully.
+    Loaded(MasterKey),
+    /// The path exists but cannot be used; the inner class is actionable.
+    Unusable(KeyFileError),
+}
+
+#[derive(Debug)]
+pub enum KeyFileError {
+    Read(anyhow::Error),
+    Parse(anyhow::Error),
+}
+
+impl KeyFileError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Read(error) | Self::Parse(error) => error,
+        }
+    }
+}
+
 /// Write the masterkey to `cfg.key_file`, owner-readable only where the
 /// platform can express that, and **do not return `Ok` until it is on the
 /// disk**.
@@ -953,13 +983,36 @@ pub fn persist_key_file(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<()>
 
 /// Load the masterkey from `cfg.key_file` (error when missing).
 pub fn load_key_file(cfg: &StoreConfig) -> anyhow::Result<MasterKey> {
-    let raw = fs::read_to_string(&cfg.key_file).with_context(|| {
-        format!(
+    match load_key_file_state(cfg) {
+        KeyFileState::Missing => Err(anyhow!(
             "cannot read masterkey file {} (lost key?)",
             cfg.key_file.display()
-        )
-    })?;
-    parse_key(&raw)
+        )),
+        KeyFileState::Loaded(mk) => Ok(mk),
+        KeyFileState::Unusable(error) => Err(error.into_anyhow()),
+    }
+}
+
+/// Read and classify the masterkey without losing the filesystem error kind.
+pub fn load_key_file_state(cfg: &StoreConfig) -> KeyFileState {
+    let raw = match fs::read_to_string(&cfg.key_file) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return KeyFileState::Missing;
+        }
+        Err(error) => {
+            return KeyFileState::Unusable(KeyFileError::Read(anyhow::Error::new(error).context(
+                format!("cannot read masterkey file {}", cfg.key_file.display()),
+            )));
+        }
+    };
+    match parse_key(&raw) {
+        Ok(mk) => KeyFileState::Loaded(mk),
+        Err(error) => KeyFileState::Unusable(KeyFileError::Parse(error.context(format!(
+            "cannot parse masterkey file {}",
+            cfg.key_file.display()
+        )))),
+    }
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

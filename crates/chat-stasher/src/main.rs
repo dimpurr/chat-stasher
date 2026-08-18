@@ -2088,10 +2088,13 @@ fn cmd_seal(
         Ok(machine) => machine,
         Err(code) => return code,
     };
-    let session = session
-        .map(String::from)
-        .or_else(|| active.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "unknown".to_string());
+    let session = match derive_seal_session_id(session, active) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("seal: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     println!("[seal] machine        : {machine}");
     println!("[seal] session        : {session}");
     println!("[seal] bucket cap     : {shard_bucket_cap}");
@@ -2111,6 +2114,18 @@ fn cmd_seal(
             ExitCode::FAILURE
         }
     }
+}
+
+fn derive_seal_session_id(session: Option<&str>, active: &Path) -> anyhow::Result<String> {
+    session
+        .map(String::from)
+        .or_else(|| active.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot derive a session id from --active; provide --session <id>; no shard was written"
+            )
+        })
 }
 
 /// Metadata-only ingest summary: counts, shard names, bytes, sha256, and
@@ -2315,8 +2330,21 @@ fn store_config_from(
 ///
 /// The "key already existed" path is untouched: it neither writes nor verifies.
 fn masterkey(config: &StoreConfig) -> anyhow::Result<(MasterKey, bool)> {
-    if let Ok(mk) = store::load_key_file(config) {
-        return Ok((mk, false));
+    match store::load_key_file_state(config) {
+        store::KeyFileState::Loaded(mk) => return Ok((mk, false)),
+        store::KeyFileState::Missing => {}
+        store::KeyFileState::Unusable(store::KeyFileError::Read(error)) => {
+            anyhow::bail!(
+                "cannot read masterkey file {}: {error:#}; do not delete this file; fix the access or I/O problem and re-run",
+                config.key_file.display()
+            );
+        }
+        store::KeyFileState::Unusable(store::KeyFileError::Parse(error)) => {
+            anyhow::bail!(
+                "cannot parse masterkey file {}: {error:#}; do not delete this file; restore a valid copy before re-running",
+                config.key_file.display()
+            );
+        }
     }
     let mk = MasterKey::new();
     store::persist_key_file(config, &mk)?;
@@ -3101,6 +3129,55 @@ mod decision_surface_tests {
             "--sessions must still print one line per session, got {} lines",
             detailed.lines().count()
         );
+    }
+
+    #[test]
+    fn masterkey_does_not_replace_an_unreadable_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("masterkey.json");
+        let original = br#"{"truncated":"#;
+        fs::write(&key_file, original).unwrap();
+        let config = StoreConfig {
+            repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+            key_file: key_file.clone(),
+            connections: 1,
+            options: BTreeMap::new(),
+        };
+
+        let result = masterkey(&config);
+        let after = fs::read(&key_file).unwrap();
+        eprintln!(
+            "B89 A key-file sha256 before={} after={}",
+            sha256_hex(original),
+            sha256_hex(&after)
+        );
+        assert!(
+            result.is_err(),
+            "a present but invalid key file must stop the archive before writing"
+        );
+        let error = result.err().unwrap().to_string();
+        assert!(error.contains("cannot parse masterkey file"));
+        assert!(
+            error.contains("do not delete"),
+            "error must protect the key file: {error}"
+        );
+        assert_eq!(fs::read(&key_file).unwrap(), original);
+    }
+
+    #[test]
+    fn masterkey_creates_a_key_when_the_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StoreConfig {
+            repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+            key_file: dir.path().join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+        };
+
+        let result = masterkey(&config).unwrap();
+        assert!(result.1);
+        assert!(config.key_file.is_file());
+        assert!(store::load_key_file(&config).is_ok());
     }
 }
 

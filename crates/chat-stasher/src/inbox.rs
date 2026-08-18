@@ -640,7 +640,7 @@ fn write_shard_atomic(
     let dir = store::session_shard_dir(stage, machine, id);
     fs::create_dir_all(&dir)?;
     clean_stale_tmp(&dir)?;
-    let seq = store::next_shard_seq(stage, machine, id);
+    let seq = store::next_shard_seq(stage, machine, id)?;
     let final_path = store::shard_path_with_cap(stage, machine, id, seq, bucket_cap);
     let final_dir = final_path.parent().expect("shard path has bucket parent");
     fs::create_dir_all(final_dir)?;
