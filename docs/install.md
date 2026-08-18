@@ -19,8 +19,8 @@ TypeScript，但你需要能打开一个终端窗口、复制粘贴几条命令�
 | **浏览器扩展（Chat Stasher）** | 把你在**网页版**聊天里的对话，存成文件落到你的下载目录，等 CLI 来收 | 你的浏览器 |
 
 **CLI 这一边**：它的自我描述是 "Append-only archive for every LLM conversation,
-across harnesses."（`crates/chat-stasher/src/main.rs:25`）。它读的是本机上已经
-存在的会话文件，读的时候是只读的（`crates/chat-stasher/src/main.rs:427`）。
+across harnesses."（`crates/chat-stasher/src/main.rs:26`）。它读的是本机上已经
+存在的会话文件，读的时候是只读的（`crates/chat-stasher/src/main.rs:428`）。
 
 **扩展这一边**：它当前认识**六个**网页平台 —— DeepSeek（`chat.deepseek.com`）、
 Perplexity（`www.perplexity.ai`）、ChatGPT（`chatgpt.com` / `chat.openai.com`）、
@@ -32,7 +32,7 @@ Gemini（`gemini.google.com`）、Claude（`claude.ai`）、Kimi（`www.kimi.com
 （`apps/extension/lib/contract.ts:324`、`apps/extension/lib/download.ts:91`）。
 
 **两边怎么接起来**：扩展只管落盘，CLI 用 `ingest --inbox <你的收件目录>
---stage <你的暂存目录>` 把这些文件收走（`crates/chat-stasher/src/main.rs:402-424`）。
+--stage <你的暂存目录>` 把这些文件收走（`crates/chat-stasher/src/main.rs:403-425`）。
 
 🔴 **「认识这个平台」不等于「能把你在这个平台上的历史补回来」。** 扩展有两条腿，
 请分开看：
@@ -76,7 +76,7 @@ Gemini（`gemini.google.com`）、Claude（`claude.ai`）、Kimi（`www.kimi.com
 正文接口地址 —— 猜错的后果不是报错，而是每条对话只存下前几轮，而你以为存全了。
 
 这三档在扩展的 popup 里也会照实显示，措辞与上表一致
-（`apps/extension/lib/popup-view.ts:271`）。
+（`apps/extension/lib/popup-view.ts:483-498`）。
 
 （**实时归档不受这张表影响**：上面六个平台的实时归档判据在
 `apps/extension/lib/contract.ts:69-303` 那张表里各自登记，与回溯是两回事。）
@@ -107,7 +107,7 @@ chat-stasher init
 ```
 
 `init` 只在配置**不存在**时写入一份带注释的默认配置，它是非破坏性的
-（`crates/chat-stasher/src/main.rs:37-38`）。配置文件的位置是
+（`crates/chat-stasher/src/main.rs:38-39`）。配置文件的位置是
 `~/.config/chat-stasher/config.toml`，如果你设了 `XDG_CONFIG_HOME` 就在那底下
 （`crates/chat-stasher/src/config.rs:15,153-161`）。
 
@@ -184,7 +184,7 @@ pnpm build:firefox    # Firefox
 
 归档的目的地由你的配置和命令行参数决定 —— 本地路径，或者你自己配置的后端。
 `push` / `read` / `verify` 读的是你在配置或参数里选定的仓库和密钥文件
-（`crates/chat-stasher/src/main.rs:118-120`、`:183-185`、`:226-228`）。
+（`crates/chat-stasher/src/main.rs:119-121`、`:183-185`、`:226-228`）。
 
 🔴 **主密钥文件是唯一的钥匙。丢了，归档就永远读不出来了，没有任何找回手段。**
 源码里对此的原话是 "The masterkey is the repository's only key — losing it means
@@ -198,11 +198,11 @@ the repo is unreadable forever"（`crates/chat-stasher/src/store.rs:813-815`）�
 
 `chat-stasher schedule` 会**渲染**一份 launchd plist 或 systemd user
 service/timer —— 注意它的原话是 "never installs it"，也就是它只生成文件，
-**不替你安装**（`crates/chat-stasher/src/main.rs:77`）。生成的模板里包着
-一条 `run-once` 命令（`crates/chat-stasher/src/main.rs:77-94`）。
+**不替你安装**（`crates/chat-stasher/src/main.rs:78`）。生成的模板里包着
+一条 `run-once` 命令（`crates/chat-stasher/src/main.rs:78-95`）。
 
 `run-once` 是一次完整的采集+推送，跑完就退出，重复调用是安全的
-（`crates/chat-stasher/src/main.rs:36-41`）。
+（`crates/chat-stasher/src/main.rs:37-42`）。
 
 ---
 
@@ -215,11 +215,11 @@ chat-stasher status
 ```
 
 `status` 是只读的。源码里对它的输出边界写的是：只有 id、路径、大小、mtime 和
-标记会进标准输出，会话内容不会（`crates/chat-stasher/src/main.rs:2701,2724,2771`）。
+标记会进标准输出，会话内容不会（`crates/chat-stasher/src/main.rs:3044,3067,3114`）。
 这是源码的自述，我们没有对每条输出路径做过穷举验证。
 
 它的输出分两段。**第一行**是定时器体检结论，来自上一次 `run-once` 留下的记录
-（`crates/chat-stasher/src/main.rs:2724`）。以下是源码里逐字定义的几种结论
+（`crates/chat-stasher/src/main.rs:3067`）。以下是源码里逐字定义的几种结论
 （`crates/chat-stasher/src/runstate.rs:184-232`）：
 
 - 还没装定时器 / 从来没跑成功过：
@@ -233,7 +233,7 @@ chat-stasher status
   `[run-once] 上次运行失败：N 分钟前在 <步骤> 步骤出错，此后没有成功的运行。`
 
 **第二段**是扫描结果。默认是固定几行的汇总，不会刷屏
-（`crates/chat-stasher/src/main.rs:2792-2818`）：
+（`crates/chat-stasher/src/main.rs:3135-3161`）：
 
 - 有会话时：`[scan] N 个会话（N compressed）：<来源> N · <来源> N`
 - 一个都没扫到时：`[scan] 本机没有扫描到任何会话。`
@@ -242,10 +242,10 @@ chat-stasher status
 - 最后固定一行：`明细（每个会话一行）：chat-stasher status --sessions`
 
 想看每个会话一行的明细，就加 `--sessions`；那会是几百行
-（`crates/chat-stasher/src/main.rs:155-159`）。
+（`crates/chat-stasher/src/main.rs:156-160`）。
 
 **🔴 一个容易踩的点**：`status` 在判定「不健康」时会**以非零码退出**
-（`crates/chat-stasher/src/main.rs:2352-2360,3191-3195`）。所以「命令报错了」不一定是
+（`crates/chat-stasher/src/main.rs:2695-2703,3534-3538`）。所以「命令报错了」不一定是
 命令坏了，很可能就是它在告诉你定时器停了。请读第一行的那句话。
 
 它的四个退出码是：`0` = 定时器判定正常 · `1` = 扫描读完了、但定时器判定不正常
@@ -256,7 +256,7 @@ chat-stasher status
 
 还有一条相关的命令：`doctor`。它回答的是另一个问题 —— **有没有哪个工具正在
 悄悄删你的历史**。它的报告只含路径、计数、字节数和时间戳
-（`crates/chat-stasher/src/main.rs:64-66,123-125,198-200`）。
+（`crates/chat-stasher/src/main.rs:65-67,124-126,199-201`）。
 
 ---
 
@@ -265,8 +265,8 @@ chat-stasher status
 这一节是**诚实清单**。以下都是我们去代码里确认过的现状，不是暂时的免责声明。
 
 - **没有 restore（整体恢复）命令。第一阶段不做。** 子命令表里没有 `restore`
-  这一项（`crates/chat-stasher/src/main.rs:36-490`）。你能做的是 `read`，
-  一次把**一个**会话打到标准输出（`crates/chat-stasher/src/main.rs:163-174`）。
+  这一项（`crates/chat-stasher/src/main.rs:37-569`）。你能做的是 `read`，
+  一次把**一个**会话打到标准输出（`crates/chat-stasher/src/main.rs:164-175`）。
   批量恢复 = 目前得你自己写脚本循环。
 
 - **🔴 主密钥丢了，没有任何找回手段。** 没有找回流程、没有恢复码、没有客服。
@@ -306,7 +306,7 @@ chat-stasher status
   `data/harness-registry-v1.json`）。
 
 - **`schedule` 不会替你安装定时器**，只生成模板文件
-  （`crates/chat-stasher/src/main.rs:77`）。真正的安装步骤要你自己做，
+  （`crates/chat-stasher/src/main.rs:78`）。真正的安装步骤要你自己做，
   **具体安装命令本文未给出 —— 未查证**（我们没有在本机走通一次完整的
   launchd/systemd 安装流程）。
 
@@ -327,7 +327,7 @@ chat-stasher status
 - 装定时器
 
 **之后自动跑**：定时器每到点跑一次 `run-once`，采集、推送、退出
-（`crates/chat-stasher/src/main.rs:37-38`）。它不需要你确认任何东西。
+（`crates/chat-stasher/src/main.rs:38-39`）。它不需要你确认任何东西。
 
 **你偶尔该做的**（不是必须，但建议）：
 
