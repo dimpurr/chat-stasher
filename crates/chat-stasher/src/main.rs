@@ -1254,14 +1254,37 @@ fn cmd_dest_init(
         let cfg = resolve_store_config(&config, Some(name), None, None, None, &[]);
         // Read before step 1 runs: step 1 writes this machine's state for the
         // *target*, and we want the record as it stood before this command.
-        let previously_recorded = chat_stasher::collect::destination_has_record(
+        //
+        // B82: three answers. A record we could not read used to arrive here
+        // as `false` — indistinguishable from "we have never collected for
+        // it" — and that `false` is what `destinit` uses to *prove* a missing
+        // repository was never built. The read error is now carried through
+        // instead of being flattened into the answer.
+        let record = match chat_stasher::collect::destination_record(
             &state_dir,
             &chat_stasher::collect::destination_id(&cfg.repo_root),
-        );
+        ) {
+            Ok(chat_stasher::collect::DestinationRecord::Known(true)) => {
+                chat_stasher::destinit::CollectRecord::Present
+            }
+            Ok(chat_stasher::collect::DestinationRecord::Known(false))
+            | Ok(chat_stasher::collect::DestinationRecord::Unrecorded) => {
+                chat_stasher::destinit::CollectRecord::Absent
+            }
+            Err(e) => {
+                eprintln!(
+                    "dest-init: cannot read this machine's collector record for source `{name}`: {e:#}"
+                );
+                eprintln!(
+                    "dest-init: that record is the only thing that tells \"never built\" apart from \"built and since lost\". Without it this source can only be reported as UNKNOWN."
+                );
+                chat_stasher::destinit::CollectRecord::Unreadable
+            }
+        };
         sources.push(chat_stasher::destinit::SourceDestination {
             name: name.clone(),
             cfg,
-            previously_recorded,
+            record,
         });
     }
 
@@ -1348,6 +1371,16 @@ fn cmd_dest_init(
                  destination, and its archive can no longer be read. This is NOT an empty \
                  destination — it may have been holding the only remaining copy of some sessions. \
                  Do not re-create it blank: find the original first."
+            ),
+            // B82: an `Unknown` that comes from our own unreadable record is a
+            // different sentence and a different thing to do about it — the
+            // location answered, our memory of it did not.
+            SourceStatus::Unknown if source.record_unreadable => println!(
+                "    UNKNOWN: there is no repository at that location, but this machine's own \
+                 collector record could not be read — so we cannot tell whether we ever collected \
+                 for it. Never-built and built-then-lost look identical without that record, and \
+                 the second one may mean the only copy of some sessions is gone. Fix the record \
+                 (state/debts-v2.json) and re-run before treating this destination as empty."
             ),
             SourceStatus::Unknown => println!(
                 "    UNKNOWN: we could not establish whether a repository is there at all, and we \
@@ -1624,10 +1657,18 @@ fn print_collect_report(
     for gap in &report.archive_gaps {
         println!("{}", scanner::format_archive_gap(gap));
     }
-    if report.scanner_unreadable_count > 0 || report.scanner_unreadable_entry_count > 0 {
+    // B82: `unlooked_harnesses` joins the same line rather than getting one of
+    // its own — and, like the other two, only when it is non-zero, so a clean
+    // pass prints exactly what it printed before.
+    if report.scanner_unreadable_count > 0
+        || report.scanner_unreadable_entry_count > 0
+        || report.scanner_unlooked_harnesses > 0
+    {
         println!(
-            "[collect] scan partial   : unreadable_sessions={} unreadable_entries={} source_not_collected=true",
-            report.scanner_unreadable_count, report.scanner_unreadable_entry_count
+            "[collect] scan partial   : unreadable_sessions={} unreadable_entries={} unlooked_harnesses={} source_not_collected=true",
+            report.scanner_unreadable_count,
+            report.scanner_unreadable_entry_count,
+            report.scanner_unlooked_harnesses
         );
     }
     println!(
@@ -2962,6 +3003,7 @@ mod decision_surface_tests {
         let mut report = scanner::ScanReport {
             records: Vec::new(),
             missing_roots: Vec::new(),
+            indeterminate_roots: Vec::new(),
             probes: vec![scanner::HarnessProbe {
                 id: "opencode".to_string(),
                 display_name: "fixture harness".to_string(),
@@ -3017,6 +3059,7 @@ mod decision_surface_tests {
                 })
                 .collect(),
             missing_roots: Vec::new(),
+            indeterminate_roots: Vec::new(),
             probes: Vec::new(),
         }
     }
@@ -3176,7 +3219,15 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
         // byte output it saw before.
         let unreadable = unreadable_notice(report);
         if report.records.is_empty() {
-            out.push_str(&format!("[scan] 本机没有扫描到任何会话。{unreadable}"));
+            // B82: "本机没有扫描到任何会话" is a claim about the whole
+            // machine, and this branch used to make it from
+            // `records.is_empty()` alone — with no regard for the harnesses
+            // this run never got to look at. Zero records plus places we did
+            // not look is not "there is nothing here".
+            out.push_str(&format!(
+                "[scan] 本机没有扫描到任何会话。{}{unreadable}",
+                unlooked_notice(report)
+            ));
             out.push('\n');
         } else {
             out.push_str(&format!(
@@ -3189,6 +3240,17 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             out.push_str(&format!(
                 "[scan] 跳过 {} 个不存在的来源根目录。",
                 report.missing_roots.len()
+            ));
+            out.push('\n');
+        }
+        // B82: kept off the line above on purpose. "不存在" is a measured
+        // absence; these paths were never established to be absent, and
+        // folding them into that count would restate the same lie in a
+        // number.
+        if !report.indeterminate_roots.is_empty() {
+            out.push_str(&format!(
+                "[scan] ⚠ 另有 {} 个来源根目录读不了，存在与否未知（会话数未知）；详见 chat-stasher doctor",
+                report.indeterminate_roots.len()
             ));
             out.push('\n');
         }
@@ -3216,11 +3278,22 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
     for miss in &report.missing_roots {
         out.push_str(&format!("  (missing root, skipped: {})\n", miss.display()));
     }
+    for unknown in &report.indeterminate_roots {
+        out.push_str(&format!(
+            "  (unreadable root, existence unknown: {})\n",
+            unknown.display()
+        ));
+    }
     out.push_str(&render_archive_gap_notice(report));
     out.push('\n');
 
     if report.records.is_empty() {
+        // Same claim, same qualification, in the `--sessions` table.
         out.push_str("  no sessions found.\n");
+        let unlooked = unlooked_notice(report);
+        if !unlooked.is_empty() {
+            out.push_str(&format!(" {}\n", unlooked.trim_start()));
+        }
         return out;
     }
 
@@ -3247,6 +3320,42 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
     }
     out.push('\n');
     out
+}
+
+/// The clause appended to "本机没有扫描到任何会话" when that sentence would
+/// otherwise be a claim we cannot back.
+///
+/// Counted here are the probes that never looked: `未查明` (scanning a guessed
+/// path is forbidden), a template that does not reduce to a root, and B82's
+/// `Indeterminate` (the path could not be stat'd, is the wrong type, or its
+/// store refused to enumerate). Deliberately *not* counted: `Missing` (looked,
+/// nothing there) and `SkipWrongPlatform` (no cell for this platform, so
+/// there is nothing on this machine to have missed).
+///
+/// Empty string when every probe was actually looked at — a machine with
+/// sessions, or a genuinely empty one, prints what it printed before.
+fn unlooked_notice(report: &scanner::ScanReport) -> String {
+    let unlooked: Vec<&str> = report
+        .probes
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.state,
+                scanner::ProbeState::SkipUnascertained
+                    | scanner::ProbeState::SkipUnresolvable
+                    | scanner::ProbeState::Indeterminate
+            )
+        })
+        .map(|p| p.id.as_str())
+        .collect();
+    if unlooked.is_empty() {
+        return String::new();
+    }
+    format!(
+        "  ⚠ 但有 {} 个 harness 这次根本没查（{}）——「没扫到」不等于「没有」；详见 chat-stasher doctor",
+        unlooked.len(),
+        unlooked.join(" · ")
+    )
 }
 
 /// The tail `status` appends to its `[scan]` line when some harness knows

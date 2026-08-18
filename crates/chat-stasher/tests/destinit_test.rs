@@ -102,7 +102,7 @@ fn new_destination_gets_the_union_of_local_and_existing_destination() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "a".to_string(),
-            previously_recorded: true,
+            record: destinit::CollectRecord::Present,
             cfg: cfg_a.clone(),
         }],
     );
@@ -150,7 +150,7 @@ fn an_intact_local_source_copies_nothing_from_the_existing_destination() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "a".to_string(),
-            previously_recorded: true,
+            record: destinit::CollectRecord::Present,
             cfg: cfg_a,
         }],
     );
@@ -194,7 +194,7 @@ fn an_unconsultable_destination_is_reported_not_treated_as_empty() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "a".to_string(),
-            previously_recorded: true,
+            record: destinit::CollectRecord::Present,
             cfg: cfg_a,
         }],
     );
@@ -234,7 +234,7 @@ fn a_missing_repository_is_never_built_or_suspected_loss_depending_on_our_record
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "never-made".to_string(),
-            previously_recorded: false,
+            record: destinit::CollectRecord::Absent,
             cfg: missing.clone(),
         }],
     );
@@ -256,7 +256,7 @@ fn a_missing_repository_is_never_built_or_suspected_loss_depending_on_our_record
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "was-here".to_string(),
-            previously_recorded: true,
+            record: destinit::CollectRecord::Present,
             cfg: missing,
         }],
     );
@@ -295,7 +295,7 @@ fn a_location_we_cannot_read_is_unknown_not_empty_and_not_loss() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "opaque".to_string(),
-            previously_recorded: false,
+            record: destinit::CollectRecord::Absent,
             cfg: cfg_for(&repo, &dir.path().join("no-such-key.json")),
         }],
     );
@@ -347,7 +347,7 @@ fn a_local_prefixed_unreadable_destination_is_unknown_not_empty() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "prefixed".to_string(),
-            previously_recorded: false,
+            record: destinit::CollectRecord::Absent,
             cfg,
         }],
     );
@@ -389,7 +389,7 @@ fn a_local_prefixed_destination_that_was_never_built_is_still_known_empty() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "not-yet".to_string(),
-            previously_recorded: false,
+            record: destinit::CollectRecord::Absent,
             cfg,
         }],
     );
@@ -437,7 +437,7 @@ fn an_unreachable_remote_destination_is_unknown_not_empty() {
         store::DEFAULT_SHARD_BUCKET_CAP,
         &[SourceDestination {
             name: "offline".to_string(),
-            previously_recorded: false,
+            record: destinit::CollectRecord::Absent,
             cfg,
         }],
     );

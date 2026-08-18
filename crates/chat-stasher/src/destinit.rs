@@ -93,7 +93,30 @@ pub struct SourceDestination {
     /// [`crate::collect::destination_id`], so a key that is present is proof we
     /// once staged reads for this destination. Supplied by the caller precisely
     /// so this module never guesses from the location itself.
-    pub previously_recorded: bool,
+    ///
+    /// B82: three values, not two. See [`CollectRecord::Unreadable`].
+    pub record: CollectRecord,
+}
+
+/// What this machine's own collector state says about a destination.
+///
+/// B82. This used to be a `bool`, and an unreadable state file arrived here as
+/// `false` — which this module then used as *evidence* that the destination
+/// had never been built. That is ignorance presented as proof, and it is the
+/// one place in this file where a wrong answer changes a decision rather than
+/// a sentence: `KnownEmpty` is the single absence that exits 0 and lets the
+/// run be declared COMPLETE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CollectRecord {
+    /// No record of ever collecting for this destination, and we could read
+    /// the state to establish that.
+    #[default]
+    Absent,
+    /// We have collected for this destination before.
+    Present,
+    /// The record could not be read. We know nothing about this destination,
+    /// which is not the same as knowing we never built it.
+    Unreadable,
 }
 
 /// How a run was able (or unable) to account for one existing destination.
@@ -137,6 +160,10 @@ pub struct SourceOutcome {
     pub reachable: bool,
     /// Why not, when it could not. Metadata only.
     pub unreachable_reason: Option<String>,
+    /// B82: this destination's `Unknown` comes from *our own* unreadable
+    /// collector record, not from the location being unreachable. Different
+    /// thing to go and do about it, so it is reported separately.
+    pub record_unreadable: bool,
     /// Sessions found in this destination's newest snapshot for our machine.
     pub sessions_for_this_machine: usize,
     /// Sessions found under *another* machine partition. These are real,
@@ -389,11 +416,23 @@ pub fn fill_difference(
                 // agrees we never built it. If we have dealt with this
                 // destination before, the same absence means the opposite
                 // thing, and the opposite thing is a lost copy.
-                outcome.status = match (absence, source.previously_recorded) {
-                    (_, true) => SourceStatus::SuspectedLoss,
-                    (Absence::NoRepository, false) => SourceStatus::KnownEmpty,
-                    (Absence::Indeterminate, false) => SourceStatus::Unknown,
+                outcome.status = match (absence, source.record) {
+                    (_, CollectRecord::Present) => SourceStatus::SuspectedLoss,
+                    (Absence::NoRepository, CollectRecord::Absent) => SourceStatus::KnownEmpty,
+                    // B82: an absent repository plus a record we could not
+                    // read is `Unknown`, not `KnownEmpty`. Both halves of the
+                    // "never built" claim have to be established; here the
+                    // second one was not, and reading `false` out of a failed
+                    // read is how "I could not confirm" became "confirmed
+                    // nothing". Unknown costs exit 3 and a re-run; the old
+                    // answer cost a destination that may have been lost being
+                    // written off as one that never existed.
+                    (Absence::NoRepository, CollectRecord::Unreadable) => SourceStatus::Unknown,
+                    (Absence::Indeterminate, _) => SourceStatus::Unknown,
                 };
+                if source.record == CollectRecord::Unreadable {
+                    outcome.record_unreadable = true;
+                }
             }
         }
         // Only a *known* empty destination leaves the union provable. Both
@@ -504,7 +543,7 @@ mod tests {
             name: "gone".to_string(),
             // We have collected for it before — so its absence is loss, not
             // emptiness, and it still holds the union back.
-            previously_recorded: true,
+            record: CollectRecord::Present,
             cfg: StoreConfig {
                 repo_root: dir
                     .path()
@@ -533,7 +572,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sources = vec![SourceDestination {
             name: "never-made".to_string(),
-            previously_recorded: false,
+            record: CollectRecord::Absent,
             cfg: StoreConfig {
                 repo_root: dir
                     .path()

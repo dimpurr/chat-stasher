@@ -116,21 +116,77 @@ struct DebtState {
 
 /// Do we hold a local record of ever having collected *for* this destination?
 ///
+/// Three answers, not two — the same shape as
+/// [`crate::inbox::RememberedInboxes`], and for the same reason.
+///
 /// ADR-015. The filesystem cannot distinguish "never built" from "built and
 /// since lost", but our own state can: `destinations` is keyed by
 /// [`destination_id`], and a key only appears once a collect pass ran against
 /// that destination. So this answers "have we dealt with it before" without a
 /// single byte of network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationRecord {
+    /// No state file has ever been written here: this machine has genuinely
+    /// never collected for *any* destination. A real answer.
+    Unrecorded,
+    /// The state was read. `Known(false)` is a trusted "we have never
+    /// collected for this one", deliberately distinct from [`Self::Unrecorded`]
+    /// and from an unreadable state.
+    Known(bool),
+}
+
+/// Read the local collector record for one destination.
 ///
-/// Deliberately conservative in one direction: an unreadable or
-/// version-mismatched state file is discarded by [`load_state`] and therefore
-/// reports `false` here. That is the *safe* direction only because the caller
-/// pairs it with "is there a repository there" — a state we cannot read plus a
-/// repository that is present still consults the repository.
+/// B82: the old `destination_has_record` returned a bare `bool` and reached it
+/// through `unwrap_or(false)`, so "the state file exists and we could not read
+/// it" produced exactly the same answer as "we have never collected for this
+/// destination". `dest-init` then used that answer as *evidence* that the
+/// destination was never built — ignorance offered as proof. `Err` now means
+/// what it says: the record exists and could not be read, so the caller knows
+/// nothing about this destination and must not call it empty.
+///
+/// Note this deliberately does not go through [`load_state`], which maps a
+/// corrupt or version-mismatched file to an empty state. That mapping is right
+/// for the collector (discard the cursors, re-read everything — the
+/// conservative direction there), and wrong here, where "no cursors" would be
+/// read as "never dealt with".
+pub fn destination_record(
+    state_dir: &Path,
+    destination_id: &str,
+) -> anyhow::Result<DestinationRecord> {
+    let path = state_dir.join(STATE_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DestinationRecord::Unrecorded)
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("read collector state {}", path.display()))
+        }
+    };
+    let state: DebtState = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse collector state {}", path.display()))?;
+    if state.version != STATE_VERSION {
+        anyhow::bail!(
+            "collector state {} is version {}, this build writes {STATE_VERSION}; its destination list cannot be trusted",
+            path.display(),
+            state.version
+        );
+    }
+    Ok(DestinationRecord::Known(
+        state.destinations.contains_key(destination_id),
+    ))
+}
+
+/// [`destination_record`] flattened to the historical boolean. Kept for the
+/// callers that only ask "is it in there" and have nothing to decide on the
+/// difference — an unreadable record answers `false` here, so **never** use it
+/// to prove a destination was never built.
 pub fn destination_has_record(state_dir: &Path, destination_id: &str) -> bool {
-    load_state(&state_dir.join(STATE_FILE))
-        .map(|state| state.destinations.contains_key(destination_id))
-        .unwrap_or(false)
+    matches!(
+        destination_record(state_dir, destination_id),
+        Ok(DestinationRecord::Known(true))
+    )
 }
 
 /// What a destination's archive can be shown to hold, keyed by
@@ -342,6 +398,11 @@ pub struct CollectReport {
     /// subtree may contain any number of sessions.
     pub scanner_unreadable_count: u64,
     pub scanner_unreadable_entry_count: u64,
+    /// B82: harnesses this pass never got to look at (root un-stattable, wrong
+    /// type, template unresolvable, confidence `未查明`). They contribute no
+    /// records, and without this count a pass that skipped them reads as a
+    /// pass that found them empty.
+    pub scanner_unlooked_harnesses: usize,
     /// Harnesses with recognised sessions that produced fewer
     /// `SessionRecord`s; these sessions were not consumed by this pass.
     pub archive_gaps: Vec<scanner::ArchiveGap>,
@@ -513,6 +574,18 @@ pub fn collect_scan_report(
             .iter()
             .filter_map(|probe| probe.unreadable_entry_count)
             .sum(),
+        scanner_unlooked_harnesses: scan
+            .probes
+            .iter()
+            .filter(|probe| {
+                matches!(
+                    probe.state,
+                    scanner::ProbeState::Indeterminate
+                        | scanner::ProbeState::SkipUnascertained
+                        | scanner::ProbeState::SkipUnresolvable
+                )
+            })
+            .count(),
         archive_gaps: scan.archive_gaps(),
         ..CollectReport::default()
     };

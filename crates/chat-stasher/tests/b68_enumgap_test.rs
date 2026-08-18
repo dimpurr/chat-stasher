@@ -223,6 +223,7 @@ fn legacy_probe_separates_a_missing_body_from_an_empty_one() {
     plant_undecodable_legacy_workspace(&workspace_storage);
 
     let probe = probe_cursor_legacy_workspace_storage(&workspace_storage)
+        .probe
         .expect("fixture must be probeable");
     let SqliteSessionProbe::Known {
         candidate_count,
