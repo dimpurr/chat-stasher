@@ -411,7 +411,11 @@ describe('C19 任务 2 · http 端口：生产代码里真的被注入了', () =
     expect(mod.lastBackfillTick()?.reason).toBe('no-http-port');
     expect(contentFetches).toEqual([]);        // 一个请求都没发出去
     expect(await mod.backfillRuntimeStatus()).toEqual({
-      transportWired: false, lastTickReason: 'no-http-port',
+      transportWired: false,
+      lastTickReason: 'no-http-port',
+      // 🔴 C33 新增的一位：没有活着的通道 ⇒ 也答不上"是哪个平台" ⇒ null。
+      //    通道判定本身一个字都没改（仍然是上面那次 ping 的结果）。
+      liveTarget: null,
     });
   });
 

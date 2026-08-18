@@ -30,6 +30,12 @@
         margin: 8px 0; padding: 8px 10px; font-weight: 600;
         border-left: 3px solid #c0392b; background: rgba(192,57,43,.10);
       }
+      /* C33：「开始回溯这个平台」。它是一个【动作】，所以比清空按钮更显眼一点；
+         但它只在「有通道、没目标」时出现，不许变成永远挂着的噪声。 */
+      #start-backfill {
+        display: block; margin: 8px 0; padding: 6px 12px;
+        font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      }
       #clear-failures {
         margin: 0 0 8px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer;
       }
@@ -44,6 +50,7 @@
     <button type="button" id="clear-failures" hidden></button>
     <div id="running"></div>
     <div id="missing"></div>
+    <button type="button" id="start-backfill" hidden></button>
     <div id="progress"></div>
     <div id="coverage"></div>
     <div class="row">

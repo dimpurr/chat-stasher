@@ -44,6 +44,18 @@ import { guardAlertDetail, type GuardState } from './download-guard';
  */
 export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
 
+/**
+ * 🔴 C33 · Popup → background：「就补这个平台，我说的」。
+ *
+ * 为什么需要第二条登记入口：登记回溯目标此前【只】发生在 kickBackfill 那一脚上
+ * （必须先有一次实时对话被捕获）。那个限制是有意的设计，本单一个字都没动它
+ * （lib/backfill/alarm.ts:80-87 —— 闹钟醒来时 SW 是全新的，不去猜、只用现成的）。
+ * 但它的推论是：一个刚装好、开着平台页面却还没聊过天的用户，回溯【永远不会开始】。
+ * ⇒ 解法不是去猜，而是让用户**自己明确说一次**。「不去猜」这条原则因此没有松动：
+ *   目标要么来自一次真实捕获，要么来自用户按下的这一次。两个来源都不是我们编的。
+ */
+export const POPUP_START_BACKFILL_MESSAGE = 'cs-backfill-start-here';
+
 /** background 回给 Popup 的运行时事实。 */
 export interface BackfillRuntimeStatus {
   /**
@@ -55,6 +67,13 @@ export interface BackfillRuntimeStatus {
   transportWired: boolean;
   /** 最近一次 tick 的结论；SW 被回收后会变回 null —— 那本身也是实话。 */
   lastTickReason: string | null;
+  /**
+   * 🔴 C33 · **此刻那个活着的通道是哪个平台/哪个源。**
+   * 它与 transportWired 来自同一次现场 ping（同一个 pickLiveTab），所以不会出现
+   * 「说有通道、却答不上是哪个平台」这种自相矛盾。
+   * null = 没有活着的通道，或者拿到的源不在平台表里 —— 两种情况下都不许显示按钮。
+   */
+  liveTarget?: { platform: string; origin: string } | null;
 }
 
 export interface PopupModel {
@@ -85,6 +104,17 @@ export interface PopupModel {
    * 或者刚装上还没到点），照实说，绝不编一条。
    */
   lastTick?: BackfillTickRecord | null;
+  /**
+   * 🔴 C33 · 此刻那个活着的通道对应的平台/源（来自 BackfillRuntimeStatus）。
+   * 省略/null ⇒ 没有可用通道 ⇒ 「开始回溯这个平台」按钮不出现（点了也没用）。
+   */
+  liveTarget?: { platform: string; origin: string } | null;
+  /**
+   * 🔴 C33 · 登记表里已经有几个回溯目标。
+   * 省略 ⇒ 按 0 处理？**不**：省略视为「不知道」，按【有】处理，
+   * 于是按钮不出现 —— 老调用点（含既有测试）一个字都不用改，也不会凭空多一个按钮。
+   */
+  targetCount?: number;
 }
 
 /** 汇总后的失败清单。entries 已按时间从新到旧排好。 */
@@ -126,6 +156,12 @@ export interface PopupView {
   toggle: { label: string; checked: boolean; disabled: boolean };
   /** 🔴 C20 · 「我知道了 / 清空失败清单」按钮。没有失败项时不显示。 */
   clearFailures: { label: string; visible: boolean };
+  /**
+   * 🔴 C33 · 「开始回溯这个平台」按钮。**只在【有可用通道、但一个目标都没有】时出现。**
+   *  · 有目标 ⇒ 不出现：它的活已经有人干了，挂着就只是噪声；
+   *  · 没通道 ⇒ 不出现：点了也登记不出一个「此刻活着的平台」，那就是在骗人。
+   */
+  startBackfill: { label: string; visible: boolean };
 }
 
 /** 开关那一行的固定措辞。开关只表示「用户同意了」，不表示「它在跑」。 */
@@ -136,6 +172,23 @@ export const CLEAR_FAILURES_LABEL = '我知道了，清空这份清单';
 
 /** 空清单。给 model 用的常量，省得各处手拼。 */
 export const NO_FAILURES: FailureSummary = { entries: [], dropped: 0 };
+
+/**
+ * 🔴 C33 · 那个按钮的固定措辞。
+ * 「开始回溯这个平台」——**这个**，指的就是此刻那个活着的通道所在的平台，
+ * 不是「所有平台」，也不是「你所有的账号」。按下去只做一件事：把它记成回溯目标。
+ */
+export const START_BACKFILL_LABEL = '开始回溯这个平台';
+
+/**
+ * 🔴 按钮出现的判据，**只有一处**（Popup 与测试共用它，不许各写各的）。
+ * 有可用通道 且 一个回溯目标都没有。两条缺一不可。
+ */
+export function canStartBackfillHere(model: PopupModel): boolean {
+  if (!model.liveTarget) return false;
+  // 省略 targetCount ⇒ 「不知道有没有」⇒ 按有处理 ⇒ 不显示。宁可少一个按钮。
+  return model.targetCount === 0;
+}
 
 export function renderPopup(model: PopupModel): PopupView {
   const status = statusLine(model);
@@ -153,6 +206,7 @@ export function renderPopup(model: PopupModel): PopupView {
     coverage: coverageLine(),
     notes: notesFor(model),
     clearFailures: { label: CLEAR_FAILURES_LABEL, visible: hasFailures },
+    startBackfill: { label: START_BACKFILL_LABEL, visible: canStartBackfillHere(model) },
     toggle: {
       label: TOGGLE_LABEL,
       checked: model.enabled,
@@ -232,7 +286,18 @@ function missingLine(model: PopupModel): string {
       //    🔴 这里【只补文案】。登记目标必须先有一次真实捕获，这是 alarm.ts:80-87
       //    有意的设计（闹钟醒来时 SW 全新、没有 tab 也没有账号，唯一不用编的
       //    信息就是实时腿现成攥着的那一个），本单一个字都没有去改它。
-      return '缺：一次真的被归档过的对话 —— 回溯要从它身上才知道该补哪个平台、哪个账号的历史。\n'
+      //
+      //    🔴 C33 · 现在这里【多了一条路】：用户可以直接按那个按钮明确说
+      //    「就补这个平台」。所以有按钮时必须把它一并说出来 —— 屏幕上摆着一个
+      //    按钮、文案却只写「你得先去发一条消息」，那是自己跟自己打架。
+      //    没有按钮（没通道）时这句一个字都不出现，免得指向一个不存在的东西。
+      return (canStartBackfillHere(model)
+        ? `你现在也可以直接按这段话下面那个「${START_BACKFILL_LABEL}」按钮 —— `
+          + '那等于你明确说了「就补这个平台」，我们才会把它记成回溯目标。'
+          + '（我们仍然不猜你的账号：那份归档范围会记成 default，'
+          + '等你真的被归档过一次之后，那个真实账号会另记一份。）\n'
+        : '')
+        + '缺：一次真的被归档过的对话 —— 回溯要从它身上才知道该补哪个平台、哪个账号的历史。\n'
         + '你现在要做的一件事：在这个平台上发一条消息，或者打开一条你已有的对话，'
         + '让它被【实时归档】一次（照常存进你的下载目录）。'
         + '捕获到那一次之后，我们才会记下这个平台和这个账号，回溯就从那个账号开始往回补。\n'
@@ -464,6 +529,9 @@ export function popupText(view: PopupView): string {
   if (view.failures) lines.push(view.failures);
   lines.push(view.running);
   if (view.missing) lines.push(view.missing);
+  // 🔴 C33：按钮在屏幕上是一个真的可点的东西，拍平的文本里也必须看得见它 ——
+  //    否则「它到底出没出现」在测试里就断言不了。
+  if (view.startBackfill.visible) lines.push(`[按钮] ${view.startBackfill.label}`);
   lines.push(view.progress);
   lines.push(view.coverage);
   for (const n of view.notes) lines.push('', n);

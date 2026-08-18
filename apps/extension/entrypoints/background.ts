@@ -4,6 +4,7 @@ import {
   SCHEMA,
   pathSafeSessionId,
   findPlatformForUrl,
+  getPlatformByOrigin,
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
@@ -34,7 +35,11 @@ import {
   tabHttpPort,
   type TabSend,
 } from '../lib/backfill/tab-port';
-import { POPUP_STATUS_MESSAGE, type BackfillRuntimeStatus } from '../lib/popup-view';
+import {
+  POPUP_START_BACKFILL_MESSAGE,
+  POPUP_STATUS_MESSAGE,
+  type BackfillRuntimeStatus,
+} from '../lib/popup-view';
 import {
   guardBadge,
   isGuardTripped,
@@ -262,19 +267,73 @@ async function resolveHttpPort(origin: string, senderTabId?: number): Promise<Ht
  *    有没有一个活着的平台标签页可以替我们取数。没有就是没有，Popup 照实说。
  */
 export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
+  // 🔴 C33：一次 ping 同时回答两个问题（通道通不通 / 是哪个平台）。
+  //    分两次问会出现「说有通道、却答不上是哪个平台」这种自相矛盾的回答。
+  const live = await liveTransport();
   return {
-    transportWired: await hasLiveTransport(),
+    transportWired: live.wired,
     lastTickReason: lastTick?.reason ?? null,
+    liveTarget: live.target,
   };
 }
 
-async function hasLiveTransport(): Promise<boolean> {
-  if (backfillTransport) return true;
+/**
+ * 此刻那条活着的取数通道。
+ * `wired` 与 C19 的 hasLiveTransport 逐字同义；`target` 是它顺带带出来的事实：
+ * 那个标签页的源，以及源在平台表里对应的平台。
+ * 🔴 显式覆盖（测试接缝）下 target 恒为 null —— 那条路上没有任何标签页，
+ *    编一个平台出来就是撒谎。
+ */
+async function liveTransport(): Promise<{
+  wired: boolean;
+  target: { platform: string; origin: string } | null;
+}> {
+  if (backfillTransport) return { wired: true, target: null };
   const tabs = tabsApi();
-  if (!tabs) return false;
+  if (!tabs) return { wired: false, target: null };
   const live = await pickLiveTab(browserLocalStore(), null, (id) =>
     tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
-  return live !== null;
+  if (!live) return { wired: false, target: null };
+  const row = getPlatformByOrigin(live.origin);
+  // 源不在平台表里 ⇒ 我们答不上"这是哪个平台" ⇒ 照实说 null，绝不猜一个。
+  return { wired: true, target: row ? { platform: row.id, origin: live.origin } : null };
+}
+
+/**
+ * 🔴 C33 · 【显式知情同意】那条登记入口：用户在 Popup 上按了「开始回溯这个平台」。
+ *
+ * 与 kickBackfill 的关系：**这是多一条登记入口，不是放宽任何既有判定。**
+ * kickBackfill / rememberTab / 闹钟里 `targets.length` 的判定一个字都没动 ——
+ * 这里做的事和 kickBackfill 里那一行 rememberTarget 完全相同，只是目标的来源
+ * 从「一次真实捕获」换成了「用户自己按下的这一次」。两个来源都不是我们编的。
+ *
+ * 🔴 scope（账号标识）怎么办：**记 'default'**，理由写在这里，不许悄悄编一个。
+ *  · 通道那一跳（内容脚本 ping）带回来的只有源，**没有任何账号信息** ——
+ *    要拿到真实账号得去读页面里的响应体，那是"猜"，本单不做；
+ *  · 'default' 不是新发明：它就是本仓「认不出账号」时既有的写法
+ *    （entrypoints/background.ts:303 的 `identity.value || 'default'`、
+ *      lib/popup-view.ts 的 emptyStateFor、lib/contract.ts 的 IdentityLevel 'default'），
+ *    含义逐字是「身份不可靠」，而不是冒充成某个具体账号；
+ *  · 取数用的仍然是用户自己那个页面的登录态，所以**补回来的确实是他自己的历史**；
+ *    scope 只是欠账账本的分区键，写 'default' 不会把别人的东西补到这里来。
+ *  · 代价（如实写下）：以后真的捕获到一次时会再记一份带真实账号的目标，
+ *    于是同一个平台下会有两份欠账集合，同一批会话可能被各自清一遍。
+ *    文件名是 platform-sessionId、下载是覆盖写 ⇒ 不会串档、不会互相抹掉，
+ *    多出来的只是重复的取数与写入。相比「回溯永远不开始」，这个代价是划算的。
+ */
+export async function registerBackfillTargetHere(): Promise<
+  | { ok: true; target: { platform: string; origin: string; scope: string } }
+  | { ok: false; reason: 'no-store' | 'no-live-transport' | 'origin-not-a-platform' }
+> {
+  const store = browserLocalStore();
+  if (!store) return { ok: false, reason: 'no-store' };
+  const live = await liveTransport();
+  if (!live.wired) return { ok: false, reason: 'no-live-transport' };
+  if (!live.target) return { ok: false, reason: 'origin-not-a-platform' };
+  // 🔴 scope = 'default'：见上面那段。这是既有约定，不是新发明的值。
+  const target = { platform: live.target.platform, origin: live.target.origin, scope: 'default' };
+  await rememberTarget(store, { ...target, at: Date.now() });
+  return { ok: true, target };
 }
 
 /** 等待 fire-and-forget 的那次 tick 结束。回溯腿绝不允许拖慢落盘，所以只能这样等。 */
@@ -451,6 +510,18 @@ export default defineBackground(async () => {
       }
       // C19：内容脚本报到。tab id 由浏览器填在 sender 上（不需要 'tabs' 权限），
       // 记进 storage 之后，闹钟醒来才知道该找谁取数。
+      // 🔴 C33：Popup 上那个「开始回溯这个平台」按钮按下来的那一脚。
+      //    登记【写完】才回话 —— 回一个 ok 就该意味着"登记表里真的有这一条了"，
+      //    否则 Popup 紧接着的那次重画会读到一张还没落盘的表，看起来像没生效。
+      if (message?.type === POPUP_START_BACKFILL_MESSAGE) {
+        registerBackfillTargetHere()
+          .then(sendResponse)
+          .catch((err: Error) => {
+            console.warn('[chat-stasher] backfill start-here failed', err.message);
+            sendResponse({ ok: false, reason: 'no-store' });
+          });
+        return true;
+      }
       if (isTabHello(message)) {
         const tabId = (sender as { tab?: { id?: number } })?.tab?.id;
         if (typeof tabId !== 'number') {
