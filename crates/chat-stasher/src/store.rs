@@ -200,6 +200,10 @@ impl BackupStore {
     /// to `connections`. Once another part of the process built a bigger pool
     /// this is a no-op — the hard bound lives at the backend layer.
     fn limit_parallelism(connections: usize) {
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "Rayon's global pool is intentionally best-effort because another initializer may already own it."
+        )]
         let _ = ThreadPoolBuilder::new()
             .num_threads(connections)
             .build_global();
@@ -903,6 +907,10 @@ pub fn persist_key_file(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<()>
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "This existing Unix hardening call is intentionally best-effort; key serialization and the write remain fallible below."
+        )]
         let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o700));
     }
     let body = serialize_key(mk)?;
@@ -1070,6 +1078,10 @@ mod tests {
             !repo.exists(),
             "machine validation must run before repository initialisation"
         );
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "Test-directory cleanup is intentionally best-effort after the assertions have completed."
+        )]
         let _ = fs::remove_dir_all(repo);
     }
 
@@ -1084,6 +1096,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!("cs-keyperm-{}", std::process::id()));
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "Test setup cleanup is intentionally best-effort before recreating the temporary directory."
+        )]
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1114,6 +1130,10 @@ mod tests {
         let again = fs::metadata(&cfg.key_file).unwrap().permissions().mode() & 0o777;
         assert_eq!(again, 0o600, "rewrite left mode {again:o}, expected 600");
 
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "Test-directory cleanup is intentionally best-effort after the permission assertions."
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 }

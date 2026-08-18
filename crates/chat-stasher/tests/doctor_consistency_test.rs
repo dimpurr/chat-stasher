@@ -139,7 +139,15 @@ fn plant_grok_db(home: &Path) {
     wal.push("-wal");
     let mut shm = db.as_os_str().to_os_string();
     shm.push("-shm");
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "The test explicitly creates the no-sidecar state; cleanup is best-effort after the state is established."
+    )]
     let _ = fs::remove_file(Path::new(&wal));
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "The test explicitly creates the no-sidecar state; cleanup is best-effort after the state is established."
+    )]
     let _ = fs::remove_file(Path::new(&shm));
 }
 

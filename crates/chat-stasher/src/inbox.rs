@@ -573,6 +573,10 @@ fn clean_stale_tmp(dir: &Path) -> anyhow::Result<()> {
         if entry.file_type()?.is_dir() {
             clean_stale_tmp(&entry.path())?;
         } else if name.ends_with(TMP_SUFFIX) {
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "Stale temporary-file cleanup is intentionally best-effort; directory traversal errors still propagate."
+            )]
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -583,6 +587,10 @@ fn clean_stale_tmp(dir: &Path) -> anyhow::Result<()> {
 fn retire(name: &str, src: &Path, consumed_dir: &Path) -> anyhow::Result<()> {
     let dst = consumed_dir.join(name);
     if dst.exists() {
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "Removing an existing destination is best-effort; the required rename below reports whether retirement succeeded."
+        )]
         let _ = fs::remove_file(&dst);
     }
     fs::rename(src, &dst)

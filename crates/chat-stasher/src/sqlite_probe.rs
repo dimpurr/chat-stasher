@@ -1642,6 +1642,10 @@ mod tests {
             drop(conn);
         }
         for suffix in ["-wal", "-shm"] {
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "This test deliberately leaves no SQLite sidecars; cleanup is best-effort after the connection has closed."
+            )]
             let _ = fs::remove_file(sidecar(&db, suffix));
         }
 
