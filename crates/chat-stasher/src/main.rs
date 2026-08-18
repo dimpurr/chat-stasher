@@ -3155,6 +3155,39 @@ fn cmd_status(sessions: bool) -> ExitCode {
     // A partial scan is a fact about coverage; the exit code here is a verdict
     // about the scheduler. Saying it in words is the fix; overloading the
     // integer would be the regression.
+    //
+    // B84 — and the third case, the one that reads wrong in a terminal: on a
+    // machine that never ran `run-once`, `[run-once]` says "从未成功跑完一次"
+    // and this returns **1**. That is deliberate, and it stays.
+    //
+    // `status` is two things at once. The body is a dashboard for a human; the
+    // exit code is a health check for a script or a wrapper. Those two audiences
+    // want different answers to "never ran", and the tie is broken by which one
+    // *cannot* be served in prose: the human already read the sentence above,
+    // so a 0 would tell them nothing they don't know; a script has nothing but
+    // the integer, and for a script "no evidence the timer ever fired" is the
+    // strongest reason there is to go look at the timer. So the integer serves
+    // the script. `docs/install.md` promises exactly this ("`status` 在判定
+    // 「不健康」时会以非零码退出"), and says why in the same words as
+    // `runstate.rs:186-192`: an absent record is the absence of evidence, not
+    // evidence of health.
+    //
+    // The tempting counter-argument — "a user who just installed the binary has
+    // never run it either, and that user is fine, not broken" — is answered by
+    // what `status` is *for*. It is the "is the backup still working?" command
+    // (`docs/install.md:328`), so it is not run before there is anything to
+    // check; and the freshly-installed state is precisely the state where the
+    // timer is not yet doing its job. Calling that 0 would mean the code reads 0
+    // both before the timer is installed and after it dies — the one interval a
+    // monitored machine must be able to distinguish. A new user pays one
+    // non-zero exit, once, with a sentence above it telling them what to do; the
+    // alternative silently blesses every dead timer on every machine forever.
+    //
+    // Note for whoever reads a shell transcript and thinks this returns 0: the
+    // whole report goes to *stderr*, so it is usually read through `2>&1 | …`,
+    // and a pipeline reports the *last* command's status. `chat-stasher status
+    // 2>&1 | head` is 0 no matter what this function returns. Pinned by
+    // `tests/b84_runstate_test.rs`.
     if verdict.healthy {
         ExitCode::SUCCESS
     } else {
