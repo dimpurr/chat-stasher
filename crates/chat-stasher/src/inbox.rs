@@ -136,8 +136,50 @@ impl ConsumedAudit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AuditCacheEntry {
     bytes: u64,
-    modified_ns: u128,
+    /// `None` means "this file's modification time could not be read" — not
+    /// "it was modified at the epoch". An entry with an unknown mtime can
+    /// never satisfy the cache (see [`audit_cache_hit`]).
+    ///
+    /// **On-disk compatibility (B86).** Builds before this change persisted a
+    /// bare `u128` here and wrote `0` both for a real epoch mtime and for an
+    /// unreadable one. `Option<u128>` reads those legacy numbers back without
+    /// a migration (serde accepts a number as `Some`), `#[serde(default)]`
+    /// covers an entry that omits the field entirely, and `deserialize_ns`
+    /// maps a legacy `0` to `None` because on disk a `0` is *ambiguous* — it
+    /// may be the old unknown-sentinel, and inheriting that ambiguity is the
+    /// bug. The cost is re-hashing a file whose mtime genuinely is the epoch;
+    /// the cost of the alternative is reporting a sha256 nobody verified.
+    ///
+    /// The state file's `version` deliberately stays at 1: bumping it would
+    /// make this build reject every existing cache outright (`read_audit_state`
+    /// bails on a version mismatch), turning a compatible field widening into
+    /// a hard failure on every installed machine.
+    #[serde(default, deserialize_with = "deserialize_ns")]
+    modified_ns: Option<u128>,
     sha256: String,
+}
+
+/// Deserialize a `modified_ns` that may be absent, `null`, or a legacy number.
+/// A legacy `0` degrades to `None`; see [`AuditCacheEntry::modified_ns`].
+fn deserialize_ns<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<u128>::deserialize(deserializer)? {
+        Some(0) | None => None,
+        Some(ns) => Some(ns),
+    })
+}
+
+/// The cache is only allowed to answer "unchanged" when it can *show* the file
+/// is unchanged. An unknown modification time — on either side — is an unknown,
+/// and an unknown must not masquerade as a match: a matching byte count alone
+/// is not evidence, so the file is re-read and re-hashed instead.
+fn audit_cache_hit(cached: &AuditCacheEntry, bytes: u64, modified_ns: Option<u128>) -> bool {
+    match (cached.modified_ns, modified_ns) {
+        (Some(cached_ns), Some(ns)) => cached.bytes == bytes && cached_ns == ns,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -242,7 +284,7 @@ pub fn audit_consumed_against_stage(
             let modified_ns = modified_ns(&metadata);
             seen_cache_keys.insert(key.clone());
             let sha256 = match state.files.get(&key) {
-                Some(cached) if cached.bytes == bytes && cached.modified_ns == modified_ns => {
+                Some(cached) if audit_cache_hit(cached, bytes, modified_ns) => {
                     audit.cache_hits += 1;
                     cached.sha256.clone()
                 }
@@ -328,13 +370,16 @@ fn save_audit_state(state_dir: &Path, state: &AuditState) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn modified_ns(metadata: &fs::Metadata) -> u128 {
+/// Nanoseconds since the Unix epoch, or `None` when the platform, filesystem,
+/// or a pre-epoch timestamp leaves the modification time genuinely unreadable.
+/// Returning a sentinel here would be the whole bug: a sentinel is a concrete
+/// value, and a concrete value compares equal to itself.
+fn modified_ns(metadata: &fs::Metadata) -> Option<u128> {
     metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
 }
 
 // -------------------------------------------------------------- envelopes
@@ -1191,5 +1236,155 @@ mod tests {
         assert_eq!(second.rehashed, 0);
         assert_eq!(second.cache_hits, 1);
         assert_eq!(second.stage_covered_files, 1);
+    }
+
+    /// Build a `consumed/` tree holding one file plus a stage shard carrying
+    /// that file's *true* hash. Returns `(inbox, stage, state_dir, file)`.
+    fn audit_fixture(dir: &Path, bytes: &[u8]) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let inbox = dir.join("inbox");
+        let stage = dir.join("stage");
+        let state = dir.join("state");
+        fs::create_dir_all(inbox.join(CONSUMED_DIR)).unwrap();
+        let file = inbox.join(CONSUMED_DIR).join("bundle.json");
+        fs::write(&file, bytes).unwrap();
+        let sha = sha256_hex(bytes);
+        store::write_sealed_shard(
+            store::StageWriter::Ingest,
+            &stage,
+            "machine",
+            "session",
+            &[format!(r#"{{"file_sha256":"{sha}"}}"#)],
+        )
+        .unwrap();
+        fs::create_dir_all(&state).unwrap();
+        (inbox, stage, state, file)
+    }
+
+    /// Hand-write an audit state file with one cache entry, so a test can pin
+    /// the exact on-disk `modified_ns` JSON literal (legacy number, or null).
+    fn write_audit_state_json(
+        state_dir: &Path,
+        file: &Path,
+        bytes_len: usize,
+        modified_ns_json: &str,
+        sha256: &str,
+    ) {
+        let key = fs::canonicalize(file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let json = format!(
+            r#"{{"version":1,"known_inboxes":[],"files":{{{key}:{{"bytes":{n},"modified_ns":{m},"sha256":"{c}"}}}}}}"#,
+            key = serde_json::to_string(&key).unwrap(),
+            n = bytes_len,
+            m = modified_ns_json,
+            c = sha256,
+        );
+        fs::write(state_dir.join(AUDIT_STATE_FILE), json).unwrap();
+    }
+
+    /// B86 (a): a cache entry whose modification time is *unknown* must never
+    /// be treated as a hit, even when the byte count still matches. Otherwise
+    /// the audit republishes a stale sha256 it never verified.
+    #[test]
+    fn unknown_mtime_never_hits_audit_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bytes = b"synthetic bundle bytes";
+        let stale = "0".repeat(64);
+        let (inbox, stage, state, file) = audit_fixture(dir.path(), bytes);
+        write_audit_state_json(&state, &file, bytes.len(), "null", &stale);
+
+        let audit = audit_consumed_against_stage(&[inbox], &stage, &state).unwrap();
+        assert_eq!(audit.file_count, 1);
+        assert_eq!(audit.cache_hits, 0, "unknown mtime must not count as a hit");
+        assert_eq!(audit.rehashed, 1, "unknown mtime must force a re-read");
+        // Re-hashing means the audit reports the real hash, not the stale one.
+        assert!(audit.hash_counts.contains_key(&sha256_hex(bytes)));
+        assert!(!audit.hash_counts.contains_key(&stale));
+        assert_eq!(audit.stage_covered_files, 1);
+        assert_eq!(audit.stage_missing_files, 0);
+    }
+
+    /// B86 (c): the concrete conflation the old sentinel caused. A file whose
+    /// mtime really is the Unix epoch hashes to `0` ns, which is exactly what
+    /// the old code stored for "could not read the mtime" — so a stale entry
+    /// left by an unreadable-mtime file silently matched and a wrong sha256
+    /// was reported. A legacy `0` must therefore be read back as *unknown*.
+    #[test]
+    fn legacy_zero_modified_ns_is_unknown_not_epoch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bytes = b"synthetic bundle bytes";
+        let stale = "1".repeat(64);
+        let (inbox, stage, state, file) = audit_fixture(dir.path(), bytes);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+        write_audit_state_json(&state, &file, bytes.len(), "0", &stale);
+
+        let audit = audit_consumed_against_stage(&[inbox], &stage, &state).unwrap();
+        assert_eq!(audit.cache_hits, 0, "a `0` mtime is ambiguous, never a hit");
+        assert_eq!(audit.rehashed, 1);
+        assert!(
+            !audit.hash_counts.contains_key(&stale),
+            "stale sha reported"
+        );
+        assert_eq!(audit.stage_missing_files, 0);
+    }
+
+    /// B86: the hit rule itself, stated as a table. Unknown on either side —
+    /// the cached entry or the file on disk — is never a hit.
+    #[test]
+    fn audit_cache_hit_rejects_every_unknown_mtime() {
+        let entry = |ns| AuditCacheEntry {
+            bytes: 10,
+            modified_ns: ns,
+            sha256: "x".into(),
+        };
+        assert!(audit_cache_hit(&entry(Some(7)), 10, Some(7)));
+        assert!(!audit_cache_hit(&entry(Some(7)), 11, Some(7)), "size moved");
+        assert!(
+            !audit_cache_hit(&entry(Some(7)), 10, Some(8)),
+            "mtime moved"
+        );
+        assert!(
+            !audit_cache_hit(&entry(None), 10, Some(7)),
+            "cached unknown"
+        );
+        assert!(!audit_cache_hit(&entry(Some(7)), 10, None), "disk unknown");
+        assert!(!audit_cache_hit(&entry(None), 10, None), "both unknown");
+    }
+
+    /// B86 (b): an audit state written by an older build stores `modified_ns`
+    /// as a bare number. Reading it back must not panic and must not fail the
+    /// whole state parse — a non-zero numeric mtime is *known* and still hits.
+    #[test]
+    fn legacy_numeric_modified_ns_state_still_parses() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bytes = b"synthetic bundle bytes";
+        let (inbox, stage, state, file) = audit_fixture(dir.path(), bytes);
+        let ns = fs::metadata(&file)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        assert_ne!(ns, 0, "fixture must not sit on the epoch");
+        write_audit_state_json(
+            &state,
+            &file,
+            bytes.len(),
+            &ns.to_string(),
+            &sha256_hex(bytes),
+        );
+
+        let audit = audit_consumed_against_stage(&[inbox], &stage, &state).unwrap();
+        assert_eq!(audit.file_count, 1);
+        assert_eq!(audit.cache_hits, 1, "legacy numeric mtime must still hit");
+        assert_eq!(audit.rehashed, 0);
+        assert_eq!(audit.stage_covered_files, 1);
     }
 }
