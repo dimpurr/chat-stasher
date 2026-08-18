@@ -75,13 +75,17 @@ jobs:
       #     sites in the lib each carry a real justification; banning them
       #     would buy a suppression per site and no information.
       #
-      # One suppression exists today (doctor.rs, with a `reason`). Extending
-      # this to `--bins` needs the 17 `writeln!(String, ..).unwrap()` sites in
-      # main.rs `render_status`/`render_archive_gap_notice` resolved first —
-      # `fmt::Write` into a `String` is infallible, so those are provably safe
-      # but still tripped by the lint.
-      - name: Clippy unwrap gate (production lib)
-        run: cargo clippy --lib -- -D clippy::unwrap_used
+      # One suppression exists today (doctor.rs, with a `reason`). The
+      # precondition for widening the scope is now resolved: all 17
+      # `writeln!(String, ..).unwrap()` sites in main.rs
+      # (`render_status`/`render_archive_gap_notice`) use String::push_str/push
+      # instead. Those APIs do not return fmt::Result, so the infallible
+      # String sink is expressed in the type and no unwrap is needed.
+      # The next scope tier would be `--all-targets`; it remains deliberately
+      # out of this production gate because tests SHOULD be allowed to panic
+      # on failed premises (and currently contain ~670 unwrap sites).
+      - name: Clippy unwrap gate (production lib and bins)
+        run: cargo clippy --lib --bins -- -D clippy::unwrap_used
 
       - name: Build
         run: cargo build

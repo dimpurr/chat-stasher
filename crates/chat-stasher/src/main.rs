@@ -3041,7 +3041,6 @@ fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
 /// Only ids, paths, sizes, mtimes and flags ever reach stdout — never the
 /// content of a session.
 fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
-    use std::fmt::Write as _;
     let mut out = String::new();
 
     // One count per source actually found (registry-driven, so any harness
@@ -3060,104 +3059,93 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             .collect::<Vec<_>>()
             .join(" · ");
         if report.records.is_empty() {
-            writeln!(out, "[scan] 本机没有扫描到任何会话。").unwrap();
+            out.push_str("[scan] 本机没有扫描到任何会话。\n");
         } else {
-            writeln!(
-                out,
+            out.push_str(&format!(
                 "[scan] {} 个会话（{compressed} compressed）：{breakdown}",
                 report.records.len()
-            )
-            .unwrap();
+            ));
+            out.push('\n');
         }
         if !report.missing_roots.is_empty() {
-            writeln!(
-                out,
+            out.push_str(&format!(
                 "[scan] 跳过 {} 个不存在的来源根目录。",
                 report.missing_roots.len()
-            )
-            .unwrap();
+            ));
+            out.push('\n');
         }
         if !gaps.is_empty() {
-            writeln!(
-                out,
+            out.push_str(&format!(
                 "⚠ {} 个 harness 有已识别但 collect 不会归档的会话。",
                 gaps.len()
-            )
-            .unwrap();
+            ));
+            out.push('\n');
         }
-        writeln!(out, "明细（每个会话一行）：chat-stasher status --sessions").unwrap();
+        out.push_str("明细（每个会话一行）：chat-stasher status --sessions\n");
         return out;
     }
 
-    writeln!(out).unwrap();
+    out.push('\n');
     for (src, n) in &per_source {
-        writeln!(out, "  {src:<22} sessions : {n}").unwrap();
+        out.push_str(&format!("  {src:<22} sessions : {n}\n"));
     }
-    writeln!(
-        out,
+    out.push_str(&format!(
         "  total                : {}  ({} compressed)",
         report.records.len(),
         compressed
-    )
-    .unwrap();
+    ));
+    out.push('\n');
     for miss in &report.missing_roots {
-        writeln!(out, "  (missing root, skipped: {})", miss.display()).unwrap();
+        out.push_str(&format!("  (missing root, skipped: {})\n", miss.display()));
     }
     out.push_str(&render_archive_gap_notice(report));
-    writeln!(out).unwrap();
+    out.push('\n');
 
     if report.records.is_empty() {
-        writeln!(out, "  no sessions found.").unwrap();
+        out.push_str("  no sessions found.\n");
         return out;
     }
 
-    writeln!(
-        out,
+    out.push_str(&format!(
         "  {:<14} {:>12} {:>14}  {:<3}  {}",
         "source", "bytes", "mtime(sec)", "zst", "id"
-    )
-    .unwrap();
+    ));
+    out.push('\n');
     for rec in &report.records {
         let secs = rec
             .mtime
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        writeln!(
-            out,
+        out.push_str(&format!(
             "  {:<14} {:>12} {:>14}  {:<3}  {}",
             rec.source.short(),
             rec.byte_size,
             secs,
             if rec.compressed { "zst" } else { "   " },
             short_session_id(&rec.id),
-        )
-        .unwrap();
+        ));
+        out.push('\n');
     }
-    writeln!(out).unwrap();
+    out.push('\n');
     out
 }
 
 fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
-    use std::fmt::Write as _;
-
     let gaps = report.archive_gaps();
     if gaps.is_empty() {
         return String::new();
     }
     let mut output = String::new();
-    writeln!(
-        output,
-        "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。"
-    )
-    .unwrap();
+    output.push_str(
+        "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。\n",
+    );
     for gap in &gaps {
-        writeln!(output, "{}", scanner::format_archive_gap(gap)).unwrap();
+        output.push_str(&scanner::format_archive_gap(gap));
+        output.push('\n');
     }
-    writeln!(
-        output,
-        "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。"
-    )
-    .unwrap();
+    output.push_str(
+        "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。\n",
+    );
     output
 }
