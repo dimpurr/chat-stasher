@@ -2350,8 +2350,12 @@ fn reap_remote(cfg: &StoreConfig, no_reap: bool) {
         eprintln!("[reap] cannot parse endpoint `{endpoint}`, nothing reaped");
         return;
     };
-    let n = reap::reap_masters_for_host(&host);
-    println!("[reap] host {host} · ssh masters shut down: {n}");
+    match reap::reap_masters_for_host(&host) {
+        Ok(n) => println!("[reap] host {host} · ssh masters shut down: {n}"),
+        Err(e) => {
+            println!("[reap] host {host} · ssh masters shut down: 未知（无法读取进程列表：{e}）")
+        }
+    }
 }
 
 fn cmd_push(
@@ -3198,13 +3202,23 @@ fn cmd_status(sessions: bool) -> ExitCode {
 /// Read the last `run-once` record and turn it into one sentence.
 ///
 /// The cadence comes from the same config the scheduler templates use, so the
-/// overdue threshold tracks whatever the user actually scheduled. If the
-/// cadence is unusable, fall back to the default rather than skipping the
-/// overdue check — silently dropping it is the failure this exists to catch.
+/// overdue threshold tracks whatever the user actually scheduled. An invalid
+/// explicit value is an unknown timer verdict, not permission to substitute an
+/// hourly cadence the user did not configure.
 fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
     use chat_stasher::runstate;
 
-    let interval = schedule::interval_secs(config).unwrap_or(config::DEFAULT_BACKUP_INTERVAL_SECS);
+    let interval = match schedule::interval_secs(config) {
+        Ok(interval) => interval,
+        Err(error) => {
+            return runstate::Verdict {
+                line: format!(
+                    "backup_interval_secs 无效：{error}。无法判断定时器是否按用户配置运行。"
+                ),
+                healthy: false,
+            }
+        }
+    };
     let state_dir = chat_stasher::collect::default_state_dir();
     let read = runstate::load(&state_dir);
     let now = std::time::SystemTime::now()

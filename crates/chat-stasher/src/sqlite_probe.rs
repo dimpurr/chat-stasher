@@ -291,11 +291,19 @@ pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStor
         SqliteSessionProbe::Known { .. } => unreadable_candidate_count(db, spec),
         _ => 0,
     };
+    let (total_bytes, unreadable_stores) = match sqlite_store_bytes(db) {
+        Ok(bytes) => (bytes, 0),
+        Err(_) => {
+            // Rows may still be readable, but an incomplete sidecar stat must
+            // remain visible as unknown store metadata rather than zero bytes.
+            (0, 1)
+        }
+    };
     SqliteStoreProbe {
-        total_bytes: sqlite_store_bytes(db),
+        total_bytes,
         sessions,
         unreadable_count,
-        unreadable_stores: 0,
+        unreadable_stores,
     }
 }
 
@@ -425,19 +433,37 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
             continue;
         };
         let workspace = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            unreadable_entries += 1;
-            continue;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
         };
         if !file_type.is_dir() {
             continue;
         }
         let db = workspace.join("state.vscdb");
-        if !db.is_file() {
-            continue;
+        match fs::metadata(&db) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                // A failed stat is an unknown workspace database, not a
+                // missing one; keep it in the unreadable-store count.
+                unreadable_stores += 1;
+                continue;
+            }
         }
         saw_database = true;
-        total_bytes += sqlite_store_bytes(&db);
+        match sqlite_store_bytes(&db) {
+            Ok(bytes) => total_bytes += bytes,
+            Err(_) => {
+                // Keep readable rows separate from an incomplete byte stat;
+                // a failed sidecar stat is not evidence of zero bytes.
+                unreadable_stores += 1;
+            }
+        }
         let Ok(conn) = open_readonly(&db) else {
             // Not "this workspace has no sessions" — we never got to look.
             unreadable_stores += 1;
@@ -534,14 +560,16 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
 
 /// Total on-disk bytes of a SQLite store: the main file plus `-wal` and
 /// `-shm` siblings when they exist.
-pub fn sqlite_store_bytes(db: &Path) -> u64 {
+pub fn sqlite_store_bytes(db: &Path) -> Result<u64, String> {
     let mut total = 0u64;
     for p in sqlite_store_files(db) {
-        if let Ok(md) = fs::metadata(&p) {
-            total += md.len();
+        match fs::metadata(&p) {
+            Ok(md) => total += md.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("stat SQLite store file {}: {e}", p.display())),
         }
     }
-    total
+    Ok(total)
 }
 
 /// Fingerprint only SQLite file metadata, never application rows. A changed
@@ -549,7 +577,7 @@ pub fn sqlite_store_bytes(db: &Path) -> u64 {
 /// opencode cursor conservative: the next collect re-exports the affected
 /// session. The `-shm` mtime is excluded because read-only SQLite locking may
 /// update it without changing application data.
-pub fn sqlite_store_fingerprint(db: &Path) -> String {
+pub fn sqlite_store_fingerprint(db: &Path) -> Result<String, String> {
     let mut digest = Sha256::new();
     for (label, path) in [
         ("db", db.to_path_buf()),
@@ -557,7 +585,7 @@ pub fn sqlite_store_fingerprint(db: &Path) -> String {
         ("shm", sidecar(db, "-shm")),
     ] {
         digest.update(label.as_bytes());
-        match fs::metadata(path) {
+        match fs::metadata(&path) {
             Ok(metadata) => {
                 digest.update(b"present");
                 digest.update(metadata.len().to_le_bytes());
@@ -568,17 +596,18 @@ pub fn sqlite_store_fingerprint(db: &Path) -> String {
                 if label != "shm" {
                     let modified = metadata
                         .modified()
-                        .ok()
-                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_nanos())
-                        .unwrap_or_default();
+                        .map_err(|e| format!("读取 SQLite mtime {}: {e}", path.display()))?
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| format!("读取 SQLite mtime {}: {e}", path.display()))?
+                        .as_nanos();
                     digest.update(modified.to_le_bytes());
                 }
             }
-            Err(_) => digest.update(b"missing"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => digest.update(b"missing"),
+            Err(e) => return Err(format!("stat SQLite store file {}: {e}", path.display())),
         }
     }
-    hex_digest(&digest.finalize())
+    Ok(hex_digest(&digest.finalize()))
 }
 
 /// Enumerate opencode session rows without touching message or part bodies.
@@ -795,7 +824,7 @@ pub fn sqlite_session_cursor(
         id: session_id.to_string(),
     });
     Ok(OpenCodeCursor {
-        store_fingerprint: sqlite_store_fingerprint(db),
+        store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated: time_value,
         row_count: count as u64,
         row_high_water: high_water,
@@ -923,7 +952,7 @@ pub fn read_cursor_legacy_session(
         .and_then(Value::as_i64)
         .ok_or_else(|| "Cursor composer createdAt 缺失，无法建立 cursor".to_string())?;
     let cursor = OpenCodeCursor {
-        store_fingerprint: sqlite_store_fingerprint(db),
+        store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated: created_at,
         row_count: 1,
         row_high_water: Some(OpenCodeHighWater {
@@ -1112,7 +1141,7 @@ fn opencode_session_cursor_with_conn(
     let part_count = count_rows(conn, "part", session_id)?;
     let part_high_water = high_water(conn, "part", session_id)?;
     Ok(OpenCodeCursor {
-        store_fingerprint: sqlite_store_fingerprint(db),
+        store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated,
         row_count: 0,
         row_high_water: None,
@@ -1549,7 +1578,7 @@ mod tests {
         write(&sidecar(&db, "-shm"), "shm-bytes");
         let db_len = fs::metadata(&db).unwrap().len();
         assert_eq!(
-            sqlite_store_bytes(&db),
+            sqlite_store_bytes(&db).expect("stat SQLite fixture files"),
             db_len + "wal-bytes".len() as u64 + "shm-bytes".len() as u64
         );
     }

@@ -442,6 +442,7 @@ pub fn ingest_with_cap(
 
     let mut report = IngestReport::default();
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut metadata_errors = 0usize;
 
     for entry in fs::read_dir(inbox).with_context(|| format!("read inbox {}", inbox.display()))? {
         let entry = entry?;
@@ -449,9 +450,19 @@ pub fn ingest_with_cap(
         if name == CONSUMED_DIR {
             continue; // our own retirement dir, never rescanned
         }
-        match entry.metadata() {
+        match fs::metadata(entry.path()) {
             Ok(m) if m.is_file() => {}
-            _ => continue, // subdirectories / unreadable entries skipped
+            Ok(_) => continue, // subdirectories are not inbox candidates
+            Err(e) => {
+                // A failed stat leaves the entry's kind unknown; skipping it
+                // would make the remaining candidate count look complete.
+                metadata_errors += 1;
+                report.errors.push(ErrorEntry {
+                    source_file: name,
+                    message: format!("metadata unreadable: {e}"),
+                });
+                continue;
+            }
         }
         if name.ends_with(PART_SUFFIX) {
             report.part_files_seen += 1;
@@ -460,7 +471,7 @@ pub fn ingest_with_cap(
         candidates.push(entry.path());
     }
     candidates.sort(); // deterministic seq order across runs
-    report.total_inbox_files = candidates.len();
+    report.total_inbox_files = candidates.len() + metadata_errors;
 
     for path in &candidates {
         let name = path
