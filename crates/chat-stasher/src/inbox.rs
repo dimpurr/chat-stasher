@@ -162,13 +162,36 @@ pub fn remember_inbox(inbox: &Path, state_dir: &Path) -> anyhow::Result<()> {
     save_audit_state(state_dir, &state)
 }
 
+/// Three-state answer to "which inboxes has this machine ever ingested from?".
+///
+/// The third state is the `Err` of the enclosing `Result`, and it is the whole
+/// point of this type: "the record could not be read" is not a shorter way of
+/// saying "there are no inboxes". `push` audits an empty stage against this
+/// list, so collapsing the two would let an unread record be reported as a
+/// passing audit — an audit that passes because it read nothing is worse than
+/// no audit at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RememberedInboxes {
+    /// No record has ever been written here: this machine has genuinely never
+    /// ingested from an inbox. Nothing to audit, and that is a real answer.
+    Unrecorded,
+    /// The record was read. `Known(vec![])` is a real, trusted empty — the
+    /// record exists and lists no inbox — and is deliberately distinct from
+    /// `Unrecorded`.
+    Known(Vec<PathBuf>),
+}
+
 /// Return inboxes previously used by the CLI ingest path.
-pub fn remembered_inboxes(state_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    Ok(load_audit_state(state_dir)?
-        .known_inboxes
-        .into_iter()
-        .map(PathBuf::from)
-        .collect())
+///
+/// `Err` means the record exists but could not be read or parsed. Callers must
+/// not turn that into an empty list; see [`RememberedInboxes`].
+pub fn remembered_inboxes(state_dir: &Path) -> anyhow::Result<RememberedInboxes> {
+    Ok(match read_audit_state(state_dir)? {
+        None => RememberedInboxes::Unrecorded,
+        Some(state) => {
+            RememberedInboxes::Known(state.known_inboxes.into_iter().map(PathBuf::from).collect())
+        }
+    })
 }
 
 /// Hash current `consumed/` files and compare their hashes with the stage's
@@ -264,7 +287,10 @@ pub fn audit_consumed_against_stage(
     Ok(audit)
 }
 
-fn load_audit_state(state_dir: &Path) -> anyhow::Result<AuditState> {
+/// Read the audit state, keeping "there is no record" (`Ok(None)`) apart from
+/// "the record could not be read" (`Err`). Only `NotFound` is absence; every
+/// other read or parse failure is an unknown and stays an error.
+fn read_audit_state(state_dir: &Path) -> anyhow::Result<Option<AuditState>> {
     let path = state_dir.join(AUDIT_STATE_FILE);
     match fs::read(&path) {
         Ok(bytes) => {
@@ -273,14 +299,19 @@ fn load_audit_state(state_dir: &Path) -> anyhow::Result<AuditState> {
             if state.version != AUDIT_STATE_VERSION {
                 anyhow::bail!("unsupported inbox audit state version {}", state.version);
             }
-            Ok(state)
+            Ok(Some(state))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AuditState {
-            version: AUDIT_STATE_VERSION,
-            ..AuditState::default()
-        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read inbox audit state {}", path.display())),
     }
+}
+
+/// Same read, for the writers that treat "no record yet" as a fresh state.
+fn load_audit_state(state_dir: &Path) -> anyhow::Result<AuditState> {
+    Ok(read_audit_state(state_dir)?.unwrap_or_else(|| AuditState {
+        version: AUDIT_STATE_VERSION,
+        ..AuditState::default()
+    }))
 }
 
 fn save_audit_state(state_dir: &Path, state: &AuditState) -> anyhow::Result<()> {
