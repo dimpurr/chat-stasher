@@ -592,7 +592,37 @@ fn write_shard_atomic(
             tmp_path.display()
         )
     })?;
-    fsync_dir(final_dir).ok();
+    // B74: this fsync is the *proof* that the rename above survives a power
+    // cut, and unlike every other best-effort fsync in this file it may not be
+    // swallowed. `consume_one` retires the inbox file the moment this returns
+    // Ok, and retirement is what removes the ability to redo the ingest:
+    // `<inbox>/consumed/` is never rescanned, so "shard entry not durable" plus
+    // "retirement durable" is a silent loss the content-addressed `fileSha256`
+    // dedup cannot repair — it only ever compares against files the inbox scan
+    // still sees. Failing here is deliberate and cheap on both counts:
+    //   * zero extra syscalls — the open+fsync already happened, only its
+    //     Result was being dropped;
+    //   * fatal for this one file, not for the run — `consume_one`'s Err
+    //     becomes one `report.errors` entry and the remaining bundles continue,
+    //     and because the inbox file is still in the inbox the next run either
+    //     re-consumes it or recognises its `fileSha256` and reports a duplicate.
+    // Contrast `retire` below, whose directory fsync stays best-effort on
+    // purpose: losing *that* rename is genuinely idempotent.
+    //
+    // `#[cfg(unix)]` for the same reason `persist_key_file` carries it: opening
+    // a directory handle is a Unix idiom, and on Windows `File::open` on a
+    // directory always fails, so propagating there would turn "no directory
+    // fsync available on this platform" into "every ingest errors out" — a
+    // promise the platform cannot keep either way. Windows keeps the previous
+    // behaviour (the call was already a guaranteed no-op there); making that
+    // honest is its own question, not this one.
+    #[cfg(unix)]
+    fsync_dir(final_dir).with_context(|| {
+        format!(
+            "prove sealed shard durable (fsync dir {})",
+            final_dir.display()
+        )
+    })?;
     Ok(store::shard_filename(seq))
 }
 
@@ -626,6 +656,14 @@ fn retire(name: &str, src: &Path, consumed_dir: &Path) -> anyhow::Result<()> {
     }
     fs::rename(src, &dst)
         .with_context(|| format!("retire {} -> {}", src.display(), dst.display()))?;
+    // B74: deliberately best-effort, and deliberately *not* the same rule as
+    // the shard seal above. If this rename is lost to a power cut the file is
+    // simply back in the inbox, and the next run reads it, matches its
+    // `fileSha256` against the already-sealed shard and reports a duplicate —
+    // nothing is lost, nothing is written twice. Guarding an idempotent,
+    // self-healing step with a fatal error would block a user over something a
+    // re-run already fixes, so the cost of the swallowed Result here is one
+    // redundant re-read, not a durability lie.
     fsync_dir(consumed_dir).ok();
     Ok(())
 }
