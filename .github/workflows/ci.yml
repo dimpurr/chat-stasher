@@ -26,8 +26,39 @@ name: CI
 # config: no job was removed, no assertion weakened, no `continue-on-error`.
 #
 # Put `push:` and `pull_request:` back the moment the billing issue is fixed.
+# 🔴 2026-08-18 10:4x — 仓库已转 public（Actions 不再计费），但触发频率【仍然要降】，
+# 理由与钱无关，是这次算出来的两个数字：
+#
+#   * 一次 run = 4 个 job，平均墙钟 10.5 分钟。而计费/排队是按「时长 × 系统倍率」，
+#     倍率 Linux ×1 · Windows ×2 · macOS ×10 ⇒ **macOS 那一格约占一次 run 成本的 77%**。
+#   * 私有仓时代 Free 计划 2000 分钟/月 ≈ 13 次 run。而一个通宵 loop 会 push 二十次。
+#     账单炸掉不是意外，是必然。
+#
+# 更根本的一条：**CI 唯一能给而本地给不了的，是 Windows 和 Linux。**
+# macOS 侧每张工单都在本机跑过 `cargo test` + `release-gate` + 两道 clippy，
+# 每次 push 再跑一遍 macOS 是纯重复。
+#
+# 所以：
+#   - `workflow_dispatch` —— 改了路径处理/文件系统/环境变量这类跨平台敏感的东西时，手动点。
+#   - `push: tags: v*`    —— 每个发布候选跑【全矩阵】，含 macOS。要发的东西必须四格全绿过一次。
+#   - `schedule` 每天一次 —— 防「两周没跑，一跑十个问题」。1 次/天 vs 20 次/天。
+#   - ~~每次 push~~       —— 删掉。
+#
+# ⚠️ 这【不是】green-by-suppression：没有删任何 job、没有弱化任何断言、
+# 没有加 `continue-on-error`。矩阵原样保留，只是不再每次 commit 都跑。
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  schedule:
+    # 每天 UTC 18:00 跑一次（伦敦晚上，不与人的工作时段抢排队）
+    - cron: '0 18 * * *'
+
+# 连着 push 三次时只跑最后一次，前两次自动取消。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -40,14 +71,16 @@ jobs:
       # Do not cancel the other OSes when one fails: a Windows-only failure is
       # information we want, not a reason to hide the Linux result.
       fail-fast: false
+      # 🔴 矩阵按触发方式算，不是写死的：
+      #   打 tag（发布候选）⇒ 三格全跑，含 macOS 与 release-gate；
+      #   其余（手动 / 每日定时）⇒ 只跑 Linux + Windows。
+      # 理由：macOS 那一格占一次 run 约 77% 的成本（×10 倍率），
+      # 而本机每张工单都已经跑过同样五条命令 —— CI 唯一给得了而本机给不了的是 Linux 与 Windows。
+      # ⚠️ 这不是删 job：发版路径上 macOS 与 release-gate 一格不少。
       matrix:
-        include:
-          - os: macos-latest
-            release_gate: true
-          - os: ubuntu-latest
-            release_gate: false
-          - os: windows-latest
-            release_gate: false
+        include: ${{ fromJSON(github.ref_type == 'tag'
+          && '[{"os":"macos-latest","release_gate":true},{"os":"ubuntu-latest","release_gate":false},{"os":"windows-latest","release_gate":false}]'
+          || '[{"os":"ubuntu-latest","release_gate":false},{"os":"windows-latest","release_gate":false}]') }}
 
     steps:
       - name: Check out repository
