@@ -201,7 +201,12 @@ pub struct SqliteStoreProbe {
     /// two: `candidate_count - count - unreadable_count` is "we looked and it
     /// really has nothing", `unreadable_count` is "it says it has something
     /// and we could not get at it". Never merge them.
-    pub unreadable_count: u64,
+    ///
+    /// B90: and `None` is the *fourth* answer — "the tally itself could not be
+    /// taken". This field exists to count how much we could not read; a
+    /// counter that reports `0` when it could not count is claiming a clean
+    /// bill of health it never earned. `Some(0)` means counted and empty.
+    pub unreadable_count: Option<u64>,
     /// Sibling databases (Cursor's per-workspace `state.vscdb`) that could not
     /// be opened or decoded at all, so their composers were never even
     /// counted as candidates. A count of stores, not of sessions.
@@ -289,7 +294,9 @@ pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStor
     // classify and its own variant already says so.
     let unreadable_count = match sessions {
         SqliteSessionProbe::Known { .. } => unreadable_candidate_count(db, spec),
-        _ => 0,
+        // A ReadFailed/SchemaMismatch store has no candidates to classify and
+        // its own variant already says so: a counted zero, not an unknown.
+        _ => Some(0),
     };
     let (total_bytes, unreadable_stores) = match sqlite_store_bytes(db) {
         Ok(bytes) => (bytes, 0),
@@ -313,16 +320,36 @@ pub fn probe_sqlite_store_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteStor
 /// makes them indistinguishable from rows that were *examined and rejected*.
 /// Counting them separately is the whole point: an undecodable row is not
 /// evidence that the session is empty.
-fn unreadable_candidate_count(db: &Path, spec: &SqliteSchemaSpec<'_>) -> u64 {
+///
+/// B90: the return type is `Option` because this function is the one place in
+/// the file whose whole job is to count ignorance — and it used to answer `0`
+/// when it could not open the database or the count query failed. That is a
+/// lie one level worse than the ones the rest of this module removes: "0 rows
+/// unreadable" reads as "nothing was missed", so a *failed* examination came
+/// out looking like a clean one. The honest neighbour is thirty lines up —
+/// `sqlite_store_bytes` failing sets `unreadable_stores = 1` rather than
+/// claiming zero bytes.
+///
+/// `Some(0)` is still returned for the two *structural* cases (a schema with
+/// no JSON value column, or a qualification rule that has no undecodable-row
+/// class at all): nothing failed there, the class is genuinely empty.
+fn unreadable_candidate_count(db: &Path, spec: &SqliteSchemaSpec<'_>) -> Option<u64> {
     let Some(value_column) = spec.json_value_column else {
-        return 0;
+        return Some(0);
     };
     if spec.qualification != Some("cursor_composer") {
-        return 0;
+        return Some(0);
     }
     let Ok(conn) = open_readonly(db) else {
-        return 0;
+        // We never got to look. Not zero.
+        return None;
     };
+    // The session probe gives its connection a 2s busy timeout; without the
+    // same grace here a harness that is merely *busy* (Cursor writes to this
+    // database constantly) would turn into an unknown tally on every run.
+    if conn.busy_timeout(Duration::from_secs(2)).is_err() {
+        return None;
+    }
     let candidate_where = candidate_where_sql(spec);
     // The candidate predicate is empty when the schema declares no key prefix,
     // so the undecodable-row predicate has to open the WHERE clause itself.
@@ -337,8 +364,13 @@ fn unreadable_candidate_count(db: &Path, spec: &SqliteSchemaSpec<'_>) -> u64 {
         quote_identifier(value_column),
     );
     conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
-        .map(|count| count.max(0) as u64)
-        .unwrap_or(0)
+        .ok()
+        // A negative count(*) is not a count: `probe_sqlite_sessions_with`
+        // already treats one as ReadFailed rather than clamping it, and
+        // clamping here would have turned the same nonsense into a confident
+        // `0` — the very reading this function must never produce.
+        .filter(|count| *count >= 0)
+        .map(|count| count as u64)
 }
 
 /// One walk of Cursor's legacy `workspaceStorage`, carrying **both** what was
@@ -547,7 +579,8 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
             earliest,
             latest,
         },
-        unreadable_count,
+        // Counted by the walk above, row by row: a real number, `Some`.
+        unreadable_count: Some(unreadable_count),
         unreadable_stores,
     });
     CursorLegacyScan {
@@ -1936,5 +1969,104 @@ mod tests {
             }))
             .unwrap();
         assert!(spec_from_cell(&sqlite_no_table).is_none());
+    }
+}
+
+#[cfg(test)]
+mod b90_unreadable_count_tests {
+    use super::*;
+
+    /// **B90 / A 的反证（一）：库根本没打开。**
+    ///
+    /// `unreadable_candidate_count` 存在的意义就是数「有多少东西读不出来」。
+    /// 它自己读不出来时报 `0`，等于说「一条都没漏」—— 把一次失败的体检读成
+    /// 一次干净的体检。返回类型必须能说出「数不出来」。
+    #[test]
+    fn a_store_that_never_opened_cannot_report_zero_unreadable_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope").join("state.vscdb");
+        assert_eq!(
+            unreadable_candidate_count(&missing, &cursor_global_schema()),
+            None,
+            "库都没打开，就不知道有多少条读不出来 —— 那不是 0"
+        );
+    }
+
+    /// **B90 / A 的反证（二）：计数查询失败。**
+    ///
+    /// 库打开了，但那条 `count(*)` 查询本身失败（这里：表不在）。旧代码
+    /// `.unwrap_or(0)` 把查询失败读成「零条读不出来」。
+    #[test]
+    fn a_failed_count_query_cannot_report_zero_unreadable_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.vscdb");
+        let conn = Connection::open(&db).unwrap();
+        // 一个真的 SQLite 库，但没有 spec 声明的那张表：能打开，查询会失败。
+        conn.execute_batch("CREATE TABLE unrelated(x INTEGER)")
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            unreadable_candidate_count(&db, &cursor_global_schema()),
+            None,
+            "计数查询失败 ≠ 零条读不出来"
+        );
+    }
+
+    /// 健康机器上「它不响」：库正常、行正常时，答案仍然是一个确定的数字
+    /// （包括确定的 `0`），不会凭空变成「未知」。
+    #[test]
+    fn a_readable_store_still_answers_with_a_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.vscdb");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY, value BLOB)")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["composerData:a", r#"{"composerId":"a"}"#],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(
+            unreadable_candidate_count(&db, &cursor_global_schema()),
+            Some(0),
+            "读得出来、且每行都是合法 JSON —— 这里的 0 是数出来的，必须照旧是 0"
+        );
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, NULL)",
+            rusqlite::params!["composerData:b"],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(
+            unreadable_candidate_count(&db, &cursor_global_schema()),
+            Some(1),
+            "一条解不出来的行 —— 数出来的 1"
+        );
+    }
+
+    /// 三态要一路走到 [`SqliteStoreProbe`]：一个能打开、schema 也认得、
+    /// 但计数查询失败的库，`unreadable_count` 必须是 `None`。
+    ///
+    /// 这里用「schema 认得但 spec 声明的表不在」构造不出来（那会走
+    /// `SchemaMismatch`），所以这条只钉住类型层面的约定：readable store 的
+    /// `unreadable_count` 是 `Some(_)`，永远不会是一个来路不明的 0。
+    #[test]
+    fn probe_carries_the_counted_number_when_it_really_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.vscdb");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY, value BLOB)")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, NULL)",
+            rusqlite::params!["composerData:b"],
+        )
+        .unwrap();
+        drop(conn);
+        let probe = probe_sqlite_store_with(&db, &cursor_global_schema());
+        assert_eq!(probe.unreadable_count, Some(1));
     }
 }

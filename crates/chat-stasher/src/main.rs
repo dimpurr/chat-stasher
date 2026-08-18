@@ -1661,11 +1661,25 @@ fn print_collect_report(
     // its own — and, like the other two, only when it is non-zero, so a clean
     // pass prints exactly what it printed before.
     if report.scanner_unreadable_count > 0
+        || report.scanner_unreadable_unknown > 0
         || report.scanner_unreadable_entry_count > 0
         || report.scanner_unlooked_harnesses > 0
     {
+        // B90: `unreadable_sessions` is a sum over the tallies that exist, so
+        // when one of them could not be taken the sum is a floor, not a total.
+        // The extra field says how many harnesses that applies to; it stays
+        // off the line entirely when it is zero, so a clean pass prints what
+        // it printed before.
+        let unknown = if report.scanner_unreadable_unknown > 0 {
+            format!(
+                " unreadable_sessions_unknown_in={} (上面这个数是下限)",
+                report.scanner_unreadable_unknown
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "[collect] scan partial   : unreadable_sessions={} unreadable_entries={} unlooked_harnesses={} source_not_collected=true",
+            "[collect] scan partial   : unreadable_sessions={}{unknown} unreadable_entries={} unlooked_harnesses={} source_not_collected=true",
             report.scanner_unreadable_count,
             report.scanner_unreadable_entry_count,
             report.scanner_unlooked_harnesses
@@ -3427,16 +3441,23 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
     ));
     out.push('\n');
     for rec in &report.records {
-        let secs = rec
+        // B90: `duration_since` fails for a timestamp *before* the epoch (a
+        // SQLite store with a negative time value, a file whose mtime the OS
+        // reports as pre-1970). Printing `0` there made it indistinguishable
+        // from a session whose mtime really is 1970-01-01T00:00:00Z — the same
+        // bug `inbox.rs` just removed from the audit cache, in the one table
+        // that sweep did not reach. `modified_ns` there is `Option<u128>` and
+        // a legacy `0` degrades to `None`; the column here says so in words.
+        let mtime = rec
             .mtime
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
         out.push_str(&format!(
             "  {:<14} {:>12} {:>14}  {:<3}  {}",
             rec.source.short(),
             rec.byte_size,
-            secs,
+            mtime,
             if rec.compressed { "zst" } else { "   " },
             short_session_id(&rec.id),
         ));
@@ -3514,7 +3535,17 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
                 .map(|n| (p.id.as_str(), n))
         })
         .collect();
-    if per_harness.is_empty() && per_harness_entries.is_empty() {
+    // B90: harnesses that *were* enumerated but whose unreadable tally could
+    // not be taken. `None` alone does not qualify — a harness that was never
+    // enumerated says so through its state, and pulling those in would put a
+    // warning on every not-installed harness of a healthy machine.
+    let uncounted: Vec<&str> = report
+        .probes
+        .iter()
+        .filter(|p| p.record_count.is_some() && p.unreadable_count.is_none())
+        .map(|p| p.id.as_str())
+        .collect();
+    if per_harness.is_empty() && per_harness_entries.is_empty() && uncounted.is_empty() {
         return String::new();
     }
     let total: u64 = per_harness.iter().map(|(_, n)| n).sum();
@@ -3529,8 +3560,27 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
             .collect::<Vec<_>>()
             .join(" · ")
     };
+    // B90: appended to whichever sentence is built below, never a line of its
+    // own — `status`'s default body was cut to a handful of lines on purpose.
+    let uncounted_clause = if uncounted.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "；另有 {} 个 harness 读不出来的条数未知（{}）",
+            uncounted.len(),
+            uncounted.join(" · ")
+        )
+    };
+    if per_harness.is_empty() && per_harness_entries.is_empty() {
+        return format!(
+            "  ⚠ 有 harness 读不出来的条数未知（{}）；详见 chat-stasher doctor",
+            uncounted.join(" · ")
+        );
+    }
     if per_harness_entries.is_empty() {
-        return format!("  ⚠ 另有 {total} 条读不出来、尚未归档（{who}）；详见 chat-stasher doctor");
+        return format!(
+            "  ⚠ 另有 {total} 条读不出来、尚未归档（{who}）{uncounted_clause}；详见 chat-stasher doctor"
+        );
     }
     let entry_total: u64 = per_harness_entries.iter().map(|(_, n)| n).sum();
     let entry_who = if per_harness_entries.len() == 1 {
@@ -3552,7 +3602,7 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
     } else {
         entry_who
     };
-    format!("  ⚠ {detail}（{who}）；详见 chat-stasher doctor")
+    format!("  ⚠ {detail}（{who}）{uncounted_clause}；详见 chat-stasher doctor")
 }
 
 fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
