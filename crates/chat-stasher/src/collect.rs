@@ -337,6 +337,11 @@ pub struct CollectReport {
     pub scanned_opencode_records: usize,
     pub scanned_cursor_records: usize,
     pub scanned_grok_records: usize,
+    /// Known session candidates and directory entries that the scanner could
+    /// not hand over. The latter is not a session count: an inaccessible
+    /// subtree may contain any number of sessions.
+    pub scanner_unreadable_count: u64,
+    pub scanner_unreadable_entry_count: u64,
     /// Harnesses with recognised sessions that produced fewer
     /// `SessionRecord`s; these sessions were not consumed by this pass.
     pub archive_gaps: Vec<scanner::ArchiveGap>,
@@ -498,6 +503,16 @@ pub fn collect_scan_report(
             .iter()
             .filter(|record| record.source == crate::models::HarnessSource::Grok)
             .count(),
+        scanner_unreadable_count: scan
+            .probes
+            .iter()
+            .filter_map(|probe| probe.unreadable_count)
+            .sum(),
+        scanner_unreadable_entry_count: scan
+            .probes
+            .iter()
+            .filter_map(|probe| probe.unreadable_entry_count)
+            .sum(),
         archive_gaps: scan.archive_gaps(),
         ..CollectReport::default()
     };

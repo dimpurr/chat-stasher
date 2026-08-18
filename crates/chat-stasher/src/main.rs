@@ -1624,6 +1624,12 @@ fn print_collect_report(
     for gap in &report.archive_gaps {
         println!("{}", scanner::format_archive_gap(gap));
     }
+    if report.scanner_unreadable_count > 0 || report.scanner_unreadable_entry_count > 0 {
+        println!(
+            "[collect] scan partial   : unreadable_sessions={} unreadable_entries={} source_not_collected=true",
+            report.scanner_unreadable_count, report.scanner_unreadable_entry_count
+        );
+    }
     println!(
         "[collect] changed={} unchanged={} reset={} shards={} lines={}",
         report.changed_records,
@@ -2965,6 +2971,7 @@ mod decision_surface_tests {
                 record_count: Some(1),
                 candidate_count: Some(1),
                 unreadable_count: Some(0),
+                unreadable_entry_count: Some(0),
                 earliest: None,
                 latest: None,
                 bytes: 1,
@@ -3265,7 +3272,16 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
                 .map(|n| (p.id.as_str(), n))
         })
         .collect();
-    if per_harness.is_empty() {
+    let per_harness_entries: Vec<(&str, u64)> = report
+        .probes
+        .iter()
+        .filter_map(|p| {
+            p.unreadable_entry_count
+                .filter(|n| *n > 0)
+                .map(|n| (p.id.as_str(), n))
+        })
+        .collect();
+    if per_harness.is_empty() && per_harness_entries.is_empty() {
         return String::new();
     }
     let total: u64 = per_harness.iter().map(|(_, n)| n).sum();
@@ -3280,7 +3296,30 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
             .collect::<Vec<_>>()
             .join(" · ")
     };
-    format!("  ⚠ 另有 {total} 条读不出来、尚未归档（{who}）；详见 chat-stasher doctor")
+    if per_harness_entries.is_empty() {
+        return format!("  ⚠ 另有 {total} 条读不出来、尚未归档（{who}）；详见 chat-stasher doctor");
+    }
+    let entry_total: u64 = per_harness_entries.iter().map(|(_, n)| n).sum();
+    let entry_who = if per_harness_entries.len() == 1 {
+        per_harness_entries[0].0.to_string()
+    } else {
+        per_harness_entries
+            .iter()
+            .map(|(id, n)| format!("{id} {n}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let detail = if total > 0 {
+        format!("另有 {total} 条读不出来、{entry_total} 个不可读目录项（会话数未知），尚未归档")
+    } else {
+        format!("另有 {entry_total} 个不可读目录项（会话数未知），尚未归档")
+    };
+    let who = if total > 0 {
+        format!("{who} · {entry_who}")
+    } else {
+        entry_who
+    };
+    format!("  ⚠ {detail}（{who}）；详见 chat-stasher doctor")
 }
 
 fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {

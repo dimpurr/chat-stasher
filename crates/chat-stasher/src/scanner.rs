@@ -467,6 +467,11 @@ pub struct HarnessProbe {
     /// this field is the failure ("it says it has something, we could not get
     /// at it"). Merging them is the lie B68 removes.
     pub unreadable_count: Option<u64>,
+    /// Directory entries whose type or contents could not be inspected. This
+    /// is separate from `unreadable_count`: an inaccessible directory may
+    /// contain zero, one, or many session files, so its session cardinality is
+    /// unknown rather than one.
+    pub unreadable_entry_count: Option<u64>,
     /// Earliest / latest session timestamp, for single-file SQLite stores that
     /// carry one (via the registry-declared schema). `None` when unknown.
     pub earliest: Option<SystemTime>,
@@ -664,6 +669,7 @@ fn probe_harness(
         record_count: None,
         candidate_count: None,
         unreadable_count: None,
+        unreadable_entry_count: None,
         earliest: None,
         latest: None,
         bytes: 0,
@@ -932,24 +938,38 @@ fn probe_harness(
             &cell.format,
             cell.session_pattern.as_deref(),
         );
-        let count = recs.len() as u64;
+        let count = recs.records.len() as u64;
         let recognized_files = recs
+            .records
             .iter()
             .map(|record| record.absolute_path.clone())
             .collect();
-        report.records.extend(recs);
+        report.records.extend(recs.records);
+        let note = if recs.unreadable_entry_count > 0 {
+            format!(
+                "目录扫描不完整：{} 个不可读目录项（会话数未知）",
+                recs.unreadable_entry_count
+            )
+        } else if recs.unreadable_count > 0 {
+            format!(
+                "{} 条读不出来（不是空，是取不到元数据）",
+                recs.unreadable_count
+            )
+        } else if count == 0 {
+            "目录在，但没有可枚举的会话文件".to_string()
+        } else {
+            String::new()
+        };
         HarnessProbe {
             root: Some(root),
             confidence,
             state: ProbeState::Scanned,
             record_count: Some(count),
-            candidate_count: Some(count),
+            candidate_count: Some(count + recs.unreadable_count),
+            unreadable_count: Some(recs.unreadable_count),
+            unreadable_entry_count: Some(recs.unreadable_entry_count),
             recognized_files,
-            note: if count == 0 {
-                "目录在，但没有可枚举的会话文件".to_string()
-            } else {
-                String::new()
-            },
+            note,
             ..base
         }
     }
@@ -1449,29 +1469,51 @@ fn home_dir() -> PathBuf {
 
 /// Walk a directory tree (iteratively, symlinks not chased) and collect
 /// metadata-only records for session files.
+#[derive(Debug)]
+struct DirectoryScan {
+    records: Vec<SessionRecord>,
+    /// Candidate session files whose metadata could not be handed over. The
+    /// filename and declared suffix make this an exact session count.
+    unreadable_count: u64,
+    /// Entries/subtrees for which the scanner cannot know how many session
+    /// files are inside.
+    unreadable_entry_count: u64,
+}
+
 fn collect_records(
     root: &Path,
     source: HarnessSource,
     machine: &str,
     format: &str,
     session_pattern: Option<&str>,
-) -> Vec<SessionRecord> {
+) -> DirectoryScan {
     let mut records = Vec::new();
+    let mut unreadable_count = 0;
+    let mut unreadable_entry_count = 0;
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue, // ignore unreadable subdirs, keep scanning
+            Err(_) => {
+                unreadable_entry_count += 1;
+                continue;
+            }
         };
         for entry in entries {
             let entry = match entry {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(_) => {
+                    unreadable_entry_count += 1;
+                    continue;
+                }
             };
             let path = entry.path();
             let file_type = match entry.file_type() {
                 Ok(t) => t,
-                Err(_) => continue,
+                Err(_) => {
+                    unreadable_entry_count += 1;
+                    continue;
+                }
             };
             if file_type.is_dir() {
                 stack.push(path);
@@ -1480,12 +1522,18 @@ fn collect_records(
             if !file_type.is_file() {
                 continue; // skip sockets, FIFOs, and (crucially) symlinks
             }
-            if let Some(rec) = build_record(&path, source, machine, format, session_pattern) {
-                records.push(rec);
+            match build_record(&path, source, machine, format, session_pattern) {
+                RecordBuild::Record(record) => records.push(record),
+                RecordBuild::Unreadable => unreadable_count += 1,
+                RecordBuild::NotSession => {}
             }
         }
     }
-    records
+    DirectoryScan {
+        records,
+        unreadable_count,
+        unreadable_entry_count,
+    }
 }
 
 /// Return the suffixes declared by a registry `format` cell.
@@ -1560,33 +1608,50 @@ fn detect_source(path: &Path) -> Option<HarnessSource> {
 /// `session_pattern`. A generic JSON cell without a pattern is rejected: this
 /// name-only fail-safe keeps settings/state/config JSON out of the session
 /// count without reading or guessing from file contents.
+#[derive(Debug)]
+enum RecordBuild {
+    NotSession,
+    Unreadable,
+    Record(SessionRecord),
+}
+
 fn build_record(
     path: &Path,
     expected: HarnessSource,
     machine: &str,
     format: &str,
     session_pattern: Option<&str>,
-) -> Option<SessionRecord> {
-    let name = path.file_name()?.to_string_lossy();
-    let (stem, compressed) = strip_format_suffix(&name, format)?;
+) -> RecordBuild {
+    let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return RecordBuild::NotSession;
+    };
+    let Some((stem, compressed)) = strip_format_suffix(&name, format) else {
+        return RecordBuild::NotSession;
+    };
     if format_suffixes(format)
         .iter()
         .any(|suffix| suffix == ".json")
         && session_pattern.is_none()
     {
-        return None;
+        return RecordBuild::NotSession;
     }
     if !matches_session_pattern(&name, session_pattern) || stem.is_empty() {
-        return None;
+        return RecordBuild::NotSession;
     }
 
     let source = detect_source(path).unwrap_or(expected);
     let source_short = source.short();
 
-    let meta = fs::metadata(path).ok()?;
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return RecordBuild::Unreadable,
+    };
     // Cache both numeric stat results in one call to avoid a second stat.
     let byte_size = meta.len();
-    let mtime: SystemTime = meta.modified().ok()?;
+    let mtime: SystemTime = match meta.modified() {
+        Ok(mtime) => mtime,
+        Err(_) => return RecordBuild::Unreadable,
+    };
 
     let ident = crate::id::SessionIdentity {
         source_short,
@@ -1594,7 +1659,7 @@ fn build_record(
         native_id: stem,
     };
 
-    Some(SessionRecord {
+    RecordBuild::Record(SessionRecord {
         id: ident.id(),
         absolute_path: absolutize(path),
         byte_size,
