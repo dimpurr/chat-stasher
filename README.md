@@ -2,7 +2,6 @@
 
 `chat-stasher` continuously archives conversation history from AI coding harnesses—Claude Code, Codex CLI, Gemini CLI, opencode, and other registered sources—to storage that you control. It is an append-only archive. (Project description and append-only design: `crates/chat-stasher/src/main.rs:15-19`.)
 
-> **Current checkout status:** the command-line help could not compile in the checkout used for this README rewrite. The exact compiler errors are recorded below. Do not treat the quickstart as verified until `cargo run -- --help` succeeds.
 
 ## Why this exists
 
@@ -36,18 +35,24 @@ cargo run -- doctor
 
 ## Commands
 
-The Rust source is the current command definition; the descriptions below were cross-checked against captured `--help` output. (`crates/chat-stasher/src/main.rs:29-188`.)
+The Rust source is the current command definition; the descriptions below were cross-checked against captured `--help` output. (`crates/chat-stasher/src/main.rs:36-490`.)
 
-- `init` — writes a commented default config if none exists; the source describes this as non-destructive. (`main.rs:31-32`.)
-- `push --stage <your-stage>` — moves sealed session shards into the rustic repository, creating the repository on first use and persisting the masterkey. (`main.rs:33-61`.)
-- `status` — reports what the local harness scanner finds; it is read-only. (`main.rs:62-63`.)
-- `read` — dumps one session as sequence-concatenated data and prints its SHA-256, or with `--all-machines` merges newest snapshots and reports per-session digests. (`main.rs:64-100`.)
-- `doctor` — diagnoses whether a harness may silently delete sessions; its report is limited to paths, counts, bytes, and timestamps. (`main.rs:101-103`.)
-- `verify --level l1|l2|l3|all` — checks repository structure, repository content, and/or reconciles the archive with the sealed staging manifest. (`main.rs:104-133`; `main.rs:703-771`.)
-- `ingest --inbox <your-inbox> --stage <your-stage>` — consumes complete `deepseek-<sessionId>.json` exports, skips `.part` files, creates sealed staging shards, retires consumed inputs, and deduplicates identical bytes. (`main.rs:135-155`.)
-- `seal --harness <id> --active <your-active-file> --stage <your-stage>` — allowlist-checks and seals one live file by rename; refusal leaves the active file untouched. (`main.rs:157-187`; `main.rs:315-321`.)
+- `init` — writes a commented default config if none exists; non-destructive. (`main.rs:37-38`.)
+- `run-once` — collects one pass from local sources, pushes when configured and changed, then exits. (`main.rs:39-43`.)
+- `schedule` — renders a launchd plist or systemd user service/timer template; never installs it. (`main.rs:77-94`.)
+- `push --stage <your-stage>` — moves sealed session shards into the rustic repository, creating the repository on first use and persisting the masterkey. (`main.rs:95-132`.)
+- `status` — reports whether scheduled archiving is working and summarizes local scanner findings (read-only). (`main.rs:133-162`.)
+- `read` — dumps one session as sequence-concatenated data and prints its SHA-256, or with `--all-machines` merges newest snapshots and reports per-session digests. (`main.rs:163-207`.)
+- `doctor` — diagnoses whether a harness may silently delete sessions; report is limited to paths, counts, bytes, and timestamps. (`main.rs:208-210`.)
+- `verify --level l1|l2|l3|all` — checks repository structure, repository content, and/or reconciles the archive with the sealed staging manifest. (`main.rs:211-249`.)
+- `dest-init` — initialises a new destination as a full extra copy from local and existing destinations. (`main.rs:250-294`.)
+- `search` — searches one destination's archive by session metadata. (`main.rs:295-345`.)
+- `view` — opens an ephemeral local web view of one destination's session list on 127.0.0.1. (`main.rs:346-401`.)
+- `ingest --inbox <your-inbox> --stage <your-stage>` — consumes complete `deepseek-<sessionId>.json` exports, skips `.part` files, creates sealed staging shards, retires consumed inputs, and deduplicates identical bytes. (`main.rs:402-424`.)
+- `collect --stage <your-stage>` — reads every scanner session into staging shards without mutating harness sources. (`main.rs:425-460`.)
+- `seal --harness <id> --active <your-active-file> --stage <your-stage>` — seals one file already inside `--stage` into the next sealed-shard slot; never renames a harness-owned path. (`main.rs:461-490`.)
 
-There is no `scan` subcommand in the current source; `status` is the scanner-facing command. (`main.rs:29-63`.)
+There is no `scan` subcommand in the current source; `status` is the scanner-facing command. (`main.rs:133-162`.)
 
 ## What it reads, writes, and sends
 
@@ -76,8 +81,8 @@ This section is intentionally blunt:
   - **Backfill is not implemented at all: Gemini, Claude, Kimi.** The leg halts before issuing any request (`apps/extension/lib/backfill/enumerate.ts:643`).
   The extension's popup states the same three tiers in the same terms (`apps/extension/lib/popup-view.ts:271`). This limit is about **backfill of past conversations**; passive capture of the conversation currently open in your browser is a separate leg with its own per-platform table (`apps/extension/lib/contract.ts:69-303`).
 - **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:157-166`; `data/harness-registry-v1.json:55-57`.)
-- **The release gate is not a substitute for installation.** `scripts/release-gate.sh` expects a built `target/debug/chat-stasher`, reads real local Claude JSONL files to make opaque fixtures, and exercises push/read/verify/doctor. It was not run for this README rewrite. (`scripts/release-gate.sh:3-19`; `scripts/release-gate.sh:23-50`; `scripts/release-gate.sh:66-112`.)
-- **The license is not selected.** `LICENSE` is still a pending-owner-confirmation placeholder and explicitly says not to treat it as a grant of rights. Do not publish or redistribute this repository as if it already had an open-source license. (`LICENSE:1-13`.)
+- **The release gate is not a substitute for installation.** `scripts/release-gate.sh` expects a built `target/debug/chat-stasher`, generates synthetic opaque fixtures by default (with `--real-data` for optional local Claude sessions), and exercises push/read/verify/doctor. (`scripts/release-gate.sh:3-21`.)
+- **License.** The project is licensed under the Apache License 2.0 (`LICENSE:2-3`; `Cargo.toml:7`).
 
 ## Security and privacy
 
@@ -112,7 +117,7 @@ Three things worth knowing before reading either:
   until `ingest` consumes them (`apps/extension/lib/download.ts:91-93`).
 
 ## Development status
+ 
+The repository contains the command implementation, harness registry, inbox schema, and release-gate script. `scripts/release-gate.sh` prints `GATE: PASS` or `GATE: FAIL`; both directions were exercised on this checkout (`--selftest` injects one byte and must produce `GATE: FAIL`).
 
-The repository contains the command implementation, harness registry, inbox schema, and release-gate script. `scripts/release-gate.sh` prints `GATE: PASS` or `GATE: FAIL`; both directions were exercised on this checkout (`--selftest` injects one byte and must produce `GATE: FAIL`). Note that the gate currently reads real local session files to build its fixtures — see the limits section. (`scripts/release-gate.sh:3-19`.)
-
-Before treating this project as release-ready, make the help path compile, run `doctor` on a machine whose paths you are willing to inspect, select a license, and verify the remote-destination policy you actually intend to use.
+Before using this project in production, run `doctor` on a machine whose paths you are willing to inspect, and verify the remote-destination policy you actually intend to use.
