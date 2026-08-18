@@ -1601,7 +1601,17 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
                     .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                     .map(|i| i + 1)
                     .unwrap_or(rest.len());
-                if name_len == rest.len() {
+                // B96: the guard used to be `name_len == rest.len()`, which is
+                // true for two different things — a bare trailing `$` (no name
+                // at all) and a template that *ends* in a variable, e.g. the
+                // whole template being `$XDG_DATA_HOME`. The second one is
+                // perfectly resolvable, and rejecting it reports a harness whose
+                // root IS knowable as `会话=未知`. That is this repo's rule run
+                // backwards: turning something already known into "unknown".
+                // No registry entry ends in a bare variable today, so this was
+                // unreachable — but the shape was wrong. `name_len == 1` is the
+                // real "there is no name after the `$`" test.
+                if name_len == 1 {
                     return None; // trailing `$` — cannot resolve.
                 }
                 let name = &rest[1..name_len];
@@ -2257,5 +2267,33 @@ mod tests {
             native_id: "019bf00d-97b6-7eb2-9bf8-eacbacc09765".into(),
         };
         assert_eq!(ident.id(), "codex.mbp.019bf00d-97b6-7eb2-9bf8-eacbacc09765");
+    }
+
+    /// B96: a template that *ends* in a variable is resolvable; only a bare
+    /// trailing `$` is not. The old guard (`name_len == rest.len()`) rejected
+    /// both, which reported a knowable root as unknown — this repo's rule run
+    /// backwards. Both directions are asserted so the guard cannot drift back.
+    #[test]
+    fn template_ending_in_a_variable_resolves_and_a_bare_dollar_does_not() {
+        assert!(
+            static_prefix_root("$XDG_DATA_HOME").is_some(),
+            "a template that is exactly one variable has a knowable root"
+        );
+        assert!(
+            static_prefix_root("$HOME").is_some(),
+            "same for $HOME with nothing after it"
+        );
+        assert!(
+            static_prefix_root("$HOME/.claude/projects").is_some(),
+            "the shape every registry entry uses today must keep working"
+        );
+        assert!(
+            static_prefix_root("$").is_none(),
+            "a bare trailing `$` still has no name after it"
+        );
+        assert!(
+            static_prefix_root("$CODEX_HOME").is_none(),
+            "an unresolved per-install override is still refused, by name"
+        );
     }
 }
