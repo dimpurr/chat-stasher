@@ -1,0 +1,291 @@
+//! B85-YELLOWBATCH regression tests.
+//!
+//! Rollback proof: before this change, the old source paths were verified by
+//! reading the pre-change lines in `git show HEAD` (no checkout or write):
+//! `unwrap_or_default()` rendered an unresolved root as `（）`; `root.is_dir()`
+//! erased records after a concurrent removal; `metadata`/`ps` failures were
+//! skipped or flattened to zero; Gemini parse failures continued to defaults;
+//! and `status` used 3600 after an invalid explicit interval. Each fixture
+//! below asserts the replacement answer, so reverting its corresponding hunk
+//! makes that test red (or makes its changed result type fail to compile).
+//!
+//! All fixtures are `tempfile` paths with isolated HOME/XDG variables. They
+//! contain only synthetic names, metadata and configuration; no session body,
+//! real harness, archive, remote, or `.private/` path is read.
+
+use chat_stasher::config::{self, Config};
+use chat_stasher::doctor::{self, ReclaimCheck};
+use chat_stasher::inbox;
+use chat_stasher::models::{HarnessSource, SessionRecord};
+use chat_stasher::reap;
+use chat_stasher::sqlite_probe;
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::Mutex;
+use std::time::SystemTime;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+const CLEAN_STATUS_BODY_SHA256: &str =
+    "e9496f26534d12d97c2728b2b69f6d6cb6760c3a20805ee586e6b1c108483b77";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn write_empty_registry(sandbox: &Path) -> PathBuf {
+    let path = sandbox.join("registry.json");
+    fs::write(
+        &path,
+        br#"{"schema_version":1,"generated":"B85","harnesses":[]}"#,
+    )
+    .expect("write synthetic empty registry");
+    path
+}
+
+fn isolated_command(sandbox: &Path, args: &[&str], registry: &Path) -> Command {
+    let home = sandbox.join("home");
+    fs::create_dir_all(&home).expect("create isolated HOME");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    command
+        .args(args)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
+        .env("XDG_DATA_HOME", sandbox.join("xdg-data"))
+        .env("XDG_STATE_HOME", sandbox.join("xdg-state"))
+        .env("XDG_CACHE_HOME", sandbox.join("xdg-cache"))
+        .env("CHAT_STASHER_REGISTRY", registry)
+        .env_remove("CODEX_HOME")
+        .env_remove("GEMINI_CLI_HOME")
+        .env_remove("OPENCODE_DB")
+        .env_remove("CURSOR_USER_DIR");
+    command
+}
+
+fn status_body(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| !line.starts_with("[run-once]"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// A registry cell with no statically resolvable root reaches the exact
+/// `probe.root == None` branch that used to build an empty `PathBuf`.
+#[test]
+fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let registry = sandbox.path().join("registry.json");
+    fs::write(
+        &registry,
+        r#"{"schema_version":1,"generated":"B85","harnesses":[{"id":"opencode","display_name":"opencode","paths":{"macos":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"本机实测","source":"B85"},"linux":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"本机实测","source":"B85"},"windows":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"本机实测","source":"B85"}}}]}"#,
+    )
+    .expect("write unresolved-root registry");
+    let mut command = isolated_command(sandbox.path(), &["doctor"], &registry);
+    command.env("HOSTNAME", "b85-machine");
+    let output = command.output().expect("run doctor");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("未安装（未知）") && !text.contains("未安装（）"),
+        "unresolved root must be rendered as unknown, not an empty path: {text}"
+    );
+}
+
+/// A synthetic record is enough to prove the aggregate boundary: the path is
+/// removed before aggregation, but the record itself was already obtained.
+#[test]
+fn b1_records_survive_a_racing_root_removal() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let root = sandbox.path().join("removed-after-scan");
+    let record = SessionRecord {
+        id: "synthetic.b85-race".to_string(),
+        absolute_path: sandbox.path().join("synthetic.jsonl"),
+        byte_size: 17,
+        mtime: SystemTime::UNIX_EPOCH,
+        source: HarnessSource::ClaudeCode,
+        compressed: false,
+        sqlite_layout: None,
+    };
+    let footprint = doctor::coverage_from_records("claude-code", root, [record].iter());
+    assert!(
+        footprint.installed && footprint.session_count == Some(1),
+        "already collected records must not be erased by a later root stat: {footprint:?}"
+    );
+}
+
+#[test]
+fn a7_wrong_shaped_repository_is_not_reported_as_missing() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let repo = sandbox.path().join("repo-file");
+    fs::write(&repo, b"synthetic repository shape").expect("write wrong-shaped repo fixture");
+    let result = doctor::inspect_reclaim(&Config {
+        rustic_repo: Some(repo.to_string_lossy().into_owned()),
+        ..Config::default()
+    });
+    assert!(
+        matches!(result, ReclaimCheck::OpenFailed { ref error, .. } if error.contains("不是目录")),
+        "a file at repo_root is a shape error, not a measured absent repo: {result:?}"
+    );
+}
+
+#[test]
+fn a8_failed_sqlite_stat_cannot_form_a_fingerprint() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let parent = sandbox.path().join("not-a-directory");
+    fs::write(&parent, b"synthetic path blocker").expect("write stat blocker");
+    let db = parent.join("sessions.sqlite");
+    assert!(
+        sqlite_probe::sqlite_store_fingerprint(&db).is_err(),
+        "a stat failure must remain unknown, not hash a zero timestamp"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn c6_inbox_metadata_failure_is_an_ingest_error() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let inbox_root = sandbox.path().join("inbox");
+    let stage = sandbox.path().join("stage");
+    fs::create_dir_all(&inbox_root).expect("create inbox");
+    symlink(
+        sandbox.path().join("does-not-exist"),
+        inbox_root.join("metadata-unknown.json"),
+    )
+    .expect("create broken synthetic inbox link");
+    let report = inbox::ingest(&inbox_root, &stage, "b85-machine").expect("ingest fixture");
+    assert_eq!(
+        (report.total_inbox_files, report.errors.len()),
+        (1, 1),
+        "a candidate whose metadata could not be read must not disappear from the count"
+    );
+}
+
+#[test]
+fn d2_malformed_gemini_settings_are_unknown_not_default_dangerous() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let settings = sandbox.path().join(".gemini/settings.json");
+    fs::create_dir_all(settings.parent().expect("settings parent")).expect("create Gemini dir");
+    fs::write(&settings, b"{ malformed synthetic settings").expect("write malformed settings");
+    let retention = doctor::inspect_gemini_settings(sandbox.path());
+    assert!(
+        retention.summarize().contains("未知") && !retention.is_dangerous(),
+        "a present but unreadable policy must not be judged using 30d defaults: {retention:?}"
+    );
+}
+
+#[test]
+fn d4_unavailable_ps_returns_unknown_reap_count() {
+    let _guard = ENV_LOCK.lock().expect("lock process environment");
+    let old_path = std::env::var_os("PATH");
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    std::env::set_var("PATH", sandbox.path());
+    let result = reap::reap_masters_for_host("b85.synthetic.invalid");
+    match old_path {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    assert!(
+        result.is_err(),
+        "when ps cannot run, reaping must not return the user-visible number 0"
+    );
+}
+
+#[test]
+fn d6_missing_home_and_invalid_interval_are_not_silently_replaced() {
+    let _guard = ENV_LOCK.lock().expect("lock process environment");
+    let old_home = std::env::var_os("HOME");
+    let old_profile = std::env::var_os("USERPROFILE");
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let profile = sandbox.path().join("profile");
+    std::env::remove_var("HOME");
+    std::env::set_var("USERPROFILE", &profile);
+    let resolved = config::home_dir();
+    match old_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match old_profile {
+        Some(value) => std::env::set_var("USERPROFILE", value),
+        None => std::env::remove_var("USERPROFILE"),
+    }
+
+    let registry = write_empty_registry(sandbox.path());
+    let config_dir = sandbox.path().join("xdg-config/chat-stasher");
+    fs::create_dir_all(&config_dir).expect("create isolated config");
+    fs::write(
+        config_dir.join("config.toml"),
+        b"backup_interval_secs = 0\n",
+    )
+    .expect("write invalid interval config");
+    let output = isolated_command(sandbox.path(), &["status"], &registry)
+        .output()
+        .expect("run status with invalid interval");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        resolved == profile
+            && text.contains("backup_interval_secs 无效")
+            && !text.contains("阈值 3600"),
+        "HOME must not become cwd and invalid explicit interval must not become silent 3600: {text}"
+    );
+}
+
+#[test]
+fn clean_status_output_is_byte_identical() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let root = sandbox.path().join("source");
+    fs::create_dir_all(&root).expect("create clean synthetic source");
+    fs::write(root.join("session.jsonl"), b"synthetic metadata fixture\n")
+        .expect("write synthetic session fixture");
+    let registry = sandbox.path().join("registry.json");
+    let root_json = serde_json::json!({
+        "template": root,
+        "format": "jsonl",
+        "session_pattern": "*.jsonl",
+        "confidence": "本机实测",
+        "source": "B85 clean fixture"
+    });
+    let registry_json = serde_json::json!({
+        "schema_version": 1,
+        "generated": "B85",
+        "harnesses": [{
+            "id": "claude-code",
+            "display_name": "Claude Code",
+            "paths": {"macos": root_json.clone(), "linux": root_json.clone(), "windows": root_json}
+        }]
+    });
+    fs::write(
+        &registry,
+        serde_json::to_vec(&registry_json).expect("serialize clean registry"),
+    )
+    .expect("write clean registry");
+    let output = isolated_command(sandbox.path(), &["status"], &registry)
+        .output()
+        .expect("run clean status");
+    let body = status_body(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the clean fixture keeps the established status exit code"
+    );
+    assert!(
+        !body.contains("scan partial") && !body.contains("读不出来"),
+        "false-positive partial-scan guard fired: {body}"
+    );
+    assert_eq!(
+        sha256_hex(body.as_bytes()),
+        CLEAN_STATUS_BODY_SHA256,
+        "clean status output changed: {body}"
+    );
+}

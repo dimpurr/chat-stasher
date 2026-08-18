@@ -36,13 +36,11 @@ pub fn host_of_endpoint(endpoint: &str) -> Option<String> {
 }
 
 /// Find the `-S` socket paths of live ssh ControlMaster masters whose
-/// command line names `host`, and shut each one down. Returns the number of
-/// masters successfully exited. Per-master failures are logged, never fatal.
-pub fn reap_masters_for_host(host: &str) -> usize {
-    let socks = match masters_for_host(host) {
-        Some(s) => s,
-        None => return 0,
-    };
+/// command line names `host`, and shut each one down. An unavailable process
+/// listing is an unknown count, not zero; per-master failures are logged,
+/// never fatal.
+pub fn reap_masters_for_host(host: &str) -> Result<usize, String> {
+    let socks = masters_for_host(host)?;
     let mut exited = 0;
     for sock in &socks {
         match Command::new("ssh")
@@ -63,18 +61,21 @@ pub fn reap_masters_for_host(host: &str) -> usize {
             Err(e) => eprintln!("reap: could not run ssh for {}: {e}", sock),
         }
     }
-    exited
+    Ok(exited)
 }
 
 /// Enumerate `-S` socket paths of live ssh masters for `host`.
 ///
-/// Returns `None` when `ps` itself is unavailable or unreadable; otherwise a
+/// Returns an error when `ps` itself is unavailable or unreadable; otherwise a
 /// (possibly empty) de-duplicated list of sockets.
-fn masters_for_host(host: &str) -> Option<Vec<String>> {
+fn masters_for_host(host: &str) -> Result<Vec<String>, String> {
     let out = Command::new("ps")
         .args(["-eo", "pid,command"])
         .output()
-        .ok()?;
+        .map_err(|e| format!("could not run ps: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("ps exited with {}", out.status));
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut socks = Vec::new();
     for line in text.lines() {
@@ -84,7 +85,7 @@ fn masters_for_host(host: &str) -> Option<Vec<String>> {
             }
         }
     }
-    Some(socks)
+    Ok(socks)
 }
 
 /// Extract `-S` socket paths from one `ps` line if it is the ssh master for

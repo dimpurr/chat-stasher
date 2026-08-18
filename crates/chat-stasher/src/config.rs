@@ -369,9 +369,20 @@ pub fn config_path() -> PathBuf {
 
 /// Best-effort `$HOME` / user home directory.
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home);
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return PathBuf::from(profile);
+    }
+    // Never turn a missing identity into `.`: that would make every default
+    // harness path point at the caller's working tree. The per-process temp
+    // quarantine is deliberately not presented as a real home and is normally
+    // absent, so probes remain unknown instead of reading the repository.
+    std::env::temp_dir().join(format!(
+        "chat-stasher-home-unavailable-{}",
+        std::process::id()
+    ))
 }
 
 /// The template written by `init` — comments explain each knob.

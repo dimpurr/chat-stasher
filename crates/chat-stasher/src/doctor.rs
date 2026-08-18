@@ -207,6 +207,10 @@ pub struct GeminiRetention {
     /// Raw `maxAge` string as written (e.g. `30d`).
     pub max_age: String,
     pub min_retention: String,
+    /// A present settings file that could not be read is not the CLI default.
+    /// Keep that uncertainty beside the parsed fields so risk synthesis cannot
+    /// mistake a fallback value for a value the user actually configured.
+    pub unreadable: Option<String>,
 }
 
 impl Default for GeminiRetention {
@@ -216,6 +220,7 @@ impl Default for GeminiRetention {
             enabled: true,
             max_age: "30d".to_string(),
             min_retention: "1d".to_string(),
+            unreadable: None,
         }
     }
 }
@@ -244,16 +249,30 @@ pub fn inspect_gemini_settings(home: &Path) -> GeminiRetention {
     let mut max_age = None;
     let mut enabled = None;
     let mut min_retention = None;
+    let mut unreadable = None;
 
     for path in [
         home.join(".gemini").join("settings.json"),
         home.join(".gemini").join("config.json"),
     ] {
-        let Ok(raw) = fs::read_to_string(&path) else {
-            continue;
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                // A file that exists but cannot be read is evidence about
+                // neither the user's policy nor the CLI default.
+                unreadable.get_or_insert_with(|| format!("{}: {e}", path.display()));
+                continue;
+            }
         };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
+        let v = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                // Do not continue with the default after a malformed policy;
+                // that would turn an unknown retention window into a risk claim.
+                unreadable.get_or_insert_with(|| format!("{}: {e}", path.display()));
+                continue;
+            }
         };
         let Some(sr) = v.get("sessionRetention") else {
             continue;
@@ -278,17 +297,27 @@ pub fn inspect_gemini_settings(home: &Path) -> GeminiRetention {
         enabled: enabled.unwrap_or_else(|| GeminiRetention::default().enabled),
         max_age: max_age.unwrap_or_else(|| GeminiRetention::default().max_age),
         min_retention: min_retention.unwrap_or_else(|| GeminiRetention::default().min_retention),
+        unreadable,
     }
 }
 
 impl GeminiRetention {
     /// True when the harness is actively cleaning up on a 30-ish day window.
     pub fn is_dangerous(&self) -> bool {
-        self.enabled && parse_duration_days(&self.max_age).map_or(true, |d| d <= 30.0)
+        self.unreadable.is_none()
+            && self.enabled
+            && parse_duration_days(&self.max_age).map_or(true, |d| d <= 30.0)
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.unreadable.is_some()
     }
 
     /// Human summary of the policy.
     pub fn summarize(&self) -> String {
+        if let Some(error) = &self.unreadable {
+            return format!("未知（配置读不出来：{error}）");
+        }
         if !self.enabled {
             "disabled (enabled=false) — safe".to_string()
         } else {
@@ -318,7 +347,9 @@ impl GeminiRetention {
 #[derive(Debug, Clone)]
 pub struct HarnessFootprint {
     pub name: String,
-    pub root: PathBuf,
+    /// `None` means the registry never resolved a path; it is not an empty
+    /// path and must not render as `未安装（）`.
+    pub root: Option<PathBuf>,
     /// False = not installed at all (NOT "0 sessions" — different meaning).
     pub installed: bool,
     /// `None` when the harness stores sessions in something non-enumerable
@@ -351,14 +382,16 @@ pub fn coverage_from_records<'a>(
     recs: impl Iterator<Item = &'a crate::models::SessionRecord>,
 ) -> HarnessFootprint {
     let recs: Vec<_> = recs.collect();
-    let installed = root.is_dir();
+    // Records are stronger evidence than a second racy directory stat: once
+    // this pass produced records, a concurrent removal cannot erase them.
+    let installed = root.is_dir() || !recs.is_empty();
     let total_bytes = recs.iter().map(|r| r.byte_size).sum();
     let earliest = recs.iter().map(|r| r.mtime).min();
     let latest = recs.iter().map(|r| r.mtime).max();
     let compressed_count = recs.iter().filter(|r| r.compressed).count() as u64;
     HarnessFootprint {
         name: name.to_string(),
-        root,
+        root: Some(root),
         installed,
         session_count: if installed {
             Some(recs.len() as u64)
@@ -438,6 +471,13 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
+fn footprint_root_label(f: &HarnessFootprint) -> String {
+    f.root
+        .as_ref()
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|| "未知".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // D4 — risk synthesis (the whole value of this command)
 // ---------------------------------------------------------------------------
@@ -450,7 +490,7 @@ fn fmt_bytes(b: u64) -> String {
 fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprint {
     HarnessFootprint {
         name: probe.id.clone(),
-        root: probe.root.clone().unwrap_or_default(),
+        root: probe.root.clone(),
         installed: probe.installed_p(),
         session_count: probe.record_count,
         candidate_count: probe.candidate_count,
@@ -520,7 +560,7 @@ fn footprint_from_dir_probe<'a>(
 fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
     HarnessFootprint {
         name: name.to_string(),
-        root,
+        root: Some(root),
         installed: false,
         session_count: None,
         candidate_count: None,
@@ -600,7 +640,14 @@ fn build_risks(
     let gem_fp = footprints.iter().find(|f| f.name == "gemini");
     let gem_earliest = gem_fp.and_then(|f| f.earliest).map(format_date);
     let gem_days = gem_fp.and_then(|f| f.earliest).map(days_since);
-    if !gem_fp.map_or(true, |f| f.installed) {
+    if let Some(error) = &gemini.unreadable {
+        // A failed settings read is a policy unknown, even when the session
+        // directory happens to be absent; defaulting here would bless a
+        // retention decision the doctor did not actually inspect.
+        risks.push(format!(
+            "🟡 Gemini: sessionRetention 未知（配置读不出来：{error}）—— 不用默认值猜测保留风险。"
+        ));
+    } else if !gem_fp.map_or(true, |f| f.installed) {
         // nothing to clean: skip silently to not cry wolf
     } else if gemini.is_dangerous() {
         risks.push(match gem_earliest {
@@ -652,7 +699,7 @@ fn build_risks(
             if fp.installed {
                 risks.push(format!(
                     "🟢 {label}: 单一 SQLite（{}，{}）—— 无按天数轮换；风险来自它自身的 SQLite，而非静默删会话。",
-                    fp.root.display(),
+                    footprint_root_label(fp),
                     fmt_bytes(fp.total_bytes)
                 ));
             }
@@ -879,10 +926,25 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         .map(expand_tilde)
         .unwrap_or_else(|| data_root.join("masterkey.json"));
 
-    // No repository configured and none at the default location → nothing to
-    // plan. This is the "no repo / no remote wired yet" skip.
-    if !repo_root.is_dir() {
-        return ReclaimCheck::NoRepo { repo_root };
+    // Distinguish measured absence from a path we could not inspect or that
+    // has the wrong shape; only NotFound proves "no repository".
+    match fs::metadata(&repo_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root,
+                error: "仓库路径存在但不是目录".to_string(),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ReclaimCheck::NoRepo { repo_root }
+        }
+        Err(e) => {
+            return ReclaimCheck::OpenFailed {
+                repo_root,
+                error: format!("无法确认仓库目录：{e}"),
+            }
+        }
     }
 
     let cfg = StoreConfig {
@@ -1077,7 +1139,7 @@ pub fn print_report(r: &DoctorReport) {
                 continue;
             }
             if !f.installed {
-                eprintln!("  {:<10} 未安装（{}）", f.name, f.root.display());
+                eprintln!("  {:<10} 未安装（{}）", f.name, footprint_root_label(f));
                 continue;
             }
             let count = footprint_count_label(f);
@@ -1124,7 +1186,7 @@ pub fn print_report(r: &DoctorReport) {
     );
     for f in &r.footprints {
         if !f.installed {
-            eprintln!("  {:<10} 未安装（{}）", f.name, f.root.display());
+            eprintln!("  {:<10} 未安装（{}）", f.name, footprint_root_label(f));
             continue;
         }
         let count = footprint_count_label(f);
