@@ -47,7 +47,7 @@ fn sealed_shards_roundtrip_in_partitioned_layout() {
     assert_eq!(names, vec!["000001.jsonl", "000002.jsonl", "000003.jsonl"]);
 
     // Reading the concatenation in seq order matches what was written.
-    assert_eq!(store::next_shard_seq(stage, machine, session), 4);
+    assert_eq!(store::next_shard_seq(stage, machine, session).unwrap(), 4);
     let expected = store::expected_concat_sha(stage, machine, session).unwrap();
     assert_eq!(expected.len(), 64);
 
@@ -74,7 +74,7 @@ fn next_shard_seq_continues_after_latest() {
         &[format!("{{\"a\":2}}")],
     )
     .unwrap();
-    assert_eq!(store::next_shard_seq(stage, "m", "s"), 3);
+    assert_eq!(store::next_shard_seq(stage, "m", "s").unwrap(), 3);
     assert_eq!(
         store::shard_path(stage, "m", "s", 3),
         PathBuf::from(stage.join("sessions/m/s/000/000003.jsonl"))
@@ -110,7 +110,7 @@ fn bucket_cap_keeps_single_bucket_bounded_and_reads_legacy_mix() {
     fs::write(session_dir.join("000022.jsonl"), b"legacy\n").unwrap();
     let entries = store::sealed_shard_entries(&session_dir).unwrap();
     assert_eq!(entries.len(), 22);
-    assert_eq!(store::next_shard_seq(stage, machine, session), 23);
+    assert_eq!(store::next_shard_seq(stage, machine, session).unwrap(), 23);
     let concat = store::concat_shards(stage, machine, session).unwrap();
     assert!(concat.ends_with(b"legacy\n"));
     drop(dir);
@@ -132,4 +132,17 @@ fn masterkey_persists_and_roundtrips() {
     assert_eq!(reloaded.mac.r, mk.mac.r);
     assert_eq!(reloaded.encrypt, mk.encrypt);
     drop(dir);
+}
+
+#[test]
+fn next_shard_seq_propagates_an_unreadable_session_dir() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path();
+    let machine_dir = stage.join("sessions").join("m");
+    fs::create_dir_all(&machine_dir).unwrap();
+    fs::write(machine_dir.join("s"), b"not a directory").unwrap();
+
+    let error = store::next_shard_seq(stage, "m", "s")
+        .expect_err("an unreadable session directory must not look empty");
+    assert!(error.to_string().contains("read session shard dir"));
 }
