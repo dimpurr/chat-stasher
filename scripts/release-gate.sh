@@ -251,85 +251,30 @@ gate "step 7 OK · doctor ran clean"
 
 # ------------------------------------------------------------------- step 8
 gate "step 8/8 · check semantic defaults in production code"
-SEMANTIC_CHECK=$(python3 -c '
-import glob, os, re, sys
+# B93: the checker itself lives in scripts/check-semantic-defaults.py so that
+# the meta-test scripts/gate-selftest-semantic.sh can exercise the SAME code
+# this gate runs, instead of a second copy that would drift.
+# Exit codes: 0 = clean · 1 = violations · anything else = the checker itself
+# broke. That last case must FAIL the gate, not pass it: a checker that
+# crashed printed no violations, and "printed no violations" is exactly what
+# clean code looks like. Never let a dead checker read as OK.
+if SEMANTIC_CHECK=$(python3 "$ROOT/scripts/check-semantic-defaults.py" "$ROOT" 2>&1); then
+  semantic_rc=0
+else
+  semantic_rc=$?
+fi
 
-root = "'"$ROOT"'"
-src_pattern = os.path.join(root, "crates", "chat-stasher", "src", "**", "*.rs")
-files = sorted(glob.glob(src_pattern, recursive=True))
+if [ "$semantic_rc" -gt 1 ]; then
+  echo "$SEMANTIC_CHECK"
+  echo "[gate] step 8 FAILED · 语义默认值检查器自身报错（exit $semantic_rc），本步的结论无效"
+  fail_gate
+fi
 
-all_violations = []
-for f in files:
-    with open(f, "r", encoding="utf-8") as fh:
-        lines = fh.readlines()
-
-    # B92 fix: the first version set `in_test = True` and never reset it, so
-    # everything after the first `#[cfg(test)]` went unchecked — which is
-    # the test module AND every line after it. A gate with a blind
-    # spot is worse than no gate: it reports OK over the exact region nobody
-    # looked at. Track brace depth so the skip ends with the module.
-    in_test = False
-    test_depth = 0
-    pending_test = False
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if not in_test and (stripped == "#[cfg(test)]" or stripped.startswith("#[cfg(test)]")):
-            pending_test = True
-            continue
-        if pending_test:
-            in_test = True
-            pending_test = False
-            test_depth = line.count("{") - line.count("}")
-            if test_depth <= 0 and "{" in line:
-                in_test = False
-            continue
-        if in_test:
-            test_depth += line.count("{") - line.count("}")
-            if test_depth <= 0:
-                in_test = False
-            continue
-        if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
-            continue
-
-        m1 = re.search(r"\.unwrap_or\s*\(\s*0[a-zA-Z0-9_.]*\s*\)", line)
-        m2 = re.search(r"\.unwrap_or\s*\(\s*false\s*\)", line)
-        m3 = re.search(r"\.unwrap_or_default\s*\(\s*\)", line)
-
-        if m1 or m2 or m3:
-            rule_name = "unwrap_or(0)" if m1 else ("unwrap_or(false)" if m2 else "unwrap_or_default()")
-            # B92 fix 2: scan the whole contiguous comment block above, not just
-            # the single line directly above. Accepting only a one-liner pushes
-            # authors toward one-line reasons, and a one-line reason is exactly
-            # the shape a rationalisation takes. A real explanation needs room.
-            has_reason = False
-            reason_text = ""
-            if "// reason:" in line:
-                reason_text = line.split("// reason:", 1)[1].strip()
-            else:
-                j = idx - 1
-                while j >= 0:
-                    prev = lines[j].strip()
-                    if not prev.startswith("//"):
-                        break
-                    if "// reason:" in prev:
-                        reason_text = prev.split("// reason:", 1)[1].strip()
-                        break
-                    j -= 1
-
-            if reason_text and len(reason_text) > 5 and reason_text.lower() != "ok":
-                has_reason = True
-
-            if not has_reason:
-                rel_path = os.path.relpath(f, root)
-                all_violations.append((rel_path, idx + 1, rule_name, stripped))
-
-if all_violations:
-    print(f"FAILED:{len(all_violations)}")
-    for rel_path, line_no, rule, code in all_violations:
-        print(f"  ! {rel_path}:{line_no} [{rule}] -> {code}")
-else:
-    print("OK")
-')
+if [ "$semantic_rc" -eq 1 ] && [[ "$SEMANTIC_CHECK" != FAILED:* ]]; then
+  echo "$SEMANTIC_CHECK"
+  echo "[gate] step 8 FAILED · 检查器退出码为 1 但没有输出违规清单，输出与退出码不自洽"
+  fail_gate
+fi
 
 if [[ "$SEMANTIC_CHECK" == FAILED:* ]]; then
   count=$(echo "$SEMANTIC_CHECK" | head -n 1 | cut -d: -f2)

@@ -3318,6 +3318,15 @@ fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        // reason: NOT an honest default — recorded as (a)-fragile, and found only
+        // after the gate's second blind spot was fixed (B93). It needs a system
+        // clock predating 1970 to reach. If reached, `now = 0` makes
+        // `summarize` compute `0.saturating_sub(finished_at)` = 0, i.e. "the
+        // scheduled run just finished, everything is healthy" — a broken clock
+        // would be reported as good news, which is the worst direction for this
+        // particular lie. Left as-is only because the branch is unreachable on a
+        // sane host; if it ever becomes reachable, thread Option through
+        // `summarize` and say the age is unknown.
         .unwrap_or(0);
     runstate::summarize(&read, now, runstate::stale_after_secs(interval))
 }
