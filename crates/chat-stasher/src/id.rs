@@ -61,29 +61,77 @@ pub fn normalize_machine(raw: &str) -> String {
 
 /// Fetch this machine's short hostname and normalise it.
 ///
-/// Shelling out to `hostname -s` (not `scutil --get ComputerName`, which on
-/// macOS returns a display name with spaces / typographic quotes that would
-/// need a wholly different kind of cleaning). Falls back to `$HOSTNAME` when
-/// the command cannot provide a usable UTF-8 value. There is deliberately no
-/// invented fallback: `None` means that a caller must either report the
-/// unresolved identity or require an explicit `--machine`.
+/// There is deliberately no invented fallback: `None` means a caller must
+/// either report the unresolved identity or require an explicit `--machine`.
+/// (Before 2026-08-18 this returned `"localhost"` instead, which silently
+/// filed one machine's sessions into a partition shared with every other
+/// machine that also failed to resolve.)
+///
+/// 🔴 The source list is platform-specific, and that is the whole point of
+/// `machine_sources()`. `hostname -s` is right on unix — `scutil --get
+/// ComputerName` on macOS returns a display name with spaces and typographic
+/// quotes that would need a wholly different kind of cleaning. But **Windows'
+/// `hostname` takes no arguments at all**, and Windows does not set
+/// `$HOSTNAME`; it sets `%COMPUTERNAME%`. Asking Windows for `hostname -s`
+/// therefore fails, and the old `localhost` fallback is what kept that
+/// failure invisible: every Windows install was writing to `localhost/`.
 pub fn machine_id() -> Option<String> {
-    let raw = std::process::Command::new("hostname")
-        .arg("-s")
+    pick_machine(machine_sources())
+}
+
+/// The ordered candidate list. Split out from [`machine_id`] so the selection
+/// rule can be tested on any platform, while the platform difference stays in
+/// exactly one place.
+fn machine_sources() -> Vec<Option<String>> {
+    #[cfg(windows)]
+    {
+        vec![
+            // Windows' own answer, and the only one that needs no subprocess.
+            env_value("COMPUTERNAME"),
+            // `hostname` exists on Windows but rejects `-s`; call it bare.
+            command_value("hostname", &[]),
+            env_value("HOSTNAME"),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![command_value("hostname", &["-s"]), env_value("HOSTNAME")]
+    }
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn command_value(program: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(program)
+        .args(args)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("HOSTNAME")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
-    raw.map(|raw| normalize_machine(&raw))
-        .filter(|machine| !machine.is_empty())
+}
+
+/// First source that yields a *usable* name after normalisation wins.
+///
+/// 🔴 "Usable" is stricter than "non-empty", and that was found by writing the
+/// test rather than by reading the code: `normalize_machine("???")` does not
+/// return `""` — it returns `"-"`, because every rejected character collapses
+/// into the separator. A partition literally named `-` carries no information
+/// about which machine wrote it, so accepting it would recreate the exact bug
+/// this module just removed (`localhost`), only with a less obvious spelling.
+/// A source that normalises to nothing but separators is therefore skipped.
+fn pick_machine(sources: Vec<Option<String>>) -> Option<String> {
+    sources
+        .into_iter()
+        .flatten()
+        .map(|raw| normalize_machine(&raw))
+        .find(|machine| !machine.trim_matches('-').is_empty())
 }
 
 /// True when `s` looks like a UUID (8-4-4-4-12 groups of lowercase hex).
@@ -182,6 +230,49 @@ impl SessionIdentity {
 
 #[cfg(test)]
 mod tests {
+    // B65 removed the `localhost` fallback, which was correct — and it
+    // immediately turned three Windows scanner tests red, because the only
+    // source we asked was `hostname -s` and Windows' `hostname` rejects `-s`.
+    // These tests pin the selection rule itself, on every platform, so the
+    // platform difference stays confined to `machine_sources()`.
+    #[test]
+    fn first_usable_source_wins_and_unusable_ones_are_skipped() {
+        assert_eq!(
+            super::pick_machine(vec![Some("Win-Box".into()), Some("other".into())]),
+            Some("win-box".to_string())
+        );
+        // A missing source is skipped, not treated as an empty name.
+        assert_eq!(
+            super::pick_machine(vec![None, Some("second".into())]),
+            Some("second".to_string())
+        );
+        // Present but normalises to nothing => keep looking. An empty
+        // partition name is not a name.
+        assert_eq!(
+            super::pick_machine(vec![Some("???".into()), Some("real-host".into())]),
+            Some("real-host".to_string())
+        );
+    }
+
+    #[test]
+    fn no_source_means_none_never_an_invented_name() {
+        assert_eq!(super::pick_machine(vec![]), None);
+        assert_eq!(super::pick_machine(vec![None, None]), None);
+        assert_eq!(super::pick_machine(vec![Some("???".into())]), None);
+    }
+
+    /// The regression itself: whatever the platform, the list we hand to
+    /// `pick_machine` must contain a source that platform can actually answer.
+    #[test]
+    fn this_platform_offers_at_least_one_answerable_source() {
+        let sources = super::machine_sources();
+        assert!(!sources.is_empty());
+        assert!(
+            sources.iter().any(Option::is_some),
+            "no machine-name source answered on this platform"
+        );
+    }
+
     use super::*;
 
     #[test]
