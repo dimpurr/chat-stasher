@@ -5,6 +5,7 @@
 //! deliberately read-only: no session content is ever read or printed in this
 //! spike, except when `read` verifies a session back from the repository.
 
+pub mod activity;
 pub mod collect;
 pub mod config;
 pub mod destinit;
@@ -13,6 +14,7 @@ pub mod id;
 pub mod inbox;
 pub mod models;
 pub mod nativehost;
+pub mod overview;
 pub mod readback;
 pub mod reap;
 pub mod runstate;
