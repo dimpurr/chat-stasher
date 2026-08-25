@@ -97,7 +97,7 @@ Concretely, four separate plaintext exposures:
    `chat-stasher/inbox/<platform>-<sessionId>.json`
    (`apps/extension/lib/contract.ts:139`;
    `apps/extension/lib/download.ts:91-93`;
-   `apps/extension/entrypoints/background.ts:79-80`). The file contains the raw
+   `apps/extension/entrypoints/background.ts:84-86`). The file contains the raw
    response body — the conversation itself
    (`apps/extension/lib/contract.ts:282-291`). It sits there, world-readable to
    anything running as you, until the CLI consumes it. **We do not encrypt it,
@@ -121,7 +121,7 @@ Concretely, four separate plaintext exposures:
    entry from the download shelf; the final file's entry is not erased
    (`apps/extension/lib/download.ts:129-141`). Your browser therefore retains a
    history record whose filename embeds the platform name and the session id
-   (`apps/extension/entrypoints/background.ts:111-114`). That is metadata, not
+   (`apps/extension/entrypoints/background.ts:116-117`). That is metadata, not
    content, but it is metadata about which conversations you archived, and it
    may be synced by your browser to your browser vendor. **We have not
    investigated** whether any particular browser syncs download history by

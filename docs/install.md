@@ -76,7 +76,7 @@ Gemini（`gemini.google.com`）、Claude（`claude.ai`）、Kimi（`www.kimi.com
 正文接口地址 —— 猜错的后果不是报错，而是每条对话只存下前几轮，而你以为存全了。
 
 这三档在扩展的 popup 里也会照实显示，措辞与上表一致
-（`apps/extension/lib/popup-view.ts:483-498`）。
+（`apps/extension/lib/popup-view.ts:498-514`）。
 
 （**实时归档不受这张表影响**：上面六个平台的实时归档判据在
 `apps/extension/lib/contract.ts:69-303` 那张表里各自登记，与回溯是两回事。）
