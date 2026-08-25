@@ -108,8 +108,9 @@ taking our word for it:
 
 - **Check the permission list on the shipped extension.** Open
   `chrome://extensions` (or `about:addons`) and look at what Chat Stasher asks
-  for. It requests exactly three permissions — `downloads`, `storage`, `alarms`
-  — and **no host permissions at all** (`apps/extension/wxt.config.ts:36`). An
+  for. It requests exactly four permissions — `downloads`, `storage`, `alarms`,
+  `nativeMessaging` — and **no host permissions at all**
+  (`apps/extension/wxt.config.ts:36`). An
   extension with no host permissions cannot make requests to a server of ours;
   the only network the code can touch is inside the pages it is already injected
   into. There is no origin belonging to this project anywhere in the extension.
@@ -173,7 +174,7 @@ Two things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:275`;
+  (`apps/extension/entrypoints/background.ts:299`;
   `apps/extension/lib/contract.ts:534-538`, `:587-602`). It is used to keep two
   machines' archives of the same account from colliding. It stays in your local
   browser storage and is written into your own archive; it is not transmitted
@@ -275,12 +276,13 @@ transport it cannot capture was used — it never reads those response bodies
 
 ## 6. What each permission is for
 
-The extension declares exactly three permissions and no host permissions
+The extension declares exactly four permissions and no host permissions
 (`apps/extension/wxt.config.ts:36`):
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
 | `downloads` | The only zero-configuration way to write a file to your disk from a background service worker. This is how a captured conversation reaches the inbox directory. (`apps/extension/lib/download.ts:27-32`) | It does not let us read your other downloads. The code only deletes files it created itself (`apps/extension/lib/download.ts:62-68`). |
+| `nativeMessaging` | Hands a captured conversation straight to the `chat-stasher` binary already on your machine, instead of going through a download. Added because Chrome's browser-level "ask where to save each file before downloading" preference overrides the extension's `saveAs: false`, which turns a 200-conversation backfill into 200 modal dialogs. The host is registered by you, per-user, with `chat-stasher install-native-host`; the manifest names exactly one allowed extension id. | It cannot reach any program other than the one host manifest you registered, and that host is a binary you installed yourself. If you never run `install-native-host`, this permission does nothing at all and the extension falls back to `downloads`. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the badge counter, the download guard, and the backfill progress set, so an interrupted backfill can resume instead of restarting. (`apps/extension/lib/backfill/store.ts:1-13`) | This is `storage.local` only. Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the chat tab open. (`apps/extension/wxt.config.ts:23-32`; `apps/extension/lib/backfill/alarm.ts`) | It does not grant any network or data access. |
 
