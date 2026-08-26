@@ -1,366 +1,429 @@
-# 安装引导
+# Installation guide
 
-这份文档写给**要用它的人**，不是写给开发者的。你不需要读懂 Rust 或
-TypeScript，但你需要能打开一个终端窗口、复制粘贴几条命令。
+This document is written for **people who will use it**, not for developers.
+You do not need to understand Rust or TypeScript, but you do need to be able to
+open a terminal window and copy-paste a few commands.
 
-全文的写法约定：凡是关于「这个软件会怎么做」的说法，后面都跟一个
-`文件:行号`，你可以自己去仓库里核对。凡是我们**没有亲手验证过**的，
-一律写「未查证」——「未查证」不等于「不存在」，只是我们没测过。
-
----
-
-## 1. 你要装的是两个东西
-
-它不是一个 App，是**一套两件**，各干各的活：
-
-| 部分 | 它负责什么 | 装在哪 |
-| --- | --- | --- |
-| **CLI（命令行程序 `chat-stasher`）** | 扫描你本机上各个 AI 编程工具留下的会话记录，收进一个只增不删的加密归档 | 你的电脑，终端里跑 |
-| **浏览器扩展（Chat Stasher）** | 把你在**网页版**聊天里的对话，存成文件落到你的下载目录，等 CLI 来收 | 你的浏览器 |
-
-**CLI 这一边**：它的自我描述是 "Append-only archive for every LLM conversation,
-across harnesses."（`crates/chat-stasher/src/main.rs:26`）。它读的是本机上已经
-存在的会话文件，读的时候是只读的（`crates/chat-stasher/src/main.rs:428`）。
-
-**扩展这一边**：它当前认识**六个**网页平台 —— DeepSeek（`chat.deepseek.com`）、
-Perplexity（`www.perplexity.ai`）、ChatGPT（`chatgpt.com` / `chat.openai.com`）、
-Gemini（`gemini.google.com`）、Claude（`claude.ai`）、Kimi（`www.kimi.com`）
-（`apps/extension/lib/contract.ts:69-70,112-113,128-129,144-145,160-161,222-231`）。
-它申请的权限只有三个：`downloads`、`storage` 和 `alarms`
-（`apps/extension/wxt.config.ts:35`）。它把抓到的会话写成 JSON 文件，路径是
-下载目录下的 `chat-stasher/inbox/<名字>.json`
-（`apps/extension/lib/contract.ts:324`、`apps/extension/lib/download.ts:91`）。
-
-**两边怎么接起来**：扩展只管落盘，CLI 用 `ingest --inbox <你的收件目录>
---stage <你的暂存目录>` 把这些文件收走（`crates/chat-stasher/src/main.rs:403-425`）。
-
-🔴 **「认识这个平台」不等于「能把你在这个平台上的历史补回来」。** 扩展有两条腿，
-请分开看：
-
-- **实时归档**（默认开着）：你正在看的这条对话，会在页面自己去取数据的时候被顺手
-  存下来。每个平台各自在那张表里登记了「哪条路由、什么方法、什么响应形状才算数」
-  （`apps/extension/lib/contract.ts:69-303`）。
-  🔴 **Perplexity 是个例外，请照实理解**：它那一行只登记了**会话列表**这一条路由，
-  并且没有登记任何「从 URL 里认出会话编号」的规则
-  （`apps/extension/lib/contract.ts:113-122`）。按代码读下来，实时归档在
-  Perplexity 上**认不出会话编号，因此不会保存任何文件**
-  （`apps/extension/lib/contract.ts:517-519`）—— 这是读代码得出的结论，
-  **我们没有在真实的 perplexity.ai 页面上实测过**。
-- **回溯历史**（默认关着，见第 6 节）：把你**过去**的对话翻出来存下来。这条腿
-  **每个平台的能力不一样**，下面第 1.1 节说清楚。
-
-### 1.1 🔴 回溯历史：三档，不是「支持 / 不支持」两档
-
-以下名单直接来自代码里那两张表，不是宣传口径
-（`apps/extension/lib/backfill/enumerate.ts:762`、`:774`、`:643`）：
-
-| 档位 | 平台 | 打开回溯之后，你实际会得到什么 |
-| --- | --- | --- |
-| **能把历史正文补回来** | **ChatGPT** | 会话被逐条列出来，正文也被逐条取回、存成文件。这一档才是「历史被备份了」。 |
-| **🔴 只能列出会话，一条正文都存不下来** | **DeepSeek**、**Perplexity** | 扩展能列出你有哪些历史会话，但**不会去取每条会话的内容**，所以**一个文件都不会落到你的下载目录**。你的 DeepSeek / Perplexity 历史**没有被备份**。 |
-| **还没支持** | **Gemini**、**Claude**、**Kimi** | 回溯这条腿在发出任何一个请求之前就停住了，什么都不会发生。 |
-
-🔴 **中间那一档最容易被误会，所以再说一遍**：DeepSeek 和 Perplexity 打开回溯之后，
-扩展**确实会动**（它在列会话），popup 里也会显示「已经列出 N 条在等着」。
-**但那 N 条一条都没有被保存。** 如果你现在关掉浏览器、格式化硬盘、或者平台把你的
-历史删了，这 N 条对话就没了 —— 扩展手里只有它们的编号，没有它们的内容。
-
-🔴 **Perplexity 还要再多说一句**：按上面那条实时归档的说明，它那一行连实时归档都
-认不出会话编号。也就是说 —— 以代码为准 —— **Perplexity 目前两条腿都不会给你留下
-任何文件**，回溯只列不存，实时也不存。它出现在名单里，表示扩展会在这个站点上运行，
-**不表示你在这里的东西被备份了**。
-
-原因写在代码里，不是我们懒：这两个平台的**会话列表接口**有多个互不相干的开源实现
-可以交叉印证，**取单条对话正文的接口没有**
-（`apps/extension/lib/backfill/enumerate.ts:538-548`、`:603-611`）。我们不会去猜一个
-正文接口地址 —— 猜错的后果不是报错，而是每条对话只存下前几轮，而你以为存全了。
-
-这三档在扩展的 popup 里也会照实显示，措辞与上表一致
-（`apps/extension/lib/popup-view.ts:498-514`）。
-
-（**实时归档不受这张表影响**：上面六个平台的实时归档判据在
-`apps/extension/lib/contract.ts:69-303` 那张表里各自登记，与回溯是两回事。）
+Convention throughout the document: every claim about "what the software will
+do" is followed by a `file:line` reference you can check in the repository
+yourself. Anything we have **not verified by hand** is marked "unverified" —
+"unverified" does not mean "does not exist", it means we have not tested it.
 
 ---
 
-## 2. 装 CLI
+## 1. What you are installing: two things
 
-仓库里没有预编译的安装包，也没有 `brew install` 之类的一键渠道 —— 你需要自己
-从源码编译一次。
+It is not one app, it is **two pieces**, each doing its own job:
+
+| Part | What it does | Where it lives |
+| --- | --- | --- |
+| **CLI (command-line program `chat-stasher`)** | Scans the session records left behind by various AI coding tools on your machine and collects them into an append-only encrypted archive | Your computer, run from the terminal |
+| **Browser extension (Chat Stasher)** | Saves your conversations from **web-based** chats as files into your download directory, waiting for the CLI to collect them | Your browser |
+
+**On the CLI side:** its self-description is "Append-only archive for every LLM
+conversation, across harnesses." (`crates/chat-stasher/src/main.rs:26`). It
+reads session files that already exist on your machine, and reads them
+read-only (`crates/chat-stasher/src/main.rs:428`).
+
+**On the extension side:** it currently recognizes **six** web platforms —
+DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
+(`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
+(`claude.ai`), Kimi (`www.kimi.com`)
+(`apps/extension/lib/contract.ts:69-70,112-113,128-129,144-145,160-161,222-231`).
+It requests only three permissions: `downloads`, `storage` and `alarms`
+(`apps/extension/wxt.config.ts:35`). It writes captured conversations as JSON
+files at `chat-stasher/inbox/<name>.json` under the download directory
+(`apps/extension/lib/contract.ts:324`, `apps/extension/lib/download.ts:91`).
+
+**How the two sides connect:** the extension only writes files to disk; the CLI
+takes them away with `ingest --inbox <your-inbox> --stage <your-stage>`
+(`crates/chat-stasher/src/main.rs:403-425`).
+
+🔴 **"Recognizing the platform" does not mean "it can recover your history on
+that platform."** The extension has two legs; please read them separately:
+
+- **Passive capture** (on by default): the conversation you are currently
+  viewing is saved as a side effect when the page fetches its own data. Each
+  platform registers in that table which route, method, and response shape
+  count (`apps/extension/lib/contract.ts:69-303`).
+  🔴 **Perplexity is an exception; read it as it is:** its row registers only
+  the **conversation-list** route, and registers no rule for recognizing a
+  session id from a URL (`apps/extension/lib/contract.ts:113-122`). Reading the
+  code, passive capture on Perplexity **cannot recognize a session id and
+  therefore saves no files** (`apps/extension/lib/contract.ts:517-519`) — this
+  is a conclusion drawn from reading the code; **we have not tested it on a
+  real perplexity.ai page**.
+- **History backfill** (off by default; see section 6): digs up your **past**
+  conversations and saves them. This leg's **capability differs per platform**,
+  spelled out in section 1.1 below.
+
+### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
+
+The list below comes directly from the two tables in the code, not from
+marketing (`apps/extension/lib/backfill/enumerate.ts:762`, `:774`, `:643`):
+
+| Tier | Platforms | What you actually get when you enable backfill |
+| --- | --- | --- |
+| **Can recover the actual history text** | **ChatGPT** | Conversations are listed one by one, and their content is fetched one by one and saved as files. This tier is the one that means "your history is backed up." |
+| **🔴 Can only list conversations, saves none of their content** | **DeepSeek**, **Perplexity** | The extension can list which historical conversations you have, but **will not fetch each conversation's content**, so **not a single file lands in your download directory**. Your DeepSeek / Perplexity history is **not backed up**. |
+| **Not implemented** | **Gemini**, **Claude**, **Kimi** | The backfill leg stops before issuing any request. Nothing happens. |
+
+🔴 **The middle tier is the easiest to misunderstand, so say it again**:
+DeepSeek and Perplexity, with backfill enabled, the extension **does act** (it
+lists conversations), and the popup shows "already listed N, waiting".
+**But not one of those N is saved.** If you now close your browser, format your
+disk, or the platform deletes your history, those N conversations are gone —
+the extension holds only their ids, not their content.
+
+🔴 **Perplexity gets one more sentence:** per the passive-capture note above,
+its row cannot recognize a session id even for passive capture. Which means —
+going by the code — **Perplexity currently leaves you no files from either
+leg**: backfill only lists, and passive capture saves nothing either. It appears
+in the list because the extension runs on that site; it does **not** mean what
+is there is backed up.
+
+The reason is written in the code, not because we are lazy: the
+**conversation-list endpoints** for these two platforms have multiple
+independent open-source implementations that cross-check one another, but the
+**endpoint for fetching a single conversation's content has none**
+(`apps/extension/lib/backfill/enumerate.ts:538-548`, `:603-611`). We will not
+guess a content-endpoint address — a wrong guess would not error; it would save
+only the first few turns of every conversation while you believed you had it
+all.
+
+The popup shows these three tiers in the same terms as the table above
+(`apps/extension/lib/popup-view.ts:498-514`).
+
+(**Passive capture is not affected by this table:** the passive-capture criteria
+for the six platforms above are each registered in the table at
+`apps/extension/lib/contract.ts:69-303`, a separate matter from backfill.)
+
+---
+
+## 2. Install the CLI
+
+There is no precompiled package in the repository, and no one-command channel
+like `brew install` — you need to compile from source once.
 
 ```sh
-git clone <你的仓库地址> <你选的目录>
-cd <你选的目录>
+git clone <repository-url> <your-directory>
+cd <your-directory>
 cargo build --release
 ```
 
-- 需要 Rust 工具链（`cargo`）。**仓库没有声明最低 Rust 版本**：`Cargo.toml`
-  与 `crates/chat-stasher/Cargo.toml` 里都没有 `rust-version` 字段
-  （`Cargo.toml:1-11`、`crates/chat-stasher/Cargo.toml:1-6`）。具体哪个版本能
-  编过 —— **未查证**。
-- 编译产物在 `target/release/chat-stasher`。
+- You need the Rust toolchain (`cargo`). **The repository does not declare a
+  minimum Rust version:** neither `Cargo.toml` nor
+  `crates/chat-stasher/Cargo.toml` has a `rust-version` field
+  (`Cargo.toml:1-11`, `crates/chat-stasher/Cargo.toml:1-6`). Which exact
+  version compiles — **unverified**.
+- The build output is at `target/release/chat-stasher`.
 
-然后写一份配置：
+Then write a config:
 
 ```sh
 chat-stasher init
 ```
 
-`init` 只在配置**不存在**时写入一份带注释的默认配置，它是非破坏性的
-（`crates/chat-stasher/src/main.rs:38-39`）。配置文件的位置是
-`~/.config/chat-stasher/config.toml`，如果你设了 `XDG_CONFIG_HOME` 就在那底下
-（`crates/chat-stasher/src/config.rs:15,153-161`）。
+`init` writes a commented default config only when the config does **not**
+already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:38-39`).
+The config file lives at `~/.config/chat-stasher/config.toml`, or under
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,153-161`).
 
 ---
 
-## 3. 装浏览器扩展
+## 3. Install the browser extension
 
-**它还没有上架任何应用商店**（详见第 6 节）。现在只能手动装：
+**It is not yet on any app store** (see section 6 for details). For now you can
+only install it manually:
 
 ```sh
 cd apps/extension
 pnpm install
-pnpm build            # Chrome/Edge 等 Chromium 系
+pnpm build            # Chrome/Edge and other Chromium-based browsers
 pnpm build:firefox    # Firefox
 ```
 
-（脚本名出自 `apps/extension/package.json:10-11`。需要 Node 和 pnpm；
-**具体最低版本仓库没有声明，未查证**。）
+(The script names come from `apps/extension/package.json:10-11`. You need Node
+and pnpm; **the exact minimum versions are not declared in the repository —
+unverified**.)
 
-构建产物落在 `apps/extension/.output/`（这个目录被 `.gitignore` 排除，
-`.gitignore:15`）。之后**怎么把这个目录加载进浏览器** —— 各浏览器的
-「加载已解压的扩展」菜单路径，见下一节；我们没有逐一实测，标了「未查证」。
-
----
-
-## 4. 一次性设置清单
-
-下面这几件事，**装的时候做一次就够了**。
-
-### 4.1 🔴 关掉浏览器的「下载前询问每个文件的保存位置」
-
-**这一条最重要，请不要跳过。**
-
-**为什么要关**：扩展保存会话走的是浏览器的下载通道
-（`apps/extension/lib/download.ts:117-121,130-134`）。而如果你开着「下载前
-询问保存位置」，浏览器每存一个文件都可能弹一次系统「另存为」对话框。我们的
-目标场景是在几天里归档**上千个会话** —— 那种情况下的弹窗数量是你不会想经历的。
-
-**🔴 请照实理解这一条的证据强度**：
-
-- **已实测**：Chrome 确实有这个设置项，它在配置文件里的键名是
-  `download.prompt_for_download`。我们在本机的 Chrome `Preferences` 文件里
-  直接读到了这个键，当时的值是 `true`（开启）。这是**一手证据**，但它只证明
-  「这个设置存在」，不证明它会怎样影响扩展。
-- **代码事实**：扩展调用下载时传的是 `saveAs: false`，也就是代码这边**要求**
-  不要弹另存为框（`apps/extension/lib/download.ts:121`、`:134`）。
-- **🔴 我们不知道的**：**`saveAs: false` 到底会不会被浏览器这个设置强行覆盖，
-  我们没有自己实测过。** 外部报告和一条 Chromium issue 都指向「会被覆盖」，
-  但那是**二手证据**，我们没有复现。
-
-**所以这里给的是一条操作建议，不是行为保证**：请关掉这个设置，以**尽量避免**归档过程
-被弹窗打断。我们不承诺关掉之后一定一个框都不会出现，也不承诺不关就一定会
-弹 —— 这两句我们都还没有资格说。
-
-**在哪里点**：
-
-- **Chrome**：设置里的「下载内容」一节有「下载前询问每个文件的保存位置」开关，
-  把它关掉。**具体菜单层级与文案 —— 未查证**（我们只核实了配置键
-  `download.prompt_for_download` 的存在，没有实际点过 UI，浏览器版本一变
-  文案就可能不同）。
-- **Edge**：**未查证**。Edge 同为 Chromium 内核，设置项大概率存在且叫法相近，
-  但我们没有在 Edge 上核实过任何菜单路径，所以这里不给路径。
-- **Firefox**：**未查证**。我们没有在 Firefox 上核实过设置位置或它对扩展下载
-  行为的影响。
-
-（我们宁可让你自己在设置里搜一下「下载」两个字，也不想在这里编一个可能是错的
-菜单路径给你。）
-
-### 4.2 跑一次 `chat-stasher init`
-
-见第 2 节。做过就不用再做。
-
-### 4.3 决定归档存到哪，并**备份好你的主密钥文件**
-
-归档的目的地由你的配置和命令行参数决定 —— 本地路径，或者你自己配置的后端。
-`push` / `read` / `verify` 读的是你在配置或参数里选定的仓库和密钥文件
-（`crates/chat-stasher/src/main.rs:119-121`、`:183-185`、`:226-228`）。
-
-🔴 **主密钥文件是唯一的钥匙。丢了，归档就永远读不出来了，没有任何找回手段。**
-源码里对此的原话是 "The masterkey is the repository's only key — losing it means
-the repo is unreadable forever"（`crates/chat-stasher/src/store.rs:813-815`）。
-密钥文件会以「仅属主可读」的权限写入，在能表达该权限的平台上
-（`crates/chat-stasher/src/store.rs:824-825`）。
-
-**请现在就把它复制一份到别的地方。** 这件事没人能替你做。
-
-### 4.4 装一个定时器（可选，但这是「装完就不用管」的关键）
-
-`chat-stasher schedule` 会**渲染**一份 launchd plist 或 systemd user
-service/timer —— 注意它的原话是 "never installs it"，也就是它只生成文件，
-**不替你安装**（`crates/chat-stasher/src/main.rs:78`）。生成的模板里包着
-一条 `run-once` 命令（`crates/chat-stasher/src/main.rs:78-95`）。
-
-`run-once` 是一次完整的采集+推送，跑完就退出，重复调用是安全的
-（`crates/chat-stasher/src/main.rs:37-42`）。
+The build output lands in `apps/extension/.output/` (that directory is excluded
+by `.gitignore`, `.gitignore:15`). Then **how to load that directory into your
+browser** — each browser's "Load unpacked extension" menu path — see the next
+section; we have not tested each one, and marked them "unverified".
 
 ---
 
-## 5. 怎么确认它在工作
+## 4. One-time setup checklist
 
-跑这一条：
+The following things, you do **once at install time and then never again**.
+
+### 4.1 🔴 Turn off the browser's "Ask where to save each file before downloading"
+
+**This one matters most; please do not skip it.**
+
+**Why turn it off:** the extension saves conversations through the browser's
+download channel (`apps/extension/lib/download.ts:117-121,130-134`). And if you
+have "ask where to save each file before downloading" on, the browser may pop a
+system "Save As" dialog for every file it saves. Our target scenario is
+archiving **thousands of conversations** over a few days — the number of dialogs
+in that situation is not one you want to experience.
+
+**🔴 Please read the strength of the evidence for this item honestly:**
+
+- **Verified:** Chrome does have this setting, and its key in the config file is
+  `download.prompt_for_download`. We read the key directly in our machine's
+  Chrome `Preferences` file, and its value at the time was `true` (on). This is
+  **first-hand evidence**, but it only proves "this setting exists", not how it
+  affects the extension.
+- **Code fact:** when the extension calls the download API it passes
+  `saveAs: false`, meaning the code **asks** for no Save-As dialog
+  (`apps/extension/lib/download.ts:121`, `:134`).
+- **🔴 What we do not know:** **whether `saveAs: false` is forcibly overridden
+  by this browser setting — we have not tested it ourselves.** External reports
+  and a Chromium issue point to "it is overridden", but that is **second-hand
+  evidence**, and we have not reproduced it.
+
+**So this is an operational recommendation, not a behavior guarantee:** please
+turn this setting off, to **try to avoid** dialogs interrupting the archiving
+process. We do not promise that no dialog will ever appear with it off, nor that
+dialogs will definitely appear with it on — we are not yet in a position to
+claim either.
+
+**Where to click:**
+
+- **Chrome:** in Settings, the "Downloads" section has an "Ask where to save
+  each file before downloading" toggle; turn it off. **The exact menu hierarchy
+  and wording — unverified** (we only verified the existence of the config key
+  `download.prompt_for_download`; we did not actually click through the UI, and
+  the wording may change across browser versions).
+- **Edge:** **unverified**. Edge is also Chromium-based, so the setting most
+  likely exists with a similar name, but we have not verified any menu path on
+  Edge, so we give no path here.
+- **Firefox:** **unverified**. We have not verified the setting's location on
+  Firefox, nor its effect on the extension's downloads.
+
+(We would rather have you search your own settings for the word "download" than
+invent a menu path here that might be wrong.)
+
+### 4.2 Run `chat-stasher init` once
+
+See section 2. If you already did it, you do not need to do it again.
+
+### 4.3 Decide where the archive lives, and **back up your master key file**
+
+The archive's destination is decided by your config and command-line arguments
+— a local path, or a backend you configure yourself. `push` / `read` / `verify`
+read the repository and key file you select in config or arguments
+(`crates/chat-stasher/src/main.rs:119-121`, `:183-185`, `:226-228`).
+
+🔴 **The master key file is the only key. Lose it and the archive can never be
+read again; there is no way to recover it.** The source's own words are "The
+masterkey is the repository's only key — losing it means the repo is unreadable
+forever" (`crates/chat-stasher/src/store.rs:813-815`). The key file is written
+with owner-only-readable permissions, on platforms that can express them
+(`crates/chat-stasher/src/store.rs:824-825`).
+
+**Make a copy of it somewhere else right now.** No one can do this for you.
+
+### 4.4 Install a timer (optional, but this is the key to "install once and forget it")
+
+`chat-stasher schedule` **renders** a launchd plist or systemd user
+service/timer — note its own words are "never installs it", i.e. it only
+generates files, **it does not install them for you**
+(`crates/chat-stasher/src/main.rs:78`). The generated template wraps a
+`run-once` command (`crates/chat-stasher/src/main.rs:78-95`).
+
+`run-once` is one complete collect-and-push pass; it exits when done, and
+repeated invocation is safe (`crates/chat-stasher/src/main.rs:37-42`).
+
+---
+
+## 5. How to confirm it is working
+
+Run this:
 
 ```sh
 chat-stasher status
 ```
 
-`status` 是只读的。源码里对它的输出边界写的是：只有 id、路径、大小、mtime 和
-标记会进标准输出，会话内容不会（`crates/chat-stasher/src/main.rs:3044,3067,3114`）。
-这是源码的自述，我们没有对每条输出路径做过穷举验证。
+`status` is read-only. The source states its output boundary as: only ids,
+paths, sizes, mtimes, and flags go to standard output; conversation content
+does not (`crates/chat-stasher/src/main.rs:3044,3067,3114`). This is the
+source's self-description; we have not exhaustively verified every output path.
 
-它的输出分两段。**第一行**是定时器体检结论，来自上一次 `run-once` 留下的记录
-（`crates/chat-stasher/src/main.rs:3067`）。以下是源码里逐字定义的几种结论
-（`crates/chat-stasher/src/runstate.rs:184-232`）：
+Its output has two parts. **The first line** is the timer health conclusion,
+from the record left by the last `run-once`
+(`crates/chat-stasher/src/main.rs:3067`). These are the conclusions defined
+verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
-- 还没装定时器 / 从来没跑成功过：
-  `[run-once] 还没有任何运行记录：本机从未成功跑完一次 run-once（也可能状态目录被清空）。无法判断定时器是否在工作。`
-- 一切正常（`{}` 处会填入真实数字）：
-  `[run-once] 正常：上次运行在 N 分钟前，耗时 N ms，入库 N 个分片，已创建快照。`
-  （没有新东西时结尾是「无变化故未创建快照」。）
-- 定时器可能停了：
-  `[run-once] 已经N 天没有运行了（阈值 N 小时）：定时器可能已经停了，上次结果是成功（无变化）。`
-- 上次跑挂了：
-  `[run-once] 上次运行失败：N 分钟前在 <步骤> 步骤出错，此后没有成功的运行。`
+- No timer installed / never run successfully:
+  `[run-once] No run records yet: this machine has never completed a run-once successfully (or the state directory was cleared). Cannot determine whether the timer is working.`
+- Everything is normal (`{}` is filled with the real numbers):
+  `[run-once] OK: last run N minutes ago, took N ms, stored N shards, snapshot created.`
+  (When there is nothing new, the ending is "no changes, so no snapshot
+  created".)
+- The timer may have stopped:
+  `[run-once] Has not run for N days (threshold N hours): the timer may have stopped; the last result was success (no changes).`
+- The last run failed:
+  `[run-once] Last run failed: N minutes ago an error occurred at the <step> step, and no run has succeeded since.`
 
-**第二段**是扫描结果。默认是固定几行的汇总，不会刷屏
-（`crates/chat-stasher/src/main.rs:3135-3161`）：
+**The second part** is the scan result. By default it is a fixed summary of a
+few lines and does not flood the screen
+(`crates/chat-stasher/src/main.rs:3135-3161`):
 
-- 有会话时：`[scan] N 个会话（N compressed）：<来源> N · <来源> N`
-- 一个都没扫到时：`[scan] 本机没有扫描到任何会话。`
-- 有来源目录不存在时会多一行：`[scan] 跳过 N 个不存在的来源根目录。`
-- 有已识别但不会被归档的会话时：`⚠ N 个 harness 有已识别但 collect 不会归档的会话。`
-- 最后固定一行：`明细（每个会话一行）：chat-stasher status --sessions`
+- When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
+- When none are found: `[scan] No conversations found on this machine.`
+- When a source root directory does not exist, an extra line: `[scan] Skipped N source root directories that do not exist.`
+- When there are identified conversations that will not be archived: `⚠ N harnesses have identified conversations that collect will not archive.`
+- Finally, a fixed last line: `Details (one line per session): chat-stasher status --sessions`
 
-想看每个会话一行的明细，就加 `--sessions`；那会是几百行
-（`crates/chat-stasher/src/main.rs:156-160`）。
+To see the per-session detail, add `--sessions`; that will be hundreds of lines
+(`crates/chat-stasher/src/main.rs:156-160`).
 
-**🔴 一个容易踩的点**：`status` 在判定「不健康」时会**以非零码退出**
-（`crates/chat-stasher/src/main.rs:2695-2703,3534-3538`）。所以「命令报错了」不一定是
-命令坏了，很可能就是它在告诉你定时器停了。请读第一行的那句话。
+**🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
+the timer "unhealthy" — the source's original wording: 在判定「不健康」时会**以非零码退出**
+(`crates/chat-stasher/src/main.rs:2695-2703,3534-3538`). So "the command errored"
+does not necessarily mean the command is broken; it may well be telling you the
+timer has stopped. Please read that first line.
 
-它的四个退出码是：`0` = 定时器判定正常 · `1` = 扫描读完了、但定时器判定不正常
-（包括**从来没跑过**）· `3` = 根本没扫成（registry 读不了之类，这时它对本机
-没有任何结论）· `2` = 用法错。**注意**：整份报告走的是 **stderr**，所以
-`chat-stasher status 2>&1 | head` 之类的管道拿到的 `$?` 是 `head` 的 0，不是它的。
-要看退出码就别接管道，或者用 `${PIPESTATUS[0]}`。
+Its four exit codes are: `0` = the timer is judged healthy · `1` = the scan
+finished, but the timer is judged unhealthy (including **never having run**) ·
+`3` = the scan did not complete at all (the registry could not be read, for
+example; in that case it has no conclusion about your machine) · `2` = usage
+error. **Note:** the entire report goes to **stderr**, so a pipeline like
+`chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
+To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`.
 
-还有一条相关的命令：`doctor`。它回答的是另一个问题 —— **有没有哪个工具正在
-悄悄删你的历史**。它的报告只含路径、计数、字节数和时间戳
-（`crates/chat-stasher/src/main.rs:65-67,124-126,199-201`）。
-
----
-
-## 6. 🔴 现在还没有的东西
-
-这一节是**诚实清单**。以下都是我们去代码里确认过的现状，不是暂时的免责声明。
-
-- **没有 restore（整体恢复）命令。第一阶段不做。** 子命令表里没有 `restore`
-  这一项（`crates/chat-stasher/src/main.rs:37-569`）。你能做的是 `read`，
-  一次把**一个**会话打到标准输出（`crates/chat-stasher/src/main.rs:164-175`）。
-  批量恢复 = 目前得你自己写脚本循环。
-
-- **🔴 主密钥丢了，没有任何找回手段。** 没有找回流程、没有恢复码、没有客服。
-  源码原话见 4.3 节（`crates/chat-stasher/src/store.rs:813-815`）。
-
-- **回溯历史要跑好几天，不是几分钟。** 回溯这条腿对「取正文」的限速是
-  **每天最多 200 条**，两次请求之间至少隔 20 秒
-  （`apps/extension/lib/backfill/pace.ts:42`，注释见 `:15`）。按这个上限，
-  一千个会话至少要 5 天。这是刻意的慢，不是 bug。
-
-- **回溯功能默认是关的。** 默认值是关
-  （`apps/extension/lib/backfill/schedule.ts:32`），源码把打开的理由写得很清楚：
-  回溯要拿你的登录态把整个账号翻一遍、往下载目录写成百上千个文件，所以必须先
-  有一次明确的「开」。
-  ⚠️ **本文早先的版本说「没有开关界面」，那句话已经过时了**：现在点浏览器工具栏上的
-  扩展图标会弹出一个小面板，里面有一个复选框可以打开它
-  （`apps/extension/entrypoints/popup/index.html`、
-  `apps/extension/entrypoints/popup/main.ts`）。默认关这件事没有变。
-
-- **🔴 打开回溯，也不等于所有平台的历史都会被补回来。** 只有 ChatGPT 会真的把历史
-  正文存下来；DeepSeek 与 Perplexity **只会把会话列出来，一条正文都不会存**；
-  Gemini / Claude / Kimi 完全没支持。名单与详细说明见第 1.1 节
-  （名单出自 `apps/extension/lib/backfill/enumerate.ts:762`、`:774`、`:643`）。
-  这一档最容易让人以为「我已经备份了」，所以它单列一条写在这里。
-
-- **扩展还没上架，要手动装。** 仓库里没有任何商店上架物料或商店扩展 ID；
-  `package.json` 里标着 `"private": true`（`apps/extension/package.json:4`），
-  构建脚本产出的是本地目录和 zip（`apps/extension/package.json:10-13`）。
-  安装方式见第 3 节。
-
-- **抓下来的会话在被 `ingest` 收走之前，是明文躺在你的下载目录里的。**
-  （`apps/extension/lib/download.ts:91`；`README.md` 的「Security and privacy」
-  一节也这么说。）同一台机器上的其他程序能读到它们。
-
-- **Zed 和 Cursor 的会话枚举没有实现**（见 `README.md` 的
-  "What this does not do / current limits" 一节及其引用的
-  `data/harness-registry-v1.json`）。
-
-- **`schedule` 不会替你安装定时器**，只生成模板文件
-  （`crates/chat-stasher/src/main.rs:78`）。真正的安装步骤要你自己做，
-  **具体安装命令本文未给出 —— 未查证**（我们没有在本机走通一次完整的
-  launchd/systemd 安装流程）。
+There is also a related command: `doctor`. It answers a different question —
+**whether any tool is silently deleting your history**. Its report contains
+only paths, counts, bytes, and timestamps
+(`crates/chat-stasher/src/main.rs:65-67,124-126,199-201`).
 
 ---
 
-## 7. 一次性的，还是要反复做的？
+## 6. 🔴 Things that do not exist yet
 
-这是这个产品的核心承诺，所以说清楚：
+This section is an **honest list**. Everything below is the current state we
+confirmed in the code, not a temporary disclaimer.
 
-**装的时候你要动几次手。之后就不用再管了。**
+- **There is no `restore` (bulk recovery) command. Not in phase one.** The
+  subcommand table has no `restore` entry
+  (`crates/chat-stasher/src/main.rs:37-569`). What you can do is `read`, which
+  dumps **one** conversation to standard output at a time
+  (`crates/chat-stasher/src/main.rs:164-175`). Bulk restore = for now you have
+  to write your own script loop.
 
-**只做一次**（第 4 节那些）：
+- **🔴 Lose the master key and there is no way to recover it.** There is no
+  recovery process, no recovery code, no customer service. The source's own
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:813-815`).
 
-- 关掉浏览器的「下载前询问保存位置」
+- **History backfill takes days, not minutes.** The backfill leg's rate limit
+  for fetching content is **at most 200 per day**, with at least 20 seconds
+  between two requests (`apps/extension/lib/backfill/pace.ts:42`; comment at
+  `:15`). At that cap, a thousand conversations take at least 5 days. This is
+  deliberately slow, not a bug.
+
+- **Backfill is off by default.** The default is off
+  (`apps/extension/lib/backfill/schedule.ts:32`), and the source states the
+  reason for enabling it clearly: backfill uses your logged-in session to walk
+  your whole account and write hundreds or thousands of files into the download
+  directory, so there must first be an explicit turn-on.
+  ⚠️ **An earlier version of this document said "there is no on/off UI"; that
+  sentence is now outdated:** clicking the extension icon in your browser
+  toolbar now opens a small panel with a checkbox to turn it on
+  (`apps/extension/entrypoints/popup/index.html`,
+  `apps/extension/entrypoints/popup/main.ts`). That it defaults to off has not
+  changed.
+
+- **🔴 Turning on backfill still does not mean every platform's history will
+  be recovered.** Only ChatGPT actually saves the history content; DeepSeek and
+  Perplexity **only list conversations, saving none of their content**;
+  Gemini / Claude / Kimi are entirely unsupported. See section 1.1 for the list
+  and the detailed explanation (list from
+  `apps/extension/lib/backfill/enumerate.ts:762`, `:774`, `:643`). This tier is
+  the one most likely to make you think "I've backed it up", so it gets its own
+  bullet here.
+
+- **The extension is not on a store yet; you install it manually.** The
+  repository has no store listing material and no store extension ID;
+  `package.json` is marked `"private": true` (`apps/extension/package.json:4`),
+  and the build scripts produce a local directory and a zip
+  (`apps/extension/package.json:10-13`). See section 3 for how to install.
+
+- **Captured conversations lie in plaintext in your download directory until
+  `ingest` takes them away.** (`apps/extension/lib/download.ts:91`; the
+  "Security and privacy" section of `README.md` says the same.) Other programs
+  on the same machine can read them.
+
+- **Zed and Cursor conversation enumeration is not implemented** (see the
+  "What this does not do / current limits" section of `README.md` and the
+  `data/harness-registry-v1.json` it cites).
+
+- **`schedule` does not install the timer for you**; it only generates template
+  files (`crates/chat-stasher/src/main.rs:78`). The actual installation steps
+  are yours to do; **this document does not give the concrete install
+  commands — unverified** (we have not completed a full launchd/systemd
+  installation flow on this machine).
+
+---
+
+## 7. One-time, or something you keep doing?
+
+This is the product's core promise, so say it clearly:
+
+**At install time you do a few things by hand. After that, you never have to
+touch it again.**
+
+**Do once** (the ones in section 4):
+
+- Turn off the browser's "ask where to save each file before downloading"
 - `chat-stasher init`
-- 决定归档目的地
-- 🔴 备份主密钥文件
-- 装定时器
+- Decide where the archive lives
+- 🔴 Back up the master key file
+- Install the timer
 
-**之后自动跑**：定时器每到点跑一次 `run-once`，采集、推送、退出
-（`crates/chat-stasher/src/main.rs:38-39`）。它不需要你确认任何东西。
+**Then it runs automatically:** the timer runs `run-once` at each scheduled
+point — collect, push, exit (`crates/chat-stasher/src/main.rs:38-39`). It does
+not need you to confirm anything.
 
-**你偶尔该做的**（不是必须，但建议）：
+**What you should occasionally do** (not required, but recommended):
 
-- 隔一阵子跑一次 `chat-stasher status`，看第一行那句话。定时器坏掉的典型症状
-  **不是报错，是沉默** —— `run-once` 在后台跑，没人看它的输出，所以它每次都
-  留一条记录，就是为了让 `status` 能替你把这句话说出来
-  （`crates/chat-stasher/src/runstate.rs:1-11`）。这也是为什么「从来没跑过」
-  被判为**不健康**而不是「还行」：没有记录是**证据的缺席**，不是**健康的证据**
-  （`crates/chat-stasher/src/runstate.rs:186-192`）。
-- 偶尔跑一次 `doctor`，看有没有哪个工具开始删你的历史。
+- Run `chat-stasher status` once in a while, and read that first line. The
+  typical symptom of a broken timer is **not an error, it is silence** —
+  `run-once` runs in the background and no one looks at its output, so it
+  leaves a record every time, precisely so that `status` can say that sentence
+  for you (`crates/chat-stasher/src/runstate.rs:1-11`). This is also why "never
+  ran" is judged **unhealthy** rather than "fine": an absent record is the
+  **absence of evidence**, not **evidence of health**
+  (`crates/chat-stasher/src/runstate.rs:186-192`).
+- Run `doctor` occasionally, to check whether any tool has started deleting
+  your history.
 
-**这不是「零配置」。** 上面那五件事是真的要你做的，其中备份密钥那件事没人能
-替你做。但它确实是**一次性**的 —— 做完就不用再想它。
+**This is not "zero config."** Those five things above genuinely require you,
+and the one about backing up the key is something no one can do for you. But it
+is indeed **one-time** — once done, you do not have to think about it again.
 
 ---
 
-## 8. 本文的「未查证」清单
+## 8. This document's "unverified" list
 
-集中列一遍，方便你知道哪些地方该自己再确认一次：
+Collected in one place, so you know which spots to double-check yourself:
 
-| 事项 | 状态 |
+| Item | Status |
 | --- | --- |
-| `saveAs: false` 会不会被浏览器「下载前询问保存位置」覆盖 | **未查证**（我们没实测；外部报告与一条 Chromium issue 指向「会」，属**二手证据**） |
-| Chrome 关闭该设置的**菜单路径与文案** | **未查证**（只核实了配置键 `download.prompt_for_download` 存在于本机 Chrome 的 `Preferences`，值为 `true`） |
-| Edge 的该设置位置 | **未查证** |
-| Firefox 的该设置位置及其对扩展下载的影响 | **未查证** |
-| 各浏览器「加载已解压的扩展」的菜单路径 | **未查证** |
-| 编译 CLI 所需的最低 Rust 版本 | **未查证**（仓库未声明 `rust-version`） |
-| 构建扩展所需的最低 Node / pnpm 版本 | **未查证**（仓库未声明） |
-| launchd / systemd 定时器的实际安装步骤 | **未查证**（`schedule` 只渲染模板，不安装） |
-| 实时归档在 Perplexity 上到底会不会存下东西 | **未查证**（读代码的结论是「认不出会话编号，因此不存」，见第 1 节；我们没有在真实页面上试过） |
-| DeepSeek / Perplexity 的会话列表接口今天是不是还长这样 | **未查证**（出自多个开源实现的交叉印证，不是官方文档，也没有登录态实测；`apps/extension/lib/backfill/enumerate.ts:549-557`、`:612-621`。形状变了会当场停下并留痕，不会变成假进度） |
+| Whether `saveAs: false` is overridden by the browser's "ask where to save each file before downloading" | **Unverified** (we did not test it; external reports and a Chromium issue point to "yes", which is **second-hand evidence**) |
+| Chrome's **menu path and wording** for turning that setting off | **Unverified** (only verified that the config key `download.prompt_for_download` exists in this machine's Chrome `Preferences`, with value `true`) |
+| Edge's location for that setting | **Unverified** |
+| Firefox's location for that setting and its effect on extension downloads | **Unverified** |
+| Each browser's menu path for "Load unpacked extension" | **Unverified** |
+| The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |
+| The minimum Node / pnpm version to build the extension | **Unverified** (the repository does not declare it) |
+| The concrete installation steps for a launchd / systemd timer | **Unverified** (`schedule` only renders templates, does not install) |
+| Whether passive capture actually saves anything on Perplexity | **Unverified** (reading the code, the conclusion is "cannot recognize a session id, therefore saves nothing"; see section 1. We have not tried it on a real page.) |
+| Whether the DeepSeek / Perplexity conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:549-557`, `:612-621`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
 
-「未查证」= 我们没测过，不代表它不存在，也不代表它不工作。
-上面第 6 节里那些**没有**的东西，是我们查过代码确认**确实不存在**的 —— 两者
-请分开看。
+"Unverified" = we have not tested it; it does not mean it does not exist, and
+it does not mean it does not work. The things in section 6 above that are
+listed as **absent** are things we checked in the code and confirmed **really
+do not exist** — please keep the two categories separate.

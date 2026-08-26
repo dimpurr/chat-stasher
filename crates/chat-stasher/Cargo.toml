@@ -4,6 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 description = "Append-only archive for every LLM conversation, across harnesses."
 license = "Apache-2.0"
+repository = "https://github.com/dimpurr/chat-stasher"
+homepage = "https://github.com/dimpurr/chat-stasher"
+documentation = "https://docs.rs/chat-stasher"
+keywords = ["llm", "archive", "conversation", "harness", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
