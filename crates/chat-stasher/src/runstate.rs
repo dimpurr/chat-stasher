@@ -242,6 +242,52 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
     }
 }
 
+/// Machine-readable shape of a [`RunStateRead`] for `status --json`.
+///
+/// The same three cases `summarize` renders as sentences are tagged here with
+/// a `kind`, so a script can tell "never ran" from "record unreadable" from
+/// "ran, here is when" without parsing prose. `unknown` is never serialised as
+/// `finished_at_unix: null`: a missing or unreadable record is its own tagged
+/// case with an explicit `why` (the same rule as `activity::TimeSource`).
+pub fn run_state_json(
+    read: &RunStateRead,
+    now_unix: u64,
+    stale_after_secs: u64,
+) -> serde_json::Value {
+    match read {
+        RunStateRead::Missing => serde_json::json!({
+            "kind": "missing",
+            "why": "没有运行记录：本机从未成功跑完一次 run-once，或状态目录被清空",
+        }),
+        RunStateRead::Unreadable(why) => serde_json::json!({
+            "kind": "unreadable",
+            "why": format!("运行记录存在但读不出来：{why}"),
+        }),
+        RunStateRead::Present(state) => {
+            let age = now_unix.saturating_sub(state.finished_at_unix);
+            let outcome = match state.outcome {
+                RunOutcome::Completed => "completed",
+                RunOutcome::Noop => "noop",
+                RunOutcome::Error => "error",
+            };
+            serde_json::json!({
+                "kind": "known",
+                "finished_at_unix": state.finished_at_unix,
+                "age_secs": age,
+                "overdue": age > stale_after_secs,
+                "stale_after_secs": stale_after_secs,
+                "outcome": outcome,
+                "duration_ms": state.duration_ms,
+                "failed_step": state.failed_step,
+                "shards_written": state.shards_written,
+                "snapshot_created": state.snapshot_created,
+                "collect_errors": state.collect_errors,
+                "archive_gaps": state.archive_gaps,
+            })
+        }
+    }
+}
+
 /// Coarse, honest duration wording — no invented precision.
 fn human_age(secs: u64) -> String {
     if secs < 90 {

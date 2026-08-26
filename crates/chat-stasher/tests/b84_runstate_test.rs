@@ -8,8 +8,8 @@
 //! ```
 //!
 //! …reported alongside exit code 0. The code was never 0. `cmd_status` maps
-//! `run_state_verdict(&config).healthy` straight onto `SUCCESS` / `FAILURE`,
-//! and `runstate::summarize` has returned `healthy: false` for
+//! `run_state_info(&config).verdict.healthy` straight onto `SUCCESS` /
+//! `FAILURE`, and `runstate::summarize` has returned `healthy: false` for
 //! `RunStateRead::Missing` since the file was written (`runstate.rs:186-192`).
 //!
 //! What produces a 0 in a transcript is the *shell*, not the binary: the whole

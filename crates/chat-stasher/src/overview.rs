@@ -16,6 +16,7 @@
 //! * Width is caller-driven (`width: usize`), never a hardcoded 80. The
 //!   heatmap picks day vs week buckets from the available width.
 
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Density ramp, low → high. `EMPTY` marks a time bucket with nothing in it
@@ -26,7 +27,17 @@ const EMPTY: char = ' ';
 const UNKNOWN: char = '?';
 
 /// Whether a session's time is attested as exact, inferred, or unavailable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` carries the exact tagged shape of [`crate::activity::TimeSource`]
+/// (`{"kind":"exact"}` / `{"kind":"inferred","how":…}` /
+/// `{"kind":"unknown","why":…}`), so `overview --json` and the sidecar index
+/// never drift apart on the one field whose tri-state is a contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "snake_case"
+)]
 pub enum TimeSource {
     Exact,
     Inferred { how: String },
@@ -118,6 +129,107 @@ pub fn render_overview(rows: &[OverviewRow], width: usize) -> String {
     out.push('\n');
     out.push_str(&render_heatmap(rows, width, HeatmapAxis::Machine));
     out
+}
+
+// ---------------------------------------------------------------------------
+// `overview --json` serialisation (pure, no IO — tested with synthetic rows)
+// ---------------------------------------------------------------------------
+
+/// The `overview --json` object for a run that *did* read the destination
+/// (exit 0 = at least one index rendered, exit 1 = read in full, no index
+/// anywhere). `rows.is_empty()` is exactly the exit-1 case and is carried as
+/// `no_index_anywhere`.
+///
+/// Every count is a number only when measured; the per-session first/last
+/// times are tri-state ([`crate::json_out::TimeState`]) so a missing time is
+/// never `null`. `display_names` maps a partition id to the ADR-018 display
+/// name, keeping the raw id (the archive key) and the human name both visible.
+pub fn overview_json(
+    rows: &[OverviewRow],
+    snapshot_machines: &BTreeSet<String>,
+    index_machines: &BTreeSet<String>,
+    declared_machines: &BTreeSet<String>,
+    display_names: &BTreeMap<String, String>,
+    exit_code: u8,
+) -> serde_json::Value {
+    let missing = snapshot_machines
+        .iter()
+        .filter(|m| !index_machines.contains(*m))
+        .cloned()
+        .collect::<Vec<_>>();
+    let undeclared = snapshot_machines
+        .iter()
+        .filter(|m| !declared_machines.contains(*m))
+        .cloned()
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "command": "overview",
+        "healthy": exit_code == 0,
+        "exit_code": exit_code,
+        "no_index_anywhere": rows.is_empty(),
+        "summary": {
+            "machines": machine_count(rows),
+            "harnesses": harness_count(rows),
+            "sessions": rows.len(),
+            "lines": total_lines(rows),
+            "unknown_time_sessions": rows.iter().filter(|r| !r.has_known_time()).count(),
+        },
+        "machines": {
+            "with_snapshot": snapshot_machines.len(),
+            "with_index": index_machines.len(),
+            "with_declaration": declared_machines.len(),
+            "missing_index": missing.iter().map(|m| display_name(m, display_names)).collect::<Vec<_>>(),
+            "undeclared": undeclared.iter().map(|m| display_name(m, display_names)).collect::<Vec<_>>(),
+        },
+        "sessions": rows.iter().map(|r| row_json(r, display_names)).collect::<Vec<_>>(),
+    })
+}
+
+/// The `overview --json` object for a run that could not produce data at all
+/// (usage error exit 2, or unreadable archive exit 3). The `error` text is the
+/// same sentence `cmd_overview` prints to stderr; the object keeps stdout a
+/// single parseable JSON value even on the failure path.
+pub fn overview_error_json(exit_code: u8, error: String) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "command": "overview",
+        "healthy": false,
+        "exit_code": exit_code,
+        "error": error,
+    })
+}
+
+/// One session row of `overview --json`. `first_unix` / `last_unix` are
+/// tri-state: when the session's time is `Unknown` they carry the same `why`
+/// as `time_source`, never `null`.
+fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_json::Value {
+    let why = match &r.time_source {
+        TimeSource::Unknown { why } => Some(why.as_str()),
+        _ => None,
+    };
+    let boundary = |v: Option<i64>| match (v, why) {
+        (Some(unix), _) => crate::json_out::TimeState::known(unix),
+        (None, Some(why)) => crate::json_out::TimeState::unknown(why.to_string()),
+        (None, None) => crate::json_out::TimeState::unknown("该会话没有记录到这一端的时间边界"),
+    };
+    serde_json::json!({
+        "session_id": r.session_id,
+        "machine": r.machine,
+        "machine_display": display_name(&r.machine, display_names),
+        "harness": r.harness,
+        "line_count": r.line_count,
+        "time_source": r.time_source,
+        "first_unix": boundary(r.first_unix),
+        "last_unix": boundary(r.last_unix),
+    })
+}
+
+fn display_name(machine: &str, display_names: &BTreeMap<String, String>) -> String {
+    display_names
+        .get(machine)
+        .cloned()
+        .unwrap_or_else(|| machine.to_string())
 }
 
 /// The machine × harness matrix. Each cell shows `N会话 · L行 · [span]`,
@@ -789,6 +901,195 @@ mod tests {
         assert_eq!(civil_from_days(days_for_test(2024, 2, 29)), (2024, 2, 29));
         // round trip through fmt (fmt_date takes seconds, not days)
         assert_eq!(fmt_date(days_for_test(2025, 12, 31) * 86_400), "2025-12-31");
+    }
+
+    // ---- `overview --json` schema stability -------------------------------
+
+    fn machines(
+        snapshot: &[&str],
+        index: &[&str],
+        declared: &[&str],
+    ) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+        (
+            snapshot.iter().map(|s| s.to_string()).collect(),
+            index.iter().map(|s| s.to_string()).collect(),
+            declared.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    /// Field-name stability for the success shape. Bumping a key here is a
+    /// breaking change for every script that parsed `overview --json`, so the
+    /// names are pinned, not just "contains the obvious ones".
+    #[test]
+    fn overview_json_field_names_are_stable() {
+        let (snap, idx, decl) = machines(&["air"], &["air"], &["air"]);
+        let mut display = BTreeMap::new();
+        display.insert("air".to_string(), "air (air)".to_string());
+        let rows = vec![row(
+            "s1",
+            "air",
+            "claude-code",
+            Some(D1),
+            Some(D1),
+            42,
+            TimeSource::Exact,
+        )];
+        let v = overview_json(&rows, &snap, &idx, &decl, &display, 0);
+        let obj = v.as_object().expect("overview json is an object");
+        let top: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            top,
+            [
+                "command",
+                "exit_code",
+                "healthy",
+                "machines",
+                "no_index_anywhere",
+                "schema_version",
+                "sessions",
+                "summary",
+            ]
+        );
+        let summary = obj["summary"].as_object().expect("summary object");
+        assert_eq!(
+            summary.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "harnesses",
+                "lines",
+                "machines",
+                "sessions",
+                "unknown_time_sessions",
+            ]
+        );
+        let machine_obj = obj["machines"].as_object().expect("machines object");
+        assert_eq!(
+            machine_obj.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "missing_index",
+                "undeclared",
+                "with_declaration",
+                "with_index",
+                "with_snapshot",
+            ]
+        );
+        let session = obj["sessions"][0].as_object().expect("session object");
+        assert_eq!(
+            session.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "first_unix",
+                "harness",
+                "last_unix",
+                "line_count",
+                "machine",
+                "machine_display",
+                "session_id",
+                "time_source",
+            ]
+        );
+    }
+
+    /// A known time serialises as `{"kind":"known","unix":…}` and the
+    /// `time_source` keeps the exact/inferred/unknown tagged shape.
+    #[test]
+    fn overview_json_known_time_is_explicit() {
+        let (snap, idx, decl) = machines(&["air"], &["air"], &["air"]);
+        let mut display = BTreeMap::new();
+        display.insert("air".to_string(), "air".to_string());
+        let rows = vec![row(
+            "s1",
+            "air",
+            "claude-code",
+            Some(D1),
+            Some(D1P1),
+            42,
+            TimeSource::Exact,
+        )];
+        let v = overview_json(&rows, &snap, &idx, &decl, &display, 0);
+        let session = &v["sessions"][0];
+        assert_eq!(
+            session["first_unix"],
+            serde_json::json!({"kind":"known","unix":D1})
+        );
+        assert_eq!(
+            session["last_unix"],
+            serde_json::json!({"kind":"known","unix":D1P1})
+        );
+        assert_eq!(session["time_source"], serde_json::json!({"kind":"exact"}));
+        assert_eq!(v["no_index_anywhere"], serde_json::json!(false));
+        assert_eq!(v["exit_code"], serde_json::json!(0));
+        assert_eq!(v["healthy"], serde_json::json!(true));
+    }
+
+    /// An unknown time must NOT serialise `first_unix`/`last_unix` as `null`:
+    /// they are `{"kind":"unknown","why":…}` carrying the same reason as
+    /// `time_source`, so a consumer can never read a null as "1970".
+    #[test]
+    fn overview_json_unknown_time_is_never_null() {
+        let (snap, idx, decl) = machines(&["air"], &["air"], &["air"]);
+        let display = BTreeMap::new();
+        let rows = vec![row(
+            "u1",
+            "air",
+            "codex",
+            None,
+            None,
+            10,
+            TimeSource::Unknown {
+                why: "corrupt header".into(),
+            },
+        )];
+        let v = overview_json(&rows, &snap, &idx, &decl, &display, 0);
+        let session = &v["sessions"][0];
+        assert_eq!(
+            session["first_unix"],
+            serde_json::json!({"kind":"unknown","why":"corrupt header"})
+        );
+        assert_eq!(
+            session["last_unix"],
+            serde_json::json!({"kind":"unknown","why":"corrupt header"})
+        );
+        assert_eq!(
+            session["time_source"],
+            serde_json::json!({"kind":"unknown","why":"corrupt header"})
+        );
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(
+            !text.contains("null"),
+            "unknown time must never serialise as null: {text}"
+        );
+        assert_eq!(v["summary"]["unknown_time_sessions"], serde_json::json!(1));
+    }
+
+    /// The exit-1 shape (read the whole repo, no index anywhere) is the same
+    /// object with `no_index_anywhere: true`, empty sessions and exit_code 1.
+    #[test]
+    fn overview_json_no_index_anywhere_shape() {
+        let (snap, idx, decl) = machines(&["air"], &[], &[]);
+        let display = BTreeMap::new();
+        let rows = Vec::new();
+        let v = overview_json(&rows, &snap, &idx, &decl, &display, 1);
+        assert_eq!(v["no_index_anywhere"], serde_json::json!(true));
+        assert_eq!(v["exit_code"], serde_json::json!(1));
+        assert_eq!(v["healthy"], serde_json::json!(false));
+        assert_eq!(v["sessions"], serde_json::json!([]));
+        // The snapshot-without-index machine is named, never dropped.
+        assert_eq!(v["machines"]["missing_index"], serde_json::json!(["air"]));
+    }
+
+    /// The error shape (exit 2 / 3) carries the same fixed top-level keys plus
+    /// `error`; the schema-stability story is that `error` is where the
+    /// machine-readable reason lives, never on `sessions`.
+    #[test]
+    fn overview_json_error_shape_is_stable() {
+        let v = overview_error_json(3, "no key".to_string());
+        let obj = v.as_object().expect("error json is an object");
+        assert_eq!(
+            obj.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["command", "error", "exit_code", "healthy", "schema_version"]
+        );
+        assert_eq!(v["exit_code"], serde_json::json!(3));
+        assert_eq!(v["error"], serde_json::json!("no key"));
+        assert_eq!(v["healthy"], serde_json::json!(false));
     }
 
     // ---- test-only calendar helpers ----

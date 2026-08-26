@@ -25,6 +25,7 @@
 //!     and what the safe cleanup sequence is — but never runs it.
 
 use crate::config::Config;
+use crate::json_out::{CountState, TimeState};
 use crate::scanner;
 use crate::store::{self, StoreConfig};
 use std::collections::BTreeMap;
@@ -1111,6 +1112,201 @@ fn default_data_root() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// `doctor --json` serialisation — pure, no IO; the report is already built.
+// ---------------------------------------------------------------------------
+
+/// The full `doctor --json` object. Same data as [`print_report`], with every
+/// count a tri-state ([`CountState`]) and every time a tri-state
+/// ([`TimeState`]): nothing that is unknown is ever serialised as `0`/`null`.
+pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "command": "doctor",
+        "scan_failed": r.scan_failed,
+        "config_source": r.config_source.label(),
+        "claude": claude_json(&r.claude),
+        "gemini": gemini_json(&r.gemini),
+        "footprints": r.footprints.iter().map(footprint_json).collect::<Vec<_>>(),
+        "other_present": r.other_present.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "risks": r.risks.iter().map(|text| risk_json(text)).collect::<Vec<_>>(),
+        "reclaim": reclaim_json(&r.reclaim),
+        "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
+        "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Claude Code's retention verdict, tagged like every other tri-state in this
+/// file: the four distinct D1 outcomes are four distinct `kind`s.
+fn claude_layer_json(v: &ClaudeRetention) -> serde_json::Value {
+    match v {
+        ClaudeRetention::UnsetDefault => serde_json::json!({"kind": "unset_default"}),
+        ClaudeRetention::Safe { days, source } => serde_json::json!({
+            "kind": "safe",
+            "days": days,
+            "source": source.display().to_string(),
+        }),
+        ClaudeRetention::SmallValue { days, source } => serde_json::json!({
+            "kind": "small_value",
+            "days": days,
+            "source": source.display().to_string(),
+        }),
+        ClaudeRetention::ParseFailed { path, error } => serde_json::json!({
+            "kind": "parse_failed",
+            "path": path.display().to_string(),
+            "error": error,
+        }),
+    }
+}
+
+fn claude_json(check: &ClaudeCheck) -> serde_json::Value {
+    serde_json::json!({
+        "dangerous": check.verdict.is_dangerous(),
+        "verdict": claude_layer_json(&check.verdict),
+        "layers": check.layers.iter().map(|(path, v)| serde_json::json!({
+            "path": path.display().to_string(),
+            "verdict": claude_layer_json(v),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Gemini's retention: a known policy or an explicit unknown (a settings file
+/// that exists but could not be read). An unreadable policy is never guessed
+/// from the CLI default.
+fn gemini_json(g: &GeminiRetention) -> serde_json::Value {
+    if let Some(error) = &g.unreadable {
+        return serde_json::json!({
+            "kind": "unknown",
+            "why": format!("配置读不出来：{error}"),
+        });
+    }
+    serde_json::json!({
+        "kind": "known",
+        "enabled": g.enabled,
+        "max_age": g.max_age,
+        "min_retention": g.min_retention,
+        "dangerous": g.is_dangerous(),
+    })
+}
+
+/// One footprint row. The three-state rule is the same as the human table:
+/// a count that was not measured is `unknown` (installed store we could not
+/// enumerate) or `not_applicable` (not installed on this machine).
+fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
+    serde_json::json!({
+        "name": f.name,
+        "installed": f.installed,
+        "root": f.root.as_ref().map(|root| root.display().to_string()),
+        "session_count": match f.session_count {
+            Some(n) => CountState::known(n),
+            None if f.installed => CountState::unknown("会话数没能枚举出来"),
+            None => CountState::not_applicable("未安装"),
+        },
+        "candidate_count": match f.candidate_count {
+            Some(n) => CountState::known(n),
+            None => CountState::not_applicable("无候选计数（非单文件 store）"),
+        },
+        "unreadable_count": unreadable_tri(f.session_count.is_some(), f.unreadable_count),
+        "unreadable_entry_count": unreadable_tri(f.session_count.is_some(), f.unreadable_entry_count),
+        "total_bytes": match f.total_bytes {
+            Some(bytes) => CountState::known(bytes),
+            None if f.installed => CountState::unknown("字节数没能测出来"),
+            None => CountState::not_applicable("未安装"),
+        },
+        "earliest": system_time_state(f.earliest),
+        "latest": system_time_state(f.latest),
+        "compressed_count": CountState::known(f.compressed_count),
+        "note": f.note,
+    })
+}
+
+/// The unreadable/entry tally rule, shared with the human table: counted ->
+/// known (including zero); enumerated but tally failed -> unknown; never
+/// enumerated -> not_applicable.
+fn unreadable_tri(enumerated: bool, value: Option<u64>) -> CountState {
+    match (enumerated, value) {
+        (_, Some(n)) => CountState::known(n),
+        (true, None) => CountState::unknown("读不出来的条数本身没数出来"),
+        (false, None) => CountState::not_applicable("这个 harness 没有被枚举"),
+    }
+}
+
+fn system_time_state(t: Option<SystemTime>) -> TimeState {
+    match t {
+        Some(t) => match t.duration_since(UNIX_EPOCH) {
+            Ok(d) => TimeState::known(d.as_secs() as i64),
+            Err(e) => {
+                TimeState::unknown(format!("时间戳早于 1970（{} 秒）", e.duration().as_secs()))
+            }
+        },
+        None => TimeState::unknown("没有记录到时间戳"),
+    }
+}
+
+/// The leading severity emoji is promoted to a structured `severity` so a
+/// script can colour an alert without parsing the emoji. The raw sentence is
+/// kept verbatim in `text`.
+fn risk_json(text: &str) -> serde_json::Value {
+    let severity = if text.starts_with("🔴🔴") {
+        "critical"
+    } else if text.starts_with("🔴") {
+        "red"
+    } else if text.starts_with("🟡") {
+        "yellow"
+    } else if text.starts_with("🟢") {
+        "green"
+    } else {
+        "none"
+    };
+    serde_json::json!({ "severity": severity, "text": text })
+}
+
+fn reclaim_json(r: &ReclaimCheck) -> serde_json::Value {
+    match r {
+        ReclaimCheck::NoRepo { repo_root } => serde_json::json!({
+            "kind": "no_repo",
+            "repo_root": repo_root.display().to_string(),
+        }),
+        ReclaimCheck::NoKey { key_file, error } => serde_json::json!({
+            "kind": "no_key",
+            "key_file": key_file.display().to_string(),
+            "error": error,
+        }),
+        ReclaimCheck::OpenFailed { repo_root, error } => serde_json::json!({
+            "kind": "open_failed",
+            "repo_root": repo_root.display().to_string(),
+            "error": error,
+        }),
+        ReclaimCheck::Ok {
+            packs_unref,
+            size_unref,
+            packs_repack,
+            size_repack,
+            append_only,
+        } => serde_json::json!({
+            "kind": "ok",
+            "packs_unref": packs_unref,
+            "size_unref": size_unref,
+            "packs_repack": packs_repack,
+            "size_repack": size_repack,
+            "append_only": append_only,
+            "has_garbage": r.has_garbage(),
+        }),
+    }
+}
+
+fn archive_gap_json(g: &scanner::ArchiveGap) -> serde_json::Value {
+    serde_json::json!({
+        "harness": g.harness_id,
+        "display_name": g.display_name,
+        "recognized_sessions": match g.recognized_sessions {
+            Some(n) => CountState::known(n),
+            None => CountState::unknown("未能计数"),
+        },
+        "session_records": g.session_records,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Printing — never session contents, only ids/paths/counts/bytes/timestamps.
 // ---------------------------------------------------------------------------
 
@@ -1696,5 +1892,148 @@ mod b90_unknown_count_tests {
         let f = default_footprint("fixture", PathBuf::from("/nowhere"));
         assert_eq!(f.total_bytes, None);
         assert_eq!(footprint_bytes_label(&f), "N/A");
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    /// A synthetic footprint row with the three-state fields exercised.
+    fn fp() -> HarnessFootprint {
+        HarnessFootprint {
+            name: "opencode".to_string(),
+            root: Some(PathBuf::from("/nowhere/store.db")),
+            installed: true,
+            session_count: Some(3),
+            candidate_count: Some(414),
+            unreadable_count: None,
+            unreadable_entry_count: Some(0),
+            total_bytes: Some(4096),
+            earliest: Some(UNIX_EPOCH),
+            latest: None,
+            compressed_count: 0,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        }
+    }
+
+    fn probe() -> scanner::HarnessProbe {
+        scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: Some(PathBuf::from("/nowhere/.claude")),
+            confidence: crate::scanner::Confidence::Confirmed,
+            state: scanner::ProbeState::Scanned,
+            record_count: Some(2),
+            candidate_count: Some(2),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: Some(UNIX_EPOCH),
+            latest: Some(UNIX_EPOCH),
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        }
+    }
+
+    /// The whole report assembled from synthetic parts — no IO.
+    fn report() -> DoctorReport {
+        DoctorReport {
+            config_source: crate::config::ConfigSource::DefaultsMissing,
+            claude: ClaudeCheck {
+                layers: vec![(
+                    PathBuf::from("/nowhere/.claude/settings.json"),
+                    ClaudeRetention::UnsetDefault,
+                )],
+                verdict: ClaudeRetention::UnsetDefault,
+            },
+            gemini: GeminiRetention::default(),
+            footprints: vec![fp()],
+            other_present: vec![PathBuf::from("/nowhere/.cursor")],
+            risks: vec![
+                "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。".to_string(),
+                "🟢 Gemini: disabled — 无风险。".to_string(),
+            ],
+            reclaim: ReclaimCheck::NoRepo {
+                repo_root: PathBuf::from("/nowhere/repo"),
+            },
+            probes: vec![probe()],
+            archive_gaps: Vec::new(),
+            scan_failed: false,
+        }
+    }
+
+    /// Top-level field-name stability. Bumping a key here is a breaking change
+    /// for every script that parsed `doctor --json`, so the names are pinned.
+    #[test]
+    fn doctor_json_top_level_field_names_are_stable() {
+        let v = report_to_json(&report());
+        let obj = v.as_object().expect("doctor json is an object");
+        assert_eq!(
+            obj.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "archive_gaps",
+                "claude",
+                "command",
+                "config_source",
+                "footprints",
+                "gemini",
+                "other_present",
+                "probes",
+                "reclaim",
+                "risks",
+                "scan_failed",
+                "schema_version",
+            ]
+        );
+    }
+
+    /// A footprint whose unreadable tally was never taken is `unknown`, never
+    /// a quiet zero — the same B90 rule the human table follows.
+    #[test]
+    fn doctor_json_uncounted_unreadable_is_unknown() {
+        let v = report_to_json(&report());
+        assert_eq!(
+            v["footprints"][0]["unreadable_count"],
+            serde_json::json!({"kind":"unknown","why":"读不出来的条数本身没数出来"})
+        );
+        // candidate_count / session_count are measured numbers.
+        assert_eq!(
+            v["footprints"][0]["candidate_count"],
+            serde_json::json!({"kind":"known","count":414})
+        );
+        assert_eq!(
+            v["footprints"][0]["session_count"],
+            serde_json::json!({"kind":"known","count":3})
+        );
+        // latest is absent -> unknown, never null.
+        assert_eq!(
+            v["footprints"][0]["latest"],
+            serde_json::json!({"kind":"unknown","why":"没有记录到时间戳"})
+        );
+    }
+
+    /// Risk severity is structured, and the reclaim shape is tagged.
+    #[test]
+    fn doctor_json_risk_severity_and_reclaim_kind() {
+        let v = report_to_json(&report());
+        assert_eq!(v["risks"][0]["severity"], serde_json::json!("red"));
+        assert_eq!(v["risks"][1]["severity"], serde_json::json!("green"));
+        assert_eq!(
+            v["risks"][0]["text"],
+            serde_json::json!("🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。")
+        );
+        assert_eq!(v["reclaim"]["kind"], serde_json::json!("no_repo"));
+    }
+
+    /// `scan_failed` is a real boolean carried through; a scan-failed report
+    /// never hides the fact that coverage is unknown.
+    #[test]
+    fn doctor_json_carries_scan_failed() {
+        let mut r = report();
+        r.scan_failed = true;
+        let v = report_to_json(&r);
+        assert_eq!(v["scan_failed"], serde_json::json!(true));
     }
 }

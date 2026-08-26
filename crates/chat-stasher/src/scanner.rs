@@ -34,6 +34,7 @@
 //!   * missing roots are reported, not fatal.
 
 use crate::config::Config;
+use crate::json_out;
 use crate::models::{HarnessSource, SessionRecord, SqliteSessionLayout};
 use crate::sqlite_probe::{
     enumerate_cursor_legacy_sessions, enumerate_opencode_sessions, enumerate_sqlite_sessions,
@@ -602,6 +603,130 @@ pub fn format_archive_gap(gap: &ArchiveGap) -> String {
             .unwrap_or_else(|| "unknown".to_string()),
         gap.session_records
     )
+}
+
+// ---------------------------------------------------------------------------
+// `status --json` / `doctor --json` serialisation
+// ---------------------------------------------------------------------------
+
+/// The probe state as a stable machine-readable word (never localised prose).
+pub fn probe_state_word(state: ProbeState) -> &'static str {
+    match state {
+        ProbeState::Scanned => "scanned",
+        ProbeState::FileTarget => "file_target",
+        ProbeState::Missing => "missing",
+        ProbeState::Indeterminate => "indeterminate",
+        ProbeState::SkipUnascertained => "skip_unascertained",
+        ProbeState::SkipWrongPlatform => "skip_wrong_platform",
+        ProbeState::SkipUnresolvable => "skip_unresolvable",
+    }
+}
+
+/// The session-count answer for one probe, as a machine-readable tri-state.
+///
+/// Same vocabulary as the display code (`doctor.rs` `footprint_count_label`):
+/// a number when the store was enumerated, `unknown` when "we did not look" or
+/// "could not enumerate", and `not_applicable` when there is no cell for this
+/// platform. `Missing` stays `known(0)` — that is a *measured* absence, the
+/// one case where `0` is earned.
+pub fn probe_session_count(p: &HarnessProbe) -> json_out::CountState {
+    use crate::json_out::CountState;
+    match p.state {
+        ProbeState::Scanned | ProbeState::FileTarget => match p.record_count {
+            Some(n) => CountState::known(n),
+            None => CountState::unknown("会话数没能枚举出来（store 无法枚举）"),
+        },
+        ProbeState::Missing => CountState::known(0),
+        ProbeState::SkipWrongPlatform => CountState::not_applicable("registry 没有本平台的 cell"),
+        ProbeState::Indeterminate => CountState::unknown("来源是否存在都无法确认"),
+        ProbeState::SkipUnascertained => {
+            CountState::unknown("confidence 未查明，禁止扫描猜测的路径")
+        }
+        ProbeState::SkipUnresolvable => CountState::unknown("模板无法归约为静态根路径"),
+    }
+}
+
+/// The unreadable-tally answer for one probe.
+///
+/// Mirrors `doctor.rs` `footprint_count_detail`: a row that was *never*
+/// enumerated (`record_count` is `None`) has no "unreadable" concept and is
+/// `not_applicable`; a row that was enumerated but whose tally itself failed
+/// is `unknown`, never a quiet zero.
+pub fn probe_unreadable_count(p: &HarnessProbe) -> json_out::CountState {
+    use crate::json_out::CountState;
+    match (p.record_count.is_some(), p.unreadable_count) {
+        (_, Some(n)) => CountState::known(n),
+        (true, None) => CountState::unknown("读不出来的条数本身没数出来"),
+        (false, None) => {
+            CountState::not_applicable("这个 harness 没有被枚举，不存在“读不出来”的概念")
+        }
+    }
+}
+
+/// The unreadable *entry* tally for one probe (directory entries whose session
+/// cardinality is unknown). Same rule as [`probe_unreadable_count`].
+pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
+    use crate::json_out::CountState;
+    match (p.record_count.is_some(), p.unreadable_entry_count) {
+        (_, Some(n)) => CountState::known(n),
+        (true, None) => CountState::unknown("不可读目录项的条数本身没数出来"),
+        (false, None) => {
+            CountState::not_applicable("这个 harness 没有被枚举，不存在不可读目录项的概念")
+        }
+    }
+}
+
+/// One probe serialised for `status --json` / `doctor --json`. Every count is
+/// a tri-state; none can be `0`-or-null because a value was never looked at.
+pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
+    serde_json::json!({
+        "harness": p.id,
+        "display_name": p.display_name,
+        "state": probe_state_word(p.state),
+        "installed": p.installed_p(),
+        "root": p.root.as_ref().map(|root| root.display().to_string()),
+        "session_count": probe_session_count(p),
+        "unreadable_count": probe_unreadable_count(p),
+        "unreadable_entry_count": probe_unreadable_entry_count(p),
+    })
+}
+
+/// The `scanner` object of `status --json`, for a scan that succeeded. Every
+/// aggregate count is `known` here because a finished `ScanReport` is a
+/// measured answer; the "could not scan at all" shape is built by the caller
+/// as `{"kind":"failed","why":...}` instead.
+pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
+    use crate::json_out::CountState;
+    let compressed = report.records.iter().filter(|r| r.compressed).count() as u64;
+    let unreadable_sessions: u64 = report
+        .probes
+        .iter()
+        .filter_map(|p| p.unreadable_count)
+        .sum();
+    let unreadable_entries: u64 = report
+        .probes
+        .iter()
+        .filter_map(|p| p.unreadable_entry_count)
+        .sum();
+    // B90: harnesses that *were* enumerated but whose unreadable tally could
+    // not be taken — same set the human `unreadable_notice` names as 未知.
+    let unreadable_uncounted: u64 = report
+        .probes
+        .iter()
+        .filter(|p| p.record_count.is_some() && p.unreadable_count.is_none())
+        .count() as u64;
+    serde_json::json!({
+        "kind": "ok",
+        "total_sessions": CountState::known(report.records.len() as u64),
+        "compressed_sessions": CountState::known(compressed),
+        "missing_roots": CountState::known(report.missing_roots.len() as u64),
+        "indeterminate_roots": CountState::known(report.indeterminate_roots.len() as u64),
+        "archive_gap_harnesses": CountState::known(report.archive_gaps().len() as u64),
+        "unreadable_sessions": CountState::known(unreadable_sessions),
+        "unreadable_entries": CountState::known(unreadable_entries),
+        "unreadable_uncounted_harnesses": CountState::known(unreadable_uncounted),
+        "harnesses": report.probes.iter().map(probe_json).collect::<Vec<_>>(),
+    })
 }
 
 // ---------------------------------------------------------------------------

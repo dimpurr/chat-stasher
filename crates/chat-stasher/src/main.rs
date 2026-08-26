@@ -167,6 +167,15 @@ enum Command {
         /// Also print one metadata line per session found (can be hundreds).
         #[arg(long)]
         sessions: bool,
+        /// Print exactly one JSON object to stdout and nothing else (the
+        /// human lines still go to stderr). Tri-state fields are tagged
+        /// `{"kind":"known",…}` / `{"kind":"unknown","why":…}` /
+        /// `{"kind":"not_applicable",…}` — an unknown is never serialised as
+        /// `0`, `null` or a missing field. `run_state.kind` is
+        /// `known` / `missing` / `unreadable`; `scanner.kind` is `ok` /
+        /// `failed`. `exit_semantics` documents what the exit code means.
+        #[arg(long)]
+        json: bool,
     },
     /// Dump one session back from the repository (sequence-concatenated) and
     /// print its sha256 for verification — or, with `--all-machines`, merge
@@ -215,7 +224,16 @@ enum Command {
     },
     /// Diagnostic: does any harness on this machine silently delete its
     /// sessions? Read-only (paths/counts/bytes/timestamps only).
-    Doctor,
+    Doctor {
+        /// Print exactly one JSON object to stdout and nothing else. Tri-state
+        /// fields are tagged `{"kind":"known",…}` / `{"kind":"unknown","why":…}`
+        /// / `{"kind":"not_applicable",…}` — an unknown is never serialised as
+        /// `0`, `null` or a missing field. `claude.verdict.kind` is one of
+        /// `unset_default` / `safe` / `small_value` / `parse_failed`;
+        /// `reclaim.kind` is `ok` / `no_repo` / `no_key` / `open_failed`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Prove the archive is intact. Three independently runnable levels:
     /// l1 = rustic structure check (cheap, no payload reads), l2 = rustic content
     /// check (downloads and re-hashes every pack), l3 = reconcile against an
@@ -686,6 +704,15 @@ enum Command {
         /// Terminal width for the matrix/heatmap (default: 100).
         #[arg(long, default_value_t = 100)]
         width: usize,
+        /// Print exactly one JSON object to stdout and nothing else (the
+        /// human matrix/heatmap is suppressed). Per-session `first_unix` /
+        /// `last_unix` and `time_source` are tri-state tagged
+        /// `{"kind":"known",…}` / `{"kind":"unknown","why":…}` — an unknown
+        /// time is never `null`. `no_index_anywhere` is `true` on exit 1
+        /// (read in full, no index anywhere); a failed read (exit 3) puts the
+        /// reason in `error`.
+        #[arg(long)]
+        json: bool,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -768,7 +795,7 @@ fn main() -> ExitCode {
             &options,
             no_reap,
         ),
-        Command::Status { sessions } => cmd_status(sessions),
+        Command::Status { sessions, json } => cmd_status(sessions, json),
         Command::Read {
             stage,
             session,
@@ -794,7 +821,7 @@ fn main() -> ExitCode {
             &options,
             no_reap,
         ),
-        Command::Doctor => cmd_doctor(),
+        Command::Doctor { json } => cmd_doctor(json),
         Command::Verify {
             level,
             stage,
@@ -960,6 +987,7 @@ fn main() -> ExitCode {
         Command::Overview {
             destination,
             width,
+            json,
             repo,
             key_file,
             connections,
@@ -968,6 +996,7 @@ fn main() -> ExitCode {
         } => cmd_overview(
             destination,
             width,
+            json,
             repo,
             key_file,
             connections,
@@ -1674,6 +1703,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
 fn cmd_overview(
     destination: Option<String>,
     width: usize,
+    json: bool,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -1682,10 +1712,14 @@ fn cmd_overview(
 ) -> ExitCode {
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
-        eprintln!(
-            "overview: name the destination to open (`--destination <name>`, or an explicit `--repo`)"
-        );
-        eprintln!("overview: there is no default destination and no cross-destination merge");
+        let msg = "overview: name the destination to open (`--destination <name>`, or an explicit `--repo`); there is no default destination and no cross-destination merge";
+        eprintln!("{msg}");
+        if json {
+            println!(
+                "{}",
+                json_string(&overview::overview_error_json(2, msg.to_string()))
+            );
+        }
         return ExitCode::from(2);
     }
     let cfg = resolve_store_config(
@@ -1699,9 +1733,13 @@ fn cmd_overview(
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
-            eprintln!("overview: {e}");
+            let msg = format!("{e:#}");
+            eprintln!("overview: {msg}");
             eprintln!("overview: without the key nothing was read — this is not an empty result");
             reap_remote(&cfg, no_reap);
+            if json {
+                println!("{}", json_string(&overview::overview_error_json(3, msg)));
+            }
             // Deliberately 3, not 1: a missing key means the archive was never
             // consulted, which belongs with "could not finish reading".
             return ExitCode::from(3);
@@ -1711,11 +1749,15 @@ fn cmd_overview(
     let read = match read_overview_indexes(&cfg, &mk) {
         Ok(read) => read,
         Err(e) => {
-            eprintln!("overview: {e:#}");
+            let msg = format!("{e:#}");
+            eprintln!("overview: {msg}");
             eprintln!(
                 "overview: the archive was not read to completion — this is not an empty result"
             );
             reap_remote(&cfg, no_reap);
+            if json {
+                println!("{}", json_string(&overview::overview_error_json(3, msg)));
+            }
             // Deliberately 3, not 1: a failed read cannot claim "there is no
             // index"; 1 is reserved for a completed read that found none.
             return ExitCode::from(3);
@@ -1739,6 +1781,25 @@ fn cmd_overview(
             labels.get(machine).map_or(&[], Vec::as_slice);
         display_machine(machine, decl, machine_labels)
     };
+
+    if json {
+        let display_names: BTreeMap<String, String> = snapshot_machines
+            .iter()
+            .map(|machine| (machine.clone(), display(machine)))
+            .collect();
+        let exit_code = if rows.is_empty() { 1 } else { 0 };
+        let value = overview::overview_json(
+            &rows,
+            &snapshot_machines,
+            &index_machines,
+            &declared_machines,
+            &display_names,
+            exit_code,
+        );
+        println!("{}", json_string(&value));
+        reap_remote(&cfg, no_reap);
+        return ExitCode::from(exit_code);
+    }
 
     println!("[overview] repo         : {}", cfg.repo_root);
     println!("[overview] width        : {width}");
@@ -2218,9 +2279,14 @@ fn cmd_view(
     ExitCode::SUCCESS
 }
 
-fn cmd_doctor() -> ExitCode {
+fn cmd_doctor(json: bool) -> ExitCode {
     let report = chat_stasher::doctor::run();
-    chat_stasher::doctor::print_report(&report);
+    if json {
+        let value = chat_stasher::doctor::report_to_json(&report);
+        println!("{}", json_string(&value));
+    } else {
+        chat_stasher::doctor::print_report(&report);
+    }
     if report.scan_failed {
         eprintln!(
             "doctor: INCOMPLETE exit_code=3 — the registry-driven scan did not run, so the coverage \
@@ -4570,37 +4636,31 @@ fn cmd_init() -> ExitCode {
     }
 }
 
-fn cmd_status(sessions: bool) -> ExitCode {
+fn cmd_status(sessions: bool, json: bool) -> ExitCode {
     let config = Config::load();
     if config.source.is_error_fallback() {
         eprintln!("config_source={}", config.source.label());
     }
-    let verdict = run_state_verdict(&config);
-    eprintln!("[run-once] {}", verdict.line);
+    let info = run_state_info(&config);
+    eprintln!("[run-once] {}", info.verdict.line);
 
-    let report = match scanner::scan(&config) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("status: scan failed: {e}");
-            // Deliberately 3, not 1. Nothing was scanned, so `status` has no
-            // answer to give about this machine at all — "did not finish /
-            // never started", the same call `doctor` makes on the same failure.
-            // It used to be 1, which is the code this command spends on "the
-            // timer is not running"; a caller could not tell an unreadable
-            // registry from a dead scheduler. Both are still non-zero, which is
-            // all `docs/install.md` promises.
-            return ExitCode::from(3);
-        }
-    };
-    eprint!("{}", render_status(&report, sessions));
-    // Deliberately *not* folded in here: `report.probes` with a non-zero
-    // `unreadable_count`, i.e. a scan that succeeded but could not read every
-    // session a harness claims. It is real and it is reported — B78 put it on
-    // the `[scan]` line ("另有 N 条读不出来 …… 尚未归档") precisely because that
-    // is its channel. Two reasons it must not also move the exit code:
+    let scan = scanner::scan(&config);
+    // Deliberately 3, not 1, when the scan fails. Nothing was scanned, so
+    // `status` has no answer to give about this machine's coverage at all —
+    // "did not finish / never started", the same call `doctor` makes on the
+    // same failure. It used to be 1, which is the code this command spends on
+    // "the timer is not running"; a caller could not tell an unreadable
+    // registry from a dead scheduler. Both are still non-zero, which is all
+    // `docs/install.md` promises.
+    //
+    // Deliberately *not* folded in here either: a scan that succeeded but could
+    // not read every session a harness claims (`report.probes` with a non-zero
+    // `unreadable_count`). It is real and it is reported — B78 put it on the
+    // `[scan]` line ("另有 N 条读不出来 …… 尚未归档") precisely because that is
+    // its channel. Two reasons it must not also move the exit code:
     //
     //   * This code already means one thing — "is the scheduled run healthy?"
-    //     (`run_state_verdict`, the `[run-once]` line above, documented in
+    //     (`run_state_info`, the `[run-once]` line above, documented in
     //     `docs/install.md`). A second meaning on the same integer does not add
     //     information, it destroys the first: a non-zero `status` would no
     //     longer tell you whether to go look at your timer.
@@ -4645,34 +4705,60 @@ fn cmd_status(sessions: bool) -> ExitCode {
     // whole report goes to *stderr*, so it is usually read through `2>&1 | …`,
     // and a pipeline reports the *last* command's status. `chat-stasher status
     // 2>&1 | head` is 0 no matter what this function returns. Pinned by
-    // `tests/b84_runstate_test.rs`.
-    if verdict.healthy {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    // `tests/b84_runstate_test.rs`. With `--json` the report's JSON is the one
+    // thing on stdout, so `chat-stasher status --json | jq …` reports `jq`'s
+    // status, not the binary's — read the integer through `$?` or
+    // `${PIPESTATUS[0]}` instead.
+    let exit_code = match &scan {
+        Ok(_) if info.verdict.healthy => 0,
+        Ok(_) => 1,
+        Err(e) => {
+            eprintln!("status: scan failed: {e}");
+            3
+        }
+    };
+
+    if json {
+        match &scan {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    status_json(config.source, &info, Ok(report), exit_code)
+                )
+            }
+            Err(e) => println!(
+                "{}",
+                status_json(config.source, &info, Err(e.to_string()), exit_code)
+            ),
+        }
+        return ExitCode::from(exit_code);
     }
+
+    if let Ok(report) = &scan {
+        eprint!("{}", render_status(report, sessions));
+    }
+    ExitCode::from(exit_code)
 }
 
-/// Read the last `run-once` record and turn it into one sentence.
+/// Everything `status` needs from the run-state record, so both the human
+/// verdict line and the `--json` object are derived from the same read.
+struct RunStateInfo {
+    verdict: chat_stasher::runstate::Verdict,
+    read: chat_stasher::runstate::RunStateRead,
+    now_unix: u64,
+    stale_after_secs: u64,
+}
+
+/// Read the last `run-once` record and turn it into a verdict + the raw read
+/// (so `status --json` can serialise the same read the sentence describes).
 ///
 /// The cadence comes from the same config the scheduler templates use, so the
 /// overdue threshold tracks whatever the user actually scheduled. An invalid
 /// explicit value is an unknown timer verdict, not permission to substitute an
 /// hourly cadence the user did not configure.
-fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
+fn run_state_info(config: &Config) -> RunStateInfo {
     use chat_stasher::runstate;
 
-    let interval = match schedule::interval_secs(config) {
-        Ok(interval) => interval,
-        Err(error) => {
-            return runstate::Verdict {
-                line: format!(
-                    "backup_interval_secs 无效：{error}。无法判断定时器是否按用户配置运行。"
-                ),
-                healthy: false,
-            }
-        }
-    };
     let state_dir = chat_stasher::collect::default_state_dir();
     let read = runstate::load(&state_dir);
     let now = std::time::SystemTime::now()
@@ -4688,7 +4774,79 @@ fn run_state_verdict(config: &Config) -> chat_stasher::runstate::Verdict {
         // sane host; if it ever becomes reachable, thread Option through
         // `summarize` and say the age is unknown.
         .unwrap_or(0);
-    runstate::summarize(&read, now, runstate::stale_after_secs(interval))
+    match schedule::interval_secs(config) {
+        Ok(interval) => {
+            let stale_after = runstate::stale_after_secs(interval);
+            let verdict = runstate::summarize(&read, now, stale_after);
+            RunStateInfo {
+                verdict,
+                read,
+                now_unix: now,
+                stale_after_secs: stale_after,
+            }
+        }
+        Err(error) => RunStateInfo {
+            verdict: runstate::Verdict {
+                line: format!(
+                    "backup_interval_secs 无效：{error}。无法判断定时器是否按用户配置运行。"
+                ),
+                healthy: false,
+            },
+            read,
+            now_unix: now,
+            // Unreachable for the JSON `run_state` shape when the interval is
+            // invalid — `run_state_json` only uses it for a *known* record.
+            stale_after_secs: runstate::STALE_FLOOR_SECS,
+        },
+    }
+}
+
+/// Serialise one `serde_json::Value` to a single stdout line. `json!` and the
+/// tagged enums above can only produce JSON-safe values, so this is
+/// infallible.
+fn json_string(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).expect("serde_json cannot fail on a json! value")
+}
+
+/// The `status --json` object. `scan` is `Ok` when the registry-driven scan
+/// ran (then every count is measured); `Err(reason)` when it could not run —
+/// the `scanner` object is then `{"kind":"failed","why":…}` instead of an
+/// `ok` object, so "could not look" is never read as "zero sessions".
+fn status_json(
+    config_source: config::ConfigSource,
+    info: &RunStateInfo,
+    scan: Result<&scanner::ScanReport, String>,
+    exit_code: u8,
+) -> String {
+    let scanner_value = match scan {
+        Ok(report) => scanner::scan_report_json(report),
+        Err(why) => serde_json::json!({ "kind": "failed", "why": why }),
+    };
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "command": "status",
+        "healthy": exit_code == 0,
+        "exit_code": exit_code,
+        "exit_semantics": status_exit_semantics(exit_code),
+        "config_source": config_source.label(),
+        "run_state": chat_stasher::runstate::run_state_json(
+            &info.read,
+            info.now_unix,
+            info.stale_after_secs
+        ),
+        "scanner": scanner_value,
+    });
+    json_string(&value)
+}
+
+/// What the exit code means, in words — the piece a 20-line shell wrapper
+/// would otherwise have to hardcode.
+fn status_exit_semantics(code: u8) -> &'static str {
+    match code {
+        0 => "0 = 健康：定时器正常，上次运行成功且未过期。",
+        1 => "1 = 不健康：从未运行 / 定时器过期 / 上次运行失败——对脚本而言是“去查定时器”的信号。",
+        _ => "3 = 无法给出结论：扫描失败（没读或没读完），上面的会话数都是未知，不是 0。",
+    }
 }
 
 /// The scan half of `status`.
