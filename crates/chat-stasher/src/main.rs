@@ -2981,6 +2981,22 @@ fn data_root() -> PathBuf {
         .join("chat-stasher")
 }
 
+/// Expand `~`/`~/` in a repo / key-file / option string and reject any
+/// residual literal `~` component. On failure this is a usage error: exit 2,
+/// like clap's own argument errors. This is the last gate before a path
+/// (notably the masterkey file) reaches the filesystem — config-sourced values
+/// were already expanded at load, and CLI `--repo`/`--key-file`/`--option`
+/// values are expanded here, so a literal `~` never survives either route.
+fn expand_path_arg(label: &str, value: &str) -> String {
+    match chat_stasher::config::expand_and_verify(value) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("{label}: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Resolve which destination a command operates on.
 ///
 /// ADR-013 product rule: **there is no default destination.** Once the config
@@ -3027,9 +3043,12 @@ fn resolve_store_config(
         );
         std::process::exit(2);
     };
-    let Some(repo_root) = repo.or_else(|| entry.repo.clone()) else {
-        eprintln!("destination: `{name}` has no `repo` set (and no --repo was given)");
-        std::process::exit(2);
+    let repo_root = match repo.or_else(|| entry.repo.clone()) {
+        Some(raw) => expand_path_arg("repo", &raw),
+        None => {
+            eprintln!("destination: `{name}` has no `repo` set (and no --repo was given)");
+            std::process::exit(2);
+        }
     };
     let mut merged: BTreeMap<String, String> = entry.options.clone();
     for kv in options {
@@ -3043,14 +3062,21 @@ fn resolve_store_config(
             }
         }
     }
+    // Expand + verify every option value. Config-sourced values were already
+    // expanded at load; re-running is idempotent and also covers the CLI
+    // `--option`s merged in above.
+    for (k, v) in &mut merged {
+        *v = expand_path_arg(&format!("option {k}"), v);
+    }
+    let key_file = match key_file.or_else(|| entry.key_file.clone()) {
+        Some(raw) => PathBuf::from(expand_path_arg("key_file", &raw)),
+        // Per-destination default: one key file per destination, so a new
+        // destination never silently adopts another one's key.
+        None => data_root().join(format!("masterkey-{name}.json")),
+    };
     StoreConfig {
         repo_root,
-        key_file: key_file
-            .map(PathBuf::from)
-            .or_else(|| entry.key_file.as_deref().map(PathBuf::from))
-            // Per-destination default: one key file per destination, so a new
-            // destination never silently adopts another one's key.
-            .unwrap_or_else(|| data_root().join(format!("masterkey-{name}.json"))),
+        key_file,
         connections: 0,
         options: merged,
     }
@@ -3079,18 +3105,26 @@ fn store_config_from(
         })
         .collect::<Result<BTreeMap<String, String>, String>>();
     match options {
-        Ok(options) => StoreConfig {
-            repo_root: repo
-                .or_else(|| config.rustic_repo.clone())
-                .unwrap_or_else(|| data_root.join("repo").to_string_lossy().into_owned()),
-            key_file: key_file
-                .map(PathBuf::from)
-                .or_else(|| config.rustic_key_file.as_deref().map(PathBuf::from))
-                .unwrap_or_else(|| data_root.join("masterkey.json")),
-            connections: 0,
-            options,
+        Ok(mut options) => {
+            for (k, v) in &mut options {
+                *v = expand_path_arg(&format!("option {k}"), v);
+            }
+            let repo_root = match repo.or_else(|| config.rustic_repo.clone()) {
+                Some(raw) => expand_path_arg("repo", &raw),
+                None => data_root.join("repo").to_string_lossy().into_owned(),
+            };
+            let key_file = match key_file.or_else(|| config.rustic_key_file.clone()) {
+                Some(raw) => PathBuf::from(expand_path_arg("key_file", &raw)),
+                None => data_root.join("masterkey.json"),
+            };
+            StoreConfig {
+                repo_root,
+                key_file,
+                connections: 0,
+                options,
+            }
+            .with_capped_connections(connections.or(config.rustic_connections))
         }
-        .with_capped_connections(connections.or(config.rustic_connections)),
         Err(e) => {
             eprintln!("option: {e}");
             std::process::exit(2);

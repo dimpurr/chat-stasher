@@ -901,13 +901,18 @@ pub fn run() -> DoctorReport {
     }
 }
 
+/// Unified `~` expansion, delegated to `config` so every consumer shares one
+/// implementation. `doctor` is read-only: an unexpandable path (missing home,
+/// `~otheruser`, a literal `~` component) is warned about and probed as
+/// written — the probe will simply find nothing, and doctor never writes a
+/// masterkey, so no literal `~` can leak credentials here.
 fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        crate::config::home_dir().join(rest)
-    } else if p == "~" {
-        crate::config::home_dir()
-    } else {
-        PathBuf::from(p)
+    match crate::config::expand_and_verify(p) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("warning: 无法展开路径 `{p}`: {e}");
+            PathBuf::from(p)
+        }
     }
 }
 

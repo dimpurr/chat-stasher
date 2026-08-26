@@ -1670,13 +1670,18 @@ fn looks_like_file_path(s: &str) -> bool {
     comp.contains('.') && !comp.starts_with('.')
 }
 
+/// Unified `~` expansion, delegated to `config` so every consumer shares one
+/// implementation. The scanner is read-only: an unexpandable path (missing
+/// home, `~otheruser`, a literal `~` component) is warned about and probed as
+/// written — the probe will simply find nothing, and the scanner never writes
+/// a masterkey, so no literal `~` can leak credentials here.
 fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        home_dir().join(rest)
-    } else if p == "~" {
-        home_dir()
-    } else {
-        PathBuf::from(p)
+    match crate::config::expand_and_verify(p) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("warning: 无法展开路径 `{p}`: {e}");
+            PathBuf::from(p)
+        }
     }
 }
 
