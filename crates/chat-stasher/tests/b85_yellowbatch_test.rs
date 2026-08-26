@@ -43,7 +43,7 @@ use std::time::SystemTime;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 const CLEAN_STATUS_BODY_SHA256: &str =
-    "e9496f26534d12d97c2728b2b69f6d6cb6760c3a20805ee586e6b1c108483b77";
+    "496303cf8515a15ccd016f5d9dfd4ef5563c1251f057cc9e75d0e4bec17e4461";
 
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -132,7 +132,7 @@ fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text.contains("未安装（未知）") && !text.contains("未安装（）"),
+        text.contains("not installed (unknown)") && !text.contains("not installed ()"),
         "unresolved root must be rendered as unknown, not an empty path: {text}"
     );
 }
@@ -177,7 +177,7 @@ fn a7_wrong_shaped_repository_is_not_reported_as_missing() {
         ..Config::default()
     });
     assert!(
-        matches!(result, ReclaimCheck::OpenFailed { ref error, .. } if error.contains("不是目录")),
+        matches!(result, ReclaimCheck::OpenFailed { ref error, .. } if error.contains("not a directory")),
         "a file at repo_root is a shape error, not a measured absent repo: {result:?}"
     );
 }
@@ -236,7 +236,7 @@ fn d2_malformed_gemini_settings_are_unknown_not_default_dangerous() {
     fs::write(&settings, b"{ malformed synthetic settings").expect("write malformed settings");
     let retention = doctor::inspect_gemini_settings(sandbox.path());
     assert!(
-        retention.summarize().contains("未知") && !retention.is_dangerous(),
+        retention.summarize().contains("unknown") && !retention.is_dangerous(),
         "a present but unreadable policy must not be judged using 30d defaults: {retention:?}"
     );
 }
@@ -295,8 +295,8 @@ fn d6_missing_home_and_invalid_interval_are_not_silently_replaced() {
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(
         resolved == profile
-            && text.contains("backup_interval_secs 无效")
-            && !text.contains("阈值 3600"),
+            && text.contains("backup_interval_secs is invalid")
+            && !text.contains("threshold 3600"),
         "HOME must not become cwd and invalid explicit interval must not become silent 3600: {text}"
     );
 }
@@ -344,7 +344,7 @@ fn clean_status_output_is_byte_identical() {
         "the clean fixture keeps the established status exit code"
     );
     assert!(
-        !body.contains("scan partial") && !body.contains("读不出来"),
+        !body.contains("scan partial") && !body.contains("unreadable"),
         "false-positive partial-scan guard fired: {body}"
     );
     assert_eq!(

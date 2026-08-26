@@ -28,12 +28,12 @@ fn never_ran_is_reported_as_unknown_not_as_healthy() {
         "missing run-state must not be healthy: {verdict:?}"
     );
     assert!(
-        verdict.line.contains("还没有任何运行记录"),
+        verdict.line.contains("No run has ever been recorded"),
         "must say there is no record at all, got: {}",
         verdict.line
     );
     assert!(
-        !verdict.line.contains("正常"),
+        !verdict.line.contains("Healthy:"),
         "must never claim things are fine, got: {}",
         verdict.line
     );
@@ -49,7 +49,7 @@ fn recent_success_is_healthy_and_reports_what_landed() {
         "recent success must be healthy: {verdict:?}"
     );
     assert!(
-        verdict.line.contains("正常") && verdict.line.contains('3'),
+        verdict.line.contains("Healthy:") && verdict.line.contains('3'),
         "must report the shard count that landed, got: {}",
         verdict.line
     );
@@ -68,7 +68,7 @@ fn last_run_failure_is_surfaced_with_the_failing_step() {
         "failed run must not be healthy: {verdict:?}"
     );
     assert!(
-        verdict.line.contains("失败") && verdict.line.contains("push"),
+        verdict.line.contains("Last run failed") && verdict.line.contains("push"),
         "must name the failing step, got: {}",
         verdict.line
     );
@@ -91,7 +91,7 @@ fn a_stopped_timer_is_caught_even_though_the_last_run_succeeded() {
         "9 days with no run must not be healthy even after a success: {verdict:?}"
     );
     assert!(
-        verdict.line.contains("没有运行") || verdict.line.contains("定时器"),
+        verdict.line.contains("No run for") || verdict.line.contains("timer may have stopped"),
         "must say it stopped running, got: {}",
         verdict.line
     );
@@ -104,7 +104,7 @@ fn unreadable_record_is_neither_missing_nor_healthy() {
     let read = RunStateRead::Unreadable("malformed json".to_string());
     let verdict = runstate::summarize(&read, NOW, 4 * HOUR);
     assert!(!verdict.healthy);
-    assert!(!verdict.line.contains("还没有任何运行记录"));
+    assert!(!verdict.line.contains("No run has ever been recorded"));
 }
 
 /// Round-trip through the real atomic write, in an isolated temp state dir.

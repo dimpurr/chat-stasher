@@ -147,7 +147,7 @@ fn activity_index_then_push_then_overview_roundtrips() {
         "overview must name the harness:\n{stdout}"
     );
     assert!(
-        !stdout.contains("索引缺失"),
+        !stdout.contains("index missing"),
         "an indexed machine must not be flagged missing:\n{stdout}"
     );
 }
@@ -209,7 +209,7 @@ fn machine_with_snapshot_but_no_index_is_listed_missing() {
         stdout
     );
     assert!(
-        stdout.contains("mbp-test") && stdout.contains("索引缺失"),
+        stdout.contains("mbp-test") && stdout.contains("index missing"),
         "the snapshot-without-index machine must be named as missing:\n{stdout}"
     );
 }

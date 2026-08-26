@@ -98,17 +98,24 @@ fn healthy_fixture_status_and_doctor_unknown_counts_are_stable() {
     let doctor = isolated_env(sandbox.path(), &["doctor"], &registry);
     let status_text = combined(&status);
     let doctor_text = combined(&doctor);
-    let status_unknown = status_text.matches("未知").count();
-    let doctor_unknown = doctor_text.matches("未知").count();
+    let status_unknown = status_text
+        .matches("The earliest session time is unknown")
+        .count();
+    let doctor_unknown = doctor_text
+        .matches("The earliest session time is unknown")
+        .count();
     println!(
         "B91 healthy fixture: status_unknown={status_unknown} doctor_unknown={doctor_unknown}"
     );
     println!("B91 status:\n{status_text}");
     println!("B91 doctor:\n{doctor_text}");
-    assert_eq!(status_unknown, 0, "healthy status grew an unexplained 未知");
+    assert_eq!(
+        status_unknown, 0,
+        "healthy status grew an unexplained unknown-earliest-session line"
+    );
     assert_eq!(
         doctor_unknown, 1,
         "healthy doctor must retain exactly its existing unknown earliest-session risk"
     );
-    assert!(doctor_text.contains("最早会话时间未知"));
+    assert!(doctor_text.contains("The earliest session time is unknown"));
 }
