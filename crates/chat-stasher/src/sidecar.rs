@@ -66,6 +66,58 @@ pub fn activity_index_machine(path: &Path) -> Option<String> {
     Some(machine.to_string())
 }
 
+/// Match an archived path against the `meta/<machine>/machine.json` marker
+/// (ADR-018), returning the machine name.
+///
+/// Same trailing-component discipline as [`activity_index_machine`]: the
+/// archived tree mirrors each machine's absolute stage path, so the prefix
+/// differs per machine and must never be reconstructed locally.
+pub fn declaration_machine(path: &Path) -> Option<String> {
+    let comps: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let n = comps.len();
+    if n < 3 {
+        return None;
+    }
+    if comps[n - 1] != "machine.json" || comps[n - 3] != "meta" {
+        return None;
+    }
+    let machine = comps[n - 2];
+    if machine.is_empty() {
+        return None;
+    }
+    Some(machine.to_string())
+}
+
+/// Match an archived path against the `meta/<machine>/label-by-<writer>.json`
+/// marker (ADR-018), returning `(machine, writer)`.
+///
+/// A label is one machine's opinion about another; the writer is the machine
+/// id in the file name, so the overview can tell who currently holds the
+/// winning label. Same trailing-component discipline as
+/// [`activity_index_machine`].
+pub fn label_record_machine(path: &Path) -> Option<(String, String)> {
+    let comps: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let n = comps.len();
+    if n < 3 || comps[n - 3] != "meta" {
+        return None;
+    }
+    let name = comps[n - 1];
+    let writer = name
+        .strip_prefix("label-by-")
+        .and_then(|w| w.strip_suffix(".json"));
+    let machine = comps[n - 2];
+    if machine.is_empty() {
+        return None;
+    }
+    writer.map(|w| (machine.to_string(), w.to_string()))
+}
+
 /// Convert an archived [`ActivityRow`] into an [`OverviewRow`] for rendering.
 ///
 /// The two modules each define their own `TimeSource` so neither imports the
@@ -249,5 +301,57 @@ mod tests {
         let snaps: BTreeSet<String> = ["air", "mbp"].iter().map(|s| s.to_string()).collect();
         let idx = snaps.clone();
         assert!(missing_index_machines(&snaps, &idx).is_empty());
+    }
+
+    // ------------------------------------------------- meta 元数据文件匹配
+    #[test]
+    fn declaration_machine_matches_meta_suffix() {
+        assert_eq!(
+            declaration_machine(Path::new(
+                "/Users/air/stage/meta/0123456789abcdef0123456789abcdef/machine.json"
+            )),
+            Some("0123456789abcdef0123456789abcdef".to_string())
+        );
+        assert_eq!(
+            declaration_machine(Path::new("/stage/meta/mac/machine.json")),
+            Some("mac".to_string())
+        );
+        assert_eq!(
+            declaration_machine(Path::new("/stage/meta/abc/activity-v1.jsonl")),
+            None
+        );
+        assert_eq!(
+            declaration_machine(Path::new("/stage/meta/abc/machine-v2.json")),
+            None
+        );
+        assert_eq!(
+            declaration_machine(Path::new("/stage/meta/abc/label-by-w.json")),
+            None
+        );
+    }
+
+    #[test]
+    fn label_record_machine_matches_meta_suffix() {
+        assert_eq!(
+            label_record_machine(Path::new("/stage/meta/abc/label-by-def.json")),
+            Some(("abc".to_string(), "def".to_string()))
+        );
+        assert_eq!(
+            label_record_machine(Path::new("/Users/air/stage/meta/xyz/label-by-writer.json")),
+            Some(("xyz".to_string(), "writer".to_string()))
+        );
+        assert_eq!(
+            label_record_machine(Path::new("/stage/meta/abc/machine.json")),
+            None,
+            "machine.json is a declaration, not a label"
+        );
+        assert_eq!(
+            label_record_machine(Path::new("/stage/meta/abc/activity-v1.jsonl")),
+            None
+        );
+        assert_eq!(
+            label_record_machine(Path::new("/stage/meta/abc/label-by-w.txt")),
+            None
+        );
     }
 }

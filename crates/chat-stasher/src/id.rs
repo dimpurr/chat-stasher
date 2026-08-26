@@ -67,6 +67,13 @@ pub fn normalize_machine(raw: &str) -> String {
 /// filed one machine's sessions into a partition shared with every other
 /// machine that also failed to resolve.)
 ///
+/// 🔴 ADR-018: this is **no longer the archive-partition source.** The archive
+/// partition comes from the config `machine` field or the identity file (see
+/// `main.rs::resolve_machine`); a hostname-derived partition is exactly the
+/// bug ADR-018 removed. `machine_id()` survives only as the machine component
+/// of *session ids* produced by the status/doctor scanner, which never writes
+/// a partition.
+///
 /// 🔴 The source list is platform-specific, and that is the whole point of
 /// `machine_sources()`. `hostname -s` is right on unix — `scutil --get
 /// ComputerName` on macOS returns a display name with spaces and typographic

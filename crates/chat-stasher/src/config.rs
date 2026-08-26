@@ -61,6 +61,17 @@ pub struct Config {
     /// Where archived snapshots will live once `push` is implemented.
     /// Kept so the config schema is stable.
     pub archive_root: Option<String>,
+    /// Explicitly pin this machine's archive partition name (ADR-018).
+    ///
+    /// Before ADR-018 the partition was derived from the hostname, which
+    /// silently merged every machine with the same default hostname (e.g. two
+    /// Macs both named `Mac`) into one partition. Now a fresh install uses a
+    /// random 128-bit identity instead, and **existing** installs keep their
+    /// old partition by setting `machine = "<partition-name>"` here — the one
+    /// line that protects an archive built before the change. New installs
+    /// leave it empty and an identity is generated automatically. An empty
+    /// value counts as unset.
+    pub machine: Option<String>,
     /// Root directory that holds Claude Code session JSONL files.
     /// Alias of `harness_roots["claude-code"]`, kept for compatibility.
     pub claude_projects_dir: Option<String>,
@@ -697,6 +708,18 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # A no-change push still writes a snapshot, which is not free.
 # push_only_if_changed = true
 
+# Explicitly pin this machine's archive partition name.
+# 已有安装用它保持不变；新安装留空即可，会自动生成一个随机身份。
+#
+# Semantics: the archive partition is no longer derived from the hostname
+# (two machines with the same default hostname used to merge into one
+# partition). A fresh install generates a random 128-bit identity and uses it
+# as the partition; you never need to write this line. An *existing* install
+# that wants to keep the partition it has been writing to must set this to that
+# partition name — this is the one line that protects an archive built before
+# the change. Leaving it empty is correct for new installs.
+# machine = "..."
+
 # Override the Claude Code session root.
 # Default: ~/.claude/projects
 # claude_projects_dir = "~/.claude/projects"
@@ -1047,5 +1070,22 @@ key_file = "~/dest/key.json"
         let cfg: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("模板本身必须能解析");
         assert!(cfg.harness_roots.is_empty());
         assert!(cfg.destinations.is_empty());
+    }
+
+    /// ADR-018: the `machine` field pins an existing install's partition name.
+    #[test]
+    fn machine_field_parses_and_template_documents_it() {
+        let cfg: Config = toml::from_str("machine = \"mac\"\n").unwrap();
+        assert_eq!(cfg.machine.as_deref(), Some("mac"));
+        // An empty value must be treated as unset, never as a partition named "".
+        let cfg: Config = toml::from_str("machine = \"\"\n").unwrap();
+        assert!(
+            cfg.machine.as_deref().map(str::is_empty).unwrap_or(false),
+            "an empty machine value is allowed to parse and is filtered at use site"
+        );
+        assert!(
+            DEFAULT_CONFIG_TEMPLATE.contains("machine = \"...\""),
+            "the init template must document the machine field"
+        );
     }
 }
