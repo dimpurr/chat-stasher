@@ -1,18 +1,24 @@
 //! chat-stasher CLI entry point.
 
 use anyhow::Context;
+use chat_stasher::activity;
 use chat_stasher::config::{self, Config};
 use chat_stasher::destinit::SourceStatus;
 use chat_stasher::nativehost;
+use chat_stasher::overview;
+use chat_stasher::readback;
 use chat_stasher::reap;
 use chat_stasher::scanner;
 use chat_stasher::schedule;
 use chat_stasher::seal;
+use chat_stasher::sidecar;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
-use rustic_core::repofile::MasterKey;
-use std::collections::BTreeMap;
+use rustic_core::repofile::{MasterKey, NodeType};
+use rustic_core::{Credentials, LsOptions, Repository, RepositoryOptions};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -567,6 +573,88 @@ enum Command {
         #[arg(long)]
         self_test: bool,
     },
+    /// Build the activity sidecar index for one machine partition (ADR-017).
+    ///
+    /// Walks `<stage>/sessions/<machine>/<session>/<bucket>/NNNNNN.jsonl`,
+    /// concatenates each session's shards in global sequence order, and feeds
+    /// every line through the conversation-time extractor to produce one
+    /// `ActivityRow` per session. The rows are written as JSONL to
+    /// `<stage>/meta/<machine>/activity-v1.jsonl` — the file the `overview`
+    /// command reads back out of a destination.
+    ///
+    /// The harness label is inferred from the session directory name: the
+    /// canonical archived ids are `<source>.<machine>.<native-id>`, so the
+    /// harness is the leading dot-segment (`claude-code.<m>.<uuid>` ->
+    /// `claude-code`); short forms are handled too (`opencode~abc123` ->
+    /// `opencode`, `cursor.d~xxx` -> `cursor`).
+    ///
+    /// Metadata only: the extraction keeps a timestamp per line and throws the
+    /// line away. Nothing else about a conversation is ever read, kept or
+    /// printed — the report is counts and the output path only.
+    ///
+    /// Exit codes: `0` = the whole partition was read and the index written;
+    /// `3` = the stage could not be read (or reading was interrupted) — nothing
+    /// (complete) was written; `1` = every session was read but the index file
+    /// itself could not be written; `2` = usage error. Same family as
+    /// `collect`/`search`: `3` means "did not finish / never started", `1`
+    /// means "finished and then failed".
+    ActivityIndex {
+        /// Stage directory that holds the sealed `sessions/` tree.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Machine partition for `sessions/<machine>/…`.
+        /// Default: this machine's normalised hostname; use `--machine`
+        /// explicitly if that identity is unavailable.
+        #[arg(long)]
+        machine: Option<String>,
+    },
+    /// Draw the machine × harness activity overview of one destination
+    /// (ADR-017).
+    ///
+    /// Opens the destination repository, takes each host's newest snapshot
+    /// (the same cross-machine merge as `read --all-machines`), and for every
+    /// snapshot recursively finds the activity index files at
+    /// `meta/<machine>/activity-v1.jsonl`. The paths carry each machine's own
+    /// absolute stage prefix, so they are matched by the trailing
+    /// `meta` / `<machine>` / `activity-v1.jsonl` marker — never by a local
+    /// path. The indexes are parsed into overview rows and rendered as a
+    /// machine × harness matrix, a time-unknown tally and a width-adaptive
+    /// heatmap. Prints counts, machine names and time spans only — never
+    /// conversation content.
+    ///
+    /// A machine that has a snapshot but **no** activity index is listed
+    /// explicitly as "索引缺失" — it never vanishes silently, because a missing
+    /// index is not the same thing as "that machine had no sessions".
+    ///
+    /// Exit codes: `0` = at least one index was read and rendered; `1` = the
+    /// whole repository was read and there is no activity index at all (a real
+    /// "there is none", not a failure to look); `3` = the repository could not
+    /// be read in full (open / snapshot / tree / dump failure) — the absences
+    /// below are unproven; `2` = usage error.
+    Overview {
+        /// Destination to open. Required unless an explicit `--repo` is given:
+        /// there is no default destination.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Terminal width for the matrix/heatmap (default: 100).
+        #[arg(long, default_value_t = 100)]
+        width: usize,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Disable ssh connection reaping after this run.
+        #[arg(long)]
+        no_reap: bool,
+    },
 }
 
 /// verify `--level` selector.
@@ -812,6 +900,24 @@ fn main() -> ExitCode {
             no_registry,
         ),
         Command::NativeHost { self_test } => cmd_native_host(self_test),
+        Command::ActivityIndex { stage, machine } => cmd_activity_index(&stage, machine.as_deref()),
+        Command::Overview {
+            destination,
+            width,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_overview(
+            destination,
+            width,
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
+        ),
     }
 }
 
@@ -1071,6 +1177,309 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
         "{}",
         nativehost::self_test_line(nativehost::HOST_NAME, env!("CARGO_PKG_VERSION"))
     );
+    ExitCode::SUCCESS
+}
+
+/// `activity-index` — build the activity sidecar for one machine partition
+/// (ADR-017).
+///
+/// Reads every sealed shard of every session under
+/// `<stage>/sessions/<machine>/`, concatenates each session's shards in global
+/// sequence order (across buckets), and hands the lines to `activity::build_row`
+/// for conversation-time extraction. One `ActivityRow` per session is written
+/// as JSONL to `<stage>/meta/<machine>/activity-v1.jsonl`.
+///
+/// Exit codes follow the house family (`collect`/`search`): `0` = the whole
+/// partition was read and the index written; `3` = the stage could not be read
+/// (or reading was interrupted), so no complete index exists; `1` = every
+/// session was read but the output file could not be written; `2` = usage
+/// error (enforced by clap).
+fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
+    let machine = match resolve_machine("activity-index", machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    if !stage.is_dir() {
+        eprintln!(
+            "activity-index: stage `{}` is not a directory — nothing was read",
+            stage.display()
+        );
+        return ExitCode::from(3);
+    }
+    let sessions_root = stage.join(store::SESSIONS_DIR).join(&machine);
+
+    // Enumerate the machine's session directories. A partition that has never
+    // been archived is a *complete* read of zero items (empty, exit 0), not a
+    // failure to look; any other read error means we could not read -> 3.
+    let mut session_dirs: Vec<PathBuf> = Vec::new();
+    match fs::read_dir(&sessions_root) {
+        Ok(rd) => {
+            for session in rd {
+                let session = match session {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "activity-index: cannot enumerate {}: {e}",
+                            sessions_root.display()
+                        );
+                        return ExitCode::from(3);
+                    }
+                };
+                if session.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    session_dirs.push(session.path());
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "activity-index: cannot read {}: {e} — nothing was read, this is not an empty index",
+                sessions_root.display()
+            );
+            return ExitCode::from(3);
+        }
+    }
+
+    let mut rows = Vec::new();
+    for session_dir in session_dirs {
+        let session_id = session_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(harness) = sidecar::infer_harness(&session_id) else {
+            eprintln!(
+                "activity-index: session `{}` has no inferable harness — skipped",
+                chat_stasher::id::short_session_id(&session_id)
+            );
+            continue;
+        };
+
+        // Global sequence order across both legacy and bucketed layouts.
+        let mut shards = match store::sealed_shard_entries(&session_dir) {
+            Ok(shards) => shards,
+            Err(e) => {
+                eprintln!("activity-index: cannot read session `{session_id}`: {e}");
+                return ExitCode::from(3);
+            }
+        };
+        shards.sort_by_key(|(seq, _)| *seq);
+
+        let mut lines: Vec<String> = Vec::new();
+        for (_, shard) in shards {
+            let bytes = match fs::read(&shard) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("activity-index: cannot read shard {}: {e}", shard.display());
+                    return ExitCode::from(3);
+                }
+            };
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                lines.push(line.to_string());
+            }
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        rows.push(activity::build_row(&session_id, &machine, &harness, &refs));
+    }
+
+    // Reading finished; writing is a separate failure family. The read
+    // completed, so "did not finish reading" (3) no longer applies — a write
+    // failure is a completed-read failure (1).
+    let meta_dir = stage.join("meta").join(&machine);
+    if let Err(e) = fs::create_dir_all(&meta_dir) {
+        eprintln!("activity-index: cannot create {}: {e}", meta_dir.display());
+        return ExitCode::from(1);
+    }
+    let out_path = meta_dir.join("activity-v1.jsonl");
+    let mut content = String::new();
+    for row in &rows {
+        content.push_str(&activity::to_jsonl(row));
+    }
+    if let Err(e) = fs::write(&out_path, content) {
+        eprintln!("activity-index: cannot write {}: {e}", out_path.display());
+        return ExitCode::from(1);
+    }
+
+    println!("[activity-index] stage    : {}", stage.display());
+    println!("[activity-index] machine  : {machine}");
+    println!("[activity-index] sessions : {}", rows.len());
+    println!("[activity-index] index    : {}", out_path.display());
+    ExitCode::SUCCESS
+}
+
+/// Everything `overview` extracts from a destination repository before
+/// rendering. The two machine sets let the caller name machines that have a
+/// snapshot but no activity index.
+struct OverviewRead {
+    rows: Vec<overview::OverviewRow>,
+    snapshot_machines: BTreeSet<String>,
+    index_machines: BTreeSet<String>,
+}
+
+/// Open the destination and walk every newest-per-host snapshot for activity
+/// index files (`meta/<machine>/activity-v1.jsonl`), parsing them into rows.
+///
+/// `anyhow::Result` so the concrete `Repository` / opaque-iterator types are
+/// resolved by `?` exactly as in `readback::read_all_machines`; the caller
+/// translates any error into exit code 3 ("could not finish reading"), so a
+/// failure here is never presented as an empty result.
+///
+/// The archive paths carry each machine's own absolute stage prefix, so files
+/// are matched by their trailing `meta` / `<machine>` / `activity-v1.jsonl`
+/// marker via [`sidecar::activity_index_machine`] — never by a local path.
+fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<OverviewRead> {
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let backends = store.backends()?;
+    let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+        .open(&Credentials::Masterkey(mk.clone()))
+        .context("open repository for overview")?
+        .to_indexed()
+        .context("index repository for overview")?;
+    let snaps = repo
+        .get_all_snapshots()
+        .context("list snapshots for overview")?;
+    let newest = readback::newest_snapshot_per_host(snaps);
+
+    let mut out = OverviewRead {
+        rows: Vec::new(),
+        snapshot_machines: BTreeSet::new(),
+        index_machines: BTreeSet::new(),
+    };
+
+    for snap in newest {
+        let hostname = snap.hostname.clone();
+        out.snapshot_machines.insert(hostname.clone());
+        let root = repo
+            .node_from_snapshot_and_path(&snap, "")
+            .with_context(|| format!("host `{hostname}`: read tree root"))?;
+        let entries: Vec<_> = repo
+            .ls(&root, &LsOptions::default())
+            .with_context(|| format!("host `{hostname}`: list snapshot tree"))?
+            .collect::<rustic_core::RusticResult<Vec<_>>>()
+            .with_context(|| format!("host `{hostname}`: collect snapshot entries"))?;
+        for (path, node) in &entries {
+            if node.node_type != NodeType::File {
+                continue;
+            }
+            let Some(machine) = sidecar::activity_index_machine(path) else {
+                continue;
+            };
+            out.index_machines.insert(machine.clone());
+            let mut buf = Vec::new();
+            repo.dump(node, &mut buf).with_context(|| {
+                format!("host `{hostname}` machine `{machine}`: read activity index")
+            })?;
+            for line in String::from_utf8_lossy(&buf).lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let row: activity::ActivityRow = serde_json::from_str(line).with_context(|| {
+                    format!("host `{hostname}` machine `{machine}`: malformed activity index line")
+                })?;
+                out.rows.push(sidecar::to_overview_row(&row));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `overview` — draw the machine × harness activity overview of one destination
+/// (ADR-017).
+///
+/// Opens the destination repository, takes each host's newest snapshot, and
+/// from each snapshot's (recursively listed) tree finds every
+/// `meta/<machine>/activity-v1.jsonl` file by its trailing marker. The indexes
+/// are parsed into [`overview::OverviewRow`] values and rendered.
+///
+/// Exit codes: `0` = at least one index was read and rendered; `1` = the whole
+/// repository was read and no activity index exists anywhere (a real empty
+/// answer); `3` = the repository could not be read in full — a missing index
+/// is then unproven, never folded into "there is none". A machine that has a
+/// snapshot but no index is listed explicitly as 索引缺失.
+#[allow(clippy::too_many_arguments)]
+fn cmd_overview(
+    destination: Option<String>,
+    width: usize,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    if destination.is_none() && repo.is_none() {
+        eprintln!(
+            "overview: name the destination to open (`--destination <name>`, or an explicit `--repo`)"
+        );
+        eprintln!("overview: there is no default destination and no cross-destination merge");
+        return ExitCode::from(2);
+    }
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!("overview: {e}");
+            eprintln!("overview: without the key nothing was read — this is not an empty result");
+            reap_remote(&cfg, no_reap);
+            // Deliberately 3, not 1: a missing key means the archive was never
+            // consulted, which belongs with "could not finish reading".
+            return ExitCode::from(3);
+        }
+    };
+
+    let read = match read_overview_indexes(&cfg, &mk) {
+        Ok(read) => read,
+        Err(e) => {
+            eprintln!("overview: {e:#}");
+            eprintln!(
+                "overview: the archive was not read to completion — this is not an empty result"
+            );
+            reap_remote(&cfg, no_reap);
+            // Deliberately 3, not 1: a failed read cannot claim "there is no
+            // index"; 1 is reserved for a completed read that found none.
+            return ExitCode::from(3);
+        }
+    };
+    let rows = read.rows;
+    let snapshot_machines = read.snapshot_machines;
+    let index_machines = read.index_machines;
+
+    println!("[overview] repo         : {}", cfg.repo_root);
+    println!("[overview] width        : {width}");
+    println!(
+        "[overview] machines     : {} with snapshot / {} with index",
+        snapshot_machines.len(),
+        index_machines.len()
+    );
+
+    // A machine that has a snapshot but no activity index must be named — never
+    // silently dropped, which would fold "no index" into "no sessions".
+    let missing = sidecar::missing_index_machines(&snapshot_machines, &index_machines);
+    if !missing.is_empty() {
+        println!("[overview] 索引缺失（有快照、无 activity 索引）:");
+        for m in &missing {
+            println!("  !! {m}");
+        }
+    }
+
+    if rows.is_empty() {
+        // Read the whole repository and there is no activity index anywhere:
+        // a genuine "there is none", not a failure to look.
+        println!(
+            "overview: the destination was read in full and contains no activity index (no `meta/*/activity-v1.jsonl` anywhere)"
+        );
+        reap_remote(&cfg, no_reap);
+        return ExitCode::from(1);
+    }
+
+    println!("{}", overview::render_overview(&rows, width));
+    reap_remote(&cfg, no_reap);
     ExitCode::SUCCESS
 }
 
