@@ -65,7 +65,7 @@ pub struct TimeAnalysis {
 /// Harnesses this module knows how to read times from. Everything else is
 /// reported [`TimeSource::Unknown`] with an explicit "not implemented" `why`,
 /// never guessed.
-const SUPPORTED_HARNESSES: &[&str] = &["claude-code", "codex"];
+const SUPPORTED_HARNESSES: &[&str] = &["claude-code", "codex", "opencode", "cursor", "gemini-cli"];
 
 /// Analyse a session's lines and pull out the earliest/latest conversation time.
 ///
@@ -100,9 +100,16 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             continue;
         };
         match line_time(harness, &value) {
-            LineTime::Time { unix, rfc3339 } => {
-                first = Some(first.map_or(unix, |old| old.min(unix)));
-                last = Some(last.map_or(unix, |old| old.max(unix)));
+            // A single line can now span a whole session (opencode/cursor/
+            // gemini export one session as one JSON object), so a line carries
+            // its own first/last and the aggregation folds those in.
+            LineTime::Time {
+                first: f,
+                last: l,
+                rfc3339,
+            } => {
+                first = Some(first.map_or(f, |old| old.min(f)));
+                last = Some(last.map_or(l, |old| old.max(l)));
                 // Once any timestamp is unambiguous RFC 3339, the whole session
                 // is Exact; otherwise (numeric epochs only) it is Inferred.
                 if rfc3339 {
@@ -180,11 +187,15 @@ fn unknown_why(
 
 /// What one line yielded.
 enum LineTime {
-    /// A usable unix-seconds timestamp was recovered from this line.
+    /// A usable unix-seconds timestamp (or span) was recovered from this line.
     Time {
-        unix: i64,
-        /// True when it came from an explicit RFC 3339 string (unambiguous);
-        /// false when it came from a numeric epoch whose unit was inferred.
+        /// Earliest unix-second timestamp in the line.
+        first: i64,
+        /// Latest unix-second timestamp in the line.
+        last: i64,
+        /// True when at least one came from an explicit RFC 3339 string
+        /// (unambiguous); false when all came from numeric epochs whose unit
+        /// was inferred.
         rfc3339: bool,
     },
     /// The harness is supported but this line carries no timestamp field.
@@ -196,37 +207,220 @@ enum LineTime {
 }
 
 /// Extract the timestamp-bearing value from a line, per harness.
+///
+/// `claude-code` / `codex` export one JSON object per message line, each with a
+/// top-level `timestamp`. The SQLite-backed harnesses (opencode, cursor) and
+/// gemini export one *whole session* per JSON line, so their timestamps live in
+/// the nested structure and a single line yields a full first/last span.
 fn line_time(harness: &str, value: &serde_json::Value) -> LineTime {
-    let ts = match harness {
-        "claude-code" | "codex" => value.get("timestamp"),
-        _ => return LineTime::NoTimestampField,
-    };
-    let Some(ts) = ts else {
+    match harness {
+        "claude-code" | "codex" => top_level_timestamp(value),
+        "opencode" => opencode_time(value),
+        "cursor" => cursor_time(value),
+        "gemini-cli" => gemini_time(value),
+        _ => LineTime::NoTimestampField,
+    }
+}
+
+/// Parse one timestamp value (RFC 3339 string, numeric epoch string, or numeric
+/// epoch) into unix seconds plus whether it was an unambiguous RFC 3339.
+fn one_ts_value(raw: &serde_json::Value) -> Option<(i64, bool)> {
+    match raw {
+        serde_json::Value::String(s) => match parse_rfc3339(s) {
+            Some(t) => Some((t, true)),
+            // A numeric epoch can also arrive as a JSON string.
+            None => parse_numeric_epoch(s).map(|t| (t, false)),
+        },
+        serde_json::Value::Number(n) => numeric_value_seconds(n).map(|t| (t, false)),
+        _ => None,
+    }
+}
+
+/// Fold `field` across an iterator of JSON objects into a first/last span.
+/// Returns `(first, last, any_rfc3339, saw_field, had_invalid)`.
+fn collect_span<'a, I>(objects: I, field: &str) -> (Option<i64>, Option<i64>, bool, bool, bool)
+where
+    I: Iterator<Item = &'a serde_json::Value>,
+{
+    let mut first: Option<i64> = None;
+    let mut last: Option<i64> = None;
+    let mut any_rfc3339 = false;
+    let mut saw = false;
+    let mut invalid = false;
+    for object in objects {
+        let Some(raw) = object.get(field) else {
+            continue;
+        };
+        saw = true;
+        match one_ts_value(raw) {
+            Some((t, rfc)) => {
+                any_rfc3339 |= rfc;
+                first = Some(first.map_or(t, |old| old.min(t)));
+                last = Some(last.map_or(t, |old| old.max(t)));
+            }
+            None => invalid = true,
+        }
+    }
+    (first, last, any_rfc3339, saw, invalid)
+}
+
+/// claude-code / codex: one timestamp per line at the top level.
+fn top_level_timestamp(value: &serde_json::Value) -> LineTime {
+    let Some(ts) = value.get("timestamp") else {
         return LineTime::Absent;
     };
-    match ts {
-        serde_json::Value::String(s) => match parse_rfc3339(s) {
-            Some(t) => LineTime::Time {
-                unix: t,
-                rfc3339: true,
-            },
-            // A numeric epoch can also arrive as a JSON string.
-            None => match parse_numeric_epoch(s) {
-                Some(t) => LineTime::Time {
-                    unix: t,
-                    rfc3339: false,
-                },
-                None => LineTime::Invalid,
-            },
+    match one_ts_value(ts) {
+        Some((t, rfc3339)) => LineTime::Time {
+            first: t,
+            last: t,
+            rfc3339,
         },
-        serde_json::Value::Number(n) => match numeric_value_seconds(n) {
-            Some(t) => LineTime::Time {
-                unix: t,
-                rfc3339: false,
+        None => LineTime::Invalid,
+    }
+}
+
+/// opencode: one exported session per line, envelope
+/// `{schema, session:{time_created,time_updated}, messages:[{time_created,...}]}`.
+///
+/// `time_created` is an epoch-**millis** number (unit inferred → `Inferred`, not
+/// `Exact`). Message-level times are preferred because they are the real
+/// conversation span; only when a session has no messages do we fall back to the
+/// session-level `time_created`/`time_updated` (session creation/last-update).
+fn opencode_time(value: &serde_json::Value) -> LineTime {
+    let messages = value
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+    let (mf, ml, mrfc, msaw, minvalid) = collect_span(messages, "time_created");
+    if let (Some(f), Some(l)) = (mf, ml) {
+        return LineTime::Time {
+            first: f,
+            last: l,
+            rfc3339: mrfc,
+        };
+    }
+    // No usable message time — fall back to the session-level fields.
+    let (sf, sl, srfc, ssaw, sinvalid) = match value.get("session") {
+        Some(session) => {
+            let has_created = session.get("time_created").is_some();
+            let has_updated = session.get("time_updated").is_some();
+            let first = session.get("time_created").and_then(one_ts_value);
+            let last = session.get("time_updated").and_then(one_ts_value);
+            let invalid = (has_created && first.is_none()) || (has_updated && last.is_none());
+            let rfc =
+                first.map(|(_, r)| r).unwrap_or(false) || last.map(|(_, r)| r).unwrap_or(false);
+            (
+                first.map(|(t, _)| t),
+                last.map(|(t, _)| t),
+                rfc,
+                has_created || has_updated,
+                invalid,
+            )
+        }
+        None => (None, None, false, false, false),
+    };
+    match (sf, sl) {
+        (Some(f), Some(l)) => LineTime::Time {
+            first: f,
+            last: l.max(f),
+            rfc3339: srfc,
+        },
+        (Some(f), None) => LineTime::Time {
+            first: f,
+            last: f,
+            rfc3339: srfc,
+        },
+        (None, Some(l)) => LineTime::Time {
+            first: l,
+            last: l,
+            rfc3339: srfc,
+        },
+        (None, None) => {
+            if msaw || ssaw || minvalid || sinvalid {
+                LineTime::Invalid
+            } else {
+                LineTime::Absent
+            }
+        }
+    }
+}
+
+/// cursor: one composer per line, in one of two exported shapes —
+///   global  `{schema:"chat-stasher.sqlite.session.v1", session:{value:{createdAt}}}`,
+///   legacy  `{schema:"chat-stasher.cursor.legacy.session.v1", session:{createdAt}}`.
+/// `createdAt` is the composer's **creation time** (epoch millis), i.e.
+/// session-level, not per-message — so this is `Inferred`, never `Exact`.
+fn cursor_time(value: &serde_json::Value) -> LineTime {
+    let created = value
+        .get("session")
+        .and_then(|session| session.get("value"))
+        .and_then(|v| v.get("createdAt"))
+        // Legacy shape carries createdAt directly on the session object.
+        .or_else(|| value.get("session").and_then(|s| s.get("createdAt")));
+    match created {
+        Some(raw) => match one_ts_value(raw) {
+            Some((t, rfc3339)) => LineTime::Time {
+                first: t,
+                last: t,
+                rfc3339,
             },
             None => LineTime::Invalid,
         },
-        _ => LineTime::Invalid,
+        None => LineTime::Absent,
+    }
+}
+
+/// gemini-cli: one whole session per line, a JSON object
+/// `{startTime, lastUpdated, messages:[{timestamp,...}]}`. `startTime`,
+/// `lastUpdated` and every `messages[].timestamp` are RFC 3339 strings
+/// (unambiguous → `Exact`). Message times are the real conversation span; the
+/// top-level start/last-update fields are the session-level fallback.
+fn gemini_time(value: &serde_json::Value) -> LineTime {
+    let messages = value
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+    let (mf, ml, mrfc, msaw, minvalid) = collect_span(messages, "timestamp");
+    if let (Some(f), Some(l)) = (mf, ml) {
+        return LineTime::Time {
+            first: f,
+            last: l,
+            rfc3339: mrfc,
+        };
+    }
+    let start = value.get("startTime").and_then(one_ts_value);
+    let last_updated = value.get("lastUpdated").and_then(one_ts_value);
+    let has_top = value.get("startTime").is_some() || value.get("lastUpdated").is_some();
+    let invalid = has_top && (start.is_none() || last_updated.is_none());
+    let rfc =
+        start.map(|(_, r)| r).unwrap_or(false) || last_updated.map(|(_, r)| r).unwrap_or(false);
+    let sf = start.map(|(t, _)| t);
+    let sl = last_updated.map(|(t, _)| t);
+    match (sf, sl) {
+        (Some(f), Some(l)) => LineTime::Time {
+            first: f,
+            last: l.max(f),
+            rfc3339: rfc,
+        },
+        (Some(f), None) => LineTime::Time {
+            first: f,
+            last: f,
+            rfc3339: rfc,
+        },
+        (None, Some(l)) => LineTime::Time {
+            first: l,
+            last: l,
+            rfc3339: rfc,
+        },
+        (None, None) => {
+            if msaw || has_top || minvalid || invalid {
+                LineTime::Invalid
+            } else {
+                LineTime::Absent
+            }
+        }
     }
 }
 
@@ -561,6 +755,156 @@ mod tests {
         let row = build_row("s1", "mbp", "claude-code", &[l.as_str()]);
         let line = to_jsonl(&row);
         assert!(line.contains(r#""kind":"exact""#), "line: {line}");
+    }
+
+    // ---------------------------------------------------------------- opencode
+    // One session = one JSON line (the collect envelope). Message times are
+    // epoch millis → Inferred, and message-level (real conversation span).
+    #[test]
+    fn opencode_message_times_are_inferred_first_last() {
+        // m1 = 2025-01-15T12:34:56.789Z (T1), m2 = T2 (T1+4211s), as ms.
+        let m1 = 1_736_944_496_789i64;
+        let m2 = 1_736_948_707_123i64; // T2 = 1736948707
+        let envelope = format!(
+            r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{"id":"s1","time_created":{m1},"time_updated":{m2}}},"messages":[{{"id":"m1","session_id":"s1","time_created":{m1},"time_updated":{m1},"parts":[]}},{{"id":"m2","session_id":"s1","time_created":{m2},"time_updated":{m2},"parts":[]}}],"orphan_parts":[]}}"#
+        );
+        let lines = [envelope.as_str()];
+        let a = analyze_session("opencode", &lines);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        let TimeSource::Inferred { how } = &a.time_source else {
+            panic!("expected Inferred (epoch millis), got {:?}", a.time_source);
+        };
+        assert!(how.contains("毫秒"), "how should say millis: {how}");
+    }
+
+    #[test]
+    fn opencode_empty_messages_falls_back_to_session_time() {
+        let m1 = 1_736_944_496_789i64; // T1
+        let m2 = 1_736_948_707_123i64; // T2
+        let envelope = format!(
+            r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{"id":"s1","time_created":{m1},"time_updated":{m2}}},"messages":[],"orphan_parts":[]}}"#
+        );
+        let lines = [envelope.as_str()];
+        let a = analyze_session("opencode", &lines);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert!(matches!(a.time_source, TimeSource::Inferred { .. }));
+    }
+
+    #[test]
+    fn opencode_line_without_time_is_unknown_with_why() {
+        // Envelope but the session row has no time columns at all.
+        let envelope = r#"{"schema":"chat-stasher.opencode.session.v1","session":{"id":"s1"},"messages":[],"orphan_parts":[]}"#;
+        let lines = [envelope];
+        let a = analyze_session("opencode", &lines);
+        assert_eq!(a.first_unix, None);
+        let TimeSource::Unknown { why } = &a.time_source else {
+            panic!("expected Unknown, got {:?}", a.time_source);
+        };
+        assert!(
+            why.contains("timestamp"),
+            "why should mention the missing field: {why}"
+        );
+    }
+
+    #[test]
+    fn opencode_out_of_window_message_time_is_unknown_not_clamped() {
+        // A message time that as seconds is year 1970 — absurd, must not be used.
+        let envelope = format!(
+            r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{"id":"s1","time_created":1736944}},"messages":[{{"id":"m1","session_id":"s1","time_created":1736944,"time_updated":1736944,"parts":[]}}],"orphan_parts":[]}}"#
+        );
+        let lines = [envelope.as_str()];
+        let a = analyze_session("opencode", &lines);
+        assert_eq!(a.first_unix, None);
+        let TimeSource::Unknown { why } = &a.time_source else {
+            panic!("expected Unknown, got {:?}", a.time_source);
+        };
+        assert!(why.contains("合理"), "why should mention the range: {why}");
+    }
+
+    // ------------------------------------------------------------------ cursor
+    #[test]
+    fn cursor_global_created_at_is_inferred() {
+        // 1751779149032 ms = 1751779149 s
+        let envelope = r#"{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{"key":"composerData:aaaaaaaa-1111","value":{"composerId":"a","createdAt":1751779149032}}}"#;
+        let lines = [envelope];
+        let a = analyze_session("cursor", &lines);
+        assert_eq!(a.first_unix, Some(1_751_779_149));
+        assert_eq!(a.last_unix, Some(1_751_779_149));
+        let TimeSource::Inferred { how } = &a.time_source else {
+            panic!(
+                "expected Inferred (createdAt is session-level millis), got {:?}",
+                a.time_source
+            );
+        };
+        assert!(how.contains("毫秒"), "how should say millis: {how}");
+    }
+
+    #[test]
+    fn cursor_legacy_created_at_is_inferred() {
+        let envelope = r#"{"schema":"chat-stasher.cursor.legacy.session.v1","session":{"composerId":"a","createdAt":1751779149032,"conversation":[{}]}}"#;
+        let lines = [envelope];
+        let a = analyze_session("cursor", &lines);
+        assert_eq!(a.first_unix, Some(1_751_779_149));
+        assert!(matches!(a.time_source, TimeSource::Inferred { .. }));
+    }
+
+    #[test]
+    fn cursor_line_without_created_at_is_unknown_with_why() {
+        let envelope = r#"{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{"key":"composerData:a","value":{"composerId":"a"}}}"#;
+        let lines = [envelope];
+        let a = analyze_session("cursor", &lines);
+        assert_eq!(a.first_unix, None);
+        let TimeSource::Unknown { why } = &a.time_source else {
+            panic!("expected Unknown, got {:?}", a.time_source);
+        };
+        assert!(
+            why.contains("timestamp"),
+            "why should mention the missing field: {why}"
+        );
+    }
+
+    // ---------------------------------------------------------------- gemini-cli
+    // One session = one whole-file JSON line. Message timestamps are RFC 3339
+    // strings → Exact, message-level.
+    #[test]
+    fn gemini_message_times_are_exact_first_last() {
+        let envelope = format!(
+            r#"{{"sessionId":"s1","projectHash":"h","startTime":"{RFC_T1}","lastUpdated":"{RFC_T2}","messages":[{{"id":"m1","timestamp":"{RFC_T1}","type":"user","content":[{{"text":"hi"}}]}},{{"id":"m2","timestamp":"{RFC_T2}","type":"gemini","content":[{{"text":"hi"}}]}}],"kind":"main"}}"#
+        );
+        let lines = [envelope.as_str()];
+        let a = analyze_session("gemini-cli", &lines);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Exact);
+    }
+
+    #[test]
+    fn gemini_empty_messages_falls_back_to_start_last_updated() {
+        let envelope = format!(
+            r#"{{"sessionId":"s1","projectHash":"h","startTime":"{RFC_T1}","lastUpdated":"{RFC_T2}","messages":[],"kind":"main"}}"#
+        );
+        let lines = [envelope.as_str()];
+        let a = analyze_session("gemini-cli", &lines);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Exact);
+    }
+
+    #[test]
+    fn gemini_line_without_time_is_unknown_with_why() {
+        let envelope = r#"{"sessionId":"s1","projectHash":"h","kind":"main"}"#;
+        let lines = [envelope];
+        let a = analyze_session("gemini-cli", &lines);
+        assert_eq!(a.first_unix, None);
+        let TimeSource::Unknown { why } = &a.time_source else {
+            panic!("expected Unknown, got {:?}", a.time_source);
+        };
+        assert!(
+            why.contains("timestamp"),
+            "why should mention the missing field: {why}"
+        );
     }
 
     // helpers -----------------------------------------------------------------

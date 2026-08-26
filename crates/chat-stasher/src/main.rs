@@ -4,6 +4,7 @@ use anyhow::Context;
 use chat_stasher::activity;
 use chat_stasher::config::{self, Config};
 use chat_stasher::destinit::SourceStatus;
+use chat_stasher::identity;
 use chat_stasher::nativehost;
 use chat_stasher::overview;
 use chat_stasher::readback;
@@ -123,8 +124,8 @@ enum Command {
         #[arg(long)]
         key_file: Option<String>,
         /// Machine name for the path partition + snapshot host.
-        /// Default: this machine's normalised hostname; if unavailable, use
-        /// `--machine` explicitly and the command exits 3 without archiving.
+        /// Default: config `machine`, else this machine's identity (generated
+        /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
         /// Concurrency cap override (default: config `rustic_connections` = 10).
@@ -230,8 +231,8 @@ enum Command {
         /// Print full session ids in L3 rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
-        /// Machine partition (default: this machine's normalised hostname;
-        /// use `--machine` explicitly if that identity is unavailable).
+        /// Machine partition (default: config `machine`, else this machine's
+        /// identity; use `--machine` explicitly to choose the partition).
         #[arg(long)]
         machine: Option<String>,
         /// Named destination from the config. Required once the config
@@ -421,8 +422,8 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname; use `--machine`
-        /// explicitly if that identity is unavailable.
+        /// Default: config `machine`, else this machine's identity (generated
+        /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
         /// Maximum sealed shards per bucket (default: 20).
@@ -446,8 +447,8 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname; use `--machine`
-        /// explicitly if that identity is unavailable.
+        /// Default: config `machine`, else this machine's identity (generated
+        /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
         /// Maximum sealed shards per bucket (default: 20).
@@ -487,8 +488,8 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname; use `--machine`
-        /// explicitly if that identity is unavailable.
+        /// Default: config `machine`, else this machine's identity (generated
+        /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
         /// Session id to seal into. Default: the active file's stem.
@@ -603,10 +604,56 @@ enum Command {
         #[arg(long)]
         stage: PathBuf,
         /// Machine partition for `sessions/<machine>/…`.
-        /// Default: this machine's normalised hostname; use `--machine`
-        /// explicitly if that identity is unavailable.
+        /// Default: config `machine`, else this machine's identity (generated
+        /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
+    },
+    /// Write this machine's display-name declaration (ADR-018).
+    ///
+    /// Writes `<stage>/meta/<machine>/machine.json` — a `MachineDeclaration`
+    /// that carries the human display name, the OS and a first-seen time. The
+    /// machine partition is resolved exactly like every other command: config
+    /// `machine` first, then the identity file (generated when missing). The
+    /// next `push` archives the whole stage root, so this file rides along.
+    ///
+    /// The display name is taken from `--display-name` when given; otherwise
+    /// the system's LocalHostName (`scutil --get LocalHostName` on macOS,
+    /// `hostname` elsewhere) is used. If neither is available the field is
+    /// written **empty** and the command says so — a name is never invented.
+    ///
+    /// Exit codes: `0` = the declaration was written; `3` = the machine
+    /// partition could not be resolved or the identity is unusable; `1` = the
+    /// file could not be written; `2` = usage error.
+    MachineDeclare {
+        /// Stage directory to write the declaration into (`<stage>/meta/…`).
+        #[arg(long)]
+        stage: PathBuf,
+        /// Human display name for this machine. Default: system LocalHostName.
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    /// Give a dead or sold machine a display name (ADR-018).
+    ///
+    /// Writes `<stage>/meta/<target>/label-by-<本机身份>.json` — a
+    /// `LabelRecord` expressing *this* machine's opinion about what `<target>`
+    /// should be called. It exists for machines that can no longer declare for
+    /// themselves (sold, dead, in a different building). Each file has exactly
+    /// one writer, so concurrent machines never fight over it; the overview
+    /// shows the label with the latest `written_at_unix`.
+    ///
+    /// Exit codes: `0` = the label was written; `3` = the local identity could
+    /// not be resolved; `1` = the file could not be written; `2` = usage error.
+    MachineLabel {
+        /// Stage directory to write the label into (`<stage>/meta/…`).
+        #[arg(long)]
+        stage: PathBuf,
+        /// Machine id (partition) being labelled, e.g. a 32-hex identity.
+        #[arg(long)]
+        target: String,
+        /// Display-name override for the target.
+        #[arg(long)]
+        label: String,
     },
     /// Draw the machine × harness activity overview of one destination
     /// (ADR-017).
@@ -901,6 +948,15 @@ fn main() -> ExitCode {
         ),
         Command::NativeHost { self_test } => cmd_native_host(self_test),
         Command::ActivityIndex { stage, machine } => cmd_activity_index(&stage, machine.as_deref()),
+        Command::MachineDeclare {
+            stage,
+            display_name,
+        } => cmd_machine_declare(&stage, display_name),
+        Command::MachineLabel {
+            stage,
+            target,
+            label,
+        } => cmd_machine_label(&stage, &target, &label),
         Command::Overview {
             destination,
             width,
@@ -1195,7 +1251,8 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
 /// session was read but the output file could not be written; `2` = usage
 /// error (enforced by clap).
 fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
-    let machine = match resolve_machine("activity-index", machine) {
+    let config = Config::load();
+    let machine = match resolve_machine("activity-index", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
@@ -1306,13 +1363,202 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `machine-declare` — write this machine's display-name declaration (ADR-018).
+///
+/// The partition is resolved by the standard three-level rule (config `machine`,
+/// then the identity file — generated when missing). The declaration goes to
+/// `<stage>/meta/<machine>/machine.json` and rides into the archive on the next
+/// `push`, which archives the whole stage root.
+fn cmd_machine_declare(stage: &Path, display_name: Option<String>) -> ExitCode {
+    let config = Config::load();
+    let machine = match resolve_machine("machine-declare", &config, None) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let display_name = match display_name.filter(|name| !name.trim().is_empty()) {
+        Some(name) => name,
+        None => match system_display_name() {
+            Some(name) => name,
+            None => {
+                eprintln!(
+                    "machine-declare: could not determine a system display name — writing an empty display_name (set one with --display-name)"
+                );
+                String::new()
+            }
+        },
+    };
+    let decl = identity::MachineDeclaration {
+        machine_id: machine.clone(),
+        display_name,
+        os: std::env::consts::OS.to_string(),
+        first_seen_unix: now_unix(),
+        declared_harnesses: Vec::new(),
+    };
+    match write_declaration(stage, &decl) {
+        Ok(path) => {
+            println!("[machine-declare] machine        : {machine}");
+            println!("[machine-declare] display name   : {}", decl.display_name);
+            println!("[machine-declare] os             : {}", decl.os);
+            println!(
+                "[machine-declare] first seen     : {}",
+                decl.first_seen_unix
+            );
+            println!("[machine-declare] file           : {}", path.display());
+            println!(
+                "[machine-declare] next           : the next `push` archives it with the stage"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("machine-declare: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `machine-label` — write this machine's display-name opinion about another
+/// machine (ADR-018). Exists for targets that can no longer declare for
+/// themselves. One writer per file, so concurrent machines never merge.
+fn cmd_machine_label(stage: &Path, target: &str, label: &str) -> ExitCode {
+    let config = Config::load();
+    let writer = match resolve_machine("machine-label", &config, None) {
+        Ok(writer) => writer,
+        Err(code) => return code,
+    };
+    let record = identity::LabelRecord {
+        target_machine_id: target.to_string(),
+        label: label.to_string(),
+        written_by_machine_id: writer.clone(),
+        written_at_unix: now_unix(),
+    };
+    match write_label(stage, &record) {
+        Ok(path) => {
+            println!("[machine-label] target  : {}", record.target_machine_id);
+            println!("[machine-label] label   : {}", record.label);
+            println!("[machine-label] writer  : {writer}");
+            println!("[machine-label] written : {}", record.written_at_unix);
+            println!("[machine-label] file    : {}", path.display());
+            println!("[machine-label] next    : the next `push` archives it with the stage");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("machine-label: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Write a declaration to `<stage>/meta/<machine>/machine.json`, creating the
+/// directory tree. Returns the path written.
+fn write_declaration(stage: &Path, decl: &identity::MachineDeclaration) -> anyhow::Result<PathBuf> {
+    let path = identity::machine_decl_path(stage, &decl.machine_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("declaration path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create declaration directory {}", parent.display()))?;
+    std::fs::write(&path, identity::serialize_declaration(decl)?)
+        .with_context(|| format!("write declaration {}", path.display()))?;
+    Ok(path)
+}
+
+/// Write a label to `<stage>/meta/<target>/label-by-<writer>.json`, creating
+/// the directory tree. Returns the path written.
+fn write_label(stage: &Path, record: &identity::LabelRecord) -> anyhow::Result<PathBuf> {
+    let path = identity::label_path(
+        stage,
+        &record.target_machine_id,
+        &record.written_by_machine_id,
+    );
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("label path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create label directory {}", parent.display()))?;
+    std::fs::write(&path, serde_json::to_string_pretty(record)?)
+        .with_context(|| format!("write label {}", path.display()))?;
+    Ok(path)
+}
+
+/// The machine's human-readable display name from the OS, if it can be read.
+/// macOS uses `scutil --get LocalHostName`; other platforms use `hostname`.
+/// `None` means the caller writes an empty name and says so — a name is never
+/// invented.
+fn system_display_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        command_stdout("scutil", &["--get", "LocalHostName"])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        command_stdout("hostname", &[])
+    }
+}
+
+/// Capture a program's stdout, trimmed, as a string. `None` when the program
+/// cannot be run, exits non-zero, prints non-UTF-8, or prints nothing.
+fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Current unix time in seconds. Falls back to 0 only when the system clock
+/// predates the epoch (unreachable on a sane host).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Render the human-facing name for an archived machine id (ADR-018).
+///
+/// A valid 32-hex identity goes through [`identity::display_for`]: a label
+/// wins, else the declaration's display name, else `short-hex (unnamed)` — the
+/// short id is always shown, and a missing name is marked explicitly, never
+/// invented and never blank.
+///
+/// A **legacy** partition id that is not 32 hex (a pre-ADR-018 hostname like
+/// `mac`) has no identity to shorten. It is rendered with the partition id as
+/// the identifier plus the declaration/label name when one exists, or an
+/// explicit `无名字` marker otherwise — the partition id is never presented as
+/// a name.
+fn display_machine(
+    machine_id: &str,
+    decl: Option<&identity::MachineDeclaration>,
+    labels: &[identity::LabelRecord],
+) -> String {
+    if let Ok(id) = identity::MachineIdentity::from_hex(machine_id) {
+        return identity::display_for(&id, decl, labels);
+    }
+    if let Some(label) = identity::effective_label(labels) {
+        return format!("{} ({machine_id})", label.label);
+    }
+    if let Some(d) = decl.filter(|d| !d.display_name.is_empty()) {
+        return format!("{} ({machine_id})", d.display_name);
+    }
+    format!("{machine_id} (无名字)")
+}
+
 /// Everything `overview` extracts from a destination repository before
-/// rendering. The two machine sets let the caller name machines that have a
-/// snapshot but no activity index.
+/// rendering. The machine sets let the caller name machines that have a
+/// snapshot but no activity index, and machines that have a snapshot but no
+/// display-name declaration.
 struct OverviewRead {
     rows: Vec<overview::OverviewRow>,
     snapshot_machines: BTreeSet<String>,
     index_machines: BTreeSet<String>,
+    /// Machines whose newest snapshot carries a `meta/<id>/machine.json`.
+    declared_machines: BTreeSet<String>,
+    /// Per-machine display metadata found while walking the snapshots.
+    declarations: BTreeMap<String, identity::MachineDeclaration>,
+    labels: BTreeMap<String, Vec<identity::LabelRecord>>,
 }
 
 /// Open the destination and walk every newest-per-host snapshot for activity
@@ -1343,6 +1589,9 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         rows: Vec::new(),
         snapshot_machines: BTreeSet::new(),
         index_machines: BTreeSet::new(),
+        declared_machines: BTreeSet::new(),
+        declarations: BTreeMap::new(),
+        labels: BTreeMap::new(),
     };
 
     for snap in newest {
@@ -1360,22 +1609,48 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
             if node.node_type != NodeType::File {
                 continue;
             }
-            let Some(machine) = sidecar::activity_index_machine(path) else {
-                continue;
-            };
-            out.index_machines.insert(machine.clone());
-            let mut buf = Vec::new();
-            repo.dump(node, &mut buf).with_context(|| {
-                format!("host `{hostname}` machine `{machine}`: read activity index")
-            })?;
-            for line in String::from_utf8_lossy(&buf).lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let row: activity::ActivityRow = serde_json::from_str(line).with_context(|| {
-                    format!("host `{hostname}` machine `{machine}`: malformed activity index line")
+            if let Some(machine) = sidecar::activity_index_machine(path) {
+                out.index_machines.insert(machine.clone());
+                let mut buf = Vec::new();
+                repo.dump(node, &mut buf).with_context(|| {
+                    format!("host `{hostname}` machine `{machine}`: read activity index")
                 })?;
-                out.rows.push(sidecar::to_overview_row(&row));
+                for line in String::from_utf8_lossy(&buf).lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let row: activity::ActivityRow = serde_json::from_str(line).with_context(|| {
+                        format!("host `{hostname}` machine `{machine}`: malformed activity index line")
+                    })?;
+                    out.rows.push(sidecar::to_overview_row(&row));
+                }
+                continue;
+            }
+            if let Some(machine) = sidecar::declaration_machine(path) {
+                let mut buf = Vec::new();
+                repo.dump(node, &mut buf).with_context(|| {
+                    format!("host `{hostname}` machine `{machine}`: read declaration")
+                })?;
+                let decl: identity::MachineDeclaration = serde_json::from_slice(&buf)
+                    .with_context(|| {
+                        format!(
+                            "host `{hostname}` machine `{machine}`: malformed machine declaration"
+                        )
+                    })?;
+                out.declared_machines.insert(machine.clone());
+                out.declarations.insert(machine, decl);
+                continue;
+            }
+            if let Some((machine, _writer)) = sidecar::label_record_machine(path) {
+                let mut buf = Vec::new();
+                repo.dump(node, &mut buf).with_context(|| {
+                    format!("host `{hostname}` machine `{machine}`: read label")
+                })?;
+                let record: identity::LabelRecord =
+                    serde_json::from_slice(&buf).with_context(|| {
+                        format!("host `{hostname}` machine `{machine}`: malformed label record")
+                    })?;
+                out.labels.entry(machine).or_default().push(record);
             }
         }
     }
@@ -1446,16 +1721,32 @@ fn cmd_overview(
             return ExitCode::from(3);
         }
     };
-    let rows = read.rows;
-    let snapshot_machines = read.snapshot_machines;
-    let index_machines = read.index_machines;
+    let OverviewRead {
+        rows,
+        snapshot_machines,
+        index_machines,
+        declared_machines,
+        declarations,
+        labels,
+    } = read;
+
+    // ADR-018 display names: a machine's name is its declaration, its labels
+    // (latest wins) or an explicit unnamed marker — never the raw partition id
+    // pretending to be a name, and never blank.
+    let display = |machine: &str| -> String {
+        let decl = declarations.get(machine);
+        let machine_labels: &[identity::LabelRecord] =
+            labels.get(machine).map_or(&[], Vec::as_slice);
+        display_machine(machine, decl, machine_labels)
+    };
 
     println!("[overview] repo         : {}", cfg.repo_root);
     println!("[overview] width        : {width}");
     println!(
-        "[overview] machines     : {} with snapshot / {} with index",
+        "[overview] machines     : {} with snapshot / {} with index / {} with declaration",
         snapshot_machines.len(),
-        index_machines.len()
+        index_machines.len(),
+        declared_machines.len()
     );
 
     // A machine that has a snapshot but no activity index must be named — never
@@ -1464,7 +1755,23 @@ fn cmd_overview(
     if !missing.is_empty() {
         println!("[overview] 索引缺失（有快照、无 activity 索引）:");
         for m in &missing {
-            println!("  !! {m}");
+            println!("  !! {}", display(m));
+        }
+    }
+
+    // A machine that has a snapshot but no display-name declaration must also
+    // be named — it renders as `<short-id> (unnamed)` and never vanishes from
+    // the totals. (Legacy hostname partitions are counted here until the owner
+    // sets `machine = "<partition>"` in the config and declares.)
+    let undeclared: Vec<String> = snapshot_machines
+        .iter()
+        .filter(|m| !declared_machines.contains(*m))
+        .cloned()
+        .collect();
+    if !undeclared.is_empty() {
+        println!("[overview] 声明缺失（有快照、无 machine.json 声明）:");
+        for m in &undeclared {
+            println!("  !! {}", display(m));
         }
     }
 
@@ -1478,37 +1785,109 @@ fn cmd_overview(
         return ExitCode::from(1);
     }
 
-    println!("{}", overview::render_overview(&rows, width));
+    // The matrix/heatmap rows are keyed by the machine's *display name* — two
+    // machines with the same display name stay distinguishable because the
+    // short id is always appended.
+    let mut display_rows = rows;
+    for row in &mut display_rows {
+        row.machine = display(&row.machine);
+    }
+    println!("{}", overview::render_overview(&display_rows, width));
     reap_remote(&cfg, no_reap);
     ExitCode::SUCCESS
 }
 
-/// Resolve the archive partition without ever inventing a hostname. A missing
-/// identity means the machine-specific operation did not start, so callers use
-/// exit code 3: the archive was not read or written and the user can retry
-/// with the existing `--machine` override.
-fn resolve_machine(command: &str, explicit: Option<&str>) -> Result<String, ExitCode> {
+/// Resolve the archive partition by ADR-018's three-level rule:
+///
+///   1. an explicit `--machine` override;
+///   2. the config's `machine` field — the one line that keeps a legacy
+///      install on its existing partition;
+///   3. the identity file — loaded when present, **generated and persisted
+///      only when the file is missing**, and a hard failure (exit 3, "do not
+///      delete this file") when the file is present but unusable.
+///
+/// 🔴 There is deliberately no hostname fallback: two machines that share a
+/// default hostname used to silently merge into one partition, and that class
+/// of bug is what ADR-018 exists to remove. A *missing* identity is generated
+/// and persisted, so the operation proceeds; a *present but unusable* identity
+/// is the hard failure (exit 3, "do not delete this file") because replacing
+/// it would silently re-key — and orphan — the machine's archive partition.
+fn resolve_machine(
+    command: &str,
+    config: &Config,
+    explicit: Option<&str>,
+) -> Result<String, ExitCode> {
+    resolve_machine_at(command, config, explicit, &machine_identity_path())
+}
+
+/// [`resolve_machine`] with the identity path supplied explicitly, so the
+/// three-way outcome (Loaded / Missing / Unusable) is unit-testable against a
+/// scratch file.
+fn resolve_machine_at(
+    command: &str,
+    config: &Config,
+    explicit: Option<&str>,
+    identity_path: &Path,
+) -> Result<String, ExitCode> {
     if let Some(machine) = explicit {
         return Ok(machine.to_string());
     }
-    chat_stasher::id::machine_id().ok_or_else(|| {
-        eprintln!(
-            "{command}: machine identity unavailable; hostname and HOSTNAME did not provide a usable value"
-        );
-        eprintln!(
-            "{command}: nothing was read or written; supply --machine <name> to choose the archive partition"
-        );
-        ExitCode::from(3)
-    })
+    if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
+        return Ok(machine.to_string());
+    }
+    match identity::load_identity_state(identity_path) {
+        identity::IdentityFileState::Loaded(id) => Ok(id.as_hex()),
+        identity::IdentityFileState::Missing => match identity::load_or_create(identity_path) {
+            Ok((id, true)) => {
+                eprintln!(
+                    "{command}: generated a new machine identity {} — this is the archive partition for this machine from now on",
+                    id.short_hex()
+                );
+                Ok(id.as_hex())
+            }
+            Ok((id, false)) => Ok(id.as_hex()),
+            Err(e) => {
+                eprintln!("{command}: cannot persist a new machine identity: {e:#}");
+                eprintln!("{command}: nothing was read or written.");
+                Err(ExitCode::from(3))
+            }
+        },
+        identity::IdentityFileState::Unusable(error) => {
+            eprintln!(
+                "{command}: machine identity file {} is present but unusable: {error:?}",
+                identity_path.display()
+            );
+            eprintln!(
+                "{command}: 🔴 do not delete this file — it is the key to this machine's archive partition."
+            );
+            eprintln!(
+                "{command}: fix the read/parse problem and re-run; nothing was read or written."
+            );
+            Err(ExitCode::from(3))
+        }
+    }
+}
+
+/// Where this machine's identity lives. One file per install, created on first
+/// use, owner-readable-only; it is the partition key for every later run.
+fn machine_identity_path() -> PathBuf {
+    data_root().join("machine-identity")
 }
 
 /// A metadata-only query can inspect every machine in a repository without
 /// selecting this machine's partition. Keep that distinction explicit in the
-/// store API; it never creates a path or snapshot host.
-fn query_machine(explicit: Option<&str>) -> Option<String> {
+/// store API; it never creates a path or snapshot host, so it never *generates*
+/// an identity either — a missing or unusable identity is simply `None`.
+fn query_machine(config: &Config, explicit: Option<&str>) -> Option<String> {
     explicit
         .map(str::to_string)
-        .or_else(chat_stasher::id::machine_id)
+        .or_else(|| config.machine.clone().filter(|m| !m.is_empty()))
+        .or_else(
+            || match identity::load_identity_state(&machine_identity_path()) {
+                identity::IdentityFileState::Loaded(id) => Some(id.as_hex()),
+                _ => None,
+            },
+        )
 }
 
 /// `search` — metadata-tier query against exactly one named destination.
@@ -1869,7 +2248,8 @@ fn cmd_ingest(
     machine: Option<&str>,
     shard_bucket_cap: usize,
 ) -> ExitCode {
-    let machine = match resolve_machine("ingest", machine) {
+    let config = Config::load();
+    let machine = match resolve_machine("ingest", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
@@ -1980,7 +2360,7 @@ fn cmd_dest_init(
         );
         return ExitCode::from(2);
     }
-    let machine = match resolve_machine("dest-init", machine) {
+    let machine = match resolve_machine("dest-init", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
@@ -2327,7 +2707,7 @@ fn cmd_collect(
     key_file: Option<String>,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = match resolve_machine("collect", machine) {
+    let machine = match resolve_machine("collect", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
@@ -2557,7 +2937,7 @@ fn run_once_pass(
     use chat_stasher::runstate::{RunOutcome, RunState};
 
     let config = Config::load();
-    let machine_name = match resolve_machine("run-once", machine.as_deref()) {
+    let machine_name = match resolve_machine("run-once", &config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => {
             let state = RunState::new(
@@ -2864,7 +3244,8 @@ fn cmd_seal(
         println!("[seal] active untouched : {}", active.display());
         return ExitCode::FAILURE;
     }
-    let machine = match resolve_machine("seal", machine) {
+    let config = Config::load();
+    let machine = match resolve_machine("seal", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
@@ -3212,7 +3593,7 @@ fn cmd_push(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = match resolve_machine("push", machine.as_deref()) {
+    let machine = match resolve_machine("push", &config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
@@ -3435,9 +3816,9 @@ fn cmd_read(
 ) -> ExitCode {
     let config = Config::load();
     let machine = if all_machines {
-        query_machine(machine)
+        query_machine(&config, machine)
     } else {
-        match resolve_machine("read", machine) {
+        match resolve_machine("read", &config, machine) {
             Ok(machine) => Some(machine),
             Err(code) => return code,
         }
@@ -3614,7 +3995,7 @@ fn cmd_verify(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let machine = query_machine(machine);
+    let machine = query_machine(&config, machine);
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -3992,6 +4373,185 @@ mod decision_surface_tests {
         assert!(result.1);
         assert!(config.key_file.is_file());
         assert!(store::load_key_file(&config).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-018: 机器名三级解析 —— 显式 > config.machine > 身份文件
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_machine_prefers_explicit_over_config() {
+        let config = Config {
+            machine: Some("cfg-mac".into()),
+            ..Config::default()
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let out = resolve_machine_at("test", &config, Some("--explicit"), &dir.path().join("id"));
+        assert_eq!(out.unwrap(), "--explicit");
+    }
+
+    #[test]
+    fn resolve_machine_uses_config_machine_without_touching_identity_file() {
+        let config = Config {
+            machine: Some("cfg-mac".into()),
+            ..Config::default()
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let id_path = dir.path().join("id");
+        let out = resolve_machine_at("test", &config, None, &id_path).unwrap();
+        assert_eq!(out, "cfg-mac");
+        assert!(
+            !id_path.exists(),
+            "config machine must not write an identity file"
+        );
+    }
+
+    #[test]
+    fn resolve_machine_uses_loaded_identity() {
+        let config = Config::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let id_path = dir.path().join("id");
+        std::fs::write(&id_path, "0123456789abcdef0123456789abcdef").unwrap();
+        let out = resolve_machine_at("test", &config, None, &id_path).unwrap();
+        assert_eq!(out, "0123456789abcdef0123456789abcdef");
+    }
+
+    #[test]
+    fn resolve_machine_generates_and_persists_identity_when_missing() {
+        let config = Config::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let id_path = dir.path().join("id");
+        let out = resolve_machine_at("test", &config, None, &id_path).unwrap();
+        assert_eq!(out.len(), 32);
+        assert!(out.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            std::fs::read_to_string(&id_path).unwrap(),
+            out,
+            "a freshly generated identity must be persisted"
+        );
+    }
+
+    #[test]
+    fn resolve_machine_hard_fails_on_unusable_identity_without_touching_file() {
+        let config = Config::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let id_path = dir.path().join("id");
+        let garbage = "garbage-not-an-identity";
+        std::fs::write(&id_path, garbage).unwrap();
+        let err = resolve_machine_at("test", &config, None, &id_path).unwrap_err();
+        assert_eq!(err, ExitCode::from(3));
+        assert_eq!(
+            std::fs::read_to_string(&id_path).unwrap(),
+            garbage,
+            "an unusable identity must never be replaced with a fresh one"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-018: overview 显示名 —— 永不为空、永不把分区名冒充名字
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn display_machine_never_shows_partition_as_name() {
+        // A valid 32-hex identity with no declaration and no label must render
+        // as short-id + an explicit unnamed marker — never blank, never the raw
+        // full partition id pretending to be a name.
+        let id = "0123456789abcdef0123456789abcdef";
+        let out = display_machine(id, None, &[]);
+        assert!(!out.is_empty());
+        assert!(out.contains("01234567"), "short id must be present: {out}");
+        assert!(
+            !out.contains(id),
+            "full partition id must not be shown as the name: {out}"
+        );
+        assert!(
+            !out.contains("0123456789abcdef"),
+            "full partition id must not be shown: {out}"
+        );
+    }
+
+    #[test]
+    fn display_machine_legacy_partition_is_marked_not_blank() {
+        // A legacy hostname partition (not 32 hex) has no identity; it must
+        // still be marked unnamed rather than silently presented as a name.
+        let out = display_machine("mac", None, &[]);
+        assert!(!out.is_empty());
+        assert!(
+            out.contains("无名字") || out.contains("unnamed"),
+            "a legacy partition must carry an explicit unnamed marker: {out}"
+        );
+    }
+
+    #[test]
+    fn display_machine_uses_declaration_and_label() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let decl = identity::MachineDeclaration {
+            machine_id: id.into(),
+            display_name: "MacBook Air".into(),
+            os: "macos".into(),
+            first_seen_unix: 0,
+            declared_harnesses: vec![],
+        };
+        let out = display_machine(id, Some(&decl), &[]);
+        assert_eq!(out, "MacBook Air (01234567)");
+
+        let label = identity::LabelRecord {
+            target_machine_id: id.into(),
+            label: "Sold off".into(),
+            written_by_machine_id: "writer".into(),
+            written_at_unix: 5,
+        };
+        let out = display_machine(id, Some(&decl), &[label]);
+        assert_eq!(
+            out, "Sold off (01234567)",
+            "a label wins over the declaration"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-018: machine-declare / machine-label 写文件
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn machine_declare_writes_declaration_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let decl = identity::MachineDeclaration {
+            machine_id: "0123456789abcdef0123456789abcdef".into(),
+            display_name: "MacBook Air".into(),
+            os: "macos".into(),
+            first_seen_unix: 123,
+            declared_harnesses: vec![],
+        };
+        let path = write_declaration(&stage, &decl).unwrap();
+        assert_eq!(path, identity::machine_decl_path(&stage, &decl.machine_id));
+        let back: identity::MachineDeclaration =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back, decl);
+    }
+
+    #[test]
+    fn machine_label_writes_label_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let record = identity::LabelRecord {
+            target_machine_id: "fedcba9876543210fedcba9876543210".into(),
+            label: "Sold to Alex".into(),
+            written_by_machine_id: "0123456789abcdef0123456789abcdef".into(),
+            written_at_unix: 42,
+        };
+        let path = write_label(&stage, &record).unwrap();
+        assert_eq!(
+            path,
+            identity::label_path(
+                &stage,
+                &record.target_machine_id,
+                &record.written_by_machine_id
+            )
+        );
+        let back: identity::LabelRecord =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back, record);
     }
 }
 

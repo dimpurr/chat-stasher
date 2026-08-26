@@ -1,7 +1,11 @@
-//! B65 regression: an unavailable hostname must not become the real-looking
-//! `localhost` archive partition.
+//! B65 regression, re-expressed for ADR-018: the archive partition is never
+//! derived from the hostname, so a machine with no hostname tool and no
+//! `HOSTNAME` neither falls back to a real-looking `localhost` partition nor
+//! stalls — a **missing identity file** gets a fresh random 32-hex identity
+//! generated and persisted, and an **unusable** identity file hard-fails with
+//! a "do not delete this file" instruction instead of being replaced.
 //!
-//! Both cases run with an empty synthetic registry and isolated XDG/HOME
+//! All cases run with an empty synthetic registry and isolated XDG/HOME
 //! directories. The child PATH contains no `hostname` executable, and
 //! `HOSTNAME` is removed; no harness directory or session body is touched.
 
@@ -39,7 +43,7 @@ fn run_collect(sandbox: &Path, machine: Option<&str>) -> Output {
 }
 
 #[test]
-fn missing_machine_identity_is_reported_without_localhost_fallback() {
+fn missing_identity_generates_a_partition_never_localhost() {
     let sandbox = tempfile::tempdir().unwrap();
     let output = run_collect(sandbox.path(), None);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -48,20 +52,69 @@ fn missing_machine_identity_is_reported_without_localhost_fallback() {
 
     assert_eq!(
         output.status.code(),
-        Some(3),
-        "identity-dependent collection did not start; stdout={stdout} stderr={stderr}"
+        Some(0),
+        "a missing identity must be generated so collection proceeds; stdout={stdout} stderr={stderr}"
     );
     assert!(
-        combined.contains("machine identity unavailable"),
-        "the unresolved state must be visible; stdout={stdout} stderr={stderr}"
+        combined.contains("generated a new machine identity"),
+        "the generation must be visible; stdout={stdout} stderr={stderr}"
+    );
+    let machine_line = stdout
+        .lines()
+        .find(|l| l.starts_with("[collect] machine"))
+        .expect("collect must print the machine line")
+        .to_string();
+    let machine = machine_line.split(':').nth(1).unwrap().trim();
+    assert_eq!(
+        machine.len(),
+        32,
+        "the partition must be a 32-hex identity: {machine_line}"
     );
     assert!(
-        combined.contains("--machine <name>"),
-        "the user must be told how to choose the partition; stdout={stdout} stderr={stderr}"
+        machine.chars().all(|c| c.is_ascii_hexdigit()),
+        "the partition must be hex: {machine_line}"
     );
     assert!(
         !combined.contains("localhost"),
-        "unavailable identity must never be rendered as localhost; stdout={stdout} stderr={stderr}"
+        "an identity is never a localhost partition; stdout={stdout} stderr={stderr}"
+    );
+    let id_path = sandbox.path().join("data/chat-stasher/machine-identity");
+    assert_eq!(
+        std::fs::read_to_string(&id_path).unwrap().trim(),
+        machine,
+        "the generated identity must be persisted where the next run reads it"
+    );
+}
+
+#[test]
+fn unusable_identity_hard_fails_without_replacing_file() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let id_path = sandbox.path().join("data/chat-stasher/machine-identity");
+    fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+    let garbage = "not-32-hex-garbage";
+    fs::write(&id_path, garbage).unwrap();
+
+    let output = run_collect(sandbox.path(), None);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "an unusable identity must hard-fail, never generate a replacement; stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("do not delete"),
+        "the user must be told not to delete the identity file; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("generated a new machine identity"),
+        "an unusable identity must not be silently replaced; stderr={stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&id_path).unwrap(),
+        garbage,
+        "an unusable identity must remain untouched on disk"
     );
 }
 
