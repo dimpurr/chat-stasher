@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Directory + filename of the config relative to the user's config home
 /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
@@ -165,6 +165,7 @@ impl Config {
             Ok(raw) => match toml::from_str::<Config>(&raw) {
                 Ok(mut cfg) => {
                     cfg.source = ConfigSource::File;
+                    expand_config_paths(&mut cfg);
                     cfg
                 }
                 Err(e) => match recover_windows_paths(&raw)
@@ -179,6 +180,7 @@ impl Config {
                             "         TOML 里 `\\` 是转义符；写成 'C:\\path' (单引号) 或 \"C:\\\\path\" 可去掉这条警告"
                         );
                         cfg.source = ConfigSource::FileAfterWindowsPathRepair;
+                        expand_config_paths(&mut cfg);
                         cfg
                     }
                     None => {
@@ -240,6 +242,81 @@ impl Config {
         std::fs::write(&path, template)?;
         eprintln!("wrote default config: {}", path.display());
         Ok(())
+    }
+
+    /// Expand every path-typed field in place. Fields whose `~` cannot be
+    /// expanded (missing home, `~otheruser`) — or that still contain a literal
+    /// `~` component after expansion — are *dropped to their default* (`None`,
+    /// an empty/removed map entry) and the problem is recorded in `problems`.
+    /// A literal `~` must never survive into a path the tool then hands to the
+    /// filesystem.
+    ///
+    /// Called from [`Config::load`] so every consumer of the effective config
+    /// sees expanded paths and no consumer has to remember to expand.
+    fn expand_all_paths(&mut self, problems: &mut Vec<String>) {
+        expand_opt_field("archive_root", &mut self.archive_root, problems);
+        expand_opt_field(
+            "claude_projects_dir",
+            &mut self.claude_projects_dir,
+            problems,
+        );
+        expand_opt_field("codex_sessions_dir", &mut self.codex_sessions_dir, problems);
+        expand_opt_field("rustic_repo", &mut self.rustic_repo, problems);
+        expand_opt_field("rustic_key_file", &mut self.rustic_key_file, problems);
+
+        let mut bad_harness_roots: Vec<String> = Vec::new();
+        for (id, root) in &mut self.harness_roots {
+            match expand_and_verify(root) {
+                Ok(path) => *root = path.to_string_lossy().into_owned(),
+                Err(e) => {
+                    problems.push(format!("harness_roots.{id}: {e}"));
+                    bad_harness_roots.push(id.clone());
+                }
+            }
+        }
+        for id in bad_harness_roots {
+            self.harness_roots.remove(&id);
+        }
+
+        for (name, dest) in &mut self.destinations {
+            let repo_label = format!("destinations.{name}.repo");
+            expand_opt_field(&repo_label, &mut dest.repo, problems);
+            let key_label = format!("destinations.{name}.key_file");
+            expand_opt_field(&key_label, &mut dest.key_file, problems);
+            // Backend option values are forwarded verbatim to rustic, but a
+            // value that names a local file (e.g. `key`/`root` for
+            // `opendal:sftp`) is a path and gets the same `~` handling. Values
+            // without a leading `~` are untouched by `expand_and_verify`.
+            let mut bad_options: Vec<String> = Vec::new();
+            for (key, value) in &mut dest.options {
+                let label = format!("destinations.{name}.options.{key}");
+                match expand_and_verify(value) {
+                    Ok(path) => *value = path.to_string_lossy().into_owned(),
+                    Err(e) => {
+                        problems.push(format!("{label}: {e}"));
+                        bad_options.push(key.clone());
+                    }
+                }
+            }
+            for key in bad_options {
+                dest.options.remove(&key);
+            }
+        }
+    }
+}
+
+/// Run the post-parse path expansion over an effective config, printing a
+/// warning for every field that had to be reset to its default. Loading never
+/// aborts over a bad `~` (a scan must not be blocked by a config typo), but it
+/// also never lets a literal `~` through: the field is dropped and the reason
+/// is printed.
+fn expand_config_paths(cfg: &mut Config) {
+    let mut problems: Vec<String> = Vec::new();
+    cfg.expand_all_paths(&mut problems);
+    for problem in &problems {
+        eprintln!(
+            "warning: 配置路径里的 `~` 无法展开，该项已按默认值处理（绝不把字面 `~` 当路径写盘）: {problem}"
+        );
     }
 }
 
@@ -415,20 +492,171 @@ pub fn config_path() -> PathBuf {
 
 /// Best-effort `$HOME` / user home directory.
 pub fn home_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(home);
+    match home_from_env() {
+        Some(home) => PathBuf::from(home),
+        None => {
+            // Never turn a missing identity into `.`: that would make every
+            // default harness path point at the caller's working tree. The
+            // per-process temp quarantine is deliberately not presented as a
+            // real home and is normally absent, so probes remain unknown
+            // instead of reading the repository.
+            std::env::temp_dir().join(format!(
+                "chat-stasher-home-unavailable-{}",
+                std::process::id()
+            ))
+        }
     }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
-        return PathBuf::from(profile);
+}
+
+/// The current user's home directory from the environment, when one is
+/// declared. `$HOME` first (Unix convention), `$USERPROFILE` second (Windows
+/// convention); an empty value counts as unset. `None` when neither is set —
+/// the caller decides whether that is fatal.
+fn home_from_env() -> Option<String> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+/// Why a `~` in a path could not be expanded.
+///
+/// This is deliberately a hard error rather than a best effort: the failure
+/// being guarded against — writing a masterkey into a literal `~` directory in
+/// the current working directory — is worse than refusing to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TildeError {
+    /// `~` / `~/` seen but no home directory is available
+    /// (`$HOME` and `$USERPROFILE` both unset or empty).
+    MissingHome { input: String },
+    /// `~somebody/...` — another user's home. Only the current user's `~` is
+    /// supported, so this is rejected rather than silently treated as a
+    /// relative path (which is exactly how `~` ends up as a literal directory).
+    OtherUserTilde { input: String },
+    /// A path that was about to reach the filesystem still contains a literal
+    /// `~` component — i.e. a `~` that was never expanded. See
+    /// [`assert_no_literal_tilde`].
+    LiteralTildeRemains { path: String },
+}
+
+impl std::fmt::Display for TildeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingHome { input } => write!(
+                f,
+                "`{input}` 以 `~` 开头，但 $HOME / $USERPROFILE 都未设置，无法展开为家目录"
+            ),
+            Self::OtherUserTilde { input } => write!(
+                f,
+                "`{input}` 是 `~用户名` 形式，本工具只支持当前用户的 `~`（不支持别人的家目录）；请写绝对路径"
+            ),
+            Self::LiteralTildeRemains { path } => write!(
+                f,
+                "`{path}` 里仍含有字面量 `~` 组件——这几乎肯定是波浪号没被展开；请用 `~/` 开头或写绝对路径"
+            ),
+        }
     }
-    // Never turn a missing identity into `.`: that would make every default
-    // harness path point at the caller's working tree. The per-process temp
-    // quarantine is deliberately not presented as a real home and is normally
-    // absent, so probes remain unknown instead of reading the repository.
-    std::env::temp_dir().join(format!(
-        "chat-stasher-home-unavailable-{}",
-        std::process::id()
-    ))
+}
+
+impl std::error::Error for TildeError {}
+
+/// Expand a leading `~` / `~/` to the current user's home directory.
+///
+/// This is the single place a config (or CLI) path's `~` is resolved. Rules:
+///
+/// - `~` and `~/...` resolve to the home directory.
+/// - Windows: `~\...` is accepted as well (the natural spelling there), and
+///   the remainder is joined with the platform separator, so
+///   `~/AppData/Roaming/...` works too. Note that backslashes in the *config
+///   file* have no meaning here — TOML escaping is handled by the parser; by
+///   the time a string reaches this function it is the literal path text.
+/// - `~somebody` (another user's home) is **rejected** (`OtherUserTilde`),
+///   never silently treated as a relative path, because that is precisely how
+///   a literal `~` directory gets created in the current working directory.
+/// - When no home is available the function **errors** (`MissingHome`) rather
+///   than return a literal `~`: a `~` that reaches the filesystem is the bug
+///   this whole module exists to prevent. Callers that must not abort (config
+///   load) drop the field to its default and warn; callers at the disk
+///   boundary (repo/key resolution) treat the error as fatal.
+/// - A `~` that is *not* the first character (e.g. `stash/~/x`) is left alone
+///   here; [`assert_no_literal_tilde`] is the check that rejects those.
+pub fn expand_tilde(s: &str) -> Result<PathBuf, TildeError> {
+    expand_tilde_with_home(s, home_from_env().as_deref())
+}
+
+/// [`expand_tilde`] with the home directory supplied explicitly, so the
+/// `$HOME`-missing branch is testable without mutating process env vars.
+fn expand_tilde_with_home(s: &str, home: Option<&str>) -> Result<PathBuf, TildeError> {
+    if s == "~" {
+        return home
+            .map(PathBuf::from)
+            .ok_or_else(|| TildeError::MissingHome {
+                input: s.to_string(),
+            });
+    }
+    if let Some(rest) = s.strip_prefix('~') {
+        let rest = match rest.strip_prefix('/') {
+            Some(rest) => rest,
+            None => match rest.strip_prefix('\\') {
+                Some(rest) => rest,
+                None => {
+                    return Err(TildeError::OtherUserTilde {
+                        input: s.to_string(),
+                    });
+                }
+            },
+        };
+        let home = home.ok_or_else(|| TildeError::MissingHome {
+            input: s.to_string(),
+        })?;
+        return Ok(PathBuf::from(home).join(rest));
+    }
+    Ok(PathBuf::from(s))
+}
+
+/// Reject a path that still contains a literal `~` component.
+///
+/// [`expand_tilde`] only expands a *leading* `~`; a `~` in the middle of a
+/// path (e.g. `stash/~/x`) or a `~alice` component in a CLI override would
+/// otherwise reach the filesystem as a directory literally named `~`. A `~`
+/// component almost always means the tilde was written but never expanded —
+/// the exact failure that once wrote a masterkey into a literal `~` directory
+/// in the current working directory.
+pub fn assert_no_literal_tilde(p: &Path) -> Result<(), TildeError> {
+    for component in p.components() {
+        let name = component.as_os_str().to_string_lossy();
+        if name.starts_with('~') {
+            return Err(TildeError::LiteralTildeRemains {
+                path: p.display().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Expand a leading `~` and then reject any residual literal `~` component.
+///
+/// The combined guarantee: the returned path contains no `~` component at all,
+/// so it is safe to hand to the filesystem. Config load and the repo/key
+/// resolution boundary both use this.
+pub fn expand_and_verify(value: &str) -> Result<PathBuf, TildeError> {
+    let path = expand_tilde(value)?;
+    assert_no_literal_tilde(&path)?;
+    Ok(path)
+}
+
+/// Expand an `Option<String>` path field in place via [`expand_and_verify`].
+/// On failure, clear the field (`None`) and record a warning — a literal `~`
+/// must never survive into a path the tool then hands to the filesystem.
+fn expand_opt_field(label: &str, value: &mut Option<String>, problems: &mut Vec<String>) {
+    let Some(raw) = value.as_deref() else { return };
+    match expand_and_verify(raw) {
+        Ok(path) => *value = Some(path.to_string_lossy().into_owned()),
+        Err(e) => {
+            problems.push(format!("{label}: {e}"));
+            *value = None;
+        }
+    }
 }
 
 /// The template written by `init` — comments explain each knob.
@@ -436,6 +664,13 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 #
 # Every value is optional. Omitted values fall back to the per-machine
 # standard locations for each harness.
+#
+# Path values: a leading `~/` expands to your home directory (`~` alone is the
+# home directory too). Windows: `~\` is accepted, and `/`-separated relative
+# tails like `~/AppData/Roaming/...` work as well. `~username` (another user's
+# home) is not supported and is rejected. If no home is available ($HOME and
+# $USERPROFILE are both unset) the option is reset to its default with a
+# warning — a literal `~` directory is never created.
 
 # Where `push` will archive snapshots once that step lands.
 # Default: unset (a local sibling directory of this config file).
@@ -487,6 +722,7 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # prefer single quotes — 'C:\Users\me\AppData\Roaming\Cursor\User\globalStorage\state.vscdb'
 # (or double every backslash). A path pasted verbatim into double quotes is
 # still read, with a warning, rather than dropping your whole config.
+# A leading `~/` (or `~\`) works here too and expands to your home directory.
 #
 # [harness_roots]
 # cursor = "~/.config/Cursor/User/globalStorage/state.vscdb"
@@ -517,7 +753,14 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use std::path::Path;
+    use std::sync::Mutex;
+
+    /// Serialises tests that mutate process env vars — cargo runs tests in
+    /// parallel threads and `set_var` is process-global. (Same pattern as the
+    /// scanner tests.)
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// The exact shape that made `doctor_consistency_test` red on
     /// `windows-latest`: a Windows path pasted verbatim into a basic string.
@@ -588,5 +831,221 @@ mod tests {
             Some("C:\new\temp.sqlite")
         );
         assert!(recover_windows_paths(raw).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 统一的 `~` 展开（`expand_tilde` / `assert_no_literal_tilde`）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expand_tilde_expands_home_and_tilde_slash() {
+        let home = tempfile::TempDir::new().unwrap();
+        let home_s = home.path().to_string_lossy();
+        assert_eq!(
+            expand_tilde_with_home("~", Some(&home_s)),
+            Ok(home.path().to_path_buf())
+        );
+        assert_eq!(
+            expand_tilde_with_home("~/x/y", Some(&home_s)),
+            Ok(home.path().join("x/y"))
+        );
+        // Windows 的 `~\` 拼写也接受（在每个平台上都按家目录展开）。
+        assert_eq!(
+            expand_tilde_with_home("~\\x", Some(&home_s)),
+            Ok(home.path().join("x"))
+        );
+        // 不带 `~` 的路径原样返回。
+        assert_eq!(
+            expand_tilde_with_home("/abs/path", Some(&home_s)),
+            Ok(PathBuf::from("/abs/path"))
+        );
+        assert_eq!(
+            expand_tilde_with_home("rel/path", Some(&home_s)),
+            Ok(PathBuf::from("rel/path"))
+        );
+    }
+
+    #[test]
+    fn expand_tilde_env_based_home() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", home.path());
+        env::remove_var("USERPROFILE");
+        assert_eq!(expand_tilde("~").unwrap(), home.path().to_path_buf());
+        assert_eq!(expand_tilde("~/x").unwrap(), home.path().join("x"));
+    }
+
+    #[test]
+    fn expand_tilde_missing_home_is_an_error_not_a_literal_tilde() {
+        assert_eq!(
+            expand_tilde_with_home("~/x", None),
+            Err(TildeError::MissingHome {
+                input: "~/x".into()
+            })
+        );
+        assert_eq!(
+            expand_tilde_with_home("~", None),
+            Err(TildeError::MissingHome { input: "~".into() })
+        );
+    }
+
+    #[test]
+    fn expand_tilde_rejects_other_user_tilde() {
+        let home = tempfile::TempDir::new().unwrap();
+        let home_s = home.path().to_string_lossy();
+        assert_eq!(
+            expand_tilde_with_home("~alice/x", Some(&home_s)),
+            Err(TildeError::OtherUserTilde {
+                input: "~alice/x".into()
+            })
+        );
+        assert_eq!(
+            expand_tilde_with_home("~someone", Some(&home_s)),
+            Err(TildeError::OtherUserTilde {
+                input: "~someone".into()
+            })
+        );
+    }
+
+    #[test]
+    fn assert_no_literal_tilde_rejects_unexpanded_component() {
+        // 人为构造的“展开漏网”路径：中间的 `~`、`~用户名` 组件都必须被拒。
+        assert!(assert_no_literal_tilde(Path::new("stash/~/x")).is_err());
+        assert!(assert_no_literal_tilde(Path::new("/home/me/~alice")).is_err());
+        // 展开后的正常绝对路径必须放行。
+        let home = tempfile::TempDir::new().unwrap();
+        assert!(assert_no_literal_tilde(&home.path().join("x")).is_ok());
+        assert!(assert_no_literal_tilde(Path::new("/home/me/real")).is_ok());
+        // 文件名里带 `~` 但不是组件开头，是合法文件名，不误伤。
+        assert!(assert_no_literal_tilde(Path::new("/home/me/foo~bar")).is_ok());
+    }
+
+    #[test]
+    fn expand_and_verify_catches_mid_path_tilde() {
+        assert!(expand_and_verify("stash/~/x").is_err());
+        assert!(expand_and_verify("~/ok").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // 载入时逐字段展开 + 缺失 `$HOME` 时按默认值处理
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_expands_tilde_in_every_path_field() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", home.path());
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+        env::remove_var("USERPROFILE");
+
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            r#"
+archive_root = "~/arch"
+claude_projects_dir = "~/cproj"
+codex_sessions_dir = "~/csess"
+rustic_repo = "~/repo"
+rustic_key_file = "~/key.json"
+
+[harness_roots]
+claude-code = "~/cc"
+grok = "~/groks/s.sqlite"
+
+[destinations.d1]
+repo = "~/dest/repo"
+key_file = "~/dest/key.json"
+[destinations.d1.options]
+key = "~/dest/ssh-key"
+root = "~/dest/remote"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        let h = home.path();
+        assert_eq!(
+            cfg.archive_root.as_deref(),
+            Some(h.join("arch").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.claude_projects_dir.as_deref(),
+            Some(h.join("cproj").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.codex_sessions_dir.as_deref(),
+            Some(h.join("csess").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.rustic_repo.as_deref(),
+            Some(h.join("repo").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.rustic_key_file.as_deref(),
+            Some(h.join("key.json").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.explicit_harness_root("claude-code"),
+            Some(h.join("cc").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.explicit_harness_root("grok"),
+            Some(h.join("groks/s.sqlite").to_str().unwrap())
+        );
+
+        let d1 = cfg.destinations.get("d1").expect("d1 present");
+        assert_eq!(
+            d1.repo.as_deref(),
+            Some(h.join("dest/repo").to_str().unwrap())
+        );
+        assert_eq!(
+            d1.key_file.as_deref(),
+            Some(h.join("dest/key.json").to_str().unwrap())
+        );
+        assert_eq!(
+            d1.options.get("key").map(String::as_str),
+            Some(h.join("dest/ssh-key").to_str().unwrap())
+        );
+        assert_eq!(
+            d1.options.get("root").map(String::as_str),
+            Some(h.join("dest/remote").to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn load_drops_tilde_field_when_home_missing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+        env::remove_var("HOME");
+        env::remove_var("USERPROFILE");
+
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            r#"
+rustic_repo = "~/repo"
+[destinations.d1]
+key_file = "~/dest/key.json"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        // 字段被重置为默认（None），绝不把字面 `~` 当路径留着。
+        assert_eq!(cfg.rustic_repo, None);
+        let d1 = cfg.destinations.get("d1").expect("d1 present");
+        assert_eq!(d1.key_file, None);
+    }
+
+    #[test]
+    fn default_template_is_valid_toml() {
+        // 模板里所有示例都是注释，解析出来必须是空 Config（且不崩溃）。
+        let cfg: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("模板本身必须能解析");
+        assert!(cfg.harness_roots.is_empty());
+        assert!(cfg.destinations.is_empty());
     }
 }
