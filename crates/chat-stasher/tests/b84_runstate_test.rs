@@ -52,7 +52,7 @@ const CLEAN: i32 = 0;
 /// The sentence `runstate::summarize` returns for `RunStateRead::Missing`,
 /// quoted so a reworded verdict cannot silently detach these assertions from
 /// the case they are about.
-const NEVER_RAN: &str = "本机从未成功跑完一次 run-once";
+const NEVER_RAN: &str = "run-once has never completed successfully";
 
 /// Run the real binary with every ambient path redirected into `sandbox`.
 fn run(sandbox: &Path) -> std::process::Output {

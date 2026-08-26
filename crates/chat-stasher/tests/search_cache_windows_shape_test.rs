@@ -63,13 +63,13 @@ fn the_per_user_cache_dir_is_spelled_the_way_each_platform_spells_it() {
     assert_eq!(
         win.first().map(PathBuf::as_path),
         Some(Path::new(WIN_LOCAL_APP_DATA)),
-        "Windows 的每用户缓存目录是 %LOCALAPPDATA%（dirs-6.0.0 src/win.rs:10），不是从 $HOME 推出来的"
+        "Windows per-user cache dir is %LOCALAPPDATA% (dirs-6.0.0 src/win.rs:10), not derived from $HOME"
     );
     // The old hard-coded pair, which is what made `windows-latest` red.
     for wrong in [win_home.join("Library/Caches"), win_home.join(".cache")] {
         assert!(
             !win.contains(&wrong),
-            "{} 是 macOS/Linux 的写法，Windows 上它不存在 —— 按它去清缓存就是一个都清不到",
+            "{} is the macOS/Linux spelling; it does not exist on Windows — clearing by it would clear nothing",
             wrong.display()
         );
     }
@@ -83,7 +83,7 @@ fn the_per_user_cache_dir_is_spelled_the_way_each_platform_spells_it() {
     assert_eq!(
         win_default.first().map(PathBuf::as_path),
         Some(win_home.join("AppData/Local").as_path()),
-        "没有 %LOCALAPPDATA% 时退回 %USERPROFILE%\\AppData\\Local，仍然不是 $HOME/.cache"
+        "with %LOCALAPPDATA% unset, fall back to %USERPROFILE%\\AppData\\Local, still not $HOME/.cache"
     );
     assert_eq!(
         win_default
@@ -120,7 +120,7 @@ fn the_per_user_cache_dir_is_spelled_the_way_each_platform_spells_it() {
     assert_eq!(
         xdg.first().map(PathBuf::as_path),
         Some(Path::new("/scratch/cache")),
-        "$XDG_CACHE_HOME 优先于 ~/.cache"
+        "$XDG_CACHE_HOME takes precedence over ~/.cache"
     );
 }
 
@@ -256,8 +256,8 @@ fn rustic_cache_roots_finds_the_cache_rustic_actually_wrote() {
     assert_eq!(
         found.len(),
         1,
-        "rustic 开库时一定建了缓存（rustic_core src/repository.rs:549），\
-         rustic_cache_roots() 必须指得到它；找到 {} 个",
+        "rustic always creates a cache when opening a repo (rustic_core src/repository.rs:549); \
+         rustic_cache_roots() must point at it; found {}",
         found.len()
     );
     for d in found {
@@ -304,7 +304,7 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
     );
     assert!(
         warm.complete(),
-        "前提失效：缓存还在时本该读得完，实际 complete={}",
+        "premise failed: with the cache warm it should read completely, actual complete={}",
         warm.complete()
     );
 
@@ -318,7 +318,7 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
     assert_eq!(
         cleared.len(),
         1,
-        "清缓存必须真的清到东西；清到 0 个就是 windows-latest 上那条红的成因"
+        "clearing must actually clear something; clearing 0 is exactly what made windows-latest red"
     );
     for d in &cleared {
         fs::remove_dir_all(d).unwrap();
@@ -335,14 +335,14 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
             );
             assert!(
                 !report.complete(),
-                "读不完的目的地绝不能看起来像空的；hits={} unreadable={}",
+                "an un-finished destination must never look empty; hits={} unreadable={}",
                 report.hits.len(),
                 report.unreadable.len()
             );
             assert!(report.no_hit_line().contains("UNKNOWN"));
         }
         Err(e) => println!(
-            "windows-shape self-check: cache COLD -> Err({}) — 以失败呈现，不是 0 命中",
+            "windows-shape self-check: cache COLD -> Err({}) — surfaces as a failure, not as 0 hits",
             e.to_string().lines().next().unwrap_or("")
         ),
     }

@@ -184,11 +184,11 @@ impl Config {
                 {
                     Some(mut cfg) => {
                         eprintln!(
-                            "warning: config 里有未转义的反斜杠路径（Windows 写法），已按字面路径读取: {}",
+                            "warning: config contains unescaped backslash paths (Windows spelling), read as literal paths: {}",
                             config_path().display()
                         );
                         eprintln!(
-                            "         TOML 里 `\\` 是转义符；写成 'C:\\path' (单引号) 或 \"C:\\\\path\" 可去掉这条警告"
+                            "         `\\` is the escape character in TOML; write 'C:\\path' (single quotes) or \"C:\\\\path\" to silence this warning"
                         );
                         cfg.source = ConfigSource::FileAfterWindowsPathRepair;
                         expand_config_paths(&mut cfg);
@@ -326,7 +326,7 @@ fn expand_config_paths(cfg: &mut Config) {
     cfg.expand_all_paths(&mut problems);
     for problem in &problems {
         eprintln!(
-            "warning: 配置路径里的 `~` 无法展开，该项已按默认值处理（绝不把字面 `~` 当路径写盘）: {problem}"
+            "warning: the `~` in a config path could not be expanded; the option was reset to its default (a literal `~` is never written as a path): {problem}"
         );
     }
 }
@@ -555,15 +555,15 @@ impl std::fmt::Display for TildeError {
         match self {
             Self::MissingHome { input } => write!(
                 f,
-                "`{input}` 以 `~` 开头，但 $HOME / $USERPROFILE 都未设置，无法展开为家目录"
+                "`{input}` starts with `~` but neither $HOME nor $USERPROFILE is set, so it cannot be expanded to a home directory"
             ),
             Self::OtherUserTilde { input } => write!(
                 f,
-                "`{input}` 是 `~用户名` 形式，本工具只支持当前用户的 `~`（不支持别人的家目录）；请写绝对路径"
+                "`{input}` is `~username` form; this tool only supports the current user's `~` (not another user's home); use an absolute path"
             ),
             Self::LiteralTildeRemains { path } => write!(
                 f,
-                "`{path}` 里仍含有字面量 `~` 组件——这几乎肯定是波浪号没被展开；请用 `~/` 开头或写绝对路径"
+                "`{path}` still contains a literal `~` component — almost certainly a tilde that was never expanded; start with `~/` or use an absolute path"
             ),
         }
     }
@@ -709,7 +709,8 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # push_only_if_changed = true
 
 # Explicitly pin this machine's archive partition name.
-# 已有安装用它保持不变；新安装留空即可，会自动生成一个随机身份。
+# Existing installs set this to keep the partition they are already writing to;
+# new installs leave it empty and a random identity is generated automatically.
 #
 # Semantics: the archive partition is no longer derived from the hostname
 # (two machines with the same default hostname used to merge into one
@@ -735,8 +736,8 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # at all (it then refuses to guess, and reports "unknown" rather than 0).
 #
 # A path you write here is a statement, not a guess: it is probed even when the
-# registry cell for your platform is missing or marked 未查明. If the path does
-# not exist, the count stays "unknown" — it never becomes 0.
+# registry cell for your platform is missing or marked unascertained. If the
+# path does not exist, the count stays "unknown" — it never becomes 0.
 #
 # Single-file (SQLite) harnesses want the file itself; directory harnesses want
 # the directory.

@@ -193,12 +193,14 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
         // "Never ran" must never be reported as fine: an absent record is the
         // absence of evidence, not evidence of health.
         RunStateRead::Missing => Verdict {
-            line: "还没有任何运行记录：本机从未成功跑完一次 run-once（也可能状态目录被清空）。无法判断定时器是否在工作。"
+            line: "No run has ever been recorded: run-once has never completed successfully on this machine (or the state directory was cleared). It is impossible to tell whether the timer is working."
                 .to_string(),
             healthy: false,
         },
         RunStateRead::Unreadable(why) => Verdict {
-            line: format!("运行记录存在但读不出来（{why}）：无法判断上次运行是否正常。"),
+            line: format!(
+                "A run record exists but is unreadable ({why}): there is no way to tell whether the last run succeeded."
+            ),
             healthy: false,
         },
         RunStateRead::Present(state) => {
@@ -211,7 +213,7 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
             if overdue {
                 return Verdict {
                     line: format!(
-                        "已经{ago}没有运行了（阈值 {}）：定时器可能已经停了，上次结果是{}。",
+                        "No run for {ago} (threshold {}): the timer may have stopped; the last result was {}.",
                         human_age(stale_after_secs),
                         outcome_word(state.outcome)
                     ),
@@ -219,21 +221,23 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                 };
             }
             if state.outcome.is_failure() {
-                let step = state.failed_step.as_deref().unwrap_or("未记录步骤");
+                let step = state.failed_step.as_deref().unwrap_or("no step recorded");
                 return Verdict {
-                    line: format!("上次运行失败：{ago}前在 {step} 步骤出错，此后没有成功的运行。"),
+                    line: format!(
+                        "Last run failed: the {step} step errored {ago} ago, with no successful run since."
+                    ),
                     healthy: false,
                 };
             }
             Verdict {
                 line: format!(
-                    "正常：上次运行在 {ago}前，耗时 {} ms，入库 {} 个分片，{}。",
+                    "Healthy: last run {ago} ago, took {} ms, archived {} shard(s), {}.",
                     state.duration_ms,
                     state.shards_written,
                     if state.snapshot_created {
-                        "已创建快照"
+                        "snapshot created"
                     } else {
-                        "无变化故未创建快照"
+                        "no change, so no snapshot created"
                     }
                 ),
                 healthy: true,
@@ -257,11 +261,11 @@ pub fn run_state_json(
     match read {
         RunStateRead::Missing => serde_json::json!({
             "kind": "missing",
-            "why": "没有运行记录：本机从未成功跑完一次 run-once，或状态目录被清空",
+            "why": "no run record: run-once has never completed successfully on this machine, or the state directory was cleared",
         }),
         RunStateRead::Unreadable(why) => serde_json::json!({
             "kind": "unreadable",
-            "why": format!("运行记录存在但读不出来：{why}"),
+            "why": format!("a run record exists but is unreadable: {why}"),
         }),
         RunStateRead::Present(state) => {
             let age = now_unix.saturating_sub(state.finished_at_unix);
@@ -291,21 +295,21 @@ pub fn run_state_json(
 /// Coarse, honest duration wording — no invented precision.
 fn human_age(secs: u64) -> String {
     if secs < 90 {
-        format!("{secs} 秒")
+        format!("{secs} seconds")
     } else if secs < 5400 {
-        format!("{} 分钟", secs / 60)
+        format!("{} minutes", secs / 60)
     } else if secs < 172_800 {
-        format!("{} 小时", secs / 3600)
+        format!("{} hours", secs / 3600)
     } else {
-        format!("{} 天", secs / 86_400)
+        format!("{} days", secs / 86_400)
     }
 }
 
 fn outcome_word(outcome: RunOutcome) -> &'static str {
     match outcome {
-        RunOutcome::Completed => "成功（已创建快照）",
-        RunOutcome::Noop => "成功（无变化）",
-        RunOutcome::Error => "失败",
+        RunOutcome::Completed => "success (snapshot created)",
+        RunOutcome::Noop => "success (no change)",
+        RunOutcome::Error => "failed",
     }
 }
 

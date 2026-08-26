@@ -425,7 +425,7 @@ pub fn render_html(data: &ViewData) -> String {
    sessions seen {seen} · data blobs read <b>{blobs}</b></p>
 <p>{completeness}</p>
 <div class=note>
- <b>正文未加载。</b> This page is rendered from archive <i>metadata</i> only
+ <b>Body not loaded.</b> This page is rendered from archive <i>metadata</i> only
  (snapshot + index + tree). No conversation payload has been fetched or
  decrypted — that is why <code>data blobs read = {blobs}</code>.<br>
  Loading full text for the {fs} session(s) listed here would mean fetching and
@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn page_states_that_payload_is_not_loaded_and_prices_it() {
         let html = render_html(&data());
-        assert!(html.contains("正文未加载"));
+        assert!(html.contains("Body not loaded"));
         assert!(html.contains("data blobs read = 0"));
         assert!(html.contains("2 data blob(s)"), "cost must be on the page");
         assert!(

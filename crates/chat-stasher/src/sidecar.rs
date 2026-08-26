@@ -260,27 +260,27 @@ mod tests {
 
         let inferred = ActivityRow {
             time_source: ActivityTimeSource::Inferred {
-                how: "数值 epoch".into(),
+                how: "numeric epoch".into(),
             },
             ..exact.clone()
         };
         assert_eq!(
             to_overview_row(&inferred).time_source,
             OverviewTimeSource::Inferred {
-                how: "数值 epoch".into()
+                how: "numeric epoch".into()
             }
         );
 
         let unknown = ActivityRow {
             time_source: ActivityTimeSource::Unknown {
-                why: "没有时间戳".into(),
+                why: "no timestamp".into(),
             },
             ..exact
         };
         assert_eq!(
             to_overview_row(&unknown).time_source,
             OverviewTimeSource::Unknown {
-                why: "没有时间戳".into()
+                why: "no timestamp".into()
             }
         );
     }

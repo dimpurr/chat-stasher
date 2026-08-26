@@ -424,12 +424,12 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
         // an empty walk.
         return match fs::metadata(workspace_storage) {
             Ok(_) => CursorLegacyScan {
-                enumerate_error: Some("workspaceStorage 存在但不是目录".to_string()),
+                enumerate_error: Some("workspaceStorage exists but is not a directory".to_string()),
                 ..CursorLegacyScan::default()
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => CursorLegacyScan::default(),
             Err(e) => CursorLegacyScan {
-                enumerate_error: Some(format!("workspaceStorage 无法确认（{e}）")),
+                enumerate_error: Some(format!("workspaceStorage could not be confirmed ({e})")),
                 ..CursorLegacyScan::default()
             },
         };
@@ -453,7 +453,7 @@ pub fn probe_cursor_legacy_workspace_storage(workspace_storage: &Path) -> Cursor
         // `continue`s, because it hid *all* of them at once.
         Err(e) => {
             return CursorLegacyScan {
-                enumerate_error: Some(format!("workspaceStorage 无法枚举（{e}）")),
+                enumerate_error: Some(format!("workspaceStorage could not be enumerated ({e})")),
                 ..CursorLegacyScan::default()
             };
         }
@@ -635,9 +635,9 @@ pub fn sqlite_store_fingerprint(db: &Path) -> Result<String, String> {
                 if label != "shm" {
                     let modified = metadata
                         .modified()
-                        .map_err(|e| format!("读取 SQLite mtime {}: {e}", path.display()))?
+                        .map_err(|e| format!("read SQLite mtime {}: {e}", path.display()))?
                         .duration_since(UNIX_EPOCH)
-                        .map_err(|e| format!("读取 SQLite mtime {}: {e}", path.display()))?
+                        .map_err(|e| format!("read SQLite mtime {}: {e}", path.display()))?
                         .as_nanos();
                     digest.update(modified.to_le_bytes());
                 }
@@ -653,13 +653,13 @@ pub fn sqlite_store_fingerprint(db: &Path) -> Result<String, String> {
 /// Every connection is opened through the same `mode=ro` path as the generic
 /// SQLite probe.
 pub fn enumerate_opencode_sessions(db: &Path) -> Result<Vec<OpenCodeSessionRow>, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_opencode_schema(&conn)?;
     let mut statement = conn
         .prepare("SELECT id, time_created, time_updated FROM session ORDER BY time_created, id")
-        .map_err(|error| format!("读取 session 行失败: {error}"))?;
+        .map_err(|error| format!("failed to read session rows: {error}"))?;
     let rows = statement
         .query_map([], |row| {
             Ok(OpenCodeSessionRow {
@@ -668,20 +668,20 @@ pub fn enumerate_opencode_sessions(db: &Path) -> Result<Vec<OpenCodeSessionRow>,
                 time_updated: row.get(2)?,
             })
         })
-        .map_err(|error| format!("枚举 session 行失败: {error}"))?;
+        .map_err(|error| format!("failed to enumerate session rows: {error}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| format!("读取 session 行失败: {error}"))
+        .map_err(|error| format!("failed to read session rows: {error}"))
 }
 
 /// Read the logical cursor for one session. This is the cheap second-pass
 /// check used by collect before it decides whether to load any message body.
 pub fn opencode_session_cursor(db: &Path, session_id: &str) -> Result<OpenCodeCursor, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_opencode_schema(&conn)?;
     conn.execute_batch("BEGIN")
-        .map_err(|error| format!("开始只读事务失败: {error}"))?;
+        .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
     opencode_session_cursor_with_conn(&conn, db, session_id)
 }
 
@@ -693,33 +693,33 @@ pub fn read_opencode_session(
     db: &Path,
     session_id: &str,
 ) -> Result<OpenCodeSessionSnapshot, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_opencode_schema(&conn)?;
     conn.execute_batch("BEGIN")
-        .map_err(|error| format!("开始只读事务失败: {error}"))?;
+        .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
     let cursor = opencode_session_cursor_with_conn(&conn, db, session_id)?;
 
     let session = conn
         .query_row("SELECT * FROM session WHERE id = ?1", [session_id], |row| {
             row_to_json_object(row, false)
         })
-        .map_err(|error| format!("读取 session 行失败: {error}"))?;
+        .map_err(|error| format!("failed to read session rows: {error}"))?;
 
     let mut messages = Vec::new();
     {
         let mut statement = conn
             .prepare("SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created, id")
-            .map_err(|error| format!("读取 message 行失败: {error}"))?;
+            .map_err(|error| format!("failed to read message rows: {error}"))?;
         let rows = statement
             .query_map([session_id], |row| {
                 let id: String = row.get("id")?;
                 Ok((id, row_to_json_object(row, true)?))
             })
-            .map_err(|error| format!("枚举 message 行失败: {error}"))?;
+            .map_err(|error| format!("failed to enumerate message rows: {error}"))?;
         for row in rows {
-            messages.push(row.map_err(|error| format!("读取 message 行失败: {error}"))?);
+            messages.push(row.map_err(|error| format!("failed to read message rows: {error}"))?);
         }
     }
 
@@ -730,15 +730,16 @@ pub fn read_opencode_session(
             .prepare(
                 "SELECT * FROM part WHERE session_id = ?1 ORDER BY message_id, time_created, id",
             )
-            .map_err(|error| format!("读取 part 行失败: {error}"))?;
+            .map_err(|error| format!("failed to read part rows: {error}"))?;
         let rows = statement
             .query_map([session_id], |row| {
                 let message_id: String = row.get("message_id")?;
                 Ok((message_id, row_to_json_object(row, true)?))
             })
-            .map_err(|error| format!("枚举 part 行失败: {error}"))?;
+            .map_err(|error| format!("failed to enumerate part rows: {error}"))?;
         for row in rows {
-            let (message_id, part) = row.map_err(|error| format!("读取 part 行失败: {error}"))?;
+            let (message_id, part) =
+                row.map_err(|error| format!("failed to read part rows: {error}"))?;
             parts_by_message.entry(message_id).or_default().push(part);
         }
     }
@@ -762,7 +763,7 @@ pub fn read_opencode_session(
         "orphan_parts": orphan_parts,
     });
     let json_line = serde_json::to_vec(&envelope)
-        .map_err(|error| format!("序列化 opencode 会话失败: {error}"))?;
+        .map_err(|error| format!("failed to serialize opencode session: {error}"))?;
     Ok(OpenCodeSessionSnapshot { cursor, json_line })
 }
 
@@ -773,13 +774,13 @@ pub fn enumerate_sqlite_sessions(
     db: &Path,
     spec: &SqliteSchemaSpec<'_>,
 ) -> Result<Vec<SqliteSessionRow>, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_registry_schema(&conn, spec)?;
     let id_column = spec
         .id_column
-        .ok_or_else(|| "SQLite schema 未声明会话 id 列".to_string())?;
+        .ok_or_else(|| "SQLite schema does not declare a session id column".to_string())?;
     let candidate_where = candidate_where_sql(spec);
     let where_sql = qualification_where_sql(spec, &candidate_where);
     let time_sql = session_time_expression(spec).unwrap_or_else(|| "NULL".to_string());
@@ -791,17 +792,18 @@ pub fn enumerate_sqlite_sessions(
     );
     let mut statement = conn
         .prepare(&sql)
-        .map_err(|error| format!("读取 {} 会话行失败: {error}", spec.table))?;
+        .map_err(|error| format!("failed to read {} session rows: {error}", spec.table))?;
     let rows = statement
         .query_map([], |row| {
             let raw_id: String = row.get(0)?;
             let time_value: Option<i64> = row.get(1)?;
             Ok((raw_id, time_value))
         })
-        .map_err(|error| format!("枚举 {} 会话行失败: {error}", spec.table))?;
+        .map_err(|error| format!("failed to enumerate {} session rows: {error}", spec.table))?;
     let mut result = Vec::new();
     for row in rows {
-        let (raw_id, time_value) = row.map_err(|error| format!("读取会话行失败: {error}"))?;
+        let (raw_id, time_value) =
+            row.map_err(|error| format!("failed to read session row: {error}"))?;
         let id = native_session_id(spec, &raw_id);
         if id.is_empty() {
             continue;
@@ -824,13 +826,13 @@ pub fn sqlite_session_cursor(
     spec: &SqliteSchemaSpec<'_>,
     session_id: &str,
 ) -> Result<OpenCodeCursor, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_registry_schema(&conn, spec)?;
     let id_column = spec
         .id_column
-        .ok_or_else(|| "SQLite schema 未声明会话 id 列".to_string())?;
+        .ok_or_else(|| "SQLite schema does not declare a session id column".to_string())?;
     let storage_id = storage_session_id(spec, session_id);
     let id_where = format!("\"{}\" = ?1", quote_identifier(id_column));
     let where_sql = qualification_where_sql(spec, &format!(" WHERE {id_where}"));
@@ -840,9 +842,9 @@ pub fn sqlite_session_cursor(
     );
     let count: i64 = conn
         .query_row(&count_sql, [&storage_id], |row| row.get(0))
-        .map_err(|error| format!("读取 {} 会话行数失败: {error}", spec.table))?;
+        .map_err(|error| format!("failed to read {} session row count: {error}", spec.table))?;
     if count <= 0 {
-        return Err("session 行不存在或未通过会话过滤".to_string());
+        return Err("session row does not exist or did not pass the session filter".to_string());
     }
     let time_value = session_time_expression(spec)
         .map(|expr| {
@@ -851,14 +853,19 @@ pub fn sqlite_session_cursor(
                 quote_identifier(spec.table)
             );
             conn.query_row(&sql, [&storage_id], |row| row.get::<_, Option<i64>>(0))
-                .map_err(|error| format!("读取 {} 会话时间失败: {error}", spec.table))
+                .map_err(|error| format!("failed to read {} session time: {error}", spec.table))
         })
         .transpose()?
         .flatten()
         // A cursor timestamp is part of the change key. Turning NULL into 0
         // makes an unknown time indistinguishable from the real Unix epoch and
         // can make both cursor reuse and summaries claim a concrete value.
-        .ok_or_else(|| format!("{} 会话时间缺失，无法建立 cursor", spec.table))?;
+        .ok_or_else(|| {
+            format!(
+                "{} session time missing, cannot establish cursor",
+                spec.table
+            )
+        })?;
     let high_water = Some(OpenCodeHighWater {
         time_updated: time_value,
         id: session_id.to_string(),
@@ -882,13 +889,13 @@ pub fn read_sqlite_session(
     spec: &SqliteSchemaSpec<'_>,
     session_id: &str,
 ) -> Result<OpenCodeSessionSnapshot, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_registry_schema(&conn, spec)?;
     let id_column = spec
         .id_column
-        .ok_or_else(|| "SQLite schema 未声明会话 id 列".to_string())?;
+        .ok_or_else(|| "SQLite schema does not declare a session id column".to_string())?;
     let storage_id = storage_session_id(spec, session_id);
     let id_where = format!("\"{}\" = ?1", quote_identifier(id_column));
     let where_sql = qualification_where_sql(spec, &format!(" WHERE {id_where}"));
@@ -898,7 +905,7 @@ pub fn read_sqlite_session(
     );
     let row = conn
         .query_row(&sql, [&storage_id], |row| row_to_json_object(row, true))
-        .map_err(|error| format!("读取 {} 会话行失败: {error}", spec.table))?;
+        .map_err(|error| format!("failed to read {} session rows: {error}", spec.table))?;
     let cursor = sqlite_session_cursor(db, spec, session_id)?;
     let envelope = serde_json::json!({
         "schema": "chat-stasher.sqlite.session.v1",
@@ -906,7 +913,7 @@ pub fn read_sqlite_session(
         "session": row,
     });
     let json_line = serde_json::to_vec(&envelope)
-        .map_err(|error| format!("序列化 SQLite 会话失败: {error}"))?;
+        .map_err(|error| format!("failed to serialize SQLite session: {error}"))?;
     Ok(OpenCodeSessionSnapshot { cursor, json_line })
 }
 
@@ -920,7 +927,7 @@ pub fn enumerate_cursor_legacy_sessions(
     }
     let mut result = Vec::new();
     for entry in fs::read_dir(workspace_storage)
-        .map_err(|error| format!("读取 Cursor workspaceStorage 失败: {error}"))?
+        .map_err(|error| format!("failed to read Cursor workspaceStorage: {error}"))?
         .flatten()
     {
         let workspace = entry.path();
@@ -973,25 +980,27 @@ pub fn read_cursor_legacy_session(
     db: &Path,
     session_id: &str,
 ) -> Result<OpenCodeSessionSnapshot, String> {
-    let conn = open_readonly(db).map_err(|error| format!("只读打开失败: {error}"))?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
-        .map_err(|error| format!("设置只读查询超时失败: {error}"))?;
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     let value = legacy_composer_value(&conn)
-        .map_err(|error| format!("读取 Cursor composer 数据失败: {error}"))?
-        .ok_or_else(|| "Cursor composer 数据不存在".to_string())?;
-    let composers =
-        legacy_composer_array(&value).ok_or_else(|| "Cursor composer 数组不存在".to_string())?;
+        .map_err(|error| format!("failed to read Cursor composer data: {error}"))?
+        .ok_or_else(|| "Cursor composer data does not exist".to_string())?;
+    let composers = legacy_composer_array(&value)
+        .ok_or_else(|| "Cursor composer array does not exist".to_string())?;
     let composer = composers
         .iter()
         .find(|composer| {
             cursor_legacy_composer_is_qualified(composer)
                 && cursor_legacy_composer_id(composer).as_deref() == Some(session_id)
         })
-        .ok_or_else(|| "Cursor composer 行不存在或未通过会话过滤".to_string())?;
+        .ok_or_else(|| {
+            "Cursor composer row does not exist or did not pass the session filter".to_string()
+        })?;
     let created_at = composer
         .get("createdAt")
         .and_then(Value::as_i64)
-        .ok_or_else(|| "Cursor composer createdAt 缺失，无法建立 cursor".to_string())?;
+        .ok_or_else(|| "Cursor composer createdAt missing, cannot establish cursor".to_string())?;
     let cursor = OpenCodeCursor {
         store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated: created_at,
@@ -1010,20 +1019,20 @@ pub fn read_cursor_legacy_session(
         "session": composer,
     });
     let json_line = serde_json::to_vec(&envelope)
-        .map_err(|error| format!("序列化 Cursor 会话失败: {error}"))?;
+        .map_err(|error| format!("failed to serialize Cursor session: {error}"))?;
     Ok(OpenCodeSessionSnapshot { cursor, json_line })
 }
 
 fn ensure_registry_schema(conn: &Connection, spec: &SqliteSchemaSpec<'_>) -> Result<(), String> {
     let columns = sqlite_table_columns(conn, spec.table)
-        .map_err(|error| format!("读取 {} 表 schema 失败: {error}", spec.table))?;
+        .map_err(|error| format!("failed to read {} table schema: {error}", spec.table))?;
     if !spec
         .required_columns
         .iter()
         .all(|required| columns.iter().any(|actual| actual == required))
     {
         return Err(format!(
-            "SQLite schema 不匹配: table={} columns={}",
+            "SQLite schema mismatch: table={} columns={}",
             spec.table,
             columns.join(",")
         ));
@@ -1104,7 +1113,7 @@ fn legacy_composer_value(conn: &Connection) -> rusqlite::Result<Option<Value>> {
                     rusqlite::types::Type::Text,
                     Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "Cursor composer JSON 无效",
+                        "invalid Cursor composer JSON",
                     )),
                 )
             })
@@ -1149,13 +1158,13 @@ fn ensure_opencode_schema(conn: &Connection) -> Result<(), String> {
         ),
     ] {
         let columns = sqlite_table_columns(conn, table)
-            .map_err(|error| format!("读取 {table} 表 schema 失败: {error}"))?;
+            .map_err(|error| format!("failed to read {table} table schema: {error}"))?;
         if !required
             .iter()
             .all(|column| columns.iter().any(|actual| actual == column))
         {
             return Err(format!(
-                "opencode schema 不匹配: table={table} columns={}",
+                "opencode schema mismatch: table={table} columns={}",
                 columns.join(",")
             ));
         }
@@ -1175,8 +1184,8 @@ fn opencode_session_cursor_with_conn(
             |row| row.get::<_, i64>(0),
         )
         .optional()
-        .map_err(|error| format!("读取 session 时间失败: {error}"))?
-        .ok_or_else(|| "session 行不存在".to_string())?;
+        .map_err(|error| format!("failed to read session time: {error}"))?
+        .ok_or_else(|| "session row does not exist".to_string())?;
     let message_count = count_rows(conn, "message", session_id)?;
     let message_high_water = high_water(conn, "message", session_id)?;
     let part_count = count_rows(conn, "part", session_id)?;
@@ -1197,8 +1206,8 @@ fn count_rows(conn: &Connection, table: &str, session_id: &str) -> Result<u64, S
     let sql = format!("SELECT count(*) FROM \"{table}\" WHERE session_id = ?1");
     let count = conn
         .query_row(&sql, [session_id], |row| row.get::<_, i64>(0))
-        .map_err(|error| format!("读取 {table} 行数失败: {error}"))?;
-    u64::try_from(count).map_err(|_| format!("{table} 行数为负数"))
+        .map_err(|error| format!("failed to read {table} row count: {error}"))?;
+    u64::try_from(count).map_err(|_| format!("{table} row count is negative"))
 }
 
 fn high_water(
@@ -1216,7 +1225,7 @@ fn high_water(
         })
     })
     .optional()
-    .map_err(|error| format!("读取 {table} 高水位失败: {error}"))
+    .map_err(|error| format!("failed to read {table} high-water mark: {error}"))
 }
 
 fn row_to_json_object(row: &rusqlite::Row<'_>, parse_data: bool) -> rusqlite::Result<Value> {
@@ -1321,13 +1330,13 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
         Ok(conn) => conn,
         Err(e) => {
             return SqliteSessionProbe::ReadFailed {
-                error: format!("只读打开失败: {e}"),
+                error: format!("read-only open failed: {e}"),
             };
         }
     };
     if let Err(e) = conn.busy_timeout(Duration::from_secs(2)) {
         return SqliteSessionProbe::ReadFailed {
-            error: format!("设置只读查询超时失败: {e}"),
+            error: format!("failed to set read-only query timeout: {e}"),
         };
     }
 
@@ -1336,7 +1345,7 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
         Ok(columns) => columns,
         Err(e) => {
             return SqliteSessionProbe::ReadFailed {
-                error: format!("读取 schema 失败: {e}"),
+                error: format!("failed to read schema: {e}"),
             };
         }
     };
@@ -1384,12 +1393,12 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
         Ok(c) if c >= 0 => c as u64,
         Ok(c) => {
             return SqliteSessionProbe::ReadFailed {
-                error: format!("SQLite 返回了负候选会话数: {c}"),
+                error: format!("SQLite returned a negative candidate session count: {c}"),
             }
         }
         Err(e) => {
             return SqliteSessionProbe::ReadFailed {
-                error: format!("读取 {} 表候选统计失败: {e}", spec.table),
+                error: format!("failed to read {} table candidate stats: {e}", spec.table),
             }
         }
     };
@@ -1397,12 +1406,12 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
         Ok(c) if c >= 0 => c as u64,
         Ok(c) => {
             return SqliteSessionProbe::ReadFailed {
-                error: format!("SQLite 返回了负会话数: {c}"),
+                error: format!("SQLite returned a negative session count: {c}"),
             }
         }
         Err(e) => {
             return SqliteSessionProbe::ReadFailed {
-                error: format!("读取 {} 表统计失败: {e}", spec.table),
+                error: format!("failed to read {} table stats: {e}", spec.table),
             }
         }
     };
@@ -1416,7 +1425,7 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
             ),
             Err(e) => {
                 return SqliteSessionProbe::ReadFailed {
-                    error: format!("读取 {} 表时间统计失败: {e}", spec.table),
+                    error: format!("failed to read {} table time stats: {e}", spec.table),
                 }
             }
         },
@@ -1547,18 +1556,18 @@ pub fn sqlite_schema_summary(conn: &Connection) -> String {
             rows.collect::<rusqlite::Result<Vec<_>>>()
         }) {
         Ok(names) => names,
-        Err(e) => return format!("<读取表名失败: {e}>"),
+        Err(e) => return format!("<failed to read table names: {e}>"),
     };
 
     if names.is_empty() {
-        return "<无用户表>".to_string();
+        return "<no user tables>".to_string();
     }
 
     names
         .iter()
         .map(|name| match sqlite_table_columns(conn, name) {
             Ok(columns) => format!("{name}({})", columns.join(", ")),
-            Err(e) => format!("{name}(<读取列失败: {e}>)"),
+            Err(e) => format!("{name}(<failed to read columns: {e}>)"),
         })
         .collect::<Vec<_>>()
         .join("; ")

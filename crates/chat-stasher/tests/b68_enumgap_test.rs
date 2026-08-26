@@ -237,25 +237,31 @@ fn legacy_probe_separates_a_missing_body_from_an_empty_one() {
         );
     };
 
-    assert_eq!(candidate_count, 4, "四个 composer 都应被计为候选");
-    assert_eq!(count, 1, "只有带非空 conversation 的那一个是合格会话");
+    assert_eq!(
+        candidate_count, 4,
+        "all four composers must count as candidates"
+    );
+    assert_eq!(
+        count, 1,
+        "only the one with a non-empty conversation is a qualified session"
+    );
     assert_eq!(
         probe.unreadable_count,
         // B90: 这个字段现在是三态 —— `Some(1)` 是「数过了，是 1」，
         // `None` 才是「这一项本身没数出来」。
         Some(1),
-        "只有 metadata-only 那一个属于「读不出来」"
+        "only the metadata-only one is 'unreadable'"
     );
     // The two genuine filters — empty conversation, archived — must not be
     // reported as failures. A false positive is its own kind of lie.
     assert_eq!(
-        candidate_count - count - probe.unreadable_count.expect("fixture 的计数是数得出来的"),
+        candidate_count - count - probe.unreadable_count.expect("fixture count is countable"),
         2,
-        "空 conversation 与 archived 是「确实没有」，不许算成失败"
+        "empty conversation and archived are 'genuinely absent', not failures"
     );
     assert_eq!(
         probe.unreadable_stores, 1,
-        "打不开/读不懂的那个库要单独计数，不能当成 0 个会话"
+        "the store that cannot be opened/read must be counted separately, not as 0 sessions"
     );
 }
 
@@ -281,17 +287,20 @@ fn global_probe_counts_an_undecodable_row_as_unreadable_not_as_empty() {
         );
     };
 
-    assert_eq!(candidate_count, 4, "四行 composerData 都是候选");
-    assert_eq!(count, 2, "两行带非空 header 的行通过过滤");
+    assert_eq!(
+        candidate_count, 4,
+        "all four composerData rows are candidates"
+    );
+    assert_eq!(count, 2, "two rows with a non-empty header pass the filter");
     assert_eq!(
         probe.unreadable_count,
         Some(1),
-        "value 为 NULL 的那行是「读不出来」，不是「读了发现是空的」"
+        "the row with NULL value is 'unreadable', not 'read and found empty'"
     );
     assert_eq!(
-        candidate_count - count - probe.unreadable_count.expect("fixture 的计数是数得出来的"),
+        candidate_count - count - probe.unreadable_count.expect("fixture count is countable"),
         1,
-        "header 为空的那行是「确实没有」，不许算成失败"
+        "the row with an empty header is 'genuinely absent', not a failure"
     );
 }
 
@@ -318,23 +327,23 @@ fn doctor_says_how_many_known_sessions_it_could_not_hand_over() {
     let probe = cursor_probe(&report);
     let footprint = cursor_footprint(&report);
 
-    assert_eq!(probe.candidate_count, Some(4), "已知候选 4 条");
-    assert_eq!(probe.record_count, Some(2), "过滤后 2 条");
+    assert_eq!(probe.candidate_count, Some(4), "known candidates: 4");
+    assert_eq!(probe.record_count, Some(2), "after filter: 2");
     // 1 undecodable candidate + 1 qualified row enumeration could not turn
     // into a record = 2 sessions this machine knows about and cannot hand over.
     assert_eq!(
         probe.unreadable_count,
         Some(2),
-        "「读不出来」必须被计数，而不是悄悄变成空集合"
+        "'unreadable' must be counted, not silently become an empty set"
     );
     assert_eq!(
         footprint.unreadable_count,
         Some(2),
-        "footprint 行与 registry 行必须报同一个数"
+        "footprint row and registry row must report the same number"
     );
     assert!(
-        probe.note.contains("读不出来"),
-        "这个数必须出现在用户看得见的那行里，实际 note = {}",
+        probe.note.contains("unreadable"),
+        "this count must appear in the user-visible line, actual note = {}",
         probe.note
     );
 }
@@ -357,16 +366,16 @@ fn legacy_fallback_reports_the_metadata_only_composers_it_cannot_read() {
     let report = doctor::run();
     let probe = cursor_probe(&report);
 
-    assert_eq!(probe.candidate_count, Some(4), "已知候选 4 条");
-    assert_eq!(probe.record_count, Some(1), "过滤后 1 条");
+    assert_eq!(probe.candidate_count, Some(4), "known candidates: 4");
+    assert_eq!(probe.record_count, Some(1), "after filter: 1");
     assert_eq!(
         probe.unreadable_count,
         Some(1),
-        "metadata-only composer 要作为「读不出来」被计数"
+        "metadata-only composer must be counted as 'unreadable'"
     );
     assert!(
-        probe.note.contains("读不出来"),
-        "这个数必须出现在用户看得见的那行里，实际 note = {}",
+        probe.note.contains("unreadable"),
+        "this count must appear in the user-visible line, actual note = {}",
         probe.note
     );
 }
@@ -415,16 +424,16 @@ fn a_store_that_only_filters_never_claims_anything_was_unreadable() {
     assert_eq!(
         probe.unreadable_count,
         Some(0),
-        "被正常过滤掉的行不许被报成失败 —— 假阳性也是一种谎"
+        "rows filtered out normally must not be reported as failures — a false positive is its own lie"
     );
     assert!(
-        !probe.note.contains("读不出来"),
-        "一切正常时这行输出必须和 B68 之前一模一样，实际 note = {}",
+        !probe.note.contains("unreadable"),
+        "when everything is fine this line must be identical to pre-B68, actual note = {}",
         probe.note
     );
     assert_eq!(
         cursor_footprint(&report).unreadable_count,
         Some(0),
-        "footprint 行同样不许无中生有"
+        "the footprint row must not invent one either"
     );
 }

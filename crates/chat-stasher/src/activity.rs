@@ -132,7 +132,7 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             TimeSource::Exact
         } else {
             TimeSource::Inferred {
-                how: "行内时间戳为数值 epoch：按数值大小判断单位（落在 2020–2100 的秒区间按秒、落在毫秒区间除以 1000 得秒）"
+                how: "in-line timestamps are numeric epochs: unit inferred from magnitude (values in the 2020–2100 seconds range treated as seconds; millis-range values divided by 1000 to get seconds)"
                     .to_string(),
             }
         }
@@ -165,24 +165,29 @@ fn unknown_why(
 ) -> String {
     if !SUPPORTED_HARNESSES.contains(&harness) {
         return format!(
-            "该 harness（{harness}）的对话时间解析尚未实现（目前支持 {}）",
-            SUPPORTED_HARNESSES.join("、")
+            "conversation-time parsing is not implemented for this harness ({harness}) (supported: {})",
+            SUPPORTED_HARNESSES.join(", ")
         );
     }
     let mut reasons: Vec<String> = Vec::new();
     if unparseable_json > 0 {
-        reasons.push(format!("{unparseable_json} 行无法解析为 JSON"));
+        reasons.push(format!(
+            "{unparseable_json} line(s) could not be parsed as JSON"
+        ));
     }
     if invalid_timestamp > 0 {
-        reasons.push("存在时间戳字段但值无法解析或超出 2020–2100 合理范围".to_string());
+        reasons.push(
+            "a timestamp field exists but the value is unparseable or outside the plausible 2020–2100 range"
+                .to_string(),
+        );
     }
     if !saw_timestamp_field {
-        reasons.push("行内未找到 timestamp 时间戳字段".to_string());
+        reasons.push("no timestamp field found within the line".to_string());
     }
     if reasons.is_empty() {
-        reasons.push("没有任何可用时间戳".to_string());
+        reasons.push("no usable timestamp at all".to_string());
     }
-    format!("无法确定对话时间：{}", reasons.join("；"))
+    format!("cannot determine conversation time: {}", reasons.join("; "))
 }
 
 /// What one line yielded.
@@ -650,7 +655,7 @@ mod tests {
         let TimeSource::Inferred { how } = &a.time_source else {
             panic!("expected Inferred, got {:?}", a.time_source);
         };
-        assert!(how.contains("毫秒"), "how should say millis: {how}");
+        assert!(how.contains("millis"), "how should say millis: {how}");
     }
 
     #[test]
@@ -689,7 +694,10 @@ mod tests {
         let TimeSource::Unknown { why } = &a.time_source else {
             panic!("expected Unknown, got {:?}", a.time_source);
         };
-        assert!(why.contains("合理"), "why should mention the range: {why}");
+        assert!(
+            why.contains("plausible"),
+            "why should mention the range: {why}"
+        );
     }
 
     #[test]
@@ -707,7 +715,7 @@ mod tests {
             panic!("expected Unknown, got {:?}", a.time_source);
         };
         assert!(
-            why.contains("未实现") || why.contains("harness"),
+            why.contains("not implemented") || why.contains("harness"),
             "unsupported-harness why must be distinct: {why}"
         );
     }
@@ -775,7 +783,7 @@ mod tests {
         let TimeSource::Inferred { how } = &a.time_source else {
             panic!("expected Inferred (epoch millis), got {:?}", a.time_source);
         };
-        assert!(how.contains("毫秒"), "how should say millis: {how}");
+        assert!(how.contains("millis"), "how should say millis: {how}");
     }
 
     #[test]
@@ -820,7 +828,10 @@ mod tests {
         let TimeSource::Unknown { why } = &a.time_source else {
             panic!("expected Unknown, got {:?}", a.time_source);
         };
-        assert!(why.contains("合理"), "why should mention the range: {why}");
+        assert!(
+            why.contains("plausible"),
+            "why should mention the range: {why}"
+        );
     }
 
     // ------------------------------------------------------------------ cursor
@@ -838,7 +849,7 @@ mod tests {
                 a.time_source
             );
         };
-        assert!(how.contains("毫秒"), "how should say millis: {how}");
+        assert!(how.contains("millis"), "how should say millis: {how}");
     }
 
     #[test]

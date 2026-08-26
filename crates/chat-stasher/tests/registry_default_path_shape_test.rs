@@ -89,7 +89,7 @@ fn isolate_unconfigured_home(home: &Path) {
     }
     assert!(
         !home.join(".config/chat-stasher/config.toml").exists(),
-        "仪器前提：这台机器不许有配置文件"
+        "instrument premise: this machine must have no config file"
     );
 }
 
@@ -100,7 +100,7 @@ fn plant_registry(home: &Path, template: &str) -> PathBuf {
     let cell = format!(
         r#"{{ "template": "{escaped}",
               "env_override": "CURSOR_USER_DIR", "format": "sqlite",
-              "confidence": "仅社区说法未核实", "source": "B59 test: 出货 registry 的 cursor 格",
+              "confidence": "仅社区说法未核实", "source": "B59 test: the shipped registry's cursor cell",
               "sql_table": "cursorDiskKV", "sql_id_column": "key",
               "sql_required_columns": ["key", "value"],
               "sql_key_column": "key", "sql_key_pattern": "composerData:%",
@@ -141,14 +141,14 @@ fn assert_anchored_but_not_counted(
     assert_ne!(
         probe.state,
         scanner::ProbeState::SkipUnresolvable,
-        "{shape} 形状、没有任何显式配置时，cursor 模板必须能解析出根路径；\
-         实际 state={:?} note={} template={template}",
+        "{shape} shape with no explicit config: the cursor template must resolve to a root path; \
+         actual state={:?} note={} template={template}",
         probe.state,
         probe.note
     );
     let root = probe.root.as_ref().unwrap_or_else(|| {
         panic!(
-            "{shape} 形状下 cursor 必须解析出根路径，实际 root=None (note={})",
+            "{shape} shape: cursor must resolve a root path, actual root=None (note={})",
             probe.note
         )
     });
@@ -156,37 +156,40 @@ fn assert_anchored_but_not_counted(
 
     assert!(
         root.starts_with(home),
-        "{shape}: 解析出的根路径必须落在隔离 HOME 内，实际 {shown}"
+        "{shape}: resolved root must land inside the isolated HOME, actual {shown}"
     );
     assert!(
         shown.ends_with("state.vscdb"),
-        "{shape}: 根路径必须指向 Cursor 的全局库 state.vscdb，实际 {shown}"
+        "{shape}: root must point at Cursor's global store state.vscdb, actual {shown}"
     );
     assert!(
         shown.contains("globalStorage"),
-        "{shape}: 根路径必须经过 globalStorage 这一层，实际 {shown}"
+        "{shape}: root must go through the globalStorage layer, actual {shown}"
     );
     assert!(
         !shown.contains('%'),
-        "{shape}: 根路径里还留着未展开的 %VAR%：{shown}"
+        "{shape}: an unexpanded %VAR% remains in the root path: {shown}"
     );
     assert!(
         !shown.contains('（') && !shown.contains('）'),
-        "{shape}: 根路径里混进了模板的中文注释尾巴：{shown}"
+        "{shape}: the template's Chinese annotation tail leaked into the root path: {shown}"
     );
 
     // The other half, and the one that must never be relaxed: the store is not
     // there, so "how many sessions" stays unknown. Anchoring a path is not
     // looking at one.
-    assert!(!root.exists(), "仪器前提：这台机器上不该真有 {shown}");
+    assert!(
+        !root.exists(),
+        "instrument premise: this store must not really exist on this machine ({shown})"
+    );
     assert_eq!(
         probe.record_count, None,
-        "{shape}: 目录不存在时会话数必须是「未知」，不是 {:?}",
+        "{shape}: when the directory is absent the session count must be \"unknown\", not {:?}",
         probe.record_count
     );
     assert!(
         !probe.installed_p(),
-        "{shape}: 目录不存在时不得判为已安装（state={:?}）",
+        "{shape}: an absent directory must not be judged installed (state={:?})",
         probe.state
     );
     let fp = report
@@ -196,7 +199,7 @@ fn assert_anchored_but_not_counted(
         .expect("cursor footprint row must exist");
     assert_eq!(
         fp.session_count, None,
-        "{shape}: 目录不存在时 footprint 会话数必须是「未知」，不是 {:?}",
+        "{shape}: when the directory is absent the footprint session count must be \"unknown\", not {:?}",
         fp.session_count
     );
 }
@@ -261,13 +264,16 @@ fn windows_shape_honours_an_exported_appdata() {
     let root = probe
         .root
         .as_ref()
-        .unwrap_or_else(|| panic!("cursor 必须解析出根路径 (note={})", probe.note));
+        .unwrap_or_else(|| panic!("cursor must resolve a root path (note={})", probe.note));
     assert!(
         root.starts_with(&roaming),
-        "导出的 %APPDATA% 必须优先于回退值，实际 {}",
+        "an exported %APPDATA% must win over the fallback, actual {}",
         root.display()
     );
-    assert_eq!(probe.record_count, None, "目录不存在，会话数仍是「未知」");
+    assert_eq!(
+        probe.record_count, None,
+        "directory absent, session count stays \"unknown\""
+    );
 
     std::env::remove_var("APPDATA");
     std::env::remove_var(scanner::REGISTRY_ENV);

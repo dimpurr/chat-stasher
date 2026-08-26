@@ -77,11 +77,11 @@ fn installed_but_unenumerable_codex_is_not_printed_as_zero() {
         output.status.code()
     );
     assert!(
-        stderr.contains("本机 未知 个 rollout 均未压缩"),
+        stderr.contains("(unknown rollouts on this machine all uncompressed)"),
         "installed + unknown must say it is unknown; stderr={stderr}"
     );
     assert!(
-        !stderr.contains("本机 0 个 rollout 均未压缩"),
+        !stderr.contains("(0 rollouts on this machine all uncompressed)"),
         "unknown must not be presented as the reassuring zero; stderr={stderr}"
     );
 }
@@ -104,7 +104,7 @@ fn installed_and_known_empty_codex_still_prints_zero() {
         output.status.code()
     );
     assert!(
-        stderr.contains("本机 0 个 rollout 均未压缩"),
+        stderr.contains("(0 rollouts on this machine all uncompressed)"),
         "a genuinely enumerated empty directory must remain zero; stderr={stderr}"
     );
 }

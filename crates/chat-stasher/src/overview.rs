@@ -116,7 +116,7 @@ fn distinct_labels(rows: &[OverviewRow], pick: impl Fn(&OverviewRow) -> &str) ->
 pub fn render_overview(rows: &[OverviewRow], width: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "机器 {} · harness {} · 会话 {} · 总行数 {}\n",
+        "machines {} · harnesses {} · sessions {} · total lines {}\n",
         machine_count(rows),
         harness_count(rows),
         rows.len(),
@@ -211,7 +211,9 @@ fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_
     let boundary = |v: Option<i64>| match (v, why) {
         (Some(unix), _) => crate::json_out::TimeState::known(unix),
         (None, Some(why)) => crate::json_out::TimeState::unknown(why.to_string()),
-        (None, None) => crate::json_out::TimeState::unknown("该会话没有记录到这一端的时间边界"),
+        (None, None) => crate::json_out::TimeState::unknown(
+            "this session recorded no time boundary on this end",
+        ),
     };
     serde_json::json!({
         "session_id": r.session_id,
@@ -241,7 +243,7 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
     let machines = distinct_labels(rows, |r| &r.machine);
     let harnesses = distinct_labels(rows, |r| &r.harness);
     if machines.is_empty() {
-        return "（无会话）".to_string();
+        return "(no sessions)".to_string();
     }
 
     // Per (machine, harness) aggregation.
@@ -305,14 +307,14 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
     }
 
     let mut out = String::new();
-    out.push_str("machine × harness 矩阵（每格: 会话数 · 行数 · [跨度]）\n");
+    out.push_str("machine × harness matrix (per cell: sessions · lines · [span])\n");
     // Header row.
     let mut head = format!("{:<label_w$} ", "");
     for (hi, h) in harnesses.iter().enumerate() {
         head.push_str(&pad_right(&truncate(h, col_w[hi]), col_w[hi]));
         head.push(' ');
     }
-    head.push_str(&pad_right("未知", 8));
+    head.push_str(&pad_right("unknown", 8));
     out.push_str(head.trim_end());
     out.push('\n');
 
@@ -350,8 +352,8 @@ fn cell_text(
     let key = (m.to_string(), h.to_string());
     let l = lines.get(&key).copied().unwrap_or(0);
     match (first.get(&key), last.get(&key)) {
-        (Some(a), Some(b)) => format!("{n}会话·{l}行·[{}~{}]", fmt_date(*a), fmt_date(*b)),
-        _ => format!("{n}会话·{l}行·[?]"),
+        (Some(a), Some(b)) => format!("{n} sessions·{l} lines·[{}~{}]", fmt_date(*a), fmt_date(*b)),
+        _ => format!("{n} sessions·{l} lines·[?]"),
     }
 }
 
@@ -374,11 +376,11 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
         e.1 += r.line_count;
     }
     if by_key.is_empty() {
-        return "时间未知: 0 会话（全部有时间）\n".to_string();
+        return "time unknown: 0 sessions (all have times)\n".to_string();
     }
 
     let mut out = String::new();
-    out.push_str("时间未知的会话（不并入任何时间桶）:\n");
+    out.push_str("sessions with unknown time (not merged into any time bucket):\n");
     let mut total_s = 0usize;
     let mut total_l = 0u64;
     for ((m, h), (s, l, why)) in &by_key {
@@ -387,11 +389,11 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
         let reason = if why.is_empty() {
             String::new()
         } else {
-            format!("（{why}）")
+            format!(" ({why})")
         };
-        out.push_str(&format!("  {m} / {h}: {s} 会话 · {l} 行{reason}\n"));
+        out.push_str(&format!("  {m} / {h}: {s} sessions · {l} lines{reason}\n"));
     }
-    out.push_str(&format!("  合计: {total_s} 会话 · {total_l} 行\n"));
+    out.push_str(&format!("  total: {total_s} sessions · {total_l} lines\n"));
     out
 }
 
@@ -416,11 +418,11 @@ pub fn render_heatmap_gran(
         HeatmapAxis::Harness => distinct_labels(rows, |r| &r.harness),
     };
     if labels.is_empty() {
-        return "（无会话）\n".to_string();
+        return "(no sessions)\n".to_string();
     }
 
     let axis_name = match axis {
-        HeatmapAxis::Machine => "机器",
+        HeatmapAxis::Machine => "machine",
         HeatmapAxis::Harness => "harness",
     };
 
@@ -458,7 +460,7 @@ pub fn render_heatmap_gran(
     // No known time at all → no horizontal axis; still show the unknown rows.
     let (Some(lo), Some(hi)) = (lo, hi) else {
         let mut out = String::new();
-        out.push_str(&format!("热力图 · 纵轴={axis_name} · 无已知时间\n"));
+        out.push_str(&format!("heatmap · y-axis={axis_name} · no known times\n"));
         for l in &labels {
             let uk = unknown.get(l).copied().unwrap_or(0);
             out.push_str(&format!(
@@ -469,7 +471,7 @@ pub fn render_heatmap_gran(
             ));
         }
         out.push_str(&format!(
-            "图例: '{}'=空桶 '{}'=时间未知（详见上方「时间未知」表）\n",
+            "legend: '{}'=empty bucket '{}'=time unknown (see the \"time unknown\" section above)\n",
             EMPTY, UNKNOWN
         ));
         return out;
@@ -532,14 +534,14 @@ pub fn render_heatmap_gran(
 
     let n_buckets = bucket_labels.len();
     let gran_name = match gran {
-        Granularity::Day => "按天",
-        Granularity::Week => "按周",
+        Granularity::Day => "by day",
+        Granularity::Week => "by week",
     };
     let mut out = String::new();
     let x_lo = bucket_labels.first().cloned().unwrap_or_default();
     let x_hi = bucket_labels.last().cloned().unwrap_or_default();
     out.push_str(&format!(
-        "热力图 · 纵轴={axis_name} · {gran_name} · x轴 {}..{} ({}桶)\n",
+        "heatmap · y-axis={axis_name} · {gran_name} · x-axis {}..{} ({} buckets)\n",
         x_lo, x_hi, n_buckets
     ));
 
@@ -560,7 +562,7 @@ pub fn render_heatmap_gran(
         ));
     }
     out.push_str(&format!(
-        "图例: '{}'=空桶 · '{}'=时间未知 · 密度 {}（最低）..{}（最高）\n",
+        "legend: '{}'=empty bucket · '{}'=time unknown · density {} (lowest)..{} (highest)\n",
         EMPTY,
         UNKNOWN,
         DENSITY[0],
@@ -691,8 +693,8 @@ mod tests {
         assert_eq!(machine_count(&rows), 0);
         assert_eq!(harness_count(&rows), 0);
         let report = render_overview(&rows, 80);
-        assert!(report.contains("总行数 0"));
-        assert!(report.contains("（无会话）"));
+        assert!(report.contains("total lines 0"));
+        assert!(report.contains("(no sessions)"));
     }
 
     #[test]
@@ -707,15 +709,15 @@ mod tests {
             TimeSource::Exact,
         )];
         let report = render_overview(&rows, 60);
-        assert!(report.contains("总行数 42"));
+        assert!(report.contains("total lines 42"));
         // matrix cell
-        assert!(report.contains("1会话·42行"));
+        assert!(report.contains("1 sessions·42 lines"));
         assert!(report.contains("[2026-05-01~2026-05-01]"));
         // unknown tally empty
-        assert!(report.contains("全部有时间"));
+        assert!(report.contains("all have times"));
         // heatmap has one bucket and the row
         assert!(report.contains("air"));
-        assert!(report.contains("(1桶)"));
+        assert!(report.contains("(1 buckets)"));
     }
 
     #[test]
@@ -746,15 +748,15 @@ mod tests {
         ];
         let report = render_overview(&rows, 60);
         // dedicated tally lists both
-        assert!(report.contains("air / claude-code: 1 会话 · 10 行"));
-        assert!(report.contains("pro / codex: 1 会话 · 5 行"));
-        assert!(report.contains("合计: 2 会话"));
-        // heatmap shows "无已知时间" and the '?' markers, no time axis buckets
+        assert!(report.contains("air / claude-code: 1 sessions · 10 lines"));
+        assert!(report.contains("pro / codex: 1 sessions · 5 lines"));
+        assert!(report.contains("total: 2 sessions"));
+        // heatmap shows "no known times" and the '?' markers, no time axis buckets
         let hm = render_heatmap(&rows, 60, HeatmapAxis::Machine);
-        assert!(hm.contains("无已知时间"));
-        assert!(hm.contains("'?'=时间未知"));
-        assert!(!hm.contains("按天"));
-        assert!(!hm.contains("x轴"));
+        assert!(hm.contains("no known times"));
+        assert!(hm.contains("'?'=time unknown"));
+        assert!(!hm.contains("by day"));
+        assert!(!hm.contains("x-axis"));
     }
 
     #[test]
@@ -783,7 +785,7 @@ mod tests {
             ),
         ];
         let hm = render_heatmap_gran(&rows, 60, HeatmapAxis::Machine, Some(Granularity::Week));
-        assert!(hm.contains("x轴 2025-12-29..2026-01-05 (2桶)"));
+        assert!(hm.contains("x-axis 2025-12-29..2026-01-05 (2 buckets)"));
         assert!(hm.contains("2025-12-29"));
         assert!(hm.contains("2026-01-05"));
     }
@@ -819,7 +821,9 @@ mod tests {
                 TimeSource::Exact,
             ),
         ];
-        let m = render_matrix(&rows, 80);
+        // Width 140 so the longer English cell texts (sessions·lines·[span])
+        // are not column-truncated before the span can be asserted.
+        let m = render_matrix(&rows, 140);
         assert!(m.contains("air"));
         assert!(m.contains("pro"));
         assert!(m.contains("claude-code"));
@@ -849,10 +853,13 @@ mod tests {
         // Both render one row of one bucket; 1 vs 2 sessions must differ.
         let c1 = row_density_char(&hm1, "air");
         let c2 = row_density_char(&hm2, "air");
-        assert_ne!(c1, c2, "1 会话应与 2 会话密度不同");
+        assert_ne!(
+            c1, c2,
+            "1 session must render a different density from 2 sessions"
+        );
         // Both carry the empty-bucket / unknown legend.
-        assert!(hm1.contains("' '=空桶"));
-        assert!(hm1.contains("'?'=时间未知"));
+        assert!(hm1.contains("' '=empty bucket"));
+        assert!(hm1.contains("'?'=time unknown"));
     }
 
     /// First density character (just after the left label) of a heatmap row.
@@ -880,8 +887,8 @@ mod tests {
         )];
         let narrow = render_heatmap(&rows, 12, HeatmapAxis::Machine);
         let wide = render_heatmap(&rows, 200, HeatmapAxis::Machine);
-        assert!(narrow.contains("按周"));
-        assert!(wide.contains("按天"));
+        assert!(narrow.contains("by week"));
+        assert!(wide.contains("by day"));
     }
 
     #[test]

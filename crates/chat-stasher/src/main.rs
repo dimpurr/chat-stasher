@@ -489,8 +489,8 @@ enum Command {
     ///
     /// Gated by `data/harness-registry-v1.json` (`seal_policy` + `seal_source`
     /// + the platform cell's `confidence`): only a harness whose policy is
-    /// `rename`, with an evidence `seal_source` line **and** a `源码确认`
-    /// platform cell may be renamed. Everything else (Codex = fd-holder,
+    /// `rename`, with an evidence `seal_source` line **and** a `source
+    /// confirmed` platform cell may be renamed. Everything else (Codex = fd-holder,
     /// opencode = sqlite, any unconfirmed harness) is refused with the active
     /// file untouched — renaming an fd-holder silently drops its post-rename
     /// data.
@@ -653,7 +653,7 @@ enum Command {
     },
     /// Give a dead or sold machine a display name (ADR-018).
     ///
-    /// Writes `<stage>/meta/<target>/label-by-<本机身份>.json` — a
+    /// Writes `<stage>/meta/<target>/label-by-<local-identity>.json` — a
     /// `LabelRecord` expressing *this* machine's opinion about what `<target>`
     /// should be called. It exists for machines that can no longer declare for
     /// themselves (sold, dead, in a different building). Each file has exactly
@@ -688,7 +688,7 @@ enum Command {
     /// conversation content.
     ///
     /// A machine that has a snapshot but **no** activity index is listed
-    /// explicitly as "索引缺失" — it never vanishes silently, because a missing
+    /// explicitly as "index missing" — it never vanishes silently, because a missing
     /// index is not the same thing as "that machine had no sessions".
     ///
     /// Exit codes: `0` = at least one index was read and rendered; `1` = the
@@ -1556,7 +1556,7 @@ fn now_unix() -> i64 {
 /// A **legacy** partition id that is not 32 hex (a pre-ADR-018 hostname like
 /// `mac`) has no identity to shorten. It is rendered with the partition id as
 /// the identifier plus the declaration/label name when one exists, or an
-/// explicit `无名字` marker otherwise — the partition id is never presented as
+/// explicit `unnamed` marker otherwise — the partition id is never presented as
 /// a name.
 fn display_machine(
     machine_id: &str,
@@ -1572,7 +1572,7 @@ fn display_machine(
     if let Some(d) = decl.filter(|d| !d.display_name.is_empty()) {
         return format!("{} ({machine_id})", d.display_name);
     }
-    format!("{machine_id} (无名字)")
+    format!("{machine_id} (unnamed)")
 }
 
 /// Everything `overview` extracts from a destination repository before
@@ -1698,7 +1698,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
 /// repository was read and no activity index exists anywhere (a real empty
 /// answer); `3` = the repository could not be read in full — a missing index
 /// is then unproven, never folded into "there is none". A machine that has a
-/// snapshot but no index is listed explicitly as 索引缺失.
+/// snapshot but no index is listed explicitly as "index missing".
 #[allow(clippy::too_many_arguments)]
 fn cmd_overview(
     destination: Option<String>,
@@ -1814,7 +1814,7 @@ fn cmd_overview(
     // silently dropped, which would fold "no index" into "no sessions".
     let missing = sidecar::missing_index_machines(&snapshot_machines, &index_machines);
     if !missing.is_empty() {
-        println!("[overview] 索引缺失（有快照、无 activity 索引）:");
+        println!("[overview] index missing (snapshot present, no activity index):");
         for m in &missing {
             println!("  !! {}", display(m));
         }
@@ -1830,7 +1830,7 @@ fn cmd_overview(
         .cloned()
         .collect();
     if !undeclared.is_empty() {
-        println!("[overview] 声明缺失（有快照、无 machine.json 声明）:");
+        println!("[overview] declaration missing (snapshot present, no machine.json declaration):");
         for m in &undeclared {
             println!("  !! {}", display(m));
         }
@@ -2884,7 +2884,7 @@ fn print_collect_report(
         // it printed before.
         let unknown = if report.scanner_unreadable_unknown > 0 {
             format!(
-                " unreadable_sessions_unknown_in={} (上面这个数是下限)",
+                " unreadable_sessions_unknown_in={} (the count above is a lower bound)",
                 report.scanner_unreadable_unknown
             )
         } else {
@@ -3304,7 +3304,10 @@ fn cmd_seal(
         } else if cell.source.trim().is_empty() {
             "platform cell source is empty".to_string()
         } else {
-            "platform cell confidence is not 源码确认".to_string()
+            format!(
+                "platform cell confidence is not {}",
+                scanner::CONF_CONFIRMED
+            )
         };
         println!("[seal] REFUSED: {reason}");
         println!("[seal] active untouched : {}", active.display());
@@ -3642,7 +3645,7 @@ fn reap_remote(cfg: &StoreConfig, no_reap: bool) {
     match reap::reap_masters_for_host(&host) {
         Ok(n) => println!("[reap] host {host} · ssh masters shut down: {n}"),
         Err(e) => {
-            println!("[reap] host {host} · ssh masters shut down: 未知（无法读取进程列表：{e}）")
+            println!("[reap] host {host} · ssh masters shut down: unknown (could not read the process list: {e})")
         }
     }
 }
@@ -4317,7 +4320,7 @@ mod decision_surface_tests {
 
         let output = render_archive_gap_notice(&report);
         assert!(
-            output.contains("不可归档"),
+            output.contains("not archivable"),
             "status must mark recognised sessions that have no SessionRecord: {output}"
         );
 
@@ -4332,7 +4335,7 @@ mod decision_surface_tests {
         });
         let output = render_archive_gap_notice(&report);
         assert!(
-            !output.contains("不可归档"),
+            !output.contains("not archivable"),
             "the marker must disappear once the harness produces a SessionRecord: {output}"
         );
     }
@@ -4543,7 +4546,7 @@ mod decision_surface_tests {
         let out = display_machine("mac", None, &[]);
         assert!(!out.is_empty());
         assert!(
-            out.contains("无名字") || out.contains("unnamed"),
+            out.contains("unnamed"),
             "a legacy partition must carry an explicit unnamed marker: {out}"
         );
     }
@@ -4788,7 +4791,7 @@ fn run_state_info(config: &Config) -> RunStateInfo {
         Err(error) => RunStateInfo {
             verdict: runstate::Verdict {
                 line: format!(
-                    "backup_interval_secs 无效：{error}。无法判断定时器是否按用户配置运行。"
+                    "backup_interval_secs is invalid: {error}. It is impossible to tell whether the timer is running as configured."
                 ),
                 healthy: false,
             },
@@ -4843,9 +4846,9 @@ fn status_json(
 /// would otherwise have to hardcode.
 fn status_exit_semantics(code: u8) -> &'static str {
     match code {
-        0 => "0 = 健康：定时器正常，上次运行成功且未过期。",
-        1 => "1 = 不健康：从未运行 / 定时器过期 / 上次运行失败——对脚本而言是“去查定时器”的信号。",
-        _ => "3 = 无法给出结论：扫描失败（没读或没读完），上面的会话数都是未知，不是 0。",
+        0 => "0 = healthy: the timer is running, the last run succeeded and is not stale.",
+        1 => "1 = unhealthy: never ran / timer stale / last run failed — for a script this is the \"go check the timer\" signal.",
+        _ => "3 = no conclusion possible: the scan failed (did not read, or did not finish), so the session counts above are all unknown, not 0.",
     }
 }
 
@@ -4893,43 +4896,43 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             // this run never got to look at. Zero records plus places we did
             // not look is not "there is nothing here".
             out.push_str(&format!(
-                "[scan] 本机没有扫描到任何会话。{}{unreadable}",
+                "[scan] No sessions were found on this machine.{}{unreadable}",
                 unlooked_notice(report)
             ));
             out.push('\n');
         } else {
             out.push_str(&format!(
-                "[scan] {} 个会话（{compressed} compressed）：{breakdown}{unreadable}",
+                "[scan] {} session(s) ({compressed} compressed): {breakdown}{unreadable}",
                 report.records.len()
             ));
             out.push('\n');
         }
         if !report.missing_roots.is_empty() {
             out.push_str(&format!(
-                "[scan] 跳过 {} 个不存在的来源根目录。",
+                "[scan] skipped {} non-existent source root(s).",
                 report.missing_roots.len()
             ));
             out.push('\n');
         }
-        // B82: kept off the line above on purpose. "不存在" is a measured
+        // B82: kept off the line above on purpose. "not exist" is a measured
         // absence; these paths were never established to be absent, and
         // folding them into that count would restate the same lie in a
         // number.
         if !report.indeterminate_roots.is_empty() {
             out.push_str(&format!(
-                "[scan] ⚠ 另有 {} 个来源根目录读不了，存在与否未知（会话数未知）；详见 chat-stasher doctor",
+                "[scan] ⚠ another {} source root(s) are unreadable — whether they exist is unknown (session count unknown); see chat-stasher doctor",
                 report.indeterminate_roots.len()
             ));
             out.push('\n');
         }
         if !gaps.is_empty() {
             out.push_str(&format!(
-                "⚠ {} 个 harness 有已识别但 collect 不会归档的会话。",
+                "⚠ {} harness(es) have recognised sessions that collect will not archive.",
                 gaps.len()
             ));
             out.push('\n');
         }
-        out.push_str("明细（每个会话一行）：chat-stasher status --sessions\n");
+        out.push_str("details (one line per session): chat-stasher status --sessions\n");
         return out;
     }
 
@@ -4997,8 +5000,8 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
     out
 }
 
-/// The clause appended to "本机没有扫描到任何会话" when that sentence would
-/// otherwise be a claim we cannot back.
+/// The clause appended to "No sessions were found on this machine" when that
+/// sentence would otherwise be a claim we cannot back.
 ///
 /// Counted here are the probes that never looked: `未查明` (scanning a guessed
 /// path is forbidden), a template that does not reduce to a root, and B82's
@@ -5027,23 +5030,38 @@ fn unlooked_notice(report: &scanner::ScanReport) -> String {
         return String::new();
     }
     format!(
-        "  ⚠ 但有 {} 个 harness 这次根本没查（{}）——「没扫到」不等于「没有」；详见 chat-stasher doctor",
+        "  ⚠ but {} harness(es) were not probed at all ({}) — \"did not scan\" is not \"there is none\"; see chat-stasher doctor",
         unlooked.len(),
         unlooked.join(" · ")
     )
 }
 
 /// The tail `status` appends to its `[scan]` line when some harness knows
-/// about sessions it could not read (`HarnessProbe::unreadable_count`, one
+/// about sessions it could not hand over (`HarnessProbe::unreadable_count`, one
 /// count per harness, set by the probe in `scanner.rs`).
+///
+/// "Could not hand over" deliberately covers two situations that must not be
+/// blurred (the reporter's Cursor machine is the second one):
+///
+///   * the body genuinely **cannot be read** here — permissions, corruption;
+///     this is `unreadable` in the narrow sense;
+///   * the row is an **index entry whose body is not available locally** —
+///     Cursor 3.0 moved session bodies into a central store this build cannot
+///     reach. The index says the session exists; the body is not on this
+///     machine in any readable location. This is neither the tool's failure
+///     nor a sign the user lost data.
+///
+/// The notice therefore says the sessions are "indexed but not archived" and
+/// names "body not available locally" instead of "we failed to read them", so
+/// a reader does not walk away thinking the tool dropped their data.
 ///
 /// Three things this wording is doing on purpose:
 ///
-///   * **`另有`** — these are *not* inside the number printed to their left.
+///   * **`another`** — these are *not* inside the number printed to their left.
 ///     `cursor 3(+411)` would have been shorter and would have been read as
 ///     414; a count that can be mistaken for a total is worse than silence.
-///   * **`尚未归档`** — the failure mode to avoid is a reader concluding the
-///     unreadable sessions are safely in the archive. They are not in it.
+///   * **`not archived`** — the failure mode to avoid is a reader concluding the
+///     unhanded-over sessions are safely in the archive. They are not in it.
 ///   * **empty string when every count is zero** — silence is the whole
 ///     contract with the "4 line status" work; nothing to say, nothing said.
 fn unreadable_notice(report: &scanner::ScanReport) -> String {
@@ -5096,20 +5114,20 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
         String::new()
     } else {
         format!(
-            "；另有 {} 个 harness 读不出来的条数未知（{}）",
+            "; another {} harness(es) have an unknown unreadable count ({})",
             uncounted.len(),
             uncounted.join(" · ")
         )
     };
     if per_harness.is_empty() && per_harness_entries.is_empty() {
         return format!(
-            "  ⚠ 有 harness 读不出来的条数未知（{}）；详见 chat-stasher doctor",
+            "  ⚠ some harness(es) have an unknown unreadable count ({}); see chat-stasher doctor",
             uncounted.join(" · ")
         );
     }
     if per_harness_entries.is_empty() {
         return format!(
-            "  ⚠ 另有 {total} 条读不出来、尚未归档（{who}）{uncounted_clause}；详见 chat-stasher doctor"
+            "  ⚠ another {total} session(s) are indexed but not archived ({who}): bodies are not available locally — unreadable, or stored where this build cannot reach (not a sign of data loss){uncounted_clause}; see chat-stasher doctor"
         );
     }
     let entry_total: u64 = per_harness_entries.iter().map(|(_, n)| n).sum();
@@ -5123,16 +5141,20 @@ fn unreadable_notice(report: &scanner::ScanReport) -> String {
             .join(" · ")
     };
     let detail = if total > 0 {
-        format!("另有 {total} 条读不出来、{entry_total} 个不可读目录项（会话数未知），尚未归档")
+        format!(
+            "another {total} session(s) and {entry_total} unreadable directory item(s) (session count unknown) — not archived"
+        )
     } else {
-        format!("另有 {entry_total} 个不可读目录项（会话数未知），尚未归档")
+        format!(
+            "another {entry_total} unreadable directory item(s) (session count unknown) — not archived"
+        )
     };
     let who = if total > 0 {
         format!("{who} · {entry_who}")
     } else {
         entry_who
     };
-    format!("  ⚠ {detail}（{who}）{uncounted_clause}；详见 chat-stasher doctor")
+    format!("  ⚠ {detail} ({who}){uncounted_clause}; see chat-stasher doctor")
 }
 
 fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
@@ -5142,14 +5164,14 @@ fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
     }
     let mut output = String::new();
     output.push_str(
-        "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。\n",
+        "  ⚠ not archivable sessions: the following harness(es) recognised sessions but produced no SessionRecord; collect will not archive them for now.\n",
     );
     for gap in &gaps {
         output.push_str(&scanner::format_archive_gap(gap));
         output.push('\n');
     }
     output.push_str(
-        "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。\n",
+        "  advice: do not treat scanner records as the total number of recognised sessions; run collect again once the harness produces SessionRecords.\n",
     );
     output
 }
