@@ -601,7 +601,7 @@ impl ScanReport {
 /// name list.
 pub fn format_archive_gap(gap: &ArchiveGap) -> String {
     format!(
-        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — 本版本还不支持归档这个 harness 的存储格式（不是你的配置问题，也没有可以设置的开关）",
+        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — this build cannot archive this harness's store format (not a configuration problem, and there is no switch to enable it)",
         gap.harness_id,
         gap.recognized_sessions
             .map(|count| count.to_string())
@@ -639,15 +639,23 @@ pub fn probe_session_count(p: &HarnessProbe) -> json_out::CountState {
     match p.state {
         ProbeState::Scanned | ProbeState::FileTarget => match p.record_count {
             Some(n) => CountState::known(n),
-            None => CountState::unknown("会话数没能枚举出来（store 无法枚举）"),
+            None => {
+                CountState::unknown("session count could not be enumerated (store not enumerable)")
+            }
         },
         ProbeState::Missing => CountState::known(0),
-        ProbeState::SkipWrongPlatform => CountState::not_applicable("registry 没有本平台的 cell"),
-        ProbeState::Indeterminate => CountState::unknown("来源是否存在都无法确认"),
-        ProbeState::SkipUnascertained => {
-            CountState::unknown("confidence 未查明，禁止扫描猜测的路径")
+        ProbeState::SkipWrongPlatform => {
+            CountState::not_applicable("registry has no cell for this platform")
         }
-        ProbeState::SkipUnresolvable => CountState::unknown("模板无法归约为静态根路径"),
+        ProbeState::Indeterminate => {
+            CountState::unknown("cannot even confirm whether the source exists")
+        }
+        ProbeState::SkipUnascertained => {
+            CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
+        }
+        ProbeState::SkipUnresolvable => {
+            CountState::unknown("template cannot be reduced to a static root path")
+        }
     }
 }
 
@@ -661,10 +669,10 @@ pub fn probe_unreadable_count(p: &HarnessProbe) -> json_out::CountState {
     use crate::json_out::CountState;
     match (p.record_count.is_some(), p.unreadable_count) {
         (_, Some(n)) => CountState::known(n),
-        (true, None) => CountState::unknown("读不出来的条数本身没数出来"),
-        (false, None) => {
-            CountState::not_applicable("这个 harness 没有被枚举，不存在“读不出来”的概念")
-        }
+        (true, None) => CountState::unknown("unreadable count itself could not be counted"),
+        (false, None) => CountState::not_applicable(
+            "this harness was not enumerated; there is no unreadable concept to report",
+        ),
     }
 }
 
@@ -674,10 +682,10 @@ pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
     use crate::json_out::CountState;
     match (p.record_count.is_some(), p.unreadable_entry_count) {
         (_, Some(n)) => CountState::known(n),
-        (true, None) => CountState::unknown("不可读目录项的条数本身没数出来"),
-        (false, None) => {
-            CountState::not_applicable("这个 harness 没有被枚举，不存在不可读目录项的概念")
-        }
+        (true, None) => CountState::unknown("unreadable entry count itself could not be counted"),
+        (false, None) => CountState::not_applicable(
+            "this harness was not enumerated; there is no unreadable-entry concept to report",
+        ),
     }
 }
 
@@ -851,7 +859,7 @@ fn probe_harness(
                 // state that says so, and `N/A` is its column.
                 return HarnessProbe {
                     state: ProbeState::SkipWrongPlatform,
-                    note: format!("无 {platform} 平台条目"),
+                    note: format!("no {platform} registry entry"),
                     ..base
                 };
             }
@@ -867,7 +875,7 @@ fn probe_harness(
         return HarnessProbe {
             confidence,
             state: ProbeState::SkipUnascertained,
-            note: format!("confidence=未查明，跳过不去扫（扫猜的路径 = 假阴/假阳）"),
+            note: format!("confidence=unascertained; skipped (scanning a guessed path = false negatives/positives)"),
             ..base
         };
     }
@@ -889,7 +897,10 @@ fn probe_harness(
                     return HarnessProbe {
                         confidence,
                         state: ProbeState::SkipUnresolvable,
-                        note: format!("模板无法静态解析为根路径：{}", cell.template),
+                        note: format!(
+                            "template cannot be statically resolved to a root path: {}",
+                            cell.template
+                        ),
                         ..base
                     }
                 }
@@ -902,7 +913,7 @@ fn probe_harness(
         return HarnessProbe {
             confidence,
             state: ProbeState::SkipUnresolvable,
-            note: format!("registry id 在此 build 中未知：{}", h.id),
+            note: format!("registry id unknown in this build: {}", h.id),
             ..base
         };
     };
@@ -938,7 +949,7 @@ fn probe_harness(
                     record_count: None,
                     candidate_count: None,
                     unreadable_count: None,
-                    note: "单文件存储，只探测存在与大小".to_string(),
+                    note: "single-file store: existence and size probed only".to_string(),
                     recognized_files: vec![root.clone()],
                     ..base
                 };
@@ -956,7 +967,7 @@ fn probe_harness(
                     probe.bytes = info.total_bytes;
                     let expected = spec
                         .as_ref()
-                        .map(|s| format!("{}表({})", s.table, s.required_columns.join(", ")))
+                        .map(|s| format!("{} table({})", s.table, s.required_columns.join(", ")))
                         .unwrap_or_else(|| "session(id, time_created, time_updated)".to_string());
                     match info.sessions {
                         SqliteSessionProbe::Known {
@@ -970,7 +981,7 @@ fn probe_harness(
                             probe.earliest = earliest;
                             probe.latest = latest;
                             probe.note = format!(
-                                "{env_note}SQLite 只读枚举 {expected}（bytes 含 .db+-wal+-shm）；过滤前 {candidate_count} / 过滤后 {count} 会话"
+                                "{env_note}SQLite read-only enumeration of {expected} (bytes include .db+-wal+-shm); before filter {candidate_count} / after {count} sessions"
                             );
                             if h.id == "opencode" {
                                 match enumerate_opencode_sessions(&root) {
@@ -1018,7 +1029,7 @@ fn probe_harness(
                                         probe.unreadable_count =
                                             enumeration_gap(count, 0, info.unreadable_count);
                                         probe.note.push_str(&format!(
-                                            "; SessionRecord 枚举失败（{error}）"
+                                            "; SessionRecord enumeration failed ({error})"
                                         ));
                                     }
                                 }
@@ -1048,7 +1059,7 @@ fn probe_harness(
                                             probe.unreadable_count =
                                                 enumeration_gap(count, 0, info.unreadable_count);
                                             probe.note.push_str(&format!(
-                                                "; SessionRecord 枚举失败（{error}）"
+                                                "; SessionRecord enumeration failed ({error})"
                                             ));
                                         }
                                     }
@@ -1057,11 +1068,13 @@ fn probe_harness(
                         }
                         SqliteSessionProbe::SchemaMismatch { actual } => {
                             probe.note = format!(
-                                "检测到 SQLite 但表结构不认识（期望 {expected}，实到 {actual}）—— 不是 0，是无法枚举"
+                                "detected SQLite but schema not recognized (expected {expected}, got {actual}) — not 0, it is un-enumerable"
                             );
                         }
                         SqliteSessionProbe::ReadFailed { error } => {
-                            probe.note = format!("检测到 SQLite 但只读枚举失败（{error}）");
+                            probe.note = format!(
+                                "detected SQLite but read-only enumeration failed ({error})"
+                            );
                         }
                     }
                 }
@@ -1079,7 +1092,7 @@ fn probe_harness(
                     state: ProbeState::Missing,
                     bytes: None,
                     record_count: None,
-                    note: "单文件不存在".to_string(),
+                    note: "single-file store not present".to_string(),
                     ..base
                 }
             }
@@ -1091,7 +1104,7 @@ fn probe_harness(
                     state: ProbeState::Indeterminate,
                     bytes: None,
                     record_count: None,
-                    note: format!("路径读不了，存在与否未知（{e}）—— 不是「不存在」"),
+                    note: format!("path unreadable, existence unknown ({e}) — not 'absent'"),
                     ..base
                 }
             }
@@ -1104,7 +1117,7 @@ fn probe_harness(
                     bytes: None,
                     record_count: None,
                     note: format!(
-                        "路径存在但不是文件（{}）—— 会话数未知，不是 0",
+                        "path exists but is not a file ({}) — session count unknown, not 0",
                         path_kind(&md)
                     ),
                     ..base
@@ -1124,7 +1137,7 @@ fn probe_harness(
                     record_count: None,
                     candidate_count: None,
                     unreadable_count: None,
-                    note: "目录不存在".to_string(),
+                    note: "directory not present".to_string(),
                     ..base
                 }
             }
@@ -1137,7 +1150,7 @@ fn probe_harness(
                     record_count: None,
                     candidate_count: None,
                     unreadable_count: None,
-                    note: format!("目录读不了，存在与否未知（{e}）—— 不是「不存在」"),
+                    note: format!("directory unreadable, existence unknown ({e}) — not 'absent'"),
                     ..base
                 }
             }
@@ -1151,7 +1164,7 @@ fn probe_harness(
                     candidate_count: None,
                     unreadable_count: None,
                     note: format!(
-                        "路径存在但不是目录（{}）—— 会话数未知，不是 0",
+                        "path exists but is not a directory ({}) — session count unknown, not 0",
                         path_kind(&md)
                     ),
                     ..base
@@ -1175,16 +1188,16 @@ fn probe_harness(
         report.records.extend(recs.records);
         let note = if recs.unreadable_entry_count > 0 {
             format!(
-                "目录扫描不完整：{} 个不可读目录项（会话数未知）",
+                "directory scan incomplete: {} unreadable directory entries (session count unknown)",
                 recs.unreadable_entry_count
             )
         } else if recs.unreadable_count > 0 {
             format!(
-                "{} 条读不出来（不是空，是取不到元数据）",
+                "{} unreadable (not empty — metadata could not be obtained)",
                 recs.unreadable_count
             )
         } else if count == 0 {
-            "目录在，但没有可枚举的会话文件".to_string()
+            "directory present, but no enumerable session files".to_string()
         } else {
             String::new()
         };
@@ -1208,11 +1221,11 @@ fn probe_harness(
 /// has to say "this is not what the registry declared".
 fn path_kind(md: &fs::Metadata) -> &'static str {
     if md.is_dir() {
-        "目录"
+        "directory"
     } else if md.is_file() {
-        "文件"
+        "file"
     } else {
-        "既不是文件也不是目录"
+        "neither file nor directory"
     }
 }
 
@@ -1314,19 +1327,23 @@ fn unreadable_note(
 ) -> String {
     let mut note = String::new();
     match unreadable {
-        Some(n) if n > 0 => note.push_str(&format!("；{n} 条读不出来（不是空，是取不到正文）")),
+        Some(n) if n > 0 => note.push_str(&format!(
+            "; {n} unreadable (not empty — body not available locally)"
+        )),
         // Counted, and the count is zero: the clean machine's note keeps its
         // pre-B68 bytes.
         Some(_) => {}
         // B90: the tally itself failed. Silence here would be byte-identical
         // to "counted, zero" — the exact confusion this ticket removes.
-        None => note.push_str("；读不出来的条数未知（这一项本身没数出来）"),
+        None => note.push_str("; unreadable count unknown (this tally itself was not counted)"),
     }
     if unreadable_stores > 0 {
-        note.push_str(&format!("；{unreadable_stores} 个库打不开/读不懂"));
+        note.push_str(&format!(
+            "; {unreadable_stores} store(s) could not be opened/read"
+        ));
     }
     if let Some(error) = enumerate_error {
-        note.push_str(&format!("；枚举失败（{error}）"));
+        note.push_str(&format!("; enumeration failed ({error})"));
     }
     note
 }
@@ -1337,21 +1354,23 @@ fn unreadable_note(
 fn legacy_ignorance_note(scan: &crate::sqlite_probe::CursorLegacyScan) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(error) = &scan.enumerate_error {
-        parts.push(format!("枚举失败（{error}），会话数未知"));
+        parts.push(format!(
+            "enumeration failed ({error}), session count unknown"
+        ));
     }
     if scan.unreadable_stores > 0 {
         parts.push(format!(
-            "{} 个库打不开/读不懂（会话数未知）",
+            "{} store(s) could not be opened/read (session count unknown)",
             scan.unreadable_stores
         ));
     }
     if scan.unreadable_entries > 0 {
         parts.push(format!(
-            "{} 个不可读目录项（会话数未知）",
+            "{} unreadable directory entries (session count unknown)",
             scan.unreadable_entries
         ));
     }
-    parts.join("；")
+    parts.join("; ")
 }
 
 /// Legacy workspaces we could not look into, as a count of *entries* whose
@@ -1371,9 +1390,9 @@ fn legacy_entry_count_field(scan: &crate::sqlite_probe::CursorLegacyScan) -> Opt
 /// could not read — never both.
 fn legacy_tail_note(ignorance: &str) -> String {
     if ignorance.is_empty() {
-        " 未找到可读 composer 数据".to_string()
+        " no readable composer data found".to_string()
     } else {
-        format!(" 没看完：{ignorance} —— 不能据此说没有")
+        format!(" did not finish reading: {ignorance} — cannot conclude it is absent")
     }
 }
 
@@ -1420,7 +1439,9 @@ fn probe_cursor_harness(
         return HarnessProbe {
             confidence,
             state: ProbeState::SkipUnresolvable,
-            note: format!("{env_note}Cursor globalStorage 路径无法推导 User 根目录"),
+            note: format!(
+                "{env_note}Cursor globalStorage path cannot derive the User root directory"
+            ),
             ..base
         };
     };
@@ -1447,14 +1468,14 @@ fn probe_cursor_harness(
             candidate_count,
             count,
             ..
-        }) => format!("global cursorDiskKV 过滤前 {candidate_count} / 过滤后 {count}；"),
+        }) => format!("global cursorDiskKV before filter {candidate_count} / after {count}; "),
         Some(SqliteSessionProbe::SchemaMismatch { .. }) => {
-            "global cursorDiskKV 表结构不认识；".to_string()
+            "global cursorDiskKV schema not recognized; ".to_string()
         }
         Some(SqliteSessionProbe::ReadFailed { .. }) => {
-            "global cursorDiskKV 只读枚举失败；".to_string()
+            "global cursorDiskKV read-only enumeration failed; ".to_string()
         }
-        None => "global cursorDiskKV 不存在；".to_string(),
+        None => "global cursorDiskKV not present; ".to_string(),
     };
     // B82: the legacy walk now hands back what it could *not* read as well as
     // what it could. `legacy_scan` is consulted twice: once for the probe it
@@ -1512,7 +1533,7 @@ fn probe_cursor_harness(
                     bytes: legacy.total_bytes,
                     recognized_files,
                     note: format!(
-                        "{env_note}来自 legacy workspaceStorage；{global_summary}SQLite 只读枚举 ItemTable；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}{gap_note}"
+                        "{env_note}from legacy workspaceStorage; {global_summary}SQLite read-only enumeration of ItemTable; before filter {candidate_count} / after {count} sessions; SessionRecord={record_count}{gap_note}"
                     ),
                     ..base
                 };
@@ -1533,7 +1554,7 @@ fn probe_cursor_harness(
                 state: ProbeState::Indeterminate,
                 unreadable_entry_count: Some(legacy_unknown_entries(&legacy_scan)),
                 note: format!(
-                    "{env_note}globalStorage/state.vscdb 不存在；legacy workspaceStorage 没看完：{legacy_ignorance_note} —— 不能据此说没有"
+                    "{env_note}globalStorage/state.vscdb not present; legacy workspaceStorage not fully read: {legacy_ignorance_note} — cannot conclude it is absent"
                 ),
                 ..base
             };
@@ -1544,7 +1565,7 @@ fn probe_cursor_harness(
             confidence,
             state: ProbeState::Missing,
             note: format!(
-                "{env_note}globalStorage/state.vscdb 不存在，legacy workspaceStorage 也未找到可读 composer 数据"
+                "{env_note}globalStorage/state.vscdb not present, and no readable composer data found in legacy workspaceStorage"
             ),
             ..base
         };
@@ -1575,7 +1596,7 @@ fn probe_cursor_harness(
                 },
                 None => (
                     Vec::new(),
-                    Some("registry cell 未声明 SQLite schema".to_string()),
+                    Some("registry cell does not declare a SQLite schema".to_string()),
                 ),
             };
             let record_count = records.len();
@@ -1602,7 +1623,7 @@ fn probe_cursor_harness(
                 bytes: info.total_bytes,
                 recognized_files,
                 note: format!(
-                    "{env_note}SQLite 只读枚举 cursorDiskKV表(key, value)；过滤前 {candidate_count} / 过滤后 {count} 会话；SessionRecord={record_count}{gap_note}"
+                    "{env_note}SQLite read-only enumeration of cursorDiskKV table(key, value); before filter {candidate_count} / after {count} sessions; SessionRecord={record_count}{gap_note}"
                 ),
                 ..base
             }
@@ -1617,7 +1638,7 @@ fn probe_cursor_harness(
             bytes: info.total_bytes,
             unreadable_entry_count: legacy_entry_count_field(&legacy_scan),
             note: format!(
-                "{env_note}检测到 SQLite 但表结构不认识（期望 cursorDiskKV(key, value)，实到 {actual}）；legacy workspaceStorage{}",
+                "{env_note}detected SQLite but schema not recognized (expected cursorDiskKV(key, value), got {actual}); legacy workspaceStorage{}",
                 legacy_tail_note(&legacy_ignorance_note)
             ),
             ..base
@@ -1629,7 +1650,7 @@ fn probe_cursor_harness(
             bytes: info.total_bytes,
             unreadable_entry_count: legacy_entry_count_field(&legacy_scan),
             note: format!(
-                "{env_note}检测到 SQLite 但只读枚举失败（{error}）；legacy workspaceStorage{}",
+                "{env_note}detected SQLite but read-only enumeration failed ({error}); legacy workspaceStorage{}",
                 legacy_tail_note(&legacy_ignorance_note)
             ),
             ..base
@@ -1809,7 +1830,7 @@ fn expand_tilde(p: &str) -> PathBuf {
     match crate::config::expand_and_verify(p) {
         Ok(path) => path,
         Err(e) => {
-            eprintln!("warning: 无法展开路径 `{p}`: {e}");
+            eprintln!("warning: cannot expand path `{p}`: {e}");
             PathBuf::from(p)
         }
     }
@@ -2174,7 +2195,7 @@ mod tests {
         );
         assert!(
             static_prefix_root("~foo/bar").is_none(),
-            "开头的 `~something` 依然锚不住：未知不能当成空"
+            "a leading `~something` still refuses to anchor: unknown must not be treated as empty"
         );
         let _ = dir;
     }

@@ -41,12 +41,14 @@ use std::process::Command;
 /// pinning the digest rather than the line count: the guard has to fail on a
 /// reworded line, an added space, or a stray marker — not only on an added row.
 const CLEAN_STATUS_BODY_SHA256: &str =
-    "13a09951a1d8bdc8473c9dc7795537839706f01dd9dda407a71cfa7db9db087e";
+    "16e84a41b7f9d35783e90c317dd98c7218c49dd9a2cf2cb6dbbcc32135bc873e";
 
 /// The pre-B78 sha256 of the same body on a machine with nothing scanned at
-/// all, recorded the same way.
+/// all, recorded the same way. (Both digests were re-recorded once when the
+/// user-visible output was translated to English; the byte-for-byte contract
+/// they pin is unchanged.)
 const EMPTY_STATUS_BODY_SHA256: &str =
-    "b0525f381aee4ba2a2db6d85fe755c338bd59358590809e80d666c09c3fe5a49";
+    "699a80733a023719bf0d82bc275d44db697d8da28df4eea9a125d9304cbd6cb1";
 
 // ---------------------------------------------------------------------------
 // Fixtures — same shapes B68 pinned, planted through rusqlite
@@ -203,33 +205,33 @@ fn status_says_out_loud_that_some_sessions_could_not_be_read() {
     let run = run_status(sandbox.path(), plant_unreadable_cursor_store);
 
     assert!(
-        run.body.contains("读不出来"),
-        "status 必须自己说出「读不出来」，而不是只有 doctor 知道；实际输出：\n{}",
+        run.body.contains("indexed but not archived"),
+        "status must say out loud that the sessions are indexed but not archived, not leave it to doctor alone; actual output:\n{}",
         run.body
     );
     assert!(
-        run.body.contains("2 条读不出来"),
-        "计数必须落在那句话里；实际输出：\n{}",
+        run.body.contains("2 session(s)"),
+        "the count must land in that sentence; actual output:\n{}",
         run.body
     );
 }
 
 /// The wording half of the ticket: a reader must not be able to come away
-/// thinking those sessions are safely in the archive. "另有" says they are not
-/// part of the count beside them; "尚未归档" says where they are not.
+/// thinking those sessions are safely in the archive. "another" says they are
+/// not part of the count beside them; "not archived" says where they are not.
 #[test]
 fn the_sentence_cannot_be_read_as_already_archived() {
     let sandbox = tempfile::tempdir().expect("sandbox");
     let run = run_status(sandbox.path(), plant_unreadable_cursor_store);
 
     assert!(
-        run.body.contains("另有") && run.body.contains("尚未归档"),
-        "措辞必须让人一眼看出这些会话还没进来；实际输出：\n{}",
+        run.body.contains("another") && run.body.contains("not archived"),
+        "the wording must make it clear at a glance that these sessions have not been archived; actual output:\n{}",
         run.body
     );
     assert!(
         run.body.contains("chat-stasher doctor"),
-        "说了有问题就要说去哪看明细；实际输出：\n{}",
+        "once it reports a problem it must say where to look for detail; actual output:\n{}",
         run.body
     );
 }
@@ -268,13 +270,13 @@ fn saying_it_costs_zero_extra_lines() {
         dirty
             .body
             .lines()
-            .any(|line| line.starts_with("[scan]") && line.contains("读不出来")),
-        "那句话必须就在 [scan] 行里，而不是自成一行：\n{}",
+            .any(|line| line.starts_with("[scan]") && line.contains("indexed but not archived")),
+        "the notice must ride inside the [scan] line, not stand on its own line:\n{}",
         dirty.body
     );
     assert_eq!(
         dirty.code, clean.code,
-        "退出码不许因为这句话而改变；clean={:?} unreadable={:?}",
+        "the exit code must not change because of this sentence; clean={:?} unreadable={:?}",
         clean.code, dirty.code
     );
 }
@@ -288,8 +290,8 @@ fn a_clean_machine_sees_a_byte_identical_status() {
     let run = run_status(sandbox.path(), plant_clean_cursor_store);
 
     assert!(
-        !run.body.contains("读不出来"),
-        "零 unreadable 时一个字都不许多；实际输出：\n{}",
+        !run.body.contains("indexed but not archived"),
+        "with zero unreadable, not a single word may be added; actual output:\n{}",
         run.body
     );
     assert_eq!(
@@ -310,8 +312,8 @@ fn an_empty_machine_sees_a_byte_identical_status() {
     let run = run_status(sandbox.path(), plant_empty_cursor_store);
 
     assert!(
-        run.body.contains("没有扫描到任何会话"),
-        "fixture 必须真的走到空扫描分支；实际输出：\n{}",
+        run.body.contains("No sessions were found on this machine"),
+        "the fixture must really reach the empty-scan branch; actual output:\n{}",
         run.body
     );
     assert_eq!(

@@ -317,7 +317,7 @@ impl GeminiRetention {
     /// Human summary of the policy.
     pub fn summarize(&self) -> String {
         if let Some(error) = &self.unreadable {
-            return format!("未知（配置读不出来：{error}）");
+            return format!("unknown (config unreadable: {error})");
         }
         if !self.enabled {
             "disabled (enabled=false) — safe".to_string()
@@ -341,7 +341,7 @@ impl GeminiRetention {
                     self.max_age
                 ),
                 None => format!(
-                    "enabled, maxAge={} (这个 build 解析不出时长，按危险处理) — dangerous",
+                    "enabled, maxAge={} (this build cannot parse the duration, treating it as dangerous) — dangerous",
                     self.max_age
                 ),
             }
@@ -504,7 +504,7 @@ fn fmt_bytes(b: u64) -> String {
 fn footprint_bytes_label(f: &HarnessFootprint) -> String {
     match f.total_bytes {
         Some(bytes) => format!("{} ({} B)", fmt_bytes(bytes), bytes),
-        None if f.installed => "未知".to_string(),
+        None if f.installed => "unknown".to_string(),
         None => "N/A".to_string(),
     }
 }
@@ -513,7 +513,7 @@ fn footprint_root_label(f: &HarnessFootprint) -> String {
     f.root
         .as_ref()
         .map(|root| root.display().to_string())
-        .unwrap_or_else(|| "未知".to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +569,8 @@ fn footprint_from_dir_probe<'a>(
 ) -> HarnessFootprint {
     let Some(probe) = probe else {
         return HarnessFootprint {
-            note: "registry 没有本平台条目 —— 会话数未知（不是 0）".to_string(),
+            note: "registry has no entry for this platform — session count unknown (not 0)"
+                .to_string(),
             ..default_footprint(name, fallback_root)
         };
     };
@@ -577,7 +578,7 @@ fn footprint_from_dir_probe<'a>(
     if !probe.installed_p() {
         return HarnessFootprint {
             note: if probe.note.is_empty() {
-                "registry 没有扫描这个 harness —— 会话数未知（不是 0）".to_string()
+                "registry did not scan this harness — session count unknown (not 0)".to_string()
             } else {
                 probe.note.clone()
             },
@@ -637,7 +638,7 @@ fn build_risks(
         .unwrap_or_else(|| default_footprint("claude-code", PathBuf::new()));
     if scan_failed {
         risks.push(
-            "🔴 registry 缺失/无法解析 —— 会话覆盖未知，拒绝用硬编码路径假装扫全。".to_string(),
+            "🔴 registry missing / unparseable — session coverage unknown; refusing to fake a full scan with hardcoded paths.".to_string(),
         );
     } else {
         match &claude.verdict {
@@ -658,35 +659,35 @@ fn build_risks(
                 risks.push(match claude_fp.earliest.and_then(|e| days_since(e).map(|d| (e, d))) {
                     Some((earliest, days_old)) => {
                         format!(
-                            "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。你最早的会话是 {}（约 {days_old:.0} 天前，今天 {today}）。\
-                             \n    —— 下一次清理触发时会删掉早于 30 天的第一批；你的历史只还剩约 {days_old:.0} 天。",
+                            "🔴 Claude Code: cleanupPeriodDays is unset → default 30 days. Your earliest session is {} (about {days_old:.0} days ago, today {today}).\
+                             \n    — the next cleanup run will delete the first batch older than 30 days; your history has only about {days_old:.0} days left.",
                             format_date(earliest)
                         )
                     }
                     None => format!(
-                        "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。最早会话时间未知（本机没扫到 claude-code 会话，其时间戳读不出来，或它落在未来），因此还剩多少天无法估算（今天 {today}）。\
-                         \n    —— 风险不因此消失：下一次清理触发时仍会删掉早于 30 天的第一批。"
+                        "🔴 Claude Code: cleanupPeriodDays is unset → default 30 days. The earliest session time is unknown (no claude-code sessions were scanned on this machine, their timestamps were unreadable, or they fall in the future), so how many days remain cannot be estimated (today {today}).\
+                         \n    — the risk does not go away: the next cleanup run will still delete the first batch older than 30 days."
                     ),
                 });
             }
             ClaudeRetention::Safe { days, source } => {
                 risks.push(format!(
-                "🟡 Claude Code: cleanupPeriodDays = {days} 天（已设大值，来源 {}）→ 本机历史不至于被轮换。\
-                 \n    —— 但这是 fail-destructive：任何一次 settings.json 解析失败都会静默退回 30 天并开始删；`.last-cleanup` 时间戳存在即说明清理兼职曾运行。",
+                "🟡 Claude Code: cleanupPeriodDays = {days} days (large value set, source {}) → local history is not at risk of rotation.\
+                 \n    — but this is fail-destructive: any settings.json parse failure silently reverts to 30 days and starts deleting; a `.last-cleanup` timestamp existing means the cleanup job has run.",
                 source.display()
             ));
             }
             ClaudeRetention::SmallValue { days, source } => {
                 risks.push(format!(
-                "🔴 Claude Code: cleanupPeriodDays = {days} 天（来源 {}）→ 低于安全阈值，仍在轮换。\
-                 \n    —— 下一次清理触发时会删掉早于 {days} 天的第一批。",
+                "🔴 Claude Code: cleanupPeriodDays = {days} days (source {}) → below the safe threshold, still rotating.\
+                 \n    — the next cleanup run will delete the first batch older than {days} days.",
                 source.display()
             ));
             }
             ClaudeRetention::ParseFailed { path, error } => {
                 risks.push(format!(
-                "🔴🔴 Claude Code: settings 解析失败—— 这就是 fail-destructive bug 的触发条件本身：\
-                 \n    —— 无论你配置过什么，现在都已静默退回 30 天开始计算删除。文件 {}：{error}",
+                "🔴🔴 Claude Code: settings parse failed — this is the fail-destructive bug's trigger condition itself:\
+                 \n    — whatever you configured, it has now silently reverted to a 30-day window and begun counting deletions. File {}: {error}",
                 path.display()
             ));
             }
@@ -702,7 +703,7 @@ fn build_risks(
         // directory happens to be absent; defaulting here would bless a
         // retention decision the doctor did not actually inspect.
         risks.push(format!(
-            "🟡 Gemini: sessionRetention 未知（配置读不出来：{error}）—— 不用默认值猜测保留风险。"
+            "🟡 Gemini: sessionRetention unknown (config unreadable: {error}) — not guessing the retention risk from a default."
         ));
     } else if !gem_fp.map_or(true, |f| f.installed) {
         // nothing to clean: skip silently to not cry wolf
@@ -716,17 +717,17 @@ fn build_risks(
             (Some(date), Some(days)) => {
                 let over = days - 30.0;
                 format!(
-                    "🔴 Gemini: sessionRetention 未配置（默认 30 天、enabled=true）。你最早的会话是 {date}（约 {days:.0} 天前，今天 {today}）——已经越过 30 天门槛约 {over:.0} 天。\
-                     \n    —— 清理当前尚未触发（或未执行），但下一次运行会删掉最早那批。会话就在 ~/.gemini/tmp（目录名就叫 tmp）。",
+                    "🔴 Gemini: sessionRetention not configured (default 30 days, enabled=true). Your earliest session is {date} (about {days:.0} days ago, today {today}) — already about {over:.0} days past the 30-day threshold.\
+                     \n    — cleanup has not triggered (or run) yet, but the next run will delete the earliest batch. Sessions live in ~/.gemini/tmp (the directory is literally named tmp).",
                 )
             }
             _ => format!(
-                "🔴 Gemini: sessionRetention 未配置（默认 30 天、enabled=true），但没有发现 session-*.json 文件可判定最早会话。\
-                 \n    —— 一旦开始跑，30 天后就会开始删。"
+                "🔴 Gemini: sessionRetention not configured (default 30 days, enabled=true), but no session-*.json files were found to determine the earliest session.\
+                 \n    — once it starts running, it will begin deleting after 30 days."
             ),
         });
     } else {
-        risks.push(format!("🟢 Gemini: {} — 无风险。", gemini.summarize()));
+        risks.push(format!("🟢 Gemini: {} — no risk.", gemini.summarize()));
     }
 
     // --- Codex --------------------------------------------------------------
@@ -737,13 +738,13 @@ fn build_risks(
                 let count = footprint_count_label(cx);
                 risks.push(if cx.compressed_count > 0 {
                     format!(
-                        "🟡 Codex: 源码没有按天数自动删除的机制，但 {n} 个空闲 rollout 已被压成 .jsonl.zst —— \
-                         \n    —— 无需现在行动，空闲即压缩，与\"删除\"无关。",
+                        "🟡 Codex: the source has no day-based auto-deletion, but {n} idle rollouts have been compressed to .jsonl.zst — \
+                         \n    — no action needed now; idle means compressed, unrelated to \"deletion\".",
                         n = cx.compressed_count
                     )
                 } else {
                     format!(
-                        "🟢 Codex: 源码没有按天数自动删除的机制（本机 {count} 个 rollout 均未压缩）——无风险。"
+                        "🟢 Codex: the source has no day-based auto-deletion ({count} rollouts on this machine all uncompressed) — no risk."
                     )
                 });
             }
@@ -759,7 +760,7 @@ fn build_risks(
         if let Some(fp) = footprints.iter().find(|f| f.name == fp_name) {
             if fp.installed {
                 risks.push(format!(
-                    "🟢 {label}: 单一 SQLite（{}，{}）—— 无按天数轮换；风险来自它自身的 SQLite，而非静默删会话。",
+                    "🟢 {label}: single SQLite ({}, {}) — no day-based rotation; the risk comes from its own SQLite, not silent session deletion.",
                     footprint_root_label(fp),
                     footprint_bytes_label(fp)
                 ));
@@ -911,7 +912,7 @@ fn expand_tilde(p: &str) -> PathBuf {
     match crate::config::expand_and_verify(p) {
         Ok(path) => path,
         Err(e) => {
-            eprintln!("warning: 无法展开路径 `{p}`: {e}");
+            eprintln!("warning: could not expand path `{p}`: {e}");
             PathBuf::from(p)
         }
     }
@@ -1001,7 +1002,7 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         Ok(_) => {
             return ReclaimCheck::OpenFailed {
                 repo_root,
-                error: "仓库路径存在但不是目录".to_string(),
+                error: "repository path exists but is not a directory".to_string(),
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1010,7 +1011,7 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         Err(e) => {
             return ReclaimCheck::OpenFailed {
                 repo_root,
-                error: format!("无法确认仓库目录：{e}"),
+                error: format!("could not confirm repository directory: {e}"),
             }
         }
     }
@@ -1176,7 +1177,7 @@ fn gemini_json(g: &GeminiRetention) -> serde_json::Value {
     if let Some(error) = &g.unreadable {
         return serde_json::json!({
             "kind": "unknown",
-            "why": format!("配置读不出来：{error}"),
+            "why": format!("config unreadable: {error}"),
         });
     }
     serde_json::json!({
@@ -1198,19 +1199,19 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
         "root": f.root.as_ref().map(|root| root.display().to_string()),
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
-            None if f.installed => CountState::unknown("会话数没能枚举出来"),
-            None => CountState::not_applicable("未安装"),
+            None if f.installed => CountState::unknown("session count could not be enumerated"),
+            None => CountState::not_applicable("not installed"),
         },
         "candidate_count": match f.candidate_count {
             Some(n) => CountState::known(n),
-            None => CountState::not_applicable("无候选计数（非单文件 store）"),
+            None => CountState::not_applicable("no candidate count (not a single-file store)"),
         },
         "unreadable_count": unreadable_tri(f.session_count.is_some(), f.unreadable_count),
         "unreadable_entry_count": unreadable_tri(f.session_count.is_some(), f.unreadable_entry_count),
         "total_bytes": match f.total_bytes {
             Some(bytes) => CountState::known(bytes),
-            None if f.installed => CountState::unknown("字节数没能测出来"),
-            None => CountState::not_applicable("未安装"),
+            None if f.installed => CountState::unknown("byte count could not be measured"),
+            None => CountState::not_applicable("not installed"),
         },
         "earliest": system_time_state(f.earliest),
         "latest": system_time_state(f.latest),
@@ -1225,8 +1226,8 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
 fn unreadable_tri(enumerated: bool, value: Option<u64>) -> CountState {
     match (enumerated, value) {
         (_, Some(n)) => CountState::known(n),
-        (true, None) => CountState::unknown("读不出来的条数本身没数出来"),
-        (false, None) => CountState::not_applicable("这个 harness 没有被枚举"),
+        (true, None) => CountState::unknown("the unreadable count itself could not be counted"),
+        (false, None) => CountState::not_applicable("this harness was not enumerated"),
     }
 }
 
@@ -1234,11 +1235,12 @@ fn system_time_state(t: Option<SystemTime>) -> TimeState {
     match t {
         Some(t) => match t.duration_since(UNIX_EPOCH) {
             Ok(d) => TimeState::known(d.as_secs() as i64),
-            Err(e) => {
-                TimeState::unknown(format!("时间戳早于 1970（{} 秒）", e.duration().as_secs()))
-            }
+            Err(e) => TimeState::unknown(format!(
+                "timestamp before 1970 ({} seconds)",
+                e.duration().as_secs()
+            )),
         },
-        None => TimeState::unknown("没有记录到时间戳"),
+        None => TimeState::unknown("no timestamp recorded"),
     }
 }
 
@@ -1300,7 +1302,7 @@ fn archive_gap_json(g: &scanner::ArchiveGap) -> serde_json::Value {
         "display_name": g.display_name,
         "recognized_sessions": match g.recognized_sessions {
             Some(n) => CountState::known(n),
-            None => CountState::unknown("未能计数"),
+            None => CountState::unknown("could not be counted"),
         },
         "session_records": g.session_records,
     })
@@ -1315,7 +1317,7 @@ fn footprint_count_label(f: &HarnessFootprint) -> String {
         Some(count) => count.to_string(),
         // Installed but the store is not enumerable (schema not recognised):
         // "unknown", never a fake zero.
-        None if f.installed => "未知".to_string(),
+        None if f.installed => "unknown".to_string(),
         None => "N/A".to_string(),
     }
 }
@@ -1324,7 +1326,7 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
     let mut parts: Vec<String> = Vec::new();
     if f.name == "cursor" {
         if let (Some(before), Some(after)) = (f.candidate_count, f.session_count) {
-            parts.push(format!("过滤前 {before} / 过滤后 {after}"));
+            parts.push(format!("before filter {before} / after filter {after}"));
         }
     }
     // B68: the number that used to be invisible. "Filtered out" and "could not
@@ -1332,7 +1334,7 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
     // second one gets its own count instead of hiding inside the first.
     // Silent when zero: an all-good line is byte-for-byte what it was.
     match f.unreadable_count {
-        Some(unreadable) if unreadable > 0 => parts.push(format!("{unreadable} 条读不出来")),
+        Some(unreadable) if unreadable > 0 => parts.push(format!("{unreadable} unreadable")),
         // Counted, and it is zero: silence, byte-for-byte as before.
         Some(_) => {}
         // B90: this row *was* enumerated (`session_count` is `Some`) and only
@@ -1343,43 +1345,45 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
         // already say so, and repeating it would put 未知 on every
         // not-installed harness of a healthy machine.
         None if f.session_count.is_some() => {
-            parts.push("有多少条读不出来 未知（这一项本身没数出来）".to_string())
+            parts.push("unreadable count unknown (it could not itself be counted)".to_string())
         }
         None => {}
     }
     if let Some(entries) = f.unreadable_entry_count.filter(|n| *n > 0) {
-        parts.push(format!("{entries} 个不可读目录项（会话数未知）"));
+        parts.push(format!(
+            "{entries} unreadable directory entries (session count unknown)"
+        ));
     }
     if parts.is_empty() {
         return String::new();
     }
-    format!("（{}）", parts.join("，"))
+    format!("({})", parts.join(", "))
 }
 
 pub fn print_report(r: &DoctorReport) {
     eprintln!();
-    eprintln!("doctor — “你的 harness 正在偷偷删你的数据吗？”");
-    eprintln!("      只读探测；只打印路径 / 计数 / 字节 / 时间戳，绝不打印会话正文。");
+    eprintln!("doctor — “Is your harness silently deleting your data?”");
+    eprintln!("      read-only probe; prints only paths / counts / bytes / timestamps, never session bodies.");
     if r.config_source.is_error_fallback() {
         eprintln!("config_source={}", r.config_source.label());
     }
     eprintln!();
 
     // D1
-    eprintln!("D1 · Claude Code 的轮转设置");
+    eprintln!("D1 · Claude Code rotation settings");
     eprintln!(
-        "  cleanupPeriodDays：{} （{}）",
+        "  cleanupPeriodDays: {} ({})",
         r.claude.verdict.label(),
         match &r.claude.verdict {
-            ClaudeRetention::UnsetDefault => "未设置 → 默认 30 天 = 危险".to_string(),
+            ClaudeRetention::UnsetDefault => "unset → default 30 days = dangerous".to_string(),
             ClaudeRetention::Safe { .. } =>
-                "已设大值，安全，但见 D4 的 fail-destructive 提醒".to_string(),
+                "large value set, safe, but see D4's fail-destructive note".to_string(),
             ClaudeRetention::SmallValue { days, .. } => {
-                format!("已显式设置 {days} 天，低于安全阈值 = 仍在轮换")
+                format!("explicitly set {days} days, below the safe threshold = still rotating")
             }
             ClaudeRetention::ParseFailed { path, error } => {
                 format!(
-                    "🔴 文件在但解析失败（这是 fail-destructive 的触发条件）：{} — {error}",
+                    "🔴 file present but parse failed (this is the fail-destructive trigger): {} — {error}",
                     path.display()
                 )
             }
@@ -1391,8 +1395,8 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
 
     // D2
-    eprintln!("D2 · Gemini CLI 的保留策略");
-    eprintln!("  sessionRetention：{}", r.gemini.summarize());
+    eprintln!("D2 · Gemini CLI retention policy");
+    eprintln!("  sessionRetention: {}", r.gemini.summarize());
     let home = crate::config::home_dir();
     let present: Vec<String> = [".gemini/config.json", ".gemini/settings.json"]
         .iter()
@@ -1400,25 +1404,31 @@ pub fn print_report(r: &DoctorReport) {
         .map(|p| home.join(p).display().to_string())
         .collect();
     if present.is_empty() {
-        eprintln!("  配置文件都不存在 → 使用 CLI 内置默认值（enabled=true, maxAge=30d）。");
+        eprintln!(
+            "  no config file exists → using the CLI built-in defaults (enabled=true, maxAge=30d)."
+        );
     } else {
-        eprintln!("  来源文件：{}", present.join(", "));
+        eprintln!("  source file(s): {}", present.join(", "));
     }
     eprintln!();
 
     // D3
     if r.scan_failed {
-        eprintln!("D3 · 覆盖率 —— 🔴 registry 缺失/无法解析，会话覆盖未知。");
+        eprintln!("D3 · Coverage — 🔴 registry missing / unparseable, session coverage unknown.");
         eprintln!(
-            "    拒绝用硬编码路径假装扫全（stderr 上方已有 “Refusing to scan with hardcoded roots”）。"
+            "    refusing to fake a full scan with hardcoded paths (see “Refusing to scan with hardcoded roots” above in stderr)."
         );
-        eprintln!("    仅列出与本 registry 无关、来自独立只读探测的条目：",);
+        eprintln!("    listing only entries from independent read-only probes, unrelated to this registry:",);
         for f in &r.footprints {
             if f.name != "gemini" && f.name != "opencode" {
                 continue;
             }
             if !f.installed {
-                eprintln!("  {:<10} 未安装（{}）", f.name, footprint_root_label(f));
+                eprintln!(
+                    "  {:<10} not installed ({})",
+                    f.name,
+                    footprint_root_label(f)
+                );
                 continue;
             }
             let count = footprint_count_label(f);
@@ -1432,7 +1442,7 @@ pub fn print_report(r: &DoctorReport) {
                 .map(format_timestamp)
                 .unwrap_or_else(|| "-".to_string());
             eprintln!(
-                "  {:<10} 会话 {:<6}{} · {} · 最早 {earliest} · 最晚 {latest}",
+                "  {:<10} sessions {:<6}{} · {} · earliest {earliest} · latest {latest}",
                 f.name,
                 count,
                 count_detail,
@@ -1443,13 +1453,13 @@ pub fn print_report(r: &DoctorReport) {
             }
         }
         eprintln!();
-        eprintln!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
+        eprintln!("D4 · Risk summary — so what happens + when");
         for (i, risk) in r.risks.iter().enumerate() {
             eprintln!("  {}. {risk}", i + 1);
         }
         eprintln!();
-        eprintln!("D5 · 仓库里有多少可回收的垃圾？");
-        eprintln!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
+        eprintln!("D5 · How much reclaimable garbage is in the repository?");
+        eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
         print_reclaim(&r.reclaim);
         eprintln!();
         return;
@@ -1460,11 +1470,15 @@ pub fn print_report(r: &DoctorReport) {
         r.probes.iter().filter(|p| p.installed_p()).count(),
     );
     eprintln!(
-        "D3 · 覆盖率 —— 本机 {installed}/{known} 个已知 harness 命中（registry v1 驱动）；轮转分析对象如下：",
+        "D3 · Coverage — {installed}/{known} known harnesses hit on this machine (registry v1 driven); rotation analysis subjects:",
     );
     for f in &r.footprints {
         if !f.installed {
-            eprintln!("  {:<10} 未安装（{}）", f.name, footprint_root_label(f));
+            eprintln!(
+                "  {:<10} not installed ({})",
+                f.name,
+                footprint_root_label(f)
+            );
             continue;
         }
         let count = footprint_count_label(f);
@@ -1478,7 +1492,7 @@ pub fn print_report(r: &DoctorReport) {
             .map(format_timestamp)
             .unwrap_or_else(|| "-".to_string());
         eprintln!(
-            "  {:<10} 会话 {:<6}{} · {} · 最早 {earliest} · 最晚 {latest}",
+            "  {:<10} sessions {:<6}{} · {} · earliest {earliest} · latest {latest}",
             f.name,
             count,
             count_detail,
@@ -1499,7 +1513,7 @@ pub fn print_report(r: &DoctorReport) {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         eprintln!(
-            "  已装但不在本命令范围（仅探测，不分析轮转）：{}",
+            "  installed but out of scope for this command (probed only, no rotation analysis): {}",
             others.join(", ")
         );
     }
@@ -1508,9 +1522,9 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
 
     // D4
-    eprintln!("D4 · 风险汇总 —— 所以会发生什么 + 什么时候");
+    eprintln!("D4 · Risk summary — so what happens + when");
     if r.risks.is_empty() {
-        eprintln!("  （没有可合成的判断）");
+        eprintln!("  (nothing to synthesise)");
     }
     for (i, risk) in r.risks.iter().enumerate() {
         eprintln!("  {}. {risk}", i + 1);
@@ -1518,8 +1532,8 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
 
     // D5 — reclaimable garbage in the archive repository (prune_plan, read-only)
-    eprintln!("D5 · 仓库里有多少可回收的垃圾？");
-    eprintln!("     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。");
+    eprintln!("D5 · How much reclaimable garbage is in the repository?");
+    eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
     print_reclaim(&r.reclaim);
     eprintln!();
 }
@@ -1529,20 +1543,20 @@ fn print_reclaim(r: &ReclaimCheck) {
     match r {
         ReclaimCheck::NoRepo { repo_root } => {
             eprintln!(
-                "  （跳过）没有仓库目录：{} —— 没仓库就没有垃圾，也不用诊断。",
+                "  (skipped) no repository directory: {} — no repo means no garbage, and nothing to diagnose.",
                 repo_root.display()
             );
         }
         ReclaimCheck::NoKey { key_file, error } => {
             eprintln!(
-                "  （跳过）仓库目录在，但 masterkey 读不了（{}）：{error}—— \
-                 打不开就无可规划，先确认 key 文件没丢。",
+                "  (skipped) repository directory present, but the masterkey cannot be read ({}): {error} — \
+                 nothing can be planned if it cannot be opened; first confirm the key file is not missing.",
                 key_file.display()
             );
         }
         ReclaimCheck::OpenFailed { repo_root, error } => {
             eprintln!(
-                "  （跳过）仓库打不开 / 算不出计划：{} —— {error}",
+                "  (skipped) repository cannot be opened / plan cannot be computed: {} — {error}",
                 repo_root.display()
             );
         }
@@ -1554,42 +1568,42 @@ fn print_reclaim(r: &ReclaimCheck) {
             append_only,
         } => {
             eprintln!(
-                "  未被引用的 pack    : {packs_unref} 个 · {}（`packs_unref`/`size_unref`）",
+                "  unreferenced packs   : {packs_unref} · {} (`packs_unref`/`size_unref`)",
                 fmt_bytes(*size_unref)
             );
             eprintln!(
-                "  需要 repack 的量   : {packs_repack} 个 pack · {}（`packs.repack`/`size.repack`）",
+                "  repack candidates   : {packs_repack} packs · {} (`packs.repack`/`size.repack`)",
                 fmt_bytes(*size_repack)
             );
             if *packs_unref > 0 || *size_unref > 0 || *packs_repack > 0 || *size_repack > 0 {
-                eprintln!("  🔴 这些垃圾现在清不掉 —— 本仓库是 append_only（{append_only}）。");
+                eprintln!("  🔴 this garbage cannot be cleaned right now — this repository is append_only ({append_only}).");
                 eprintln!(
-                    "     `prune`/`repair`/`rewrite --forget` 都被 append_only 挡死（源码 `commands/prune.rs`）。"
+                    "     `prune`/`repair`/`rewrite --forget` are all blocked by append_only (source `commands/prune.rs`)."
                 );
                 eprintln!(
-                    "     要清的标准流程：临时关掉 append_only → 跑一次 `rustic prune --instant-delete` → 再开回 append_only。"
+                    "     standard clean-up sequence: temporarily disable append_only → run `rustic prune --instant-delete` → re-enable append_only."
                 );
                 eprintln!(
-                    "     ⚠️ 必须带 `--instant-delete`：普通 `prune` 的默认 `--keep-delete 23h` 只把 pack 标记为待删、"
+                    "     ⚠️ must use `--instant-delete`: plain `prune`'s default `--keep-delete 23h` only marks packs as pending delete,"
                 );
                 eprintln!(
-                    "        23 小时宽限期后才真删 —— 实测即使关掉 append_only 也会停在 nothing to do!，垃圾根本没走。"
+                    "        and actually deletes only after the 23-hour grace period — in practice even with append_only off it stalls at nothing to do!, and the garbage never leaves."
                 );
                 eprintln!(
-                    "     ⚠️ 代价：`--instant-delete` 跳过这 23 小时宽限期 —— 删了就没了，没有反悔窗口；执行前先确认上面两个数字确实是垃圾。"
+                    "     ⚠️ cost: `--instant-delete` skips the 23-hour grace period — once deleted it is gone, with no undo window; before running, confirm the two numbers above really are garbage."
                 );
                 eprintln!(
-                    "     ⚠️ 这要求临时关掉 append_only —— 那是你的安全设置：关掉到再开回之间仓库失去“防误删”的保险网，"
+                    "     ⚠️ this requires temporarily disabling append_only — that is your safety setting: between disabling and re-enabling, the repository loses its “no-accidental-delete” safety net,"
                 );
-                eprintln!("        只在这个窗口期内操作、先做一次备份，操作完立刻开回。");
+                eprintln!("        operate only within this window, take a backup first, and re-enable immediately when done.");
                 eprintln!(
-                    "     doctor 是只读诊断：它只报告数字和操作步骤，绝不会替你执行 prune 或切换 append_only。"
+                    "     doctor is a read-only diagnostic: it only reports numbers and steps, and will never run prune or toggle append_only for you."
                 );
             } else {
-                eprintln!("  ✅ 没有任何可回收的垃圾 —— 不用清。");
+                eprintln!("  ✅ no reclaimable garbage — nothing to clean.");
                 if *append_only {
                     eprintln!(
-                        "     （append_only=true，即便有垃圾也只会被挡下，不会自动发生误删。）"
+                        "     (append_only=true; even if there were garbage it would only be blocked, never silently deleted.)"
                     );
                 }
             }
@@ -1603,13 +1617,13 @@ fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
         return;
     }
     eprintln!(
-        "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。"
+        "  ⚠ non-archivable sessions: the following harnesses recognised sessions but produced no SessionRecord; collect will not archive them for now."
     );
     for gap in gaps {
         eprintln!("{}", scanner::format_archive_gap(gap));
     }
     eprintln!(
-        "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。"
+        "  advice: do not treat scanner records as the total of recognised sessions; wait until the corresponding harness produces SessionRecords before running collect."
     );
 }
 
@@ -1619,27 +1633,29 @@ fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
 /// platform, template not statically resolvable).
 fn print_probes(probes: &[scanner::HarnessProbe]) {
     if probes.is_empty() {
-        eprintln!("  （registry 探测为空 —— 扫描未运行，或没有候选 harness。）");
+        eprintln!(
+            "  [registry] no probes — the scan did not run, or there are no candidate harnesses."
+        );
         return;
     }
     let platform = scanner::current_platform();
     let hit = probes.iter().filter(|p| p.installed_p()).count();
     eprintln!(
-        "  [registry] 驱动表 —— 平台={platform} · 本机命中/扫描成功 {hit}/{n} 个 harness",
+        "  [registry] driven table — platform={platform} · {hit}/{n} harnesses hit / scanned successfully",
         n = probes.len()
     );
     for p in probes {
         let mark = match p.state {
-            scanner::ProbeState::Scanned => "已扫    ",
-            scanner::ProbeState::FileTarget => "单文件  ",
-            scanner::ProbeState::Missing => "不存在  ",
-            scanner::ProbeState::Indeterminate => "查不出来",
-            scanner::ProbeState::SkipUnascertained => "跳过(未查明) ",
-            scanner::ProbeState::SkipWrongPlatform => "跨平台  ",
-            scanner::ProbeState::SkipUnresolvable => "跳过(模板)   ",
+            scanner::ProbeState::Scanned => "scanned     ",
+            scanner::ProbeState::FileTarget => "single-file ",
+            scanner::ProbeState::Missing => "missing     ",
+            scanner::ProbeState::Indeterminate => "indeterminate",
+            scanner::ProbeState::SkipUnascertained => "skip(uncertain) ",
+            scanner::ProbeState::SkipWrongPlatform => "cross-platform",
+            scanner::ProbeState::SkipUnresolvable => "skip(template)  ",
         };
         let conf = if p.low_confidence_p() {
-            format!("[低置信] {}", p.confidence.label())
+            format!("[low-confidence] {}", p.confidence.label())
         } else {
             format!("[{}]", p.confidence.label())
         };
@@ -1651,7 +1667,9 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         let bytes = match p.state {
             scanner::ProbeState::FileTarget => format!(
                 " bytes={}",
-                p.bytes.map(fmt_bytes).unwrap_or_else(|| "未知".to_string())
+                p.bytes
+                    .map(fmt_bytes)
+                    .unwrap_or_else(|| "unknown".to_string())
             ),
             _ => String::new(),
         };
@@ -1666,7 +1684,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         let count = match p.state {
             scanner::ProbeState::FileTarget => match p.record_count {
                 Some(c) => c.to_string(),
-                None => "未知".to_string(),
+                None => "unknown".to_string(),
             },
             // B90: `unwrap_or(0)` here is unreachable today (a Scanned probe
             // always carries a count) — which is exactly why it was worth
@@ -1674,13 +1692,13 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             // the moment the invariant moves. Same shape as FileTarget above.
             scanner::ProbeState::Scanned => match p.record_count {
                 Some(c) => c.to_string(),
-                None => "未知".to_string(),
+                None => "unknown".to_string(),
             },
             scanner::ProbeState::Missing => "0".to_string(),
             scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
             scanner::ProbeState::Indeterminate
             | scanner::ProbeState::SkipUnascertained
-            | scanner::ProbeState::SkipUnresolvable => "未知".to_string(),
+            | scanner::ProbeState::SkipUnresolvable => "unknown".to_string(),
         };
         let extra = if p.note.is_empty() {
             String::new()
@@ -1688,7 +1706,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             format!("  ({})", p.note)
         };
         eprintln!(
-            "    {mark} {:<16} {conf:<26} 会话={:<4}{bytes:<0} {root}{extra}",
+            "    {mark} {:<16} {conf:<26} sessions={:<4}{bytes:<0} {root}{extra}",
             p.display_name, count
         );
     }
@@ -1699,7 +1717,7 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         .collect::<Vec<_>>()
         .join(", ");
     if !flagged.is_empty() {
-        eprintln!("    低置信（仅社区说法未核实，扫了但不可当作核实）：{flagged}");
+        eprintln!("    low-confidence (community claims only, scanned but cannot be treated as verified): {flagged}");
     }
 }
 
@@ -1850,8 +1868,8 @@ mod b90_unknown_count_tests {
     fn an_uncounted_unreadable_tally_shows_up_as_unknown() {
         let detail = footprint_count_detail(&footprint(None));
         assert!(
-            detail.contains("未知"),
-            "数不出来就要显示成「未知」，不许沉默地等同于 0；实际：{detail:?}"
+            detail.contains("unknown"),
+            "数不出来就要显示成「unknown」，不许沉默地等同于 0；实际：{detail:?}"
         );
     }
 
@@ -1859,7 +1877,7 @@ mod b90_unknown_count_tests {
     fn an_unavailable_footprint_bytes_stay_unknown() {
         let f = default_footprint("fixture", PathBuf::from("/nowhere"));
         assert_eq!(footprint_bytes_label(&f), "N/A");
-        assert_eq!(footprint_bytes_label(&footprint(None)), "未知");
+        assert_eq!(footprint_bytes_label(&footprint(None)), "unknown");
     }
 
     /// 健康机器上「它不响」：数过了、就是 0 时，这一格逐字为空。
@@ -1871,7 +1889,7 @@ mod b90_unknown_count_tests {
     /// 数过了、非 0 时，照旧印那个数字。
     #[test]
     fn a_counted_number_still_prints_itself() {
-        assert!(footprint_count_detail(&footprint(Some(411))).contains("411 条读不出来"));
+        assert!(footprint_count_detail(&footprint(Some(411))).contains("411 unreadable"));
     }
 
     /// 压根没枚举过的行（`session_count` 也是 `None`）不该被这条新规则
@@ -1996,7 +2014,7 @@ mod json_tests {
         let v = report_to_json(&report());
         assert_eq!(
             v["footprints"][0]["unreadable_count"],
-            serde_json::json!({"kind":"unknown","why":"读不出来的条数本身没数出来"})
+            serde_json::json!({"kind":"unknown","why":"the unreadable count itself could not be counted"})
         );
         // candidate_count / session_count are measured numbers.
         assert_eq!(
@@ -2010,7 +2028,7 @@ mod json_tests {
         // latest is absent -> unknown, never null.
         assert_eq!(
             v["footprints"][0]["latest"],
-            serde_json::json!({"kind":"unknown","why":"没有记录到时间戳"})
+            serde_json::json!({"kind":"unknown","why":"no timestamp recorded"})
         );
     }
 

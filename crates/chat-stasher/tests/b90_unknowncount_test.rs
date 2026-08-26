@@ -71,11 +71,11 @@ fn claude_risk_never_invents_a_day_count_it_does_not_have() {
     let line = claude_risk(&report);
 
     assert!(
-        !line.contains("0 天前"),
+        !line.contains("0 days ago"),
         "最早会话未知时不许印出「约 0 天前」这个编出来的数字；实际输出：\n{line}"
     );
     assert!(
-        !line.contains("只还剩约 0 天"),
+        !line.contains("only about 0 days left"),
         "「只还剩约 0 天」是一句让人立刻采取行动的假警报；实际输出：\n{line}"
     );
 }
@@ -92,12 +92,12 @@ fn claude_risk_still_says_the_retention_risk_and_names_the_unknown() {
     let line = claude_risk(&report);
 
     assert!(
-        line.contains("cleanupPeriodDays 未设置"),
+        line.contains("cleanupPeriodDays is unset"),
         "风险本身没有消失，仍然要说；实际输出：\n{line}"
     );
     assert!(
-        line.contains("未知"),
-        "说不出天数就要明说「未知」，而不是不吭声；实际输出：\n{line}"
+        line.contains("unknown"),
+        "说不出天数就要明说「unknown」，而不是不吭声；实际输出：\n{line}"
     );
 }
 
@@ -121,7 +121,7 @@ fn a_machine_with_sessions_still_gets_a_real_date_and_a_real_day_count() {
         "有会话时日期必须是真的；实际输出：\n{line}"
     );
     assert!(
-        line.contains("约 0 天前"),
+        line.contains("about 0 days ago"),
         "有会话时天数必须照旧印出来（刚写的文件就是 0 天前）；实际输出：\n{line}"
     );
 }

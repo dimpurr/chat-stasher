@@ -765,8 +765,9 @@ fn process_sqlite(
         }
         SqliteSessionLayout::CursorLegacy => {
             let session_id = native_session_id(record, "Cursor legacy")?;
-            let snapshot = read_cursor_legacy_session(&record.absolute_path, &session_id)
-                .map_err(|error| anyhow!("读取 Cursor legacy 会话快照失败: {error}"))?;
+            let snapshot = read_cursor_legacy_session(&record.absolute_path, &session_id).map_err(
+                |error| anyhow!("failed to read Cursor legacy session snapshot: {error}"),
+            )?;
             process_sqlite_snapshot(
                 record,
                 old,
@@ -782,12 +783,12 @@ fn process_sqlite(
             let session_id = native_session_id(record, "Cursor global")?;
             let spec = cursor_global_schema();
             let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
-                .map_err(|error| anyhow!("读取 Cursor 会话游标失败: {error}"))?;
+                .map_err(|error| anyhow!("failed to read Cursor session cursor: {error}"))?;
             if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
                 return Ok(unchanged_sqlite(record, old.expect("checked above")));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
-                .map_err(|error| anyhow!("读取 Cursor 会话快照失败: {error}"))?;
+                .map_err(|error| anyhow!("failed to read Cursor session snapshot: {error}"))?;
             process_sqlite_snapshot(
                 record,
                 old,
@@ -803,12 +804,12 @@ fn process_sqlite(
             let session_id = native_session_id(record, "Grok")?;
             let spec = grok_schema();
             let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
-                .map_err(|error| anyhow!("读取 Grok 会话游标失败: {error}"))?;
+                .map_err(|error| anyhow!("failed to read Grok session cursor: {error}"))?;
             if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
                 return Ok(unchanged_sqlite(record, old.expect("checked above")));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
-                .map_err(|error| anyhow!("读取 Grok 会话快照失败: {error}"))?;
+                .map_err(|error| anyhow!("failed to read Grok session snapshot: {error}"))?;
             process_sqlite_snapshot(
                 record,
                 old,
@@ -959,7 +960,7 @@ fn process_opencode(
         .nth(2)
         .ok_or_else(|| anyhow!("invalid opencode session id"))?;
     let cursor = opencode_session_cursor(&record.absolute_path, session_id)
-        .map_err(|error| anyhow!("读取 opencode 会话游标失败: {error}"))?;
+        .map_err(|error| anyhow!("failed to read opencode session cursor: {error}"))?;
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
         // reason: 前提是 old.is_some() 为 true，此处 unwrap_or(0) 仅为类型解包保底，实际必有 offset
         let source_bytes = old.map(|entry| entry.offset).unwrap_or(0);
@@ -980,7 +981,7 @@ fn process_opencode(
     }
 
     let snapshot = read_opencode_session(&record.absolute_path, session_id)
-        .map_err(|error| anyhow!("读取 opencode 会话快照失败: {error}"))?;
+        .map_err(|error| anyhow!("failed to read opencode session snapshot: {error}"))?;
     let source_bytes = snapshot.json_line.len() as u64;
     let digest = sha256_hex(&snapshot.json_line);
     let lines = vec![snapshot.json_line];

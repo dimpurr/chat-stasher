@@ -204,11 +204,11 @@ fn a2_unstattable_single_file_root_is_not_reported_as_absent() {
         "an unstattable root must not be counted as a missing one: {status_text}"
     );
     assert!(
-        row.contains("查不出来") && row.contains("会话=未知"),
-        "doctor must print 未知, not a fabricated 0, for a root it could not stat: {row}"
+        row.contains("indeterminate") && row.contains("sessions=unknown"),
+        "doctor must print unknown, not a fabricated 0, for a root it could not stat: {row}"
     );
     assert!(
-        !row.contains("单文件不存在") && !row.starts_with("    不存在"),
+        !row.contains("单文件不存在") && !row.starts_with("    missing"),
         "doctor must not call an unstattable root absent: {row}"
     );
 }
@@ -228,7 +228,7 @@ fn a2_wrong_path_type_is_reported_as_unknown_not_absent() {
     let row = probe_row(&doctor_text, "opencode");
 
     assert!(
-        row.contains("路径存在但不是文件") && row.contains("会话=未知"),
+        row.contains("路径存在但不是文件") && row.contains("sessions=unknown"),
         "a path of the wrong type is unknown, not empty: {row}"
     );
     assert!(
@@ -342,7 +342,7 @@ fn a4_unenumerable_cursor_legacy_storage_is_not_reported_as_no_data() {
     let row = probe_row(&doctor_text, "Cursor");
 
     assert!(
-        row.contains("不能据此说没有") && row.contains("会话=未知"),
+        row.contains("不能据此说没有") && row.contains("sessions=unknown"),
         "an un-enumerable legacy store is unknown, not empty: {row}"
     );
     assert!(
@@ -570,11 +570,11 @@ fn a_clean_scan_keeps_the_doctor_probe_row_identical() {
 
     assert_eq!(doctor.status.code(), Some(0), "doctor exit code unchanged");
     assert!(
-        row.contains("单文件") && row.contains("会话=0"),
+        row.contains("single-file") && row.contains("sessions=0"),
         "a store that was read and holds nothing still prints 0: {row}"
     );
     assert!(
-        !row.contains("未知"),
+        !row.contains("unknown"),
         "a completed read must not pick up the new hedge: {row}"
     );
 }
@@ -607,7 +607,7 @@ fn a2_doctor_session_column_is_three_valued() {
     let row = probe_row(&doctor_text, "Grok");
 
     assert!(
-        row.contains("跨平台") && row.contains("会话=N/A"),
+        row.contains("cross-platform") && row.contains("sessions=N/A"),
         "a harness with no cell for this platform is N/A, not 0: {row}"
     );
 }
@@ -616,7 +616,7 @@ fn a2_doctor_session_column_is_three_valued() {
 fn probe_row(doctor_text: &str, display_name: &str) -> String {
     doctor_text
         .lines()
-        .find(|line| line.contains(display_name) && line.contains("会话="))
+        .find(|line| line.contains(display_name) && line.contains("sessions="))
         .unwrap_or_else(|| panic!("no registry probe row for {display_name}:\n{doctor_text}"))
         .to_string()
 }

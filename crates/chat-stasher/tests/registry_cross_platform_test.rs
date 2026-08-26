@@ -140,7 +140,7 @@ fn describe(by_struct: &BTreeMap<Vec<String>, Vec<&str>>) -> String {
                 .join(", ")
         ));
     }
-    parts.join(" ；")
+    parts.join("; ")
 }
 
 /// The invariant: for every harness, the structural segment sequences of its
@@ -192,7 +192,7 @@ fn every_harness_os_cells_structurally_consistent() {
             continue;
         }
         panic!(
-            "harness {} 各 OS 路径结构不一致：{}",
+            "harness {} OS cell path structures are inconsistent: {}",
             h.id,
             describe(&by_struct)
         );

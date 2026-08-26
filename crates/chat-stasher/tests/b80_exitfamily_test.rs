@@ -133,16 +133,16 @@ fn doctor_that_could_not_scan_does_not_exit_zero() {
 
     assert!(
         text.contains("scan failed"),
-        "fixture must really hit the failed-scan branch; 实际输出：\n{text}"
+        "fixture must really hit the failed-scan branch; actual output:\n{text}"
     );
     assert!(
-        text.contains("覆盖未知"),
-        "报告必须先承认覆盖未知；实际输出：\n{text}"
+        text.contains("coverage unknown"),
+        "the report must admit coverage is unknown first; actual output:\n{text}"
     );
     assert_eq!(
         out.status.code(),
         Some(DID_NOT_FINISH),
-        "扫描根本没跑起来 = 没读到 = 3，不是 1（读完了失败），更不是 0；实际输出：\n{text}"
+        "a scan that never started = nothing read = 3, not 1 (finished and failed), and certainly not 0; actual output:\n{text}"
     );
 }
 
@@ -252,7 +252,7 @@ fn status_that_could_not_scan_says_did_not_read_not_unhealthy_timer() {
 
     assert!(
         text.contains("status: scan failed"),
-        "fixture must really hit the failed-scan branch; 实际输出：\n{text}"
+        "fixture must really hit the failed-scan branch; actual output:\n{text}"
     );
     assert_eq!(
         out.status.code(),
