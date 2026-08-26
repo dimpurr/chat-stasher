@@ -15,6 +15,12 @@ pub const LAUNCHD_LABEL: &str = "com.chat-stasher.run-once";
 pub const SYSTEMD_SERVICE: &str = "chat-stasher-run-once.service";
 pub const SYSTEMD_TIMER: &str = "chat-stasher-run-once.timer";
 
+/// Cap for the launchd stdout/stderr logs, in bytes. Beyond this the log is
+/// truncated to empty in place at the start of the next run (see
+/// [`render_launchd`]). macOS launchd has no rotation key of its own, so the
+/// cap is enforced by the shell preamble we render into `ProgramArguments`.
+pub const LAUNCHD_LOG_CAP_BYTES: usize = 5 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Format {
     /// macOS launchd property list.
@@ -150,12 +156,36 @@ fn render_launchd(binary: &Path, stage: &Path, interval: u64, verify: bool, home
     if verify {
         args.push("--verify".to_string());
     }
-    let arguments = args
+
+    let log_dir = home.join("Library/Logs/chat-stasher");
+    let stdout_log = log_dir.join("run-once.log");
+    let stderr_log = log_dir.join("run-once.err.log");
+
+    // launchd opens StandardOutPath/StandardErrorPath with O_APPEND *before*
+    // our process starts, and its fd follows the inode, not the path. Renaming
+    // either log at startup would therefore strand this run's output in the
+    // renamed file. So we cap by truncating *in place* — the one mutation that
+    // keeps launchd's fd valid — instead of rotating: if a log exceeds the cap
+    // we truncate it to empty, then `exec` the real binary. Truncation never
+    // changes the inode and O_APPEND resumes writing at the new end; `exec`
+    // keeps launchd's view of our exit status intact (the tracked process *is*
+    // chat-stasher, so SuccessExitStatus=0 semantics are preserved).
+    let cap = LAUNCHD_LOG_CAP_BYTES;
+    let command = format!(
+        "{}\n{}\nexec {}",
+        cap_line(&stdout_log, cap),
+        cap_line(&stderr_log, cap),
+        args.iter()
+            .map(|arg| sh_single_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+
+    let arguments = ["/bin/sh", "-c", &command]
         .iter()
         .map(|arg| format!("        <string>{}</string>", xml_escape(arg)))
         .collect::<Vec<_>>()
         .join("\n");
-    let log_dir = home.join("Library/Logs/chat-stasher");
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -179,9 +209,25 @@ fn render_launchd(binary: &Path, stage: &Path, interval: u64, verify: bool, home
 </dict>
 </plist>
 "#,
-        stdout = xml_escape(&log_dir.join("run-once.log").to_string_lossy()),
-        stderr = xml_escape(&log_dir.join("run-once.err.log").to_string_lossy()),
+        stdout = xml_escape(&stdout_log.to_string_lossy()),
+        stderr = xml_escape(&stderr_log.to_string_lossy()),
     )
+}
+
+/// One line of the launchd shell preamble: truncate `path` to empty if it
+/// exceeds `cap`. Written as a POSIX `sh` test-and-truncate so a missing or
+/// otherwise odd file can never abort the run before `exec`.
+fn cap_line(path: &Path, cap: usize) -> String {
+    format!(
+        "f={path}; [ -f \"$f\" ] && [ \"$(stat -f%z \"$f\")\" -gt {cap} ] && : > \"$f\"",
+        path = sh_single_quote(&path.to_string_lossy())
+    )
+}
+
+/// Single-quote a string for use inside a POSIX sh command. A single quote in
+/// the input is closed, re-opened around a double-quoted quote, and continued.
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn render_systemd_service(binary: &Path, stage: &Path, verify: bool) -> String {
@@ -267,6 +313,77 @@ mod tests {
             ..Config::default()
         };
         assert!(interval_secs(&config).is_err());
+    }
+
+    #[test]
+    fn launchd_plist_caps_logs_via_in_place_truncate_and_exec() {
+        let launchd = render(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            false,
+            Path::new("/home/tester"),
+        );
+        let plist = &launchd[0].content;
+        // The binary is wrapped so the cap runs before the real process, and
+        // `exec` keeps launchd's view of the exit status intact.
+        assert!(plist.contains("<string>/bin/sh</string>"));
+        assert!(plist.contains("<string>-c</string>"));
+        // `exec` keeps launchd's view of the exit status intact (single quotes
+        // appear XML-escaped inside the plist string element).
+        assert!(plist.contains(
+            "exec &apos;/opt/chat-stasher&apos; &apos;run-once&apos; &apos;--stage&apos; &apos;/var/lib/chat-stasher/stage&apos;"
+        ));
+        // Both logs are capped, using the documented byte cap.
+        let cap = format!("{LAUNCHD_LOG_CAP_BYTES}");
+        assert!(plist.contains(&format!("-gt {cap} ]")));
+        assert!(plist.contains("run-once.log"));
+        assert!(plist.contains("run-once.err.log"));
+        // Capping must truncate in place — never rotate/rename (which would
+        // strand this run's output in the renamed inode).
+        assert!(!plist.contains("mv "));
+        assert!(!plist.contains(".1\""));
+    }
+
+    #[test]
+    fn launchd_preamble_truncates_only_when_over_cap() {
+        let tmp = std::env::temp_dir().join(format!("cs-cap-test-{}", std::process::id()));
+        fs::create_dir_all(&tmp).expect("create temp log dir");
+        let log = tmp.join("run-once.log");
+        fs::write(&log, vec![b'x'; LAUNCHD_LOG_CAP_BYTES + 10]).unwrap();
+
+        let preamble = cap_line(&log, LAUNCHD_LOG_CAP_BYTES);
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{preamble}\nexec true")])
+            .status()
+            .expect("run sh preamble");
+        assert!(status.success());
+        assert_eq!(
+            fs::metadata(&log).unwrap().len(),
+            0,
+            "over-cap log truncated"
+        );
+
+        fs::write(&log, vec![b'y'; 64]).unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{preamble}\nexec true")])
+            .status()
+            .expect("run sh preamble");
+        assert!(status.success());
+        assert_eq!(
+            fs::metadata(&log).unwrap().len(),
+            64,
+            "under-cap log left intact"
+        );
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn sh_single_quote_escapes_embedded_quotes() {
+        assert_eq!(sh_single_quote("plain"), "'plain'");
+        assert_eq!(sh_single_quote("a'b"), "'a'\"'\"'b'");
     }
 
     #[test]

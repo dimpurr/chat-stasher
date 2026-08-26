@@ -1,5 +1,6 @@
 //! Local harness scanner — driven by the harness path registry
-//! (`data/harness-registry-v1.json`), which is authoritative for which
+//! (shipped in this crate as `data/harness-registry-v1.json`), which is
+//! authoritative for which
 //! harness × platform roots to probe. Nothing is hardcoded here: a root is
 //! only scanned when the registry says to scan it.
 //!
@@ -48,19 +49,23 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Registry file, relative to the repo root, that drives the scan.
-pub const REGISTRY_REL_PATH: &str = "data/harness-registry-v1.json";
+/// Registry file, relative to the repo root, that drives the scan. Lives
+/// inside this crate (`crates/chat-stasher/data/`) so the packaged crate
+/// carries it; [`resolve_registry_path`] walks up to the repo root from the
+/// cwd / manifest dir and joins this against every ancestor.
+pub const REGISTRY_REL_PATH: &str = "crates/chat-stasher/data/harness-registry-v1.json";
 
 /// Optional runtime registry override. This is intentionally checked before
 /// both the repository copy and the embedded fallback.
 pub const REGISTRY_ENV: &str = "CHAT_STASHER_REGISTRY";
 
 /// The shipped registry is the data file itself, not a second hand-written
-/// Rust representation. The repository path is resolved from the crate
+/// Rust representation. The file lives inside this crate — it must, or the
+/// packaged crate could not compile — and is embedded from the crate
 /// manifest at compile time, so an installed binary can scan outside the repo.
 const EMBEDDED_REGISTRY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../data/harness-registry-v1.json"
+    "/data/harness-registry-v1.json"
 ));
 
 /// Confidence values used by the registry (`harnesses[].paths.*.confidence`).
@@ -245,7 +250,7 @@ pub fn current_platform() -> &'static str {
 // Registry schema
 // ---------------------------------------------------------------------------
 
-/// Top level of `data/harness-registry-v1.json`.
+/// Top level of this crate's `data/harness-registry-v1.json`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HarnessRegistry {
     #[serde(default)]

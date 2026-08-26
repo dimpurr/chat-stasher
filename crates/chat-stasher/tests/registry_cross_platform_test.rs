@@ -1,6 +1,7 @@
 //! Cross-platform registry self-consistency.
 //!
-//! Every harness in `data/harness-registry-v1.json` carries one cell per OS
+//! Every harness in `crates/chat-stasher/data/harness-registry-v1.json`
+//! carries one cell per OS
 //! (macos / linux / windows). Those cells must describe the *same* directory
 //! structure for the harness — a cell that silently dropped a directory layer
 //! (e.g. Gemini's macOS cell used to be `~/.gemini/tmp/` while linux/windows

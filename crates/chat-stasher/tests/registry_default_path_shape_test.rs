@@ -9,7 +9,8 @@
 //!
 //! Both shapes are reproduced with the same instrument the Windows shape test
 //! uses: the *shipped* cell for the foreign platform is read out of
-//! `data/harness-registry-v1.json` and planted in all three platform slots of a
+//! `crates/chat-stasher/data/harness-registry-v1.json` and planted in all
+//! three platform slots of a
 //! scratch registry, so the foreign platform's template travels the identical
 //! code path on macOS, Linux and Windows.
 //!
