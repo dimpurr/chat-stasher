@@ -30,14 +30,14 @@ use sha2::{Digest, Sha256};
 /// fixing the four lies above cannot move one byte of a healthy machine's
 /// output. Same value as B81's guard — the two agree on purpose.
 const CLEAN_SESSION_STATUS_BODY_SHA256: &str =
-    "e9496f26534d12d97c2728b2b69f6d6cb6760c3a20805ee586e6b1c108483b77";
+    "496303cf8515a15ccd016f5d9dfd4ef5563c1251f057cc9e75d0e4bec17e4461";
 
 /// A machine that was fully looked at and genuinely holds nothing. This is the
 /// exact sentence A3 qualifies, so its *un*qualified form has to be pinned
-/// too: "本机没有扫描到任何会话。" is still the right answer when every probe
-/// really did look.
+/// too: "No sessions were found on this machine." is still the right answer
+/// when every probe really did look.
 const CLEAN_EMPTY_STATUS_BODY_SHA256: &str =
-    "b0525f381aee4ba2a2db6d85fe755c338bd59358590809e80d666c09c3fe5a49";
+    "699a80733a023719bf0d82bc275d44db697d8da28df4eea9a125d9304cbd6cb1";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -196,11 +196,11 @@ fn a2_unstattable_single_file_root_is_not_reported_as_absent() {
     let row = probe_row(&doctor_text, "opencode");
 
     assert!(
-        status_text.contains("存在与否未知"),
+        status_text.contains("whether they exist is unknown"),
         "status must not silently drop a root it could not stat: {status_text}"
     );
     assert!(
-        !status_text.contains("不存在的来源根目录"),
+        !status_text.contains("non-existent source root"),
         "an unstattable root must not be counted as a missing one: {status_text}"
     );
     assert!(
@@ -208,7 +208,7 @@ fn a2_unstattable_single_file_root_is_not_reported_as_absent() {
         "doctor must print unknown, not a fabricated 0, for a root it could not stat: {row}"
     );
     assert!(
-        !row.contains("单文件不存在") && !row.starts_with("    missing"),
+        !row.contains("not present") && !row.starts_with("    missing"),
         "doctor must not call an unstattable root absent: {row}"
     );
 }
@@ -228,11 +228,11 @@ fn a2_wrong_path_type_is_reported_as_unknown_not_absent() {
     let row = probe_row(&doctor_text, "opencode");
 
     assert!(
-        row.contains("路径存在但不是文件") && row.contains("sessions=unknown"),
+        row.contains("path exists but is not a file") && row.contains("sessions=unknown"),
         "a path of the wrong type is unknown, not empty: {row}"
     );
     assert!(
-        !row.contains("单文件不存在"),
+        !row.contains("not present"),
         "a path that exists must never be reported as absent: {row}"
     );
 }
@@ -282,11 +282,11 @@ fn a3_status_qualifies_its_zero_when_a_harness_was_never_looked_at() {
     let status_text = status_body(&status);
 
     assert!(
-        status_text.contains("本机没有扫描到任何会话"),
+        status_text.contains("No sessions were found on this machine"),
         "the established sentence must still be there: {status_text}"
     );
     assert!(
-        status_text.contains("根本没查") && status_text.contains("crush"),
+        status_text.contains("were not probed at all") && status_text.contains("crush"),
         "a machine-wide zero must name the harnesses this run never looked at: {status_text}"
     );
 
@@ -342,15 +342,15 @@ fn a4_unenumerable_cursor_legacy_storage_is_not_reported_as_no_data() {
     let row = probe_row(&doctor_text, "Cursor");
 
     assert!(
-        row.contains("不能据此说没有") && row.contains("sessions=unknown"),
+        row.contains("cannot conclude it is absent") && row.contains("sessions=unknown"),
         "an un-enumerable legacy store is unknown, not empty: {row}"
     );
     assert!(
-        !row.contains("未找到可读 composer 数据"),
+        !row.contains("no readable composer data"),
         "the 'no readable composer data' sentence requires a completed walk: {row}"
     );
     assert!(
-        status_text.contains("会话数未知"),
+        status_text.contains("session count unknown"),
         "status must carry the unknown legacy cardinality: {status_text}"
     );
 }
@@ -518,10 +518,13 @@ fn a_clean_scan_keeps_status_bytes_and_exit_code_identical() {
 
     assert_eq!(output.status.code(), Some(1), "run-once verdict unchanged");
     assert!(
-        !body.contains("存在与否未知"),
+        !body.contains("existence unknown"),
         "clean scan says nothing new"
     );
-    assert!(!body.contains("根本没查"), "clean scan says nothing new");
+    assert!(
+        !body.contains("were not probed at all"),
+        "clean scan says nothing new"
+    );
     assert_eq!(
         sha256_hex(body.as_bytes()),
         CLEAN_EMPTY_STATUS_BODY_SHA256,

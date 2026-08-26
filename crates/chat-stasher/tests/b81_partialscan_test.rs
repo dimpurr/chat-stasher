@@ -20,7 +20,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const CLEAN_STATUS_BODY_SHA256: &str =
-    "e9496f26534d12d97c2728b2b69f6d6cb6760c3a20805ee586e6b1c108483b77";
+    "496303cf8515a15ccd016f5d9dfd4ef5563c1251f057cc9e75d0e4bec17e4461";
 
 fn write_registry(sandbox: &Path, root: &Path) -> PathBuf {
     let cell = json!({
@@ -147,11 +147,13 @@ fn partial_directory_scan_is_reported_at_entry_granularity() {
     assert_eq!(doctor.status.code(), Some(0));
     assert_eq!(collect.status.code(), Some(0));
     assert!(
-        status_text.contains("不可读目录项") && status_text.contains("会话数未知"),
+        status_text.contains("unreadable directory item")
+            && status_text.contains("session count unknown"),
         "status must expose partial directory coverage: {status_text}"
     );
     assert!(
-        doctor_text.contains("不可读目录项") && doctor_text.contains("会话数未知"),
+        doctor_text.contains("unreadable directory")
+            && doctor_text.contains("session count unknown"),
         "doctor must expose partial directory coverage: {doctor_text}"
     );
     assert!(
@@ -168,8 +170,8 @@ fn all_readable_directory_scan_keeps_status_bytes_identical() {
     let body = status_body(&output);
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(!body.contains("不可读目录项"));
-    assert!(!body.contains("读不出来"));
+    assert!(!body.contains("unreadable directory"));
+    assert!(!body.contains("cannot read"));
     assert_eq!(
         sha256_hex(body.as_bytes()),
         CLEAN_STATUS_BODY_SHA256,
