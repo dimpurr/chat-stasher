@@ -32,7 +32,8 @@ use rustic_backend::BackendOptions;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
 use rustic_core::{
     BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions, LsOptions,
-    ParentOptions, PathList, Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions,
+    NoProgressBars, ParentOptions, PathList, ProgressBars, Repository, RepositoryBackends,
+    RepositoryOptions, SnapshotOptions,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -261,8 +262,20 @@ impl BackupStore {
         &self,
         mk: &MasterKey,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
+        self.open_or_init_with_progress(mk, NoProgressBars {})
+    }
+
+    /// Like [`BackupStore::open_or_init`], but the freshly created repository
+    /// carries a caller-supplied [`ProgressBars`] so a `push` can observe the
+    /// backup as it runs. All other call sites keep the silent
+    /// `NoProgressBars` default.
+    fn open_or_init_with_progress<P: ProgressBars>(
+        &self,
+        mk: &MasterKey,
+        pb: P,
+    ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
         let backends = self.backends()?;
-        let repo = Repository::new(&RepositoryOptions::default(), &backends)?;
+        let repo = Repository::new_with_progress(&RepositoryOptions::default(), &backends, pb)?;
         let creds = Credentials::Masterkey(mk.clone());
         if self.repo_exists(&backends)? {
             let r = repo
@@ -294,7 +307,15 @@ impl BackupStore {
                 "refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
             );
         }
-        let (r, init) = self.open_or_init(mk)?;
+        // Live progress for what is usually the longest phase of a push. The
+        // reporter is driven by rustic's byte-level callbacks; `stage_shards`
+        // is already counted above and gives the `shards=N/total` scale.
+        let push_progress =
+            std::sync::Arc::new(crate::push_progress::PushProgress::new(stage_shards as u64));
+        let (r, init) = self.open_or_init_with_progress(
+            mk,
+            crate::push_progress::PushProgressBars::new(push_progress),
+        )?;
         let snap_opt = SnapshotOptions::default().host(self.machine.clone());
         let snap = snap_opt.to_snapshot().context("build snapshot opts")?;
         let source = PathList::from_string(
