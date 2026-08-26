@@ -1,0 +1,111 @@
+# Release — build the installable binary and attach it to the tagged Release.
+#
+# Runs ONLY when a version tag (`v*`) is pushed. A release is an event — the
+# tag — not a manual toggle, so there is no workflow_dispatch here.
+#
+# The whole workflow is pinned to the one platform scripts/install.sh ships a
+# prebuilt binary for. install.sh (scripts/install.sh:41-58) hard-refuses every
+# target except darwin-arm64, so building anything else would produce an asset
+# the official installer cannot use. That also keeps billing honest: macOS
+# runners bill at ×10, and this job is the only one the release needs.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# A tag pushed twice in a row cancels its own earlier run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Only the auto-generated GITHUB_TOKEN is used (no stored secrets). Writing
+  # the Release and uploading assets to it needs contents: write.
+  contents: write
+
+jobs:
+  build-and-release:
+    name: build + release (aarch64-apple-darwin)
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust with aarch64-apple-darwin target
+        # Mirrors .github/workflows/ci.yml:89 (dtolnay/rust-toolchain@stable).
+        # The explicit `targets` input makes the built binary arm64 whether the
+        # runner is natively arm64 or x86_64 cross-compiling it.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build release binary
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Stage artifacts (binary + SHA256SUMS)
+        run: |
+          set -euo pipefail
+
+          # The artifact name is the install.sh contract, byte for byte
+          # (scripts/install.sh:36-60):
+          #   TARGET   = "$(uname -s)-$(uname -m)" → darwin-arm64
+          #   ARTIFACT = "chat-stasher-${TARGET}"
+          # install.sh downloads exactly "$BASE_URL/$ARTIFACT", so renaming here
+          # would make the installer 404.
+          ARTIFACT="chat-stasher-darwin-arm64"
+
+          mkdir -p dist
+          cp "target/aarch64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT"
+
+          # Guard against a mislabeled binary: assert the Mach-O is really arm64
+          # regardless of the runner's native architecture.
+          file "dist/$ARTIFACT" | grep -q 'arm64' || {
+            echo "error: built binary is not arm64:" >&2
+            file "dist/$ARTIFACT" >&2
+            exit 1
+          }
+
+          # SHA256SUMS must parse under install.sh's exact rule
+          # `awk -v a="$ARTIFACT" '$2 == a { print $1 }'` (install.sh:80), i.e.
+          # one "<hex>  <filename>" line per asset. `shasum -a 256` emits the
+          # same two-space separator release-artifacts.sh produces locally
+          # (scripts/release-artifacts.sh:52).
+          ( cd dist && shasum -a 256 "$ARTIFACT" > SHA256SUMS )
+
+          # Self-check with install.sh's own awk: the digest for our artifact
+          # must be present, or installs would hard-fail at install.sh:81-84.
+          EXPECTED="$(awk -v a="$ARTIFACT" '$2 == a { print $1 }' dist/SHA256SUMS)"
+          [ -n "$EXPECTED" ] || {
+            echo "error: SHA256SUMS has no entry for '${ARTIFACT}'" >&2
+            exit 1
+          }
+
+          echo "staged:"
+          ls -l dist
+          cat dist/SHA256SUMS
+
+      - name: Create Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The tag is "v0.1.0"; install.sh fetches from
+          # https://github.com/dimpurr/chat-stasher/releases/download/v${VERSION}
+          # (install.sh:22), so the Release tag and asset names must match the
+          # tag exactly — nothing is renamed here.
+          TAG="$GITHUB_REF_NAME"    # e.g. v0.1.0
+          VERSION="${TAG#v}"        # e.g. 0.1.0
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; uploading assets (--clobber)."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            echo "Creating Release ${TAG}."
+            gh release create "$TAG" dist/* \
+              --title "chat-stasher v${VERSION}" \
+              --notes "Prebuilt binary for Apple Silicon macOS (aarch64-apple-darwin) plus SHA256SUMS. See docs/install.md for installation."
+          fi

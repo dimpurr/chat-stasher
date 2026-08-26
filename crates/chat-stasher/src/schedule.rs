@@ -35,6 +35,24 @@ pub struct TemplateFile {
     pub content: String,
 }
 
+/// Arguments forwarded from `schedule` to the embedded `run-once` command.
+///
+/// The template only renders what it is given; it does not decide whether a
+/// destination is required. The caller (`cmd_schedule`) enforces the same
+/// product rule as `run-once`.
+#[derive(Debug, Clone, Default)]
+pub struct RunOnceArgs {
+    pub destination: Option<String>,
+    pub repo: Option<String>,
+    pub key_file: Option<String>,
+    pub connections: Option<usize>,
+    pub options: Vec<String>,
+    pub machine: Option<String>,
+    pub shard_bucket_cap: Option<usize>,
+    pub no_reap: bool,
+    pub verify: bool,
+}
+
 /// Resolve the configured cadence. Zero is rejected because it would create
 /// a hot loop in both launchd and systemd.
 pub fn interval_secs(config: &Config) -> Result<u64> {
@@ -52,18 +70,18 @@ pub fn render(
     binary: &Path,
     stage: &Path,
     interval: u64,
-    verify: bool,
+    args: &RunOnceArgs,
     home: &Path,
 ) -> Vec<TemplateFile> {
     match format {
         Format::Launchd => vec![TemplateFile {
             name: format!("{LAUNCHD_LABEL}.plist"),
-            content: render_launchd(binary, stage, interval, verify, home),
+            content: render_launchd(binary, stage, interval, args, home),
         }],
         Format::Systemd => vec![
             TemplateFile {
                 name: SYSTEMD_SERVICE.to_string(),
-                content: render_systemd_service(binary, stage, verify),
+                content: render_systemd_service(binary, stage, args),
             },
             TemplateFile {
                 name: SYSTEMD_TIMER.to_string(),
@@ -146,16 +164,61 @@ pub fn install_command_for_saved(format: Format) -> String {
     }
 }
 
-fn render_launchd(binary: &Path, stage: &Path, interval: u64, verify: bool, home: &Path) -> String {
-    let mut args = vec![
+/// Build the `run-once` argument vector that both launchd and systemd will
+/// embed. Paths and values are kept as separate tokens so each renderer can
+/// quote them in its own dialect.
+fn run_once_argv(binary: &Path, stage: &Path, args: &RunOnceArgs) -> Vec<String> {
+    let mut argv = vec![
         binary.to_string_lossy().into_owned(),
         "run-once".to_string(),
         "--stage".to_string(),
         stage.to_string_lossy().into_owned(),
     ];
-    if verify {
-        args.push("--verify".to_string());
+    if let Some(machine) = &args.machine {
+        argv.push("--machine".to_string());
+        argv.push(machine.clone());
     }
+    if let Some(cap) = args.shard_bucket_cap {
+        argv.push("--shard-bucket-cap".to_string());
+        argv.push(cap.to_string());
+    }
+    if let Some(destination) = &args.destination {
+        argv.push("--destination".to_string());
+        argv.push(destination.clone());
+    }
+    if let Some(repo) = &args.repo {
+        argv.push("--repo".to_string());
+        argv.push(repo.clone());
+    }
+    if let Some(key_file) = &args.key_file {
+        argv.push("--key-file".to_string());
+        argv.push(key_file.clone());
+    }
+    if let Some(connections) = args.connections {
+        argv.push("--connections".to_string());
+        argv.push(connections.to_string());
+    }
+    for opt in &args.options {
+        argv.push("--option".to_string());
+        argv.push(opt.clone());
+    }
+    if args.verify {
+        argv.push("--verify".to_string());
+    }
+    if args.no_reap {
+        argv.push("--no-reap".to_string());
+    }
+    argv
+}
+
+fn render_launchd(
+    binary: &Path,
+    stage: &Path,
+    interval: u64,
+    args: &RunOnceArgs,
+    home: &Path,
+) -> String {
+    let argv = run_once_argv(binary, stage, args);
 
     let log_dir = home.join("Library/Logs/chat-stasher");
     let stdout_log = log_dir.join("run-once.log");
@@ -175,7 +238,7 @@ fn render_launchd(binary: &Path, stage: &Path, interval: u64, verify: bool, home
         "{}\n{}\nexec {}",
         cap_line(&stdout_log, cap),
         cap_line(&stderr_log, cap),
-        args.iter()
+        argv.iter()
             .map(|arg| sh_single_quote(arg))
             .collect::<Vec<_>>()
             .join(" "),
@@ -230,15 +293,13 @@ fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn render_systemd_service(binary: &Path, stage: &Path, verify: bool) -> String {
-    let mut args = format!(
-        "{} run-once --stage {}",
-        systemd_quote(binary),
-        systemd_quote(stage)
-    );
-    if verify {
-        args.push_str(" --verify");
-    }
+fn render_systemd_service(binary: &Path, stage: &Path, args: &RunOnceArgs) -> String {
+    let argv = run_once_argv(binary, stage, args);
+    let args = argv
+        .iter()
+        .map(|arg| systemd_quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         r#"[Unit]
 Description=Run one chat-stasher archive cycle
@@ -286,8 +347,7 @@ fn shell_quote(path: &Path) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
 }
 
-fn systemd_quote(path: &Path) -> String {
-    let value = path.to_string_lossy();
+fn systemd_quote_arg(value: &str) -> String {
     format!(
         "\"{}\"",
         value
@@ -317,12 +377,16 @@ mod tests {
 
     #[test]
     fn launchd_plist_caps_logs_via_in_place_truncate_and_exec() {
+        let args = RunOnceArgs {
+            verify: false,
+            ..RunOnceArgs::default()
+        };
         let launchd = render(
             Format::Launchd,
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
-            false,
+            &args,
             Path::new("/home/tester"),
         );
         let plist = &launchd[0].content;
@@ -388,12 +452,16 @@ mod tests {
 
     #[test]
     fn scheduler_templates_describe_zero_as_the_only_success_status() {
+        let args = RunOnceArgs {
+            verify: false,
+            ..RunOnceArgs::default()
+        };
         let files = render(
             Format::Systemd,
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
-            false,
+            &args,
             Path::new("/home/tester"),
         );
         assert_eq!(files.len(), 2);
@@ -406,11 +474,54 @@ mod tests {
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
-            false,
+            &args,
             Path::new("/home/tester"),
         );
         assert!(launchd[0]
             .content
             .contains("exit 0 is success; result=NOOP means no snapshot"));
+    }
+
+    #[test]
+    fn schedule_embeds_destination_in_both_templates() {
+        let args = RunOnceArgs {
+            destination: Some("external-disk".to_string()),
+            verify: true,
+            connections: Some(2),
+            ..RunOnceArgs::default()
+        };
+        let launchd = render(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            Path::new("/home/tester"),
+        );
+        let plist = &launchd[0].content;
+        // The destination must appear as its own argument token, XML-escaped,
+        // inside the exec line.
+        assert!(plist.contains("exec &apos;/opt/chat-stasher&apos;"));
+        assert!(plist.contains("&apos;--destination&apos;"));
+        assert!(plist.contains("&apos;external-disk&apos;"));
+        assert!(plist.contains("&apos;--verify&apos;"));
+        assert!(plist.contains("&apos;--connections&apos;"));
+        assert!(plist.contains("&apos;2&apos;"));
+
+        let systemd = render(
+            Format::Systemd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            Path::new("/home/tester"),
+        );
+        let service = &systemd[0].content;
+        assert!(service.contains("ExecStart="));
+        assert!(service.contains("\"--destination\""));
+        assert!(service.contains("\"external-disk\""));
+        assert!(service.contains("\"--verify\""));
+        assert!(service.contains("\"--connections\""));
+        assert!(service.contains("\"2\""));
     }
 }

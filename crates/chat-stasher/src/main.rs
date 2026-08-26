@@ -93,12 +93,40 @@ enum Command {
         /// Write to this plist path, or systemd directory. Without it, print.
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Binary path embedded in the template (defaults to this executable).
+        /// Binary path embedded in the template. Defaults to the current
+        /// executable; if that is a build artifact under `target/`, a warning is
+        /// printed because the path will not survive `cargo clean`. Pass the
+        /// installed binary path for a durable service.
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Named destination forwarded to `run-once`. Required once the config
+        /// declares any destination (unless `--repo` is given).
+        #[arg(long)]
+        destination: Option<String>,
+        /// Repository path override forwarded to `run-once`.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override forwarded to `run-once`.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override forwarded to `run-once`.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable, forwarded to `run-once`.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Machine partition forwarded to `run-once`.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket forwarded to `run-once`.
+        #[arg(long)]
+        shard_bucket_cap: Option<usize>,
         /// Add the cheap L1 verify pass after each archive cycle.
         #[arg(long)]
         verify: bool,
+        /// Disable ssh connection reaping after each run.
+        #[arg(long)]
+        no_reap: bool,
     },
     /// Move a batch of sealed session shards into the rustic repository.
     ///
@@ -128,7 +156,7 @@ enum Command {
         /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
-        /// Concurrency cap override (default: config `rustic_connections` = 10).
+        /// Concurrency cap override (default: config `rustic_connections` = 4).
         #[arg(long)]
         connections: Option<usize>,
         /// Backend option `key=value`, repeatable (e.g. `--option endpoint=ssh://host:23`).
@@ -772,8 +800,30 @@ fn main() -> ExitCode {
             stage,
             output,
             binary,
+            destination,
+            repo,
+            key_file,
+            connections,
+            options,
+            machine,
+            shard_bucket_cap,
             verify,
-        } => cmd_schedule(format, &stage, output, binary, verify),
+            no_reap,
+        } => cmd_schedule(
+            format,
+            &stage,
+            output,
+            binary,
+            destination,
+            repo,
+            key_file,
+            connections,
+            options,
+            machine,
+            shard_bucket_cap,
+            verify,
+            no_reap,
+        ),
         Command::Push {
             stage,
             inbox,
@@ -3167,12 +3217,21 @@ fn run_once_pass(
     (ExitCode::SUCCESS, state)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_schedule(
     format: schedule::Format,
     stage: &Path,
     output: Option<PathBuf>,
     binary: Option<PathBuf>,
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: Vec<String>,
+    machine: Option<String>,
+    shard_bucket_cap: Option<usize>,
     verify: bool,
+    no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
     let interval = match schedule::interval_secs(&config) {
@@ -3182,6 +3241,20 @@ fn cmd_schedule(
             return ExitCode::FAILURE;
         }
     };
+
+    // Enforce the same product rule as `run-once`: once destinations exist, the
+    // rendered command must name one (or give an explicit repo override).
+    if destination.is_none() && repo.is_none() && !config.destinations.is_empty() {
+        let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        eprintln!(
+            "schedule: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}",
+            names.len(),
+            names.join(", ")
+        );
+        return ExitCode::from(2);
+    }
+
     let binary = match binary {
         Some(path) => absolute_path(&path),
         None => match std::env::current_exe() {
@@ -3192,13 +3265,32 @@ fn cmd_schedule(
             }
         },
     };
+    if is_build_artifact(&binary) {
+        eprintln!(
+            "[schedule] warning: resolved binary is a build artifact at {}. \
+             It will not survive `cargo clean`. Pass `--binary` with the installed path.",
+            binary.display()
+        );
+    }
+
     let stage = absolute_path(stage);
+    let args = schedule::RunOnceArgs {
+        destination,
+        repo,
+        key_file,
+        connections,
+        options,
+        machine,
+        shard_bucket_cap,
+        no_reap,
+        verify,
+    };
     let files = schedule::render(
         format,
         &binary,
         &stage,
         interval,
-        verify,
+        &args,
         &config::home_dir(),
     );
     let paths = match output {
@@ -3251,6 +3343,22 @@ fn absolute_path(path: &Path) -> PathBuf {
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     }
+}
+
+/// Detect whether a path looks like a Cargo build artifact. This is a heuristic
+/// used by `schedule` to warn that the embedded binary path will vanish after
+/// `cargo clean`.
+fn is_build_artifact(path: &Path) -> bool {
+    let parts: Vec<&str> = path.iter().filter_map(|c| c.to_str()).collect();
+    for window in parts.windows(3) {
+        if window[0] == "target"
+            && (window[1] == "debug" || window[1] == "release")
+            && window[2] == "chat-stasher"
+        {
+            return true;
+        }
+    }
+    false
 }
 /// `seal` — allowlist-checked rename-sealing of one active file.
 ///
