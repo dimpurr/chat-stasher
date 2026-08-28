@@ -24,7 +24,7 @@ fn write_registry(path: &Path) {
         "template": "$OPENCODE_DB",
         "env_override": "OPENCODE_DB",
         "format": "sqlite",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "B64 synthetic fixture"
     }"#;
     fs::write(

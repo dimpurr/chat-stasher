@@ -89,7 +89,7 @@ fn unparseable_registry(sandbox: &Path) -> std::path::PathBuf {
 /// false-positive guards below.
 fn empty_registry(sandbox: &Path) -> std::path::PathBuf {
     let cell = r#"{ "template": "~/no-such-harness-root", "format": "sqlite",
-                    "confidence": "本机实测", "source": "B80 test fixture",
+                    "confidence": "measured-locally", "source": "B80 test fixture",
                     "sql_table": "t", "sql_id_column": "k",
                     "sql_required_columns": ["k"] }"#;
     let path = sandbox.join("empty-registry.json");

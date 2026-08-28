@@ -155,7 +155,7 @@ pub fn maybe_seal_active(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scanner::CONF_CONFIRMED;
+    use crate::scanner::{CONF_CONFIRMED, CONF_UNASCERTAINED};
     use crate::store::{self, session_shard_dir, write_sealed_shard};
     use serde_json::json;
     use std::fs;
@@ -191,7 +191,7 @@ mod tests {
         // Unknown and missing tokens resolve to no-rename, never rename.
         assert_eq!(SealPolicy::classify(""), SealPolicy::NoRename);
         assert_eq!(SealPolicy::classify("   "), SealPolicy::NoRename);
-        assert_eq!(SealPolicy::classify("持 fd"), SealPolicy::NoRename);
+        assert_eq!(SealPolicy::classify("holds fd"), SealPolicy::NoRename);
         assert_eq!(SealPolicy::classify("weekly"), SealPolicy::NoRename);
         assert_eq!(SealPolicy::classify("RENAME"), SealPolicy::NoRename);
     }
@@ -217,7 +217,7 @@ mod tests {
         assert!(!seal_allowed(&uncredited, &confirmed));
 
         // rename policy + evidence but the CELL is a community claim -> excluded.
-        let community = cell("仅社区说法未核实", "forum post");
+        let community = cell("community-claim-unverified", "forum post");
         assert!(!seal_allowed(&h, &community));
 
         // rename policy + evidence but the cell has no source -> excluded.
@@ -273,7 +273,7 @@ mod tests {
 
         // Case 2: rename policy but UNCONFIRMED cell -> also no rename.
         let claude = harness("claude-code", "rename", "A9 measured");
-        let unconfirmed = cell("未查明", "");
+        let unconfirmed = cell(CONF_UNASCERTAINED, "");
         let out = maybe_seal_active(
             &claude,
             &unconfirmed,

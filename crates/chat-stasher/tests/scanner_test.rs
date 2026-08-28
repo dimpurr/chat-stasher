@@ -16,7 +16,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Build a registry with just claude-code + codex, every platform cell
 /// populated (so the test passes regardless of which OS it runs on).
 fn scratch_registry() -> HarnessRegistry {
-    let cell = |template: &str| json!({ "template": template, "format": "jsonl / jsonl.zst", "confidence": "源码确认", "source": "test" });
+    let cell = |template: &str| json!({ "template": template, "format": "jsonl / jsonl.zst", "confidence": "source-confirmed", "source": "test" });
     serde_json::from_value(json!({
         "schema_version": 1,
         "generated": "2026-08-16",
@@ -167,7 +167,7 @@ fn gemini_pattern_counts_session_and_rejects_config_json() {
         "template": chats.to_string_lossy(),
         "format": "json",
         "session_pattern": "session-*",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "test"
     });
     let paths = match scanner::current_platform() {
@@ -227,7 +227,7 @@ fn opencode_db_env_override_wins_for_scanner() {
         "template": "$XDG_DATA_HOME/opencode/opencode.db",
         "env_override": "OPENCODE_DB",
         "format": "sqlite",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "test",
         "sql_table": "session",
         "sql_required_columns": ["id", "time_created", "time_updated"],

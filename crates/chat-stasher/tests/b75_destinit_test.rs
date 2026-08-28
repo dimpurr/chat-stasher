@@ -134,7 +134,7 @@ fn text(output: &Output) -> (String, String) {
 fn archive_gap_is_not_a_completed_union() {
     let root = tempfile::tempdir().unwrap();
     let registry = root.path().join("registry.json");
-    let cell = r#"{"template":"$OPENCODE_DB","env_override":"OPENCODE_DB","format":"sqlite","confidence":"源码确认","source":"B75 synthetic"}"#;
+    let cell = r#"{"template":"$OPENCODE_DB","env_override":"OPENCODE_DB","format":"sqlite","confidence":"source-confirmed","source":"B75 synthetic"}"#;
     fs::write(
         &registry,
         format!(
@@ -224,7 +224,7 @@ fn unread_difference_source_exits_three() {
 fn local_collect_error_exits_one() {
     let root = tempfile::tempdir().unwrap();
     let registry = root.path().join("registry.json");
-    let cell = r#"{"template":"$B75_SOURCE/.codex/sessions/<date>","env_override":"B75_SOURCE","format":"jsonl.zst","confidence":"源码确认","source":"B75 synthetic"}"#;
+    let cell = r#"{"template":"$B75_SOURCE/.codex/sessions/<date>","env_override":"B75_SOURCE","format":"jsonl.zst","confidence":"source-confirmed","source":"B75 synthetic"}"#;
     fs::write(
         &registry,
         format!(

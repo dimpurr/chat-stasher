@@ -35,7 +35,7 @@ fn registry_for_empty_fixture(sandbox: &Path) -> PathBuf {
     fs::write(
         &registry,
         format!(
-            r#"{{"schema_version":1,"generated":"B91","harnesses":[{{"id":"claude-code","display_name":"Claude Code","paths":{{"macos":{{"template":{},"format":"jsonl","session_pattern":"*.jsonl","confidence":"本机实测","source":"B91"}},"linux":{{"template":{},"format":"jsonl","session_pattern":"*.jsonl","confidence":"本机实测","source":"B91"}},"windows":{{"template":{},"format":"jsonl","session_pattern":"*.jsonl","confidence":"本机实测","source":"B91"}}}}}}]}}"#,
+            r#"{{"schema_version":1,"generated":"B91","harnesses":[{{"id":"claude-code","display_name":"Claude Code","paths":{{"macos":{{"template":{},"format":"jsonl","session_pattern":"*.jsonl","confidence":"measured-locally","source":"B91"}},"linux":{{"template":{},"format":"jsonl","session_pattern":"*.jsonl","confidence":"measured-locally","source":"B91"}},"windows":{{"template":{},"format":"jsonl","session_pattern":"*.jsonl","confidence":"measured-locally","source":"B91"}}}}}}]}}"#,
             serde_json::to_string(&root).unwrap(),
             serde_json::to_string(&root).unwrap(),
             serde_json::to_string(&root).unwrap(),

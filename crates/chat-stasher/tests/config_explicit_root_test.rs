@@ -60,7 +60,7 @@ fn write_config(home: &Path, body: &str) {
 /// original divergence reached CI green on macOS and red on Linux.
 fn write_unascertained_registry(home: &Path) {
     let cell = r#"{ "template": "$NOWHERE_AT_ALL/sessions/",
-                    "format": "jsonl", "confidence": "未查明",
+                    "format": "jsonl", "confidence": "unascertained",
                     "source": "B57 test: 未核实" }"#;
     let path = home.join("registry.json");
     fs::write(

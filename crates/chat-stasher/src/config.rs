@@ -86,7 +86,7 @@ pub struct Config {
     /// registry's per-platform template and its `confidence` gate exist to stop
     /// the scanner walking a guessed path; neither applies to a path the user
     /// wrote down. So an entry here outranks the template and bypasses the
-    /// `未查明` skip — see `scanner::probe_harness`.
+    /// `unascertained` skip — see `scanner::probe_harness`.
     ///
     /// It does **not** relax "unknown is not empty": a configured path that
     /// does not exist still probes as missing and still reports an unknown
@@ -793,14 +793,14 @@ mod tests {
         let raw = "[harness_roots]\ncursor = \"C:\\Users\\me\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb\"\n";
         assert!(
             toml::from_str::<Config>(raw).is_err(),
-            "前提：这份 config 严格解析必须是失败的，否则本恢复路径根本不会跑"
+            "precondition: this config must fail strict parsing, or the recovery path would not run"
         );
-        let fixed = recover_windows_paths(raw).expect("应当识别出未转义的反斜杠");
-        let cfg: Config = toml::from_str(&fixed).expect("补转义后应当解析成功");
+        let fixed = recover_windows_paths(raw).expect("should detect unescaped backslashes");
+        let cfg: Config = toml::from_str(&fixed).expect("should parse after escaping backslashes");
         assert_eq!(
             cfg.explicit_harness_root("cursor"),
             Some("C:\\Users\\me\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb"),
-            "恢复出来的必须是用户写下的那条字面路径"
+            "recovered path must be the literal path the user wrote"
         );
     }
 
@@ -811,7 +811,7 @@ mod tests {
         let raw = "a = \"line\\nbreak\\tand \\u0041\"\nb = 'C:\\Users\\me'\n# comment C:\\x\n";
         assert!(
             recover_windows_paths(raw).is_none(),
-            "没有可修的反斜杠时必须返回 None，好让调用方报原始错误"
+            "must return None when there is nothing to fix so the caller reports the original error"
         );
     }
 
@@ -823,7 +823,10 @@ mod tests {
         let recovered = recover_windows_paths(raw)
             .map(|fixed| toml::from_str::<Config>(&fixed).is_ok())
             .unwrap_or(false);
-        assert!(!recovered, "括号都没闭合，不该被这条恢复路径救活");
+        assert!(
+            !recovered,
+            "unclosed bracket must not be rescued by this recovery path"
+        );
     }
 
     /// Recovery is a spelling fix, never a permission slip: a path that does not
@@ -849,7 +852,8 @@ mod tests {
     #[test]
     fn a_path_that_is_already_valid_toml_is_not_second_guessed() {
         let raw = "[harness_roots]\ngrok = \"C:\\new\\temp.sqlite\"\n";
-        let cfg: Config = toml::from_str(raw).expect("这份 config 严格解析本来就成立");
+        let cfg: Config =
+            toml::from_str(raw).expect("this config is already valid under strict parsing");
         assert_eq!(
             cfg.explicit_harness_root("grok"),
             Some("C:\new\temp.sqlite")
@@ -1059,7 +1063,7 @@ key_file = "~/dest/key.json"
         .unwrap();
 
         let cfg = Config::load();
-        // 字段被重置为默认（None），绝不把字面 `~` 当路径留着。
+        // Field reset to default (None); a literal `~` must never remain as a path.
         assert_eq!(cfg.rustic_repo, None);
         let d1 = cfg.destinations.get("d1").expect("d1 present");
         assert_eq!(d1.key_file, None);
@@ -1067,8 +1071,10 @@ key_file = "~/dest/key.json"
 
     #[test]
     fn default_template_is_valid_toml() {
-        // 模板里所有示例都是注释，解析出来必须是空 Config（且不崩溃）。
-        let cfg: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("模板本身必须能解析");
+        // All examples in the template are comments, so parsing must yield an
+        // empty Config (and not panic).
+        let cfg: Config =
+            toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("the template itself must parse");
         assert!(cfg.harness_roots.is_empty());
         assert!(cfg.destinations.is_empty());
     }

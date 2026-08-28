@@ -1954,7 +1954,7 @@ mod tests {
         let cell: crate::scanner::RegistryCell = serde_json::from_value(serde_json::json!({
             "template": "~/x.db",
             "format": "sqlite",
-            "confidence": "本机实测",
+            "confidence": "measured-locally",
             "source": "s",
             "sql_table": "cursorDiskKV",
             "sql_required_columns": ["key", "value"],
@@ -1972,7 +1972,7 @@ mod tests {
         let non_sqlite: crate::scanner::RegistryCell = serde_json::from_value(serde_json::json!({
             "template": "~/x.jsonl",
             "format": "jsonl",
-            "confidence": "源码确认",
+            "confidence": "source-confirmed",
             "source": "s"
         }))
         .unwrap();
@@ -1982,7 +1982,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "template": "~/x.db",
                 "format": "sqlite",
-                "confidence": "源码确认",
+                "confidence": "source-confirmed",
                 "source": "s"
             }))
             .unwrap();
@@ -2006,7 +2006,7 @@ mod b90_unreadable_count_tests {
         assert_eq!(
             unreadable_candidate_count(&missing, &cursor_global_schema()),
             None,
-            "库都没打开，就不知道有多少条读不出来 —— 那不是 0"
+            "database never opened, so the number of unreadable rows is unknown — it is not 0"
         );
     }
 
@@ -2026,7 +2026,7 @@ mod b90_unreadable_count_tests {
         assert_eq!(
             unreadable_candidate_count(&db, &cursor_global_schema()),
             None,
-            "计数查询失败 ≠ 零条读不出来"
+            "count query failure is not the same as zero unreadable rows"
         );
     }
 
@@ -2048,7 +2048,7 @@ mod b90_unreadable_count_tests {
         assert_eq!(
             unreadable_candidate_count(&db, &cursor_global_schema()),
             Some(0),
-            "读得出来、且每行都是合法 JSON —— 这里的 0 是数出来的，必须照旧是 0"
+            "rows are readable and every row is valid JSON — this 0 was counted and must stay 0"
         );
 
         let conn = Connection::open(&db).unwrap();
@@ -2061,7 +2061,7 @@ mod b90_unreadable_count_tests {
         assert_eq!(
             unreadable_candidate_count(&db, &cursor_global_schema()),
             Some(1),
-            "一条解不出来的行 —— 数出来的 1"
+            "one row that could not be decoded — the counted 1"
         );
     }
 

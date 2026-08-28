@@ -27,7 +27,7 @@ fn write_registry(sandbox: &Path, root: &Path) -> PathBuf {
         "template": root,
         "format": "jsonl",
         "session_pattern": "*.jsonl",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B81 test fixture"
     });
     let registry = json!({
