@@ -410,6 +410,14 @@ mod tests {
         assert!(!plist.contains(".1\""));
     }
 
+    /// Executes the launchd preamble for real, so it can only run where that
+    /// preamble's shell is the one launchd would use. The cap check is
+    /// `stat -f%z` — BSD syntax; GNU coreutils spells it `stat -c%s` and fails
+    /// the flag outright, so on Linux the guard silently never fires and the
+    /// assertion below fails for a reason that has nothing to do with the code
+    /// under test. launchd itself is macOS-only, so gating here loses no
+    /// coverage: the systemd path has its own tests.
+    #[cfg(target_os = "macos")]
     #[test]
     fn launchd_preamble_truncates_only_when_over_cap() {
         let tmp = std::env::temp_dir().join(format!("cs-cap-test-{}", std::process::id()));
