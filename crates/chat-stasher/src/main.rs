@@ -814,7 +814,58 @@ enum VerifyLevel {
     All,
 }
 
+/// Stack reserved for the thread that does all the real work.
+///
+/// Windows gives the main thread 1 MiB; Unix gives 8. That difference is not
+/// academic here: `#[derive(Parser)]` expands into a builder chain that walks
+/// every subcommand and every argument, and in a debug build — no inlining, no
+/// stack-slot reuse — that chain alone measures ~944 KiB on arm64. Measured
+/// 2026-08-28 by lowering `ulimit -s`: the debug binary survives 944 KiB and
+/// dies at 900, and `--version` dies at exactly the same threshold as `push`,
+/// which is what proves the cost is argument parsing rather than any command's
+/// own work. On Windows CI the same chain sat just over the 1 MiB line and the
+/// process died with STATUS_STACK_OVERFLOW before `main` could print anything.
+///
+/// A release build needs roughly a seventh of that (survives 256 KiB, dies at
+/// 128), so shipped binaries were never at risk — but every Windows test that
+/// invokes the binary runs the debug build, so Windows CI could not be green.
+///
+/// Growing the stack is the fix rather than trimming subcommands because the
+/// requirement scales with the CLI surface, and a CLI that must stay small to
+/// keep running is a constraint nobody would remember. 16 MiB leaves room for
+/// the parser chain to double and still not be the thing that breaks.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    // Everything runs on a thread we size ourselves, so the platform's main
+    // thread limit stops being part of the contract. `join()` propagates a
+    // panic by re-panicking here, which keeps the existing panic behaviour
+    // (message on stderr, non-zero exit) rather than swallowing it.
+    match std::thread::Builder::new()
+        .name("chat-stasher".to_string())
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(run)
+    {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        // Spawning can fail when the OS refuses the thread (hitting a process
+        // or memory limit). Falling back to the main thread is better than
+        // dying: the smaller stack is only fatal for debug builds, and a
+        // release build has ample room.
+        Err(err) => {
+            eprintln!(
+                "warning: could not start the {} MiB worker thread ({err}); \
+                 continuing on the main thread, which may overflow on Windows",
+                WORKER_STACK_BYTES / (1024 * 1024)
+            );
+            run()
+        }
+    }
+}
+
+fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init => cmd_init(),
