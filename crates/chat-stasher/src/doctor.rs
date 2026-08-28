@@ -1869,7 +1869,7 @@ mod b90_unknown_count_tests {
         let detail = footprint_count_detail(&footprint(None));
         assert!(
             detail.contains("unknown"),
-            "数不出来就要显示成「unknown」，不许沉默地等同于 0；实际：{detail:?}"
+            "a failed tally must display as 'unknown', not silently equal 0; got: {detail:?}"
         );
     }
 
@@ -1970,8 +1970,8 @@ mod json_tests {
             footprints: vec![fp()],
             other_present: vec![PathBuf::from("/nowhere/.cursor")],
             risks: vec![
-                "🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。".to_string(),
-                "🟢 Gemini: disabled — 无风险。".to_string(),
+                "🔴 Claude Code: cleanupPeriodDays is unset → default 30 days.".to_string(),
+                "🟢 Gemini: disabled — no risk.".to_string(),
             ],
             reclaim: ReclaimCheck::NoRepo {
                 repo_root: PathBuf::from("/nowhere/repo"),
@@ -2040,7 +2040,7 @@ mod json_tests {
         assert_eq!(v["risks"][1]["severity"], serde_json::json!("green"));
         assert_eq!(
             v["risks"][0]["text"],
-            serde_json::json!("🔴 Claude Code: cleanupPeriodDays 未设置 → 默认 30 天。")
+            serde_json::json!("🔴 Claude Code: cleanupPeriodDays is unset → default 30 days.")
         );
         assert_eq!(v["reclaim"]["kind"], serde_json::json!("no_repo"));
     }

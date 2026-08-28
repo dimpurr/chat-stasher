@@ -173,7 +173,7 @@ fn existing_dir_the_registry_never_resolved_is_unknown_not_zero() {
     let registry_path = home.path().join("registry.json");
     let cell = format!(
         r#"{{ "template": "{unresolvable}", "env_override": "CODEX_HOME",
-              "format": "jsonl / jsonl.zst", "confidence": "源码确认", "source": "B55 test" }}"#
+              "format": "jsonl / jsonl.zst", "confidence": "source-confirmed", "source": "B55 test" }}"#
     );
     fs::write(
         &registry_path,

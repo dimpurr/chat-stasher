@@ -55,7 +55,7 @@ fn gemini_registry(chats: &Path) -> HarnessRegistry {
         "template": chats.to_string_lossy(),
         "format": "json",
         "session_pattern": "session-*",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "test"
     });
     let paths = match scanner::current_platform() {
@@ -135,7 +135,7 @@ fn leading_tilde_is_still_home_and_unanchorable_is_still_refused() {
     let unresolvable = json!({
         "template": "$CWD/.aider.chat.history.md",
         "format": "json",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "test"
     });
     let paths = match scanner::current_platform() {

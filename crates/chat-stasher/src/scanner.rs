@@ -5,14 +5,14 @@
 //! only scanned when the registry says to scan it.
 //!
 //! Each registry cell (harness × platform) carries a `confidence`:
-//!   - `未查明`            ⇒ the cell is **not** scanned (guessing a path would
+//!   - `unascertained`            ⇒ the cell is **not** scanned (guessing a path would
 //!                            produce false negatives/positives),
-//!   - `仅社区说法未核实`   ⇒ scanned, but flagged **low-confidence**, so the
+//!   - `community-claim-unverified`   ⇒ scanned, but flagged **low-confidence**, so the
 //!                            report can mark it instead of presenting it as fact,
-//!   - `本机实测`          ⇒ verified empirically on the machine this tool runs
+//!   - `measured-locally`          ⇒ verified empirically on the machine this tool runs
 //!                            on (schema/path measured live) but source not read —
 //!                            scanned, not low-confidence,
-//!   - `源码确认`/`官方文档` ⇒ scanned normally.
+//!   - `source-confirmed`/`official-docs` ⇒ scanned normally.
 //!
 //! Path templates are expanded before probing (`~`, `$HOME`, `$XDG_*`,
 //! `%USERPROFILE%`), with the standard XDG fallbacks: `$XDG_DATA_HOME`
@@ -69,11 +69,11 @@ const EMBEDDED_REGISTRY: &str = include_str!(concat!(
 ));
 
 /// Confidence values used by the registry (`harnesses[].paths.*.confidence`).
-pub const CONF_CONFIRMED: &str = "源码确认";
-pub const CONF_OFFICIAL: &str = "官方文档";
-pub const CONF_COMMUNITY: &str = "仅社区说法未核实";
-pub const CONF_MEASURED: &str = "本机实测";
-pub const CONF_UNASCERTAINED: &str = "未查明";
+pub const CONF_CONFIRMED: &str = "source-confirmed";
+pub const CONF_OFFICIAL: &str = "official-docs";
+pub const CONF_COMMUNITY: &str = "community-claim-unverified";
+pub const CONF_MEASURED: &str = "measured-locally";
+pub const CONF_UNASCERTAINED: &str = "unascertained";
 
 // ---------------------------------------------------------------------------
 // Confidence
@@ -83,18 +83,18 @@ pub const CONF_UNASCERTAINED: &str = "未查明";
 /// treated as [`Confidence::Unascertained`] — conservative, never scanned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
-    /// `源码确认` — confirmed in harness source.
+    /// `source-confirmed` — confirmed in harness source.
     Confirmed,
-    /// `官方文档` — confirmed in official docs.
+    /// `official-docs` — confirmed in official docs.
     OfficialDocs,
-    /// `仅社区说法未核实` — plausible but never verified. Scan, but flag low.
+    /// `community-claim-unverified` — plausible but never verified. Scan, but flag low.
     CommunityClaim,
-    /// `本机实测` — verified empirically on this machine (path + schema read
+    /// `measured-locally` — verified empirically on this machine (path + schema read
     /// live), but the harness source was not read. Scan, not flagged low —
     /// it is verified, just not source-anchored (so it can drift on an app
     /// update without any source link to re-check).
     Measured,
-    /// `未查明` — unknown. Do **not** scan (guessing = false pos/neg).
+    /// `unascertained` — unknown. Do **not** scan (guessing = false pos/neg).
     Unascertained,
 }
 
@@ -272,7 +272,7 @@ pub struct RegistryHarness {
     /// `not-applicable`. Lives here — the *same* file that drives scanning —
     /// so the sealing allowlist can never drift from the path registry. Any
     /// missing / unknown value resolves to `no-rename` (fail-safe, see
-    /// `crate::seal`). To be on the `rename` list a harness needs a `源码确认`
+    /// `crate::seal`). To be on the `rename` list a harness needs a `source-confirmed`
     /// platform cell **and** a non-empty `seal_source` evidence line.
     #[serde(default)]
     pub seal_policy: String,
@@ -867,9 +867,10 @@ fn probe_harness(
     };
 
     // 2. Confidence decides whether we scan a *guessed* path at all. A
-    // configured path is not a guess, so `未查明` does not gate it: refusing to
-    // count a store the user pointed us at, opened, and enumerated would be its
-    // own false claim ("I could not determine"), just in the other direction.
+    // configured path is not a guess, so `unascertained` does not gate it:
+    // refusing to count a store the user pointed us at, opened, and enumerated
+    // would be its own false claim ("I could not determine"), just in the other
+    // direction.
     let confidence = Confidence::classify(&cell.confidence);
     if !confidence.scan_allowed() && explicit_root.is_none() {
         return HarnessProbe {
@@ -2229,16 +2230,28 @@ mod tests {
 
     #[test]
     fn confidence_classification_and_skip_rules() {
-        assert_eq!(Confidence::classify("源码确认"), Confidence::Confirmed);
-        assert_eq!(Confidence::classify("官方文档"), Confidence::OfficialDocs);
         assert_eq!(
-            Confidence::classify("仅社区说法未核实"),
+            Confidence::classify("source-confirmed"),
+            Confidence::Confirmed
+        );
+        assert_eq!(
+            Confidence::classify("official-docs"),
+            Confidence::OfficialDocs
+        );
+        assert_eq!(
+            Confidence::classify("community-claim-unverified"),
             Confidence::CommunityClaim
         );
-        assert_eq!(Confidence::classify("本机实测"), Confidence::Measured);
-        assert_eq!(Confidence::classify("未查明"), Confidence::Unascertained);
         assert_eq!(
-            Confidence::classify("某未知措辞"),
+            Confidence::classify("measured-locally"),
+            Confidence::Measured
+        );
+        assert_eq!(
+            Confidence::classify("unascertained"),
+            Confidence::Unascertained
+        );
+        assert_eq!(
+            Confidence::classify("some-unknown-token"),
             Confidence::Unascertained
         );
 
@@ -2291,7 +2304,7 @@ mod tests {
         assert!(!report.probes[0].installed_p());
     }
 
-    /// The other side of the same gate: `未查明` says *we* could not verify a
+    /// The other side of the same gate: `unascertained` says *we* could not verify a
     /// path, which has nothing to say about a path the **user** wrote down. A
     /// configured root is walked, and its real count reported — refusing to
     /// count a store we opened would be its own false claim.

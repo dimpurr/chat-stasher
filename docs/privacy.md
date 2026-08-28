@@ -83,11 +83,11 @@ the sentence.
    browser's own download API (`apps/extension/lib/download.ts:117-135`).
 3. **Ingest.** The `chat-stasher` CLI, which you run yourself on your own
    machine, reads those files and turns them into sealed shards in a staging
-   directory (`crates/chat-stasher/src/main.rs:403-425`).
+   directory (`crates/chat-stasher/src/main.rs:456-478`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:96-133`;
-   `crates/chat-stasher/src/store.rs:271`).
+   (`crates/chat-stasher/src/main.rs:131-168`;
+   `crates/chat-stasher/src/store.rs:261-296`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
 step that can involve a network, and the only destination it can reach is the
@@ -184,7 +184,7 @@ Two things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:96`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:271`, `:834-869`).
+kept on your machine (`crates/chat-stasher/src/store.rs:261-296,919-1004`).
 
 ## 4. Who your data is shared with
 
@@ -197,7 +197,7 @@ The parties who *do* see something, stated plainly:
 | Party | What they see | Why |
 |---|---|---|
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi) | Your conversations — they host them; they always could. The passive capture adds no traffic of its own. | `apps/extension/lib/page-hook.ts:332`, `:356-373` |
-| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271`; see `docs/threat-model.md` |
+| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:261-296`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | Download-history entries containing platform names and session ids, *if* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/download.ts:138-139` |
 | **Anything else running on your computer as you** | The plaintext inbox files, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
@@ -314,7 +314,7 @@ Chat Stasher does not call any AI model, does not send your conversations to a
 model provider, and does not use your conversations for training anything. The
 word "chat" in this product refers to conversations you already had, on someone
 else's service, that this tool copies into your own archive. The archive format
-is `rustic` encrypted backup objects (`crates/chat-stasher/src/store.rs:271`);
+is `rustic` encrypted backup objects (`crates/chat-stasher/src/store.rs:261-296`);
 nothing reads them except you.
 
 ## 9. How long data is kept, and how to delete it
@@ -327,11 +327,11 @@ Retention on **your** machine is under your control:
 
 | Where | How long it stays | How to delete it |
 |---|---|---|
-| Inbox files in your download directory | Until the CLI's `ingest` consumes them, which moves each file to `<inbox>/consumed/` (`crates/chat-stasher/src/main.rs:403-409`). **If you never run `ingest`, they stay indefinitely, in plaintext.** | Delete the files in `chat-stasher/inbox/` (and `consumed/`) with your file manager. Nothing else depends on them once ingested. |
+| Inbox files in your download directory | Until the CLI's `ingest` consumes them, which moves each file to `<inbox>/consumed/` (`crates/chat-stasher/src/main.rs:456-478`). **If you never run `ingest`, they stay indefinitely, in plaintext.** | Delete the files in `chat-stasher/inbox/` (and `consumed/`) with your file manager. Nothing else depends on them once ingested. |
 | Browser download history entries | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (badge, guard, backfill progress) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`, `install-native-host`, `native-host` (`crates/chat-stasher/src/main.rs:37-569`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`, `install-native-host`, `native-host` (`crates/chat-stasher/src/main.rs:44-760`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension stops all capture immediately** and removes its
 local storage. It does not delete files already written to your download
@@ -364,10 +364,10 @@ this is the normal situation; on a shared machine it is the dominant risk.
 **3. The master key is the only key, and losing it is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:834-869`, `:871-877`). The key file
+archive (`crates/chat-stasher/src/store.rs:877-884,1006-1010`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:847-868`).
+(`crates/chat-stasher/src/store.rs:919-1004`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension can read our downloaded files, observe the

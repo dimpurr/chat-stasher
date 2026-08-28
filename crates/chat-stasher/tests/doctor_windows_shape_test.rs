@@ -88,14 +88,14 @@ fn isolate_home(home: &Path) {
 fn write_windows_shaped_registry(home: &Path) -> PathBuf {
     let cursor = r#"{ "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
                       "env_override": "CURSOR_USER_DIR", "format": "sqlite",
-                      "confidence": "仅社区说法未核实", "source": "B58 test: 出货 registry 的 cursor.windows 格",
+                      "confidence": "community-claim-unverified", "source": "B58 test: 出货 registry 的 cursor.windows 格",
                       "sql_table": "cursorDiskKV", "sql_id_column": "key",
                       "sql_required_columns": ["key", "value"],
                       "sql_key_column": "key", "sql_key_pattern": "composerData:%",
                       "sql_value_column": "value", "sql_time_json_path": "$.createdAt",
                       "sql_qualification": "cursor-composer-headers" }"#;
     let grok = r#"{ "template": "%USERPROFILE%\\.grok\\sessions\\session_search.sqlite",
-                    "format": "sqlite", "confidence": "未查明",
+                    "format": "sqlite", "confidence": "unascertained",
                     "source": "B58 test: 出货 registry 的 grok.windows 格",
                     "sql_table": "session_docs", "sql_id_column": "session_id",
                     "sql_required_columns": ["session_id", "updated_at"],

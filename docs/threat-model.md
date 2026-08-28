@@ -32,10 +32,10 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/download.ts:28-32`).
 3. The Rust CLI reads those files (`ingest`) and/or reads local coding-harness
    session stores (`collect`, `status`), and produces *sealed shards* in a stage
-   directory (`crates/chat-stasher/src/main.rs:313-334`).
+   directory (`crates/chat-stasher/src/main.rs:456-514`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:96-133`).
+   (`crates/chat-stasher/src/main.rs:131-168`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary, and it is also the only step that can involve a network.
@@ -48,7 +48,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:14-15`; `crates/chat-stasher/src/config.rs:90-98`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:39-41`, `:119`), and when wired it is restricted to an origin that must already be in the platform table (`apps/extension/lib/backfill/engine.ts:186-188`). The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:22`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:39-41`, `:119`), and when wired it is restricted to an origin that must already be in the platform table (`apps/extension/lib/backfill/engine.ts:186-188`). The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:22`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -66,13 +66,13 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:271-330`, `:813-831`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:14-15`; `crates/chat-stasher/src/config.rs:97-98`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:261-296,919-1004`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:146-162`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
 much you produced each time, and therefore roughly when you were and were not
 having conversations. If you archive on a schedule
-(`crates/chat-stasher/src/main.rs:78-95`), the schedule itself is visible to
+(`crates/chat-stasher/src/main.rs:85-130`), the schedule itself is visible to
 them as a pattern of writes. If you archive manually, the write times are a
 usage log.
 
@@ -108,14 +108,14 @@ Concretely, four separate plaintext exposures:
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
    inside a parent directory tightened to `0700`
-   (`crates/chat-stasher/src/store.rs:917-983`); on platforms without Unix
+   (`crates/chat-stasher/src/store.rs:919-1004`); on platforms without Unix
    modes it inherits whatever the filesystem gives it. That keeps it away from
    *other* users, not from you: any process running as you can read it and,
    combined with access to your destination, decrypt the entire archive.
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:99-100,2885-2888`).
+   (`crates/chat-stasher/src/main.rs:131-135`).
 
 4. **Browser download history.** The two-phase write erases only the `.part`
    entry from the download shelf; the final file's entry is not erased
@@ -137,7 +137,7 @@ your user, it is the dominant risk in this document.
 | | |
 |---|---|
 | **Can see** | Everything the previous row lists, if the disk is not encrypted or is unlocked: the plaintext inbox files, the key file, the stage, the config. With the key file *and* the repository, they can read the entire archive. |
-| **Cannot see** | The repository contents alone, *without* the key file — a stolen remote-destination copy is encrypted (`crates/chat-stasher/src/store.rs:813-815`). |
+| **Cannot see** | The repository contents alone, *without* the key file — a stolen remote-destination copy is encrypted (`crates/chat-stasher/src/store.rs:261-296`). |
 | **Evidence** | No at-rest protection is implemented by this project beyond the rustic repository itself; see the key-file citations above. |
 
 The practical consequence: **full-disk encryption is doing the work here, not
@@ -229,7 +229,7 @@ potentially exposed**, not as safe.
 |---|---|
 | **Can see** | Encrypted object traffic: sizes and timing, as with the destination provider. |
 | **Cannot see** | Content. |
-| **Evidence** | Same encryption boundary as the destination row (`crates/chat-stasher/src/store.rs:271-330`). Transport confidentiality is whatever your configured backend provides — SSH for the SFTP case (`crates/chat-stasher/src/reap.rs:1-12`). |
+| **Evidence** | Same encryption boundary as the destination row (`crates/chat-stasher/src/store.rs:261-296`). Transport confidentiality is whatever your configured backend provides — SSH for the SFTP case (`crates/chat-stasher/src/reap.rs:1-12`). |
 
 **We have not verified** the TLS or host-key verification behaviour of every
 opendal backend the config permits. If you configure a backend over a plaintext
@@ -244,17 +244,17 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:1062-1065`). The module states the
+  (`crates/chat-stasher/src/sqlite_probe.rs:1310-1313`). The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:1621-1625`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:1902-1948`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:137-147`, `:3213-3260`).
+  (`crates/chat-stasher/src/main.rs:169-170,253-254`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:429-431`).
+  the old inode (`crates/chat-stasher/src/main.rs:515-547`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -270,9 +270,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:3144-3161`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:3803-3895`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:212-216`).
+  (`crates/chat-stasher/src/main.rs:3786-3793`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -283,7 +283,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:1423-1438`).
+  as many words (`crates/chat-stasher/src/main.rs:2626-2682`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -305,15 +305,15 @@ a real limitation of the current code.
 
 2. **The master key file is plaintext on disk.** It is not passphrase-wrapped
    and not kept in an OS keychain. On Unix it is created `0600` in a `0700`
-   parent (`crates/chat-stasher/src/store.rs:917-983`), which keeps it from
+   parent (`crates/chat-stasher/src/store.rs:919-1004`), which keeps it from
    other users but not from anything running as you; on platforms without Unix
    modes it inherits the filesystem's defaults.
 
 3. **Lose the key file and the data is gone. We have no recovery mechanism of
    any kind.** The master key is the repository's only key
-   (`crates/chat-stasher/src/store.rs:813-815`); losing it makes the repository
+   (`crates/chat-stasher/src/store.rs:877-879`); losing it makes the repository
    unreadable, and `load_key_file` can only report the loss
-   (`crates/chat-stasher/src/store.rs:834-841`). There is no escrow, no
+   (`crates/chat-stasher/src/store.rs:1006-1010`). There is no escrow, no
    recovery code, no maintainer-held copy, and no password-reset path — by
    design, because any of those would mean someone other than you could open
    your archive. **Back up the key file separately from the repository, or your
@@ -322,10 +322,10 @@ a real limitation of the current code.
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:37-569`); **a bulk restore-to-disk command
+   (`crates/chat-stasher/src/main.rs:44-760`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:164-166,3043-3078`), and note that `read` therefore
+   (`crates/chat-stasher/src/main.rs:208-210,4059-4090`), and note that `read` therefore
    *is* a payload-output command — it prints conversation content. Restoring a
    whole archive is not something you can currently do with one command. If
    getting everything back in bulk matters to you, this is not ready for you
@@ -333,10 +333,10 @@ a real limitation of the current code.
 
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
    never fetches or decrypts a data blob; full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:251-261,1541-1583`). It also distinguishes "nothing
+   (`crates/chat-stasher/src/main.rs:349-364`). It also distinguishes "nothing
    matched" from "could not finish reading", which is the same
    unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:259-261,1773-1783`).
+   (`crates/chat-stasher/src/main.rs:361-364`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -361,9 +361,9 @@ Stating these as "we do not defend this" rather than implying coverage:
 - <a id="supply-chain-not-defended"></a>**Supply chain.** We do not defend
   against a compromised dependency. The CLI pulls `rustic_core`,
   `rustic_backend`, `rusqlite` and others
-  (`crates/chat-stasher/Cargo.toml:8-24`); the extension has its own npm
+  (`crates/chat-stasher/Cargo.toml:14-27`); the extension has its own npm
   dependency tree (`apps/extension/package.json`). Some crate versions are
-  pinned (`crates/chat-stasher/Cargo.toml:14-15`, `:21`), which aids
+  pinned (`crates/chat-stasher/Cargo.toml:20-21,27`), which aids
   reproducibility but is not a defence against a malicious pinned version.
   There is no signed release, no reproducible build claim, and no published
   artifact checksum to verify.
@@ -415,5 +415,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:212-216,3147-3161`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:265-303`) rather than assuming
    the archive is intact.

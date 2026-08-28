@@ -158,7 +158,7 @@ fn plant_rows(user_dir: &Path, rows: &[(&str, &str)]) {
 fn write_cursor_registry(base: &Path) -> PathBuf {
     let cursor = r#"{ "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
                       "env_override": "CURSOR_USER_DIR", "format": "sqlite",
-                      "confidence": "本机实测", "source": "B90 test fixture",
+                      "confidence": "measured-locally", "source": "B90 test fixture",
                       "sql_table": "cursorDiskKV", "sql_id_column": "key",
                       "sql_required_columns": ["key", "value"],
                       "sql_key_column": "key", "sql_key_pattern": "composerData:%",

@@ -21,7 +21,7 @@ fn push_does_not_call_an_unresolved_scan_empty() {
         "template": "$CODEX_HOME/sessions/<date>",
         "env_override": "CODEX_HOME",
         "format": "jsonl",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "B63 synthetic fixture"
     }"#;
     fs::write(

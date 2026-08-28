@@ -63,7 +63,7 @@ fn jsonl_harness(root: &Path) -> serde_json::Value {
         "template": root,
         "format": "jsonl",
         "session_pattern": "*.jsonl",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B82 test fixture"
     });
     json!([{
@@ -77,7 +77,7 @@ fn single_file_harness(db: &Path) -> serde_json::Value {
     let cell = json!({
         "template": db,
         "format": "sqlite",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B82 test fixture",
         "sql_table": "session",
         "sql_required_columns": ["id", "time_created", "time_updated"],
@@ -95,7 +95,7 @@ fn cursor_harness(global_db: &Path) -> serde_json::Value {
     let cell = json!({
         "template": global_db,
         "format": "sqlite",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B82 test fixture",
         "sql_table": "cursorDiskKV",
         "sql_required_columns": ["key", "value"],
@@ -252,14 +252,14 @@ fn a3_status_qualifies_its_zero_when_a_harness_was_never_looked_at() {
     let unresolvable = json!({
         "template": "$CWD/.crush/crush.db",
         "format": "sqlite",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B82 test fixture"
     });
     let present = json!({
         "template": absent,
         "format": "jsonl",
         "session_pattern": "*.jsonl",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B82 test fixture"
     });
     let registry = write_registry(
@@ -593,7 +593,7 @@ fn a2_doctor_session_column_is_three_valued() {
     let cell = json!({
         "template": "C:\\fixture\\store.db",
         "format": "sqlite",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B82 test fixture"
     });
     let registry = write_registry(

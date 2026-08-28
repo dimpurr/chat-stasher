@@ -100,7 +100,7 @@ fn plant_registry(home: &Path, template: &str) -> PathBuf {
     let cell = format!(
         r#"{{ "template": "{escaped}",
               "env_override": "CURSOR_USER_DIR", "format": "sqlite",
-              "confidence": "仅社区说法未核实", "source": "B59 test: the shipped registry's cursor cell",
+              "confidence": "community-claim-unverified", "source": "B59 test: the shipped registry's cursor cell",
               "sql_table": "cursorDiskKV", "sql_id_column": "key",
               "sql_required_columns": ["key", "value"],
               "sql_key_column": "key", "sql_key_pattern": "composerData:%",

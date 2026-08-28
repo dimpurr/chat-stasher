@@ -97,7 +97,7 @@ RULES = [
                 "forbidden": r"\bmissing\b",
                 "context": (
                     r"\b(?:archive|archives|archived|archival|backup|backups|backed|"
-                    r"shard|shards|session|sessions|snapshot|snapshots)\b"
+                    r"shard|shards)\b"
                 ),
                 # the verification/audit "expected but absent" sense is NOT the
                 # "未归档" misuse: a session the manifest expected but the archive

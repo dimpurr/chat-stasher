@@ -9,34 +9,34 @@
         "macos": {
           "template": "~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl",
           "format": "jsonl",
-          "confidence": "源码确认",
-          "source": "任务已知事实（macOS 实测）"
+          "confidence": "source-confirmed",
+          "source": "known fact (measured on macOS)"
         },
         "linux": {
           "template": "~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl",
           "format": "jsonl",
-          "confidence": "官方文档",
-          "source": "https://code.claude.com/docs/en/claude-directory （Linux 例 -home-user-work-my-repo 证实 /→-）"
+          "confidence": "official-docs",
+          "source": "https://code.claude.com/docs/en/claude-directory (Linux example -home-user-work-my-repo confirms /->-)"
         },
         "windows": {
           "template": "%USERPROFILE%\\.claude\\projects\\<sanitized-cwd>\\<session-uuid>.jsonl",
           "format": "jsonl",
-          "confidence": "官方文档",
-          "source": "https://code.claude.com/docs/en/claude-directory（原话：~/.claude → %USERPROFILE%\\.claude）+ anthropics/claude-code#80683 #84354"
+          "confidence": "official-docs",
+          "source": "https://code.claude.com/docs/en/claude-directory(original text: ~/.claude -> %USERPROFILE%\\.claude)+ anthropics/claude-code#80683 #84354"
         }
       },
-      "notes": "Windows 走 %USERPROFILE%，不是 %APPDATA%\\Claude。Windows 上短路径用可读 slug；长路径(>~200字符)用路径哈希目录(issue #84354)；该哈希 Windows 上仍区分大小写(c:\\ vs C:\\ 产生不同目录→会话消失)。盘符冒号:与反斜杠\\在短路径下的具体 sanitize：未查明，需 Windows 真机实测。CLAUDE_CONFIG_DIR 覆盖整个 base；清理默认 30 天。",
+      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude。Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear)。drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware。CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days。",
       "seal_policy": "rename",
-      "seal_source": "A9 实测（macOS）：201 采样点跨真实写入窗口（172210→194561 B，11 次 size 变化）全部 lsof=0 ⇒ 每次按路径 reopen，rename 封口安全",
+      "seal_source": "A9 measured(macOS): 201 sample points across real write windows(172210->194561 B, 11 size changes)all lsof=0 => reopens by path each time, rename seal is safe",
       "reference": {
-        "upstream_project": "Anthropic Claude Code 官方文档",
+        "upstream_project": "Anthropic Claude Code official docs",
         "file_path": "/docs/en/claude-directory",
         "line_count": 1531,
-        "license": "未查明",
-        "relationship": "参考",
+        "license": "unascertained",
+        "relationship": "reference",
         "source_url": "https://code.claude.com/docs/en/claude-directory",
-        "license_url": "未查明",
-        "scope": "curl 核实的是渲染文档页，不是公开实现源码。"
+        "license_url": "unascertained",
+        "scope": "curl verified the rendered documentation page, not public implementation source。"
       }
     },
     {
@@ -47,33 +47,33 @@
           "template": "~/.codex/sessions/",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
-          "confidence": "源码确认",
-          "source": "任务已知事实（macOS 实测）"
+          "confidence": "source-confirmed",
+          "source": "known fact (measured on macOS)"
         },
         "linux": {
           "template": "$CODEX_HOME/sessions/（默认 $HOME/.codex/sessions/）",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
-          "confidence": "源码确认",
-          "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()（dirs::home_dir().push(\".codex\")）+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235"
+          "confidence": "source-confirmed",
+          "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()(dirs::home_dir().push(\".codex\"))+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235"
         },
         "windows": {
           "template": "%CODEX_HOME%\\sessions\\（默认 %USERPROFILE%\\.codex\\sessions\\）",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
-          "confidence": "源码确认",
-          "source": "同上（dirs::home_dir() Windows 返回 %USERPROFILE%，无平台分支）"
+          "confidence": "source-confirmed",
+          "source": "same as above(dirs::home_dir() on Windows returns %USERPROFILE%, no platform branch)"
         }
       },
-      "notes": "不 honor XDG_DATA_HOME（home-dir crate 无 XDG 引用）。空闲 rollout 压缩为 .jsonl.zst。session_index.jsonl 在 codex home 根。CODEX_HOME 可覆盖。",
+      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references)。idle rollouts are compressed to .jsonl.zst。session_index.jsonl is at the codex home root。CODEX_HOME can override。",
       "seal_policy": "no-rename",
-      "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746（ensure_writer_open 已开则不重开）+ :1928（JsonlWriter 持 tokio::fs::File）⇒ 持 fd，rename 后新增会写进旧 inode",
+      "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746(ensure_writer_open does not reopen if already open)+ :1928(JsonlWriter holds tokio::fs::File)=> holds fd; new writes after rename go to old inode",
       "reference": {
         "upstream_project": "openai/codex",
         "file_path": "codex-rs/utils/home-dir/src/lib.rs",
         "line_count": 134,
         "license": "Apache-2.0",
-        "relationship": "参考",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs",
         "license_url": "https://raw.githubusercontent.com/openai/codex/main/LICENSE"
       }
@@ -87,35 +87,35 @@
           "env_override": "GEMINI_CLI_HOME",
           "format": "json / jsonl",
           "session_pattern": "session-*",
-          "confidence": "源码确认",
-          "source": "任务已知事实（macOS 实测）"
+          "confidence": "source-confirmed",
+          "source": "known fact (measured on macOS)"
         },
         "linux": {
           "template": "$HOME/.gemini/tmp/<projectId>/chats/",
           "env_override": "GEMINI_CLI_HOME",
           "format": "json / jsonl",
           "session_pattern": "session-*",
-          "confidence": "源码确认",
-          "source": "packages/core/src/utils/paths.ts:17,25-34；packages/core/src/config/storage.ts:56-68,181-184,363-401"
+          "confidence": "source-confirmed",
+          "source": "packages/core/src/utils/paths.ts:17,25-34; packages/core/src/config/storage.ts:56-68,181-184,363-401"
         },
         "windows": {
           "template": "%USERPROFILE%\\.gemini\\tmp\\<projectId>\\chats\\",
           "env_override": "GEMINI_CLI_HOME",
           "format": "json / jsonl",
           "session_pattern": "session-*",
-          "confidence": "源码确认",
-          "source": "同上（os.homedir() → %USERPROFILE%）"
+          "confidence": "source-confirmed",
+          "source": "same as above(os.homedir() -> %USERPROFILE%)"
         }
       },
-      "notes": "用 os.homedir()（Windows=%USERPROFILE%），无 APPDATA/XDG 逻辑；不 honor XDG_DATA_HOME。GEMINI_CLI_HOME 环境变量会整体覆盖 home。30 天清理：全局 tmp 目录 sweep。聊天历史在 tmp/<projectId>/chats/（名字叫 tmp 但并非临时）。",
+      "notes": "uses os.homedir() (Windows=%USERPROFILE%), no APPDATA/XDG logic; does not honor XDG_DATA_HOME。GEMINI_CLI_HOME env var overrides the home directory entirely。30-day cleanup: global tmp directory sweep。chat history in tmp/<projectId>/chats/(named tmp but not temporary)。",
       "seal_policy": "rename",
-      "seal_source": "packages/core/src/services/chatRecordingService.ts:559-564 fs.appendFileSync = 每次调用 open→append→close，不跨调用持 fd ⇒ 每次 reopen，rename 封口安全",
+      "seal_source": "packages/core/src/services/chatRecordingService.ts:559-564 fs.appendFileSync = each call does open->append->close, no fd held across calls => reopens each time, rename seal is safe",
       "reference": {
         "upstream_project": "google-gemini/gemini-cli",
         "file_path": "packages/core/src/utils/paths.ts",
         "line_count": 625,
         "license": "Apache-2.0",
-        "relationship": "参考",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts",
         "license_url": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/LICENSE"
       }
@@ -128,33 +128,33 @@
           "template": "$XDG_DATA_HOME/opencode/opencode.db",
           "env_override": "OPENCODE_DB",
           "format": "sqlite",
-          "confidence": "源码确认",
-          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
+          "confidence": "source-confirmed",
+          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         },
         "linux": {
           "template": "$XDG_DATA_HOME/opencode/opencode.db",
           "env_override": "OPENCODE_DB",
           "format": "sqlite",
-          "confidence": "源码确认",
-          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
+          "confidence": "source-confirmed",
+          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         },
         "windows": {
           "template": "$XDG_DATA_HOME/opencode/opencode.db",
           "env_override": "OPENCODE_DB",
           "format": "sqlite",
-          "confidence": "源码确认",
-          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
+          "confidence": "source-confirmed",
+          "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         }
       },
-      "notes": "上游是 TypeScript 项目 anomalyco/opencode（原 sst/opencode），不是 Go 项目。v1.18.4 的 packages/core/src/global.ts:10-14 从 xdg-basedir 的 xdgData 计算 Global.Path.data；xdg-basedir v5.1.0 的 index.js:7-8 只取 XDG_DATA_HOME，否则一律回退到 homedir/.local/share，因此 macOS/Linux/Windows 的默认结构都是 $HOME/.local/share/opencode/opencode.db（registry 用 $XDG_DATA_HOME 表示该可覆盖基目录）。packages/core/src/database/database.ts:43-54 使用 OPENCODE_DB，packages/core/src/flag/flag.ts:47 从环境读取它：:memory: 或绝对路径直用，相对值挂在 Global.Path.data 下；发布 channel latest/beta/prod 或禁用 channel db 时文件名为 opencode.db，其他 channel 可能带 channel 后缀。源码出处：https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts；https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/flag/flag.ts；https://raw.githubusercontent.com/sindresorhus/xdg-basedir/v5.1.0/index.js。与本机 ~/.local/share/opencode/opencode.db 存在的实测一致。",
+      "notes": "upstream is the TypeScript project anomalyco/opencode(originally sst/opencode), not a Go project。v1.18.4's packages/core/src/global.ts:10-14 computes Global.Path.data from xdg-basedir's xdgData; xdg-basedir v5.1.0's index.js:7-8 only takes XDG_DATA_HOME, otherwise always falls back to homedir/.local/share, therefore the default structure on macOS/Linux/Windows is $HOME/.local/share/opencode/opencode.db(registry uses $XDG_DATA_HOME for this overrideable base directory). packages/core/src/database/database.ts:43-54 uses OPENCODE_DB, packages/core/src/flag/flag.ts:47 reads it from the environment: :memory: or uses absolute path directly, relative values hang under Global.Path.data; release channel latest/beta/prod or when channel db is disabled the file name is opencode.db, other channels may include a channel suffix。source URLs: https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/flag/flag.ts; https://raw.githubusercontent.com/sindresorhus/xdg-basedir/v5.1.0/index.js。matches local measurement: ~/.local/share/opencode/opencode.db exists。",
       "seal_policy": "not-applicable",
-      "seal_source": "单一 SQLite（database.ts path() → opencode.db，WAL 必然长期持 fd，但本身也非 append jsonl）⇒ 没有可 rename 的活跃 jsonl",
+      "seal_source": "single SQLite(database.ts path() -> opencode.db, WAL necessarily holds fd for a long time, but it is also not an append jsonl)=> no active jsonl to rename",
       "reference": {
         "upstream_project": "anomalyco/opencode",
         "file_path": "packages/core/src/database/database.ts",
         "line_count": 57,
         "license": "MIT",
-        "relationship": "参考",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts",
         "license_url": "https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/LICENSE"
       }
@@ -167,11 +167,14 @@
           "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
           "env_override": "CURSOR_USER_DIR",
           "format": "sqlite",
-          "confidence": "本机实测",
-          "source": "本机实测（B27 2026-08-17）：state.vscdb 只读实开，cursorDiskKV 表存在，key LIKE 'composerData:%' 计数=19、value 总字节 28,291；路径来源 cursaves 社区文档（未读 Cursor 源码）",
+          "confidence": "measured-locally",
+          "source": "measured locally (B27 2026-08-17): state.vscdb opened read-only, cursorDiskKV table exists, key LIKE 'composerData:%' count=19, value total bytes 28,291; path source: cursaves community docs(Cursor source not read)",
           "sql_table": "cursorDiskKV",
           "sql_id_column": "key",
-          "sql_required_columns": ["key", "value"],
+          "sql_required_columns": [
+            "key",
+            "value"
+          ],
           "sql_key_column": "key",
           "sql_key_pattern": "composerData:%",
           "sql_value_column": "value",
@@ -182,29 +185,29 @@
           "template": "$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb",
           "env_override": "CURSOR_USER_DIR",
           "format": "sqlite",
-          "confidence": "仅社区说法未核实",
+          "confidence": "community-claim-unverified",
           "source": "github.com/Callum-Ward/cursaves/docs/how-cursor-stores-chats.md + forum.cursor.com/t/77295"
         },
         "windows": {
           "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
           "env_override": "CURSOR_USER_DIR",
           "format": "sqlite",
-          "confidence": "仅社区说法未核实",
-          "source": "同上 + Electron userData 惯例（%APPDATA%\\<name>）"
+          "confidence": "community-claim-unverified",
+          "source": "same as above + Electron userData convention(%APPDATA%\\<name>)"
         }
       },
-      "notes": "闭源（VS Code fork/Electron），无官方文档。会话正文在全局 state.vscdb 的 cursorDiskKV 表(composerData:{id} 等 key，每会话一行)；项目级 chats 列表在 workspaceStorage/<id>/state.vscdb。Cursor 3.0(2026-04)把索引集中到全局 DB。Linux 走 $XDG_CONFIG_HOME/Cursor/...，该变量未设置时按 XDG 惯例回退到 ~/.config/Cursor/...（B59：这句默认值说明原先写在 linux 格的 template 尾巴里，导致模板解析出的路径不以 globalStorage 结尾 ⇒ 没写配置的 Linux 用户一律 SkipUnresolvable；说明性文字统一放 notes，template 只放路径）。Windows 走 %APPDATA%(Roaming)，不是 %USERPROFILE% 根——区别于多数 CLI 工具（%APPDATA% 未导出时按 Windows 惯例回退到 %USERPROFILE%\\AppData\\Roaming）。少数社区说法：新版也写 ~/.cursor/projects/<project>/agent-transcripts（CLI agent 数据目录）。⚠️ confidence 说明：macOS cell 是「本机实测但未读源码」——现有取值(源码确认/官方文档/仅社区说法未核实/未查明)都不贴切，故新增取值「本机实测」（B27 发现：这四种证据来源词汇不足以表达『本机实测』这一类）。linux/windows cell 仍为社区说法，未核实。",
+      "notes": "closed source (VS Code fork/Electron), no official docs。session body lives in the global state.vscdb cursorDiskKV table (composerData:{id} keys, one row per session); project-level chats list in workspaceStorage/<id>/state.vscdb。Cursor 3.0 (2026-04) moved the index to the global DB。Linux uses $XDG_CONFIG_HOME/Cursor/...; when this variable is unset falls back per XDG convention to ~/.config/Cursor/...(B59: this default explanation used to live in the linux cell template tail, making the resolved path not end in globalStorage => Linux users without config always got SkipUnresolvable; explanatory text now belongs in notes, template holds only the path)。Windows uses %APPDATA%(Roaming), not under %USERPROFILE% root - different from most CLI tools(%APPDATA% when unset falls back per Windows convention to %USERPROFILE%\\AppData\\Roaming)。some community claims: newer versions also write ~/.cursor/projects/<project>/agent-transcripts (CLI agent data directory)。⚠️ confidence note: the macOS cell is \"measured-locally but source not read\" - existing values (source-confirmed/official-docs/community-claim-unverified/unascertained) are not a good fit, so a new value \"measured-locally\" was added (B27 finding: these four evidence-source terms are insufficient to express the \"measured-locally\" category)。linux/windows cells remain community claims, unverified。",
       "seal_policy": "not-applicable",
-      "seal_source": "单 SQLite（state.vscdb，cursorDiskKV 表）——非 append 单文件 jsonl，无活跃文件可 rename；且 ADR-011 已废除 rename 封口方案",
+      "seal_source": "single SQLite (state.vscdb, cursorDiskKV table) - not an append-only single-file jsonl, no active file to rename; and ADR-011 deprecated the rename-seal approach",
       "reference": {
-        "upstream_project": "cursor/cursor（公开仓库；会话存储实现文件未找到）",
+        "upstream_project": "cursor/cursor (public repo; session storage implementation file not found)",
         "file_path": "README.md",
         "line_count": 21,
-        "license": "未查明",
-        "relationship": "参考",
+        "license": "unascertained",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/cursor/cursor/main/README.md",
-        "license_url": "未查明",
-        "scope": "只作上游项目资料参考；不把 README 当作会话存储实现源码。"
+        "license_url": "unascertained",
+        "scope": "for upstream project reference only; do not treat README as session storage implementation source。"
       }
     },
     {
@@ -214,39 +217,42 @@
         "macos": {
           "template": "~/.grok/sessions/session_search.sqlite",
           "format": "sqlite",
-          "confidence": "本机实测",
-          "source": "本机实测（B27 2026-08-17）：~/.grok/sessions/session_search.sqlite 只读实开，session_docs 表存在，计数=1、updated_at=1784924765（Unix 秒）；会话本体另有 ~/.grok/sessions/<sanitized-cwd>/<uuid>/ 下 JSONL",
+          "confidence": "measured-locally",
+          "source": "measured locally (B27 2026-08-17): ~/.grok/sessions/session_search.sqlite opened read-only, session_docs table exists, count=1, updated_at=1784924765(Unix seconds); session body also has JSONL under ~/.grok/sessions/<sanitized-cwd>/<uuid>/",
           "sql_table": "session_docs",
           "sql_id_column": "session_id",
-          "sql_required_columns": ["session_id", "updated_at"],
+          "sql_required_columns": [
+            "session_id",
+            "updated_at"
+          ],
           "sql_time_column": "updated_at",
           "sql_time_value_is_seconds": true
         },
         "linux": {
           "template": "$HOME/.grok/sessions/session_search.sqlite",
           "format": "sqlite",
-          "confidence": "未查明",
-          "source": "未核实：本机未安装 Linux 版，源码未读"
+          "confidence": "unascertained",
+          "source": "unverified: Linux version not installed locally, source not read"
         },
         "windows": {
           "template": "%USERPROFILE%\\.grok\\sessions\\session_search.sqlite",
           "format": "sqlite",
-          "confidence": "未查明",
-          "source": "未核实：本机未安装 Windows 版，源码未读"
+          "confidence": "unascertained",
+          "source": "unverified: Windows version not installed locally, source not read"
         }
       },
-      "notes": "xAI Grok CLI（目录结构实测与 Claude Code 相似：sessions/<sanitized-cwd>/<uuid>/ 下 chat_history.jsonl + events.jsonl，但「Claude Code 系 fork」未读源码证实）。会话本体在 ~/.grok/sessions/<sanitized-cwd>/<session-uuid>/{chat_history,events}.jsonl（每会话一目录）；session_search.sqlite 是搜索索引，session_docs 每会话一行，updated_at 为 Unix 秒。SQLite 库位于 ~/.grok/sessions/ 下，WAL 模式。macOS cell confidence=本机实测；linux/windows 未核实。",
+      "notes": "xAI Grok CLI(directory structure measured to be similar to Claude Code: sessions/<sanitized-cwd>/<uuid>/ under chat_history.jsonl + events.jsonl, but \"Claude Code family fork\" not confirmed by reading source)。session body lives in ~/.grok/sessions/<sanitized-cwd>/<session-uuid>/{chat_history,events}.jsonl(one directory per session); session_search.sqlite is the search index, session_docs one row per session, updated_at in Unix seconds。SQLite library located at ~/.grok/sessions/ in WAL mode。macOS cell confidence=measured-locally; linux/windows unverified。",
       "seal_policy": "not-applicable",
-      "seal_source": "单 SQLite（session_search.sqlite，WAL）+ 会话本体为每会话独立 JSONL 目录——无活跃 append 单文件可 rename；且 ADR-011 已废除 rename 封口方案",
+      "seal_source": "single SQLite (session_search.sqlite, WAL) + session body is a per-session independent JSONL directory - no active append-only single file to rename; and ADR-011 deprecated the rename-seal approach",
       "reference": {
         "upstream_project": "xAI Grok CLI",
-        "file_path": "未找到",
-        "line_count": "未查明",
-        "license": "未查明",
-        "relationship": "无参考",
+        "file_path": "not found",
+        "line_count": "unascertained",
+        "license": "unascertained",
+        "relationship": "no reference",
         "source_url": "https://github.com/xai-org/grok-cli",
-        "license_url": "未查明",
-        "verification": "候选上游仓库 URL 本轮 curl 返回 HTTP 404；没有把本机实测文件写成上游文件。"
+        "license_url": "unascertained",
+        "verification": "candidate upstream repo URL returned HTTP 404 in this curl round; did not write the locally measured file as an upstream file。"
       }
     },
     {
@@ -256,34 +262,34 @@
         "macos": {
           "template": "~/.copilot/",
           "format": "sqlite + jsonl",
-          "confidence": "源码确认",
-          "source": "@github/copilot v1.0.80 编译产物（app.js + runtime.node 内嵌 SQLite DDL）"
+          "confidence": "source-confirmed",
+          "source": "@github/copilot v1.0.80 build artifacts(app.js + runtime.node embedded SQLite DDL)"
         },
         "linux": {
           "template": "~/.copilot/（+ XDG 迁移：$XDG_CONFIG_HOME/copilot、$XDG_STATE_HOME/copilot）",
           "format": "sqlite + jsonl",
-          "confidence": "源码确认",
-          "source": "同上（bOn=\".copilot\"、join(homedir,.copilot)、session-store.db）"
+          "confidence": "source-confirmed",
+          "source": "same as above(bOn=\".copilot\", join(homedir,.copilot), session-store.db)"
         },
         "windows": {
           "template": "%USERPROFILE%\\.copilot\\",
           "format": "sqlite + jsonl",
-          "confidence": "源码确认",
-          "source": "同上（home 无 win32 分支）；缓存走 %LOCALAPPDATA%\\copilot\\"
+          "confidence": "source-confirmed",
+          "source": "same as above(home has no win32 branch); cache goes to %LOCALAPPDATA%\\copilot\\"
         }
       },
-      "notes": "会持久化会话（非 ephemeral）：session-store.db SQLite(sessions/turns/... WAL)+每会话 events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir 可覆盖。Linux 若设 XDG_CONFIG_HOME/XDG_STATE_HOME 会一次性迁移 config→XDG_CONFIG_HOME/copilot、state(含 session-store.db)→XDG_STATE_HOME/copilot。Windows 不适用 XDG 迁移。",
+      "notes": "persists sessions (non-ephemeral): session-store.db SQLite(sessions/turns/... WAL)+per-session events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir can override。Linux if set XDG_CONFIG_HOME/XDG_STATE_HOME performs a one-time migration config->XDG_CONFIG_HOME/copilot, state(including session-store.db)->XDG_STATE_HOME/copilot。XDG migration does not apply on Windows。",
       "seal_policy": "no-rename",
-      "seal_source": "（fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）",
+      "seal_source": "(fd semantics not measured/source-confirmed before B20 => default no-rename)",
       "reference": {
         "upstream_project": "github/copilot-cli",
         "file_path": "README.md",
         "line_count": 194,
-        "license": "GitHub Copilot CLI 自定义条款（非 SPDX 标准值）",
-        "relationship": "参考",
+        "license": "GitHub Copilot CLI custom terms (non-SPDX standard value)",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/github/copilot-cli/main/README.md",
         "license_url": "https://raw.githubusercontent.com/github/copilot-cli/main/LICENSE.md",
-        "scope": "只作产品/上游资料参考；未找到公开会话存储实现文件。"
+        "scope": "for product/upstream reference only; not foundpublic session storage implementation file。"
       }
     },
     {
@@ -293,31 +299,31 @@
         "macos": {
           "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）",
           "format": "markdown / txt / jsonl",
-          "confidence": "源码确认",
-          "source": "aider/args.py:271-276；aider/io.py:1117-1136"
+          "confidence": "source-confirmed",
+          "source": "aider/args.py:271-276; aider/io.py:1117-1136"
         },
         "linux": {
           "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）；config 在 ~/.aider/",
           "format": "markdown / txt / jsonl",
-          "confidence": "源码确认",
-          "source": "同上 + aider/main.py:370,1185"
+          "confidence": "source-confirmed",
+          "source": "same as above + aider/main.py:370,1185"
         },
         "windows": {
           "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）；config 在 %USERPROFILE%\\.aider\\",
           "format": "markdown / txt / jsonl",
-          "confidence": "源码确认",
-          "source": "同上（平台无关 CWD 相对）"
+          "confidence": "source-confirmed",
+          "source": "same as above(platform-independent CWD-relative)"
         }
       },
-      "notes": "聊天历史在 CWD，不在 home；~/.aider/ 只放 config/state（installs.json、oauth-keys.env、model settings）。旧的 .aider.history.jsonl 已不存在（改为 .aider.chat.history.md）。不 honor XDG/APPDATA。",
+      "notes": "chat history is in CWD, not home; ~/.aider/ only holds config/state(installs.json, oauth-keys.env, model settings)。old .aider.history.jsonl no longer exists (changed to .aider.chat.history.md)。does not honor XDG/APPDATA。",
       "seal_policy": "no-rename",
-      "seal_source": "（CWD 相对 store 且 fd 语义未在 B20 前实测/源码确认 ⇒ 默认 no-rename）",
+      "seal_source": "(CWD-relative store and fd semantics not measured/source-confirmed before B20 => default no-rename)",
       "reference": {
         "upstream_project": "Aider-AI/aider",
         "file_path": "aider/args.py",
         "line_count": 945,
         "license": "Apache-2.0",
-        "relationship": "参考",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py",
         "license_url": "https://raw.githubusercontent.com/Aider-AI/aider/main/LICENSE.txt"
       }
@@ -329,31 +335,31 @@
         "macos": {
           "template": "$CWD/.crush/crush.db",
           "format": "sqlite",
-          "confidence": "源码确认",
+          "confidence": "source-confirmed",
           "source": "internal/db/connect.go:93 + internal/config/load.go:559-562"
         },
         "linux": {
           "template": "$CWD/.crush/crush.db（项目级）；全局 config ~/.config/crush/、data ~/.local/share/crush/",
           "format": "sqlite",
-          "confidence": "源码确认",
-          "source": "同上 + internal/config/load.go:1181-1258"
+          "confidence": "source-confirmed",
+          "source": "same as above + internal/config/load.go:1181-1258"
         },
         "windows": {
           "template": "$CWD/.crush/crush.db（项目级）；全局 config %APPDATA%\\crush\\、data %LOCALAPPDATA%\\crush\\",
           "format": "sqlite",
-          "confidence": "源码确认",
-          "source": "同上"
+          "confidence": "source-confirmed",
+          "source": "same as above"
         }
       },
-      "notes": "项目级 SQLite（data_directory 默认 .crush，随项目走）。全局目录只放 config，不放聊天历史。",
+      "notes": "project-level SQLite (data_directory defaults to .crush, follows the project)。global directory only holds config, not chat history。",
       "seal_policy": "no-rename",
-      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）",
+      "seal_source": "(single-file SQLite store, no active jsonl; and fd semantics unconfirmed => no-rename)",
       "reference": {
         "upstream_project": "charmbracelet/crush",
         "file_path": "internal/db/connect.go",
         "line_count": 248,
         "license": "MIT",
-        "relationship": "参考",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go",
         "license_url": "https://raw.githubusercontent.com/charmbracelet/crush/main/LICENSE.md"
       }
@@ -365,31 +371,31 @@
         "macos": {
           "template": "~/Library/Application Support/Zed/threads/threads.db",
           "format": "sqlite",
-          "confidence": "仅社区说法未核实",
-          "source": "未直接核实 macOS 分支；由 crates/paths 平台惯例推断"
+          "confidence": "community-claim-unverified",
+          "source": "macOS branch not directly verified; inferred from crates/paths platform convention"
         },
         "linux": {
           "template": "$XDG_DATA_HOME/zed/threads/threads.db（默认 ~/.local/share/zed/threads/threads.db）",
           "format": "sqlite",
-          "confidence": "源码确认",
+          "confidence": "source-confirmed",
           "source": "crates/agent/src/db.rs:438-440 + crates/paths/src/paths.rs:57-65"
         },
         "windows": {
           "template": "%LOCALAPPDATA%\\Zed\\threads\\threads.db",
           "format": "sqlite",
-          "confidence": "源码确认",
-          "source": "同上"
+          "confidence": "source-confirmed",
+          "source": "same as above"
         }
       },
-      "notes": "AI 面板/agent 聊天历史在 <data_dir>/threads/threads.db（ThreadStore）。主 app DB 在 <data_dir>/db/0-<channel>/db.sqlite（非聊天）。✅Zed 是 Linux 上真正走 XDG_DATA_HOME 的第二个例子。macOS 分支未逐一核实。",
+      "notes": "AI panel/agent chat history in <data_dir>/threads/threads.db(ThreadStore)。main app DB in <data_dir>/db/0-<channel>/db.sqlite(not chat)。✅Zed is the second example on Linux that truly uses XDG_DATA_HOME。macOS branch not verified one by one。",
       "seal_policy": "no-rename",
-      "seal_source": "（SQLite 单文件存储，无活跃 jsonl；且 fd 语义未确认 ⇒ no-rename）",
+      "seal_source": "(single-file SQLite store, no active jsonl; and fd semantics unconfirmed => no-rename)",
       "reference": {
         "upstream_project": "zed-industries/zed",
         "file_path": "crates/agent/src/db.rs",
         "line_count": 1249,
-        "license": "Apache-2.0 OR GPL-family（具体 SPDX 未查明）",
-        "relationship": "参考",
+        "license": "Apache-2.0 OR GPL-family (exact SPDX unascertained)",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs",
         "license_url": "https://raw.githubusercontent.com/zed-industries/zed/main/LICENSE-APACHE",
         "alternate_license_url": "https://raw.githubusercontent.com/zed-industries/zed/main/LICENSE-GPL"
@@ -402,31 +408,31 @@
         "macos": {
           "template": "~/.continue/sessions/<id>.json + sessions.json",
           "format": "json",
-          "confidence": "源码确认",
-          "source": "core/util/paths.ts:27-35,79-112（os.homedir 平台无关）"
+          "confidence": "source-confirmed",
+          "source": "core/util/paths.ts:27-35,79-112(os.homedir is platform-independent)"
         },
         "linux": {
           "template": "~/.continue/sessions/<id>.json + sessions.json",
           "format": "json",
-          "confidence": "源码确认",
-          "source": "同上 + core/util/history.ts:26-30"
+          "confidence": "source-confirmed",
+          "source": "same as above + core/util/history.ts:26-30"
         },
         "windows": {
           "template": "%USERPROFILE%\\.continue\\sessions\\<id>.json + sessions.json",
           "format": "json",
-          "confidence": "源码确认",
-          "source": "同上（os.homedir → %USERPROFILE%，无 %APPDATA%/XDG，除非 CONTINUE_GLOBAL_DIR 覆盖）"
+          "confidence": "source-confirmed",
+          "source": "same as above(os.homedir -> %USERPROFILE%, no %APPDATA%/XDG unless CONTINUE_GLOBAL_DIR overrides)"
         }
       },
-      "notes": "每会话一个 JSON + sessions.json 索引。Continue 的 SQLite(dev_data at ~/.continue/dev_data/) 是 analytics，不是聊天历史。CONTINUE_GLOBAL_DIR 可整体覆盖。",
+      "notes": "one JSON per session + sessions.json index。Continue's SQLite(dev_data at ~/.continue/dev_data/) is analytics, not chat history。CONTINUE_GLOBAL_DIR can override entirely。",
       "seal_policy": "no-rename",
-      "seal_source": "（每会话独立 JSON 文件、覆盖/新建语义，fd 语义未在 B20 前确认 ⇒ 默认 no-rename）",
+      "seal_source": "(per-session independent JSON files, overwrite/create semantics, fd semantics not confirmed before B20 => default no-rename)",
       "reference": {
         "upstream_project": "continuedev/continue",
         "file_path": "core/util/paths.ts",
         "line_count": 513,
         "license": "Apache-2.0",
-        "relationship": "参考",
+        "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts",
         "license_url": "https://raw.githubusercontent.com/continuedev/continue/main/LICENSE"
       }

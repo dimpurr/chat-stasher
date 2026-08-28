@@ -14,7 +14,7 @@ fn write_registry(sandbox: &Path, template: &str) -> PathBuf {
             "template": "{template}",
             "env_override": "CODEX_HOME",
             "format": "jsonl / jsonl.zst",
-            "confidence": "源码确认",
+            "confidence": "source-confirmed",
             "source": "B69 synthetic fixture"
         }}"#
     );

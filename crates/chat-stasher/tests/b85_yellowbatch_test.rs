@@ -120,7 +120,7 @@ fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
     let registry = sandbox.path().join("registry.json");
     fs::write(
         &registry,
-        r#"{"schema_version":1,"generated":"B85","harnesses":[{"id":"opencode","display_name":"opencode","paths":{"macos":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"本机实测","source":"B85"},"linux":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"本机实测","source":"B85"},"windows":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"本机实测","source":"B85"}}}]}"#,
+        r#"{"schema_version":1,"generated":"B85","harnesses":[{"id":"opencode","display_name":"opencode","paths":{"macos":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"measured-locally","source":"B85"},"linux":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"measured-locally","source":"B85"},"windows":{"template":"$B85_UNKNOWN/opencode.db","format":"sqlite","confidence":"measured-locally","source":"B85"}}}]}"#,
     )
     .expect("write unresolved-root registry");
     let mut command = isolated_command(sandbox.path(), &["doctor"], &registry);
@@ -317,7 +317,7 @@ fn clean_status_output_is_byte_identical() {
         "template": root,
         "format": "jsonl",
         "session_pattern": "*.jsonl",
-        "confidence": "本机实测",
+        "confidence": "measured-locally",
         "source": "B85 clean fixture"
     });
     let registry_json = serde_json::json!({

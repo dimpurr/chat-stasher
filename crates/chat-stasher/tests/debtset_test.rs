@@ -25,7 +25,7 @@ fn registry() -> HarnessRegistry {
     let cell = json!({
         "template": "~/.claude/projects",
         "format": "jsonl",
-        "confidence": "源码确认",
+        "confidence": "source-confirmed",
         "source": "synthetic fixture"
     });
     let paths = match scanner::current_platform() {
