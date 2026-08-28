@@ -21,9 +21,9 @@ It is not one app, it is **two pieces**, each doing its own job:
 | **Browser extension (Chat Stasher)** | Saves your conversations from **web-based** chats as files into your download directory, waiting for the CLI to collect them | Your browser |
 
 **On the CLI side:** its self-description is "Append-only archive for every LLM
-conversation, across harnesses." (`crates/chat-stasher/src/main.rs:33`). It
+conversation, across harnesses." (`crates/chat-stasher/src/main.rs:34`). It
 reads session files that already exist on your machine, and reads them
-read-only (`crates/chat-stasher/src/main.rs:481`).
+read-only (`crates/chat-stasher/src/main.rs:482`).
 
 **On the extension side:** it currently recognizes **six** web platforms —
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
@@ -37,7 +37,7 @@ files at `chat-stasher/inbox/<name>.json` under the download directory
 
 **How the two sides connect:** the extension only writes files to disk; the CLI
 takes them away with `ingest --inbox <your-inbox> --stage <your-stage>`
-(`crates/chat-stasher/src/main.rs:456-478`).
+(`crates/chat-stasher/src/main.rs:457-479`).
 
 🔴 **"Recognizing the platform" does not mean "it can recover your history on
 that platform."** The extension has two legs; please read them separately:
@@ -125,7 +125,7 @@ chat-stasher init
 ```
 
 `init` writes a commented default config only when the config does **not**
-already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:45-46`).
+already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:46-47`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
 `XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,491-502`).
 
@@ -215,14 +215,14 @@ See section 2. If you already did it, you do not need to do it again.
 The archive's destination is decided by your config and command-line arguments
 — a local path, or a backend you configure yourself. `push` / `read` / `verify`
 read the repository and key file you select in config or arguments
-(`crates/chat-stasher/src/main.rs:148-153,237-242,288-293`).
+(`crates/chat-stasher/src/main.rs:149-154,237-242,288-293`).
 
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:877-879`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1044-1046`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:977-985`).
+(`crates/chat-stasher/src/store.rs:1144-1152`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -231,11 +231,11 @@ with owner-only-readable permissions, on platforms that can express them
 `chat-stasher schedule` **renders** a launchd plist or systemd user
 service/timer — note its own words are "never installs it", i.e. it only
 generates files, **it does not install them for you**
-(`crates/chat-stasher/src/main.rs:85`). The generated template wraps a
-`run-once` command (`crates/chat-stasher/src/main.rs:85-130`).
+(`crates/chat-stasher/src/main.rs:86`). The generated template wraps a
+`run-once` command (`crates/chat-stasher/src/main.rs:86-131`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
-repeated invocation is safe (`crates/chat-stasher/src/main.rs:47-84`).
+repeated invocation is safe (`crates/chat-stasher/src/main.rs:48-85`).
 
 ---
 
@@ -249,12 +249,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:4974-4975`). This is the
+does not (`crates/chat-stasher/src/main.rs:5485-5486`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:4755-4756`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:5266-5267`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -270,7 +270,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:4965-4975`):
+(`crates/chat-stasher/src/main.rs:5476-5486`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -279,11 +279,11 @@ few lines and does not flood the screen
 - Finally, a fixed last line: `Details (one line per session): chat-stasher status --sessions`
 
 To see the per-session detail, add `--sessions`; that will be hundreds of lines
-(`crates/chat-stasher/src/main.rs:191-193`).
+(`crates/chat-stasher/src/main.rs:192-194`).
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:4823-4830`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:5334-5341`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -298,7 +298,7 @@ To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`.
 There is also a related command: `doctor`. It answers a different question —
 **whether any tool is silently deleting your history**. Its report contains
 only paths, counts, bytes, and timestamps
-(`crates/chat-stasher/src/main.rs:253-264`).
+(`crates/chat-stasher/src/main.rs:254-265`).
 
 ---
 
@@ -311,12 +311,12 @@ confirmed in the code, not a temporary disclaimer.
   subcommand table has no `restore` entry
   (`crates/chat-stasher/src/main.rs:44-760`). What you can do is `read`, which
   dumps **one** conversation to standard output at a time
-  (`crates/chat-stasher/src/main.rs:208-252`). Bulk restore = for now you have
+  (`crates/chat-stasher/src/main.rs:209-253`). Bulk restore = for now you have
   to write your own script loop.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:877-884`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1044-1051`).
 
 - **History backfill takes days, not minutes.** The backfill leg's rate limit
   for fetching content is **at most 200 per day**, with at least 20 seconds
@@ -361,7 +361,7 @@ confirmed in the code, not a temporary disclaimer.
   `crates/chat-stasher/data/harness-registry-v1.json` it cites).
 
 - **`schedule` does not install the timer for you**; it only generates template
-  files (`crates/chat-stasher/src/main.rs:85`). The actual installation steps
+  files (`crates/chat-stasher/src/main.rs:86`). The actual installation steps
   are yours to do; **this document does not give the concrete install
   commands — unverified** (we have not completed a full launchd/systemd
   installation flow on this machine).
@@ -384,7 +384,7 @@ touch it again.**
 - Install the timer
 
 **Then it runs automatically:** the timer runs `run-once` at each scheduled
-point — collect, push, exit (`crates/chat-stasher/src/main.rs:47-84`). It does
+point — collect, push, exit (`crates/chat-stasher/src/main.rs:48-85`). It does
 not need you to confirm anything.
 
 **What you should occasionally do** (not required, but recommended):

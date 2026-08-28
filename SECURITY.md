@@ -64,7 +64,7 @@ actually claims (each is derived from code in `docs/threat-model.md`):
    which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
    `:1310-1313`).
 4. `push` creating a snapshot that silently drops content it cannot account for
-   (`crates/chat-stasher/src/main.rs:3886-3895`).
+   (`crates/chat-stasher/src/main.rs:4072-4081`).
 
 **Known and already documented, so not a new finding** — these are written up in
 [`docs/threat-model.md`](docs/threat-model.md) and we are not currently defending
