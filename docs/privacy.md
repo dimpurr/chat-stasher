@@ -83,10 +83,10 @@ the sentence.
    browser's own download API (`apps/extension/lib/download.ts:117-135`).
 3. **Ingest.** The `chat-stasher` CLI, which you run yourself on your own
    machine, reads those files and turns them into sealed shards in a staging
-   directory (`crates/chat-stasher/src/main.rs:456-478`).
+   directory (`crates/chat-stasher/src/main.rs:457-479`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:131-168`;
+   (`crates/chat-stasher/src/main.rs:132-169`;
    `crates/chat-stasher/src/store.rs:261-296`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
@@ -327,7 +327,7 @@ Retention on **your** machine is under your control:
 
 | Where | How long it stays | How to delete it |
 |---|---|---|
-| Inbox files in your download directory | Until the CLI's `ingest` consumes them, which moves each file to `<inbox>/consumed/` (`crates/chat-stasher/src/main.rs:456-478`). **If you never run `ingest`, they stay indefinitely, in plaintext.** | Delete the files in `chat-stasher/inbox/` (and `consumed/`) with your file manager. Nothing else depends on them once ingested. |
+| Inbox files in your download directory | Until the CLI's `ingest` consumes them, which moves each file to `<inbox>/consumed/` (`crates/chat-stasher/src/main.rs:457-479`). **If you never run `ingest`, they stay indefinitely, in plaintext.** | Delete the files in `chat-stasher/inbox/` (and `consumed/`) with your file manager. Nothing else depends on them once ingested. |
 | Browser download history entries | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (badge, guard, backfill progress) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
@@ -364,10 +364,10 @@ this is the normal situation; on a shared machine it is the dominant risk.
 **3. The master key is the only key, and losing it is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:877-884,1006-1010`). The key file
+archive (`crates/chat-stasher/src/store.rs:1044-1051,1006-1010`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:919-1004`).
+(`crates/chat-stasher/src/store.rs:1086-1171`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension can read our downloaded files, observe the
