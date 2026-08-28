@@ -616,6 +616,53 @@ pub fn sqlite_store_bytes(db: &Path) -> Result<u64, String> {
 /// opencode cursor conservative: the next collect re-exports the affected
 /// session. The `-shm` mtime is excluded because read-only SQLite locking may
 /// update it without changing application data.
+/// Decide whether a `NotFound` from `fs::metadata` really means "the file is
+/// not there", or only means "the path could not be resolved".
+///
+/// The two are the same error on Windows. Unix separates them — a component of
+/// the path that is a file rather than a directory gives `ENOTDIR` — but
+/// Windows folds both into `ERROR_PATH_NOT_FOUND`, which `std` maps to
+/// `NotFound`. Reading that as absence is exactly the mistake this repository
+/// refuses to make: a path we cannot resolve is *unknown*, and unknown must
+/// never be recorded as empty. Measured 2026-08-28: this is why
+/// `a8_failed_sqlite_stat_cannot_form_a_fingerprint` passed on Unix and failed
+/// on Windows — Windows hashed a "three files missing" fingerprint for a store
+/// whose parent was a plain file.
+///
+/// So absence is *confirmed*, never inferred: walk up until some ancestor
+/// exists, and require it to be a directory. An ancestor that exists but is
+/// not a directory is a shape error. Ancestors that are themselves absent are
+/// fine — a harness that was never installed has no directory at all, and that
+/// is genuine absence, not a failure.
+fn confirm_absence(path: &Path) -> Result<(), String> {
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        match fs::metadata(dir) {
+            Ok(md) if md.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(format!(
+                    "path component {} is not a directory, so the absence of {} is unproven",
+                    dir.display(),
+                    path.display()
+                ))
+            }
+            // This ancestor is absent too; keep walking. The whole subtree
+            // simply may not exist.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ancestor = dir.parent(),
+            Err(e) => {
+                return Err(format!(
+                    "stat path component {}: {e}; the absence of {} is unproven",
+                    dir.display(),
+                    path.display()
+                ))
+            }
+        }
+    }
+    // Ran out of ancestors without meeting anything: nothing along the path
+    // exists, which is absence, not failure.
+    Ok(())
+}
+
 pub fn sqlite_store_fingerprint(db: &Path) -> Result<String, String> {
     let mut digest = Sha256::new();
     for (label, path) in [
@@ -642,7 +689,10 @@ pub fn sqlite_store_fingerprint(db: &Path) -> Result<String, String> {
                     digest.update(modified.to_le_bytes());
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => digest.update(b"missing"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                confirm_absence(&path)?;
+                digest.update(b"missing")
+            }
             Err(e) => return Err(format!("stat SQLite store file {}: {e}", path.display())),
         }
     }
@@ -1588,6 +1638,51 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The three states `confirm_absence` has to keep apart. These run on every
+    /// platform on purpose: the bug they guard is a *Windows* one, but the
+    /// logic that fixes it is platform-independent, so pinning it here means
+    /// the guard is exercised on the machine the author is actually sitting at
+    /// rather than only in CI. (An earlier guard in this repo was written
+    /// macOS-only by accident and therefore never fired on Linux at all.)
+    #[test]
+    fn absence_under_a_non_directory_is_unproven_not_empty() {
+        let sandbox = tempfile::tempdir().expect("create sandbox");
+        let blocker = sandbox.path().join("not-a-directory");
+        fs::write(&blocker, b"a file where a directory is expected").expect("write blocker");
+
+        let err = super::confirm_absence(&blocker.join("sessions.sqlite"))
+            .expect_err("a path under a plain file cannot prove absence");
+        assert!(
+            err.contains("is not a directory"),
+            "the refusal must name the shape problem: {err}"
+        );
+    }
+
+    #[test]
+    fn absence_inside_a_real_directory_is_confirmed() {
+        let sandbox = tempfile::tempdir().expect("create sandbox");
+        assert!(
+            super::confirm_absence(&sandbox.path().join("sessions.sqlite")).is_ok(),
+            "a file that is simply not in an existing directory is genuinely absent"
+        );
+    }
+
+    #[test]
+    fn a_harness_that_was_never_installed_is_absent_not_unknown() {
+        // No directory at all: the common case of a harness this machine has
+        // never run. Walking up must reach the (existing) sandbox and stop.
+        let sandbox = tempfile::tempdir().expect("create sandbox");
+        let never = sandbox
+            .path()
+            .join("never-installed")
+            .join("deep")
+            .join("sessions.sqlite");
+        assert!(
+            super::confirm_absence(&never).is_ok(),
+            "an absent directory tree is absence, not a read failure"
+        );
+    }
     use super::*;
 
     fn write(path: &Path, content: &str) {
