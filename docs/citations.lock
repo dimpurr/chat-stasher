@@ -239,16 +239,16 @@ crates/chat-stasher/Cargo.toml:20-21  4a5b59a2acb8  lines=2
   <- docs/threat-model.md:51, docs/threat-model.md:69, docs/threat-model.md:366  :: rustic_core = { version = "=0.12.0" }
 crates/chat-stasher/Cargo.toml:27  f6c7a40dd8b1  lines=1
   <- docs/threat-model.md:366  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
-crates/chat-stasher/data/harness-registry-v1.json:28  c1cb0cdeb17c  lines=1
-  <- README.md:10, README.md:78  :: "notes": "Windows 走 %USERPROFILE%，不是 %APPDATA%\\Claude。Wind…
-crates/chat-stasher/data/harness-registry-v1.json:69-70  aa479c356cb1  lines=2
+crates/chat-stasher/data/harness-registry-v1.json:28  d9bf419bfc8b  lines=1
+  <- README.md:10, README.md:78  :: "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude…
+crates/chat-stasher/data/harness-registry-v1.json:69-70  f94222ed89c0  lines=2
   <- README.md:85  :: "seal_policy": "no-rename",
-crates/chat-stasher/data/harness-registry-v1.json:82-122  969f3e4d0820  lines=41
+crates/chat-stasher/data/harness-registry-v1.json:82-122  e6835a0b9d0c  lines=41
   <- README.md:11  :: "id": "gemini-cli",
-crates/chat-stasher/data/harness-registry-v1.json:163-209  8cc28d6ca47c  lines=47
+crates/chat-stasher/data/harness-registry-v1.json:163-209  584dd1dcf1bf  lines=47
   <- README.md:77  :: "id": "cursor",
-crates/chat-stasher/data/harness-registry-v1.json:362-397  79e2fb710fbe  lines=36
-  <- README.md:77  :: "id": "zed",
+crates/chat-stasher/data/harness-registry-v1.json:362-397  d304337789c2  lines=36
+  <- README.md:77  :: "relationship": "reference",
 crates/chat-stasher/src/config.rs:15  77df992f9b24  lines=1
   <- docs/install.md:130  :: pub const CONFIG_RELATIVE_PATH: &str = "chat-stasher/config…
 crates/chat-stasher/src/config.rs:95-100  14278973cf4d  lines=6

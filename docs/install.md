@@ -282,7 +282,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 (`crates/chat-stasher/src/main.rs:191-193`).
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
-the timer "unhealthy" — the source's original wording: 在判定「不健康」时会**以非零码退出**
+the timer "unhealthy", **it exits with a non-zero code**
 (`crates/chat-stasher/src/main.rs:4823-4830`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.

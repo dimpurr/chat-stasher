@@ -25,7 +25,7 @@
           "source": "https://code.claude.com/docs/en/claude-directory(original text: ~/.claude -> %USERPROFILE%\\.claude)+ anthropics/claude-code#80683 #84354"
         }
       },
-      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude。Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear)。drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware。CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days。",
+      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude. Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear). drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware. CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days.",
       "seal_policy": "rename",
       "seal_source": "A9 measured(macOS): 201 sample points across real write windows(172210->194561 B, 11 size changes)all lsof=0 => reopens by path each time, rename seal is safe",
       "reference": {
@@ -36,7 +36,7 @@
         "relationship": "reference",
         "source_url": "https://code.claude.com/docs/en/claude-directory",
         "license_url": "unascertained",
-        "scope": "curl verified the rendered documentation page, not public implementation source。"
+        "scope": "curl verified the rendered documentation page, not public implementation source."
       }
     },
     {
@@ -65,7 +65,7 @@
           "source": "same as above(dirs::home_dir() on Windows returns %USERPROFILE%, no platform branch)"
         }
       },
-      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references)。idle rollouts are compressed to .jsonl.zst。session_index.jsonl is at the codex home root。CODEX_HOME can override。",
+      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override.",
       "seal_policy": "no-rename",
       "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746(ensure_writer_open does not reopen if already open)+ :1928(JsonlWriter holds tokio::fs::File)=> holds fd; new writes after rename go to old inode",
       "reference": {
@@ -107,7 +107,7 @@
           "source": "same as above(os.homedir() -> %USERPROFILE%)"
         }
       },
-      "notes": "uses os.homedir() (Windows=%USERPROFILE%), no APPDATA/XDG logic; does not honor XDG_DATA_HOME。GEMINI_CLI_HOME env var overrides the home directory entirely。30-day cleanup: global tmp directory sweep。chat history in tmp/<projectId>/chats/(named tmp but not temporary)。",
+      "notes": "uses os.homedir() (Windows=%USERPROFILE%), no APPDATA/XDG logic; does not honor XDG_DATA_HOME. GEMINI_CLI_HOME env var overrides the home directory entirely. 30-day cleanup: global tmp directory sweep. chat history in tmp/<projectId>/chats/(named tmp but not temporary).",
       "seal_policy": "rename",
       "seal_source": "packages/core/src/services/chatRecordingService.ts:559-564 fs.appendFileSync = each call does open->append->close, no fd held across calls => reopens each time, rename seal is safe",
       "reference": {
@@ -146,7 +146,7 @@
           "source": "anomalyco/opencode v1.18.4 packages/core/src/database/database.ts:43-54 + packages/core/src/global.ts:10-14; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts"
         }
       },
-      "notes": "upstream is the TypeScript project anomalyco/opencode(originally sst/opencode), not a Go project。v1.18.4's packages/core/src/global.ts:10-14 computes Global.Path.data from xdg-basedir's xdgData; xdg-basedir v5.1.0's index.js:7-8 only takes XDG_DATA_HOME, otherwise always falls back to homedir/.local/share, therefore the default structure on macOS/Linux/Windows is $HOME/.local/share/opencode/opencode.db(registry uses $XDG_DATA_HOME for this overrideable base directory). packages/core/src/database/database.ts:43-54 uses OPENCODE_DB, packages/core/src/flag/flag.ts:47 reads it from the environment: :memory: or uses absolute path directly, relative values hang under Global.Path.data; release channel latest/beta/prod or when channel db is disabled the file name is opencode.db, other channels may include a channel suffix。source URLs: https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/flag/flag.ts; https://raw.githubusercontent.com/sindresorhus/xdg-basedir/v5.1.0/index.js。matches local measurement: ~/.local/share/opencode/opencode.db exists。",
+      "notes": "upstream is the TypeScript project anomalyco/opencode(originally sst/opencode), not a Go project. v1.18.4's packages/core/src/global.ts:10-14 computes Global.Path.data from xdg-basedir's xdgData; xdg-basedir v5.1.0's index.js:7-8 only takes XDG_DATA_HOME, otherwise always falls back to homedir/.local/share, therefore the default structure on macOS/Linux/Windows is $HOME/.local/share/opencode/opencode.db(registry uses $XDG_DATA_HOME for this overrideable base directory). packages/core/src/database/database.ts:43-54 uses OPENCODE_DB, packages/core/src/flag/flag.ts:47 reads it from the environment: :memory: or uses absolute path directly, relative values hang under Global.Path.data; release channel latest/beta/prod or when channel db is disabled the file name is opencode.db, other channels may include a channel suffix. source URLs: https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/global.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts; https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/flag/flag.ts; https://raw.githubusercontent.com/sindresorhus/xdg-basedir/v5.1.0/index.js. matches local measurement: ~/.local/share/opencode/opencode.db exists.",
       "seal_policy": "not-applicable",
       "seal_source": "single SQLite(database.ts path() -> opencode.db, WAL necessarily holds fd for a long time, but it is also not an append jsonl)=> no active jsonl to rename",
       "reference": {
@@ -196,7 +196,7 @@
           "source": "same as above + Electron userData convention(%APPDATA%\\<name>)"
         }
       },
-      "notes": "closed source (VS Code fork/Electron), no official docs。session body lives in the global state.vscdb cursorDiskKV table (composerData:{id} keys, one row per session); project-level chats list in workspaceStorage/<id>/state.vscdb。Cursor 3.0 (2026-04) moved the index to the global DB。Linux uses $XDG_CONFIG_HOME/Cursor/...; when this variable is unset falls back per XDG convention to ~/.config/Cursor/...(B59: this default explanation used to live in the linux cell template tail, making the resolved path not end in globalStorage => Linux users without config always got SkipUnresolvable; explanatory text now belongs in notes, template holds only the path)。Windows uses %APPDATA%(Roaming), not under %USERPROFILE% root - different from most CLI tools(%APPDATA% when unset falls back per Windows convention to %USERPROFILE%\\AppData\\Roaming)。some community claims: newer versions also write ~/.cursor/projects/<project>/agent-transcripts (CLI agent data directory)。⚠️ confidence note: the macOS cell is \"measured-locally but source not read\" - existing values (source-confirmed/official-docs/community-claim-unverified/unascertained) are not a good fit, so a new value \"measured-locally\" was added (B27 finding: these four evidence-source terms are insufficient to express the \"measured-locally\" category)。linux/windows cells remain community claims, unverified。",
+      "notes": "closed source (VS Code fork/Electron), no official docs. session body lives in the global state.vscdb cursorDiskKV table (composerData:{id} keys, one row per session); project-level chats list in workspaceStorage/<id>/state.vscdb. Cursor 3.0 (2026-04) moved the index to the global DB. Linux uses $XDG_CONFIG_HOME/Cursor/...; when this variable is unset falls back per XDG convention to ~/.config/Cursor/...(B59: this default explanation used to live in the linux cell template tail, making the resolved path not end in globalStorage => Linux users without config always got SkipUnresolvable; explanatory text now belongs in notes, template holds only the path). Windows uses %APPDATA%(Roaming), not under %USERPROFILE% root - different from most CLI tools(%APPDATA% when unset falls back per Windows convention to %USERPROFILE%\\AppData\\Roaming). some community claims: newer versions also write ~/.cursor/projects/<project>/agent-transcripts (CLI agent data directory). ⚠️ confidence note: the macOS cell is \"measured-locally but source not read\" - existing values (source-confirmed/official-docs/community-claim-unverified/unascertained) are not a good fit, so a new value \"measured-locally\" was added (B27 finding: these four evidence-source terms are insufficient to express the \"measured-locally\" category). linux/windows cells remain community claims, unverified.",
       "seal_policy": "not-applicable",
       "seal_source": "single SQLite (state.vscdb, cursorDiskKV table) - not an append-only single-file jsonl, no active file to rename; and ADR-011 deprecated the rename-seal approach",
       "reference": {
@@ -207,7 +207,7 @@
         "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/cursor/cursor/main/README.md",
         "license_url": "unascertained",
-        "scope": "for upstream project reference only; do not treat README as session storage implementation source。"
+        "scope": "for upstream project reference only; do not treat README as session storage implementation source."
       }
     },
     {
@@ -241,7 +241,7 @@
           "source": "unverified: Windows version not installed locally, source not read"
         }
       },
-      "notes": "xAI Grok CLI(directory structure measured to be similar to Claude Code: sessions/<sanitized-cwd>/<uuid>/ under chat_history.jsonl + events.jsonl, but \"Claude Code family fork\" not confirmed by reading source)。session body lives in ~/.grok/sessions/<sanitized-cwd>/<session-uuid>/{chat_history,events}.jsonl(one directory per session); session_search.sqlite is the search index, session_docs one row per session, updated_at in Unix seconds。SQLite library located at ~/.grok/sessions/ in WAL mode。macOS cell confidence=measured-locally; linux/windows unverified。",
+      "notes": "xAI Grok CLI(directory structure measured to be similar to Claude Code: sessions/<sanitized-cwd>/<uuid>/ under chat_history.jsonl + events.jsonl, but \"Claude Code family fork\" not confirmed by reading source). session body lives in ~/.grok/sessions/<sanitized-cwd>/<session-uuid>/{chat_history,events}.jsonl(one directory per session); session_search.sqlite is the search index, session_docs one row per session, updated_at in Unix seconds. SQLite library located at ~/.grok/sessions/ in WAL mode. macOS cell confidence=measured-locally; linux/windows unverified.",
       "seal_policy": "not-applicable",
       "seal_source": "single SQLite (session_search.sqlite, WAL) + session body is a per-session independent JSONL directory - no active append-only single file to rename; and ADR-011 deprecated the rename-seal approach",
       "reference": {
@@ -252,7 +252,7 @@
         "relationship": "no reference",
         "source_url": "https://github.com/xai-org/grok-cli",
         "license_url": "unascertained",
-        "verification": "candidate upstream repo URL returned HTTP 404 in this curl round; did not write the locally measured file as an upstream file。"
+        "verification": "candidate upstream repo URL returned HTTP 404 in this curl round; did not write the locally measured file as an upstream file."
       }
     },
     {
@@ -278,7 +278,7 @@
           "source": "same as above(home has no win32 branch); cache goes to %LOCALAPPDATA%\\copilot\\"
         }
       },
-      "notes": "persists sessions (non-ephemeral): session-store.db SQLite(sessions/turns/... WAL)+per-session events.jsonl+data.db/session.db/embedding-cache.db。COPILOT_HOME/configDir can override。Linux if set XDG_CONFIG_HOME/XDG_STATE_HOME performs a one-time migration config->XDG_CONFIG_HOME/copilot, state(including session-store.db)->XDG_STATE_HOME/copilot。XDG migration does not apply on Windows。",
+      "notes": "persists sessions (non-ephemeral): session-store.db SQLite(sessions/turns/... WAL)+per-session events.jsonl+data.db/session.db/embedding-cache.db. COPILOT_HOME/configDir can override. Linux if set XDG_CONFIG_HOME/XDG_STATE_HOME performs a one-time migration config->XDG_CONFIG_HOME/copilot, state(including session-store.db)->XDG_STATE_HOME/copilot. XDG migration does not apply on Windows.",
       "seal_policy": "no-rename",
       "seal_source": "(fd semantics not measured/source-confirmed before B20 => default no-rename)",
       "reference": {
@@ -289,7 +289,7 @@
         "relationship": "reference",
         "source_url": "https://raw.githubusercontent.com/github/copilot-cli/main/README.md",
         "license_url": "https://raw.githubusercontent.com/github/copilot-cli/main/LICENSE.md",
-        "scope": "for product/upstream reference only; not foundpublic session storage implementation file。"
+        "scope": "for product/upstream reference only; not foundpublic session storage implementation file."
       }
     },
     {
@@ -315,7 +315,7 @@
           "source": "same as above(platform-independent CWD-relative)"
         }
       },
-      "notes": "chat history is in CWD, not home; ~/.aider/ only holds config/state(installs.json, oauth-keys.env, model settings)。old .aider.history.jsonl no longer exists (changed to .aider.chat.history.md)。does not honor XDG/APPDATA。",
+      "notes": "chat history is in CWD, not home; ~/.aider/ only holds config/state(installs.json, oauth-keys.env, model settings). old .aider.history.jsonl no longer exists (changed to .aider.chat.history.md). does not honor XDG/APPDATA.",
       "seal_policy": "no-rename",
       "seal_source": "(CWD-relative store and fd semantics not measured/source-confirmed before B20 => default no-rename)",
       "reference": {
@@ -351,7 +351,7 @@
           "source": "same as above"
         }
       },
-      "notes": "project-level SQLite (data_directory defaults to .crush, follows the project)。global directory only holds config, not chat history。",
+      "notes": "project-level SQLite (data_directory defaults to .crush, follows the project). global directory only holds config, not chat history.",
       "seal_policy": "no-rename",
       "seal_source": "(single-file SQLite store, no active jsonl; and fd semantics unconfirmed => no-rename)",
       "reference": {
@@ -387,7 +387,7 @@
           "source": "same as above"
         }
       },
-      "notes": "AI panel/agent chat history in <data_dir>/threads/threads.db(ThreadStore)。main app DB in <data_dir>/db/0-<channel>/db.sqlite(not chat)。✅Zed is the second example on Linux that truly uses XDG_DATA_HOME。macOS branch not verified one by one。",
+      "notes": "AI panel/agent chat history in <data_dir>/threads/threads.db(ThreadStore). main app DB in <data_dir>/db/0-<channel>/db.sqlite(not chat). ✅Zed is the second example on Linux that truly uses XDG_DATA_HOME. macOS branch not verified one by one.",
       "seal_policy": "no-rename",
       "seal_source": "(single-file SQLite store, no active jsonl; and fd semantics unconfirmed => no-rename)",
       "reference": {
@@ -424,7 +424,7 @@
           "source": "same as above(os.homedir -> %USERPROFILE%, no %APPDATA%/XDG unless CONTINUE_GLOBAL_DIR overrides)"
         }
       },
-      "notes": "one JSON per session + sessions.json index。Continue's SQLite(dev_data at ~/.continue/dev_data/) is analytics, not chat history。CONTINUE_GLOBAL_DIR can override entirely。",
+      "notes": "one JSON per session + sessions.json index. Continue's SQLite(dev_data at ~/.continue/dev_data/) is analytics, not chat history. CONTINUE_GLOBAL_DIR can override entirely.",
       "seal_policy": "no-rename",
       "seal_source": "(per-session independent JSON files, overwrite/create semantics, fd semantics not confirmed before B20 => default no-rename)",
       "reference": {
