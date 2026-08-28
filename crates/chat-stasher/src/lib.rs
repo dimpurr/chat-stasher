@@ -28,6 +28,7 @@ pub mod seal;
 pub mod search;
 pub mod sidecar;
 pub mod sqlite_probe;
+pub mod stagereap;
 pub mod store;
 pub mod verify;
 pub mod view;

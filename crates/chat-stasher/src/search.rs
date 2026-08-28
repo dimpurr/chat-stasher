@@ -38,7 +38,7 @@
 
 use anyhow::Context;
 use rustic_core::repofile::{MasterKey, NodeType};
-use rustic_core::{Credentials, LsOptions, Repository, RepositoryOptions};
+use rustic_core::{Credentials, LsOptions, Repository};
 use std::collections::BTreeMap;
 
 use crate::readback::{bucket_shard_path, newest_snapshot_per_host};
@@ -205,7 +205,7 @@ pub fn search_sessions(
     filter: &SearchFilter,
 ) -> anyhow::Result<SearchReport> {
     let backends = store.backends()?;
-    let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+    let repo = Repository::new(&store.cfg.repository_options(), &backends)?
         .open(&Credentials::Masterkey(mk.clone()))
         .context("open repository for search")?
         .to_indexed()

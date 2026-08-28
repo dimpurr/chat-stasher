@@ -463,6 +463,8 @@ fn a5_unreadable_record_downgrades_never_built_to_unknown() {
                 key_file: sandbox.path().join("peer.key"),
                 connections: 1,
                 options: std::collections::BTreeMap::new(),
+                cache_dir: None,
+                no_cache: false,
             },
             record,
         }];

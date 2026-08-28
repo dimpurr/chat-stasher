@@ -29,7 +29,7 @@
 
 use anyhow::Context;
 use rustic_core::repofile::MasterKey;
-use rustic_core::{CheckOptions, Credentials, Repository, RepositoryOptions};
+use rustic_core::{CheckOptions, Credentials, Repository};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -203,7 +203,7 @@ impl BackupStore {
     pub fn check_repo(&self, mk: &MasterKey, read_data: bool) -> anyhow::Result<CheckSummary> {
         let start = Instant::now();
         let backends = self.backends()?;
-        let repo = Repository::new(&RepositoryOptions::default(), &backends)
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)
             .context("build repository")?
             .open(&Credentials::Masterkey(mk.clone()))
             .context("open repository for verify")?;

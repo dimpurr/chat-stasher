@@ -141,7 +141,7 @@ pub fn assert_stage_writer_audited(writer: StageWriter) -> anyhow::Result<()> {
 }
 
 /// Everything BackupStore needs to reach a repository.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StoreConfig {
     /// Repository location. A plain path = local repo (this spike); the same
     /// slot later takes a backend string such as `opendal:sftp`.
@@ -154,6 +154,19 @@ pub struct StoreConfig {
     /// `opendal:sftp`). Forwarded verbatim to the backend; only keys the
     /// backend documents are honoured (unknown ones are ignored).
     pub options: BTreeMap<String, String>,
+    /// Custom local metadata-cache root, forwarded as rustic's `cache_dir`.
+    ///
+    /// `None` follows rustic's per-machine default (`dirs::cache_dir()/rustic`,
+    /// see [`rustic_cache_roots`]). Ignored when [`no_cache`](Self::no_cache)
+    /// is set — rustic declares `cache_dir` and `no_cache` `conflicts_with`
+    /// (rustic_core-0.12.0 `src/repository.rs:108`).
+    pub cache_dir: Option<PathBuf>,
+    /// Disable rustic's local metadata cache entirely (rustic `no_cache`).
+    ///
+    /// The cache holds snapshot / index / *tree* packs — metadata only, never
+    /// the data packs — so disabling it loses no archive content; it only
+    /// re-reads that metadata on every open instead of keeping it between runs.
+    pub no_cache: bool,
 }
 
 impl StoreConfig {
@@ -166,6 +179,26 @@ impl StoreConfig {
         let n = user_value.unwrap_or(DEFAULT_CONNECTIONS);
         self.connections = n.clamp(1, MAX_CONNECTIONS);
         self
+    }
+
+    /// rustic's repository options for this config, honouring the cache knobs.
+    ///
+    /// The default is exactly rustic's own [`RepositoryOptions::default()`] —
+    /// cache enabled, standard per-machine cache dir — so a config that never
+    /// sets the new fields behaves byte-for-byte as it did when every caller
+    /// passed the default directly. `no_cache` turns the cache off entirely;
+    /// `cache_dir` redirects where it lives. When `no_cache` is set the custom
+    /// dir is deliberately not forwarded: rustic declares the two
+    /// `conflicts_with` (rustic_core-0.12.0 `src/repository.rs:108`), so under
+    /// `no_cache` a `cache_dir` would be silently ignored anyway.
+    pub fn repository_options(&self) -> RepositoryOptions {
+        if self.no_cache {
+            RepositoryOptions::default().no_cache(true)
+        } else if let Some(dir) = &self.cache_dir {
+            RepositoryOptions::default().cache_dir(dir.clone())
+        } else {
+            RepositoryOptions::default()
+        }
     }
 }
 
@@ -275,7 +308,7 @@ impl BackupStore {
         pb: P,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
         let backends = self.backends()?;
-        let repo = Repository::new_with_progress(&RepositoryOptions::default(), &backends, pb)?;
+        let repo = Repository::new_with_progress(&self.cfg.repository_options(), &backends, pb)?;
         let creds = Credentials::Masterkey(mk.clone());
         if self.repo_exists(&backends)? {
             let r = repo
@@ -372,7 +405,7 @@ impl BackupStore {
             return Ok(BTreeSet::new());
         }
         let backends = self.backends()?;
-        let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
             .open(&Credentials::Masterkey(mk.clone()))
             .context("open repository for consumed audit")?
             .to_indexed()
@@ -428,7 +461,7 @@ impl BackupStore {
         mk: &MasterKey,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, SnapshotFile)> {
         let backends = self.backends()?;
-        let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
             .open(&Credentials::Masterkey(mk.clone()))?
             .to_indexed()?;
         let snaps = repo.get_all_snapshots()?;
@@ -983,13 +1016,13 @@ pub fn sealed_shard_entries(session_dir: &Path) -> anyhow::Result<Vec<(u64, Path
 
 /// Where `rustic_core` keeps this machine's local metadata cache.
 ///
-/// Every repository this crate opens does so with `RepositoryOptions::default()`
-/// (`open_or_init`, `consumed_shas`, `open_with_newest_snapshot`), which leaves
-/// `no_cache = false` and `cache_dir = None` — so rustic falls back to
-/// `dirs::cache_dir()/rustic` (rustic_core-0.12.0 `src/backend/cache.rs:261`,
-/// `src/repository.rs:549`). `dirs` spells that directory differently per
-/// platform, and on Windows it is not under `$HOME` at all
-/// (dirs-6.0.0 `src/win.rs:10` → `known_folder_local_app_data()`).
+/// Opens honour the per-config cache knobs ([`StoreConfig::cache_dir`],
+/// [`StoreConfig::no_cache`]); when neither is set they behave exactly like the
+/// `RepositoryOptions::default()` this list used to document — cache enabled,
+/// falling back to `dirs::cache_dir()/rustic` (rustic_core-0.12.0
+/// `src/backend/cache.rs:261`, `src/repository.rs:549`). `dirs` spells that
+/// directory differently per platform, and on Windows it is not under `$HOME`
+/// at all (dirs-6.0.0 `src/win.rs:10` → `known_folder_local_app_data()`).
 ///
 /// The cache holds metadata only — snapshots, index, and *tree* packs
 /// (rustic_core-0.12.0 `src/backend.rs:82`, `src/blob.rs:54`) — so anything
@@ -1187,6 +1220,8 @@ mod tests {
             key_file: PathBuf::from("/tmp/x.key"),
             options: BTreeMap::new(),
             connections: 0,
+            cache_dir: None,
+            no_cache: false,
         }
         .with_capped_connections(None);
         assert_eq!(cfg.connections, DEFAULT_CONNECTIONS);
@@ -1195,6 +1230,8 @@ mod tests {
             key_file: PathBuf::from("/tmp/x.key"),
             options: BTreeMap::new(),
             connections: 0,
+            cache_dir: None,
+            no_cache: false,
         }
         .with_capped_connections(Some(3));
         assert_eq!(cfg2.connections, 3);
@@ -1203,6 +1240,8 @@ mod tests {
             key_file: PathBuf::from("/tmp/x.key"),
             options: BTreeMap::new(),
             connections: 0,
+            cache_dir: None,
+            no_cache: false,
         }
         .with_capped_connections(Some(100));
         // Over-large values clamp to the hard backend ceiling, NOT to the
@@ -1218,9 +1257,63 @@ mod tests {
             key_file: PathBuf::from("/tmp/x.key"),
             options: BTreeMap::new(),
             connections: 0,
+            cache_dir: None,
+            no_cache: false,
         }
         .with_capped_connections(Some(0));
         assert_eq!(cfg4.connections, 1);
+    }
+
+    /// ADR-020 Phase 5: the cache knobs must actually reach rustic's
+    /// `RepositoryOptions`. Pure and injectable — no repository, no remote.
+    #[test]
+    fn repository_options_forwards_cache_switches() {
+        // Default (fields unset): exactly rustic's own default — cache on,
+        // standard per-machine cache dir. Callers that never set the new
+        // fields must get byte-for-byte what `RepositoryOptions::default()`
+        // used to produce.
+        let cfg = StoreConfig {
+            repo_root: "/tmp/x".into(),
+            key_file: PathBuf::from("/tmp/x.key"),
+            options: BTreeMap::new(),
+            connections: 1,
+            cache_dir: None,
+            no_cache: false,
+        };
+        let opts = cfg.repository_options();
+        assert!(!opts.no_cache, "default must keep the cache enabled");
+        assert!(
+            opts.cache_dir.is_none(),
+            "default must keep rustic's standard per-machine cache dir"
+        );
+
+        // no_cache=true turns the cache off; a custom dir is deliberately not
+        // forwarded (rustic declares the two conflicts_with).
+        let cfg = StoreConfig {
+            no_cache: true,
+            cache_dir: Some(PathBuf::from("/tmp/cache")),
+            ..cfg.clone()
+        };
+        let opts = cfg.repository_options();
+        assert!(opts.no_cache, "no_cache must reach RepositoryOptions");
+        assert!(
+            opts.cache_dir.is_none(),
+            "a custom dir under no_cache is contradictory and must not be forwarded"
+        );
+
+        // cache_dir set: cache stays on but is redirected.
+        let cfg = StoreConfig {
+            no_cache: false,
+            cache_dir: Some(PathBuf::from("/tmp/cache")),
+            ..cfg
+        };
+        let opts = cfg.repository_options();
+        assert!(!opts.no_cache);
+        assert_eq!(
+            opts.cache_dir.as_deref(),
+            Some(Path::new("/tmp/cache")),
+            "cache_dir must reach RepositoryOptions"
+        );
     }
 
     #[test]
@@ -1277,6 +1370,8 @@ mod tests {
             key_file: dir.path().join("key.json"),
             connections: 1,
             options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: false,
         };
         let store = BackupStore::new(cfg, "machine-b".to_string());
         let err = store.push(&stage, &MasterKey::new()).unwrap_err();
@@ -1326,6 +1421,8 @@ mod tests {
             key_file: dir.join("masterkey.json"),
             connections: 1,
             options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: false,
         };
         persist_key_file(&cfg, &MasterKey::new()).unwrap();
         let mode = fs::metadata(&cfg.key_file).unwrap().permissions().mode() & 0o777;

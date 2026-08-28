@@ -13,11 +13,12 @@ use chat_stasher::scanner;
 use chat_stasher::schedule;
 use chat_stasher::seal;
 use chat_stasher::sidecar;
+use chat_stasher::stagereap::{self, BlockedKind, NamedStore};
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, NodeType};
-use rustic_core::{Credentials, LsOptions, Repository, RepositoryOptions};
+use rustic_core::{Credentials, LsOptions, Repository};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -545,6 +546,51 @@ enum Command {
         #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
         shard_bucket_cap: usize,
     },
+    /// Reclaim the sealed shard body from the staging tree, but only where the
+    /// archive provably holds every byte (ADR-020 Phase 4).
+    ///
+    /// The stage is an unbounded local full copy; nothing ever shrinks it.
+    /// This command retires the shard body once every declared destination
+    /// proves it holds each session. Proof means asking the archive itself —
+    /// never the local cursor — for every session's digest triple (shard
+    /// count / concatenated bytes / concatenated sha256) and matching it
+    /// against the stage. A destination that cannot be consulted is
+    /// "unproven" and blocks the reap: it is never treated as "does not have
+    /// it". Every declared destination must prove it holds each session, or
+    /// nothing is deleted.
+    ///
+    /// Default is a dry run that reports what would be reclaimed and deletes
+    /// nothing; pass `--apply` to actually remove the body. `--apply` writes
+    /// each machine's retained summaries first, then deletes session by
+    /// session, keeping each session's persistent `shard-seq` counter so the
+    /// next sequence never falls back onto archived shard names.
+    ///
+    /// Exit codes: 0 = reclaimable (dry run) or reclaimed (apply); 1 =
+    /// blocked — at least one destination is unreachable, partial, or fails
+    /// to hold a session, so nothing was deleted; 2 = usage error.
+    ReapStage {
+        /// Stage directory that holds the sealed `sessions/` tree.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Actually delete the proven shard body. Default: dry run (report only).
+        #[arg(long)]
+        apply: bool,
+        /// Repository path override (single-destination config only).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override (single-destination config only).
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override (single-destination config only).
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable (single-destination config only).
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Disable ssh connection reaping after this run (for troubleshooting).
+        #[arg(long)]
+        no_reap: bool,
+    },
     /// Register this executable as the browsers' Native Messaging host
     /// (ADR-014 step 2) — or, with `--uninstall`, remove that registration.
     ///
@@ -1001,6 +1047,23 @@ fn main() -> ExitCode {
             machine.as_deref(),
             session.as_deref(),
             shard_bucket_cap,
+        ),
+        Command::ReapStage {
+            stage,
+            apply,
+            repo,
+            key_file,
+            connections,
+            options,
+            no_reap,
+        } => cmd_reap_stage(
+            &stage,
+            apply,
+            repo,
+            key_file,
+            connections,
+            &options,
+            no_reap,
         ),
         Command::InstallNativeHost {
             browsers,
@@ -1734,7 +1797,7 @@ struct OverviewRead {
 fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<OverviewRead> {
     let store = BackupStore::for_metadata_query(cfg.clone());
     let backends = store.backends()?;
-    let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+    let repo = Repository::new(&cfg.repository_options(), &backends)?
         .open(&Credentials::Masterkey(mk.clone()))
         .context("open repository for overview")?
         .to_indexed()
@@ -3749,6 +3812,12 @@ fn resolve_store_config(
         key_file,
         connections: 0,
         options: merged,
+        cache_dir: entry
+            .cache_dir
+            .as_deref()
+            .or(config.rustic_cache_dir.as_deref())
+            .map(|raw| PathBuf::from(expand_path_arg("cache_dir", raw))),
+        no_cache: entry.no_cache.or(config.rustic_no_cache).unwrap_or(false),
     }
     .with_capped_connections(
         connections
@@ -3792,6 +3861,11 @@ fn store_config_from(
                 key_file,
                 connections: 0,
                 options,
+                cache_dir: config
+                    .rustic_cache_dir
+                    .as_deref()
+                    .map(|raw| PathBuf::from(expand_path_arg("cache_dir", raw))),
+                no_cache: config.rustic_no_cache.unwrap_or(false),
             }
             .with_capped_connections(connections.or(config.rustic_connections))
         }
@@ -4456,6 +4530,165 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     );
 }
 
+/// `reap-stage` — reclaim the sealed shard body once every declared
+/// destination proves it holds each session (ADR-020 Phase 4).
+///
+/// The destination set is the whole debt set: with a `destinations` table the
+/// command proves against *every* declared destination; without one it proves
+/// against the single default repository. A destination that is unreachable or
+/// read only partially is "unproven" and blocks the reap — never "does not
+/// have it" and never "has it". A blocked reap deletes nothing and exits 1.
+fn cmd_reap_stage(
+    stage: &PathBuf,
+    apply: bool,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    no_reap: bool,
+) -> ExitCode {
+    let config = Config::load();
+    let multi = !config.destinations.is_empty();
+    if multi {
+        if repo.is_some() || key_file.is_some() {
+            eprintln!(
+                "reap-stage: `--repo` / `--key-file` only apply to a single-destination config; ignoring them (this run proves every declared destination)"
+            );
+        }
+    }
+    let destinations: Vec<NamedStore> = if multi {
+        config
+            .destinations
+            .keys()
+            .map(|name| NamedStore {
+                name: name.clone(),
+                cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+            })
+            .collect()
+    } else {
+        vec![NamedStore {
+            name: "default".to_string(),
+            cfg: store_config_from(&config, repo, key_file, connections, options),
+        }]
+    };
+    let mut destinations = destinations;
+    destinations.sort_by(|a, b| a.name.cmp(&b.name));
+
+    println!("[reap-stage] stage        : {}", stage.display());
+    println!(
+        "[reap-stage] mode         : {}",
+        if apply { "apply" } else { "dry-run" }
+    );
+    println!(
+        "[reap-stage] destinations : {}",
+        destinations
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let report = match stagereap::reap_stage(stage, &destinations, apply) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("reap-stage: {e:#}");
+            for dest in &destinations {
+                reap_remote(&dest.cfg, no_reap);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    for dest in &destinations {
+        reap_remote(&dest.cfg, no_reap);
+    }
+
+    println!(
+        "[reap-stage] candidates   : {} session(s) / {}",
+        report.candidates.len(),
+        fmt_bytes(report.candidate_bytes)
+    );
+    if report.already_reaped > 0 {
+        println!(
+            "[reap-stage] already reaped: {} session(s) (summary retained, no body)",
+            report.already_reaped
+        );
+    }
+
+    if report.blocked() {
+        for block in &report.blocked {
+            let word = match &block.kind {
+                BlockedKind::Unreachable { .. } => "unreachable",
+                BlockedKind::PartialRead { .. } => "could not be fully read",
+                BlockedKind::SessionNotHeld => "does not hold the archived session(s)",
+                BlockedKind::TripleMismatch => "holds a different digest for the session(s)",
+            };
+            println!(
+                "  blocked: destination \"{}\" {word} — {} session(s) / {} held back",
+                block.destination,
+                block.sessions,
+                fmt_bytes(block.bytes)
+            );
+            match &block.kind {
+                BlockedKind::Unreachable { error } => {
+                    println!("    reason: could not read the destination: {error}");
+                }
+                BlockedKind::PartialRead { detail } => {
+                    println!("    reason: destination was read but not to completion: {detail}");
+                }
+                BlockedKind::SessionNotHeld | BlockedKind::TripleMismatch => {}
+            }
+        }
+        println!(
+            "[reap-stage] RESULT       : BLOCKED — nothing was deleted; fix the destination(s) above and re-run"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    if !apply {
+        println!(
+            "[reap-stage] reclaimable  : {} session(s) / {} — dry run, pass `--apply` to delete the body",
+            report.candidates.len(),
+            fmt_bytes(report.candidate_bytes)
+        );
+        println!("[reap-stage] RESULT       : OK (dry run)");
+        return ExitCode::SUCCESS;
+    }
+
+    println!("[reap-stage] summary      : retained per-session summaries written before delete");
+    for r in &report.reclaimed {
+        println!(
+            "  reaped: {} {} {} shard(s) / {} (summary retained)",
+            r.machine,
+            short_session_id(&r.session_id),
+            r.shard_count,
+            fmt_bytes(r.bytes)
+        );
+    }
+    println!(
+        "[reap-stage] reclaimed    : {} session(s) / {}",
+        report.reclaimed.len(),
+        fmt_bytes(report.candidate_bytes)
+    );
+    println!(
+        "[reap-stage] next         : `verify --level l3 --stage <stage>` now reconciles against the retained summaries"
+    );
+    println!("[reap-stage] RESULT       : OK");
+    ExitCode::SUCCESS
+}
+
+/// Human-readable byte size, same shape as `doctor`'s (1 KiB = 1024 B).
+fn fmt_bytes(bytes: u64) -> String {
+    if bytes >= 1 << 30 {
+        format!("{:.1} GiB", bytes as f64 / (1 << 30) as f64)
+    } else if bytes >= 1 << 20 {
+        format!("{:.1} MiB", bytes as f64 / (1 << 20) as f64)
+    } else if bytes >= 1 << 10 {
+        format!("{:.1} KiB", bytes as f64 / (1 << 10) as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -4626,6 +4859,8 @@ mod decision_surface_tests {
             key_file: key_file.clone(),
             connections: 1,
             options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: false,
         };
 
         let result = masterkey(&config);
@@ -4656,6 +4891,8 @@ mod decision_surface_tests {
             key_file: dir.path().join("masterkey.json"),
             connections: 1,
             options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: false,
         };
 
         let result = masterkey(&config).unwrap();

@@ -253,6 +253,8 @@ fn masterkey_persists_and_roundtrips() {
         key_file: dir.path().join("masterkey.json"),
         connections: 10,
         options: Default::default(),
+        cache_dir: None,
+        no_cache: false,
     };
     let mk = MasterKey::new();
     store::persist_key_file(&cfg, &mk).unwrap();

@@ -785,6 +785,9 @@ pub struct DoctorReport {
     pub other_present: Vec<PathBuf>,
     pub risks: Vec<String>,
     pub reclaim: ReclaimCheck,
+    /// D6 — how much the local rustic metadata cache occupies (and whether
+    /// `rustic_no_cache` has turned it off).
+    pub cache: CacheCheck,
     /// Per-harness fate decided by the path registry (`scanner::scan`).
     pub probes: Vec<scanner::HarnessProbe>,
     /// Registry-recognised sessions that are not represented by a
@@ -888,6 +891,9 @@ pub fn run() -> DoctorReport {
     // D5
     let reclaim = inspect_reclaim(&config);
 
+    // D6
+    let cache = inspect_cache(&config);
+
     let probes = scan.probes;
     DoctorReport {
         config_source: config.source,
@@ -897,6 +903,7 @@ pub fn run() -> DoctorReport {
         other_present,
         risks,
         reclaim,
+        cache,
         probes,
         archive_gaps,
         scan_failed,
@@ -981,7 +988,7 @@ impl ReclaimCheck {
 /// prior spikes): the garbage is measurable, just not removable while
 /// append-only holds.
 pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
-    use rustic_core::{Credentials, PruneOptions, PrunePlan, Repository, RepositoryOptions};
+    use rustic_core::{Credentials, PruneOptions, PrunePlan, Repository};
 
     let data_root = default_data_root();
     let repo_root = config
@@ -1021,6 +1028,8 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         key_file: key_file.clone(),
         connections: 1,
         options: BTreeMap::new(),
+        cache_dir: config.rustic_cache_dir.as_deref().map(expand_tilde),
+        no_cache: config.rustic_no_cache.unwrap_or(false),
     };
 
     // The masterkey is required to decrypt the index and plan.
@@ -1052,7 +1061,7 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
             }
         }
     };
-    let repo = match Repository::new(&RepositoryOptions::default(), &backends) {
+    let repo = match Repository::new(&cfg.repository_options(), &backends) {
         Ok(r) => r,
         Err(e) => {
             return ReclaimCheck::OpenFailed {
@@ -1101,6 +1110,124 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
     }
 }
 
+// ---------------------------------------------------------------------------
+// D6 — how much does the local metadata cache actually occupy?
+// ---------------------------------------------------------------------------
+
+/// Measured bytes of one rustic cache directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheUsage {
+    /// Sum of every file size under the cache root, recursively.
+    pub total_bytes: u64,
+    /// Number of per-repository subdirectories directly under the root.
+    /// rustic stores one directory per repository id (`Cache::new` pushes
+    /// `id.to_hex()`), so this is "how many repositories share this cache".
+    pub repo_dirs: usize,
+}
+
+/// Outcome of probing the machine's rustic metadata cache (ADR-001 option 6,
+/// made visible). Every non-`Ok` variant is a graceful skip: `doctor` never
+/// crashes just because the cache is absent or unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheCheck {
+    /// `rustic_no_cache = true`: the cache is deliberately off. `leftover` is
+    /// what is still on disk from before the switch was turned off — `None`
+    /// means it could not be determined (dir absent / unreadable), not "zero".
+    Disabled {
+        root: PathBuf,
+        leftover: Option<CacheUsage>,
+    },
+    /// Cache is on, but no rustic cache directory exists yet on this machine.
+    /// The occupancy is **unknown** (never measured), never a fake `0`.
+    NoCacheDir { root: PathBuf },
+    /// Cache is on and the directory exists, but it could not be measured.
+    Unreadable { root: PathBuf, error: String },
+    /// Cache is on and measured.
+    Ok { root: PathBuf, usage: CacheUsage },
+}
+
+impl CacheCheck {
+    /// Short machine-readable tag, mirrored by `cache_json`'s `kind`.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            CacheCheck::Disabled { .. } => "disabled",
+            CacheCheck::NoCacheDir { .. } => "no_cache_dir",
+            CacheCheck::Unreadable { .. } => "unreadable",
+            CacheCheck::Ok { .. } => "ok",
+        }
+    }
+}
+
+/// Measure a cache root: recursive byte sum plus a count of per-repository
+/// subdirectories directly under the root.
+///
+/// Symlinks are deliberately not followed (a symlink pointing out of the tree
+/// could count an unbounded amount of disk), so only real directories and
+/// regular files contribute.
+fn measure_cache_dir(root: &Path) -> io::Result<CacheUsage> {
+    let mut total_bytes = 0u64;
+    let mut repo_dirs = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            let path = entry.path();
+            if ft.is_dir() {
+                if dir.as_path() == root {
+                    repo_dirs += 1;
+                }
+                stack.push(path);
+            } else if ft.is_file() {
+                total_bytes += entry.metadata()?.len();
+            }
+        }
+    }
+    Ok(CacheUsage {
+        total_bytes,
+        repo_dirs,
+    })
+}
+
+/// The cache root `doctor` reports on: the configured `rustic_cache_dir`, or
+/// the first platform default from [`store::rustic_cache_roots`] when unset.
+/// Uses the store's own list rather than guessing at a path — the Windows
+/// spelling differs from the other platforms and must not be invented here.
+fn resolve_cache_root(config: &Config) -> PathBuf {
+    if let Some(dir) = &config.rustic_cache_dir {
+        expand_tilde(dir)
+    } else {
+        store::rustic_cache_roots()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| crate::config::home_dir().join(".cache").join("rustic"))
+    }
+}
+
+/// D6 — measure the machine's local rustic metadata cache.
+///
+/// The number is deliberately the **whole machine's** rustic cache: every
+/// repository this machine has ever opened writes under the same root, and —
+/// as noted in the spike — test repositories accumulate there too (rustic's
+/// cache is keyed by repository id, not by the temporary directory that was
+/// cleaned up). The report therefore says what the number includes rather than
+/// pretending it is this machine's archive alone.
+pub fn inspect_cache(config: &Config) -> CacheCheck {
+    let root = resolve_cache_root(config);
+    if config.rustic_no_cache.unwrap_or(false) {
+        let leftover = measure_cache_dir(&root).ok();
+        return CacheCheck::Disabled { root, leftover };
+    }
+    match measure_cache_dir(&root) {
+        Ok(usage) => CacheCheck::Ok { root, usage },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => CacheCheck::NoCacheDir { root },
+        Err(e) => CacheCheck::Unreadable {
+            root,
+            error: e.to_string(),
+        },
+    }
+}
+
 /// Default data dir for the repository + key file (mirrors main.rs).
 fn default_data_root() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
@@ -1131,6 +1258,7 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "other_present": r.other_present.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "risks": r.risks.iter().map(|text| risk_json(text)).collect::<Vec<_>>(),
         "reclaim": reclaim_json(&r.reclaim),
+        "cache": cache_json(&r.cache),
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
     })
@@ -1292,6 +1420,43 @@ fn reclaim_json(r: &ReclaimCheck) -> serde_json::Value {
             "size_repack": size_repack,
             "append_only": append_only,
             "has_garbage": r.has_garbage(),
+        }),
+    }
+}
+
+/// D6 JSON. The byte count is a tri-state like every other count: unknown when
+/// the cache directory does not exist (never `0`), not_applicable when the
+/// cache is deliberately disabled.
+fn cache_json(c: &CacheCheck) -> serde_json::Value {
+    match c {
+        CacheCheck::Disabled { root, leftover } => serde_json::json!({
+            "kind": "disabled",
+            "root": root.display().to_string(),
+            "total_bytes": match leftover {
+                Some(u) => CountState::known(u.total_bytes),
+                None => CountState::not_applicable(
+                    "cache is disabled and no leftover cache could be measured",
+                ),
+            },
+            "repo_dirs": leftover.as_ref().map(|u| u.repo_dirs),
+        }),
+        CacheCheck::NoCacheDir { root } => serde_json::json!({
+            "kind": "no_cache_dir",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::unknown("cache directory does not exist"),
+        }),
+        CacheCheck::Unreadable { root, error } => serde_json::json!({
+            "kind": "unreadable",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::unknown(error),
+            "error": error,
+        }),
+        CacheCheck::Ok { root, usage } => serde_json::json!({
+            "kind": "ok",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::known(usage.total_bytes),
+            "repo_dirs": usage.repo_dirs,
+            "note": "whole-machine rustic cache: every repository this machine has ever touched (including test repositories and other machines' archives), not just the configured repository",
         }),
     }
 }
@@ -1462,6 +1627,9 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
         print_reclaim(&r.reclaim);
         eprintln!();
+        eprintln!("D6 · Local metadata cache occupancy");
+        print_cache(&r.cache);
+        eprintln!();
         return;
     }
 
@@ -1536,6 +1704,62 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
     print_reclaim(&r.reclaim);
     eprintln!();
+
+    // D6 — how much the local metadata cache actually occupies
+    eprintln!("D6 · Local metadata cache occupancy");
+    print_cache(&r.cache);
+    eprintln!();
+}
+
+/// D6 printing — shared by the normal path and the scan-failed early return.
+fn print_cache(c: &CacheCheck) {
+    match c {
+        CacheCheck::Disabled { root, leftover } => {
+            eprintln!(
+                "  cache is disabled (rustic_no_cache = true) — no metadata cache is written."
+            );
+            eprintln!(
+                "  cache root (may still hold data from before the switch): {}",
+                root.display()
+            );
+            match leftover {
+                Some(u) => eprintln!(
+                    "  leftover on disk: {} ({} B) across {} repository cache dir(s) — written before the switch, not by it",
+                    fmt_bytes(u.total_bytes),
+                    u.total_bytes,
+                    u.repo_dirs
+                ),
+                None => eprintln!("  leftover on disk: unknown (cache root could not be measured)"),
+            }
+        }
+        CacheCheck::NoCacheDir { root } => {
+            eprintln!(
+                "  cache root: {} — does not exist yet; local cache occupancy is unknown (never measured), not 0.",
+                root.display()
+            );
+        }
+        CacheCheck::Unreadable { root, error } => {
+            eprintln!(
+                "  cache root: {} — could not be measured: {error}",
+                root.display()
+            );
+        }
+        CacheCheck::Ok { root, usage } => {
+            eprintln!("  cache root: {}", root.display());
+            eprintln!(
+                "  total usage: {} ({} B) across {} repository cache dir(s)",
+                fmt_bytes(usage.total_bytes),
+                usage.total_bytes,
+                usage.repo_dirs
+            );
+            eprintln!(
+                "  note: this is the whole machine's rustic cache — it includes every repository this machine has ever touched,"
+            );
+            eprintln!(
+                "        including test repositories and other machines' archives, not just the configured repository's metadata."
+            );
+        }
+    }
 }
 
 /// D5 printing — shared by the normal path and the scan-failed early return.
@@ -1976,6 +2200,9 @@ mod json_tests {
             reclaim: ReclaimCheck::NoRepo {
                 repo_root: PathBuf::from("/nowhere/repo"),
             },
+            cache: CacheCheck::NoCacheDir {
+                root: PathBuf::from("/nowhere/rustic"),
+            },
             probes: vec![probe()],
             archive_gaps: Vec::new(),
             scan_failed: false,
@@ -1992,6 +2219,7 @@ mod json_tests {
             obj.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "archive_gaps",
+                "cache",
                 "claude",
                 "command",
                 "config_source",
@@ -2053,5 +2281,106 @@ mod json_tests {
         r.scan_failed = true;
         let v = report_to_json(&r);
         assert_eq!(v["scan_failed"], serde_json::json!(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // D6 — local metadata cache occupancy
+    // -----------------------------------------------------------------------
+
+    /// ADR-001 option 6, made visible: a cache root that does not exist yet is
+    /// "unknown" (never measured), NEVER a fake `0` — the same lie this repo
+    /// has paid for before (unknown counts serialised as zero).
+    #[test]
+    fn cache_report_is_unknown_when_cache_dir_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-cache");
+        let config = Config {
+            rustic_cache_dir: Some(missing.to_string_lossy().into_owned()),
+            rustic_no_cache: None,
+            ..Config::default()
+        };
+        let check = inspect_cache(&config);
+        assert_eq!(check.kind_label(), "no_cache_dir");
+        let v = cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("no_cache_dir"));
+        assert_eq!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"unknown","why":"cache directory does not exist"})
+        );
+        assert_ne!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":0}),
+            "a missing cache dir must never read as a measured empty"
+        );
+    }
+
+    /// A real directory measures its recursive bytes and counts one subdir per
+    /// repository cached on this machine (rustic caches each repo under
+    /// `<root>/<repository-id>`).
+    #[test]
+    fn cache_report_measures_a_real_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("rustic");
+        fs::create_dir_all(root.join("repo-a-0123456789abcdef")).unwrap();
+        fs::create_dir_all(root.join("repo-b-0123456789abcdef")).unwrap();
+        fs::write(
+            root.join("repo-a-0123456789abcdef").join("index.jsonl"),
+            vec![0u8; 100],
+        )
+        .unwrap();
+        fs::write(
+            root.join("repo-b-0123456789abcdef").join("snapshot.jsonl"),
+            vec![0u8; 50],
+        )
+        .unwrap();
+        let tag = b"Signature: 8a477f597d28d172789f06886806bc55\n";
+        fs::write(root.join("CACHEDIR.TAG"), tag).unwrap();
+
+        let usage = measure_cache_dir(&root).unwrap();
+        assert_eq!(usage.total_bytes, (100 + 50 + tag.len()) as u64);
+        assert_eq!(usage.repo_dirs, 2);
+
+        // Through the full report + JSON serialisation.
+        let config = Config {
+            rustic_cache_dir: Some(root.to_string_lossy().into_owned()),
+            rustic_no_cache: None,
+            ..Config::default()
+        };
+        let v = cache_json(&inspect_cache(&config));
+        assert_eq!(v["kind"], serde_json::json!("ok"));
+        assert_eq!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":(100 + 50 + tag.len())})
+        );
+        assert_eq!(v["repo_dirs"], serde_json::json!(2));
+        assert!(
+            v["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("whole-machine"),
+            "the JSON must say explicitly that the number covers every repository, not just the configured one"
+        );
+    }
+
+    /// The switch is visible: `rustic_no_cache = true` reports "disabled"
+    /// rather than pretending there is no cache directory. With no leftover to
+    /// measure (the configured root does not exist) the byte count is
+    /// `not_applicable`, not a number and not `0`.
+    #[test]
+    fn cache_report_is_disabled_when_no_cache_set() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("never-written");
+        let config = Config {
+            rustic_cache_dir: Some(root.to_string_lossy().into_owned()),
+            rustic_no_cache: Some(true),
+            ..Config::default()
+        };
+        let v = cache_json(&inspect_cache(&config));
+        assert_eq!(v["kind"], serde_json::json!("disabled"));
+        assert_eq!(
+            v["total_bytes"]["kind"],
+            serde_json::json!("not_applicable"),
+            "a deliberately-disabled cache is not a number; the switch itself is the answer"
+        );
     }
 }

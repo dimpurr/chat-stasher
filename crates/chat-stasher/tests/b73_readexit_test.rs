@@ -23,6 +23,8 @@ fn config(repo: &Path, key: &Path) -> StoreConfig {
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
+        cache_dir: None,
+        no_cache: false,
     }
 }
 

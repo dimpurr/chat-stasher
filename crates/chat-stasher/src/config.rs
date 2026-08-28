@@ -109,6 +109,21 @@ pub struct Config {
     /// config knob now so a remote backend's connection limit (e.g. <10 for
     /// SFTP) is honoured before it is wired in.
     pub rustic_connections: Option<usize>,
+    /// Where rustic keeps this machine's local metadata cache.
+    ///
+    /// rustic caches snapshot / index / *tree* packs — metadata, never the
+    /// data packs — under a per-machine directory (`dirs::cache_dir()/rustic`,
+    /// e.g. `~/Library/Caches/rustic` on macOS). It is purely a speed-up; it
+    /// holds no conversation content. `None` follows rustic's own per-platform
+    /// default. Ignored when [`rustic_no_cache`](Self::rustic_no_cache) is set.
+    pub rustic_cache_dir: Option<String>,
+    /// Completely disable the local metadata cache (rustic `no_cache`).
+    ///
+    /// Default `false`. The cache holds metadata only — snapshots, index and
+    /// *tree* packs — so turning it off loses no archive content; every open
+    /// just re-reads that metadata instead of keeping it between runs. Turn it
+    /// on to stop the cache directory from growing.
+    pub rustic_no_cache: Option<bool>,
 
     /// How often an unattended run should archive, in seconds.
     ///
@@ -159,6 +174,10 @@ pub struct DestinationConfig {
     pub connections: Option<usize>,
     /// Backend options forwarded verbatim (e.g. `endpoint` for `opendal:sftp`).
     pub options: BTreeMap<String, String>,
+    /// Per-destination rustic cache root (overrides `rustic_cache_dir`).
+    pub cache_dir: Option<String>,
+    /// Per-destination `rustic_no_cache` (overrides the singular field).
+    pub no_cache: Option<bool>,
 }
 
 /// Decided default archive cadence: hourly.
@@ -274,6 +293,7 @@ impl Config {
         expand_opt_field("codex_sessions_dir", &mut self.codex_sessions_dir, problems);
         expand_opt_field("rustic_repo", &mut self.rustic_repo, problems);
         expand_opt_field("rustic_key_file", &mut self.rustic_key_file, problems);
+        expand_opt_field("rustic_cache_dir", &mut self.rustic_cache_dir, problems);
 
         let mut bad_harness_roots: Vec<String> = Vec::new();
         for (id, root) in &mut self.harness_roots {
@@ -294,6 +314,8 @@ impl Config {
             expand_opt_field(&repo_label, &mut dest.repo, problems);
             let key_label = format!("destinations.{name}.key_file");
             expand_opt_field(&key_label, &mut dest.key_file, problems);
+            let cache_dir_label = format!("destinations.{name}.cache_dir");
+            expand_opt_field(&cache_dir_label, &mut dest.cache_dir, problems);
             // Backend option values are forwarded verbatim to rustic, but a
             // value that names a local file (e.g. `key`/`root` for
             // `opendal:sftp`) is a path and gets the same `~` handling. Values
@@ -700,6 +722,25 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # but does open more ssh ControlMasters that must later be reaped.
 # rustic_connections = 4
 
+# Where rustic keeps this machine's local metadata cache.
+#
+# rustic caches snapshot / index / *tree* packs — metadata only, never the
+# data packs with your conversations — under a per-machine directory
+# (`dirs::cache_dir()/rustic`; ~/Library/Caches/rustic on macOS,
+# ~/.cache/rustic on Linux, %LOCALAPPDATA%\rustic on Windows). The cache is
+# purely a speed-up for re-opening the repository; it holds no archive content.
+#
+# Default: follow rustic's own per-platform location. Set this to move the
+# cache somewhere you can see (and, if you ever need to, delete) it.
+# rustic_cache_dir = "~/Library/Caches/rustic"
+#
+# Completely disable the local metadata cache (rustic `no_cache`). Default
+# false. Because the cache holds metadata only — never the data packs —
+# disabling it loses no archive content; every open just re-reads the
+# metadata instead of keeping it between runs. `doctor` reports how much the
+# cache currently occupies, so you can see what this switch is saving.
+# rustic_no_cache = false
+
 # How often an unattended run should archive, in seconds. Default 3600 (hourly).
 # The scheduler template reads this value; it is not installed automatically.
 # backup_interval_secs = 3600
@@ -770,6 +811,10 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # repo = "opendal:sftp"
 # key_file = "~/stash/chat-stasher/masterkey-storagebox.json"
 # connections = 4
+# Per-destination cache knobs. Same semantics as `rustic_cache_dir` /
+# `rustic_no_cache` above, scoped to this destination's repository.
+# cache_dir = "~/Library/Caches/rustic-storagebox"
+# no_cache = false
 # [destinations.storagebox.options]
 # endpoint = "ssh://example:23"
 "#;
@@ -1040,6 +1085,60 @@ root = "~/dest/remote"
             d1.options.get("root").map(String::as_str),
             Some(h.join("dest/remote").to_str().unwrap())
         );
+    }
+
+    /// ADR-020 Phase 5: the cache knobs parse, and the path one goes through
+    /// the same `~` expansion as every other path field.
+    #[test]
+    fn cache_fields_parse_and_expand() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", home.path());
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+        env::remove_var("USERPROFILE");
+
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            r#"
+rustic_cache_dir = "~/caches/rustic"
+rustic_no_cache = true
+
+[destinations.d1]
+repo = "~/dest/repo"
+cache_dir = "~/caches/rustic-d1"
+no_cache = false
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        let h = home.path();
+        assert_eq!(
+            cfg.rustic_cache_dir.as_deref(),
+            Some(h.join("caches/rustic").to_str().unwrap())
+        );
+        assert_eq!(cfg.rustic_no_cache, Some(true));
+        let d1 = cfg.destinations.get("d1").expect("d1 present");
+        assert_eq!(
+            d1.cache_dir.as_deref(),
+            Some(h.join("caches/rustic-d1").to_str().unwrap())
+        );
+        assert_eq!(d1.no_cache, Some(false));
+    }
+
+    /// The knobs are optional: an absent config leaves them at their defaults
+    /// (`None`/`None`), which store.rs maps to "cache on, standard dir".
+    #[test]
+    fn cache_fields_default_when_absent() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.rustic_cache_dir, None);
+        assert_eq!(cfg.rustic_no_cache, None);
+        let cfg: Config = toml::from_str("[destinations.d1]\nrepo = \"x\"\n").unwrap();
+        assert_eq!(cfg.destinations["d1"].cache_dir, None);
+        assert_eq!(cfg.destinations["d1"].no_cache, None);
     }
 
     #[test]

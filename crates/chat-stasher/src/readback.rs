@@ -37,9 +37,7 @@
 
 use anyhow::Context;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
-use rustic_core::{
-    Credentials, Grouped, LsOptions, Repository, RepositoryOptions, SnapshotGroupCriterion,
-};
+use rustic_core::{Credentials, Grouped, LsOptions, Repository, SnapshotGroupCriterion};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -154,7 +152,7 @@ impl BackupStore {
     /// lengths / digests are ever produced.
     pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
-        let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
             .open(&Credentials::Masterkey(mk.clone()))
             .context("open repository for read-all")?
             .to_indexed()
@@ -275,7 +273,7 @@ impl BackupStore {
             return Ok(out);
         }
         let backends = self.backends()?;
-        let repo = Repository::new(&RepositoryOptions::default(), &backends)?
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
             .open(&Credentials::Masterkey(mk.clone()))
             .context("open repository for shard restore")?
             .to_indexed()
