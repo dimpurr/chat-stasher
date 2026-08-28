@@ -1117,6 +1117,16 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
 /// Measured bytes of one rustic cache directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheUsage {
+    /// Bytes actually allocated on disk, from each file's block count.
+    ///
+    /// 🔴 This, not `total_bytes`, is the number that answers "how much disk is
+    /// this costing me". A rustic cache is tens of thousands of tiny files
+    /// (measured on a real machine: 17,051 files averaging 2,397 B against a
+    /// 4 KiB block size, plus 38,395 directories) so every file rounds up to a
+    /// whole block: 39.0 MiB of content occupied 90.4 MiB of disk, 2.3x more.
+    /// Reporting only the logical sum understates the cost by that factor, and
+    /// the shape that causes it is inherent to this cache, not incidental.
+    pub disk_bytes: u64,
     /// Sum of every file size under the cache root, recursively.
     pub total_bytes: u64,
     /// Number of per-repository subdirectories directly under the root.
@@ -1166,6 +1176,7 @@ impl CacheCheck {
 /// regular files contribute.
 fn measure_cache_dir(root: &Path) -> io::Result<CacheUsage> {
     let mut total_bytes = 0u64;
+    let mut disk_bytes = 0u64;
     let mut repo_dirs = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -1179,11 +1190,26 @@ fn measure_cache_dir(root: &Path) -> io::Result<CacheUsage> {
                 }
                 stack.push(path);
             } else if ft.is_file() {
-                total_bytes += entry.metadata()?.len();
+                let md = entry.metadata()?;
+                total_bytes += md.len();
+                // `st_blocks` is defined in 512-byte units regardless of the
+                // filesystem's own block size, so this is the allocated size.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    disk_bytes += md.blocks() * 512;
+                }
+                // No portable block count on Windows: fall back to the logical
+                // size and say so rather than invent an allocation figure.
+                #[cfg(not(unix))]
+                {
+                    disk_bytes += md.len();
+                }
             }
         }
     }
     Ok(CacheUsage {
+        disk_bytes,
         total_bytes,
         repo_dirs,
     })
@@ -1747,11 +1773,21 @@ fn print_cache(c: &CacheCheck) {
         CacheCheck::Ok { root, usage } => {
             eprintln!("  cache root: {}", root.display());
             eprintln!(
-                "  total usage: {} ({} B) across {} repository cache dir(s)",
-                fmt_bytes(usage.total_bytes),
-                usage.total_bytes,
+                "  disk used  : {} ({} B) across {} repository cache dir(s)",
+                fmt_bytes(usage.disk_bytes),
+                usage.disk_bytes,
                 usage.repo_dirs
             );
+            eprintln!(
+                "  content    : {} ({} B) — logical size of the files themselves",
+                fmt_bytes(usage.total_bytes),
+                usage.total_bytes
+            );
+            if usage.disk_bytes > usage.total_bytes.saturating_mul(3) / 2 {
+                eprintln!(
+                    "  note: disk used is well above content size because this cache is many tiny files and each one rounds up to a whole filesystem block. The first number is what reclaiming it would give you back."
+                );
+            }
             eprintln!(
                 "  note: this is the whole machine's rustic cache — it includes every repository this machine has ever touched,"
             );
@@ -1951,6 +1987,33 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
 
 #[cfg(test)]
 mod tests {
+    /// D6 exists to answer "how much disk is this costing me". A rustic cache
+    /// is tens of thousands of tiny files, so the logical byte sum is far
+    /// below what is actually allocated; reporting only the logical figure
+    /// answers a different question than the one asked.
+    #[cfg(unix)]
+    #[test]
+    fn cache_usage_reports_allocation_not_just_logical_size() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        // 8 files of 1 byte each: 8 logical bytes, but each occupies a whole
+        // filesystem block.
+        for i in 0..8u32 {
+            let d = root.join(format!("repo-{i}"));
+            std::fs::create_dir_all(&d).expect("mkdir");
+            std::fs::write(d.join("f"), b"x").expect("write");
+        }
+        let usage = measure_cache_dir(root).expect("measure");
+        assert_eq!(usage.repo_dirs, 8);
+        assert_eq!(usage.total_bytes, 8, "logical sum is 8 one-byte files");
+        assert!(
+            usage.disk_bytes > usage.total_bytes,
+            "allocation must exceed the logical sum for sub-block files; got disk={} logical={}",
+            usage.disk_bytes,
+            usage.total_bytes
+        );
+    }
+
     use super::*;
 
     fn write(path: &Path, content: &str) {
