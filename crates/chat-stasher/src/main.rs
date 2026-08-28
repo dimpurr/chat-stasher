@@ -88,6 +88,13 @@ enum Command {
         /// Template format to render.
         #[arg(long, value_enum, default_value = "launchd")]
         format: schedule::Format,
+        /// Which scheduled job to render. `run-once` (default) is the hourly
+        /// archive cycle. `reap-stage` is the weekly stage reclamation that
+        /// deletes staged shard bodies once every destination proves it holds
+        /// them — a different "reap" from the ssh connection reaping that
+        /// `--no-reap` disables.
+        #[arg(long, value_enum, default_value = "run-once")]
+        unit: schedule::Unit,
         /// Stage path embedded in the one-shot command.
         #[arg(long)]
         stage: PathBuf,
@@ -101,19 +108,23 @@ enum Command {
         #[arg(long)]
         binary: Option<PathBuf>,
         /// Named destination forwarded to `run-once`. Required once the config
-        /// declares any destination (unless `--repo` is given).
+        /// declares any destination (unless `--repo` is given). Not valid with
+        /// `--unit reap-stage`.
         #[arg(long)]
         destination: Option<String>,
-        /// Repository path override forwarded to `run-once`.
+        /// Repository path override forwarded to the scheduled command
+        /// (`reap-stage` honours it for a single-destination config only).
         #[arg(long)]
         repo: Option<String>,
-        /// Masterkey file override forwarded to `run-once`.
+        /// Masterkey file override forwarded to the scheduled command
+        /// (`reap-stage` honours it for a single-destination config only).
         #[arg(long)]
         key_file: Option<String>,
-        /// Concurrency cap override forwarded to `run-once`.
+        /// Concurrency cap override forwarded to the scheduled command.
         #[arg(long)]
         connections: Option<usize>,
-        /// Backend option `key=value`, repeatable, forwarded to `run-once`.
+        /// Backend option `key=value`, repeatable, forwarded to the scheduled
+        /// command.
         #[arg(long = "option")]
         options: Vec<String>,
         /// Machine partition forwarded to `run-once`.
@@ -125,7 +136,9 @@ enum Command {
         /// Add the cheap L1 verify pass after each archive cycle.
         #[arg(long)]
         verify: bool,
-        /// Disable ssh connection reaping after each run.
+        /// Disable ssh connection reaping after the scheduled command runs
+        /// (troubleshooting). This is ssh connection reaping only — it never
+        /// disables the stage reclamation that `--unit reap-stage` performs.
         #[arg(long)]
         no_reap: bool,
     },
@@ -893,6 +906,7 @@ fn run() -> ExitCode {
             no_reap,
         ),
         Command::Schedule {
+            unit,
             format,
             stage,
             output,
@@ -907,6 +921,7 @@ fn run() -> ExitCode {
             verify,
             no_reap,
         } => cmd_schedule(
+            unit,
             format,
             &stage,
             output,
@@ -3445,6 +3460,7 @@ fn run_once_pass(
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_schedule(
+    unit: schedule::Unit,
     format: schedule::Format,
     stage: &Path,
     output: Option<PathBuf>,
@@ -3460,23 +3476,45 @@ fn cmd_schedule(
     no_reap: bool,
 ) -> ExitCode {
     let config = Config::load();
-    let interval = match schedule::interval_secs(&config) {
-        Ok(interval) => interval,
-        Err(e) => {
-            eprintln!("schedule: {e:#}");
-            return ExitCode::FAILURE;
-        }
+
+    // The run-once timer's cadence comes from the config; the reap-stage timer
+    // is a fixed weekly slot, so no interval is resolved for it (`render`
+    // ignores the value for that unit).
+    let interval = match unit {
+        schedule::Unit::RunOnce => match schedule::interval_secs(&config) {
+            Ok(interval) => interval,
+            Err(e) => {
+                eprintln!("schedule: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        },
+        schedule::Unit::ReapStage => 0,
     };
 
-    // Enforce the same product rule as `run-once`: once destinations exist, the
-    // rendered command must name one (or give an explicit repo override).
-    if destination.is_none() && repo.is_none() && !config.destinations.is_empty() {
+    // `reap-stage` proves against *every* declared destination, so the
+    // run-once "must name a destination" rule does not apply to it.
+    if unit == schedule::Unit::RunOnce
+        && destination.is_none()
+        && repo.is_none()
+        && !config.destinations.is_empty()
+    {
         let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
         names.sort_unstable();
         eprintln!(
             "schedule: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}",
             names.len(),
             names.join(", ")
+        );
+        return ExitCode::from(2);
+    }
+
+    // Only `run-once` takes the run-once-only forwarding slots; reject them
+    // loudly for the reap-stage unit instead of silently dropping them.
+    if unit == schedule::Unit::ReapStage
+        && (destination.is_some() || machine.is_some() || shard_bucket_cap.is_some() || verify)
+    {
+        eprintln!(
+            "schedule: `--unit reap-stage` does not forward `--destination` / `--machine` / `--shard-bucket-cap` / `--verify` (those are `run-once` slots). `--repo` / `--key-file` / `--connections` / `--option` / `--no-reap` are forwarded to `reap-stage`."
         );
         return ExitCode::from(2);
     }
@@ -3502,21 +3540,30 @@ fn cmd_schedule(
     let stage = absolute_path(stage);
     let args = schedule::RunOnceArgs {
         destination,
-        repo,
-        key_file,
+        repo: repo.clone(),
+        key_file: key_file.clone(),
         connections,
-        options,
+        options: options.clone(),
         machine,
         shard_bucket_cap,
         no_reap,
         verify,
     };
+    let reap_args = schedule::ReapStageArgs {
+        repo,
+        key_file,
+        connections,
+        options,
+        no_reap,
+    };
     let files = schedule::render(
+        unit,
         format,
         &binary,
         &stage,
         interval,
         &args,
+        &reap_args,
         &config::home_dir(),
     );
     let paths = match output {
@@ -3540,23 +3587,30 @@ fn cmd_schedule(
             Vec::new()
         }
     };
-    println!("[schedule] interval_secs: {interval}");
+    match unit {
+        schedule::Unit::RunOnce => println!("[schedule] interval_secs: {interval}"),
+        schedule::Unit::ReapStage => println!(
+            "[schedule] cadence: weekly — Sun {:02}:{:02} local",
+            schedule::REAP_STAGE_HOUR,
+            schedule::REAP_STAGE_MINUTE
+        ),
+    }
     println!("[schedule] install is NOT automatic.");
     if paths.is_empty() {
         match format {
             schedule::Format::Launchd => println!(
                 "[schedule] save the plist as \"$HOME/Library/LaunchAgents/{label}.plist\" first.",
-                label = schedule::LAUNCHD_LABEL
+                label = schedule::launchd_label(unit)
             ),
             schedule::Format::Systemd => {
                 println!("[schedule] save both units under \"$HOME/.config/systemd/user/\" first.")
             }
         }
         println!("[schedule] installation requires you to execute this command yourself:");
-        println!("{}", schedule::install_command_for_saved(format));
+        println!("{}", schedule::install_command_for_saved(unit, format));
     } else {
         println!("[schedule] you must execute this command yourself to install:");
-        println!("{}", schedule::install_command(format, &paths));
+        println!("{}", schedule::install_command(unit, format, &paths));
     }
     ExitCode::SUCCESS
 }
