@@ -75,7 +75,14 @@ fn push_does_not_call_an_unresolved_scan_empty() {
     );
     assert!(
         stdout.contains("scanner_unknown=1"),
-        "the diagnostic must preserve the unknown probe count; stdout={stdout}"
+        // stderr is included because a failure here has twice been an *earlier*
+        // failure in disguise: the command exited non-zero before printing any
+        // stdout at all, so the missing substring says nothing about why. On
+        // Windows CI (2026-08-28) this assertion fired with a completely empty
+        // stdout, and without stderr there was no way to tell whether the
+        // scanner diagnostic regressed or the process died before reaching it.
+        "the diagnostic must preserve the unknown probe count; exit={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
     );
     assert!(
         !stdout.contains("no archivable content this run"),
