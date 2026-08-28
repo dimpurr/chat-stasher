@@ -228,7 +228,7 @@ fn the_install_doc_still_promises_a_non_zero_exit_when_unhealthy() {
     let text = fs::read_to_string(&doc).expect("read docs/install.md");
 
     assert!(
-        text.contains("在判定「不健康」时会**以非零码退出**"),
-        "docs/install.md 承诺过 status 不健康时非零；改行为前先改这句话"
+        text.contains("it exits with a non-zero code"),
+        "docs/install.md promises a non-zero exit when status is unhealthy; change this sentence before changing the behaviour"
     );
 }

@@ -18,100 +18,100 @@ context      crates/chat-stasher/src/collect.rs:478  "scan harness sessions for 
 context      crates/chat-stasher/src/collect.rs:524  "scan harness sessions"
 with_context crates/chat-stasher/src/collect.rs:539  "create stage {}"
 with_context crates/chat-stasher/src/collect.rs:541  "create collector state {}"
-anyhow       crates/chat-stasher/src/collect.rs:769  "读取 Cursor legacy 会话快照失败: {error}"
-anyhow       crates/chat-stasher/src/collect.rs:785  "读取 Cursor 会话游标失败: {error}"
-anyhow       crates/chat-stasher/src/collect.rs:790  "读取 Cursor 会话快照失败: {error}"
-anyhow       crates/chat-stasher/src/collect.rs:806  "读取 Grok 会话游标失败: {error}"
-anyhow       crates/chat-stasher/src/collect.rs:811  "读取 Grok 会话快照失败: {error}"
-anyhow       crates/chat-stasher/src/collect.rs:895  "invalid {label} session id"
-anyhow       crates/chat-stasher/src/collect.rs:960  "invalid opencode session id"
-anyhow       crates/chat-stasher/src/collect.rs:962  "读取 opencode 会话游标失败: {error}"
-anyhow       crates/chat-stasher/src/collect.rs:983  "读取 opencode 会话快照失败: {error}"
-with_context crates/chat-stasher/src/collect.rs:1026  "read source bytes ({})"
-with_context crates/chat-stasher/src/collect.rs:1092  "read compressed source ({})"
-context      crates/chat-stasher/src/collect.rs:1111  "decompress jsonl.zst"
-anyhow       crates/chat-stasher/src/collect.rs:1239  "source changed during three consistent-read attempts"
-with_context crates/chat-stasher/src/collect.rs:1288  "read collector state {}"
-context      crates/chat-stasher/src/collect.rs:1309  "serialise collector state"
-anyhow       crates/chat-stasher/src/collect.rs:1357  "source range is too large for this process"
-eprintln     crates/chat-stasher/src/config.rs:187  "warning: config 里有未转义的反斜杠路径（Windows 写法），已按字面路径读取: {}"
-eprintln     crates/chat-stasher/src/config.rs:191  "         TOML 里 `\\` 是转义符；写成 'C:\\path' (单引号) 或 \"C:\\\\path\" 可去掉这条警告"
+anyhow       crates/chat-stasher/src/collect.rs:769  "failed to read Cursor legacy session snapshot: {error}"
+anyhow       crates/chat-stasher/src/collect.rs:786  "failed to read Cursor session cursor: {error}"
+anyhow       crates/chat-stasher/src/collect.rs:791  "failed to read Cursor session snapshot: {error}"
+anyhow       crates/chat-stasher/src/collect.rs:807  "failed to read Grok session cursor: {error}"
+anyhow       crates/chat-stasher/src/collect.rs:812  "failed to read Grok session snapshot: {error}"
+anyhow       crates/chat-stasher/src/collect.rs:896  "invalid {label} session id"
+anyhow       crates/chat-stasher/src/collect.rs:961  "invalid opencode session id"
+anyhow       crates/chat-stasher/src/collect.rs:963  "failed to read opencode session cursor: {error}"
+anyhow       crates/chat-stasher/src/collect.rs:984  "failed to read opencode session snapshot: {error}"
+with_context crates/chat-stasher/src/collect.rs:1027  "read source bytes ({})"
+with_context crates/chat-stasher/src/collect.rs:1093  "read compressed source ({})"
+context      crates/chat-stasher/src/collect.rs:1112  "decompress jsonl.zst"
+anyhow       crates/chat-stasher/src/collect.rs:1240  "source changed during three consistent-read attempts"
+with_context crates/chat-stasher/src/collect.rs:1289  "read collector state {}"
+context      crates/chat-stasher/src/collect.rs:1310  "serialise collector state"
+anyhow       crates/chat-stasher/src/collect.rs:1358  "source range is too large for this process"
+eprintln     crates/chat-stasher/src/config.rs:187  "warning: config contains unescaped backslash paths (Windows spelling), read as literal paths: {}"
+eprintln     crates/chat-stasher/src/config.rs:191  "         `\\` is the escape character in TOML; write 'C:\\path' (single quotes) or \"C:\\\\path\" to silence this warning"
 eprintln     crates/chat-stasher/src/config.rs:198  "warning: config is not valid TOML, using defaults: {e}"
 eprintln     crates/chat-stasher/src/config.rs:211  "warning: could not read config, using defaults: {e}"
 eprintln     crates/chat-stasher/src/config.rs:247  "config already exists: {}"
 eprintln     crates/chat-stasher/src/config.rs:254  "wrote default config: {}"
-eprintln     crates/chat-stasher/src/config.rs:329  "warning: 配置路径里的 `~` 无法展开，该项已按默认值处理（绝不把字面 `~` 当路径写盘）: {problem}"
-write        crates/chat-stasher/src/config.rs:558  "`{input}` 以 `~` 开头，但 $HOME / $USERPROFILE 都未设置，无法展开为家目录"
-write        crates/chat-stasher/src/config.rs:562  "`{input}` 是 `~用户名` 形式，本工具只支持当前用户的 `~`（不支持别人的家目录）；请写绝对路径"
-write        crates/chat-stasher/src/config.rs:566  "`{path}` 里仍含有字面量 `~` 组件——这几乎肯定是波浪号没被展开；请用 `~/` 开头或写绝对路径"
+eprintln     crates/chat-stasher/src/config.rs:329  "warning: the `~` in a config path could not be expanded; the option was reset to its default (a literal `~` is never written as a path): {problem}"
+write        crates/chat-stasher/src/config.rs:558  "`{input}` starts with `~` but neither $HOME nor $USERPROFILE is set, so it cannot be expanded to a home directory"
+write        crates/chat-stasher/src/config.rs:562  "`{input}` is `~username` form; this tool only supports the current user's `~` (not another user's home); use an absolute path"
+write        crates/chat-stasher/src/config.rs:566  "`{path}` still contains a literal `~` component — almost certainly a tilde that was never expanded; start with `~/` or use an absolute path"
 anyhow       crates/chat-stasher/src/destinit.rs:232  "{reason}"
 context      crates/chat-stasher/src/destinit.rs:495  "dump shards from the existing destination"
-eprintln     crates/chat-stasher/src/doctor.rs:813  "doctor: scan failed: {e}"
-eprintln     crates/chat-stasher/src/doctor.rs:914  "warning: 无法展开路径 `{p}`: {e}"
-eprintln     crates/chat-stasher/src/doctor.rs:1360  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1361  "doctor — “你的 harness 正在偷偷删你的数据吗？”"
-eprintln     crates/chat-stasher/src/doctor.rs:1362  "      只读探测；只打印路径 / 计数 / 字节 / 时间戳，绝不打印会话正文。"
-eprintln     crates/chat-stasher/src/doctor.rs:1364  "config_source={}"
-eprintln     crates/chat-stasher/src/doctor.rs:1366  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1369  "D1 · Claude Code 的轮转设置"
-eprintln     crates/chat-stasher/src/doctor.rs:1371  "  cleanupPeriodDays：{} （{}）"
-eprintln     crates/chat-stasher/src/doctor.rs:1389  "    {:<52} {}"
-eprintln     crates/chat-stasher/src/doctor.rs:1391  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1394  "D2 · Gemini CLI 的保留策略"
-eprintln     crates/chat-stasher/src/doctor.rs:1395  "  sessionRetention：{}"
-eprintln     crates/chat-stasher/src/doctor.rs:1403  "  配置文件都不存在 → 使用 CLI 内置默认值（enabled=true, maxAge=30d）。"
-eprintln     crates/chat-stasher/src/doctor.rs:1405  "  来源文件：{}"
-eprintln     crates/chat-stasher/src/doctor.rs:1407  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1411  "D3 · 覆盖率 —— 🔴 registry 缺失/无法解析，会话覆盖未知。"
-eprintln     crates/chat-stasher/src/doctor.rs:1413  "    拒绝用硬编码路径假装扫全（stderr 上方已有 “Refusing to scan with hardcoded roots”）。"
-eprintln     crates/chat-stasher/src/doctor.rs:1415  "    仅列出与本 registry 无关、来自独立只读探测的条目："
-eprintln     crates/chat-stasher/src/doctor.rs:1421  "  {:<10} 未安装（{}）"
-eprintln     crates/chat-stasher/src/doctor.rs:1435  "  {:<10} 会话 {:<6}{} · {} · 最早 {earliest} · 最晚 {latest}"
-eprintln     crates/chat-stasher/src/doctor.rs:1442  "             ({})"
-eprintln     crates/chat-stasher/src/doctor.rs:1445  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1446  "D4 · 风险汇总 —— 所以会发生什么 + 什么时候"
-eprintln     crates/chat-stasher/src/doctor.rs:1448  "  {}. {risk}"
-eprintln     crates/chat-stasher/src/doctor.rs:1450  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1451  "D5 · 仓库里有多少可回收的垃圾？"
-eprintln     crates/chat-stasher/src/doctor.rs:1452  "     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。"
-eprintln     crates/chat-stasher/src/doctor.rs:1454  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1463  "D3 · 覆盖率 —— 本机 {installed}/{known} 个已知 harness 命中（registry v1 驱动）；轮转分析对象如下："
-eprintln     crates/chat-stasher/src/doctor.rs:1467  "  {:<10} 未安装（{}）"
-eprintln     crates/chat-stasher/src/doctor.rs:1481  "  {:<10} 会话 {:<6}{} · {} · 最早 {earliest} · 最晚 {latest}"
-eprintln     crates/chat-stasher/src/doctor.rs:1488  "             ({})"
-eprintln     crates/chat-stasher/src/doctor.rs:1502  "  已装但不在本命令范围（仅探测，不分析轮转）：{}"
-eprintln     crates/chat-stasher/src/doctor.rs:1508  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1511  "D4 · 风险汇总 —— 所以会发生什么 + 什么时候"
-eprintln     crates/chat-stasher/src/doctor.rs:1513  "  （没有可合成的判断）"
-eprintln     crates/chat-stasher/src/doctor.rs:1516  "  {}. {risk}"
-eprintln     crates/chat-stasher/src/doctor.rs:1518  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1521  "D5 · 仓库里有多少可回收的垃圾？"
-eprintln     crates/chat-stasher/src/doctor.rs:1522  "     `prune_plan` 只算不删 —— doctor 永远不执行 prune，也不碰 append_only。"
-eprintln     crates/chat-stasher/src/doctor.rs:1524  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1532  "  （跳过）没有仓库目录：{} —— 没仓库就没有垃圾，也不用诊断。"
-eprintln     crates/chat-stasher/src/doctor.rs:1538  "  （跳过）仓库目录在，但 masterkey 读不了（{}）：{error}—— 打不开就无可规划，先确认 key 文件没丢。"
-eprintln     crates/chat-stasher/src/doctor.rs:1545  "  （跳过）仓库打不开 / 算不出计划：{} —— {error}"
-eprintln     crates/chat-stasher/src/doctor.rs:1557  "  未被引用的 pack    : {packs_unref} 个 · {}（`packs_unref`/`size_unref`）"
-eprintln     crates/chat-stasher/src/doctor.rs:1561  "  需要 repack 的量   : {packs_repack} 个 pack · {}（`packs.repack`/`size.repack`）"
-eprintln     crates/chat-stasher/src/doctor.rs:1565  "  🔴 这些垃圾现在清不掉 —— 本仓库是 append_only（{append_only}）。"
-eprintln     crates/chat-stasher/src/doctor.rs:1567  "     `prune`/`repair`/`rewrite --forget` 都被 append_only 挡死（源码 `commands/prune.rs`）。"
-eprintln     crates/chat-stasher/src/doctor.rs:1570  "     要清的标准流程：临时关掉 append_only → 跑一次 `rustic prune --instant-delete` → 再开回 append_only。"
-eprintln     crates/chat-stasher/src/doctor.rs:1573  "     ⚠️ 必须带 `--instant-delete`：普通 `prune` 的默认 `--keep-delete 23h` 只把 pack 标记为待删、"
-eprintln     crates/chat-stasher/src/doctor.rs:1576  "        23 小时宽限期后才真删 —— 实测即使关掉 append_only 也会停在 nothing to do!，垃圾根本没走。"
-eprintln     crates/chat-stasher/src/doctor.rs:1579  "     ⚠️ 代价：`--instant-delete` 跳过这 23 小时宽限期 —— 删了就没了，没有反悔窗口；执行前先确认上面两个数字确实是垃圾。"
-eprintln     crates/chat-stasher/src/doctor.rs:1582  "     ⚠️ 这要求临时关掉 append_only —— 那是你的安全设置：关掉到再开回之间仓库失去“防误删”的保险网，"
-eprintln     crates/chat-stasher/src/doctor.rs:1584  "        只在这个窗口期内操作、先做一次备份，操作完立刻开回。"
-eprintln     crates/chat-stasher/src/doctor.rs:1586  "     doctor 是只读诊断：它只报告数字和操作步骤，绝不会替你执行 prune 或切换 append_only。"
-eprintln     crates/chat-stasher/src/doctor.rs:1589  "  ✅ 没有任何可回收的垃圾 —— 不用清。"
-eprintln     crates/chat-stasher/src/doctor.rs:1592  "     （append_only=true，即便有垃圾也只会被挡下，不会自动发生误删。）"
-eprintln     crates/chat-stasher/src/doctor.rs:1598  ""
-eprintln     crates/chat-stasher/src/doctor.rs:1606  "  ⚠ 不可归档会话：以下 harness 已识别会话，但未产出 SessionRecord；collect 当前不会归档它们。"
-eprintln     crates/chat-stasher/src/doctor.rs:1609  "{}"
-eprintln     crates/chat-stasher/src/doctor.rs:1612  "  建议：不要把 scanner records 当作已识别会话总数；等对应 harness 产出 SessionRecord 后再运行 collect。"
-eprintln     crates/chat-stasher/src/doctor.rs:1622  "  （registry 探测为空 —— 扫描未运行，或没有候选 harness。）"
-eprintln     crates/chat-stasher/src/doctor.rs:1628  "  [registry] 驱动表 —— 平台={platform} · 本机命中/扫描成功 {hit}/{n} 个 harness"
-eprintln     crates/chat-stasher/src/doctor.rs:1691  "    {mark} {:<16} {conf:<26} 会话={:<4}{bytes:<0} {root}{extra}"
-eprintln     crates/chat-stasher/src/doctor.rs:1702  "    低置信（仅社区说法未核实，扫了但不可当作核实）：{flagged}"
+eprintln     crates/chat-stasher/src/doctor.rs:814  "doctor: scan failed: {e}"
+eprintln     crates/chat-stasher/src/doctor.rs:915  "warning: could not expand path `{p}`: {e}"
+eprintln     crates/chat-stasher/src/doctor.rs:1364  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1365  "doctor — “Is your harness silently deleting your data?”"
+eprintln     crates/chat-stasher/src/doctor.rs:1366  "      read-only probe; prints only paths / counts / bytes / timestamps, never session bodies."
+eprintln     crates/chat-stasher/src/doctor.rs:1368  "config_source={}"
+eprintln     crates/chat-stasher/src/doctor.rs:1370  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1373  "D1 · Claude Code rotation settings"
+eprintln     crates/chat-stasher/src/doctor.rs:1375  "  cleanupPeriodDays: {} ({})"
+eprintln     crates/chat-stasher/src/doctor.rs:1393  "    {:<52} {}"
+eprintln     crates/chat-stasher/src/doctor.rs:1395  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1398  "D2 · Gemini CLI retention policy"
+eprintln     crates/chat-stasher/src/doctor.rs:1399  "  sessionRetention: {}"
+eprintln     crates/chat-stasher/src/doctor.rs:1408  "  no config file exists → using the CLI built-in defaults (enabled=true, maxAge=30d)."
+eprintln     crates/chat-stasher/src/doctor.rs:1411  "  source file(s): {}"
+eprintln     crates/chat-stasher/src/doctor.rs:1413  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1417  "D3 · Coverage — 🔴 registry missing / unparseable, session coverage unknown."
+eprintln     crates/chat-stasher/src/doctor.rs:1419  "    refusing to fake a full scan with hardcoded paths (see “Refusing to scan with hardcoded roots” above in stderr)."
+eprintln     crates/chat-stasher/src/doctor.rs:1421  "    listing only entries from independent read-only probes, unrelated to this registry:"
+eprintln     crates/chat-stasher/src/doctor.rs:1428  "  {:<10} not installed ({})"
+eprintln     crates/chat-stasher/src/doctor.rs:1445  "  {:<10} sessions {:<6}{} · {} · earliest {earliest} · latest {latest}"
+eprintln     crates/chat-stasher/src/doctor.rs:1452  "             ({})"
+eprintln     crates/chat-stasher/src/doctor.rs:1455  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1456  "D4 · Risk summary — so what happens + when"
+eprintln     crates/chat-stasher/src/doctor.rs:1458  "  {}. {risk}"
+eprintln     crates/chat-stasher/src/doctor.rs:1460  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1461  "D5 · How much reclaimable garbage is in the repository?"
+eprintln     crates/chat-stasher/src/doctor.rs:1462  "     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only."
+eprintln     crates/chat-stasher/src/doctor.rs:1464  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1473  "D3 · Coverage — {installed}/{known} known harnesses hit on this machine (registry v1 driven); rotation analysis subjects:"
+eprintln     crates/chat-stasher/src/doctor.rs:1478  "  {:<10} not installed ({})"
+eprintln     crates/chat-stasher/src/doctor.rs:1495  "  {:<10} sessions {:<6}{} · {} · earliest {earliest} · latest {latest}"
+eprintln     crates/chat-stasher/src/doctor.rs:1502  "             ({})"
+eprintln     crates/chat-stasher/src/doctor.rs:1516  "  installed but out of scope for this command (probed only, no rotation analysis): {}"
+eprintln     crates/chat-stasher/src/doctor.rs:1522  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1525  "D4 · Risk summary — so what happens + when"
+eprintln     crates/chat-stasher/src/doctor.rs:1527  "  (nothing to synthesise)"
+eprintln     crates/chat-stasher/src/doctor.rs:1530  "  {}. {risk}"
+eprintln     crates/chat-stasher/src/doctor.rs:1532  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1535  "D5 · How much reclaimable garbage is in the repository?"
+eprintln     crates/chat-stasher/src/doctor.rs:1536  "     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only."
+eprintln     crates/chat-stasher/src/doctor.rs:1538  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1546  "  (skipped) no repository directory: {} — no repo means no garbage, and nothing to diagnose."
+eprintln     crates/chat-stasher/src/doctor.rs:1552  "  (skipped) repository directory present, but the masterkey cannot be read ({}): {error} — nothing can be planned if it cannot be opened; first confirm the key file is not missing."
+eprintln     crates/chat-stasher/src/doctor.rs:1559  "  (skipped) repository cannot be opened / plan cannot be computed: {} — {error}"
+eprintln     crates/chat-stasher/src/doctor.rs:1571  "  unreferenced packs   : {packs_unref} · {} (`packs_unref`/`size_unref`)"
+eprintln     crates/chat-stasher/src/doctor.rs:1575  "  repack candidates   : {packs_repack} packs · {} (`packs.repack`/`size.repack`)"
+eprintln     crates/chat-stasher/src/doctor.rs:1579  "  🔴 this garbage cannot be cleaned right now — this repository is append_only ({append_only})."
+eprintln     crates/chat-stasher/src/doctor.rs:1581  "     `prune`/`repair`/`rewrite --forget` are all blocked by append_only (source `commands/prune.rs`)."
+eprintln     crates/chat-stasher/src/doctor.rs:1584  "     standard clean-up sequence: temporarily disable append_only → run `rustic prune --instant-delete` → re-enable append_only."
+eprintln     crates/chat-stasher/src/doctor.rs:1587  "     ⚠️ must use `--instant-delete`: plain `prune`'s default `--keep-delete 23h` only marks packs as pending delete,"
+eprintln     crates/chat-stasher/src/doctor.rs:1590  "        and actually deletes only after the 23-hour grace period — in practice even with append_only off it stalls at nothing to do!, and the garbage never leaves."
+eprintln     crates/chat-stasher/src/doctor.rs:1593  "     ⚠️ cost: `--instant-delete` skips the 23-hour grace period — once deleted it is gone, with no undo window; before running, confirm the two numbers above really are garbage."
+eprintln     crates/chat-stasher/src/doctor.rs:1596  "     ⚠️ this requires temporarily disabling append_only — that is your safety setting: between disabling and re-enabling, the repository loses its “no-accidental-delete” safety net,"
+eprintln     crates/chat-stasher/src/doctor.rs:1598  "        operate only within this window, take a backup first, and re-enable immediately when done."
+eprintln     crates/chat-stasher/src/doctor.rs:1600  "     doctor is a read-only diagnostic: it only reports numbers and steps, and will never run prune or toggle append_only for you."
+eprintln     crates/chat-stasher/src/doctor.rs:1603  "  ✅ no reclaimable garbage — nothing to clean."
+eprintln     crates/chat-stasher/src/doctor.rs:1606  "     (append_only=true; even if there were garbage it would only be blocked, never silently deleted.)"
+eprintln     crates/chat-stasher/src/doctor.rs:1612  ""
+eprintln     crates/chat-stasher/src/doctor.rs:1620  "  ⚠ non-archivable sessions: the following harnesses recognised sessions but produced no SessionRecord; collect will not archive them for now."
+eprintln     crates/chat-stasher/src/doctor.rs:1623  "{}"
+eprintln     crates/chat-stasher/src/doctor.rs:1626  "  advice: do not treat scanner records as the total of recognised sessions; wait until the corresponding harness produces SessionRecords before running collect."
+eprintln     crates/chat-stasher/src/doctor.rs:1637  "  [registry] no probes — the scan did not run, or there are no candidate harnesses."
+eprintln     crates/chat-stasher/src/doctor.rs:1644  "  [registry] driven table — platform={platform} · {hit}/{n} harnesses hit / scanned successfully"
+eprintln     crates/chat-stasher/src/doctor.rs:1709  "    {mark} {:<16} {conf:<26} sessions={:<4}{bytes:<0} {root}{extra}"
+eprintln     crates/chat-stasher/src/doctor.rs:1720  "    low-confidence (community claims only, scanned but cannot be treated as verified): {flagged}"
 bail         crates/chat-stasher/src/identity.rs:54  "machine identity must be exactly 32 hex characters, got {hex:?}"
 with_context crates/chat-stasher/src/identity.rs:89  "open /dev/urandom for a machine identity"
 with_context crates/chat-stasher/src/identity.rs:91  "read random bytes for a machine identity"
@@ -177,739 +177,753 @@ help_doc     crates/chat-stasher/src/main.rs:85  Render a launchd plist or syste
 help_doc     crates/chat-stasher/src/main.rs:87  Template format to render.
 help_doc     crates/chat-stasher/src/main.rs:90  Stage path embedded in the one-shot command.
 help_doc     crates/chat-stasher/src/main.rs:93  Write to this plist path, or systemd directory. Without it, print.
-help_doc     crates/chat-stasher/src/main.rs:96  Binary path embedded in the template (defaults to this executable).
-help_doc     crates/chat-stasher/src/main.rs:99  Add the cheap L1 verify pass after each archive cycle.
-help_doc     crates/chat-stasher/src/main.rs:103  Move a batch of sealed session shards into the rustic repository.
-help_doc     crates/chat-stasher/src/main.rs:104  
-help_doc     crates/chat-stasher/src/main.rs:105  The stage directory is expected to already hold only *sealed* shards at
-help_doc     crates/chat-stasher/src/main.rs:106  `sessions/<machine>/<session>/{NNNNNN}.jsonl`. Creates the repository
-help_doc     crates/chat-stasher/src/main.rs:107  on first run and persists the masterkey.
-help_doc     crates/chat-stasher/src/main.rs:109  Stage directory holding the sealed shard tree.
-help_doc     crates/chat-stasher/src/main.rs:112  Inbox whose consumed/ directory must be accounted for when stage
-help_doc     crates/chat-stasher/src/main.rs:113  is empty. If omitted, the most recent CLI ingest inboxes are used.
-help_doc     crates/chat-stasher/src/main.rs:116  Named destination from the config. Required once the config
-help_doc     crates/chat-stasher/src/main.rs:117  declares any destination; there is no default.
-help_doc     crates/chat-stasher/src/main.rs:120  Repository path override (default: config `rustic_repo` / data dir).
-help_doc     crates/chat-stasher/src/main.rs:123  Masterkey file override (default: config `rustic_key_file` / data dir).
-help_doc     crates/chat-stasher/src/main.rs:126  Machine name for the path partition + snapshot host.
-help_doc     crates/chat-stasher/src/main.rs:127  Default: config `machine`, else this machine's identity (generated
-help_doc     crates/chat-stasher/src/main.rs:128  on first use); use `--machine` explicitly to choose the partition.
-help_doc     crates/chat-stasher/src/main.rs:131  Concurrency cap override (default: config `rustic_connections` = 10).
-help_doc     crates/chat-stasher/src/main.rs:134  Backend option `key=value`, repeatable (e.g. `--option endpoint=ssh://host:23`).
-help_doc     crates/chat-stasher/src/main.rs:137  Disable ssh connection reaping after this run (for troubleshooting).
-help_doc     crates/chat-stasher/src/main.rs:141  Is the scheduled archive actually working? Plus what the local harness
-help_doc     crates/chat-stasher/src/main.rs:142  scanner finds (read-only).
-help_doc     crates/chat-stasher/src/main.rs:143  
-help_doc     crates/chat-stasher/src/main.rs:144  The first line answers the question the timer cannot: it reads the
-help_doc     crates/chat-stasher/src/main.rs:145  `run-state.json` written by the last `run-once` pass. Three distinct
-help_doc     crates/chat-stasher/src/main.rs:146  answers, and only the first is a healthy one:
-help_doc     crates/chat-stasher/src/main.rs:147  
-help_doc     crates/chat-stasher/src/main.rs:148  * last run recent and successful -> exit 0
-help_doc     crates/chat-stasher/src/main.rs:149  * last run FAILED -> exit 1, saying which step failed
-help_doc     crates/chat-stasher/src/main.rs:150  * no run recorded at all, or nothing has run for longer than
-help_doc     crates/chat-stasher/src/main.rs:151    4x `backup_interval_secs` (minimum 1 hour) -> exit 1. A dead timer
-help_doc     crates/chat-stasher/src/main.rs:152    usually leaves a *successful* last run behind, so this overdue check
-help_doc     crates/chat-stasher/src/main.rs:153    is the only thing that catches it.
-help_doc     crates/chat-stasher/src/main.rs:154  
-help_doc     crates/chat-stasher/src/main.rs:155  Never prints session content: counts, timestamps and digests only.
-help_doc     crates/chat-stasher/src/main.rs:156  
-help_doc     crates/chat-stasher/src/main.rs:157  Default output is a handful of lines and nothing more: the verdict
-help_doc     crates/chat-stasher/src/main.rs:158  above, then aggregate scan counts (per-harness session totals, skipped
-help_doc     crates/chat-stasher/src/main.rs:159  roots, unarchivable-session warning). It stays that size whether the
-help_doc     crates/chat-stasher/src/main.rs:160  machine holds three sessions or three thousand, so the verdict never
-help_doc     crates/chat-stasher/src/main.rs:161  scrolls away.
-help_doc     crates/chat-stasher/src/main.rs:162  
-help_doc     crates/chat-stasher/src/main.rs:163  `--sessions` adds the per-session metadata table on top of that —
-help_doc     crates/chat-stasher/src/main.rs:164  one line per session (harness / bytes / mtime / first 8 chars of the
-help_doc     crates/chat-stasher/src/main.rs:165  id). That is the troubleshooting view; it can be hundreds of lines.
-help_doc     crates/chat-stasher/src/main.rs:167  Also print one metadata line per session found (can be hundreds).
-help_doc     crates/chat-stasher/src/main.rs:170  Print exactly one JSON object to stdout and nothing else (the
-help_doc     crates/chat-stasher/src/main.rs:171  human lines still go to stderr). Tri-state fields are tagged
-help_doc     crates/chat-stasher/src/main.rs:172  `{"kind":"known",…}` / `{"kind":"unknown","why":…}` /
-help_doc     crates/chat-stasher/src/main.rs:173  `{"kind":"not_applicable",…}` — an unknown is never serialised as
-help_doc     crates/chat-stasher/src/main.rs:174  `0`, `null` or a missing field. `run_state.kind` is
-help_doc     crates/chat-stasher/src/main.rs:175  `known` / `missing` / `unreadable`; `scanner.kind` is `ok` /
-help_doc     crates/chat-stasher/src/main.rs:176  `failed`. `exit_semantics` documents what the exit code means.
-help_doc     crates/chat-stasher/src/main.rs:180  Dump one session back from the repository (sequence-concatenated) and
-help_doc     crates/chat-stasher/src/main.rs:181  print its sha256 for verification — or, with `--all-machines`, merge
-help_doc     crates/chat-stasher/src/main.rs:182  the newest snapshot of every machine and report per-session digests.
-help_doc     crates/chat-stasher/src/main.rs:184  Stage directory used by push (mapping into the snapshot tree).
-help_doc     crates/chat-stasher/src/main.rs:185  Ignored by `--all-machines`.
-help_doc     crates/chat-stasher/src/main.rs:188  Native session id to dump, e.g. `019bf00d-...`. Ignored by
-help_doc     crates/chat-stasher/src/main.rs:189  `--all-machines`.
-help_doc     crates/chat-stasher/src/main.rs:192  Cross-machine merge: every hostname's newest snapshot, all sessions
-help_doc     crates/chat-stasher/src/main.rs:193  (`sessions/<machine>/…`), each session's shards sequence-joined and
-help_doc     crates/chat-stasher/src/main.rs:194  hashed. Prints ids / shard counts / byte lengths / sha256 only.
-help_doc     crates/chat-stasher/src/main.rs:197  Print full session ids in per-session rows (default: privacy-safe short ids).
-help_doc     crates/chat-stasher/src/main.rs:200  Machine partition to read. Uses this machine's id when available;
-help_doc     crates/chat-stasher/src/main.rs:201  if it is unavailable, use `--machine` explicitly. Unused by
-help_doc     crates/chat-stasher/src/main.rs:202  `--all-machines`, which reads every machine.
-help_doc     crates/chat-stasher/src/main.rs:205  Named destination from the config. Required once the config
-help_doc     crates/chat-stasher/src/main.rs:206  declares any destination; there is no default.
-help_doc     crates/chat-stasher/src/main.rs:209  Repository path override.
-help_doc     crates/chat-stasher/src/main.rs:212  Masterkey file override.
-help_doc     crates/chat-stasher/src/main.rs:215  Concurrency cap override.
-help_doc     crates/chat-stasher/src/main.rs:218  Backend option `key=value`, repeatable.
-help_doc     crates/chat-stasher/src/main.rs:221  Disable ssh connection reaping after this run (for troubleshooting).
-help_doc     crates/chat-stasher/src/main.rs:225  Diagnostic: does any harness on this machine silently delete its
-help_doc     crates/chat-stasher/src/main.rs:226  sessions? Read-only (paths/counts/bytes/timestamps only).
-help_doc     crates/chat-stasher/src/main.rs:228  Print exactly one JSON object to stdout and nothing else. Tri-state
-help_doc     crates/chat-stasher/src/main.rs:229  fields are tagged `{"kind":"known",…}` / `{"kind":"unknown","why":…}`
-help_doc     crates/chat-stasher/src/main.rs:230  / `{"kind":"not_applicable",…}` — an unknown is never serialised as
-help_doc     crates/chat-stasher/src/main.rs:231  `0`, `null` or a missing field. `claude.verdict.kind` is one of
-help_doc     crates/chat-stasher/src/main.rs:232  `unset_default` / `safe` / `small_value` / `parse_failed`;
-help_doc     crates/chat-stasher/src/main.rs:233  `reclaim.kind` is `ok` / `no_repo` / `no_key` / `open_failed`.
-help_doc     crates/chat-stasher/src/main.rs:237  Prove the archive is intact. Three independently runnable levels:
-help_doc     crates/chat-stasher/src/main.rs:238  l1 = rustic structure check (cheap, no payload reads), l2 = rustic content
-help_doc     crates/chat-stasher/src/main.rs:239  check (downloads and re-hashes every pack), l3 = reconcile against an
-help_doc     crates/chat-stasher/src/main.rs:240  expected manifest derived from the sealed staging tree (per session:
-help_doc     crates/chat-stasher/src/main.rs:241  shard count / concatenated bytes / concatenated sha256).
-help_doc     crates/chat-stasher/src/main.rs:243  Which level(s) to run: `l1`, `l2`, `l3` or `all`.
-help_doc     crates/chat-stasher/src/main.rs:246  Stage directory holding the sealed shard tree (required by l3 / all).
-help_doc     crates/chat-stasher/src/main.rs:249  Print full session ids in L3 rows (default: privacy-safe short ids).
-help_doc     crates/chat-stasher/src/main.rs:252  Machine partition (default: config `machine`, else this machine's
-help_doc     crates/chat-stasher/src/main.rs:253  identity; use `--machine` explicitly to choose the partition).
-help_doc     crates/chat-stasher/src/main.rs:256  Named destination from the config. Required once the config
-help_doc     crates/chat-stasher/src/main.rs:257  declares any destination; there is no default.
-help_doc     crates/chat-stasher/src/main.rs:260  Repository path override.
-help_doc     crates/chat-stasher/src/main.rs:263  Masterkey file override.
-help_doc     crates/chat-stasher/src/main.rs:266  Concurrency cap override.
-help_doc     crates/chat-stasher/src/main.rs:269  Backend option `key=value`, repeatable.
-help_doc     crates/chat-stasher/src/main.rs:272  Disable ssh connection reaping after this run (for troubleshooting).
-help_doc     crates/chat-stasher/src/main.rs:276  Initialise a new destination as a *full extra copy* (ADR-013).
-help_doc     crates/chat-stasher/src/main.rs:277  
-help_doc     crates/chat-stasher/src/main.rs:278  Order is fixed: re-collect from the local sources first (they are the
-help_doc     crates/chat-stasher/src/main.rs:279  truth, and rereading them puts no load on an existing destination),
-help_doc     crates/chat-stasher/src/main.rs:280  then copy back only what an existing destination holds and the local
-help_doc     crates/chat-stasher/src/main.rs:281  source no longer does, then push the result. The new destination ends
-help_doc     crates/chat-stasher/src/main.rs:282  up with `local ∪ existing destinations`.
-help_doc     crates/chat-stasher/src/main.rs:283  
-help_doc     crates/chat-stasher/src/main.rs:284  A source destination that cannot be consulted makes the difference set
-help_doc     crates/chat-stasher/src/main.rs:285  *incomplete*: that is reported and the command exits non-zero. It is
-help_doc     crates/chat-stasher/src/main.rs:286  never treated as "that destination had nothing extra".
-help_doc     crates/chat-stasher/src/main.rs:288  Destination to initialise. Must be declared in the config, unless
-help_doc     crates/chat-stasher/src/main.rs:289  an explicit `--repo` is given instead.
-help_doc     crates/chat-stasher/src/main.rs:292  Stage directory that holds the sealed `sessions/` tree.
-help_doc     crates/chat-stasher/src/main.rs:295  Machine partition for `sessions/<machine>/…`.
-help_doc     crates/chat-stasher/src/main.rs:298  Maximum sealed shards per bucket (default: 20).
-help_doc     crates/chat-stasher/src/main.rs:301  Existing destination to compute the difference set against,
-help_doc     crates/chat-stasher/src/main.rs:302  repeatable. Default: every other destination in the config.
-help_doc     crates/chat-stasher/src/main.rs:305  Repository path override for the destination being initialised.
-help_doc     crates/chat-stasher/src/main.rs:308  Masterkey file override for the destination being initialised.
-help_doc     crates/chat-stasher/src/main.rs:311  Concurrency cap override.
-help_doc     crates/chat-stasher/src/main.rs:314  Backend option `key=value`, repeatable.
-help_doc     crates/chat-stasher/src/main.rs:317  Disable ssh connection reaping after this run.
-help_doc     crates/chat-stasher/src/main.rs:321  Search one destination's archive by session metadata.
-help_doc     crates/chat-stasher/src/main.rs:322  
-help_doc     crates/chat-stasher/src/main.rs:323  Metadata tier only: this walks snapshot/index/tree objects and never
-help_doc     crates/chat-stasher/src/main.rs:324  fetches or decrypts a data blob, which is why it is cheap. On a local
-help_doc     crates/chat-stasher/src/main.rs:325  three-session fixture the metadata walk read 11,761 bytes against
-help_doc     crates/chat-stasher/src/main.rs:326  1,206,285 bytes of data packs — two orders of magnitude apart. Use
-help_doc     crates/chat-stasher/src/main.rs:327  `--cost` to see what a full-text pass over the current hits *would*
-help_doc     crates/chat-stasher/src/main.rs:328  cost before asking for one; full-text matching is not implemented.
-help_doc     crates/chat-stasher/src/main.rs:329  
-help_doc     crates/chat-stasher/src/main.rs:330  One destination per run, always named: there is no automatic merge
-help_doc     crates/chat-stasher/src/main.rs:331  across destinations, and no default destination to search "everything".
-help_doc     crates/chat-stasher/src/main.rs:332  
-help_doc     crates/chat-stasher/src/main.rs:333  Exit codes distinguish the three answers, because two of them look the
-help_doc     crates/chat-stasher/src/main.rs:334  same and mean opposite things: `0` matched something, `1` read the whole
-help_doc     crates/chat-stasher/src/main.rs:335  destination and nothing matched, `3` could not finish reading it — so
-help_doc     crates/chat-stasher/src/main.rs:336  "nothing matched" is unproven. `2` is a usage error, as elsewhere.
-help_doc     crates/chat-stasher/src/main.rs:338  Destination to search. Required unless an explicit `--repo` is given.
-help_doc     crates/chat-stasher/src/main.rs:341  Match sessions whose id starts with this prefix.
-help_doc     crates/chat-stasher/src/main.rs:344  Match one machine partition exactly.
-help_doc     crates/chat-stasher/src/main.rs:347  Lower bound (inclusive) on archive time (rustic snapshot time), unix seconds.
-help_doc     crates/chat-stasher/src/main.rs:350  Upper bound (inclusive) on archive time (rustic snapshot time), unix seconds.
-help_doc     crates/chat-stasher/src/main.rs:353  Also report what a full-text pass over the hits would cost.
-help_doc     crates/chat-stasher/src/main.rs:356  Repository path override.
-help_doc     crates/chat-stasher/src/main.rs:359  Masterkey file override.
-help_doc     crates/chat-stasher/src/main.rs:362  Concurrency cap override.
-help_doc     crates/chat-stasher/src/main.rs:365  Backend option `key=value`, repeatable.
-help_doc     crates/chat-stasher/src/main.rs:368  Disable ssh connection reaping after this run.
-help_doc     crates/chat-stasher/src/main.rs:372  Open an ephemeral local web view of one destination's session list.
-help_doc     crates/chat-stasher/src/main.rs:373  
-help_doc     crates/chat-stasher/src/main.rs:374  Binds a short-lived HTTP server on `127.0.0.1` with an OS-assigned port
-help_doc     crates/chat-stasher/src/main.rs:375  (never `0.0.0.0`, never a fixed port), prints the URL, optionally opens
-help_doc     crates/chat-stasher/src/main.rs:376  your browser, and exits when idle or on Ctrl+C. Nothing is installed:
-help_doc     crates/chat-stasher/src/main.rs:377  no launchd, no systemd, no background process, no resident daemon.
-help_doc     crates/chat-stasher/src/main.rs:378  
-help_doc     crates/chat-stasher/src/main.rs:379  THREAT, stated plainly: loopback is NOT a security boundary. Every other
-help_doc     crates/chat-stasher/src/main.rs:380  program running on this machine can connect to `127.0.0.1`, so this is
-help_doc     crates/chat-stasher/src/main.rs:381  not "safe because it's local". Access is gated by a random token that is
-help_doc     crates/chat-stasher/src/main.rs:382  generated fresh on every launch and appears only in the printed URL —
-help_doc     crates/chat-stasher/src/main.rs:383  never in a file, never in a log. Requests without that exact token are
-help_doc     crates/chat-stasher/src/main.rs:384  refused (403), and any method other than GET is refused (405). Treat the
-help_doc     crates/chat-stasher/src/main.rs:385  URL as a secret for the lifetime of the process.
-help_doc     crates/chat-stasher/src/main.rs:386  
-help_doc     crates/chat-stasher/src/main.rs:387  Metadata tier only, same as `search`: machine, first 8 chars of the
-help_doc     crates/chat-stasher/src/main.rs:388  session id, shard count, byte length, archive time. Conversation text is
-help_doc     crates/chat-stasher/src/main.rs:389  NOT loaded and there is no full-text search; the page says so and prints
-help_doc     crates/chat-stasher/src/main.rs:390  what loading it would cost. Exit codes match `search`: 0 listed
-help_doc     crates/chat-stasher/src/main.rs:391  something, 1 read it all and there was nothing, 3 could not finish
-help_doc     crates/chat-stasher/src/main.rs:392  reading (or no key), 2 usage error.
-help_doc     crates/chat-stasher/src/main.rs:394  Destination to view. Required unless an explicit `--repo` is given:
-help_doc     crates/chat-stasher/src/main.rs:395  there is no default destination and no cross-destination merge.
-help_doc     crates/chat-stasher/src/main.rs:398  Restrict the listing to one machine partition.
-help_doc     crates/chat-stasher/src/main.rs:401  Restrict the listing to session ids with this prefix.
-help_doc     crates/chat-stasher/src/main.rs:404  Do NOT launch a browser; just print the URL. Correct on headless or
-help_doc     crates/chat-stasher/src/main.rs:405  remote machines, where opening a browser is meaningless or wrong.
-help_doc     crates/chat-stasher/src/main.rs:408  Exit after this many seconds with no request (0 = never idle out,
-help_doc     crates/chat-stasher/src/main.rs:409  still exits on Ctrl+C).
-help_doc     crates/chat-stasher/src/main.rs:412  Repository path override.
-help_doc     crates/chat-stasher/src/main.rs:415  Masterkey file override.
-help_doc     crates/chat-stasher/src/main.rs:418  Concurrency cap override.
-help_doc     crates/chat-stasher/src/main.rs:421  Backend option `key=value`, repeatable.
-help_doc     crates/chat-stasher/src/main.rs:424  Disable ssh connection reaping after this run.
-help_doc     crates/chat-stasher/src/main.rs:428  Consume ext inbox bundles into sealed staging shards.
-help_doc     crates/chat-stasher/src/main.rs:429  
-help_doc     crates/chat-stasher/src/main.rs:430  Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
-help_doc     crates/chat-stasher/src/main.rs:431  (skipping `.part` files), archives each as one record in a sealed
-help_doc     crates/chat-stasher/src/main.rs:432  shard under `<stage>/sessions/<machine>/<id>/<bucket>/NNNNNN.jsonl`, and retires
-help_doc     crates/chat-stasher/src/main.rs:433  the source file to `<inbox>/consumed/`. Idempotent by content: the same
-help_doc     crates/chat-stasher/src/main.rs:434  bytes are never archived twice. Prints paths/counts/sha256 only.
-help_doc     crates/chat-stasher/src/main.rs:436  Inbox directory holding the ext exports.
-help_doc     crates/chat-stasher/src/main.rs:439  Stage directory that holds the sealed `sessions/` tree.
-help_doc     crates/chat-stasher/src/main.rs:442  Machine partition for `sessions/<machine>/…`.
-help_doc     crates/chat-stasher/src/main.rs:443  Default: config `machine`, else this machine's identity (generated
-help_doc     crates/chat-stasher/src/main.rs:444  on first use); use `--machine` explicitly to choose the partition.
-help_doc     crates/chat-stasher/src/main.rs:447  Maximum sealed shards per bucket (default: 20).
-help_doc     crates/chat-stasher/src/main.rs:451  Read every scanner session returned by `status` into our own stage.
-help_doc     crates/chat-stasher/src/main.rs:452  
-help_doc     crates/chat-stasher/src/main.rs:453  Harness sources are opened read-only. File-backed JSONL sources use a
-help_doc     crates/chat-stasher/src/main.rs:454  durable byte offset plus committed-prefix SHA-256; opencode SQLite
-help_doc     crates/chat-stasher/src/main.rs:455  sessions use a durable logical high-water cursor. The cursor state lives
-help_doc     crates/chat-stasher/src/main.rs:456  under chat-stasher's own data directory, not under any harness directory.
+help_doc     crates/chat-stasher/src/main.rs:96  Binary path embedded in the template. Defaults to the current
+help_doc     crates/chat-stasher/src/main.rs:97  executable; if that is a build artifact under `target/`, a warning is
+help_doc     crates/chat-stasher/src/main.rs:98  printed because the path will not survive `cargo clean`. Pass the
+help_doc     crates/chat-stasher/src/main.rs:99  installed binary path for a durable service.
+help_doc     crates/chat-stasher/src/main.rs:102  Named destination forwarded to `run-once`. Required once the config
+help_doc     crates/chat-stasher/src/main.rs:103  declares any destination (unless `--repo` is given).
+help_doc     crates/chat-stasher/src/main.rs:106  Repository path override forwarded to `run-once`.
+help_doc     crates/chat-stasher/src/main.rs:109  Masterkey file override forwarded to `run-once`.
+help_doc     crates/chat-stasher/src/main.rs:112  Concurrency cap override forwarded to `run-once`.
+help_doc     crates/chat-stasher/src/main.rs:115  Backend option `key=value`, repeatable, forwarded to `run-once`.
+help_doc     crates/chat-stasher/src/main.rs:118  Machine partition forwarded to `run-once`.
+help_doc     crates/chat-stasher/src/main.rs:121  Maximum sealed shards per bucket forwarded to `run-once`.
+help_doc     crates/chat-stasher/src/main.rs:124  Add the cheap L1 verify pass after each archive cycle.
+help_doc     crates/chat-stasher/src/main.rs:127  Disable ssh connection reaping after each run.
+help_doc     crates/chat-stasher/src/main.rs:131  Move a batch of sealed session shards into the rustic repository.
+help_doc     crates/chat-stasher/src/main.rs:132  
+help_doc     crates/chat-stasher/src/main.rs:133  The stage directory is expected to already hold only *sealed* shards at
+help_doc     crates/chat-stasher/src/main.rs:134  `sessions/<machine>/<session>/{NNNNNN}.jsonl`. Creates the repository
+help_doc     crates/chat-stasher/src/main.rs:135  on first run and persists the masterkey.
+help_doc     crates/chat-stasher/src/main.rs:137  Stage directory holding the sealed shard tree.
+help_doc     crates/chat-stasher/src/main.rs:140  Inbox whose consumed/ directory must be accounted for when stage
+help_doc     crates/chat-stasher/src/main.rs:141  is empty. If omitted, the most recent CLI ingest inboxes are used.
+help_doc     crates/chat-stasher/src/main.rs:144  Named destination from the config. Required once the config
+help_doc     crates/chat-stasher/src/main.rs:145  declares any destination; there is no default.
+help_doc     crates/chat-stasher/src/main.rs:148  Repository path override (default: config `rustic_repo` / data dir).
+help_doc     crates/chat-stasher/src/main.rs:151  Masterkey file override (default: config `rustic_key_file` / data dir).
+help_doc     crates/chat-stasher/src/main.rs:154  Machine name for the path partition + snapshot host.
+help_doc     crates/chat-stasher/src/main.rs:155  Default: config `machine`, else this machine's identity (generated
+help_doc     crates/chat-stasher/src/main.rs:156  on first use); use `--machine` explicitly to choose the partition.
+help_doc     crates/chat-stasher/src/main.rs:159  Concurrency cap override (default: config `rustic_connections` = 4).
+help_doc     crates/chat-stasher/src/main.rs:162  Backend option `key=value`, repeatable (e.g. `--option endpoint=ssh://host:23`).
+help_doc     crates/chat-stasher/src/main.rs:165  Disable ssh connection reaping after this run (for troubleshooting).
+help_doc     crates/chat-stasher/src/main.rs:169  Is the scheduled archive actually working? Plus what the local harness
+help_doc     crates/chat-stasher/src/main.rs:170  scanner finds (read-only).
+help_doc     crates/chat-stasher/src/main.rs:171  
+help_doc     crates/chat-stasher/src/main.rs:172  The first line answers the question the timer cannot: it reads the
+help_doc     crates/chat-stasher/src/main.rs:173  `run-state.json` written by the last `run-once` pass. Three distinct
+help_doc     crates/chat-stasher/src/main.rs:174  answers, and only the first is a healthy one:
+help_doc     crates/chat-stasher/src/main.rs:175  
+help_doc     crates/chat-stasher/src/main.rs:176  * last run recent and successful -> exit 0
+help_doc     crates/chat-stasher/src/main.rs:177  * last run FAILED -> exit 1, saying which step failed
+help_doc     crates/chat-stasher/src/main.rs:178  * no run recorded at all, or nothing has run for longer than
+help_doc     crates/chat-stasher/src/main.rs:179    4x `backup_interval_secs` (minimum 1 hour) -> exit 1. A dead timer
+help_doc     crates/chat-stasher/src/main.rs:180    usually leaves a *successful* last run behind, so this overdue check
+help_doc     crates/chat-stasher/src/main.rs:181    is the only thing that catches it.
+help_doc     crates/chat-stasher/src/main.rs:182  
+help_doc     crates/chat-stasher/src/main.rs:183  Never prints session content: counts, timestamps and digests only.
+help_doc     crates/chat-stasher/src/main.rs:184  
+help_doc     crates/chat-stasher/src/main.rs:185  Default output is a handful of lines and nothing more: the verdict
+help_doc     crates/chat-stasher/src/main.rs:186  above, then aggregate scan counts (per-harness session totals, skipped
+help_doc     crates/chat-stasher/src/main.rs:187  roots, unarchivable-session warning). It stays that size whether the
+help_doc     crates/chat-stasher/src/main.rs:188  machine holds three sessions or three thousand, so the verdict never
+help_doc     crates/chat-stasher/src/main.rs:189  scrolls away.
+help_doc     crates/chat-stasher/src/main.rs:190  
+help_doc     crates/chat-stasher/src/main.rs:191  `--sessions` adds the per-session metadata table on top of that —
+help_doc     crates/chat-stasher/src/main.rs:192  one line per session (harness / bytes / mtime / first 8 chars of the
+help_doc     crates/chat-stasher/src/main.rs:193  id). That is the troubleshooting view; it can be hundreds of lines.
+help_doc     crates/chat-stasher/src/main.rs:195  Also print one metadata line per session found (can be hundreds).
+help_doc     crates/chat-stasher/src/main.rs:198  Print exactly one JSON object to stdout and nothing else (the
+help_doc     crates/chat-stasher/src/main.rs:199  human lines still go to stderr). Tri-state fields are tagged
+help_doc     crates/chat-stasher/src/main.rs:200  `{"kind":"known",…}` / `{"kind":"unknown","why":…}` /
+help_doc     crates/chat-stasher/src/main.rs:201  `{"kind":"not_applicable",…}` — an unknown is never serialised as
+help_doc     crates/chat-stasher/src/main.rs:202  `0`, `null` or a missing field. `run_state.kind` is
+help_doc     crates/chat-stasher/src/main.rs:203  `known` / `missing` / `unreadable`; `scanner.kind` is `ok` /
+help_doc     crates/chat-stasher/src/main.rs:204  `failed`. `exit_semantics` documents what the exit code means.
+help_doc     crates/chat-stasher/src/main.rs:208  Dump one session back from the repository (sequence-concatenated) and
+help_doc     crates/chat-stasher/src/main.rs:209  print its sha256 for verification — or, with `--all-machines`, merge
+help_doc     crates/chat-stasher/src/main.rs:210  the newest snapshot of every machine and report per-session digests.
+help_doc     crates/chat-stasher/src/main.rs:212  Stage directory used by push (mapping into the snapshot tree).
+help_doc     crates/chat-stasher/src/main.rs:213  Ignored by `--all-machines`.
+help_doc     crates/chat-stasher/src/main.rs:216  Native session id to dump, e.g. `019bf00d-...`. Ignored by
+help_doc     crates/chat-stasher/src/main.rs:217  `--all-machines`.
+help_doc     crates/chat-stasher/src/main.rs:220  Cross-machine merge: every hostname's newest snapshot, all sessions
+help_doc     crates/chat-stasher/src/main.rs:221  (`sessions/<machine>/…`), each session's shards sequence-joined and
+help_doc     crates/chat-stasher/src/main.rs:222  hashed. Prints ids / shard counts / byte lengths / sha256 only.
+help_doc     crates/chat-stasher/src/main.rs:225  Print full session ids in per-session rows (default: privacy-safe short ids).
+help_doc     crates/chat-stasher/src/main.rs:228  Machine partition to read. Uses this machine's id when available;
+help_doc     crates/chat-stasher/src/main.rs:229  if it is unavailable, use `--machine` explicitly. Unused by
+help_doc     crates/chat-stasher/src/main.rs:230  `--all-machines`, which reads every machine.
+help_doc     crates/chat-stasher/src/main.rs:233  Named destination from the config. Required once the config
+help_doc     crates/chat-stasher/src/main.rs:234  declares any destination; there is no default.
+help_doc     crates/chat-stasher/src/main.rs:237  Repository path override.
+help_doc     crates/chat-stasher/src/main.rs:240  Masterkey file override.
+help_doc     crates/chat-stasher/src/main.rs:243  Concurrency cap override.
+help_doc     crates/chat-stasher/src/main.rs:246  Backend option `key=value`, repeatable.
+help_doc     crates/chat-stasher/src/main.rs:249  Disable ssh connection reaping after this run (for troubleshooting).
+help_doc     crates/chat-stasher/src/main.rs:253  Diagnostic: does any harness on this machine silently delete its
+help_doc     crates/chat-stasher/src/main.rs:254  sessions? Read-only (paths/counts/bytes/timestamps only).
+help_doc     crates/chat-stasher/src/main.rs:256  Print exactly one JSON object to stdout and nothing else. Tri-state
+help_doc     crates/chat-stasher/src/main.rs:257  fields are tagged `{"kind":"known",…}` / `{"kind":"unknown","why":…}`
+help_doc     crates/chat-stasher/src/main.rs:258  / `{"kind":"not_applicable",…}` — an unknown is never serialised as
+help_doc     crates/chat-stasher/src/main.rs:259  `0`, `null` or a missing field. `claude.verdict.kind` is one of
+help_doc     crates/chat-stasher/src/main.rs:260  `unset_default` / `safe` / `small_value` / `parse_failed`;
+help_doc     crates/chat-stasher/src/main.rs:261  `reclaim.kind` is `ok` / `no_repo` / `no_key` / `open_failed`.
+help_doc     crates/chat-stasher/src/main.rs:265  Prove the archive is intact. Three independently runnable levels:
+help_doc     crates/chat-stasher/src/main.rs:266  l1 = rustic structure check (cheap, no payload reads), l2 = rustic content
+help_doc     crates/chat-stasher/src/main.rs:267  check (downloads and re-hashes every pack), l3 = reconcile against an
+help_doc     crates/chat-stasher/src/main.rs:268  expected manifest derived from the sealed staging tree (per session:
+help_doc     crates/chat-stasher/src/main.rs:269  shard count / concatenated bytes / concatenated sha256).
+help_doc     crates/chat-stasher/src/main.rs:271  Which level(s) to run: `l1`, `l2`, `l3` or `all`.
+help_doc     crates/chat-stasher/src/main.rs:274  Stage directory holding the sealed shard tree (required by l3 / all).
+help_doc     crates/chat-stasher/src/main.rs:277  Print full session ids in L3 rows (default: privacy-safe short ids).
+help_doc     crates/chat-stasher/src/main.rs:280  Machine partition (default: config `machine`, else this machine's
+help_doc     crates/chat-stasher/src/main.rs:281  identity; use `--machine` explicitly to choose the partition).
+help_doc     crates/chat-stasher/src/main.rs:284  Named destination from the config. Required once the config
+help_doc     crates/chat-stasher/src/main.rs:285  declares any destination; there is no default.
+help_doc     crates/chat-stasher/src/main.rs:288  Repository path override.
+help_doc     crates/chat-stasher/src/main.rs:291  Masterkey file override.
+help_doc     crates/chat-stasher/src/main.rs:294  Concurrency cap override.
+help_doc     crates/chat-stasher/src/main.rs:297  Backend option `key=value`, repeatable.
+help_doc     crates/chat-stasher/src/main.rs:300  Disable ssh connection reaping after this run (for troubleshooting).
+help_doc     crates/chat-stasher/src/main.rs:304  Initialise a new destination as a *full extra copy* (ADR-013).
+help_doc     crates/chat-stasher/src/main.rs:305  
+help_doc     crates/chat-stasher/src/main.rs:306  Order is fixed: re-collect from the local sources first (they are the
+help_doc     crates/chat-stasher/src/main.rs:307  truth, and rereading them puts no load on an existing destination),
+help_doc     crates/chat-stasher/src/main.rs:308  then copy back only what an existing destination holds and the local
+help_doc     crates/chat-stasher/src/main.rs:309  source no longer does, then push the result. The new destination ends
+help_doc     crates/chat-stasher/src/main.rs:310  up with `local ∪ existing destinations`.
+help_doc     crates/chat-stasher/src/main.rs:311  
+help_doc     crates/chat-stasher/src/main.rs:312  A source destination that cannot be consulted makes the difference set
+help_doc     crates/chat-stasher/src/main.rs:313  *incomplete*: that is reported and the command exits non-zero. It is
+help_doc     crates/chat-stasher/src/main.rs:314  never treated as "that destination had nothing extra".
+help_doc     crates/chat-stasher/src/main.rs:316  Destination to initialise. Must be declared in the config, unless
+help_doc     crates/chat-stasher/src/main.rs:317  an explicit `--repo` is given instead.
+help_doc     crates/chat-stasher/src/main.rs:320  Stage directory that holds the sealed `sessions/` tree.
+help_doc     crates/chat-stasher/src/main.rs:323  Machine partition for `sessions/<machine>/…`.
+help_doc     crates/chat-stasher/src/main.rs:326  Maximum sealed shards per bucket (default: 20).
+help_doc     crates/chat-stasher/src/main.rs:329  Existing destination to compute the difference set against,
+help_doc     crates/chat-stasher/src/main.rs:330  repeatable. Default: every other destination in the config.
+help_doc     crates/chat-stasher/src/main.rs:333  Repository path override for the destination being initialised.
+help_doc     crates/chat-stasher/src/main.rs:336  Masterkey file override for the destination being initialised.
+help_doc     crates/chat-stasher/src/main.rs:339  Concurrency cap override.
+help_doc     crates/chat-stasher/src/main.rs:342  Backend option `key=value`, repeatable.
+help_doc     crates/chat-stasher/src/main.rs:345  Disable ssh connection reaping after this run.
+help_doc     crates/chat-stasher/src/main.rs:349  Search one destination's archive by session metadata.
+help_doc     crates/chat-stasher/src/main.rs:350  
+help_doc     crates/chat-stasher/src/main.rs:351  Metadata tier only: this walks snapshot/index/tree objects and never
+help_doc     crates/chat-stasher/src/main.rs:352  fetches or decrypts a data blob, which is why it is cheap. On a local
+help_doc     crates/chat-stasher/src/main.rs:353  three-session fixture the metadata walk read 11,761 bytes against
+help_doc     crates/chat-stasher/src/main.rs:354  1,206,285 bytes of data packs — two orders of magnitude apart. Use
+help_doc     crates/chat-stasher/src/main.rs:355  `--cost` to see what a full-text pass over the current hits *would*
+help_doc     crates/chat-stasher/src/main.rs:356  cost before asking for one; full-text matching is not implemented.
+help_doc     crates/chat-stasher/src/main.rs:357  
+help_doc     crates/chat-stasher/src/main.rs:358  One destination per run, always named: there is no automatic merge
+help_doc     crates/chat-stasher/src/main.rs:359  across destinations, and no default destination to search "everything".
+help_doc     crates/chat-stasher/src/main.rs:360  
+help_doc     crates/chat-stasher/src/main.rs:361  Exit codes distinguish the three answers, because two of them look the
+help_doc     crates/chat-stasher/src/main.rs:362  same and mean opposite things: `0` matched something, `1` read the whole
+help_doc     crates/chat-stasher/src/main.rs:363  destination and nothing matched, `3` could not finish reading it — so
+help_doc     crates/chat-stasher/src/main.rs:364  "nothing matched" is unproven. `2` is a usage error, as elsewhere.
+help_doc     crates/chat-stasher/src/main.rs:366  Destination to search. Required unless an explicit `--repo` is given.
+help_doc     crates/chat-stasher/src/main.rs:369  Match sessions whose id starts with this prefix.
+help_doc     crates/chat-stasher/src/main.rs:372  Match one machine partition exactly.
+help_doc     crates/chat-stasher/src/main.rs:375  Lower bound (inclusive) on archive time (rustic snapshot time), unix seconds.
+help_doc     crates/chat-stasher/src/main.rs:378  Upper bound (inclusive) on archive time (rustic snapshot time), unix seconds.
+help_doc     crates/chat-stasher/src/main.rs:381  Also report what a full-text pass over the hits would cost.
+help_doc     crates/chat-stasher/src/main.rs:384  Repository path override.
+help_doc     crates/chat-stasher/src/main.rs:387  Masterkey file override.
+help_doc     crates/chat-stasher/src/main.rs:390  Concurrency cap override.
+help_doc     crates/chat-stasher/src/main.rs:393  Backend option `key=value`, repeatable.
+help_doc     crates/chat-stasher/src/main.rs:396  Disable ssh connection reaping after this run.
+help_doc     crates/chat-stasher/src/main.rs:400  Open an ephemeral local web view of one destination's session list.
+help_doc     crates/chat-stasher/src/main.rs:401  
+help_doc     crates/chat-stasher/src/main.rs:402  Binds a short-lived HTTP server on `127.0.0.1` with an OS-assigned port
+help_doc     crates/chat-stasher/src/main.rs:403  (never `0.0.0.0`, never a fixed port), prints the URL, optionally opens
+help_doc     crates/chat-stasher/src/main.rs:404  your browser, and exits when idle or on Ctrl+C. Nothing is installed:
+help_doc     crates/chat-stasher/src/main.rs:405  no launchd, no systemd, no background process, no resident daemon.
+help_doc     crates/chat-stasher/src/main.rs:406  
+help_doc     crates/chat-stasher/src/main.rs:407  THREAT, stated plainly: loopback is NOT a security boundary. Every other
+help_doc     crates/chat-stasher/src/main.rs:408  program running on this machine can connect to `127.0.0.1`, so this is
+help_doc     crates/chat-stasher/src/main.rs:409  not "safe because it's local". Access is gated by a random token that is
+help_doc     crates/chat-stasher/src/main.rs:410  generated fresh on every launch and appears only in the printed URL —
+help_doc     crates/chat-stasher/src/main.rs:411  never in a file, never in a log. Requests without that exact token are
+help_doc     crates/chat-stasher/src/main.rs:412  refused (403), and any method other than GET is refused (405). Treat the
+help_doc     crates/chat-stasher/src/main.rs:413  URL as a secret for the lifetime of the process.
+help_doc     crates/chat-stasher/src/main.rs:414  
+help_doc     crates/chat-stasher/src/main.rs:415  Metadata tier only, same as `search`: machine, first 8 chars of the
+help_doc     crates/chat-stasher/src/main.rs:416  session id, shard count, byte length, archive time. Conversation text is
+help_doc     crates/chat-stasher/src/main.rs:417  NOT loaded and there is no full-text search; the page says so and prints
+help_doc     crates/chat-stasher/src/main.rs:418  what loading it would cost. Exit codes match `search`: 0 listed
+help_doc     crates/chat-stasher/src/main.rs:419  something, 1 read it all and there was nothing, 3 could not finish
+help_doc     crates/chat-stasher/src/main.rs:420  reading (or no key), 2 usage error.
+help_doc     crates/chat-stasher/src/main.rs:422  Destination to view. Required unless an explicit `--repo` is given:
+help_doc     crates/chat-stasher/src/main.rs:423  there is no default destination and no cross-destination merge.
+help_doc     crates/chat-stasher/src/main.rs:426  Restrict the listing to one machine partition.
+help_doc     crates/chat-stasher/src/main.rs:429  Restrict the listing to session ids with this prefix.
+help_doc     crates/chat-stasher/src/main.rs:432  Do NOT launch a browser; just print the URL. Correct on headless or
+help_doc     crates/chat-stasher/src/main.rs:433  remote machines, where opening a browser is meaningless or wrong.
+help_doc     crates/chat-stasher/src/main.rs:436  Exit after this many seconds with no request (0 = never idle out,
+help_doc     crates/chat-stasher/src/main.rs:437  still exits on Ctrl+C).
+help_doc     crates/chat-stasher/src/main.rs:440  Repository path override.
+help_doc     crates/chat-stasher/src/main.rs:443  Masterkey file override.
+help_doc     crates/chat-stasher/src/main.rs:446  Concurrency cap override.
+help_doc     crates/chat-stasher/src/main.rs:449  Backend option `key=value`, repeatable.
+help_doc     crates/chat-stasher/src/main.rs:452  Disable ssh connection reaping after this run.
+help_doc     crates/chat-stasher/src/main.rs:456  Consume ext inbox bundles into sealed staging shards.
 help_doc     crates/chat-stasher/src/main.rs:457  
-help_doc     crates/chat-stasher/src/main.rs:458  Exit codes: 0 = every recognised session was archivable and was
-help_doc     crates/chat-stasher/src/main.rs:459  collected; 3 = PARTIAL — the pass ran, but at least one harness
-help_doc     crates/chat-stasher/src/main.rs:460  recognised sessions this build cannot archive (the `not archivable`
-help_doc     crates/chat-stasher/src/main.rs:461  line), so what was written is real but incomplete; 1 = the pass failed
-help_doc     crates/chat-stasher/src/main.rs:462  (collect itself errored, or individual sources could not be read).
-help_doc     crates/chat-stasher/src/main.rs:464  Stage directory that holds the sealed `sessions/` tree.
-help_doc     crates/chat-stasher/src/main.rs:467  Machine partition for `sessions/<machine>/…`.
-help_doc     crates/chat-stasher/src/main.rs:468  Default: config `machine`, else this machine's identity (generated
-help_doc     crates/chat-stasher/src/main.rs:469  on first use); use `--machine` explicitly to choose the partition.
-help_doc     crates/chat-stasher/src/main.rs:472  Maximum sealed shards per bucket (default: 20).
-help_doc     crates/chat-stasher/src/main.rs:475  Named destination from the config. Read state is kept per
-help_doc     crates/chat-stasher/src/main.rs:476  destination, so a different destination is a different debt set.
-help_doc     crates/chat-stasher/src/main.rs:479  Destination repository this pass collects *for*. Read state is kept
-help_doc     crates/chat-stasher/src/main.rs:480  per destination, so a different value is a different debt set.
-help_doc     crates/chat-stasher/src/main.rs:483  Masterkey file override for the destination above.
-help_doc     crates/chat-stasher/src/main.rs:487  Seal one file already inside our stage into the next sealed-shard slot.
-help_doc     crates/chat-stasher/src/main.rs:488  This command never renames a harness-owned path.
-help_doc     crates/chat-stasher/src/main.rs:489  
-help_doc     crates/chat-stasher/src/main.rs:490  Gated by `data/harness-registry-v1.json` (`seal_policy` + `seal_source`
-help_doc     crates/chat-stasher/src/main.rs:491  + the platform cell's `confidence`): only a harness whose policy is
-help_doc     crates/chat-stasher/src/main.rs:492  `rename`, with an evidence `seal_source` line **and** a `源码确认`
-help_doc     crates/chat-stasher/src/main.rs:493  platform cell may be renamed. Everything else (Codex = fd-holder,
-help_doc     crates/chat-stasher/src/main.rs:494  opencode = sqlite, any unconfirmed harness) is refused with the active
-help_doc     crates/chat-stasher/src/main.rs:495  file untouched — renaming an fd-holder silently drops its post-rename
-help_doc     crates/chat-stasher/src/main.rs:496  data.
-help_doc     crates/chat-stasher/src/main.rs:498  Registry harness id that owns the active file (e.g. `claude-code`).
-help_doc     crates/chat-stasher/src/main.rs:501  Path of a file already inside --stage to seal. Paths outside the
-help_doc     crates/chat-stasher/src/main.rs:502  stage are rejected and left untouched.
-help_doc     crates/chat-stasher/src/main.rs:505  Stage directory that holds the sealed `sessions/` tree.
-help_doc     crates/chat-stasher/src/main.rs:508  Machine partition for `sessions/<machine>/…`.
-help_doc     crates/chat-stasher/src/main.rs:509  Default: config `machine`, else this machine's identity (generated
-help_doc     crates/chat-stasher/src/main.rs:510  on first use); use `--machine` explicitly to choose the partition.
-help_doc     crates/chat-stasher/src/main.rs:513  Session id to seal into. Default: the active file's stem.
-help_doc     crates/chat-stasher/src/main.rs:516  Maximum sealed shards per bucket (default: 20).
-help_doc     crates/chat-stasher/src/main.rs:520  Register this executable as the browsers' Native Messaging host
-help_doc     crates/chat-stasher/src/main.rs:521  (ADR-014 step 2) — or, with `--uninstall`, remove that registration.
-help_doc     crates/chat-stasher/src/main.rs:522  
-help_doc     crates/chat-stasher/src/main.rs:523  ADR-014 exists because `chrome.downloads` with `saveAs: false` is
-help_doc     crates/chat-stasher/src/main.rs:524  overridden by the browser-level "ask where to save each file before
-help_doc     crates/chat-stasher/src/main.rs:525  downloading" preference, which no extension flag can suppress. At up to
-help_doc     crates/chat-stasher/src/main.rs:526  200 backfilled conversations a day that is 200 modal dialogs.
-help_doc     crates/chat-stasher/src/main.rs:527  
-help_doc     crates/chat-stasher/src/main.rs:528  This is one command instead of the five physical actions Native
-help_doc     crates/chat-stasher/src/main.rs:529  Messaging otherwise costs: it renders the host manifest (`name` /
-help_doc     crates/chat-stasher/src/main.rs:530  `description` / the absolute `path` of *this* executable / `type:
-help_doc     crates/chat-stasher/src/main.rs:531  stdio` / the pinned extension allowlist) and drops it into each
-help_doc     crates/chat-stasher/src/main.rs:532  installed browser's discovery directory. No elevation: everything is
-help_doc     crates/chat-stasher/src/main.rs:533  per-user.
-help_doc     crates/chat-stasher/src/main.rs:534  
-help_doc     crates/chat-stasher/src/main.rs:535  Every path written, left alone, skipped or removed is printed
-help_doc     crates/chat-stasher/src/main.rs:536  absolutely. "No error" is not the same claim as "a file landed".
-help_doc     crates/chat-stasher/src/main.rs:537  
-help_doc     crates/chat-stasher/src/main.rs:538  Idempotent: run it twice and there is exactly one manifest per browser,
-help_doc     crates/chat-stasher/src/main.rs:539  byte-identical, exit 0 both times. Exit codes: 0 = at least one manifest
-help_doc     crates/chat-stasher/src/main.rs:540  is in place (or, for `--uninstall`, removal finished), 3 = nothing was
-help_doc     crates/chat-stasher/src/main.rs:541  written because no known browser was found, 2 = usage error (bad host
-help_doc     crates/chat-stasher/src/main.rs:542  name / extension id / relative binary path), 1 = an action failed.
-help_doc     crates/chat-stasher/src/main.rs:544  Browser to register with, repeatable. Default: every browser whose
-help_doc     crates/chat-stasher/src/main.rs:545  data directory exists on this machine. Naming one explicitly writes
-help_doc     crates/chat-stasher/src/main.rs:546  it even when that directory is absent.
-help_doc     crates/chat-stasher/src/main.rs:549  Discovery root override (macOS default: `~/Library/Application
-help_doc     crates/chat-stasher/src/main.rs:550  Support`). This is what makes the command testable without writing
-help_doc     crates/chat-stasher/src/main.rs:551  into a real browser directory.
-help_doc     crates/chat-stasher/src/main.rs:554  Which OS path layout to use. Default: this platform.
-help_doc     crates/chat-stasher/src/main.rs:557  Host binary recorded in the manifest. Default: this executable
-help_doc     crates/chat-stasher/src/main.rs:558  (`std::env::current_exe()`), which is the only value that stays
-help_doc     crates/chat-stasher/src/main.rs:559  correct after `cargo install --force`.
-help_doc     crates/chat-stasher/src/main.rs:562  Host name override. Chromium's grammar is `[a-z0-9_.]` only.
-help_doc     crates/chat-stasher/src/main.rs:565  Chrome/Chromium/Edge/Brave/Vivaldi extension id.
-help_doc     crates/chat-stasher/src/main.rs:568  Firefox add-on id (`browser_specific_settings.gecko.id`).
-help_doc     crates/chat-stasher/src/main.rs:571  Remove the manifests this command writes — and nothing else.
-help_doc     crates/chat-stasher/src/main.rs:574  Windows only: skip the `reg.exe` step and only write the JSON.
-help_doc     crates/chat-stasher/src/main.rs:578  The Native Messaging host process itself.
-help_doc     crates/chat-stasher/src/main.rs:579  
-help_doc     crates/chat-stasher/src/main.rs:580  The framed stdio message loop is NOT implemented in this build. This
-help_doc     crates/chat-stasher/src/main.rs:581  subcommand exists so that the registration above points at something
-help_doc     crates/chat-stasher/src/main.rs:582  verifiable: `--self-test` prints one line of JSON on stdout and exits 0,
-help_doc     crates/chat-stasher/src/main.rs:583  which is how "does the host actually start?" is answered on a real
-help_doc     crates/chat-stasher/src/main.rs:584  machine and in later tickets. Without `--self-test` it exits 2 rather
-help_doc     crates/chat-stasher/src/main.rs:585  than pretending to serve a connection.
-help_doc     crates/chat-stasher/src/main.rs:586  
-help_doc     crates/chat-stasher/src/main.rs:587  Nothing but that one line may ever reach stdout: Chromium reads stdout
-help_doc     crates/chat-stasher/src/main.rs:588  as a `u32` frame length, so a stray log line is read as a multi-gigabyte
-help_doc     crates/chat-stasher/src/main.rs:589  frame and kills the pipe. Diagnostics go to stderr.
-help_doc     crates/chat-stasher/src/main.rs:591  Print one line of JSON describing this host, then exit 0.
-help_doc     crates/chat-stasher/src/main.rs:595  Build the activity sidecar index for one machine partition (ADR-017).
-help_doc     crates/chat-stasher/src/main.rs:596  
-help_doc     crates/chat-stasher/src/main.rs:597  Walks `<stage>/sessions/<machine>/<session>/<bucket>/NNNNNN.jsonl`,
-help_doc     crates/chat-stasher/src/main.rs:598  concatenates each session's shards in global sequence order, and feeds
-help_doc     crates/chat-stasher/src/main.rs:599  every line through the conversation-time extractor to produce one
-help_doc     crates/chat-stasher/src/main.rs:600  `ActivityRow` per session. The rows are written as JSONL to
-help_doc     crates/chat-stasher/src/main.rs:601  `<stage>/meta/<machine>/activity-v1.jsonl` — the file the `overview`
-help_doc     crates/chat-stasher/src/main.rs:602  command reads back out of a destination.
-help_doc     crates/chat-stasher/src/main.rs:603  
-help_doc     crates/chat-stasher/src/main.rs:604  The harness label is inferred from the session directory name: the
-help_doc     crates/chat-stasher/src/main.rs:605  canonical archived ids are `<source>.<machine>.<native-id>`, so the
-help_doc     crates/chat-stasher/src/main.rs:606  harness is the leading dot-segment (`claude-code.<m>.<uuid>` ->
-help_doc     crates/chat-stasher/src/main.rs:607  `claude-code`); short forms are handled too (`opencode~abc123` ->
-help_doc     crates/chat-stasher/src/main.rs:608  `opencode`, `cursor.d~xxx` -> `cursor`).
-help_doc     crates/chat-stasher/src/main.rs:609  
-help_doc     crates/chat-stasher/src/main.rs:610  Metadata only: the extraction keeps a timestamp per line and throws the
-help_doc     crates/chat-stasher/src/main.rs:611  line away. Nothing else about a conversation is ever read, kept or
-help_doc     crates/chat-stasher/src/main.rs:612  printed — the report is counts and the output path only.
-help_doc     crates/chat-stasher/src/main.rs:613  
-help_doc     crates/chat-stasher/src/main.rs:614  Exit codes: `0` = the whole partition was read and the index written;
-help_doc     crates/chat-stasher/src/main.rs:615  `3` = the stage could not be read (or reading was interrupted) — nothing
-help_doc     crates/chat-stasher/src/main.rs:616  (complete) was written; `1` = every session was read but the index file
-help_doc     crates/chat-stasher/src/main.rs:617  itself could not be written; `2` = usage error. Same family as
-help_doc     crates/chat-stasher/src/main.rs:618  `collect`/`search`: `3` means "did not finish / never started", `1`
-help_doc     crates/chat-stasher/src/main.rs:619  means "finished and then failed".
-help_doc     crates/chat-stasher/src/main.rs:621  Stage directory that holds the sealed `sessions/` tree.
-help_doc     crates/chat-stasher/src/main.rs:624  Machine partition for `sessions/<machine>/…`.
-help_doc     crates/chat-stasher/src/main.rs:625  Default: config `machine`, else this machine's identity (generated
-help_doc     crates/chat-stasher/src/main.rs:626  on first use); use `--machine` explicitly to choose the partition.
-help_doc     crates/chat-stasher/src/main.rs:630  Write this machine's display-name declaration (ADR-018).
+help_doc     crates/chat-stasher/src/main.rs:458  Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
+help_doc     crates/chat-stasher/src/main.rs:459  (skipping `.part` files), archives each as one record in a sealed
+help_doc     crates/chat-stasher/src/main.rs:460  shard under `<stage>/sessions/<machine>/<id>/<bucket>/NNNNNN.jsonl`, and retires
+help_doc     crates/chat-stasher/src/main.rs:461  the source file to `<inbox>/consumed/`. Idempotent by content: the same
+help_doc     crates/chat-stasher/src/main.rs:462  bytes are never archived twice. Prints paths/counts/sha256 only.
+help_doc     crates/chat-stasher/src/main.rs:464  Inbox directory holding the ext exports.
+help_doc     crates/chat-stasher/src/main.rs:467  Stage directory that holds the sealed `sessions/` tree.
+help_doc     crates/chat-stasher/src/main.rs:470  Machine partition for `sessions/<machine>/…`.
+help_doc     crates/chat-stasher/src/main.rs:471  Default: config `machine`, else this machine's identity (generated
+help_doc     crates/chat-stasher/src/main.rs:472  on first use); use `--machine` explicitly to choose the partition.
+help_doc     crates/chat-stasher/src/main.rs:475  Maximum sealed shards per bucket (default: 20).
+help_doc     crates/chat-stasher/src/main.rs:479  Read every scanner session returned by `status` into our own stage.
+help_doc     crates/chat-stasher/src/main.rs:480  
+help_doc     crates/chat-stasher/src/main.rs:481  Harness sources are opened read-only. File-backed JSONL sources use a
+help_doc     crates/chat-stasher/src/main.rs:482  durable byte offset plus committed-prefix SHA-256; opencode SQLite
+help_doc     crates/chat-stasher/src/main.rs:483  sessions use a durable logical high-water cursor. The cursor state lives
+help_doc     crates/chat-stasher/src/main.rs:484  under chat-stasher's own data directory, not under any harness directory.
+help_doc     crates/chat-stasher/src/main.rs:485  
+help_doc     crates/chat-stasher/src/main.rs:486  Exit codes: 0 = every recognised session was archivable and was
+help_doc     crates/chat-stasher/src/main.rs:487  collected; 3 = PARTIAL — the pass ran, but at least one harness
+help_doc     crates/chat-stasher/src/main.rs:488  recognised sessions this build cannot archive (the `not archivable`
+help_doc     crates/chat-stasher/src/main.rs:489  line), so what was written is real but incomplete; 1 = the pass failed
+help_doc     crates/chat-stasher/src/main.rs:490  (collect itself errored, or individual sources could not be read).
+help_doc     crates/chat-stasher/src/main.rs:492  Stage directory that holds the sealed `sessions/` tree.
+help_doc     crates/chat-stasher/src/main.rs:495  Machine partition for `sessions/<machine>/…`.
+help_doc     crates/chat-stasher/src/main.rs:496  Default: config `machine`, else this machine's identity (generated
+help_doc     crates/chat-stasher/src/main.rs:497  on first use); use `--machine` explicitly to choose the partition.
+help_doc     crates/chat-stasher/src/main.rs:500  Maximum sealed shards per bucket (default: 20).
+help_doc     crates/chat-stasher/src/main.rs:503  Named destination from the config. Read state is kept per
+help_doc     crates/chat-stasher/src/main.rs:504  destination, so a different destination is a different debt set.
+help_doc     crates/chat-stasher/src/main.rs:507  Destination repository this pass collects *for*. Read state is kept
+help_doc     crates/chat-stasher/src/main.rs:508  per destination, so a different value is a different debt set.
+help_doc     crates/chat-stasher/src/main.rs:511  Masterkey file override for the destination above.
+help_doc     crates/chat-stasher/src/main.rs:515  Seal one file already inside our stage into the next sealed-shard slot.
+help_doc     crates/chat-stasher/src/main.rs:516  This command never renames a harness-owned path.
+help_doc     crates/chat-stasher/src/main.rs:517  
+help_doc     crates/chat-stasher/src/main.rs:518  Gated by `data/harness-registry-v1.json` (`seal_policy` + `seal_source`
+help_doc     crates/chat-stasher/src/main.rs:519  + the platform cell's `confidence`): only a harness whose policy is
+help_doc     crates/chat-stasher/src/main.rs:520  `rename`, with an evidence `seal_source` line **and** a `source
+help_doc     crates/chat-stasher/src/main.rs:521  confirmed` platform cell may be renamed. Everything else (Codex = fd-holder,
+help_doc     crates/chat-stasher/src/main.rs:522  opencode = sqlite, any unconfirmed harness) is refused with the active
+help_doc     crates/chat-stasher/src/main.rs:523  file untouched — renaming an fd-holder silently drops its post-rename
+help_doc     crates/chat-stasher/src/main.rs:524  data.
+help_doc     crates/chat-stasher/src/main.rs:526  Registry harness id that owns the active file (e.g. `claude-code`).
+help_doc     crates/chat-stasher/src/main.rs:529  Path of a file already inside --stage to seal. Paths outside the
+help_doc     crates/chat-stasher/src/main.rs:530  stage are rejected and left untouched.
+help_doc     crates/chat-stasher/src/main.rs:533  Stage directory that holds the sealed `sessions/` tree.
+help_doc     crates/chat-stasher/src/main.rs:536  Machine partition for `sessions/<machine>/…`.
+help_doc     crates/chat-stasher/src/main.rs:537  Default: config `machine`, else this machine's identity (generated
+help_doc     crates/chat-stasher/src/main.rs:538  on first use); use `--machine` explicitly to choose the partition.
+help_doc     crates/chat-stasher/src/main.rs:541  Session id to seal into. Default: the active file's stem.
+help_doc     crates/chat-stasher/src/main.rs:544  Maximum sealed shards per bucket (default: 20).
+help_doc     crates/chat-stasher/src/main.rs:548  Register this executable as the browsers' Native Messaging host
+help_doc     crates/chat-stasher/src/main.rs:549  (ADR-014 step 2) — or, with `--uninstall`, remove that registration.
+help_doc     crates/chat-stasher/src/main.rs:550  
+help_doc     crates/chat-stasher/src/main.rs:551  ADR-014 exists because `chrome.downloads` with `saveAs: false` is
+help_doc     crates/chat-stasher/src/main.rs:552  overridden by the browser-level "ask where to save each file before
+help_doc     crates/chat-stasher/src/main.rs:553  downloading" preference, which no extension flag can suppress. At up to
+help_doc     crates/chat-stasher/src/main.rs:554  200 backfilled conversations a day that is 200 modal dialogs.
+help_doc     crates/chat-stasher/src/main.rs:555  
+help_doc     crates/chat-stasher/src/main.rs:556  This is one command instead of the five physical actions Native
+help_doc     crates/chat-stasher/src/main.rs:557  Messaging otherwise costs: it renders the host manifest (`name` /
+help_doc     crates/chat-stasher/src/main.rs:558  `description` / the absolute `path` of *this* executable / `type:
+help_doc     crates/chat-stasher/src/main.rs:559  stdio` / the pinned extension allowlist) and drops it into each
+help_doc     crates/chat-stasher/src/main.rs:560  installed browser's discovery directory. No elevation: everything is
+help_doc     crates/chat-stasher/src/main.rs:561  per-user.
+help_doc     crates/chat-stasher/src/main.rs:562  
+help_doc     crates/chat-stasher/src/main.rs:563  Every path written, left alone, skipped or removed is printed
+help_doc     crates/chat-stasher/src/main.rs:564  absolutely. "No error" is not the same claim as "a file landed".
+help_doc     crates/chat-stasher/src/main.rs:565  
+help_doc     crates/chat-stasher/src/main.rs:566  Idempotent: run it twice and there is exactly one manifest per browser,
+help_doc     crates/chat-stasher/src/main.rs:567  byte-identical, exit 0 both times. Exit codes: 0 = at least one manifest
+help_doc     crates/chat-stasher/src/main.rs:568  is in place (or, for `--uninstall`, removal finished), 3 = nothing was
+help_doc     crates/chat-stasher/src/main.rs:569  written because no known browser was found, 2 = usage error (bad host
+help_doc     crates/chat-stasher/src/main.rs:570  name / extension id / relative binary path), 1 = an action failed.
+help_doc     crates/chat-stasher/src/main.rs:572  Browser to register with, repeatable. Default: every browser whose
+help_doc     crates/chat-stasher/src/main.rs:573  data directory exists on this machine. Naming one explicitly writes
+help_doc     crates/chat-stasher/src/main.rs:574  it even when that directory is absent.
+help_doc     crates/chat-stasher/src/main.rs:577  Discovery root override (macOS default: `~/Library/Application
+help_doc     crates/chat-stasher/src/main.rs:578  Support`). This is what makes the command testable without writing
+help_doc     crates/chat-stasher/src/main.rs:579  into a real browser directory.
+help_doc     crates/chat-stasher/src/main.rs:582  Which OS path layout to use. Default: this platform.
+help_doc     crates/chat-stasher/src/main.rs:585  Host binary recorded in the manifest. Default: this executable
+help_doc     crates/chat-stasher/src/main.rs:586  (`std::env::current_exe()`), which is the only value that stays
+help_doc     crates/chat-stasher/src/main.rs:587  correct after `cargo install --force`.
+help_doc     crates/chat-stasher/src/main.rs:590  Host name override. Chromium's grammar is `[a-z0-9_.]` only.
+help_doc     crates/chat-stasher/src/main.rs:593  Chrome/Chromium/Edge/Brave/Vivaldi extension id.
+help_doc     crates/chat-stasher/src/main.rs:596  Firefox add-on id (`browser_specific_settings.gecko.id`).
+help_doc     crates/chat-stasher/src/main.rs:599  Remove the manifests this command writes — and nothing else.
+help_doc     crates/chat-stasher/src/main.rs:602  Windows only: skip the `reg.exe` step and only write the JSON.
+help_doc     crates/chat-stasher/src/main.rs:606  The Native Messaging host process itself.
+help_doc     crates/chat-stasher/src/main.rs:607  
+help_doc     crates/chat-stasher/src/main.rs:608  The framed stdio message loop is NOT implemented in this build. This
+help_doc     crates/chat-stasher/src/main.rs:609  subcommand exists so that the registration above points at something
+help_doc     crates/chat-stasher/src/main.rs:610  verifiable: `--self-test` prints one line of JSON on stdout and exits 0,
+help_doc     crates/chat-stasher/src/main.rs:611  which is how "does the host actually start?" is answered on a real
+help_doc     crates/chat-stasher/src/main.rs:612  machine and in later tickets. Without `--self-test` it exits 2 rather
+help_doc     crates/chat-stasher/src/main.rs:613  than pretending to serve a connection.
+help_doc     crates/chat-stasher/src/main.rs:614  
+help_doc     crates/chat-stasher/src/main.rs:615  Nothing but that one line may ever reach stdout: Chromium reads stdout
+help_doc     crates/chat-stasher/src/main.rs:616  as a `u32` frame length, so a stray log line is read as a multi-gigabyte
+help_doc     crates/chat-stasher/src/main.rs:617  frame and kills the pipe. Diagnostics go to stderr.
+help_doc     crates/chat-stasher/src/main.rs:619  Print one line of JSON describing this host, then exit 0.
+help_doc     crates/chat-stasher/src/main.rs:623  Build the activity sidecar index for one machine partition (ADR-017).
+help_doc     crates/chat-stasher/src/main.rs:624  
+help_doc     crates/chat-stasher/src/main.rs:625  Walks `<stage>/sessions/<machine>/<session>/<bucket>/NNNNNN.jsonl`,
+help_doc     crates/chat-stasher/src/main.rs:626  concatenates each session's shards in global sequence order, and feeds
+help_doc     crates/chat-stasher/src/main.rs:627  every line through the conversation-time extractor to produce one
+help_doc     crates/chat-stasher/src/main.rs:628  `ActivityRow` per session. The rows are written as JSONL to
+help_doc     crates/chat-stasher/src/main.rs:629  `<stage>/meta/<machine>/activity-v1.jsonl` — the file the `overview`
+help_doc     crates/chat-stasher/src/main.rs:630  command reads back out of a destination.
 help_doc     crates/chat-stasher/src/main.rs:631  
-help_doc     crates/chat-stasher/src/main.rs:632  Writes `<stage>/meta/<machine>/machine.json` — a `MachineDeclaration`
-help_doc     crates/chat-stasher/src/main.rs:633  that carries the human display name, the OS and a first-seen time. The
-help_doc     crates/chat-stasher/src/main.rs:634  machine partition is resolved exactly like every other command: config
-help_doc     crates/chat-stasher/src/main.rs:635  `machine` first, then the identity file (generated when missing). The
-help_doc     crates/chat-stasher/src/main.rs:636  next `push` archives the whole stage root, so this file rides along.
+help_doc     crates/chat-stasher/src/main.rs:632  The harness label is inferred from the session directory name: the
+help_doc     crates/chat-stasher/src/main.rs:633  canonical archived ids are `<source>.<machine>.<native-id>`, so the
+help_doc     crates/chat-stasher/src/main.rs:634  harness is the leading dot-segment (`claude-code.<m>.<uuid>` ->
+help_doc     crates/chat-stasher/src/main.rs:635  `claude-code`); short forms are handled too (`opencode~abc123` ->
+help_doc     crates/chat-stasher/src/main.rs:636  `opencode`, `cursor.d~xxx` -> `cursor`).
 help_doc     crates/chat-stasher/src/main.rs:637  
-help_doc     crates/chat-stasher/src/main.rs:638  The display name is taken from `--display-name` when given; otherwise
-help_doc     crates/chat-stasher/src/main.rs:639  the system's LocalHostName (`scutil --get LocalHostName` on macOS,
-help_doc     crates/chat-stasher/src/main.rs:640  `hostname` elsewhere) is used. If neither is available the field is
-help_doc     crates/chat-stasher/src/main.rs:641  written **empty** and the command says so — a name is never invented.
-help_doc     crates/chat-stasher/src/main.rs:642  
-help_doc     crates/chat-stasher/src/main.rs:643  Exit codes: `0` = the declaration was written; `3` = the machine
-help_doc     crates/chat-stasher/src/main.rs:644  partition could not be resolved or the identity is unusable; `1` = the
-help_doc     crates/chat-stasher/src/main.rs:645  file could not be written; `2` = usage error.
-help_doc     crates/chat-stasher/src/main.rs:647  Stage directory to write the declaration into (`<stage>/meta/…`).
-help_doc     crates/chat-stasher/src/main.rs:650  Human display name for this machine. Default: system LocalHostName.
-help_doc     crates/chat-stasher/src/main.rs:654  Give a dead or sold machine a display name (ADR-018).
-help_doc     crates/chat-stasher/src/main.rs:655  
-help_doc     crates/chat-stasher/src/main.rs:656  Writes `<stage>/meta/<target>/label-by-<本机身份>.json` — a
-help_doc     crates/chat-stasher/src/main.rs:657  `LabelRecord` expressing *this* machine's opinion about what `<target>`
-help_doc     crates/chat-stasher/src/main.rs:658  should be called. It exists for machines that can no longer declare for
-help_doc     crates/chat-stasher/src/main.rs:659  themselves (sold, dead, in a different building). Each file has exactly
-help_doc     crates/chat-stasher/src/main.rs:660  one writer, so concurrent machines never fight over it; the overview
-help_doc     crates/chat-stasher/src/main.rs:661  shows the label with the latest `written_at_unix`.
-help_doc     crates/chat-stasher/src/main.rs:662  
-help_doc     crates/chat-stasher/src/main.rs:663  Exit codes: `0` = the label was written; `3` = the local identity could
-help_doc     crates/chat-stasher/src/main.rs:664  not be resolved; `1` = the file could not be written; `2` = usage error.
-help_doc     crates/chat-stasher/src/main.rs:666  Stage directory to write the label into (`<stage>/meta/…`).
-help_doc     crates/chat-stasher/src/main.rs:669  Machine id (partition) being labelled, e.g. a 32-hex identity.
-help_doc     crates/chat-stasher/src/main.rs:672  Display-name override for the target.
-help_doc     crates/chat-stasher/src/main.rs:676  Draw the machine × harness activity overview of one destination
-help_doc     crates/chat-stasher/src/main.rs:677  (ADR-017).
-help_doc     crates/chat-stasher/src/main.rs:678  
-help_doc     crates/chat-stasher/src/main.rs:679  Opens the destination repository, takes each host's newest snapshot
-help_doc     crates/chat-stasher/src/main.rs:680  (the same cross-machine merge as `read --all-machines`), and for every
-help_doc     crates/chat-stasher/src/main.rs:681  snapshot recursively finds the activity index files at
-help_doc     crates/chat-stasher/src/main.rs:682  `meta/<machine>/activity-v1.jsonl`. The paths carry each machine's own
-help_doc     crates/chat-stasher/src/main.rs:683  absolute stage prefix, so they are matched by the trailing
-help_doc     crates/chat-stasher/src/main.rs:684  `meta` / `<machine>` / `activity-v1.jsonl` marker — never by a local
-help_doc     crates/chat-stasher/src/main.rs:685  path. The indexes are parsed into overview rows and rendered as a
-help_doc     crates/chat-stasher/src/main.rs:686  machine × harness matrix, a time-unknown tally and a width-adaptive
-help_doc     crates/chat-stasher/src/main.rs:687  heatmap. Prints counts, machine names and time spans only — never
-help_doc     crates/chat-stasher/src/main.rs:688  conversation content.
-help_doc     crates/chat-stasher/src/main.rs:689  
-help_doc     crates/chat-stasher/src/main.rs:690  A machine that has a snapshot but **no** activity index is listed
-help_doc     crates/chat-stasher/src/main.rs:691  explicitly as "索引缺失" — it never vanishes silently, because a missing
-help_doc     crates/chat-stasher/src/main.rs:692  index is not the same thing as "that machine had no sessions".
-help_doc     crates/chat-stasher/src/main.rs:693  
-help_doc     crates/chat-stasher/src/main.rs:694  Exit codes: `0` = at least one index was read and rendered; `1` = the
-help_doc     crates/chat-stasher/src/main.rs:695  whole repository was read and there is no activity index at all (a real
-help_doc     crates/chat-stasher/src/main.rs:696  "there is none", not a failure to look); `3` = the repository could not
-help_doc     crates/chat-stasher/src/main.rs:697  be read in full (open / snapshot / tree / dump failure) — the absences
-help_doc     crates/chat-stasher/src/main.rs:698  below are unproven; `2` = usage error.
-help_doc     crates/chat-stasher/src/main.rs:700  Destination to open. Required unless an explicit `--repo` is given:
-help_doc     crates/chat-stasher/src/main.rs:701  there is no default destination.
-help_doc     crates/chat-stasher/src/main.rs:704  Terminal width for the matrix/heatmap (default: 100).
-help_doc     crates/chat-stasher/src/main.rs:707  Print exactly one JSON object to stdout and nothing else (the
-help_doc     crates/chat-stasher/src/main.rs:708  human matrix/heatmap is suppressed). Per-session `first_unix` /
-help_doc     crates/chat-stasher/src/main.rs:709  `last_unix` and `time_source` are tri-state tagged
-help_doc     crates/chat-stasher/src/main.rs:710  `{"kind":"known",…}` / `{"kind":"unknown","why":…}` — an unknown
-help_doc     crates/chat-stasher/src/main.rs:711  time is never `null`. `no_index_anywhere` is `true` on exit 1
-help_doc     crates/chat-stasher/src/main.rs:712  (read in full, no index anywhere); a failed read (exit 3) puts the
-help_doc     crates/chat-stasher/src/main.rs:713  reason in `error`.
-help_doc     crates/chat-stasher/src/main.rs:716  Repository path override.
-help_doc     crates/chat-stasher/src/main.rs:719  Masterkey file override.
-help_doc     crates/chat-stasher/src/main.rs:722  Concurrency cap override.
-help_doc     crates/chat-stasher/src/main.rs:725  Backend option `key=value`, repeatable.
-help_doc     crates/chat-stasher/src/main.rs:728  Disable ssh connection reaping after this run.
-eprintln     crates/chat-stasher/src/main.rs:1039  "install-native-host: cannot resolve current executable: {e}"
-eprintln     crates/chat-stasher/src/main.rs:1068  "install-native-host: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:1081  "install-native-host: {e:#}"
-println      crates/chat-stasher/src/main.rs:1087  "{TAG} mode: {}"
-println      crates/chat-stasher/src/main.rs:1090  "{TAG} host name: {host_name}"
-println      crates/chat-stasher/src/main.rs:1091  "{TAG} host binary: {}"
-println      crates/chat-stasher/src/main.rs:1092  "{TAG} platform: {}"
-println      crates/chat-stasher/src/main.rs:1093  "{TAG} discovery root: {}"
-println      crates/chat-stasher/src/main.rs:1095  "{TAG} chromium allowlist: chrome-extension://{extension_id}/"
-println      crates/chat-stasher/src/main.rs:1096  "{TAG} gecko allowlist: {firefox_extension_id}"
-println      crates/chat-stasher/src/main.rs:1113  "{TAG} {}: no discovery path known for {} in this build — nothing written"
-println      crates/chat-stasher/src/main.rs:1124  "{TAG} {}: removed {}"
-println      crates/chat-stasher/src/main.rs:1133  "{TAG} {}: absent (nothing to remove) {}"
-eprintln     crates/chat-stasher/src/main.rs:1141  "install-native-host: {}: {e:#}"
-println      crates/chat-stasher/src/main.rs:1159  "{TAG} {}: skipped, browser not installed (no {}) — pass --browser {} to write anyway"
-println      crates/chat-stasher/src/main.rs:1172  "{TAG} {}: {} {}"
-eprintln     crates/chat-stasher/src/main.rs:1181  "install-native-host: {}: {e:#}"
-println      crates/chat-stasher/src/main.rs:1199  "{TAG} {}: no registry key known in this build — manifest written but NOT discoverable"
-println      crates/chat-stasher/src/main.rs:1207  "{TAG} {}: registry {}"
-eprintln     crates/chat-stasher/src/main.rs:1213  "install-native-host: {}: {e:#}"
-println      crates/chat-stasher/src/main.rs:1218  "{TAG} {}: registry NOT applied (not running on Windows), would run: {}"
-println      crates/chat-stasher/src/main.rs:1227  "{TAG} summary: removed {removed}, already absent {absent}, unsupported {unsupported}, failed {failed}"
-println      crates/chat-stasher/src/main.rs:1228  "{TAG} directories themselves were left in place; no other vendor's manifest was touched."
-println      crates/chat-stasher/src/main.rs:1236  "{TAG} summary: wrote {wrote}, updated {updated}, unchanged {unchanged}, skipped {skipped}, unsupported {unsupported}, failed {failed}"
-eprintln     crates/chat-stasher/src/main.rs:1242  "install-native-host: nothing was written — no known browser directory under {}"
-println      crates/chat-stasher/src/main.rs:1247  "{TAG} next: reload the extension, then connect to {host_name}."
-eprintln     crates/chat-stasher/src/main.rs:1255  "native-host: the stdio message loop is not implemented in this build; run `native-host --self-test` to check that the host starts."
-println      crates/chat-stasher/src/main.rs:1262  "{}"
-eprintln     crates/chat-stasher/src/main.rs:1290  "activity-index: stage `{}` is not a directory — nothing was read"
-eprintln     crates/chat-stasher/src/main.rs:1308  "activity-index: cannot enumerate {}: {e}"
-eprintln     crates/chat-stasher/src/main.rs:1322  "activity-index: cannot read {}: {e} — nothing was read, this is not an empty index"
-eprintln     crates/chat-stasher/src/main.rs:1337  "activity-index: session `{}` has no inferable harness — skipped"
-eprintln     crates/chat-stasher/src/main.rs:1347  "activity-index: cannot read session `{session_id}`: {e}"
-eprintln     crates/chat-stasher/src/main.rs:1358  "activity-index: cannot read shard {}: {e}"
-eprintln     crates/chat-stasher/src/main.rs:1375  "activity-index: cannot create {}: {e}"
-eprintln     crates/chat-stasher/src/main.rs:1384  "activity-index: cannot write {}: {e}"
-println      crates/chat-stasher/src/main.rs:1388  "[activity-index] stage    : {}"
-println      crates/chat-stasher/src/main.rs:1389  "[activity-index] machine  : {machine}"
-println      crates/chat-stasher/src/main.rs:1390  "[activity-index] sessions : {}"
-println      crates/chat-stasher/src/main.rs:1391  "[activity-index] index    : {}"
-eprintln     crates/chat-stasher/src/main.rs:1413  "machine-declare: could not determine a system display name — writing an empty display_name (set one with --display-name)"
-println      crates/chat-stasher/src/main.rs:1428  "[machine-declare] machine        : {machine}"
-println      crates/chat-stasher/src/main.rs:1429  "[machine-declare] display name   : {}"
-println      crates/chat-stasher/src/main.rs:1430  "[machine-declare] os             : {}"
-println      crates/chat-stasher/src/main.rs:1432  "[machine-declare] first seen     : {}"
-println      crates/chat-stasher/src/main.rs:1435  "[machine-declare] file           : {}"
-println      crates/chat-stasher/src/main.rs:1437  "[machine-declare] next           : the next `push` archives it with the stage"
-eprintln     crates/chat-stasher/src/main.rs:1442  "machine-declare: {e:#}"
-println      crates/chat-stasher/src/main.rs:1465  "[machine-label] target  : {}"
-println      crates/chat-stasher/src/main.rs:1466  "[machine-label] label   : {}"
-println      crates/chat-stasher/src/main.rs:1467  "[machine-label] writer  : {writer}"
-println      crates/chat-stasher/src/main.rs:1468  "[machine-label] written : {}"
-println      crates/chat-stasher/src/main.rs:1469  "[machine-label] file    : {}"
-println      crates/chat-stasher/src/main.rs:1470  "[machine-label] next    : the next `push` archives it with the stage"
-eprintln     crates/chat-stasher/src/main.rs:1474  "machine-label: {e:#}"
-anyhow       crates/chat-stasher/src/main.rs:1486  "declaration path has no parent: {}"
-with_context crates/chat-stasher/src/main.rs:1488  "create declaration directory {}"
-with_context crates/chat-stasher/src/main.rs:1490  "write declaration {}"
-anyhow       crates/chat-stasher/src/main.rs:1504  "label path has no parent: {}"
-with_context crates/chat-stasher/src/main.rs:1506  "create label directory {}"
-with_context crates/chat-stasher/src/main.rs:1508  "write label {}"
-context      crates/chat-stasher/src/main.rs:1609  "open repository for overview"
-context      crates/chat-stasher/src/main.rs:1611  "index repository for overview"
-context      crates/chat-stasher/src/main.rs:1614  "list snapshots for overview"
-with_context crates/chat-stasher/src/main.rs:1631  "host `{hostname}`: read tree root"
-with_context crates/chat-stasher/src/main.rs:1634  "host `{hostname}`: list snapshot tree"
-with_context crates/chat-stasher/src/main.rs:1636  "host `{hostname}`: collect snapshot entries"
-with_context crates/chat-stasher/src/main.rs:1645  "host `{hostname}` machine `{machine}`: read activity index"
-with_context crates/chat-stasher/src/main.rs:1652  "host `{hostname}` machine `{machine}`: malformed activity index line"
-with_context crates/chat-stasher/src/main.rs:1661  "host `{hostname}` machine `{machine}`: read declaration"
-with_context crates/chat-stasher/src/main.rs:1666  "host `{hostname}` machine `{machine}`: malformed machine declaration"
-with_context crates/chat-stasher/src/main.rs:1676  "host `{hostname}` machine `{machine}`: read label"
-with_context crates/chat-stasher/src/main.rs:1680  "host `{hostname}` machine `{machine}`: malformed label record"
-eprintln     crates/chat-stasher/src/main.rs:1716  "{msg}"
-println      crates/chat-stasher/src/main.rs:1719  "{}"
-eprintln     crates/chat-stasher/src/main.rs:1737  "overview: {msg}"
-eprintln     crates/chat-stasher/src/main.rs:1738  "overview: without the key nothing was read — this is not an empty result"
-println      crates/chat-stasher/src/main.rs:1741  "{}"
-eprintln     crates/chat-stasher/src/main.rs:1753  "overview: {msg}"
-eprintln     crates/chat-stasher/src/main.rs:1755  "overview: the archive was not read to completion — this is not an empty result"
-println      crates/chat-stasher/src/main.rs:1759  "{}"
-println      crates/chat-stasher/src/main.rs:1799  "{}"
-println      crates/chat-stasher/src/main.rs:1804  "[overview] repo         : {}"
-println      crates/chat-stasher/src/main.rs:1805  "[overview] width        : {width}"
-println      crates/chat-stasher/src/main.rs:1807  "[overview] machines     : {} with snapshot / {} with index / {} with declaration"
-println      crates/chat-stasher/src/main.rs:1817  "[overview] 索引缺失（有快照、无 activity 索引）:"
-println      crates/chat-stasher/src/main.rs:1819  "  !! {}"
-println      crates/chat-stasher/src/main.rs:1833  "[overview] 声明缺失（有快照、无 machine.json 声明）:"
-println      crates/chat-stasher/src/main.rs:1835  "  !! {}"
-println      crates/chat-stasher/src/main.rs:1843  "overview: the destination was read in full and contains no activity index (no `meta/*/activity-v1.jsonl` anywhere)"
-println      crates/chat-stasher/src/main.rs:1856  "{}"
-eprintln     crates/chat-stasher/src/main.rs:1904  "{command}: generated a new machine identity {} — this is the archive partition for this machine from now on"
-eprintln     crates/chat-stasher/src/main.rs:1911  "{command}: cannot persist a new machine identity: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:1912  "{command}: nothing was read or written."
-eprintln     crates/chat-stasher/src/main.rs:1918  "{command}: machine identity file {} is present but unusable: {error:?}"
-eprintln     crates/chat-stasher/src/main.rs:1922  "{command}: 🔴 do not delete this file — it is the key to this machine's archive partition."
-eprintln     crates/chat-stasher/src/main.rs:1925  "{command}: fix the read/parse problem and re-run; nothing was read or written."
-eprintln     crates/chat-stasher/src/main.rs:1984  "search: name the destination to search (`--destination <name>`, or an explicit `--repo`)"
-eprintln     crates/chat-stasher/src/main.rs:1987  "search: there is no default destination and no cross-destination merge — archives are not required to agree"
-eprintln     crates/chat-stasher/src/main.rs:2006  "search: {e}"
-eprintln     crates/chat-stasher/src/main.rs:2007  "search: without the key nothing was read — this is not an empty result"
-eprintln     crates/chat-stasher/src/main.rs:2036  "search: cannot read `{}`: {e}"
-eprintln     crates/chat-stasher/src/main.rs:2037  "search: this is not an empty destination — the archive was not read"
-println      crates/chat-stasher/src/main.rs:2043  "[search] destination  : {}"
-println      crates/chat-stasher/src/main.rs:2045  "[search] snapshots    : {} scanned / {} in repo"
-println      crates/chat-stasher/src/main.rs:2048  "[search] sessions seen: {}"
-println      crates/chat-stasher/src/main.rs:2049  "[search] data blobs read: {}"
-println      crates/chat-stasher/src/main.rs:2051  "  !! unreadable: {path}"
-println      crates/chat-stasher/src/main.rs:2055  "{}"
-println      crates/chat-stasher/src/main.rs:2062  "[search] matched      : {}"
-println      crates/chat-stasher/src/main.rs:2065  "  {}  machine={}  shards={}  bytes={}  snapshot={}  archive_time_unix={}"
-println      crates/chat-stasher/src/main.rs:2078  "search: PARTIAL — the matches above are real, but `{}` could not be read in full ({} unreadable), so there may be more"
-println      crates/chat-stasher/src/main.rs:2090  "[search] full-text pass over these hits would need:"
-println      crates/chat-stasher/src/main.rs:2092  "  sessions={}  shards={}  data_blobs={}  plaintext_bytes={}"
-println      crates/chat-stasher/src/main.rs:2095  "  (not performed — full-text matching is not implemented)"
-eprintln     crates/chat-stasher/src/main.rs:2130  "view: name the destination to view (`--destination <name>`, or an explicit `--repo`)"
-eprintln     crates/chat-stasher/src/main.rs:2133  "view: there is no default destination and no cross-destination merge — archives are not required to agree"
-eprintln     crates/chat-stasher/src/main.rs:2152  "view: {e}"
-eprintln     crates/chat-stasher/src/main.rs:2153  "view: without the key nothing was read — this is not an empty result"
-eprintln     crates/chat-stasher/src/main.rs:2172  "view: cannot read `{}`: {e}"
-eprintln     crates/chat-stasher/src/main.rs:2173  "view: this is not an empty destination — the archive was not read"
-println      crates/chat-stasher/src/main.rs:2183  "  !! unreadable: {path}"
-println      crates/chat-stasher/src/main.rs:2186  "{}"
-println      crates/chat-stasher/src/main.rs:2187  "view: nothing to show, so no server was started"
-eprintln     crates/chat-stasher/src/main.rs:2201  "view: cannot read OS randomness for the access token: {e}"
-eprintln     crates/chat-stasher/src/main.rs:2202  "view: refusing to serve without a strong token"
-eprintln     crates/chat-stasher/src/main.rs:2209  "view: cannot bind 127.0.0.1:0 — {e}"
-eprintln     crates/chat-stasher/src/main.rs:2216  "view: bound but cannot read local address — {e}"
-println      crates/chat-stasher/src/main.rs:2227  "[view] destination  : {}"
-println      crates/chat-stasher/src/main.rs:2229  "[view] snapshots    : {} scanned / {} in repo"
-println      crates/chat-stasher/src/main.rs:2233  "[view] sessions     : {} listed / {} seen"
-println      crates/chat-stasher/src/main.rs:2237  "[view] data blobs read: {}"
-println      crates/chat-stasher/src/main.rs:2238  "[view] bound        : {addr} (loopback only, OS-assigned port)"
-println      crates/chat-stasher/src/main.rs:2240  "[view] idle timeout : {}"
-println      crates/chat-stasher/src/main.rs:2247  "[view] payload      : NOT loaded — metadata tier only, no full-text search"
-println      crates/chat-stasher/src/main.rs:2248  "[view] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it."
-println      crates/chat-stasher/src/main.rs:2249  "{url}"
-println      crates/chat-stasher/src/main.rs:2252  "[view] browser      : not opened (--no-open)"
-eprintln     crates/chat-stasher/src/main.rs:2254  "[view] browser      : could not open ({e}) — use the URL above, or --no-open"
-println      crates/chat-stasher/src/main.rs:2256  "[view] browser      : opened"
-eprintln     crates/chat-stasher/src/main.rs:2262  "view: serve loop failed: {e}"
-println      crates/chat-stasher/src/main.rs:2267  "[view] exiting      : idle for {}s · requests served={} rejected={}"
-println      crates/chat-stasher/src/main.rs:2273  "view: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more"
-println      crates/chat-stasher/src/main.rs:2286  "{}"
-eprintln     crates/chat-stasher/src/main.rs:2292  "doctor: INCOMPLETE exit_code=3 — the registry-driven scan did not run, so the coverage numbers above are UNKNOWN, not zero. The retention verdicts that depend on a session count were omitted rather than fabricated; nothing here proves your harnesses are safe."
-eprintln     crates/chat-stasher/src/main.rs:2326  "ingest: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:2332  "ingest: cannot persist consumed-inbox audit pointer: {e:#}"
-println      crates/chat-stasher/src/main.rs:2335  "[ingest] shard bucket cap : {shard_bucket_cap}"
-eprintln     crates/chat-stasher/src/main.rs:2339  "ingest: FAILED exit_code=1 — {} inbox file(s) were opened and could not be turned into a sealed shard. They were NOT retired, so they are still in the inbox in plaintext and a re-run will try them again. The shards listed above are real; the inbox is not empty."
-bail         crates/chat-stasher/src/main.rs:2373  "destination repository is not initialised"
-eprintln     crates/chat-stasher/src/main.rs:2425  "dest-init: name the destination being initialised (`--destination <name>`, or an explicit `--repo`)"
-eprintln     crates/chat-stasher/src/main.rs:2459  "dest-init: `--from {name}` is the destination being initialised"
-eprintln     crates/chat-stasher/src/main.rs:2463  "dest-init: `--from {name}` is not declared in the config"
-eprintln     crates/chat-stasher/src/main.rs:2488  "dest-init: cannot read this machine's collector record for source `{name}`: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:2491  "dest-init: that record is the only thing that tells \"never built\" apart from \"built and since lost\". Without it this source can only be reported as UNKNOWN."
-println      crates/chat-stasher/src/main.rs:2504  "[dest-init] destination   : sha256={} (new copy)"
-println      crates/chat-stasher/src/main.rs:2508  "[dest-init] machine       : sha256={}"
-println      crates/chat-stasher/src/main.rs:2511  "[dest-init] stage         : {}"
-println      crates/chat-stasher/src/main.rs:2513  "[dest-init] sources       : {} ({})"
-println      crates/chat-stasher/src/main.rs:2524  "[dest-init] step 1        : re-collect from the local sources"
-eprintln     crates/chat-stasher/src/main.rs:2536  "dest-init: local re-collect failed: {e:#}"
-println      crates/chat-stasher/src/main.rs:2555  "[dest-init] step 2        : difference set (existing destination has it, local re-collect did not produce it)"
-println      crates/chat-stasher/src/main.rs:2560  "  source {:<16} sha256={} state={} reachable={} sessions_here={} other_machines={} missing_locally={} restored={} shards={} failed={}"
-println      crates/chat-stasher/src/main.rs:2573  "    reason: {reason}"
-println      crates/chat-stasher/src/main.rs:2577  "    NEVER-BUILT: no repository at that location, and this machine has no record of ever collecting for it. It was never built, so it holds nothing and cannot be holding a copy we need. Not counted against the union."
-println      crates/chat-stasher/src/main.rs:2582  "    !! SUSPECTED DATA LOSS: this machine DOES have a record of collecting for this destination, and its archive can no longer be read. This is NOT an empty destination — it may have been holding the only remaining copy of some sessions. Do not re-create it blank: find the original first."
-println      crates/chat-stasher/src/main.rs:2591  "    UNKNOWN: there is no repository at that location, but this machine's own collector record could not be read — so we cannot tell whether we ever collected for it. Never-built and built-then-lost look identical without that record, and the second one may mean the only copy of some sessions is gone. Fix the record (state/debts-v2.json) and re-run before treating this destination as empty."
-println      crates/chat-stasher/src/main.rs:2598  "    UNKNOWN: we could not establish whether a repository is there at all, and we have no record of collecting for it. Unknown is not empty — this could be a destination that was never built, or one that is merely unreachable right now."
-println      crates/chat-stasher/src/main.rs:2606  "    WARNING: {} session(s) belong to another machine partition and were NOT copied (the stage is single-partition by construction; copying them would re-attribute another machine's history to this one). They remain only in the source destination."
-println      crates/chat-stasher/src/main.rs:2614  "[dest-init] restored      : sessions={} shards={}"
-println      crates/chat-stasher/src/main.rs:2618  "[dest-init] never built   : {} ({})"
-println      crates/chat-stasher/src/main.rs:2623  "[dest-init] suspect lost  : {} ({})"
-println      crates/chat-stasher/src/main.rs:2628  "[dest-init] unknown       : {} ({})"
-println      crates/chat-stasher/src/main.rs:2632  "[dest-init] diff complete : {}"
-eprintln     crates/chat-stasher/src/main.rs:2640  "dest-init: cannot audit stage: {e:#}"
-println      crates/chat-stasher/src/main.rs:2649  "[dest-init] step 3        : nothing on the stage, no snapshot created"
-println      crates/chat-stasher/src/main.rs:2651  "[dest-init] step 3        : push the union to the new destination"
-eprintln     crates/chat-stasher/src/main.rs:2657  "dest-init: cannot put a new masterkey on the disk: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:2659  "dest-init: nothing was pushed to the new destination — an archive written under a key that is not on the disk could never be opened again."
-println      crates/chat-stasher/src/main.rs:2670  "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}"
-eprintln     crates/chat-stasher/src/main.rs:2678  "dest-init: push failed: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:2716  "dest-init: result: ERROR exit_code=1 — the difference set was read, but {failed_sessions} session(s) could not be restored. The new destination is not proven to hold the union."
-eprintln     crates/chat-stasher/src/main.rs:2720  "[dest-init] result: ERROR exit_code=1 local_errors={local_failed} push_failed={push_failed}"
-eprintln     crates/chat-stasher/src/main.rs:2731  "dest-init: result: SUSPECTED-DATA-LOSS exit_code=3 — {} destination(s) that this machine has collected for before can no longer be read: {}. This is NOT \"one fewer destination to copy from\": each of them may have been the last place some sessions still existed. The new destination has been given everything else, but it is NOT proven to hold the union. Go find those archives before you re-create anything."
-eprintln     crates/chat-stasher/src/main.rs:2744  "dest-init: result: INCOMPLETE exit_code=3 — the difference set could not be computed in full. {} destination(s) could not be consulted ({}), so it is UNKNOWN whether this new destination holds the union. Unknown is not empty, and it is not loss either — we cannot tell whether these were ever built. Re-run once they are reachable."
-eprintln     crates/chat-stasher/src/main.rs:2759  "[dest-init] result: ERROR exit_code=3 local_errors={local_failed} push_failed={push_failed}"
-println      crates/chat-stasher/src/main.rs:2763  "[dest-init] result: COMPLETED exit_code=0 union=local+existing-destinations"
-eprintln     crates/chat-stasher/src/main.rs:2794  "collect: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:2809  "collect: PARTIAL exit_code=3 — {} harness(es) recognised sessions this build cannot turn into SessionRecord values, so they were not archived. The shards written above are real; the archive is not complete."
-println      crates/chat-stasher/src/main.rs:2834  "[collect] stage           : {}"
-println      crates/chat-stasher/src/main.rs:2835  "[collect] state           : {}"
-println      crates/chat-stasher/src/main.rs:2836  "[collect] machine         : {machine}"
-println      crates/chat-stasher/src/main.rs:2838  "[collect] destination     : sha256={} (read state is kept per destination)"
-println      crates/chat-stasher/src/main.rs:2842  "[collect] legacy state    : ignored={} (a pre-destination state file proves nothing to any destination)"
-println      crates/chat-stasher/src/main.rs:2846  "[collect] unverified      : {} cursor(s) could not prove themselves and were reread"
-println      crates/chat-stasher/src/main.rs:2850  "[collect] scanner records : {} (only SessionRecord values; not the full recognised-session count)"
-println      crates/chat-stasher/src/main.rs:2854  "[collect] opencode records: {} (one virtual SessionRecord per SQLite session)"
-println      crates/chat-stasher/src/main.rs:2858  "[collect] cursor records  : {} (one virtual SessionRecord per qualified composer)"
-println      crates/chat-stasher/src/main.rs:2862  "[collect] grok records    : {} (one virtual SessionRecord per session_docs row)"
-println      crates/chat-stasher/src/main.rs:2866  "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values"
-println      crates/chat-stasher/src/main.rs:2870  "{}"
-println      crates/chat-stasher/src/main.rs:2894  "[collect] scan partial   : unreadable_sessions={}{unknown} unreadable_entries={} unlooked_harnesses={} source_not_collected=true"
-println      crates/chat-stasher/src/main.rs:2901  "[collect] changed={} unchanged={} reset={} shards={} lines={}"
-println      crates/chat-stasher/src/main.rs:2909  "[collect] read bytes      : delta_or_full={} prefix_validated={}"
-println      crates/chat-stasher/src/main.rs:2914  "[collect] reconciled      : {} session(s) forced through reset"
-println      crates/chat-stasher/src/main.rs:2919  "  ! session={} reason={}"
-println      crates/chat-stasher/src/main.rs:2926  "  + session={} path_sha256={} source_bytes={} read_bytes={} prefix_bytes={} lines={} shard={} reset={} compressed={}"
-println      crates/chat-stasher/src/main.rs:2939  "[collect] errors          : {}"
-println      crates/chat-stasher/src/main.rs:2942  "  ! session={} path_sha256={} source_not_collected=true"
-eprintln     crates/chat-stasher/src/main.rs:2985  "[run-once] warning: run-state not recorded: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:3044  "[run-once] result: ERROR exit_code=1 collect={e:#}"
-eprintln     crates/chat-stasher/src/main.rs:3055  "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={}"
-eprintln     crates/chat-stasher/src/main.rs:3066  "[run-once] result: ERROR exit_code=1 stage_audit={e:#}"
-println      crates/chat-stasher/src/main.rs:3077  "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}"
-eprintln     crates/chat-stasher/src/main.rs:3105  "[run-once] result: ERROR exit_code=1 verify=l1"
-println      crates/chat-stasher/src/main.rs:3111  "[run-once] verify skipped: no repository exists yet"
-eprintln     crates/chat-stasher/src/main.rs:3114  "[run-once] result: ERROR exit_code=1 verify_preflight={e:#}"
-println      crates/chat-stasher/src/main.rs:3120  "[run-once] result: NOOP snapshot=not-created exit_code=0"
-eprintln     crates/chat-stasher/src/main.rs:3139  "[run-once] result: ERROR exit_code=1 push_failed"
-eprintln     crates/chat-stasher/src/main.rs:3158  "[run-once] result: ERROR exit_code=1 verify=l1"
-println      crates/chat-stasher/src/main.rs:3163  "[run-once] result: COMPLETED snapshot=created exit_code=0"
-eprintln     crates/chat-stasher/src/main.rs:3181  "schedule: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:3190  "schedule: cannot resolve current executable: {e}"
-println      crates/chat-stasher/src/main.rs:3208  "[schedule] wrote template: {}"
-eprintln     crates/chat-stasher/src/main.rs:3213  "schedule: {e:#}"
-println      crates/chat-stasher/src/main.rs:3219  "===== {} ====="
-print        crates/chat-stasher/src/main.rs:3220  "{}"
-println      crates/chat-stasher/src/main.rs:3225  "[schedule] interval_secs: {interval}"
-println      crates/chat-stasher/src/main.rs:3226  "[schedule] install is NOT automatic."
-println      crates/chat-stasher/src/main.rs:3230  "[schedule] save the plist as \"$HOME/Library/LaunchAgents/{label}.plist\" first."
-println      crates/chat-stasher/src/main.rs:3234  "[schedule] save both units under \"$HOME/.config/systemd/user/\" first."
-println      crates/chat-stasher/src/main.rs:3237  "[schedule] installation requires you to execute this command yourself:"
-println      crates/chat-stasher/src/main.rs:3238  "{}"
-println      crates/chat-stasher/src/main.rs:3240  "[schedule] you must execute this command yourself to install:"
-println      crates/chat-stasher/src/main.rs:3241  "{}"
-eprintln     crates/chat-stasher/src/main.rs:3271  "seal: {e}"
-eprintln     crates/chat-stasher/src/main.rs:3277  "seal: {e}"
-eprintln     crates/chat-stasher/src/main.rs:3282  "seal: harness `{harness_id}` unknown to the registry"
-println      crates/chat-stasher/src/main.rs:3286  "[seal] harness        : {} ({})"
-println      crates/chat-stasher/src/main.rs:3288  "[seal] policy         : {} (raw `{}`)"
-println      crates/chat-stasher/src/main.rs:3294  "[seal] REFUSED: no `{}` registry cell -> no rename (default)"
-println      crates/chat-stasher/src/main.rs:3309  "[seal] REFUSED: {reason}"
-println      crates/chat-stasher/src/main.rs:3310  "[seal] active untouched : {}"
-eprintln     crates/chat-stasher/src/main.rs:3321  "seal: {error}"
-println      crates/chat-stasher/src/main.rs:3325  "[seal] machine        : {machine}"
-println      crates/chat-stasher/src/main.rs:3326  "[seal] session        : {session}"
-println      crates/chat-stasher/src/main.rs:3327  "[seal] bucket cap     : {shard_bucket_cap}"
-println      crates/chat-stasher/src/main.rs:3331  "[seal] sealed          : {} -> {}/{} (seq {seq})"
-println      crates/chat-stasher/src/main.rs:3336  "[seal] source was stage-owned; no harness path was changed"
-eprintln     crates/chat-stasher/src/main.rs:3340  "seal: {e:#}"
-anyhow       crates/chat-stasher/src/main.rs:3353  "cannot derive a session id from --active; provide --session <id>; no shard was written"
-println      crates/chat-stasher/src/main.rs:3363  "[ingest] inbox            : candidates={} skipped_{}={}"
-println      crates/chat-stasher/src/main.rs:3366  "[ingest] consumed         : {}"
-println      crates/chat-stasher/src/main.rs:3369  "  + kind={}  bytes={}  sha256={}  -> {}  (session={})"
-println      crates/chat-stasher/src/main.rs:3377  "[ingest] duplicates (same bytes already archived, not re-sealed):"
-println      crates/chat-stasher/src/main.rs:3380  "  = sha256={}  matched in {}  (session={})"
-println      crates/chat-stasher/src/main.rs:3387  "[ingest] errors           : {}"
-println      crates/chat-stasher/src/main.rs:3390  "[ingest] staging machine   : sha256={}"
-println      crates/chat-stasher/src/main.rs:3404  "[ingest] note             : no consumed bundle carried an `identity` field - the account axis is missing; ids are `platform.sessionId` (machine-independent)"
-println      crates/chat-stasher/src/main.rs:3414  "[ingest] identity axis    : {seen} (archived verbatim, NOT yet used for the id or the dedup key - ids stay `platform.sessionId`)"
-eprintln     crates/chat-stasher/src/main.rs:3441  "{label}: {e}"
-eprintln     crates/chat-stasher/src/main.rs:3472  "destination: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}"
-eprintln     crates/chat-stasher/src/main.rs:3484  "destination: `{name}` is not declared in the config. Declared: {}"
-eprintln     crates/chat-stasher/src/main.rs:3496  "destination: `{name}` has no `repo` set (and no --repo was given)"
-eprintln     crates/chat-stasher/src/main.rs:3507  "option: option must be key=value, got `{kv}`"
-eprintln     crates/chat-stasher/src/main.rs:3576  "option: {e}"
-bail         crates/chat-stasher/src/main.rs:3599  "cannot read masterkey file {}: {error:#}; do not delete this file; fix the access or I/O problem and re-run"
-bail         crates/chat-stasher/src/main.rs:3605  "cannot parse masterkey file {}: {error:#}; do not delete this file; restore a valid copy before re-running"
-with_context crates/chat-stasher/src/main.rs:3617  "re-read new masterkey {}"
-bail         crates/chat-stasher/src/main.rs:3620  "new masterkey {} does not read back as written"
-println      crates/chat-stasher/src/main.rs:3632  "[reap] skipped (--no-reap)"
-eprintln     crates/chat-stasher/src/main.rs:3639  "[reap] cannot parse endpoint `{endpoint}`, nothing reaped"
-println      crates/chat-stasher/src/main.rs:3643  "[reap] host {host} · ssh masters shut down: {n}"
-println      crates/chat-stasher/src/main.rs:3645  "[reap] host {host} · ssh masters shut down: 未知（无法读取进程列表：{e}）"
-eprintln     crates/chat-stasher/src/main.rs:3679  "push: cannot establish empty-stage safety: {e:#}"
-println      crates/chat-stasher/src/main.rs:3684  "[push] stage check   : shards={} scanner_records={} sqlite_sessions={} sqlite_unknown={} scanner_unknown={} committed_reads={}"
-eprintln     crates/chat-stasher/src/main.rs:3702  "push: cannot read the remembered inbox list: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:3704  "push: nothing was archived. On this line `inboxes=0` means \"this machine has no inbox\" — but the record could not be read, so the number is unknown, not zero. Auditing an empty stage against a list we failed to read would clear a run that may well have inbox content waiting, and an audit that passes because it read nothing is worse than no audit at all. Fix the collector state directory ({}) and re-run; the stage is untouched."
-eprintln     crates/chat-stasher/src/main.rs:3725  "push: cannot establish consumed-inbox audit for empty stage"
-println      crates/chat-stasher/src/main.rs:3758  "[push] consumed audit: inboxes={} files={} bytes={} unique_sha256={} cache_hits={} rehashed={} stage_covered={} repo_covered={} missing={}"
-println      crates/chat-stasher/src/main.rs:3771  "[push] no archivable content this run: stage, scanner, collector, and consumed audit agree"
-eprintln     crates/chat-stasher/src/main.rs:3777  "push: refusing empty snapshot: consumed files are not proven in stage or repository"
-eprintln     crates/chat-stasher/src/main.rs:3782  "push: refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
-eprintln     crates/chat-stasher/src/main.rs:3792  "push: cannot put a new masterkey on the disk: {e:#}"
-eprintln     crates/chat-stasher/src/main.rs:3794  "push: nothing was archived. This repository is encrypted — an archive written under a key that is not on the disk could never be opened again, so the run stops here instead of producing one. Fix the key file location (--key-file) and re-run; the stage is untouched."
-println      crates/chat-stasher/src/main.rs:3809  "[push] machine        : sha256={}"
-println      crates/chat-stasher/src/main.rs:3813  "[push] repo            : sha256={}"
-println      crates/chat-stasher/src/main.rs:3817  "[push] key file       : sha256={}"
-println      crates/chat-stasher/src/main.rs:3821  "[push] connections    : {} (cap {})"
-println      crates/chat-stasher/src/main.rs:3826  "[push] reap           : {}"
-eprintln     crates/chat-stasher/src/main.rs:3832  "push: {e:#}"
-println      crates/chat-stasher/src/main.rs:3839  "[push] {} {}"
-println      crates/chat-stasher/src/main.rs:3851  "[push] stage shards   : {}"
-println      crates/chat-stasher/src/main.rs:3853  "[push] summary: files_new={} files_changed={} files_unmodified={} data_blobs={} data_added={} data_added_packed={}"
-println      crates/chat-stasher/src/main.rs:3862  "[push] snapshot host  : sha256={} (must equal machine)"
-println      crates/chat-stasher/src/main.rs:3865  "[push] snapshots      : {}"
-eprintln     crates/chat-stasher/src/main.rs:3907  "read: {e}"
-eprintln     crates/chat-stasher/src/main.rs:3922  "read: local machine identity is required unless --all-machines is set"
-eprintln     crates/chat-stasher/src/main.rs:3929  "read: `--stage` is required unless `--all-machines` is set"
-eprintln     crates/chat-stasher/src/main.rs:3940  "read: `--session` is required unless `--all-machines` is set"
-println      crates/chat-stasher/src/main.rs:3948  "[read] machine        : {machine}"
-println      crates/chat-stasher/src/main.rs:3949  "[read] repo           : {}"
-println      crates/chat-stasher/src/main.rs:3951  "[read] reap           : {}"
-eprintln     crates/chat-stasher/src/main.rs:3957  "read: {e}"
-println      crates/chat-stasher/src/main.rs:3966  "[read] shards (seq order):"
-println      crates/chat-stasher/src/main.rs:3968  "  {name}  sha256={hash}"
-println      crates/chat-stasher/src/main.rs:3971  "[read] concat len      : {}  sha256={}"
-println      crates/chat-stasher/src/main.rs:3976  "[read] expected src    : sha256={}"
-println      crates/chat-stasher/src/main.rs:3991  "[read] mode           : all-machines (newest snapshot per hostname)"
-println      crates/chat-stasher/src/main.rs:3992  "[read] repo           : {}"
-eprintln     crates/chat-stasher/src/main.rs:3996  "read: {e}"
-println      crates/chat-stasher/src/main.rs:4004  "[read] snapshots read : {} (get_all_snapshots lists every snapshot file)"
-println      crates/chat-stasher/src/main.rs:4007  "[read] machines       : {}"
-println      crates/chat-stasher/src/main.rs:4010  "  machine {:<16} snapshot={}  time={}  unix={}  sessions={}"
-println      crates/chat-stasher/src/main.rs:4019  "    session {:<15} shards={:<3} bytes={:<10} sha256={}"
-println      crates/chat-stasher/src/main.rs:4028  "  WARN: {w}"
-println      crates/chat-stasher/src/main.rs:4032  "read: PARTIAL exit_code=3 — the sessions listed above are real, but {} snapshot(s) could not be opened, so the machines they belong to are listed with an empty session set they did not earn. Absence below is not proof of absence in the archive."
-eprintln     crates/chat-stasher/src/main.rs:4080  "verify: {e}"
-eprintln     crates/chat-stasher/src/main.rs:4089  "verify: `--stage` is required for level l3 / all"
-println      crates/chat-stasher/src/main.rs:4096  "[verify] repo           : {}"
-println      crates/chat-stasher/src/main.rs:4098  "[verify] machine        : {}"
-println      crates/chat-stasher/src/main.rs:4102  "[verify] reap           : {}"
-println      crates/chat-stasher/src/main.rs:4111  "[verify] stage          : {}"
-println      crates/chat-stasher/src/main.rs:4117  "[verify] stage          : {}"
-println      crates/chat-stasher/src/main.rs:4124  "[verify] RESULT         : OK"
-println      crates/chat-stasher/src/main.rs:4127  "[verify] RESULT         : FAILED ({failed} level(s) reported failures)"
-eprintln     crates/chat-stasher/src/main.rs:4141  "verify: {name} failed to run: {e:#}"
-println      crates/chat-stasher/src/main.rs:4154  "[verify] {name:<16} ok={:<5} findings={:<3} errors={:<3} warns={:<3} ({kind}) took {:?}"
-println      crates/chat-stasher/src/main.rs:4162  "  ! {detail}"
-eprintln     crates/chat-stasher/src/main.rs:4181  "verify: L3 reconcile failed to run: {e:#}"
-println      crates/chat-stasher/src/main.rs:4189  "[verify] L3 reconcile     : machines={} expected={} took {:?}"
-println      crates/chat-stasher/src/main.rs:4203  "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}"
-println      crates/chat-stasher/src/main.rs:4207  "  {mark} {:<12} {:<20} MISSING IN ARCHIVE"
-println      crates/chat-stasher/src/main.rs:4211  "  {mark} {:<12} {:<20} SHARD COUNT expected={expected} observed={observed}"
-println      crates/chat-stasher/src/main.rs:4215  "  {mark} {:<12} {:<20} BYTE LENGTH expected={expected} observed={observed}"
-println      crates/chat-stasher/src/main.rs:4219  "  {mark} {:<12} {:<20} SHA MISMATCH\n      expected={expected}\n      observed={observed}"
-println      crates/chat-stasher/src/main.rs:4226  "  !? {m:<12} {:<20} in archive but NOT in expected manifest (informational)"
-println      crates/chat-stasher/src/main.rs:4231  "[verify] L3 verdict       : {}"
-eprintln     crates/chat-stasher/src/main.rs:4628  "next: chat-stasher collect --stage <stage-dir> && chat-stasher push --stage <stage-dir> && chat-stasher verify --stage <stage-dir>"
-eprintln     crates/chat-stasher/src/main.rs:4633  "init: {e}"
-eprintln     crates/chat-stasher/src/main.rs:4642  "config_source={}"
-eprintln     crates/chat-stasher/src/main.rs:4645  "[run-once] {}"
-eprintln     crates/chat-stasher/src/main.rs:4716  "status: scan failed: {e}"
-println      crates/chat-stasher/src/main.rs:4725  "{}"
-println      crates/chat-stasher/src/main.rs:4730  "{}"
-eprint       crates/chat-stasher/src/main.rs:4738  "{}"
+help_doc     crates/chat-stasher/src/main.rs:638  Metadata only: the extraction keeps a timestamp per line and throws the
+help_doc     crates/chat-stasher/src/main.rs:639  line away. Nothing else about a conversation is ever read, kept or
+help_doc     crates/chat-stasher/src/main.rs:640  printed — the report is counts and the output path only.
+help_doc     crates/chat-stasher/src/main.rs:641  
+help_doc     crates/chat-stasher/src/main.rs:642  Exit codes: `0` = the whole partition was read and the index written;
+help_doc     crates/chat-stasher/src/main.rs:643  `3` = the stage could not be read (or reading was interrupted) — nothing
+help_doc     crates/chat-stasher/src/main.rs:644  (complete) was written; `1` = every session was read but the index file
+help_doc     crates/chat-stasher/src/main.rs:645  itself could not be written; `2` = usage error. Same family as
+help_doc     crates/chat-stasher/src/main.rs:646  `collect`/`search`: `3` means "did not finish / never started", `1`
+help_doc     crates/chat-stasher/src/main.rs:647  means "finished and then failed".
+help_doc     crates/chat-stasher/src/main.rs:649  Stage directory that holds the sealed `sessions/` tree.
+help_doc     crates/chat-stasher/src/main.rs:652  Machine partition for `sessions/<machine>/…`.
+help_doc     crates/chat-stasher/src/main.rs:653  Default: config `machine`, else this machine's identity (generated
+help_doc     crates/chat-stasher/src/main.rs:654  on first use); use `--machine` explicitly to choose the partition.
+help_doc     crates/chat-stasher/src/main.rs:658  Write this machine's display-name declaration (ADR-018).
+help_doc     crates/chat-stasher/src/main.rs:659  
+help_doc     crates/chat-stasher/src/main.rs:660  Writes `<stage>/meta/<machine>/machine.json` — a `MachineDeclaration`
+help_doc     crates/chat-stasher/src/main.rs:661  that carries the human display name, the OS and a first-seen time. The
+help_doc     crates/chat-stasher/src/main.rs:662  machine partition is resolved exactly like every other command: config
+help_doc     crates/chat-stasher/src/main.rs:663  `machine` first, then the identity file (generated when missing). The
+help_doc     crates/chat-stasher/src/main.rs:664  next `push` archives the whole stage root, so this file rides along.
+help_doc     crates/chat-stasher/src/main.rs:665  
+help_doc     crates/chat-stasher/src/main.rs:666  The display name is taken from `--display-name` when given; otherwise
+help_doc     crates/chat-stasher/src/main.rs:667  the system's LocalHostName (`scutil --get LocalHostName` on macOS,
+help_doc     crates/chat-stasher/src/main.rs:668  `hostname` elsewhere) is used. If neither is available the field is
+help_doc     crates/chat-stasher/src/main.rs:669  written **empty** and the command says so — a name is never invented.
+help_doc     crates/chat-stasher/src/main.rs:670  
+help_doc     crates/chat-stasher/src/main.rs:671  Exit codes: `0` = the declaration was written; `3` = the machine
+help_doc     crates/chat-stasher/src/main.rs:672  partition could not be resolved or the identity is unusable; `1` = the
+help_doc     crates/chat-stasher/src/main.rs:673  file could not be written; `2` = usage error.
+help_doc     crates/chat-stasher/src/main.rs:675  Stage directory to write the declaration into (`<stage>/meta/…`).
+help_doc     crates/chat-stasher/src/main.rs:678  Human display name for this machine. Default: system LocalHostName.
+help_doc     crates/chat-stasher/src/main.rs:682  Give a dead or sold machine a display name (ADR-018).
+help_doc     crates/chat-stasher/src/main.rs:683  
+help_doc     crates/chat-stasher/src/main.rs:684  Writes `<stage>/meta/<target>/label-by-<local-identity>.json` — a
+help_doc     crates/chat-stasher/src/main.rs:685  `LabelRecord` expressing *this* machine's opinion about what `<target>`
+help_doc     crates/chat-stasher/src/main.rs:686  should be called. It exists for machines that can no longer declare for
+help_doc     crates/chat-stasher/src/main.rs:687  themselves (sold, dead, in a different building). Each file has exactly
+help_doc     crates/chat-stasher/src/main.rs:688  one writer, so concurrent machines never fight over it; the overview
+help_doc     crates/chat-stasher/src/main.rs:689  shows the label with the latest `written_at_unix`.
+help_doc     crates/chat-stasher/src/main.rs:690  
+help_doc     crates/chat-stasher/src/main.rs:691  Exit codes: `0` = the label was written; `3` = the local identity could
+help_doc     crates/chat-stasher/src/main.rs:692  not be resolved; `1` = the file could not be written; `2` = usage error.
+help_doc     crates/chat-stasher/src/main.rs:694  Stage directory to write the label into (`<stage>/meta/…`).
+help_doc     crates/chat-stasher/src/main.rs:697  Machine id (partition) being labelled, e.g. a 32-hex identity.
+help_doc     crates/chat-stasher/src/main.rs:700  Display-name override for the target.
+help_doc     crates/chat-stasher/src/main.rs:704  Draw the machine × harness activity overview of one destination
+help_doc     crates/chat-stasher/src/main.rs:705  (ADR-017).
+help_doc     crates/chat-stasher/src/main.rs:706  
+help_doc     crates/chat-stasher/src/main.rs:707  Opens the destination repository, takes each host's newest snapshot
+help_doc     crates/chat-stasher/src/main.rs:708  (the same cross-machine merge as `read --all-machines`), and for every
+help_doc     crates/chat-stasher/src/main.rs:709  snapshot recursively finds the activity index files at
+help_doc     crates/chat-stasher/src/main.rs:710  `meta/<machine>/activity-v1.jsonl`. The paths carry each machine's own
+help_doc     crates/chat-stasher/src/main.rs:711  absolute stage prefix, so they are matched by the trailing
+help_doc     crates/chat-stasher/src/main.rs:712  `meta` / `<machine>` / `activity-v1.jsonl` marker — never by a local
+help_doc     crates/chat-stasher/src/main.rs:713  path. The indexes are parsed into overview rows and rendered as a
+help_doc     crates/chat-stasher/src/main.rs:714  machine × harness matrix, a time-unknown tally and a width-adaptive
+help_doc     crates/chat-stasher/src/main.rs:715  heatmap. Prints counts, machine names and time spans only — never
+help_doc     crates/chat-stasher/src/main.rs:716  conversation content.
+help_doc     crates/chat-stasher/src/main.rs:717  
+help_doc     crates/chat-stasher/src/main.rs:718  A machine that has a snapshot but **no** activity index is listed
+help_doc     crates/chat-stasher/src/main.rs:719  explicitly as "index missing" — it never vanishes silently, because a missing
+help_doc     crates/chat-stasher/src/main.rs:720  index is not the same thing as "that machine had no sessions".
+help_doc     crates/chat-stasher/src/main.rs:721  
+help_doc     crates/chat-stasher/src/main.rs:722  Exit codes: `0` = at least one index was read and rendered; `1` = the
+help_doc     crates/chat-stasher/src/main.rs:723  whole repository was read and there is no activity index at all (a real
+help_doc     crates/chat-stasher/src/main.rs:724  "there is none", not a failure to look); `3` = the repository could not
+help_doc     crates/chat-stasher/src/main.rs:725  be read in full (open / snapshot / tree / dump failure) — the absences
+help_doc     crates/chat-stasher/src/main.rs:726  below are unproven; `2` = usage error.
+help_doc     crates/chat-stasher/src/main.rs:728  Destination to open. Required unless an explicit `--repo` is given:
+help_doc     crates/chat-stasher/src/main.rs:729  there is no default destination.
+help_doc     crates/chat-stasher/src/main.rs:732  Terminal width for the matrix/heatmap (default: 100).
+help_doc     crates/chat-stasher/src/main.rs:735  Print exactly one JSON object to stdout and nothing else (the
+help_doc     crates/chat-stasher/src/main.rs:736  human matrix/heatmap is suppressed). Per-session `first_unix` /
+help_doc     crates/chat-stasher/src/main.rs:737  `last_unix` and `time_source` are tri-state tagged
+help_doc     crates/chat-stasher/src/main.rs:738  `{"kind":"known",…}` / `{"kind":"unknown","why":…}` — an unknown
+help_doc     crates/chat-stasher/src/main.rs:739  time is never `null`. `no_index_anywhere` is `true` on exit 1
+help_doc     crates/chat-stasher/src/main.rs:740  (read in full, no index anywhere); a failed read (exit 3) puts the
+help_doc     crates/chat-stasher/src/main.rs:741  reason in `error`.
+help_doc     crates/chat-stasher/src/main.rs:744  Repository path override.
+help_doc     crates/chat-stasher/src/main.rs:747  Masterkey file override.
+help_doc     crates/chat-stasher/src/main.rs:750  Concurrency cap override.
+help_doc     crates/chat-stasher/src/main.rs:753  Backend option `key=value`, repeatable.
+help_doc     crates/chat-stasher/src/main.rs:756  Disable ssh connection reaping after this run.
+eprintln     crates/chat-stasher/src/main.rs:1089  "install-native-host: cannot resolve current executable: {e}"
+eprintln     crates/chat-stasher/src/main.rs:1118  "install-native-host: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:1131  "install-native-host: {e:#}"
+println      crates/chat-stasher/src/main.rs:1137  "{TAG} mode: {}"
+println      crates/chat-stasher/src/main.rs:1140  "{TAG} host name: {host_name}"
+println      crates/chat-stasher/src/main.rs:1141  "{TAG} host binary: {}"
+println      crates/chat-stasher/src/main.rs:1142  "{TAG} platform: {}"
+println      crates/chat-stasher/src/main.rs:1143  "{TAG} discovery root: {}"
+println      crates/chat-stasher/src/main.rs:1145  "{TAG} chromium allowlist: chrome-extension://{extension_id}/"
+println      crates/chat-stasher/src/main.rs:1146  "{TAG} gecko allowlist: {firefox_extension_id}"
+println      crates/chat-stasher/src/main.rs:1163  "{TAG} {}: no discovery path known for {} in this build — nothing written"
+println      crates/chat-stasher/src/main.rs:1174  "{TAG} {}: removed {}"
+println      crates/chat-stasher/src/main.rs:1183  "{TAG} {}: absent (nothing to remove) {}"
+eprintln     crates/chat-stasher/src/main.rs:1191  "install-native-host: {}: {e:#}"
+println      crates/chat-stasher/src/main.rs:1209  "{TAG} {}: skipped, browser not installed (no {}) — pass --browser {} to write anyway"
+println      crates/chat-stasher/src/main.rs:1222  "{TAG} {}: {} {}"
+eprintln     crates/chat-stasher/src/main.rs:1231  "install-native-host: {}: {e:#}"
+println      crates/chat-stasher/src/main.rs:1249  "{TAG} {}: no registry key known in this build — manifest written but NOT discoverable"
+println      crates/chat-stasher/src/main.rs:1257  "{TAG} {}: registry {}"
+eprintln     crates/chat-stasher/src/main.rs:1263  "install-native-host: {}: {e:#}"
+println      crates/chat-stasher/src/main.rs:1268  "{TAG} {}: registry NOT applied (not running on Windows), would run: {}"
+println      crates/chat-stasher/src/main.rs:1277  "{TAG} summary: removed {removed}, already absent {absent}, unsupported {unsupported}, failed {failed}"
+println      crates/chat-stasher/src/main.rs:1278  "{TAG} directories themselves were left in place; no other vendor's manifest was touched."
+println      crates/chat-stasher/src/main.rs:1286  "{TAG} summary: wrote {wrote}, updated {updated}, unchanged {unchanged}, skipped {skipped}, unsupported {unsupported}, failed {failed}"
+eprintln     crates/chat-stasher/src/main.rs:1292  "install-native-host: nothing was written — no known browser directory under {}"
+println      crates/chat-stasher/src/main.rs:1297  "{TAG} next: reload the extension, then connect to {host_name}."
+eprintln     crates/chat-stasher/src/main.rs:1305  "native-host: the stdio message loop is not implemented in this build; run `native-host --self-test` to check that the host starts."
+println      crates/chat-stasher/src/main.rs:1312  "{}"
+eprintln     crates/chat-stasher/src/main.rs:1340  "activity-index: stage `{}` is not a directory — nothing was read"
+eprintln     crates/chat-stasher/src/main.rs:1358  "activity-index: cannot enumerate {}: {e}"
+eprintln     crates/chat-stasher/src/main.rs:1372  "activity-index: cannot read {}: {e} — nothing was read, this is not an empty index"
+eprintln     crates/chat-stasher/src/main.rs:1387  "activity-index: session `{}` has no inferable harness — skipped"
+eprintln     crates/chat-stasher/src/main.rs:1397  "activity-index: cannot read session `{session_id}`: {e}"
+eprintln     crates/chat-stasher/src/main.rs:1408  "activity-index: cannot read shard {}: {e}"
+eprintln     crates/chat-stasher/src/main.rs:1425  "activity-index: cannot create {}: {e}"
+eprintln     crates/chat-stasher/src/main.rs:1434  "activity-index: cannot write {}: {e}"
+println      crates/chat-stasher/src/main.rs:1438  "[activity-index] stage    : {}"
+println      crates/chat-stasher/src/main.rs:1439  "[activity-index] machine  : {machine}"
+println      crates/chat-stasher/src/main.rs:1440  "[activity-index] sessions : {}"
+println      crates/chat-stasher/src/main.rs:1441  "[activity-index] index    : {}"
+eprintln     crates/chat-stasher/src/main.rs:1463  "machine-declare: could not determine a system display name — writing an empty display_name (set one with --display-name)"
+println      crates/chat-stasher/src/main.rs:1478  "[machine-declare] machine        : {machine}"
+println      crates/chat-stasher/src/main.rs:1479  "[machine-declare] display name   : {}"
+println      crates/chat-stasher/src/main.rs:1480  "[machine-declare] os             : {}"
+println      crates/chat-stasher/src/main.rs:1482  "[machine-declare] first seen     : {}"
+println      crates/chat-stasher/src/main.rs:1485  "[machine-declare] file           : {}"
+println      crates/chat-stasher/src/main.rs:1487  "[machine-declare] next           : the next `push` archives it with the stage"
+eprintln     crates/chat-stasher/src/main.rs:1492  "machine-declare: {e:#}"
+println      crates/chat-stasher/src/main.rs:1515  "[machine-label] target  : {}"
+println      crates/chat-stasher/src/main.rs:1516  "[machine-label] label   : {}"
+println      crates/chat-stasher/src/main.rs:1517  "[machine-label] writer  : {writer}"
+println      crates/chat-stasher/src/main.rs:1518  "[machine-label] written : {}"
+println      crates/chat-stasher/src/main.rs:1519  "[machine-label] file    : {}"
+println      crates/chat-stasher/src/main.rs:1520  "[machine-label] next    : the next `push` archives it with the stage"
+eprintln     crates/chat-stasher/src/main.rs:1524  "machine-label: {e:#}"
+anyhow       crates/chat-stasher/src/main.rs:1536  "declaration path has no parent: {}"
+with_context crates/chat-stasher/src/main.rs:1538  "create declaration directory {}"
+with_context crates/chat-stasher/src/main.rs:1540  "write declaration {}"
+anyhow       crates/chat-stasher/src/main.rs:1554  "label path has no parent: {}"
+with_context crates/chat-stasher/src/main.rs:1556  "create label directory {}"
+with_context crates/chat-stasher/src/main.rs:1558  "write label {}"
+context      crates/chat-stasher/src/main.rs:1659  "open repository for overview"
+context      crates/chat-stasher/src/main.rs:1661  "index repository for overview"
+context      crates/chat-stasher/src/main.rs:1664  "list snapshots for overview"
+with_context crates/chat-stasher/src/main.rs:1681  "host `{hostname}`: read tree root"
+with_context crates/chat-stasher/src/main.rs:1684  "host `{hostname}`: list snapshot tree"
+with_context crates/chat-stasher/src/main.rs:1686  "host `{hostname}`: collect snapshot entries"
+with_context crates/chat-stasher/src/main.rs:1695  "host `{hostname}` machine `{machine}`: read activity index"
+with_context crates/chat-stasher/src/main.rs:1702  "host `{hostname}` machine `{machine}`: malformed activity index line"
+with_context crates/chat-stasher/src/main.rs:1711  "host `{hostname}` machine `{machine}`: read declaration"
+with_context crates/chat-stasher/src/main.rs:1716  "host `{hostname}` machine `{machine}`: malformed machine declaration"
+with_context crates/chat-stasher/src/main.rs:1726  "host `{hostname}` machine `{machine}`: read label"
+with_context crates/chat-stasher/src/main.rs:1730  "host `{hostname}` machine `{machine}`: malformed label record"
+eprintln     crates/chat-stasher/src/main.rs:1766  "{msg}"
+println      crates/chat-stasher/src/main.rs:1769  "{}"
+eprintln     crates/chat-stasher/src/main.rs:1787  "overview: {msg}"
+eprintln     crates/chat-stasher/src/main.rs:1788  "overview: without the key nothing was read — this is not an empty result"
+println      crates/chat-stasher/src/main.rs:1791  "{}"
+eprintln     crates/chat-stasher/src/main.rs:1803  "overview: {msg}"
+eprintln     crates/chat-stasher/src/main.rs:1805  "overview: the archive was not read to completion — this is not an empty result"
+println      crates/chat-stasher/src/main.rs:1809  "{}"
+println      crates/chat-stasher/src/main.rs:1849  "{}"
+println      crates/chat-stasher/src/main.rs:1854  "[overview] repo         : {}"
+println      crates/chat-stasher/src/main.rs:1855  "[overview] width        : {width}"
+println      crates/chat-stasher/src/main.rs:1857  "[overview] machines     : {} with snapshot / {} with index / {} with declaration"
+println      crates/chat-stasher/src/main.rs:1867  "[overview] index missing (snapshot present, no activity index):"
+println      crates/chat-stasher/src/main.rs:1869  "  !! {}"
+println      crates/chat-stasher/src/main.rs:1883  "[overview] declaration missing (snapshot present, no machine.json declaration):"
+println      crates/chat-stasher/src/main.rs:1885  "  !! {}"
+println      crates/chat-stasher/src/main.rs:1893  "overview: the destination was read in full and contains no activity index (no `meta/*/activity-v1.jsonl` anywhere)"
+println      crates/chat-stasher/src/main.rs:1906  "{}"
+eprintln     crates/chat-stasher/src/main.rs:1954  "{command}: generated a new machine identity {} — this is the archive partition for this machine from now on"
+eprintln     crates/chat-stasher/src/main.rs:1961  "{command}: cannot persist a new machine identity: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:1962  "{command}: nothing was read or written."
+eprintln     crates/chat-stasher/src/main.rs:1968  "{command}: machine identity file {} is present but unusable: {error:?}"
+eprintln     crates/chat-stasher/src/main.rs:1972  "{command}: 🔴 do not delete this file — it is the key to this machine's archive partition."
+eprintln     crates/chat-stasher/src/main.rs:1975  "{command}: fix the read/parse problem and re-run; nothing was read or written."
+eprintln     crates/chat-stasher/src/main.rs:2034  "search: name the destination to search (`--destination <name>`, or an explicit `--repo`)"
+eprintln     crates/chat-stasher/src/main.rs:2037  "search: there is no default destination and no cross-destination merge — archives are not required to agree"
+eprintln     crates/chat-stasher/src/main.rs:2056  "search: {e}"
+eprintln     crates/chat-stasher/src/main.rs:2057  "search: without the key nothing was read — this is not an empty result"
+eprintln     crates/chat-stasher/src/main.rs:2086  "search: cannot read `{}`: {e}"
+eprintln     crates/chat-stasher/src/main.rs:2087  "search: this is not an empty destination — the archive was not read"
+println      crates/chat-stasher/src/main.rs:2093  "[search] destination  : {}"
+println      crates/chat-stasher/src/main.rs:2095  "[search] snapshots    : {} scanned / {} in repo"
+println      crates/chat-stasher/src/main.rs:2098  "[search] sessions seen: {}"
+println      crates/chat-stasher/src/main.rs:2099  "[search] data blobs read: {}"
+println      crates/chat-stasher/src/main.rs:2101  "  !! unreadable: {path}"
+println      crates/chat-stasher/src/main.rs:2105  "{}"
+println      crates/chat-stasher/src/main.rs:2112  "[search] matched      : {}"
+println      crates/chat-stasher/src/main.rs:2115  "  {}  machine={}  shards={}  bytes={}  snapshot={}  archive_time_unix={}"
+println      crates/chat-stasher/src/main.rs:2128  "search: PARTIAL — the matches above are real, but `{}` could not be read in full ({} unreadable), so there may be more"
+println      crates/chat-stasher/src/main.rs:2140  "[search] full-text pass over these hits would need:"
+println      crates/chat-stasher/src/main.rs:2142  "  sessions={}  shards={}  data_blobs={}  plaintext_bytes={}"
+println      crates/chat-stasher/src/main.rs:2145  "  (not performed — full-text matching is not implemented)"
+eprintln     crates/chat-stasher/src/main.rs:2180  "view: name the destination to view (`--destination <name>`, or an explicit `--repo`)"
+eprintln     crates/chat-stasher/src/main.rs:2183  "view: there is no default destination and no cross-destination merge — archives are not required to agree"
+eprintln     crates/chat-stasher/src/main.rs:2202  "view: {e}"
+eprintln     crates/chat-stasher/src/main.rs:2203  "view: without the key nothing was read — this is not an empty result"
+eprintln     crates/chat-stasher/src/main.rs:2222  "view: cannot read `{}`: {e}"
+eprintln     crates/chat-stasher/src/main.rs:2223  "view: this is not an empty destination — the archive was not read"
+println      crates/chat-stasher/src/main.rs:2233  "  !! unreadable: {path}"
+println      crates/chat-stasher/src/main.rs:2236  "{}"
+println      crates/chat-stasher/src/main.rs:2237  "view: nothing to show, so no server was started"
+eprintln     crates/chat-stasher/src/main.rs:2251  "view: cannot read OS randomness for the access token: {e}"
+eprintln     crates/chat-stasher/src/main.rs:2252  "view: refusing to serve without a strong token"
+eprintln     crates/chat-stasher/src/main.rs:2259  "view: cannot bind 127.0.0.1:0 — {e}"
+eprintln     crates/chat-stasher/src/main.rs:2266  "view: bound but cannot read local address — {e}"
+println      crates/chat-stasher/src/main.rs:2277  "[view] destination  : {}"
+println      crates/chat-stasher/src/main.rs:2279  "[view] snapshots    : {} scanned / {} in repo"
+println      crates/chat-stasher/src/main.rs:2283  "[view] sessions     : {} listed / {} seen"
+println      crates/chat-stasher/src/main.rs:2287  "[view] data blobs read: {}"
+println      crates/chat-stasher/src/main.rs:2288  "[view] bound        : {addr} (loopback only, OS-assigned port)"
+println      crates/chat-stasher/src/main.rs:2290  "[view] idle timeout : {}"
+println      crates/chat-stasher/src/main.rs:2297  "[view] payload      : NOT loaded — metadata tier only, no full-text search"
+println      crates/chat-stasher/src/main.rs:2298  "[view] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it."
+println      crates/chat-stasher/src/main.rs:2299  "{url}"
+println      crates/chat-stasher/src/main.rs:2302  "[view] browser      : not opened (--no-open)"
+eprintln     crates/chat-stasher/src/main.rs:2304  "[view] browser      : could not open ({e}) — use the URL above, or --no-open"
+println      crates/chat-stasher/src/main.rs:2306  "[view] browser      : opened"
+eprintln     crates/chat-stasher/src/main.rs:2312  "view: serve loop failed: {e}"
+println      crates/chat-stasher/src/main.rs:2317  "[view] exiting      : idle for {}s · requests served={} rejected={}"
+println      crates/chat-stasher/src/main.rs:2323  "view: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more"
+println      crates/chat-stasher/src/main.rs:2336  "{}"
+eprintln     crates/chat-stasher/src/main.rs:2342  "doctor: INCOMPLETE exit_code=3 — the registry-driven scan did not run, so the coverage numbers above are UNKNOWN, not zero. The retention verdicts that depend on a session count were omitted rather than fabricated; nothing here proves your harnesses are safe."
+eprintln     crates/chat-stasher/src/main.rs:2376  "ingest: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:2382  "ingest: cannot persist consumed-inbox audit pointer: {e:#}"
+println      crates/chat-stasher/src/main.rs:2385  "[ingest] shard bucket cap : {shard_bucket_cap}"
+eprintln     crates/chat-stasher/src/main.rs:2389  "ingest: FAILED exit_code=1 — {} inbox file(s) were opened and could not be turned into a sealed shard. They were NOT retired, so they are still in the inbox in plaintext and a re-run will try them again. The shards listed above are real; the inbox is not empty."
+bail         crates/chat-stasher/src/main.rs:2423  "destination repository is not initialised"
+eprintln     crates/chat-stasher/src/main.rs:2475  "dest-init: name the destination being initialised (`--destination <name>`, or an explicit `--repo`)"
+eprintln     crates/chat-stasher/src/main.rs:2509  "dest-init: `--from {name}` is the destination being initialised"
+eprintln     crates/chat-stasher/src/main.rs:2513  "dest-init: `--from {name}` is not declared in the config"
+eprintln     crates/chat-stasher/src/main.rs:2538  "dest-init: cannot read this machine's collector record for source `{name}`: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:2541  "dest-init: that record is the only thing that tells \"never built\" apart from \"built and since lost\". Without it this source can only be reported as UNKNOWN."
+println      crates/chat-stasher/src/main.rs:2554  "[dest-init] destination   : sha256={} (new copy)"
+println      crates/chat-stasher/src/main.rs:2558  "[dest-init] machine       : sha256={}"
+println      crates/chat-stasher/src/main.rs:2561  "[dest-init] stage         : {}"
+println      crates/chat-stasher/src/main.rs:2563  "[dest-init] sources       : {} ({})"
+println      crates/chat-stasher/src/main.rs:2574  "[dest-init] step 1        : re-collect from the local sources"
+eprintln     crates/chat-stasher/src/main.rs:2586  "dest-init: local re-collect failed: {e:#}"
+println      crates/chat-stasher/src/main.rs:2605  "[dest-init] step 2        : difference set (existing destination has it, local re-collect did not produce it)"
+println      crates/chat-stasher/src/main.rs:2610  "  source {:<16} sha256={} state={} reachable={} sessions_here={} other_machines={} missing_locally={} restored={} shards={} failed={}"
+println      crates/chat-stasher/src/main.rs:2623  "    reason: {reason}"
+println      crates/chat-stasher/src/main.rs:2627  "    NEVER-BUILT: no repository at that location, and this machine has no record of ever collecting for it. It was never built, so it holds nothing and cannot be holding a copy we need. Not counted against the union."
+println      crates/chat-stasher/src/main.rs:2632  "    !! SUSPECTED DATA LOSS: this machine DOES have a record of collecting for this destination, and its archive can no longer be read. This is NOT an empty destination — it may have been holding the only remaining copy of some sessions. Do not re-create it blank: find the original first."
+println      crates/chat-stasher/src/main.rs:2641  "    UNKNOWN: there is no repository at that location, but this machine's own collector record could not be read — so we cannot tell whether we ever collected for it. Never-built and built-then-lost look identical without that record, and the second one may mean the only copy of some sessions is gone. Fix the record (state/debts-v2.json) and re-run before treating this destination as empty."
+println      crates/chat-stasher/src/main.rs:2648  "    UNKNOWN: we could not establish whether a repository is there at all, and we have no record of collecting for it. Unknown is not empty — this could be a destination that was never built, or one that is merely unreachable right now."
+println      crates/chat-stasher/src/main.rs:2656  "    WARNING: {} session(s) belong to another machine partition and were NOT copied (the stage is single-partition by construction; copying them would re-attribute another machine's history to this one). They remain only in the source destination."
+println      crates/chat-stasher/src/main.rs:2664  "[dest-init] restored      : sessions={} shards={}"
+println      crates/chat-stasher/src/main.rs:2668  "[dest-init] never built   : {} ({})"
+println      crates/chat-stasher/src/main.rs:2673  "[dest-init] suspect lost  : {} ({})"
+println      crates/chat-stasher/src/main.rs:2678  "[dest-init] unknown       : {} ({})"
+println      crates/chat-stasher/src/main.rs:2682  "[dest-init] diff complete : {}"
+eprintln     crates/chat-stasher/src/main.rs:2690  "dest-init: cannot audit stage: {e:#}"
+println      crates/chat-stasher/src/main.rs:2699  "[dest-init] step 3        : nothing on the stage, no snapshot created"
+println      crates/chat-stasher/src/main.rs:2701  "[dest-init] step 3        : push the union to the new destination"
+eprintln     crates/chat-stasher/src/main.rs:2707  "dest-init: cannot put a new masterkey on the disk: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:2709  "dest-init: nothing was pushed to the new destination — an archive written under a key that is not on the disk could never be opened again."
+println      crates/chat-stasher/src/main.rs:2720  "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}"
+eprintln     crates/chat-stasher/src/main.rs:2728  "dest-init: push failed: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:2766  "dest-init: result: ERROR exit_code=1 — the difference set was read, but {failed_sessions} session(s) could not be restored. The new destination is not proven to hold the union."
+eprintln     crates/chat-stasher/src/main.rs:2770  "[dest-init] result: ERROR exit_code=1 local_errors={local_failed} push_failed={push_failed}"
+eprintln     crates/chat-stasher/src/main.rs:2781  "dest-init: result: SUSPECTED-DATA-LOSS exit_code=3 — {} destination(s) that this machine has collected for before can no longer be read: {}. This is NOT \"one fewer destination to copy from\": each of them may have been the last place some sessions still existed. The new destination has been given everything else, but it is NOT proven to hold the union. Go find those archives before you re-create anything."
+eprintln     crates/chat-stasher/src/main.rs:2794  "dest-init: result: INCOMPLETE exit_code=3 — the difference set could not be computed in full. {} destination(s) could not be consulted ({}), so it is UNKNOWN whether this new destination holds the union. Unknown is not empty, and it is not loss either — we cannot tell whether these were ever built. Re-run once they are reachable."
+eprintln     crates/chat-stasher/src/main.rs:2809  "[dest-init] result: ERROR exit_code=3 local_errors={local_failed} push_failed={push_failed}"
+println      crates/chat-stasher/src/main.rs:2813  "[dest-init] result: COMPLETED exit_code=0 union=local+existing-destinations"
+eprintln     crates/chat-stasher/src/main.rs:2844  "collect: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:2859  "collect: PARTIAL exit_code=3 — {} harness(es) recognised sessions this build cannot turn into SessionRecord values, so they were not archived. The shards written above are real; the archive is not complete."
+println      crates/chat-stasher/src/main.rs:2884  "[collect] stage           : {}"
+println      crates/chat-stasher/src/main.rs:2885  "[collect] state           : {}"
+println      crates/chat-stasher/src/main.rs:2886  "[collect] machine         : {machine}"
+println      crates/chat-stasher/src/main.rs:2888  "[collect] destination     : sha256={} (read state is kept per destination)"
+println      crates/chat-stasher/src/main.rs:2892  "[collect] legacy state    : ignored={} (a pre-destination state file proves nothing to any destination)"
+println      crates/chat-stasher/src/main.rs:2896  "[collect] unverified      : {} cursor(s) could not prove themselves and were reread"
+println      crates/chat-stasher/src/main.rs:2900  "[collect] scanner records : {} (only SessionRecord values; not the full recognised-session count)"
+println      crates/chat-stasher/src/main.rs:2904  "[collect] opencode records: {} (one virtual SessionRecord per SQLite session)"
+println      crates/chat-stasher/src/main.rs:2908  "[collect] cursor records  : {} (one virtual SessionRecord per qualified composer)"
+println      crates/chat-stasher/src/main.rs:2912  "[collect] grok records    : {} (one virtual SessionRecord per session_docs row)"
+println      crates/chat-stasher/src/main.rs:2916  "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values"
+println      crates/chat-stasher/src/main.rs:2920  "{}"
+println      crates/chat-stasher/src/main.rs:2944  "[collect] scan partial   : unreadable_sessions={}{unknown} unreadable_entries={} unlooked_harnesses={} source_not_collected=true"
+println      crates/chat-stasher/src/main.rs:2951  "[collect] changed={} unchanged={} reset={} shards={} lines={}"
+println      crates/chat-stasher/src/main.rs:2959  "[collect] read bytes      : delta_or_full={} prefix_validated={}"
+println      crates/chat-stasher/src/main.rs:2964  "[collect] reconciled      : {} session(s) forced through reset"
+println      crates/chat-stasher/src/main.rs:2969  "  ! session={} reason={}"
+println      crates/chat-stasher/src/main.rs:2976  "  + session={} path_sha256={} source_bytes={} read_bytes={} prefix_bytes={} lines={} shard={} reset={} compressed={}"
+println      crates/chat-stasher/src/main.rs:2989  "[collect] errors          : {}"
+println      crates/chat-stasher/src/main.rs:2992  "  ! session={} path_sha256={} source_not_collected=true"
+eprintln     crates/chat-stasher/src/main.rs:3035  "[run-once] warning: run-state not recorded: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:3094  "[run-once] result: ERROR exit_code=1 collect={e:#}"
+eprintln     crates/chat-stasher/src/main.rs:3105  "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={}"
+eprintln     crates/chat-stasher/src/main.rs:3116  "[run-once] result: ERROR exit_code=1 stage_audit={e:#}"
+println      crates/chat-stasher/src/main.rs:3127  "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}"
+eprintln     crates/chat-stasher/src/main.rs:3155  "[run-once] result: ERROR exit_code=1 verify=l1"
+println      crates/chat-stasher/src/main.rs:3161  "[run-once] verify skipped: no repository exists yet"
+eprintln     crates/chat-stasher/src/main.rs:3164  "[run-once] result: ERROR exit_code=1 verify_preflight={e:#}"
+println      crates/chat-stasher/src/main.rs:3170  "[run-once] result: NOOP snapshot=not-created exit_code=0"
+eprintln     crates/chat-stasher/src/main.rs:3189  "[run-once] result: ERROR exit_code=1 push_failed"
+eprintln     crates/chat-stasher/src/main.rs:3208  "[run-once] result: ERROR exit_code=1 verify=l1"
+println      crates/chat-stasher/src/main.rs:3213  "[run-once] result: COMPLETED snapshot=created exit_code=0"
+eprintln     crates/chat-stasher/src/main.rs:3240  "schedule: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:3251  "schedule: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}"
+eprintln     crates/chat-stasher/src/main.rs:3263  "schedule: cannot resolve current executable: {e}"
+eprintln     crates/chat-stasher/src/main.rs:3270  "[schedule] warning: resolved binary is a build artifact at {}. It will not survive `cargo clean`. Pass `--binary` with the installed path."
+println      crates/chat-stasher/src/main.rs:3300  "[schedule] wrote template: {}"
+eprintln     crates/chat-stasher/src/main.rs:3305  "schedule: {e:#}"
+println      crates/chat-stasher/src/main.rs:3311  "===== {} ====="
+print        crates/chat-stasher/src/main.rs:3312  "{}"
+println      crates/chat-stasher/src/main.rs:3317  "[schedule] interval_secs: {interval}"
+println      crates/chat-stasher/src/main.rs:3318  "[schedule] install is NOT automatic."
+println      crates/chat-stasher/src/main.rs:3322  "[schedule] save the plist as \"$HOME/Library/LaunchAgents/{label}.plist\" first."
+println      crates/chat-stasher/src/main.rs:3326  "[schedule] save both units under \"$HOME/.config/systemd/user/\" first."
+println      crates/chat-stasher/src/main.rs:3329  "[schedule] installation requires you to execute this command yourself:"
+println      crates/chat-stasher/src/main.rs:3330  "{}"
+println      crates/chat-stasher/src/main.rs:3332  "[schedule] you must execute this command yourself to install:"
+println      crates/chat-stasher/src/main.rs:3333  "{}"
+eprintln     crates/chat-stasher/src/main.rs:3379  "seal: {e}"
+eprintln     crates/chat-stasher/src/main.rs:3385  "seal: {e}"
+eprintln     crates/chat-stasher/src/main.rs:3390  "seal: harness `{harness_id}` unknown to the registry"
+println      crates/chat-stasher/src/main.rs:3394  "[seal] harness        : {} ({})"
+println      crates/chat-stasher/src/main.rs:3396  "[seal] policy         : {} (raw `{}`)"
+println      crates/chat-stasher/src/main.rs:3402  "[seal] REFUSED: no `{}` registry cell -> no rename (default)"
+println      crates/chat-stasher/src/main.rs:3420  "[seal] REFUSED: {reason}"
+println      crates/chat-stasher/src/main.rs:3421  "[seal] active untouched : {}"
+eprintln     crates/chat-stasher/src/main.rs:3432  "seal: {error}"
+println      crates/chat-stasher/src/main.rs:3436  "[seal] machine        : {machine}"
+println      crates/chat-stasher/src/main.rs:3437  "[seal] session        : {session}"
+println      crates/chat-stasher/src/main.rs:3438  "[seal] bucket cap     : {shard_bucket_cap}"
+println      crates/chat-stasher/src/main.rs:3442  "[seal] sealed          : {} -> {}/{} (seq {seq})"
+println      crates/chat-stasher/src/main.rs:3447  "[seal] source was stage-owned; no harness path was changed"
+eprintln     crates/chat-stasher/src/main.rs:3451  "seal: {e:#}"
+anyhow       crates/chat-stasher/src/main.rs:3464  "cannot derive a session id from --active; provide --session <id>; no shard was written"
+println      crates/chat-stasher/src/main.rs:3474  "[ingest] inbox            : candidates={} skipped_{}={}"
+println      crates/chat-stasher/src/main.rs:3477  "[ingest] consumed         : {}"
+println      crates/chat-stasher/src/main.rs:3480  "  + kind={}  bytes={}  sha256={}  -> {}  (session={})"
+println      crates/chat-stasher/src/main.rs:3488  "[ingest] duplicates (same bytes already archived, not re-sealed):"
+println      crates/chat-stasher/src/main.rs:3491  "  = sha256={}  matched in {}  (session={})"
+println      crates/chat-stasher/src/main.rs:3498  "[ingest] errors           : {}"
+println      crates/chat-stasher/src/main.rs:3501  "[ingest] staging machine   : sha256={}"
+println      crates/chat-stasher/src/main.rs:3515  "[ingest] note             : no consumed bundle carried an `identity` field - the account axis is missing; ids are `platform.sessionId` (machine-independent)"
+println      crates/chat-stasher/src/main.rs:3525  "[ingest] identity axis    : {seen} (archived verbatim, NOT yet used for the id or the dedup key - ids stay `platform.sessionId`)"
+eprintln     crates/chat-stasher/src/main.rs:3552  "{label}: {e}"
+eprintln     crates/chat-stasher/src/main.rs:3583  "destination: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}"
+eprintln     crates/chat-stasher/src/main.rs:3595  "destination: `{name}` is not declared in the config. Declared: {}"
+eprintln     crates/chat-stasher/src/main.rs:3607  "destination: `{name}` has no `repo` set (and no --repo was given)"
+eprintln     crates/chat-stasher/src/main.rs:3618  "option: option must be key=value, got `{kv}`"
+eprintln     crates/chat-stasher/src/main.rs:3687  "option: {e}"
+bail         crates/chat-stasher/src/main.rs:3710  "cannot read masterkey file {}: {error:#}; do not delete this file; fix the access or I/O problem and re-run"
+bail         crates/chat-stasher/src/main.rs:3716  "cannot parse masterkey file {}: {error:#}; do not delete this file; restore a valid copy before re-running"
+with_context crates/chat-stasher/src/main.rs:3728  "re-read new masterkey {}"
+bail         crates/chat-stasher/src/main.rs:3731  "new masterkey {} does not read back as written"
+println      crates/chat-stasher/src/main.rs:3743  "[reap] skipped (--no-reap)"
+eprintln     crates/chat-stasher/src/main.rs:3750  "[reap] cannot parse endpoint `{endpoint}`, nothing reaped"
+println      crates/chat-stasher/src/main.rs:3754  "[reap] host {host} · ssh masters shut down: {n}"
+println      crates/chat-stasher/src/main.rs:3756  "[reap] host {host} · ssh masters shut down: unknown (could not read the process list: {e})"
+eprintln     crates/chat-stasher/src/main.rs:3790  "push: cannot establish empty-stage safety: {e:#}"
+println      crates/chat-stasher/src/main.rs:3795  "[push] stage check   : shards={} scanner_records={} sqlite_sessions={} sqlite_unknown={} scanner_unknown={} committed_reads={}"
+eprintln     crates/chat-stasher/src/main.rs:3813  "push: cannot read the remembered inbox list: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:3815  "push: nothing was archived. On this line `inboxes=0` means \"this machine has no inbox\" — but the record could not be read, so the number is unknown, not zero. Auditing an empty stage against a list we failed to read would clear a run that may well have inbox content waiting, and an audit that passes because it read nothing is worse than no audit at all. Fix the collector state directory ({}) and re-run; the stage is untouched."
+eprintln     crates/chat-stasher/src/main.rs:3836  "push: cannot establish consumed-inbox audit for empty stage"
+println      crates/chat-stasher/src/main.rs:3869  "[push] consumed audit: inboxes={} files={} bytes={} unique_sha256={} cache_hits={} rehashed={} stage_covered={} repo_covered={} missing={}"
+println      crates/chat-stasher/src/main.rs:3882  "[push] no archivable content this run: stage, scanner, collector, and consumed audit agree"
+eprintln     crates/chat-stasher/src/main.rs:3888  "push: refusing empty snapshot: consumed files are not proven in stage or repository"
+eprintln     crates/chat-stasher/src/main.rs:3893  "push: refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
+eprintln     crates/chat-stasher/src/main.rs:3903  "push: cannot put a new masterkey on the disk: {e:#}"
+eprintln     crates/chat-stasher/src/main.rs:3905  "push: nothing was archived. This repository is encrypted — an archive written under a key that is not on the disk could never be opened again, so the run stops here instead of producing one. Fix the key file location (--key-file) and re-run; the stage is untouched."
+println      crates/chat-stasher/src/main.rs:3920  "[push] machine        : sha256={}"
+println      crates/chat-stasher/src/main.rs:3924  "[push] repo            : sha256={}"
+println      crates/chat-stasher/src/main.rs:3928  "[push] key file       : sha256={}"
+println      crates/chat-stasher/src/main.rs:3932  "[push] connections    : {} (cap {})"
+println      crates/chat-stasher/src/main.rs:3937  "[push] reap           : {}"
+eprintln     crates/chat-stasher/src/main.rs:3943  "push: {e:#}"
+println      crates/chat-stasher/src/main.rs:3950  "[push] {} {}"
+println      crates/chat-stasher/src/main.rs:3962  "[push] stage shards   : {}"
+println      crates/chat-stasher/src/main.rs:3964  "[push] summary: files_new={} files_changed={} files_unmodified={} data_blobs={} data_added={} data_added_packed={}"
+println      crates/chat-stasher/src/main.rs:3973  "[push] snapshot host  : sha256={} (must equal machine)"
+println      crates/chat-stasher/src/main.rs:3976  "[push] snapshots      : {}"
+eprintln     crates/chat-stasher/src/main.rs:4018  "read: {e}"
+eprintln     crates/chat-stasher/src/main.rs:4033  "read: local machine identity is required unless --all-machines is set"
+eprintln     crates/chat-stasher/src/main.rs:4040  "read: `--stage` is required unless `--all-machines` is set"
+eprintln     crates/chat-stasher/src/main.rs:4051  "read: `--session` is required unless `--all-machines` is set"
+println      crates/chat-stasher/src/main.rs:4059  "[read] machine        : {machine}"
+println      crates/chat-stasher/src/main.rs:4060  "[read] repo           : {}"
+println      crates/chat-stasher/src/main.rs:4062  "[read] reap           : {}"
+eprintln     crates/chat-stasher/src/main.rs:4068  "read: {e}"
+println      crates/chat-stasher/src/main.rs:4077  "[read] shards (seq order):"
+println      crates/chat-stasher/src/main.rs:4079  "  {name}  sha256={hash}"
+println      crates/chat-stasher/src/main.rs:4082  "[read] concat len      : {}  sha256={}"
+println      crates/chat-stasher/src/main.rs:4087  "[read] expected src    : sha256={}"
+println      crates/chat-stasher/src/main.rs:4102  "[read] mode           : all-machines (newest snapshot per hostname)"
+println      crates/chat-stasher/src/main.rs:4103  "[read] repo           : {}"
+eprintln     crates/chat-stasher/src/main.rs:4107  "read: {e}"
+println      crates/chat-stasher/src/main.rs:4115  "[read] snapshots read : {} (get_all_snapshots lists every snapshot file)"
+println      crates/chat-stasher/src/main.rs:4118  "[read] machines       : {}"
+println      crates/chat-stasher/src/main.rs:4121  "  machine {:<16} snapshot={}  time={}  unix={}  sessions={}"
+println      crates/chat-stasher/src/main.rs:4130  "    session {:<15} shards={:<3} bytes={:<10} sha256={}"
+println      crates/chat-stasher/src/main.rs:4139  "  WARN: {w}"
+println      crates/chat-stasher/src/main.rs:4143  "read: PARTIAL exit_code=3 — the sessions listed above are real, but {} snapshot(s) could not be opened, so the machines they belong to are listed with an empty session set they did not earn. Absence below is not proof of absence in the archive."
+eprintln     crates/chat-stasher/src/main.rs:4191  "verify: {e}"
+eprintln     crates/chat-stasher/src/main.rs:4200  "verify: `--stage` is required for level l3 / all"
+println      crates/chat-stasher/src/main.rs:4207  "[verify] repo           : {}"
+println      crates/chat-stasher/src/main.rs:4209  "[verify] machine        : {}"
+println      crates/chat-stasher/src/main.rs:4213  "[verify] reap           : {}"
+println      crates/chat-stasher/src/main.rs:4222  "[verify] stage          : {}"
+println      crates/chat-stasher/src/main.rs:4228  "[verify] stage          : {}"
+println      crates/chat-stasher/src/main.rs:4235  "[verify] RESULT         : OK"
+println      crates/chat-stasher/src/main.rs:4238  "[verify] RESULT         : FAILED ({failed} level(s) reported failures)"
+eprintln     crates/chat-stasher/src/main.rs:4252  "verify: {name} failed to run: {e:#}"
+println      crates/chat-stasher/src/main.rs:4265  "[verify] {name:<16} ok={:<5} findings={:<3} errors={:<3} warns={:<3} ({kind}) took {:?}"
+println      crates/chat-stasher/src/main.rs:4273  "  ! {detail}"
+eprintln     crates/chat-stasher/src/main.rs:4292  "verify: L3 reconcile failed to run: {e:#}"
+println      crates/chat-stasher/src/main.rs:4300  "[verify] L3 reconcile     : machines={} expected={} took {:?}"
+println      crates/chat-stasher/src/main.rs:4314  "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}"
+println      crates/chat-stasher/src/main.rs:4318  "  {mark} {:<12} {:<20} MISSING IN ARCHIVE"
+println      crates/chat-stasher/src/main.rs:4322  "  {mark} {:<12} {:<20} SHARD COUNT expected={expected} observed={observed}"
+println      crates/chat-stasher/src/main.rs:4326  "  {mark} {:<12} {:<20} BYTE LENGTH expected={expected} observed={observed}"
+println      crates/chat-stasher/src/main.rs:4330  "  {mark} {:<12} {:<20} SHA MISMATCH\n      expected={expected}\n      observed={observed}"
+println      crates/chat-stasher/src/main.rs:4337  "  !? {m:<12} {:<20} in archive but NOT in expected manifest (informational)"
+println      crates/chat-stasher/src/main.rs:4342  "[verify] L3 verdict       : {}"
+eprintln     crates/chat-stasher/src/main.rs:4739  "next: chat-stasher collect --stage <stage-dir> && chat-stasher push --stage <stage-dir> && chat-stasher verify --stage <stage-dir>"
+eprintln     crates/chat-stasher/src/main.rs:4744  "init: {e}"
+eprintln     crates/chat-stasher/src/main.rs:4753  "config_source={}"
+eprintln     crates/chat-stasher/src/main.rs:4756  "[run-once] {}"
+eprintln     crates/chat-stasher/src/main.rs:4827  "status: scan failed: {e}"
+println      crates/chat-stasher/src/main.rs:4836  "{}"
+println      crates/chat-stasher/src/main.rs:4841  "{}"
+eprint       crates/chat-stasher/src/main.rs:4849  "{}"
 write        crates/chat-stasher/src/models.rs:86  "{}"
 bail         crates/chat-stasher/src/nativehost.rs:290  "host binary path must be absolute, got {}"
 bail         crates/chat-stasher/src/nativehost.rs:304  "firefox extension id must not be empty"
@@ -945,11 +959,11 @@ eprintln     crates/chat-stasher/src/reap.rs:55  "reap: `-O exit` failed for {}:
 eprintln     crates/chat-stasher/src/reap.rs:61  "reap: could not run ssh for {}: {e}"
 with_context crates/chat-stasher/src/runstate.rs:139  "create state dir {}"
 context      crates/chat-stasher/src/runstate.rs:142  "serialise run state"
-eprintln     crates/chat-stasher/src/scanner.rs:1812  "warning: 无法展开路径 `{p}`: {e}"
-bail         crates/chat-stasher/src/schedule.rs:45  "backup_interval_secs must be greater than zero"
-with_context crates/chat-stasher/src/schedule.rs:85  "create systemd template directory {}"
-with_context crates/chat-stasher/src/schedule.rs:88  "create launchd template directory {}"
-with_context crates/chat-stasher/src/schedule.rs:99  "write scheduler template {}"
+eprintln     crates/chat-stasher/src/scanner.rs:1834  "warning: cannot expand path `{p}`: {e}"
+bail         crates/chat-stasher/src/schedule.rs:63  "backup_interval_secs must be greater than zero"
+with_context crates/chat-stasher/src/schedule.rs:103  "create systemd template directory {}"
+with_context crates/chat-stasher/src/schedule.rs:106  "create launchd template directory {}"
+with_context crates/chat-stasher/src/schedule.rs:117  "write scheduler template {}"
 context      crates/chat-stasher/src/seal.rs:86  "resolve --stage"
 bail         crates/chat-stasher/src/seal.rs:97  "refusing seal: --active must be inside --stage; source left untouched"
 bail         crates/chat-stasher/src/seal.rs:122  "active file does not exist: {}"
