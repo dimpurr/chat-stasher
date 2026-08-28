@@ -44,11 +44,27 @@ name: CI
 #   - `schedule` 每天一次 —— 防「两周没跑，一跑十个问题」。1 次/天 vs 20 次/天。
 #   - ~~每次 push~~       —— 删掉。
 #
+# 🔴 2026-08-28 —— `push: branches: [main]` 加回来，但【只跑 ubuntu 一格】。
+# 触发这次修改的不是省钱，是一次实测到的代价：ubuntu 格因为一条 macOS-only 的
+# `stat -f%z` 断言红了【整整两天】没人发现，因为主干上根本没有东西会去戳它。
+# 「每天一次」在人一天推二十次的节奏下，等于「问题最多藏 12 小时」。
+#
+# 为什么只加 ubuntu（×1）而不连 Windows（×2）一起加：
+#   Windows 格此刻正因为一个真 bug 红着（STATUS_STACK_OVERFLOW，见 b63_honesty_test）。
+#   现在把它挂上 push，效果就是【每次 push 发一封失败邮件】—— 正是 08-18 花力气
+#   摆脱的那种纯噪音。⇒ 等那个 bug 修好，再把 windows 加进 push 这一档。
+#   （Windows 才是真正抓得到东西的那格：它一个人贡献了八个 macOS 上永不出现的缺陷。）
+#
+# ⚠️ 同样不是 green-by-suppression：矩阵没删格、断言没弱化、没有 continue-on-error。
+# push 这一档少跑的两格，在 tag 与每日定时里一格不少。
+#
 # ⚠️ 这【不是】green-by-suppression：没有删任何 job、没有弱化任何断言、
 # 没有加 `continue-on-error`。矩阵原样保留，只是不再每次 commit 都跑。
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   schedule:
@@ -72,14 +88,17 @@ jobs:
       # information we want, not a reason to hide the Linux result.
       fail-fast: false
       # 🔴 矩阵按触发方式算，不是写死的：
-      #   打 tag（发布候选）⇒ 三格全跑，含 macOS 与 release-gate；
-      #   其余（手动 / 每日定时）⇒ 只跑 Linux + Windows。
+      #   打 tag（发布候选）    ⇒ 三格全跑，含 macOS 与 release-gate；
+      #   push 到 main         ⇒ 只跑 ubuntu（×1，最便宜的一格，图的是「合进去就知道」）；
+      #   其余（手动 / 每日定时）⇒ 跑 Linux + Windows。
       # 理由：macOS 那一格占一次 run 约 77% 的成本（×10 倍率），
       # 而本机每张工单都已经跑过同样五条命令 —— CI 唯一给得了而本机给不了的是 Linux 与 Windows。
       # ⚠️ 这不是删 job：发版路径上 macOS 与 release-gate 一格不少。
       matrix:
         include: ${{ fromJSON(github.ref_type == 'tag'
           && '[{"os":"macos-latest","release_gate":true},{"os":"ubuntu-latest","release_gate":false},{"os":"windows-latest","release_gate":false}]'
+          || (github.event_name == 'push')
+          && '[{"os":"ubuntu-latest","release_gate":false}]'
           || '[{"os":"ubuntu-latest","release_gate":false},{"os":"windows-latest","release_gate":false}]') }}
 
     steps:
