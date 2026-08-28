@@ -1315,8 +1315,40 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `activity-index` — build the activity sidecar for one machine partition
-/// (ADR-017).
+/// Outcome of a full activity-index rebuild for one machine partition.
+#[derive(Debug)]
+struct ActivityIndexOutcome {
+    /// Number of sessions whose rows were written to the index.
+    sessions_indexed: usize,
+    /// Number of sessions skipped because no harness could be inferred.
+    skipped_sessions: usize,
+    /// Absolute path of the written index.
+    out_path: PathBuf,
+    /// Wall-clock time the rebuild took.
+    elapsed: std::time::Duration,
+}
+
+/// Why an activity-index rebuild failed, in the two failure families the
+/// `activity-index` exit-code contract promises: `Read` = reading was
+/// interrupted, so no complete index exists (exit 3); `Write` = every session
+/// was read but the output could not be written (exit 1).
+#[derive(Debug)]
+enum ActivityIndexError {
+    Read(String),
+    Write(String),
+}
+
+impl std::fmt::Display for ActivityIndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(message) | Self::Write(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ActivityIndexError {}
+
+/// Rebuild the activity index for one machine partition (ADR-017).
 ///
 /// Reads every sealed shard of every session under
 /// `<stage>/sessions/<machine>/`, concatenates each session's shards in global
@@ -1324,29 +1356,34 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
 /// for conversation-time extraction. One `ActivityRow` per session is written
 /// as JSONL to `<stage>/meta/<machine>/activity-v1.jsonl`.
 ///
-/// Exit codes follow the house family (`collect`/`search`): `0` = the whole
-/// partition was read and the index written; `3` = the stage could not be read
-/// (or reading was interrupted), so no complete index exists; `1` = every
-/// session was read but the output file could not be written; `2` = usage
-/// error (enforced by clap).
-fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
-    let config = Config::load();
-    let machine = match resolve_machine("activity-index", &config, machine) {
-        Ok(machine) => machine,
-        Err(code) => return code,
-    };
+/// Deliberately a **full rebuild**, never an incremental update: the index is
+/// derived from the stage, so after a full rebuild "the index says" and "the
+/// archive holds" can never diverge, while an incremental scheme would have to
+/// track exactly which shards changed since the last build — and any bug in
+/// that tracking produces a stale index that looks authoritative. The measured
+/// cost of a full rebuild is ~6.5 s on a 759-session stage (0.18% of the 3600 s
+/// run-once period), which is nothing next to the correctness it buys.
+///
+/// `print_skips` controls the per-session "no inferable harness" stderr line:
+/// `activity-index` wants it (it is part of its existing output), `run-once`
+/// only wants the count.
+fn rebuild_activity_index(
+    stage: &Path,
+    machine: &str,
+    print_skips: bool,
+) -> Result<ActivityIndexOutcome, ActivityIndexError> {
+    let started = std::time::Instant::now();
     if !stage.is_dir() {
-        eprintln!(
-            "activity-index: stage `{}` is not a directory — nothing was read",
+        return Err(ActivityIndexError::Read(format!(
+            "stage `{}` is not a directory — nothing was read",
             stage.display()
-        );
-        return ExitCode::from(3);
+        )));
     }
-    let sessions_root = stage.join(store::SESSIONS_DIR).join(&machine);
+    let sessions_root = stage.join(store::SESSIONS_DIR).join(machine);
 
     // Enumerate the machine's session directories. A partition that has never
-    // been archived is a *complete* read of zero items (empty, exit 0), not a
-    // failure to look; any other read error means we could not read -> 3.
+    // been archived is a *complete* read of zero items (empty), not a failure
+    // to look; any other read error means we could not read.
     let mut session_dirs: Vec<PathBuf> = Vec::new();
     match fs::read_dir(&sessions_root) {
         Ok(rd) => {
@@ -1354,11 +1391,10 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
                 let session = match session {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!(
-                            "activity-index: cannot enumerate {}: {e}",
+                        return Err(ActivityIndexError::Read(format!(
+                            "cannot enumerate {}: {e}",
                             sessions_root.display()
-                        );
-                        return ExitCode::from(3);
+                        )));
                     }
                 };
                 if session.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -1368,25 +1404,28 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            eprintln!(
-                "activity-index: cannot read {}: {e} — nothing was read, this is not an empty index",
+            return Err(ActivityIndexError::Read(format!(
+                "cannot read {}: {e} — nothing was read, this is not an empty index",
                 sessions_root.display()
-            );
-            return ExitCode::from(3);
+            )));
         }
     }
 
     let mut rows = Vec::new();
+    let mut skipped_sessions = 0usize;
     for session_dir in session_dirs {
         let session_id = session_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let Some(harness) = sidecar::infer_harness(&session_id) else {
-            eprintln!(
-                "activity-index: session `{}` has no inferable harness — skipped",
-                chat_stasher::id::short_session_id(&session_id)
-            );
+            skipped_sessions += 1;
+            if print_skips {
+                eprintln!(
+                    "activity-index: session `{}` has no inferable harness — skipped",
+                    chat_stasher::id::short_session_id(&session_id)
+                );
+            }
             continue;
         };
 
@@ -1394,8 +1433,9 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
         let mut shards = match store::sealed_shard_entries(&session_dir) {
             Ok(shards) => shards,
             Err(e) => {
-                eprintln!("activity-index: cannot read session `{session_id}`: {e}");
-                return ExitCode::from(3);
+                return Err(ActivityIndexError::Read(format!(
+                    "cannot read session `{session_id}`: {e}"
+                )));
             }
         };
         shards.sort_by_key(|(seq, _)| *seq);
@@ -1405,8 +1445,10 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
             let bytes = match fs::read(&shard) {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("activity-index: cannot read shard {}: {e}", shard.display());
-                    return ExitCode::from(3);
+                    return Err(ActivityIndexError::Read(format!(
+                        "cannot read shard {}: {e}",
+                        shard.display()
+                    )));
                 }
             };
             for line in String::from_utf8_lossy(&bytes).lines() {
@@ -1414,16 +1456,18 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
             }
         }
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        rows.push(activity::build_row(&session_id, &machine, &harness, &refs));
+        rows.push(activity::build_row(&session_id, machine, &harness, &refs));
     }
 
     // Reading finished; writing is a separate failure family. The read
     // completed, so "did not finish reading" (3) no longer applies — a write
     // failure is a completed-read failure (1).
-    let meta_dir = stage.join("meta").join(&machine);
+    let meta_dir = stage.join("meta").join(machine);
     if let Err(e) = fs::create_dir_all(&meta_dir) {
-        eprintln!("activity-index: cannot create {}: {e}", meta_dir.display());
-        return ExitCode::from(1);
+        return Err(ActivityIndexError::Write(format!(
+            "cannot create {}: {e}",
+            meta_dir.display()
+        )));
     }
     let out_path = meta_dir.join("activity-v1.jsonl");
     let mut content = String::new();
@@ -1431,15 +1475,51 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
         content.push_str(&activity::to_jsonl(row));
     }
     if let Err(e) = fs::write(&out_path, content) {
-        eprintln!("activity-index: cannot write {}: {e}", out_path.display());
-        return ExitCode::from(1);
+        return Err(ActivityIndexError::Write(format!(
+            "cannot write {}: {e}",
+            out_path.display()
+        )));
     }
 
-    println!("[activity-index] stage    : {}", stage.display());
-    println!("[activity-index] machine  : {machine}");
-    println!("[activity-index] sessions : {}", rows.len());
-    println!("[activity-index] index    : {}", out_path.display());
-    ExitCode::SUCCESS
+    Ok(ActivityIndexOutcome {
+        sessions_indexed: rows.len(),
+        skipped_sessions,
+        out_path,
+        elapsed: started.elapsed(),
+    })
+}
+
+/// `activity-index` — build the activity sidecar for one machine partition
+/// (ADR-017).
+///
+/// Thin CLI wrapper over [`rebuild_activity_index`]. Exit codes follow the
+/// house family (`collect`/`search`): `0` = the whole partition was read and
+/// the index written; `3` = the stage could not be read (or reading was
+/// interrupted), so no complete index exists; `1` = every session was read but
+/// the output file could not be written; `2` = usage error (enforced by clap).
+fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
+    let config = Config::load();
+    let machine = match resolve_machine("activity-index", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    match rebuild_activity_index(stage, &machine, true) {
+        Ok(outcome) => {
+            println!("[activity-index] stage    : {}", stage.display());
+            println!("[activity-index] machine  : {machine}");
+            println!("[activity-index] sessions : {}", outcome.sessions_indexed);
+            println!("[activity-index] index    : {}", outcome.out_path.display());
+            ExitCode::SUCCESS
+        }
+        Err(ActivityIndexError::Read(message)) => {
+            eprintln!("activity-index: {message}");
+            ExitCode::from(3)
+        }
+        Err(ActivityIndexError::Write(message)) => {
+            eprintln!("activity-index: {message}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// `machine-declare` — write this machine's display-name declaration (ADR-018).
@@ -3174,6 +3254,38 @@ fn run_once_pass(
         return (ExitCode::SUCCESS, state);
     }
 
+    // Rebuild the activity index before pushing, so the snapshot that leaves
+    // this stage carries an index that reflects what was just collected —
+    // otherwise the archived overview stays frozen at the last manual build.
+    // Always a full rebuild, never an incremental update: the index is derived
+    // from the stage, so after a full rebuild "the index says" and "the
+    // archive holds" can never diverge, while an incremental scheme would have
+    // to track exactly which shards changed since the last build — and any bug
+    // in that tracking produces a stale index that looks authoritative. The
+    // measured cost is ~6.5 s on a 759-session stage (0.18% of the 3600 s
+    // period), which is nothing next to the correctness it buys.
+    match rebuild_activity_index(stage, &machine_name, false) {
+        Ok(outcome) => {
+            println!(
+                "[run-once] activity-index: sessions={} skipped={} index={} elapsed={}ms",
+                outcome.sessions_indexed,
+                outcome.skipped_sessions,
+                outcome.out_path.display(),
+                outcome.elapsed.as_millis()
+            );
+        }
+        Err(err) => {
+            // The index is observability, not data. Push is the primary duty of
+            // this pass — the step that protects the collected shards — and a
+            // failed rebuild must not block it. The index is recomputable from
+            // the stage at any time (`activity-index`), so log the failure
+            // loudly and continue with the push.
+            eprintln!(
+                "[run-once] warning: activity-index rebuild failed, continuing with push: {err}"
+            );
+        }
+    }
+
     let push_code = cmd_push(
         &stage.to_path_buf(),
         None,
@@ -4729,6 +4841,168 @@ mod decision_surface_tests {
         let back: identity::LabelRecord =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(back, record);
+    }
+
+    // ------------------------------------------------------- activity index
+
+    /// One synthetic claude-code line with an RFC 3339 timestamp.
+    fn cc_line(ts: &str) -> String {
+        format!(
+            r#"{{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{{"role":"user","content":"hi"}},"uuid":"u1","timestamp":"{ts}","cwd":"/x","version":"1.0.31"}}"#
+        )
+    }
+
+    /// Write one sealed shard for `session` under `machine` (bucketed layout).
+    fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
+        let dir = stage
+            .join(store::SESSIONS_DIR)
+            .join(machine)
+            .join(session)
+            .join("000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("000001.jsonl"), lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn rebuild_activity_index_writes_rows_for_each_session() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        write_shard(
+            &stage,
+            machine,
+            "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            &[
+                cc_line("2025-01-15T12:34:56.789Z"),
+                cc_line("2025-01-15T13:45:07Z"),
+            ],
+        );
+        let outcome = rebuild_activity_index(&stage, machine, false)
+            .expect("rebuild should succeed on a valid stage");
+        assert_eq!(outcome.sessions_indexed, 1);
+        assert_eq!(outcome.skipped_sessions, 0);
+        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        let content = fs::read_to_string(&index).unwrap();
+        let rows: Vec<&str> = content.lines().collect();
+        assert_eq!(rows.len(), 1, "one session -> one row: {content}");
+        assert!(
+            rows[0].contains(&format!("\"machine\":\"{machine}\"")),
+            "row must name the machine: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("claude-code"),
+            "row must name the harness: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains(r#""first_unix":1736944496"#)
+                && rows[0].contains(r#""last_unix":1736948707"#),
+            "row must carry the conversation span: {}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn rebuild_activity_index_rewrites_stale_index_and_advances_mtime() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        write_shard(
+            &stage,
+            machine,
+            "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+
+        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        fs::create_dir_all(index.parent().unwrap()).unwrap();
+        fs::write(&index, "stale\n").unwrap();
+        let stale_mtime = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+        fs::File::options()
+            .write(true)
+            .open(&index)
+            .unwrap()
+            .set_modified(stale_mtime)
+            .unwrap();
+
+        rebuild_activity_index(&stage, machine, false).expect("rebuild should succeed");
+        let content = fs::read_to_string(&index).unwrap();
+        assert!(
+            !content.contains("stale"),
+            "a stale index must be replaced, not kept: {content}"
+        );
+        assert!(content.contains("claude-code"));
+        let new_mtime = fs::metadata(&index).unwrap().modified().unwrap();
+        assert!(
+            new_mtime > stale_mtime,
+            "index mtime must advance on rebuild"
+        );
+    }
+
+    #[test]
+    fn rebuild_activity_index_counts_sessions_without_harness_as_skipped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        // A directory name with no inferable harness prefix is skipped.
+        fs::create_dir_all(
+            stage
+                .join(store::SESSIONS_DIR)
+                .join(machine)
+                .join("~orphan"),
+        )
+        .unwrap();
+        write_shard(
+            &stage,
+            machine,
+            "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        let outcome =
+            rebuild_activity_index(&stage, machine, false).expect("rebuild should succeed");
+        assert_eq!(outcome.sessions_indexed, 1);
+        assert_eq!(outcome.skipped_sessions, 1);
+        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        assert_eq!(
+            fs::read_to_string(&index).unwrap().lines().count(),
+            1,
+            "only the session with a harness is indexed"
+        );
+    }
+
+    #[test]
+    fn rebuild_activity_index_read_error_when_stage_is_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("no-such-stage");
+        match rebuild_activity_index(&stage, "mbp-test", false) {
+            Err(ActivityIndexError::Read(message)) => {
+                assert!(message.contains("not a directory"), "message: {message}");
+            }
+            other => panic!("expected a Read error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuild_activity_index_write_error_when_meta_is_blocked_by_a_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        write_shard(
+            &stage,
+            machine,
+            "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        // A regular file where `meta/` must become a directory forces the write
+        // failure family: reading finished, writing could not.
+        fs::write(stage.join("meta"), "blocking file").unwrap();
+        match rebuild_activity_index(&stage, machine, false) {
+            Err(ActivityIndexError::Write(message)) => {
+                assert!(message.contains("cannot create"), "message: {message}");
+            }
+            other => panic!("expected a Write error, got {other:?}"),
+        }
     }
 }
 

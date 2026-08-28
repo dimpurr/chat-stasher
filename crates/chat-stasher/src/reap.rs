@@ -35,6 +35,15 @@ pub fn host_of_endpoint(endpoint: &str) -> Option<String> {
     }
 }
 
+/// Returns true when ssh `-O exit` failed only because the control socket
+/// is already gone (the master exited on its own). These are not user-facing
+/// errors — telling the user we could not close a socket that no longer
+/// exists is noise.
+fn is_missing_control_socket(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("control socket connect") && stderr.contains("no such file or directory")
+}
+
 /// Find the `-S` socket paths of live ssh ControlMaster masters whose
 /// command line names `host`, and shut each one down. An unavailable process
 /// listing is an unknown count, not zero; per-master failures are logged,
@@ -51,11 +60,13 @@ pub fn reap_masters_for_host(host: &str) -> Result<usize, String> {
                 if out.status.success() {
                     exited += 1;
                 } else {
-                    eprintln!(
-                        "reap: `-O exit` failed for {}: {}",
-                        sock,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if is_missing_control_socket(&stderr) {
+                        // The master already exited and removed its socket;
+                        // nothing needs reaping and no user cares.
+                        continue;
+                    }
+                    eprintln!("reap: `-O exit` failed for {}: {}", sock, stderr.trim());
                 }
             }
             Err(e) => eprintln!("reap: could not run ssh for {}: {e}", sock),
@@ -123,6 +134,27 @@ fn sockets_in_line(line: &str, host: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_control_socket_is_silently_skipped() {
+        assert!(is_missing_control_socket(
+            "Control socket connect(/tmp/ssh.sock): No such file or directory"
+        ));
+        assert!(is_missing_control_socket(
+            "reap: -O exit failed: Control socket connect(/var/run/x): No such file or directory"
+        ));
+    }
+
+    #[test]
+    fn real_control_socket_failure_is_not_silenced() {
+        assert!(!is_missing_control_socket("Permission denied"));
+        assert!(!is_missing_control_socket(
+            "Control socket connect(/tmp/ssh.sock): Permission denied"
+        ));
+        assert!(!is_missing_control_socket(
+            "Could not request local forwarding."
+        ));
+    }
 
     #[test]
     fn endpoint_host_is_parsed() {

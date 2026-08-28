@@ -51,18 +51,20 @@
           "source": "known fact (measured on macOS)"
         },
         "linux": {
-          "template": "$CODEX_HOME/sessions/（默认 $HOME/.codex/sessions/）",
+          "template": "$CODEX_HOME/sessions/",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
-          "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()(dirs::home_dir().push(\".codex\"))+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235"
+          "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()(dirs::home_dir().push(\".codex\"))+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235",
+          "notes": "Default when CODEX_HOME is unset: $HOME/.codex/sessions/."
         },
         "windows": {
-          "template": "%CODEX_HOME%\\sessions\\（默认 %USERPROFILE%\\.codex\\sessions\\）",
+          "template": "%CODEX_HOME%\\sessions\\",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
-          "source": "same as above(dirs::home_dir() on Windows returns %USERPROFILE%, no platform branch)"
+          "source": "same as above(dirs::home_dir() on Windows returns %USERPROFILE%, no platform branch)",
+          "notes": "Default when CODEX_HOME is unset: %USERPROFILE%\\.codex\\sessions\\."
         }
       },
       "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override.",
@@ -266,10 +268,11 @@
           "source": "@github/copilot v1.0.80 build artifacts(app.js + runtime.node embedded SQLite DDL)"
         },
         "linux": {
-          "template": "~/.copilot/（+ XDG 迁移：$XDG_CONFIG_HOME/copilot、$XDG_STATE_HOME/copilot）",
+          "template": "~/.copilot/",
           "format": "sqlite + jsonl",
           "confidence": "source-confirmed",
-          "source": "same as above(bOn=\".copilot\", join(homedir,.copilot), session-store.db)"
+          "source": "same as above(bOn=\".copilot\", join(homedir,.copilot), session-store.db)",
+          "notes": "When XDG_CONFIG_HOME and XDG_STATE_HOME are set, a one-time migration moves config to $XDG_CONFIG_HOME/copilot and state (including session-store.db) to $XDG_STATE_HOME/copilot."
         },
         "windows": {
           "template": "%USERPROFILE%\\.copilot\\",
@@ -297,22 +300,25 @@
       "display_name": "aider",
       "paths": {
         "macos": {
-          "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）",
+          "template": "$CWD/.aider.chat.history.md",
           "format": "markdown / txt / jsonl",
           "confidence": "source-confirmed",
-          "source": "aider/args.py:271-276; aider/io.py:1117-1136"
+          "source": "aider/args.py:271-276; aider/io.py:1117-1136",
+          "notes": "Sidecar files: .input.history and .llm.history."
         },
         "linux": {
-          "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）；config 在 ~/.aider/",
+          "template": "$CWD/.aider.chat.history.md",
           "format": "markdown / txt / jsonl",
           "confidence": "source-confirmed",
-          "source": "same as above + aider/main.py:370,1185"
+          "source": "same as above + aider/main.py:370,1185",
+          "notes": "Sidecar files: .input.history and .llm.history. Config directory: ~/.aider/."
         },
         "windows": {
-          "template": "$CWD/.aider.chat.history.md（+ .input.history / .llm.history）；config 在 %USERPROFILE%\\.aider\\",
+          "template": "$CWD/.aider.chat.history.md",
           "format": "markdown / txt / jsonl",
           "confidence": "source-confirmed",
-          "source": "same as above(platform-independent CWD-relative)"
+          "source": "same as above(platform-independent CWD-relative)",
+          "notes": "Sidecar files: .input.history and .llm.history. Config directory: %USERPROFILE%\\.aider\\."
         }
       },
       "notes": "chat history is in CWD, not home; ~/.aider/ only holds config/state(installs.json, oauth-keys.env, model settings). old .aider.history.jsonl no longer exists (changed to .aider.chat.history.md). does not honor XDG/APPDATA.",
@@ -339,16 +345,18 @@
           "source": "internal/db/connect.go:93 + internal/config/load.go:559-562"
         },
         "linux": {
-          "template": "$CWD/.crush/crush.db（项目级）；全局 config ~/.config/crush/、data ~/.local/share/crush/",
+          "template": "$CWD/.crush/crush.db",
           "format": "sqlite",
           "confidence": "source-confirmed",
-          "source": "same as above + internal/config/load.go:1181-1258"
+          "source": "same as above + internal/config/load.go:1181-1258",
+          "notes": "Project-level store. Global directories hold only config, not chat history: config ~/.config/crush/, data ~/.local/share/crush/."
         },
         "windows": {
-          "template": "$CWD/.crush/crush.db（项目级）；全局 config %APPDATA%\\crush\\、data %LOCALAPPDATA%\\crush\\",
+          "template": "$CWD/.crush/crush.db",
           "format": "sqlite",
           "confidence": "source-confirmed",
-          "source": "same as above"
+          "source": "same as above",
+          "notes": "Project-level store. Global directories hold only config, not chat history: config %APPDATA%\\crush\\, data %LOCALAPPDATA%\\crush\\."
         }
       },
       "notes": "project-level SQLite (data_directory defaults to .crush, follows the project). global directory only holds config, not chat history.",
@@ -375,10 +383,11 @@
           "source": "macOS branch not directly verified; inferred from crates/paths platform convention"
         },
         "linux": {
-          "template": "$XDG_DATA_HOME/zed/threads/threads.db（默认 ~/.local/share/zed/threads/threads.db）",
+          "template": "$XDG_DATA_HOME/zed/threads/threads.db",
           "format": "sqlite",
           "confidence": "source-confirmed",
-          "source": "crates/agent/src/db.rs:438-440 + crates/paths/src/paths.rs:57-65"
+          "source": "crates/agent/src/db.rs:438-440 + crates/paths/src/paths.rs:57-65",
+          "notes": "Default when XDG_DATA_HOME is unset: ~/.local/share/zed/threads/threads.db."
         },
         "windows": {
           "template": "%LOCALAPPDATA%\\Zed\\threads\\threads.db",
