@@ -564,6 +564,8 @@ mod tests {
                 key_file: dir.path().join("no-such-key.json"),
                 connections: 1,
                 options: BTreeMap::new(),
+                cache_dir: None,
+                no_cache: false,
             },
         }];
         let report = fill_difference(&dir.path().join("stage"), "fixture-machine", 20, &sources);
@@ -593,6 +595,8 @@ mod tests {
                 key_file: dir.path().join("no-such-key.json"),
                 connections: 1,
                 options: BTreeMap::new(),
+                cache_dir: None,
+                no_cache: false,
             },
         }];
         let report = fill_difference(&dir.path().join("stage"), "fixture-machine", 20, &sources);

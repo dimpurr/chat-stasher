@@ -34,6 +34,8 @@ fn config(repo: &Path, key: &Path) -> StoreConfig {
         key_file: key.to_path_buf(),
         connections: 1,
         options: Default::default(),
+        cache_dir: None,
+        no_cache: false,
     }
 }
 

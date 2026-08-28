@@ -121,6 +121,18 @@ pub fn generate_manifest_at(
         // Same derivation as `verify::expected_manifest`: count the sealed
         // shards and hash their concatenation in global sequence order.
         let shard_count = store::sealed_shard_entries(&entry.path())?.len();
+        // A session directory with no sealed shard has no body to summarise.
+        // Two ways to get here and both must be skipped:
+        //   * the body was reaped (`stagereap`) — the session dir deliberately
+        //     survives because it still holds `shard-seq`, and the authoritative
+        //     summary for it now lives in the *stored* manifest, not on disk;
+        //   * the session was just created and nothing has been sealed yet.
+        // Emitting a row here would overwrite a reaped session's real summary
+        // with an empty one — i.e. silently destroy the only remaining evidence
+        // of what the archive is supposed to hold.
+        if shard_count == 0 {
+            continue;
+        }
         let concat = store::concat_shards(stage, machine, &session_id)?;
         out.push(SessionManifest {
             session_id,

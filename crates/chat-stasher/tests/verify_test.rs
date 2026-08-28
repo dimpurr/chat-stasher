@@ -37,6 +37,8 @@ fn build_repo(dir: &Path, connections: usize) -> (StoreConfig, MasterKey, PathBu
         key_file: dir.join("masterkey.json"),
         connections,
         options: Default::default(),
+        cache_dir: None,
+        no_cache: false,
     };
     let mk = MasterKey::new();
     store::persist_key_file(&cfg, &mk).unwrap();
@@ -63,6 +65,8 @@ fn consumed_hash_audit_distinguishes_archived_and_missing_repo_records() {
         key_file: dir.path().join("masterkey.json"),
         connections: 1,
         options: Default::default(),
+        cache_dir: None,
+        no_cache: false,
     };
     let mk = MasterKey::new();
     store::persist_key_file(&cfg, &mk).unwrap();
