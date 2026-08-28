@@ -38,7 +38,11 @@ fn write_and_measure(cap: usize, writes: usize) -> ObservedLayout {
 
     for bucket_entry in fs::read_dir(&session_dir).unwrap() {
         let bucket_entry = bucket_entry.unwrap();
-        assert!(bucket_entry.file_type().unwrap().is_dir());
+        // The session dir also holds the shard sequence counter metadata file
+        // (ADR-020 Phase 2); only bucket directories take part in the census.
+        if !bucket_entry.file_type().unwrap().is_dir() {
+            continue;
+        }
         let bucket_name = bucket_entry.file_name().to_string_lossy().into_owned();
         let children: Vec<_> = fs::read_dir(bucket_entry.path())
             .unwrap()

@@ -709,16 +709,150 @@ pub fn parse_shard_seq(name: &str) -> Option<u64> {
     base.parse().ok()
 }
 
-/// Next sequence number for a sealed session shard set (1 + highest existing).
-pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<u64> {
+/// Name of the persisted per-(machine, session) shard sequence counter file,
+/// stored next to the sealed shards it governs. The name can never collide
+/// with a shard: `parse_shard_seq` requires exactly six digits plus `.jsonl`.
+pub const SHARD_SEQ_FILE: &str = "shard-seq";
+
+/// The three semantic outcomes of reading the shard sequence counter.
+///
+/// Mirrors [`KeyFileState`]: `Missing` is the only outcome that permits
+/// seeding the counter from the existing shard set; `Unusable` hard-fails so
+/// an unreadable or corrupt counter is never silently treated as 0 — that is
+/// exactly how a reclaim would otherwise reset the sequence and collide with
+/// archived shards.
+#[derive(Debug)]
+pub enum ShardSeqState {
+    /// The counter file does not exist (io::ErrorKind::NotFound).
+    Missing,
+    /// The counter was read and parsed successfully.
+    Loaded(u64),
+    /// The counter path exists but cannot be used; the inner class is actionable.
+    Unusable(ShardSeqError),
+}
+
+#[derive(Debug)]
+pub enum ShardSeqError {
+    Read(anyhow::Error),
+    Parse(anyhow::Error),
+}
+
+impl ShardSeqError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Read(error) | Self::Parse(error) => error,
+        }
+    }
+}
+
+/// Path of the shard sequence counter for one (machine, session).
+pub fn shard_seq_file(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
+    session_shard_dir(stage_root, machine, session_id).join(SHARD_SEQ_FILE)
+}
+
+/// Read and classify the shard sequence counter without losing the filesystem
+/// error kind. `Missing` is produced only by `io::ErrorKind::NotFound`;
+/// anything else is `Unusable` and must be repaired, not treated as zero.
+pub fn load_shard_seq_state(stage_root: &Path, machine: &str, session_id: &str) -> ShardSeqState {
+    let path = shard_seq_file(stage_root, machine, session_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ShardSeqState::Missing;
+        }
+        Err(error) => {
+            return ShardSeqState::Unusable(ShardSeqError::Read(
+                anyhow::Error::new(error).context(format!(
+                    "cannot read shard sequence file {} (do not delete this file)",
+                    path.display()
+                )),
+            ));
+        }
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(seq) => ShardSeqState::Loaded(seq),
+        Err(error) => ShardSeqState::Unusable(ShardSeqError::Parse(
+            anyhow::Error::new(error).context(format!(
+                "cannot parse shard sequence file {} (do not delete this file)",
+                path.display()
+            )),
+        )),
+    }
+}
+
+/// Highest shard sequence already present in the session dir (0 when none).
+///
+/// Seeds the counter on first run so a pre-existing stage migrates seamlessly:
+/// an existing stage already has shards, so the counter must never start at 0.
+fn derive_shard_high_water(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<u64> {
     let dir = session_shard_dir(stage_root, machine, session_id);
     Ok(sealed_shard_entries(&dir)?
         .into_iter()
         .map(|(seq, _)| seq)
         .max()
-        // reason: session 目录下尚无任何 sealed shard 时序列号从 0 起算（+1 得首个分片序号 1）
-        .unwrap_or(0)
-        + 1)
+        .unwrap_or(0))
+}
+
+/// Persist the shard sequence counter durably: temp file -> fsync -> rename,
+/// plus an fsync of the parent directory so the rename survives a power cut.
+///
+/// The counter is written BEFORE the shard it numbers, so the on-disk
+/// high-watermark is never behind the shard set it governs — a stage reclaim
+/// that deletes shard files can therefore never reset the next sequence
+/// (ADR-020 Phase 2).
+fn persist_shard_seq(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    seq: u64,
+) -> anyhow::Result<()> {
+    let path = shard_seq_file(stage_root, machine, session_id);
+    let parent = path.parent().expect("shard seq file has a parent");
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create shard seq directory {}", parent.display()))?;
+    let tmp = parent.join(format!(".{}.tmp", SHARD_SEQ_FILE));
+    if tmp.exists() {
+        fs::remove_file(&tmp)?;
+    }
+    let mut f = fs::File::create(&tmp)
+        .with_context(|| format!("create shard seq temp file {}", tmp.display()))?;
+    f.write_all(seq.to_string().as_bytes())
+        .with_context(|| format!("write shard seq temp file {}", tmp.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync shard seq temp file {}", tmp.display()))?;
+    drop(f);
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("move shard seq into place {}", path.display()))?;
+    // Without this the rename can still be lost on a power cut, i.e. the
+    // counter would reset to the pre-rename value (or vanish) next boot.
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("fsync shard seq directory {}", parent.display()))?;
+    Ok(())
+}
+
+/// Reserve the next sequence number for a sealed session shard set and persist
+/// the advanced high-watermark counter before the caller writes the shard.
+///
+/// The counter, not the directory listing, is the source of sequence numbers:
+/// a stage reclaim that deletes already-archived shard files must not make the
+/// next sequence fall back and collide with archived shards (ADR-020 Phase 2).
+/// On first run the counter does not exist yet, so the initial high-watermark
+/// is derived from the shards already on disk (seamless migration — never 0).
+pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<u64> {
+    let high_water = match load_shard_seq_state(stage_root, machine, session_id) {
+        ShardSeqState::Missing => derive_shard_high_water(stage_root, machine, session_id)?,
+        ShardSeqState::Loaded(seq) => seq,
+        ShardSeqState::Unusable(error) => return Err(error.into_anyhow()),
+    };
+    let next = high_water + 1;
+    persist_shard_seq(stage_root, machine, session_id, next)?;
+    Ok(next)
 }
 
 /// Append a batch of lines as a new sealed shard. Returns the shard's file

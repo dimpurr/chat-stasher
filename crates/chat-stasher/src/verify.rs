@@ -63,6 +63,47 @@ impl CheckSummary {
     }
 }
 
+/// Where an L3 expected-manifest row came from.
+///
+/// The two bases have different evidential strength and must never be
+/// conflated. Hashing the shard bytes that are still on the staging disk is a
+/// direct check: "the archive still equals the bytes on disk". Reading a
+/// summary written earlier is weaker: "the archive still equals the numbers we
+/// computed some time ago", which says nothing about anything that changed
+/// before the summary was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectationBasis {
+    /// Expected values freshly derived by hashing the sealed shard bytes still
+    /// on the staging disk.
+    DerivedFromStageBody,
+    /// Expected values read back from the persisted per-session summary
+    /// (`manifest-v1.jsonl`), written while the body still existed.
+    StoredManifest,
+}
+
+impl ExpectationBasis {
+    /// Short machine-readable label for this basis.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::DerivedFromStageBody => "derived-from-stage",
+            Self::StoredManifest => "stored-manifest",
+        }
+    }
+
+    /// One-sentence description of what this basis actually proves, for
+    /// user-facing output.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::DerivedFromStageBody => {
+                "expected values derived by hashing sealed shard bytes on disk"
+            }
+            Self::StoredManifest => {
+                "expected values read from the persisted summary written earlier; this compares archived data against our own past numbers, not against current disk bytes"
+            }
+        }
+    }
+}
+
 /// One row of the L3 expected manifest: what the sealed stage says a session
 /// must be, once archived.
 #[derive(Debug, Clone)]
@@ -72,6 +113,8 @@ pub struct SessionExpectation {
     pub shard_count: usize,
     pub concat_bytes: u64,
     pub sha256: String,
+    /// Which authority this row's expected values came from.
+    pub basis: ExpectationBasis,
 }
 
 /// Verdict for one session after reconciling the archive against the expected
@@ -104,6 +147,11 @@ pub struct ReconcileRow {
     pub observed_bytes: u64,
     /// sha256 of the concatenation actually read back from the archive.
     pub observed_sha: String,
+    /// Which basis this row's expected values were compared against. A
+    /// consumer printing rows must surface this: `StoredManifest` is weaker
+    /// evidence than `DerivedFromStageBody` and must not be presented as the
+    /// same check.
+    pub basis: ExpectationBasis,
 }
 
 /// Full L3 result.
@@ -128,6 +176,18 @@ impl ReconcileReport {
         self.rows
             .iter()
             .filter(|r| r.outcome != SessionOutcome::Match)
+            .count()
+    }
+
+    /// How many rows were reconciled against the persisted summary rather than
+    /// fresh stage bytes. Zero in the normal body-present case. A caller that
+    /// prints L3 rows must surface this count (or the per-row basis): when it
+    /// is non-zero the run is comparing against our own past numbers, not
+    /// against the bytes on disk.
+    pub fn stored_basis_rows(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| r.basis == ExpectationBasis::StoredManifest)
             .count()
     }
 }
@@ -180,7 +240,7 @@ impl BackupStore {
         stage: &Path,
     ) -> anyhow::Result<ReconcileReport> {
         let start = Instant::now();
-        let expected = expected_manifest(stage)?;
+        let expected = load_expected_manifest(stage)?;
         let observation = self
             .read_all_machines(mk)
             .context("read archive back for reconcile")?;
@@ -228,6 +288,7 @@ impl BackupStore {
                     .map(|o| o.sha256.clone())
                     // reason: 远端归档中未找到对应会话时，观测到的分片数与字节数即为 0，sha 为空字符串
                     .unwrap_or_default(),
+                basis: exp.basis.clone(),
             });
         }
 
@@ -287,9 +348,56 @@ pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>
                 shard_count,
                 concat_bytes: concat.len() as u64,
                 sha256: hex_digest(&Sha256::digest(&concat)),
+                basis: ExpectationBasis::DerivedFromStageBody,
             });
         }
     }
+    out.sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
+    Ok(out)
+}
+
+/// Resolve the L3 expected manifest, preferring the strongest available
+/// basis: when the sealed shard body is still on the staging disk, derive the
+/// expectations fresh by hashing those bytes; when the body is gone, fall back
+/// to the persisted per-session summaries. No baseline at all is an error —
+/// L3 must never pass vacuously against an empty expectation list.
+pub fn load_expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
+    if stage_body_present(stage)? {
+        expected_manifest(stage)
+    } else {
+        stored_manifest_expectations(stage)
+    }
+}
+
+/// Whether the staging tree still holds any sealed shard (the "body"). Once
+/// the archived body is reaped this is false, and L3 must fall back to the
+/// persisted summary.
+fn stage_body_present(stage: &Path) -> anyhow::Result<bool> {
+    Ok(crate::store::sealed_shard_count(stage)? > 0)
+}
+
+/// Build expectations from the persisted summaries. Zero manifest files means
+/// no baseline exists — an error, never an empty expectation list.
+fn stored_manifest_expectations(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
+    let stored = crate::manifest::stored_manifest_rows(stage)?;
+    if stored.files == 0 {
+        anyhow::bail!(
+            "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against",
+            stage.join(crate::manifest::META_DIR).display()
+        );
+    }
+    let mut out: Vec<SessionExpectation> = stored
+        .rows
+        .iter()
+        .map(|row| SessionExpectation {
+            machine: row.machine.clone(),
+            session_id: row.session_id.clone(),
+            shard_count: row.shard_count,
+            concat_bytes: row.concat_bytes,
+            sha256: row.concat_sha256.clone(),
+            basis: ExpectationBasis::StoredManifest,
+        })
+        .collect();
     out.sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
     Ok(out)
 }
@@ -340,6 +448,7 @@ mod tests {
         assert_eq!(row.shard_count, 2);
         assert_eq!(row.concat_bytes, expected_bytes.len() as u64);
         assert_eq!(row.sha256, hex_digest(&Sha256::digest(&expected_bytes)));
+        assert_eq!(row.basis, ExpectationBasis::DerivedFromStageBody);
         drop(dir);
     }
 
@@ -347,6 +456,106 @@ mod tests {
     fn expected_manifest_is_empty_without_stage() {
         let dir = TempDir::new().unwrap();
         assert!(expected_manifest(dir.path()).unwrap().is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn expectation_basis_labels_are_distinct_and_descriptions_distinguish() {
+        let derived = ExpectationBasis::DerivedFromStageBody;
+        let stored = ExpectationBasis::StoredManifest;
+        assert_ne!(derived.label(), stored.label());
+        assert!(derived.describe().contains("bytes on disk"));
+        assert!(stored.describe().contains("past numbers"));
+        // The stored-manifest description must not sound like the same direct
+        // byte check — that conflation is exactly what the basis exists to stop.
+        assert!(!stored.describe().contains("bytes on disk"));
+    }
+
+    #[test]
+    fn reconcile_report_stored_basis_rows_counts_only_stored_rows() {
+        let row = |basis: ExpectationBasis| ReconcileRow {
+            machine: "m".into(),
+            session_id: "s".into(),
+            outcome: SessionOutcome::Match,
+            observed_shards: 0,
+            observed_bytes: 0,
+            observed_sha: String::new(),
+            basis,
+        };
+        let report = ReconcileReport {
+            machines: 1,
+            rows: vec![
+                row(ExpectationBasis::DerivedFromStageBody),
+                row(ExpectationBasis::StoredManifest),
+                row(ExpectationBasis::StoredManifest),
+            ],
+            extra_in_archive: Vec::new(),
+            duration: Duration::ZERO,
+        };
+        assert_eq!(report.stored_basis_rows(), 2);
+    }
+
+    #[test]
+    fn load_expected_manifest_derives_from_body_when_present() {
+        let dir = TempDir::new().unwrap();
+        let stage = dir.path();
+        let machine = "m-l3";
+        let session = "s-1";
+        let lines = vec![r#"{"x":1}"#.to_string()];
+        crate::store::write_sealed_shard(
+            crate::store::StageWriter::Collect,
+            stage,
+            machine,
+            session,
+            &lines,
+        )
+        .unwrap();
+        let rows = load_expected_manifest(stage).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].basis, ExpectationBasis::DerivedFromStageBody);
+        drop(dir);
+    }
+
+    #[test]
+    fn load_expected_manifest_falls_back_to_stored_when_body_gone() {
+        let dir = TempDir::new().unwrap();
+        let stage = dir.path();
+        let machine = "m-l3";
+        let session = "s-1";
+        let lines = vec![r#"{"x":1}"#.to_string()];
+        crate::store::write_sealed_shard(
+            crate::store::StageWriter::Collect,
+            stage,
+            machine,
+            session,
+            &lines,
+        )
+        .unwrap();
+        let rows = crate::manifest::generate_manifest_at(stage, machine, 1_736_944_496).unwrap();
+        crate::manifest::write_manifest(stage, machine, &rows).unwrap();
+        // Reap the body: the session shard tree disappears entirely.
+        fs::remove_dir_all(stage.join(crate::store::SESSIONS_DIR)).unwrap();
+
+        let expectations = load_expected_manifest(stage).unwrap();
+        assert_eq!(expectations.len(), 1);
+        assert_eq!(expectations[0].basis, ExpectationBasis::StoredManifest);
+        assert_eq!(expectations[0].session_id, session);
+        assert_eq!(expectations[0].shard_count, 1);
+        drop(dir);
+    }
+
+    #[test]
+    fn load_expected_manifest_errors_when_body_gone_and_no_baseline() {
+        let dir = TempDir::new().unwrap();
+        let stage = dir.path();
+        // Empty stage: no body, no stored summary. This must be an error, not
+        // a vacuous pass against zero expected rows.
+        let err = load_expected_manifest(stage).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("baseline") || msg.contains("nothing to reconcile"),
+            "error should explain the missing baseline: {msg}"
+        );
         drop(dir);
     }
 }
