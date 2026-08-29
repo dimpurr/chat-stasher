@@ -23,7 +23,7 @@ It is not one app, it is **two pieces**, each doing its own job:
 **On the CLI side:** its self-description is "Append-only archive for every LLM
 conversation, across harnesses." (`crates/chat-stasher/src/main.rs:34`). It
 reads session files that already exist on your machine, and reads them
-read-only (`crates/chat-stasher/src/main.rs:482`).
+read-only (`crates/chat-stasher/src/main.rs:496`).
 
 **On the extension side:** it currently recognizes **six** web platforms —
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
@@ -37,7 +37,7 @@ files at `chat-stasher/inbox/<name>.json` under the download directory
 
 **How the two sides connect:** the extension only writes files to disk; the CLI
 takes them away with `ingest --inbox <your-inbox> --stage <your-stage>`
-(`crates/chat-stasher/src/main.rs:457-479`).
+(`crates/chat-stasher/src/main.rs:471-493`).
 
 🔴 **"Recognizing the platform" does not mean "it can recover your history on
 that platform."** The extension has two legs; please read them separately:
@@ -215,14 +215,14 @@ See section 2. If you already did it, you do not need to do it again.
 The archive's destination is decided by your config and command-line arguments
 — a local path, or a backend you configure yourself. `push` / `read` / `verify`
 read the repository and key file you select in config or arguments
-(`crates/chat-stasher/src/main.rs:149-154,237-242,288-293`).
+(`crates/chat-stasher/src/main.rs:163-168,251-256,302-307`).
 
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1044-1046`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1102-1104`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1144-1152`).
+(`crates/chat-stasher/src/store.rs:1202-1210`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -232,7 +232,7 @@ with owner-only-readable permissions, on platforms that can express them
 service/timer — note its own words are "never installs it", i.e. it only
 generates files, **it does not install them for you**
 (`crates/chat-stasher/src/main.rs:86`). The generated template wraps a
-`run-once` command (`crates/chat-stasher/src/main.rs:86-131`).
+`run-once` command (`crates/chat-stasher/src/main.rs:86-145`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:48-85`).
@@ -249,12 +249,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:5485-5486`). This is the
+does not (`crates/chat-stasher/src/main.rs:5658-5659`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:5266-5267`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:5439-5440`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -270,7 +270,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:5476-5486`):
+(`crates/chat-stasher/src/main.rs:5649-5659`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -279,11 +279,11 @@ few lines and does not flood the screen
 - Finally, a fixed last line: `Details (one line per session): chat-stasher status --sessions`
 
 To see the per-session detail, add `--sessions`; that will be hundreds of lines
-(`crates/chat-stasher/src/main.rs:192-194`).
+(`crates/chat-stasher/src/main.rs:206-208`).
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:5334-5341`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:5507-5514`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -298,7 +298,7 @@ To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`.
 There is also a related command: `doctor`. It answers a different question —
 **whether any tool is silently deleting your history**. Its report contains
 only paths, counts, bytes, and timestamps
-(`crates/chat-stasher/src/main.rs:254-265`).
+(`crates/chat-stasher/src/main.rs:268-279`).
 
 ---
 
@@ -309,14 +309,14 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` (bulk recovery) command. Not in phase one.** The
   subcommand table has no `restore` entry
-  (`crates/chat-stasher/src/main.rs:44-760`). What you can do is `read`, which
+  (`crates/chat-stasher/src/main.rs:44-821`). What you can do is `read`, which
   dumps **one** conversation to standard output at a time
-  (`crates/chat-stasher/src/main.rs:209-253`). Bulk restore = for now you have
+  (`crates/chat-stasher/src/main.rs:223-267`). Bulk restore = for now you have
   to write your own script loop.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1044-1051`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1102-1109`).
 
 - **History backfill takes days, not minutes.** The backfill leg's rate limit
   for fetching content is **at most 200 per day**, with at least 20 seconds

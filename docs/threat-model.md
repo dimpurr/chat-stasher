@@ -32,10 +32,10 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/download.ts:28-32`).
 3. The Rust CLI reads those files (`ingest`) and/or reads local coding-harness
    session stores (`collect`, `status`), and produces *sealed shards* in a stage
-   directory (`crates/chat-stasher/src/main.rs:457-515`).
+   directory (`crates/chat-stasher/src/main.rs:471-529`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:132-169`).
+   (`crates/chat-stasher/src/main.rs:146-183`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary, and it is also the only step that can involve a network.
@@ -66,13 +66,13 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:261-296,919-1004`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:146-162`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:261-296,977-1062`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:146-162`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
 much you produced each time, and therefore roughly when you were and were not
 having conversations. If you archive on a schedule
-(`crates/chat-stasher/src/main.rs:86-131`), the schedule itself is visible to
+(`crates/chat-stasher/src/main.rs:86-145`), the schedule itself is visible to
 them as a pattern of writes. If you archive manually, the write times are a
 usage log.
 
@@ -108,14 +108,14 @@ Concretely, four separate plaintext exposures:
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
    inside a parent directory tightened to `0700`
-   (`crates/chat-stasher/src/store.rs:1086-1171`); on platforms without Unix
+   (`crates/chat-stasher/src/store.rs:1144-1229`); on platforms without Unix
    modes it inherits whatever the filesystem gives it. That keeps it away from
    *other* users, not from you: any process running as you can read it and,
    combined with access to your destination, decrypt the entire archive.
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:132-136`).
+   (`crates/chat-stasher/src/main.rs:146-150`).
 
 4. **Browser download history.** The two-phase write erases only the `.part`
    entry from the download shelf; the final file's entry is not erased
@@ -244,17 +244,17 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:1310-1313`). The module states the
+  (`crates/chat-stasher/src/sqlite_probe.rs:1364-1367`). The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:1902-1948`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2001-2047`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:170-171,253-254`).
+  (`crates/chat-stasher/src/main.rs:184-185,267-268`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:516-548`).
+  the old inode (`crates/chat-stasher/src/main.rs:530-562`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -270,9 +270,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:3989-4081`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:4118-4210`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:3972-3979`).
+  (`crates/chat-stasher/src/main.rs:4101-4108`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -283,7 +283,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:2769-2825`).
+  as many words (`crates/chat-stasher/src/main.rs:2855-2911`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -305,15 +305,15 @@ a real limitation of the current code.
 
 2. **The master key file is plaintext on disk.** It is not passphrase-wrapped
    and not kept in an OS keychain. On Unix it is created `0600` in a `0700`
-   parent (`crates/chat-stasher/src/store.rs:1086-1171`), which keeps it from
+   parent (`crates/chat-stasher/src/store.rs:1144-1229`), which keeps it from
    other users but not from anything running as you; on platforms without Unix
    modes it inherits the filesystem's defaults.
 
 3. **Lose the key file and the data is gone. We have no recovery mechanism of
    any kind.** The master key is the repository's only key
-   (`crates/chat-stasher/src/store.rs:1044-1046`); losing it makes the repository
+   (`crates/chat-stasher/src/store.rs:1102-1104`); losing it makes the repository
    unreadable, and `load_key_file` can only report the loss
-   (`crates/chat-stasher/src/store.rs:1173-1177`). There is no escrow, no
+   (`crates/chat-stasher/src/store.rs:1231-1235`). There is no escrow, no
    recovery code, no maintainer-held copy, and no password-reset path — by
    design, because any of those would mean someone other than you could open
    your archive. **Back up the key file separately from the repository, or your
@@ -322,10 +322,10 @@ a real limitation of the current code.
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:44-760`); **a bulk restore-to-disk command
+   (`crates/chat-stasher/src/main.rs:44-821`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:209-211,4059-4090`), and note that `read` therefore
+   (`crates/chat-stasher/src/main.rs:223-225,4188-4219`), and note that `read` therefore
    *is* a payload-output command — it prints conversation content. Restoring a
    whole archive is not something you can currently do with one command. If
    getting everything back in bulk matters to you, this is not ready for you
@@ -333,10 +333,10 @@ a real limitation of the current code.
 
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
    never fetches or decrypts a data blob; full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:350-365`). It also distinguishes "nothing
+   (`crates/chat-stasher/src/main.rs:364-379`). It also distinguishes "nothing
    matched" from "could not finish reading", which is the same
    unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:362-365`).
+   (`crates/chat-stasher/src/main.rs:376-379`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -415,5 +415,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:266-304`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:280-318`) rather than assuming
    the archive is intact.
