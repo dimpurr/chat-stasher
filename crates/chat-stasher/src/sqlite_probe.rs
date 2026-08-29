@@ -634,7 +634,11 @@ pub fn sqlite_store_bytes(db: &Path) -> Result<u64, String> {
 /// not a directory is a shape error. Ancestors that are themselves absent are
 /// fine — a harness that was never installed has no directory at all, and that
 /// is genuine absence, not a failure.
-fn confirm_absence(path: &Path) -> Result<(), String> {
+/// `pub(crate)`: the same "never infer absence" contract is shared by
+/// `store::load_shard_seq_state` (whose private `confirm_shard_seq_absence`
+/// mirrors this walk) and `doctor::inspect_reclaim`. One implementation, one
+/// promise.
+pub(crate) fn confirm_absence(path: &Path) -> Result<(), String> {
     let mut ancestor = path.parent();
     while let Some(dir) = ancestor {
         match fs::metadata(dir) {

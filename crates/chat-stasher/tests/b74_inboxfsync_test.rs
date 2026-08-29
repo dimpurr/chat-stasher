@@ -20,11 +20,20 @@
 //! Everything runs against a `tempfile` sandbox with a synthetic bundle. No real
 //! inbox, stage, repository or session body is touched, and the assertions only
 //! look at counts, path existence and the presence/absence of words.
-
-#![cfg(unix)]
+//!
+//! The two fault-injection tests are `#[cfg(unix)]`: their mechanism —
+//! `chmod`-ing a directory to `0o300` so `File::open(dir)` fails with `EACCES`
+//! while `rename` still works — is a POSIX permission feature Windows has no
+//! equivalent of through the standard API. That is not an excuse to skip the
+//! *property* on Windows: the durability proof this rig attacks is itself
+//! compiled out on Windows (`inbox.rs` gates the directory fsync behind
+//! `#[cfg(unix)]`), so the "rename proven durable" property does not exist
+//! there to assert. `ordinary_ingest_still_consumes_seals_and_retires` runs on
+//! every platform.
 
 use chat_stasher::inbox;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -52,6 +61,7 @@ fn write_bundle(inbox_dir: &Path) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 fn mode(path: &Path, bits: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
 }
@@ -76,6 +86,7 @@ fn mode(path: &Path, bits: u32) {
 ///
 /// Returns `None` when the sandbox cannot express "unreadable" (e.g. running as
 /// root), so the case is skipped instead of silently passing.
+#[cfg(unix)]
 fn rig_unfsyncable_bucket(stage: &Path, locked: &Path) -> Option<PathBuf> {
     let session_dir = stage.join("sessions").join(MACHINE).join(SESSION_ID);
     fs::create_dir_all(&session_dir).unwrap();
@@ -93,6 +104,9 @@ fn rig_unfsyncable_bucket(stage: &Path, locked: &Path) -> Option<PathBuf> {
     Some(bucket)
 }
 
+// Unix-only: chmod-based EACCES rig; the durability proof under test is itself
+// compiled out on Windows (see the file doc comment).
+#[cfg(unix)]
 #[test]
 fn shard_whose_rename_is_not_proven_durable_is_not_consumed_and_is_not_retired() {
     let sandbox = tempfile::tempdir().unwrap();
@@ -155,6 +169,7 @@ fn shard_whose_rename_is_not_proven_durable_is_not_consumed_and_is_not_retired()
 /// ingest over the untouched inbox file recognises the already-sealed bytes via
 /// `fileSha256` and reports a duplicate instead of writing a second shard. This
 /// is what makes "fatal for this one file" safe rather than obstructive.
+#[cfg(unix)]
 #[test]
 fn the_next_run_recovers_the_unproven_seal_through_content_dedup() {
     let sandbox = tempfile::tempdir().unwrap();
