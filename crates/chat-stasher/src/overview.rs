@@ -282,6 +282,8 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
         .iter()
         .map(|m| m.len())
         .max()
+        // reason: `machines.is_empty()` returned "(no sessions)" above, so this
+        // iterator is non-empty and max() is Some; 0 is an unreachable default.
         .unwrap_or(0)
         .clamp(1, width.saturating_sub(2).max(1));
     let mut col_w: Vec<usize> = harnesses.iter().map(|h| h.len()).collect::<Vec<_>>();
@@ -290,6 +292,9 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
             let n = cell_sessions
                 .get(&(m.clone(), h.clone()))
                 .copied()
+                // reason: column width is derived from the cell's real content,
+                // and cell_sessions only ever receives keys with ≥1 session — a
+                // missing key is a genuinely empty cell, 0 sessions.
                 .unwrap_or(0);
             let text = cell_text(n, &cell_lines, &cell_first, &cell_last, m, h);
             col_w[hi] = col_w[hi].max(text.len());
@@ -324,11 +329,17 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
             let n = cell_sessions
                 .get(&(m.clone(), h.clone()))
                 .copied()
+                // reason: same per-cell lookup as the width pass — the map is
+                // only written for pairs that had ≥1 session, so an absent key
+                // renders as an empty cell, never a dropped count.
                 .unwrap_or(0);
             let text = cell_text(n, &cell_lines, &cell_first, &cell_last, m, h);
             line.push_str(&pad_right(&truncate(&text, col_w[hi]), col_w[hi]));
             line.push(' ');
         }
+        // reason: unknown_by_machine is an accumulator only written for machines
+        // that had time-unknown sessions; a machine absent from it has zero such
+        // sessions, and 0 is that true zero.
         let uk = unknown_by_machine.get(m).copied().unwrap_or(0);
         line.push_str(&pad_right(&format!("{uk}"), 8));
         out.push_str(line.trim_end());
@@ -350,6 +361,9 @@ fn cell_text(
         return "-".to_string();
     }
     let key = (m.to_string(), h.to_string());
+    // reason: only reachable when n > 0 (n == 0 returned "-" above), and
+    // cell_lines is filled in the same loop, same key, unconditionally — so the
+    // lookup is guaranteed present; 0 is an unreachable type-level default.
     let l = lines.get(&key).copied().unwrap_or(0);
     match (first.get(&key), last.get(&key)) {
         (Some(a), Some(b)) => format!("{n} sessions·{l} lines·[{}~{}]", fmt_date(*a), fmt_date(*b)),
@@ -454,6 +468,8 @@ pub fn render_heatmap_gran(
         .iter()
         .map(|l| l.len())
         .max()
+        // reason: `labels.is_empty()` returned "(no sessions)" above, so this
+        // iterator is non-empty and max() is Some; 0 is an unreachable default.
         .unwrap_or(0)
         .clamp(1, 20);
 
@@ -462,6 +478,8 @@ pub fn render_heatmap_gran(
         let mut out = String::new();
         out.push_str(&format!("heatmap · y-axis={axis_name} · no known times\n"));
         for l in &labels {
+            // reason: `unknown` is tallied only for labels that had time-unknown
+            // sessions; a label absent from it has zero, and 0 is that true zero.
             let uk = unknown.get(l).copied().unwrap_or(0);
             out.push_str(&format!(
                 "{:<label_w$} {} {}\n",
@@ -538,7 +556,12 @@ pub fn render_heatmap_gran(
         Granularity::Week => "by week",
     };
     let mut out = String::new();
+    // reason: `(lo, hi)` was already destructured as `Some` above, so the day or
+    // week bucket list always has ≥1 label; the empty-string default only
+    // satisfies the type checker.
     let x_lo = bucket_labels.first().cloned().unwrap_or_default();
+    // reason: same provable non-emptiness as x_lo — the last label exists
+    // whenever lo/hi are Some, which the destructure above guarantees.
     let x_hi = bucket_labels.last().cloned().unwrap_or_default();
     out.push_str(&format!(
         "heatmap · y-axis={axis_name} · {gran_name} · x-axis {}..{} ({} buckets)\n",
@@ -549,9 +572,13 @@ pub fn render_heatmap_gran(
         let row_counts = counts.get(l);
         let mut chars = String::with_capacity(n_buckets);
         for b in &bucket_labels {
+            // reason: the heatmap's horizontal axis spans the full time range, so
+            // a bucket with no sessions for this label is a true empty bucket (0).
             let c = row_counts.and_then(|m| m.get(b)).copied().unwrap_or(0);
             chars.push(density_char(c, max_count));
         }
+        // reason: same accumulator as the no-known-times branch — a label absent
+        // from `unknown` has zero time-unknown sessions; 0 is the true zero.
         let uk = unknown.get(l).copied().unwrap_or(0);
         let uk_char = if uk > 0 { UNKNOWN } else { EMPTY };
         out.push_str(&format!(

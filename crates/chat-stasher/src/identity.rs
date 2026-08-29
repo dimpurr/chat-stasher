@@ -104,6 +104,9 @@ fn read_csprng(buf: &mut [u8]) -> anyhow::Result<()> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
+        // reason: only a clock before the epoch lands here; the time component is
+        // then meaningless, so 0 is as honest as any value, while COUNTER still
+        // varies so the hash input stays distinct within this process.
         .unwrap_or_default();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let digest = Sha256::digest(format!("{nanos}:{n}").as_bytes());

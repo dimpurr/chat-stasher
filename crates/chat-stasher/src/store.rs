@@ -882,6 +882,9 @@ fn derive_shard_high_water(
         .into_iter()
         .map(|(seq, _)| seq)
         .max()
+        // reason: the `?` above has already turned any read failure into an
+        // error, so reaching here means the entry list is provably empty and 0
+        // is the honest "no shards yet" high-water mark.
         .unwrap_or(0))
 }
 

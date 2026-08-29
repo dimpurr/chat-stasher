@@ -1040,6 +1040,8 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         connections: 1,
         options: BTreeMap::new(),
         cache_dir: config.rustic_cache_dir.as_deref().map(expand_tilde),
+        // reason: rustic_no_cache unset = rustic's default (cache on); a config
+        // default, not an unknown read result collapsed to false.
         no_cache: config.rustic_no_cache.unwrap_or(false),
     };
 
@@ -1251,6 +1253,8 @@ fn resolve_cache_root(config: &Config) -> PathBuf {
 /// pretending it is this machine's archive alone.
 pub fn inspect_cache(config: &Config) -> CacheCheck {
     let root = resolve_cache_root(config);
+    // reason: unset rustic_no_cache means "use the default (cache enabled)" —
+    // a config default, never an unknown turned into false.
     if config.rustic_no_cache.unwrap_or(false) {
         let leftover = measure_cache_dir(&root).ok();
         return CacheCheck::Disabled { root, leftover };
