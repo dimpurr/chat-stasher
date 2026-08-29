@@ -11,7 +11,7 @@ Your harness may already be deleting history before you notice.
 - **Gemini CLI:** its official session-management documentation puts sessions under `~/.gemini/tmp/<project_hash>/chats/` and says the default retention policy is 30 days. The project registry records that the directory is literally named `tmp`, although it contains chat history. ([official documentation](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md); `crates/chat-stasher/data/harness-registry-v1.json:84-124`.)
 - **This tool’s `doctor`:** the R1 audit ran it on the maintainer’s machine and found a live risk: one harness had no retention policy configured and its oldest session had already crossed the threshold. That is an audit observation, not a promise that every machine will show the same result.
 
-The useful first question is therefore not “is the archive elegant?” It is: **is any harness silently deleting my history right now?** `doctor` is intended to answer that question without modifying the source histories. (`crates/chat-stasher/src/main.rs:254-255`.)
+The useful first question is therefore not “is the archive elegant?” It is: **is any harness silently deleting my history right now?** `doctor` is intended to answer that question without modifying the source histories. (`crates/chat-stasher/src/main.rs:268-269`.)
 
 ## Install and first check
 
@@ -29,46 +29,46 @@ cd <your-directory>
 cargo run -- doctor
 ```
 
-`doctor` is the smallest useful path: it is read-only and reports paths, counts, bytes, and timestamps rather than session text. (`crates/chat-stasher/src/main.rs:254-255`.)
+`doctor` is the smallest useful path: it is read-only and reports paths, counts, bytes, and timestamps rather than session text. (`crates/chat-stasher/src/main.rs:268-269`.)
 
 **Verification status:** `cargo run -- --help` and `cargo run -- doctor` were both run successfully against this checkout. The `doctor` output is not reproduced here because it contains local paths.
 
 ## Commands
 
-The Rust source is the current command definition; the descriptions below were cross-checked against captured `--help` output. (`crates/chat-stasher/src/main.rs:44-760`.)
+The Rust source is the current command definition; the descriptions below were cross-checked against captured `--help` output. (`crates/chat-stasher/src/main.rs:44-821`.)
 
 - `init` — writes a commented default config if none exists; non-destructive. (`main.rs:45-46`.)
-- `run-once` — collects one pass from local sources, pushes when configured and changed, then exits. (`main.rs:47-84`.)
-- `schedule` — renders a launchd plist or systemd user service/timer template; never installs it. (`main.rs:85-130`.)
-- `push --stage <your-stage>` — moves sealed session shards into the rustic repository, creating the repository on first use and persisting the masterkey. (`main.rs:131-168`.)
-- `status` — reports whether scheduled archiving is working and summarizes local scanner findings (read-only). (`main.rs:169-207`.)
-- `read` — dumps one session as sequence-concatenated data and prints its SHA-256, or with `--all-machines` merges newest snapshots and reports per-session digests. (`main.rs:208-252`.)
-- `doctor` — diagnoses whether a harness may silently delete sessions; report is limited to paths, counts, bytes, and timestamps. (`main.rs:253-264`.)
-- `verify --level l1|l2|l3|all` — checks repository structure, repository content, and/or reconciles the archive with the sealed staging manifest. (`main.rs:265-303`.)
-- `dest-init` — initialises a new destination as a full extra copy from local and existing destinations. (`main.rs:304-348`.)
-- `search` — searches one destination's archive by session metadata. (`main.rs:349-399`.)
-- `view` — opens an ephemeral local web view of one destination's session list on 127.0.0.1. (`main.rs:400-455`.)
-- `ingest --inbox <your-inbox> --stage <your-stage>` — consumes complete `deepseek-<sessionId>.json` exports, skips `.part` files, creates sealed staging shards, retires consumed inputs, and deduplicates identical bytes. (`main.rs:456-478`.)
-- `collect --stage <your-stage>` — reads every scanner session into staging shards without mutating harness sources. (`main.rs:479-514`.)
-- `seal --harness <id> --active <your-active-file> --stage <your-stage>` — seals one file already inside `--stage` into the next sealed-shard slot; never renames a harness-owned path. (`main.rs:515-547`.)
-- `install-native-host` — writes the Native Messaging host manifest into each installed browser's discovery directory so the extension can hand conversations to this binary directly instead of through the download folder; `--uninstall` removes exactly those files and nothing else, and every path touched is printed. Per-user, no elevation. (`main.rs:548-605`.)
-- `native-host --self-test` — prints one line of JSON and exits; it is the check that the host process starts. The framed stdio message loop is **not implemented in this version**, and the subcommand exits 2 rather than pretending to serve a connection. (`main.rs:606-622`.)
+- `run-once` — collects one pass from local sources, pushes when configured and changed, then exits. (`main.rs:48-85`.)
+- `schedule` — renders a launchd plist or systemd user service/timer template; never installs it. (`main.rs:86-145`.)
+- `push --stage <your-stage>` — moves sealed session shards into the rustic repository, creating the repository on first use and persisting the masterkey. (`main.rs:146-183`.)
+- `status` — reports whether scheduled archiving is working and summarizes local scanner findings (read-only). (`main.rs:183-221`.)
+- `read` — dumps one session as sequence-concatenated data and prints its SHA-256, or with `--all-machines` merges newest snapshots and reports per-session digests. (`main.rs:223-267`.)
+- `doctor` — diagnoses whether a harness may silently delete sessions; report is limited to paths, counts, bytes, and timestamps. (`main.rs:267-278`.)
+- `verify --level l1|l2|l3|all` — checks repository structure, repository content, and/or reconciles the archive with the sealed staging manifest. (`main.rs:280-318`.)
+- `dest-init` — initialises a new destination as a full extra copy from local and existing destinations. (`main.rs:319-363`.)
+- `search` — searches one destination's archive by session metadata. (`main.rs:364-414`.)
+- `view` — opens an ephemeral local web view of one destination's session list on 127.0.0.1. (`main.rs:415-470`.)
+- `ingest --inbox <your-inbox> --stage <your-stage>` — consumes complete `deepseek-<sessionId>.json` exports, skips `.part` files, creates sealed staging shards, retires consumed inputs, and deduplicates identical bytes. (`main.rs:470-492`.)
+- `collect --stage <your-stage>` — reads every scanner session into staging shards without mutating harness sources. (`main.rs:493-528`.)
+- `seal --harness <id> --active <your-active-file> --stage <your-stage>` — seals one file already inside `--stage` into the next sealed-shard slot; never renames a harness-owned path. (`main.rs:529-561`.)
+- `install-native-host` — writes the Native Messaging host manifest into each installed browser's discovery directory so the extension can hand conversations to this binary directly instead of through the download folder; `--uninstall` removes exactly those files and nothing else, and every path touched is printed. Per-user, no elevation. (`main.rs:609-666`.)
+- `native-host --self-test` — prints one line of JSON and exits; it is the check that the host process starts. The framed stdio message loop is **not implemented in this version**, and the subcommand exits 2 rather than pretending to serve a connection. (`main.rs:667-683`.)
 
-There is no `scan` subcommand in the current source; `status` is the scanner-facing command. (`main.rs:169-207`.)
+There is no `scan` subcommand in the current source; `status` is the scanner-facing command. (`main.rs:183-221`.)
 
 ## What it reads, writes, and sends
 
 The paths below are placeholders on purpose. Do not paste real account names, hostnames, or keys into examples.
 
-- `status` reads the local harness locations known to the registry and prints IDs, paths, sizes, mtimes, and flags; it does not print session content. (`main.rs:4974-4975`.)
-- `doctor` reads local harness metadata for its diagnostic report; its declared output is paths, counts, bytes, and timestamps. (`main.rs:253-254`.)
-- `ingest` reads complete export files from the `--inbox` you provide and writes sealed shards beneath the `--stage` you provide; consumed inputs are moved under `<your-inbox>/consumed/`. It prints paths, counts, and SHA-256 values, not conversation text. (`main.rs:456-478`.)
-- `seal` reads the registry and the active file you name, then may rename that file into the stage tree. The registry policy and confidence gate are part of the decision. (`main.rs:515-547`.)
-- `push`, `read`, and `verify` read the repository and key file selected by config or flags. They can use a backend you explicitly configure with repository options; do not assume those three commands are offline. (`main.rs:131-168`; `main.rs:208-252`; `main.rs:265-303`.)
+- `status` reads the local harness locations known to the registry and prints IDs, paths, sizes, mtimes, and flags; it does not print session content. (`main.rs:5763-5790`.)
+- `doctor` reads local harness metadata for its diagnostic report; its declared output is paths, counts, bytes, and timestamps. (`main.rs:267-268`.)
+- `ingest` reads complete export files from the `--inbox` you provide and writes sealed shards beneath the `--stage` you provide; consumed inputs are moved under `<your-inbox>/consumed/`. It prints paths, counts, and SHA-256 values, not conversation text. (`main.rs:470-492`.)
+- `seal` reads the registry and the active file you name, then may rename that file into the stage tree. The registry policy and confidence gate are part of the decision. (`main.rs:529-561`.)
+- `push`, `read`, and `verify` read the repository and key file selected by config or flags. They can use a backend you explicitly configure with repository options; do not assume those three commands are offline. (`main.rs:146-183`; `main.rs:223-267`; `main.rs:280-318`.)
 
-What does not leave the process through the metadata-only paths: `status`, `doctor`, and `ingest` do not print conversation bodies, and the ingest summary is explicitly metadata-only. (`main.rs:456-478`; `main.rs:4974-4975`.) `read` is intentionally different: its single-session mode dumps session data to your stdout, so treat that command as payload output. (`main.rs:208-210,4059-4090`.)
+What does not leave the process through the metadata-only paths: `status`, `doctor`, and `ingest` do not print conversation bodies, and the ingest summary is explicitly metadata-only. (`main.rs:470-492`; `main.rs:5763-5790`.) `read` is intentionally different: its single-session mode dumps session data to your stdout, so treat that command as payload output. (`main.rs:222-224,4188-4219`.)
 
-The destination is selected by your config and flags: local stage/repository paths or a backend you configure. The source exposes repository, key-file, and backend-option inputs rather than a hard-coded destination. (`main.rs:47-84`; `main.rs:131-168`.)
+The destination is selected by your config and flags: local stage/repository paths or a backend you configure. The source exposes repository, key-file, and backend-option inputs rather than a hard-coded destination. (`main.rs:48-85`; `main.rs:146-183`.)
 
 ## What this does not do / current limits
 
@@ -76,13 +76,13 @@ This section is intentionally blunt:
 
 - **Zed and Cursor session enumeration is not implemented in this version.** Their registry entries are path research, not a promise that `status` can enumerate their conversations; Cursor’s registry evidence is explicitly community-only, and Zed’s macOS path is not individually verified. (`crates/chat-stasher/data/harness-registry-v1.json:362-397`; `crates/chat-stasher/data/harness-registry-v1.json:165-211`.)
 - **Claude Code on Windows has an unresolved path-sanitize detail.** The registry says the exact handling of the drive-letter colon and backslash in the short-path form is not determined and needs a real Windows test. (`crates/chat-stasher/data/harness-registry-v1.json:28`.)
-- **`ingest` is not a generic import API.** Its documented input is complete `deepseek-<sessionId>.json` exports; `.part` files are skipped, and the source notes that bundles carry no account field. (`main.rs:456-478`.)
+- **`ingest` is not a generic import API.** Its documented input is complete `deepseek-<sessionId>.json` exports; `.part` files are skipped, and the source notes that bundles carry no account field. (`main.rs:470-492`.)
 - **The browser extension's history backfill works on exactly one platform, and "lists your conversations" is not the same as "saves them."** There are three tiers, and the middle one is the easy one to misread:
   - **Backfill can recover the actual conversation text: ChatGPT only.** (`apps/extension/lib/backfill/enumerate.ts:762`.)
   - **Backfill can list your conversations but saves none of their content: DeepSeek and Perplexity.** (`apps/extension/lib/backfill/enumerate.ts:774`.) With backfill enabled on these two, the extension enumerates your existing conversations and shows a pending count — **and then writes nothing to disk.** No file lands in your download directory, so **your DeepSeek and Perplexity history is not backed up.** The reason is recorded in the code: the *list* endpoint for each has cross-checked open-source provenance, the *single-conversation* endpoint has none, and we will not guess one — a wrong guess would not error, it would silently archive the first few turns of every chat while you believed it had them all (`apps/extension/lib/backfill/enumerate.ts:538-548`, `:603-611`).
   - **Backfill is not implemented at all: Gemini, Claude, Kimi.** The leg halts before issuing any request (`apps/extension/lib/backfill/enumerate.ts:643`).
   The extension's popup states the same three tiers in the same terms (`apps/extension/lib/popup-view.ts:498-514`). This limit is about **backfill of past conversations**; passive capture of the conversation currently open in your browser is a separate leg with its own per-platform table (`apps/extension/lib/contract.ts:69-303`).
-- **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:515-547`; `crates/chat-stasher/data/harness-registry-v1.json:71-72`.)
+- **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:529-561`; `crates/chat-stasher/data/harness-registry-v1.json:71-72`.)
 - **The release gate is not a substitute for installation.** `scripts/release-gate.sh` expects a built `target/debug/chat-stasher`, generates synthetic opaque fixtures by default (with `--real-data` for optional local Claude sessions), and exercises push/read/verify/doctor. (`scripts/release-gate.sh:3-21`.)
 - **License.** The project is licensed under the Apache License 2.0 (`LICENSE:2-3`; `crates/chat-stasher/Cargo.toml:5`).
 
@@ -111,9 +111,9 @@ Three things worth knowing before reading either:
 
 - **Your master key file is the only key.** Lose it and the archive is
   unreadable forever, with no recovery path of any kind
-  (`crates/chat-stasher/src/store.rs:1044-1051`, `:1006-1010`).
+  (`crates/chat-stasher/src/store.rs:1102-1109`, `:1064-1068`).
 - **There is no restore command.** `read` returns one session at a time to
-  stdout (`crates/chat-stasher/src/main.rs:209-211,4059-4090`); bulk restore is not
+  stdout (`crates/chat-stasher/src/main.rs:223-225,4188-4219`); bulk restore is not
   implemented.
 - **Captured conversations are plaintext on disk** in your download directory
   until `ingest` consumes them (`apps/extension/lib/download.ts:91-93`).
