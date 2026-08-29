@@ -96,10 +96,10 @@ jobs:
       # ⚠️ 这不是删 job：发版路径上 macOS 与 release-gate 一格不少。
       matrix:
         include: ${{ fromJSON(github.ref_type == 'tag'
-          && '[{"os":"macos-latest","release_gate":true},{"os":"ubuntu-latest","release_gate":false},{"os":"windows-latest","release_gate":false}]'
+          && '[{"os":"macos-latest"},{"os":"ubuntu-latest"},{"os":"windows-latest"}]'
           || (github.event_name == 'push')
-          && '[{"os":"ubuntu-latest","release_gate":false}]'
-          || '[{"os":"ubuntu-latest","release_gate":false},{"os":"windows-latest","release_gate":false}]') }}
+          && '[{"os":"ubuntu-latest"}]'
+          || '[{"os":"ubuntu-latest"},{"os":"windows-latest"}]') }}
 
     steps:
       - name: Check out repository
@@ -162,26 +162,24 @@ jobs:
       # for this workflow change. Until then these two cells are honestly
       # uncovered — they are NOT marked continue-on-error and NOT faked green.
       # ---------------------------------------------------------------------
-      - name: Create synthetic release-gate input
-        if: matrix.release_gate
+      # One line, because scripts/release-gate.sh now provides its own synthetic
+      # fixture and builds the debug binary it needs. It used to take three steps
+      # here and three more in release.yml — two copies of a gate, which is how
+      # gates drift apart, and the copy nobody looks at is the one that rots.
+      #
+      # It also moved off "macOS on a tag only": the script was macOS-only solely
+      # because it used BSD `stat -f %z`, the same flag that once left the ubuntu
+      # job red for two days. With that probed rather than assumed, the gate runs
+      # on every push — which is the whole point, since a gate that first speaks
+      # at release time can only block you at the worst possible moment.
+      #
+      # COVERAGE HOLE (deliberate, stated): not run on Windows. The script is
+      # `#!/usr/bin/env bash` and invokes `target/debug/chat-stasher` with no
+      # `.exe` suffix. That is a real gap, not a masked failure — no assertion is
+      # weakened and nothing is marked continue-on-error.
+      - name: Release gate
+        if: runner.os != 'Windows'
         shell: bash
-        run: |
-          set -euo pipefail
-          fixture_root="$RUNNER_TEMP/chat-stasher-claude-projects"
-          mkdir -p "$fixture_root"
-          for n in 1 2 3; do
-            file="$fixture_root/synthetic-$n.jsonl"
-            : > "$file"
-            for i in $(seq 1 600); do
-              printf '{"synthetic":true,"session":%s,"event":%s}\n' "$n" "$i" >> "$file"
-            done
-          done
-
-      - name: Run release gate
-        if: matrix.release_gate
-        shell: bash
-        env:
-          CLAUDE_PROJECTS_DIR: ${{ runner.temp }}/chat-stasher-claude-projects
         run: bash scripts/release-gate.sh
 
   # ---------------------------------------------------------------------------

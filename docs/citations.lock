@@ -227,10 +227,10 @@ apps/extension/wxt.config.ts:36  f2a0c650d9ac  lines=1
   <- docs/privacy.md:113, docs/privacy.md:280, docs/privacy.md:304  :: permissions: ['downloads', 'storage', 'alarms', 'nativeMess…
 apps/extension/wxt.config.ts:59  84787b717b3c  lines=1
   <- docs/privacy.md:129  :: data_collection_permissions: { required: ['none'] },
-crates/chat-stasher/Cargo.toml:1-6  7acd0b20a508  lines=6
+crates/chat-stasher/Cargo.toml:1-6  67c6d5782580  lines=6
   <- docs/install.md:117  :: [package]
-crates/chat-stasher/Cargo.toml:3  f5efcadb7997  lines=1
-  <- SECURITY.md:48  :: version = "0.1.0"
+crates/chat-stasher/Cargo.toml:3  608a3132dc6f  lines=1
+  <- SECURITY.md:48  :: version = "0.2.0"
 crates/chat-stasher/Cargo.toml:5  53a903362b38  lines=1
   <- README.md:87  :: description = "Append-only archive for every LLM conversati…
 crates/chat-stasher/Cargo.toml:14-27  096bce56001a  lines=14
@@ -393,5 +393,5 @@ crates/chat-stasher/src/store.rs:1231-1235  6e8994a07a1c  lines=5
   <- docs/threat-model.md:316  :: /// Load the masterkey from `cfg.key_file` (error when miss…
 scripts/release-gate.sh:2-3  44aa3a8e0acf  lines=2
   <- README.md:87  :: #
-scripts/release-gate.sh:3-21  75d1ecc09a7a  lines=19
+scripts/release-gate.sh:3-21  d6f983c5d039  lines=19
   <- README.md:86  :: # release-gate.sh — one command that runs the whole chat-st…

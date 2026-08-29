@@ -21,7 +21,7 @@ before trusting this file.
 2. Put `chat-stasher.rb` in the repo (root **or** `Formula/` — see §2).
 3. Copy the `README.md` as the repo's README.
 4. Replace the placeholder `sha256` in the formula with the real digest (§5).
-5. Create the `v0.1.0` GitHub Release in `dimpurr/chat-stasher` with
+5. Create the `v0.2.0` GitHub Release in `dimpurr/chat-stasher` with
    `chat-stasher-darwin-arm64` + `SHA256SUMS` (§5).
 6. Test: `brew install dimpurr/chat-stasher/chat-stasher` (§6).
 
@@ -103,7 +103,7 @@ The formula at `packaging/homebrew/chat-stasher.rb` is a **binary formula**:
   On Linux the formula has no URL and install fails early — by design.
 - `def install` just copies the staged artifact to `bin/chat-stasher`.
 - `test do` runs `chat-stasher --version` and asserts the output contains
-  `chat-stasher 0.1.0` — a real check, not an empty block.
+  `chat-stasher 0.2.0` — a real check, not an empty block.
 
 **Keep the artifact names in sync with the main repo.** The three places that
 must agree:
@@ -142,7 +142,7 @@ the same commit, `brew install` will fetch a 404.
 
    ```sh
    git add -A
-   git commit -m "Add chat-stasher formula v0.1.0"
+   git commit -m "Add chat-stasher formula v0.2.0"
    git push -u origin main
    ```
 
@@ -151,7 +151,7 @@ the same commit, `brew install` will fetch a 404.
 
 ---
 
-## 5. Publish the v0.1.0 release (must happen before users can install)
+## 5. Publish the v0.2.0 release (must happen before users can install)
 
 `brew install` downloads the binary from the **main** repository's GitHub
 Release, so the release must exist first:
@@ -162,8 +162,8 @@ Release, so the release must exist first:
    bash scripts/release-artifacts.sh   # writes dist/ with binary + SHA256SUMS
    ```
 
-2. Create a GitHub Release tagged **`v0.1.0`** (the tag must be exactly
-   `v0.1.0` — `install.sh` and the formula both use `v${VERSION}`), and upload
+2. Create a GitHub Release tagged **`v0.2.0`** (the tag must be exactly
+   `v0.2.0` — `install.sh` and the formula both use `v${VERSION}`), and upload
    from `dist/`:
    - `chat-stasher-darwin-arm64`
    - `SHA256SUMS`
@@ -197,7 +197,7 @@ brew untap dimpurr/chat-stasher 2>/dev/null; true
 # Fully-qualified form — Homebrew auto-taps, no explicit `brew tap` needed:
 brew install dimpurr/chat-stasher/chat-stasher
 
-chat-stasher --version   # → chat-stasher 0.1.0
+chat-stasher --version   # → chat-stasher 0.2.0
 chat-stasher doctor      # → runs and reports (may exit non-zero if a timer is unhealthy; that's expected)
 ```
 

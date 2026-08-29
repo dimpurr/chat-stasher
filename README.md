@@ -83,7 +83,7 @@ This section is intentionally blunt:
   - **Backfill is not implemented at all: Gemini, Claude, Kimi.** The leg halts before issuing any request (`apps/extension/lib/backfill/enumerate.ts:643`).
   The extension's popup states the same three tiers in the same terms (`apps/extension/lib/popup-view.ts:498-514`). This limit is about **backfill of past conversations**; passive capture of the conversation currently open in your browser is a separate leg with its own per-platform table (`apps/extension/lib/contract.ts:69-303`).
 - **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:529-561`; `crates/chat-stasher/data/harness-registry-v1.json:71-72`.)
-- **The release gate is not a substitute for installation.** `scripts/release-gate.sh` expects a built `target/debug/chat-stasher`, generates synthetic opaque fixtures by default (with `--real-data` for optional local Claude sessions), and exercises push/read/verify/doctor. (`scripts/release-gate.sh:3-21`.)
+- **The release gate is not a substitute for installation.** `scripts/release-gate.sh` builds `target/debug/chat-stasher` if it is missing and generates its own synthetic opaque fixtures, so a contributor can run it with no arguments and no setup (`--real-data` opts into local Claude sessions instead). It exercises push/read/verify/doctor. (`scripts/release-gate.sh:3-21`.)
 - **License.** The project is licensed under the Apache License 2.0 (`LICENSE:2-3`; `crates/chat-stasher/Cargo.toml:5`).
 
 ## Security and privacy
