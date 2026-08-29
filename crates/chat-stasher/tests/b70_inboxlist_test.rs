@@ -106,6 +106,14 @@ fn unlock_file(path: &Path) {
 }
 
 /// The regression itself.
+///
+/// Unix-only: "the record cannot be read" is injected by chmodding the file to
+/// 0o000, and Windows has no standard-API equivalent of an unreadable file.
+/// The two normal-path arms around it — `machine_that_never_used_an_inbox_is_
+/// unchanged` and `readable_but_empty_record_prints_exactly_what_no_record_
+/// prints` — run on every platform, so on Windows the "unknown must not become
+/// inboxes=0" property is pinned from the sides that Windows can express while
+/// the chmod arm is documented rather than faked.
 #[test]
 #[cfg(unix)]
 fn unreadable_inbox_record_is_not_reported_as_a_passing_audit() {

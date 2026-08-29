@@ -756,7 +756,9 @@ pub const SHARD_SEQ_FILE: &str = "shard-seq";
 /// archived shards.
 #[derive(Debug)]
 pub enum ShardSeqState {
-    /// The counter file does not exist (io::ErrorKind::NotFound).
+    /// The counter file is confirmed absent: the path resolves through real
+    /// directories to a missing leaf (never a broken path masquerading as
+    /// absence).
     Missing,
     /// The counter was read and parsed successfully.
     Loaded(u64),
@@ -783,15 +785,68 @@ pub fn shard_seq_file(stage_root: &Path, machine: &str, session_id: &str) -> Pat
     session_shard_dir(stage_root, machine, session_id).join(SHARD_SEQ_FILE)
 }
 
+/// Decide whether a `NotFound` from reading the shard sequence file really
+/// means "the counter is not there", or only means "the path could not be
+/// resolved". The two are the same error on Windows: `ERROR_PATH_NOT_FOUND`
+/// is folded into `io::ErrorKind::NotFound`, so a path component that is a
+/// regular file looks exactly like a missing counter. (Mirrors
+/// `sqlite_probe::confirm_absence`, which keeps the same promise.)
+///
+/// Absence is *confirmed*, never inferred: walk up until some ancestor exists
+/// and require it to be a directory. An ancestor that exists but is not a
+/// directory is a shape error. Ancestors that are themselves absent are fine —
+/// a session that was never written has no directory at all, and that is
+/// genuine absence, not a failure.
+fn confirm_shard_seq_absence(path: &Path) -> Result<(), std::io::Error> {
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        match fs::metadata(dir) {
+            Ok(md) if md.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!(
+                        "path component {} is not a directory, so the absence of {} is unproven",
+                        dir.display(),
+                        path.display()
+                    ),
+                ))
+            }
+            // This ancestor is absent too; keep walking. The whole subtree
+            // simply may not exist.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ancestor = dir.parent(),
+            Err(e) => return Err(e),
+        }
+    }
+    // Ran out of ancestors without meeting anything: nothing along the path
+    // exists, which is absence, not failure.
+    Ok(())
+}
+
 /// Read and classify the shard sequence counter without losing the filesystem
-/// error kind. `Missing` is produced only by `io::ErrorKind::NotFound`;
-/// anything else is `Unusable` and must be repaired, not treated as zero.
+/// error kind. `Missing` is produced only by a *confirmed* absence: the
+/// `NotFound` must survive [`confirm_shard_seq_absence`], which walks up to
+/// the first existing ancestor and requires it to be a directory. Anything
+/// else — including a `NotFound` caused by a path component being a regular
+/// file, which Windows folds into the same error code — is `Unusable` and must
+/// be repaired, not treated as zero.
 pub fn load_shard_seq_state(stage_root: &Path, machine: &str, session_id: &str) -> ShardSeqState {
     let path = shard_seq_file(stage_root, machine, session_id);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ShardSeqState::Missing;
+            // Windows maps a path whose component is a regular file to the
+            // same `NotFound` as a genuinely absent file. Absence must be
+            // confirmed — a broken path is an unknown, never a fresh counter.
+            return match confirm_shard_seq_absence(&path) {
+                Ok(()) => ShardSeqState::Missing,
+                Err(shape) => ShardSeqState::Unusable(ShardSeqError::Read(
+                    anyhow::Error::new(shape).context(format!(
+                        "cannot read shard sequence file {} (do not delete this file)",
+                        path.display()
+                    )),
+                )),
+            };
         }
         Err(error) => {
             return ShardSeqState::Unusable(ShardSeqError::Read(
@@ -1394,6 +1449,18 @@ mod tests {
     /// default mode. The control assertion matters as much as the subject: a
     /// plain `fs::write` in the same directory is checked first, so a test that
     /// passes because the filesystem hands out 0600 anyway would be caught.
+    ///
+    /// Unix-only: the whole mechanism is the POSIX mode bit — including the
+    /// control, which needs a filesystem that visibly hands out a loose default
+    /// mode so the test can tell a fix apart from the default. Windows has no
+    /// mode bits (its `std::fs::Permissions` carries an ACL read/write pair,
+    /// not owner/group/other), so neither the subject nor the control can be
+    /// expressed. The owner-only restriction on Windows is enforced through
+    /// `persist_identity`'s ACL-equivalent path elsewhere and is not asserted
+    /// here; the file's *writable only by the owner* property is covered on
+    /// Windows by the sibling roundtrip test
+    /// `normal_path_still_creates_a_key_that_the_next_run_loads` (b66), which
+    /// proves the key lands and loads on every platform.
     #[cfg(unix)]
     #[test]
     fn masterkey_file_is_owner_only_and_a_plain_write_is_not() {

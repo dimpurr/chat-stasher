@@ -8,18 +8,22 @@
 //! so the *reported* failure was a missing diagnostic line in an unrelated
 //! test, and the real cause stayed hidden for days.
 //!
-//! `main` now does its work on a thread whose stack it sizes itself. This test
-//! pins that: run the real binary with a deliberately tiny stack limit and it
-//! must still parse arguments. `--version` is the right probe precisely
-//! because it does nothing else — if it survives, argument parsing survives,
-//! and argument parsing is what was overflowing.
+//! `main` now does its work on a thread whose stack it sizes itself (16 MiB).
+//! The two arms pin that from opposite directions:
 //!
-//! Unix-only because `ulimit -s` is how the limit is lowered; the guard is
-//! `cfg(unix)` rather than `cfg(target_os)` because `ulimit -s` is POSIX and
-//! behaves the same on Linux and macOS (an earlier guard in this repo used a
-//! BSD-only `stat` flag and silently never fired on Linux).
-
-#![cfg(unix)]
+//!   * **Unix** lowers the stack with `ulimit -s` and runs the real binary
+//!     under a limit well below what Windows gives its main thread — argument
+//!     parsing must still survive. The guard is `cfg(unix)` rather than
+//!     `cfg(target_os)` because `ulimit -s` is POSIX and behaves the same on
+//!     Linux and macOS (an earlier guard in this repo used a BSD-only `stat`
+//!     flag and silently never fired on Linux). Windows has no `ulimit`, so
+//!     the stack-lowering dimension cannot be reproduced there through this
+//!     API.
+//!   * **Windows** runs the un-lowered binary. That is not a weaker probe: the
+//!     original defect overflowed the *ordinary* 1 MiB main thread, so on the
+//!     platform that actually had the bug, a bare `--version` is the full
+//!     regression test. Before the `main`-on-16-MiB-thread fix this arm fails
+//!     with STATUS_STACK_OVERFLOW (exit 0xC00000FD) and no version output.
 
 use std::process::Command;
 
@@ -28,6 +32,7 @@ use std::process::Command;
 /// spawning thread, and the OS needs room to create the worker thread at all.
 const TINY_STACK_KIB: u32 = 256;
 
+#[cfg(unix)]
 #[test]
 fn argument_parsing_survives_a_stack_smaller_than_windows_gives() {
     let bin = env!("CARGO_BIN_EXE_chat-stasher");
@@ -51,6 +56,32 @@ fn argument_parsing_survives_a_stack_smaller_than_windows_gives() {
     assert!(
         output.status.success(),
         "`--version` under a {TINY_STACK_KIB} KiB stack must succeed; exit={:?}\n\
+         stdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("chat-stasher"),
+        "`--version` must still print the version; stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn argument_parsing_survives_the_windows_main_thread_stack() {
+    let bin = env!("CARGO_BIN_EXE_chat-stasher");
+    let output = Command::new(bin)
+        .arg("--version")
+        .output()
+        .expect("spawn binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The original defect died inside Cli::parse with STATUS_STACK_OVERFLOW —
+    // a non-zero exit with nothing on stdout. Both conditions are asserted.
+    assert!(
+        output.status.success(),
+        "`--version` must succeed on Windows' 1 MiB main thread; exit={:?}\n\
          stdout={stdout}\nstderr={stderr}",
         output.status.code()
     );

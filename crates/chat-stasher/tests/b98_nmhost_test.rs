@@ -363,10 +363,12 @@ fn linux_layout_shape_is_dot_config_and_dot_mozilla() {
 
 /// Windows layout + registry argv shape.
 ///
-/// ⚠️ UNVERIFIED against a real registry: no Windows machine was available for
-/// this ticket. This asserts only what can be asserted from macOS — that the
-/// JSON lands somewhere concrete and that the `reg.exe` argv is well formed and
-/// per-user (`HKCU`, never `HKLM`, which would need elevation).
+/// Both arms of the final assertion run on their own platform, so the shape is
+/// pinned on Windows CI as well as off it. What is still *not* verified is an
+/// actual write to a live registry: this test never executes `reg.exe`, only
+/// the printed command line (asserting it targets `HKCU`, never `HKLM`, which
+/// would need elevation), plus the manifest JSON landing where Windows looks
+/// for it under `LocalAppData`.
 #[test]
 fn windows_shape_writes_json_and_prints_the_hkcu_registry_command() {
     let tmp = tempfile::tempdir().unwrap();

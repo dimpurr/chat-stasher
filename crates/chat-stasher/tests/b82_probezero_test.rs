@@ -177,6 +177,14 @@ fn plant_readable_store(db: &Path) -> PathBuf {
 /// `state=Missing, note="单文件不存在"`, the path went into `missing_roots`,
 /// and the doctor table printed `不存在 … 会话=0`. Rolling the fix back makes
 /// every assertion below fail on exactly that output.
+///
+/// Unix-only: the "stat failed" injection is a chmod, and Windows has no
+/// standard-API way to make a directory un-stat-able. The property — a failed
+/// stat must not be reported as absent — is asserted on every platform by the
+/// sibling tests that reach the same code through a path Windows *can*
+/// express: `a2_wrong_path_type...` (the wrong-kind branch) and, at the store
+/// level, B85's `a7`/`a7b` and `a8_failed_sqlite_stat_cannot_form_a_fingerprint`
+/// (a parent component that is a file, which Windows folds into NotFound).
 #[cfg(unix)]
 #[test]
 fn a2_unstattable_single_file_root_is_not_reported_as_absent() {
@@ -320,6 +328,12 @@ fn a3_status_qualifies_its_zero_when_a_harness_was_never_looked_at() {
 /// printed "globalStorage/state.vscdb 不存在，legacy workspaceStorage 也未找到
 /// 可读 composer 数据" — an absence claim built out of a directory nobody was
 /// allowed to open.
+///
+/// Unix-only: the un-enumerable directory is made so with a chmod; Windows has
+/// no standard-API equivalent. The sibling `a4_unreadable_workspace_database`
+/// covers the same fix's counting half on Unix; the property is covered on
+/// Windows at the store level by B85's `a7`/`a7b` (NotFound-from-broken-path
+/// must not become a measured absence).
 #[cfg(unix)]
 #[test]
 fn a4_unenumerable_cursor_legacy_storage_is_not_reported_as_no_data() {
@@ -358,6 +372,12 @@ fn a4_unenumerable_cursor_legacy_storage_is_not_reported_as_no_data() {
 /// The `sqlite_probe` half of the same fix, at the level where the counting
 /// happens: a workspace database that refuses to open is counted, and that
 /// count now leaves the function instead of dying with the `Option`.
+///
+/// Unix-only: "refuses to open" is injected with a chmod; on Windows a file
+/// cannot be made unreadable through the standard API. The counting path it
+/// guards is exercised on every platform by `a_clean_scan_keeps_status_bytes_
+/// and_exit_code_identical`, which proves a *readable* store is counted as
+/// sessions=0 and never as unknown.
 #[cfg(unix)]
 #[test]
 fn a4_unreadable_workspace_database_leaves_the_probe_as_ignorance() {
@@ -394,6 +414,13 @@ fn a4_unreadable_workspace_database_leaves_the_probe_as_ignorance() {
 /// answers `false` for an unreadable state file — exactly what it answers for
 /// a destination we have genuinely never collected for — and `dest-init` then
 /// spent that `false` as evidence of "never built".
+///
+/// Unix-only: "unreadable" is injected with a chmod, and Windows has no
+/// standard-API way to make a file unreadable. The *decision* this boolean
+/// fed is asserted on every platform by the cross-platform
+/// `a5_unreadable_record_downgrades_never_built_to_unknown`, and the two
+/// cross-platform error semantics of `destination_record` live in
+/// `a5_version_mismatched_collector_record_is_an_error_not_a_no`.
 #[cfg(unix)]
 #[test]
 fn a5_unreadable_collector_record_is_an_error_not_a_no() {
@@ -419,6 +446,12 @@ fn a5_unreadable_collector_record_is_an_error_not_a_no() {
         "this is the old answer, and it is indistinguishable from 'never collected' \
          — which is why the boolean must not decide anything"
     );
+}
+
+/// The two error semantics of `destination_record` that do not need a chmod,
+/// so they are asserted on every platform.
+#[test]
+fn a5_version_mismatched_collector_record_is_an_error_not_a_no() {
     // The *reachable* form of the same fault, and the one that made it all the
     // way to `dest-init` exiting 0: `load_state` deliberately maps a
     // version-mismatched file to an empty state so the collector re-reads
@@ -504,10 +537,8 @@ fn a5_unreadable_record_downgrades_never_built_to_unknown() {
 
 /// A store that reads cleanly must produce exactly the bytes and exit code it
 /// produced before B82 — both when it holds sessions and when it holds none.
-/// The false-positive guard is the second half: the same fixture made
-/// unreadable has to hash differently, otherwise this test would pass even if
-/// `status` had stopped saying anything at all.
-#[cfg(unix)]
+/// The false-positive guard (the hashes must be sensitive to the fixture) lives
+/// in its own `#[cfg(unix)]` test because its mechanism is a chmod.
 #[test]
 fn a_clean_scan_keeps_status_bytes_and_exit_code_identical() {
     let sandbox = tempfile::tempdir().expect("create sandbox");
@@ -546,8 +577,22 @@ fn a_clean_scan_keeps_status_bytes_and_exit_code_identical() {
         CLEAN_SESSION_STATUS_BODY_SHA256,
         "a clean scan with sessions changed status bytes: {with_sessions_body}"
     );
+}
 
-    // False-positive guard: the pinned hashes must be sensitive to the fixture.
+// Unix-only: proving the pinned hashes are sensitive to the fixture requires
+// making the fixture *unreadable*, which on Windows has no chmod-based
+// equivalent through the standard API. On Windows the hash-pinning test above
+// still runs and still fails if the clean output changes; only the "it would
+// differ if the store could not be read" half is unrunnable there, because the
+// store genuinely cannot be made unreadable that way.
+#[cfg(unix)]
+#[test]
+fn a_clean_scan_hash_is_sensitive_to_unreadability() {
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let db = sandbox.path().join("store/store.db");
+    plant_readable_store(&db);
+    let registry = write_registry(sandbox.path(), single_file_harness(&db));
+
     let blocked = sandbox.path().join("store");
     set_mode(&blocked, 0o0);
     let broken = run_cli(sandbox.path(), &registry, "status");
@@ -588,7 +633,10 @@ fn a_clean_scan_keeps_the_doctor_probe_row_identical() {
 /// does not list for this platform has nothing here to have missed, so it
 /// prints `N/A` — distinct from both the `0` of a measured absence and the
 /// `未知` of a look that did not happen.
-#[cfg(unix)]
+///
+/// The cell is registered under the *other* platform family, so the assertion
+/// is symmetric: on a Unix host the Windows cell does not apply, on a Windows
+/// host the macOS cell does not apply, and both end at `SkipWrongPlatform`.
 #[test]
 fn a2_doctor_session_column_is_three_valued() {
     let sandbox = tempfile::tempdir().expect("create sandbox");
@@ -598,12 +646,17 @@ fn a2_doctor_session_column_is_three_valued() {
         "confidence": "measured-locally",
         "source": "B82 test fixture"
     });
+    let other_family = if cfg!(target_os = "windows") {
+        json!({"macos": cell})
+    } else {
+        json!({"windows": cell})
+    };
     let registry = write_registry(
         sandbox.path(),
         json!([{
             "id": "grok",
             "display_name": "Grok",
-            "paths": {"windows": cell}
+            "paths": other_family
         }]),
     );
 

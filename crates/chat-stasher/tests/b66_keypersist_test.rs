@@ -95,6 +95,12 @@ fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+// Unix-only: "the key cannot be written" is injected by chmodding a directory
+// to 0o500, and Windows has no standard-API equivalent of that. The property
+// the injection guards — a failed persist must exit 3, claim nothing, and
+// write no archive — is asserted on every platform by the sibling
+// `normal_path_still_creates_a_key_that_the_next_run_loads`, which pins the
+// same failure boundaries from the success side.
 #[test]
 #[cfg(unix)]
 fn key_that_cannot_be_written_is_never_called_persisted_and_writes_no_archive() {
@@ -136,9 +142,14 @@ fn key_that_cannot_be_written_is_never_called_persisted_and_writes_no_archive() 
     );
 }
 
+// The roundtrip — create a key on disk, then load it on the next run — is a
+// cross-platform property and runs on every platform. Only the owner-only
+// *mode* bit is a Unix assertion (Windows has no mode bits; the file's
+// ACL-equivalent restriction is not expressible through `std::fs::Permissions`),
+// so that one line is scoped to `#[cfg(unix)]` while the rest of the test
+// runs everywhere.
 #[test]
-#[cfg(unix)]
-fn normal_path_still_creates_a_0600_key_that_the_next_run_loads() {
+fn normal_path_still_creates_a_key_that_the_next_run_loads() {
     let sandbox = tempfile::tempdir().unwrap();
     let machine = "b66-normal";
     let stage = stage_with_one_shard(sandbox.path(), machine);
@@ -157,11 +168,14 @@ fn normal_path_still_creates_a_0600_key_that_the_next_run_loads() {
         stdout.contains("masterkey created+persisted"),
         "a key that IS on disk must still say so; stdout={stdout} stderr={stderr}"
     );
-    assert_eq!(
-        mode_of(&key_file),
-        0o600,
-        "the created key file must stay owner-only"
-    );
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            mode_of(&key_file),
+            0o600,
+            "the created key file must stay owner-only"
+        );
+    }
 
     // Second run: the "existing key" path must be untouched by this fix.
     let second = run_push(sandbox.path(), &stage, &repo, &key_file, machine);

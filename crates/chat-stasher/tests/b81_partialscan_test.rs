@@ -121,6 +121,14 @@ fn plant_partial_fixture(sandbox: &Path) -> (PathBuf, PathBuf, PathBuf) {
     (root, registry, blocked)
 }
 
+// Unix-only: an unreadable *directory* is made so with a chmod 0o0, which
+// takes away its search permission and makes `read_dir` genuinely fail.
+// Windows has no standard-API equivalent of a directory that exists but cannot
+// be enumerated. The sibling `all_readable_directory_scan_keeps_status_bytes_
+// identical` runs on every platform and pins the clean side; the "partial scan
+// must be reported, not guessed at one-entry-per-session" property on the
+// broken side is expressed here in the only way the file system will let us
+// break a directory, and is documented rather than faked on Windows.
 #[cfg(unix)]
 #[test]
 fn partial_directory_scan_is_reported_at_entry_granularity() {

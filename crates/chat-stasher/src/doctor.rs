@@ -27,6 +27,7 @@
 use crate::config::Config;
 use crate::json_out::{CountState, TimeState};
 use crate::scanner;
+use crate::sqlite_probe;
 use crate::store::{self, StoreConfig};
 use std::collections::BTreeMap;
 use std::fs;
@@ -1003,7 +1004,11 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         .unwrap_or_else(|| data_root.join("masterkey.json"));
 
     // Distinguish measured absence from a path we could not inspect or that
-    // has the wrong shape; only NotFound proves "no repository".
+    // has the wrong shape. `NotFound` does NOT prove "no repository" on its
+    // own: Windows folds `ERROR_PATH_NOT_FOUND` (a path component that is a
+    // regular file) into the same error code, so absence must be *confirmed*
+    // — walk up to the first existing ancestor and require it to be a
+    // directory — exactly as `sqlite_probe::confirm_absence` promises.
     match fs::metadata(&repo_root) {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => {
@@ -1013,7 +1018,13 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return ReclaimCheck::NoRepo { repo_root }
+            if let Err(shape) = sqlite_probe::confirm_absence(&repo_root) {
+                return ReclaimCheck::OpenFailed {
+                    repo_root,
+                    error: format!("could not confirm repository directory: {shape}"),
+                };
+            }
+            return ReclaimCheck::NoRepo { repo_root };
         }
         Err(e) => {
             return ReclaimCheck::OpenFailed {
@@ -1991,6 +2002,30 @@ mod tests {
     /// is tens of thousands of tiny files, so the logical byte sum is far
     /// below what is actually allocated; reporting only the logical figure
     /// answers a different question than the one asked.
+    #[test]
+    fn cache_usage_counts_directories_and_logical_bytes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        for i in 0..8u32 {
+            let d = root.join(format!("repo-{i}"));
+            std::fs::create_dir_all(&d).expect("mkdir");
+            std::fs::write(d.join("f"), b"x").expect("write");
+        }
+        let usage = measure_cache_dir(root).expect("measure");
+        assert_eq!(usage.repo_dirs, 8);
+        assert_eq!(usage.total_bytes, 8, "logical sum is 8 one-byte files");
+    }
+
+    /// The allocation figure, asserted where the platform reports one.
+    ///
+    /// Unix-only: `disk_bytes > total_bytes` needs `metadata.blocks()` — the
+    /// POSIX stat field that is the *only* way to learn a file's allocation.
+    /// Windows does not expose per-file allocation through `std::fs::Metadata`,
+    /// so `measure_cache_dir` falls back to `disk_bytes == total_bytes` there
+    /// and the inequality cannot hold. The property is platform-shaped, not an
+    /// omission: the cross-platform half lives in
+    /// `cache_usage_counts_directories_and_logical_bytes`, and this test pins
+    /// the allocation half on the platform that reports it.
     #[cfg(unix)]
     #[test]
     fn cache_usage_reports_allocation_not_just_logical_size() {

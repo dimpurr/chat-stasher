@@ -183,6 +183,30 @@ fn a7_wrong_shaped_repository_is_not_reported_as_missing() {
 }
 
 #[test]
+fn a7b_repo_below_a_file_is_not_measured_absence() {
+    // The same wrong-shape bug one level up: the *parent* of `repo_root` is a
+    // regular file. Unix reports that as ENOTDIR; Windows folds it into
+    // `ErrorKind::NotFound`, so a `NotFound`-means-absent read would call a
+    // broken path a measured "no repository". Absence must be confirmed.
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let blocker = sandbox.path().join("repo-blocker");
+    fs::write(&blocker, b"synthetic path blocker").expect("write repo parent blocker");
+    let repo_root = blocker.join("repo");
+    let result = doctor::inspect_reclaim(&Config {
+        rustic_repo: Some(repo_root.to_string_lossy().into_owned()),
+        ..Config::default()
+    });
+    assert!(
+        matches!(result, ReclaimCheck::OpenFailed { .. }),
+        "a repo_root whose parent is a file is a shape error, not measured absence: {result:?}"
+    );
+}
+
+#[test]
 fn a8_failed_sqlite_stat_cannot_form_a_fingerprint() {
     // B97: see `ENV_LOCK` — readers serialize with writers too.
     let _guard = ENV_LOCK
@@ -198,6 +222,15 @@ fn a8_failed_sqlite_stat_cannot_form_a_fingerprint() {
     );
 }
 
+// Unix-only: "a candidate whose metadata cannot be read" is injected with a
+// broken symlink. On Windows, creating a broken symlink through the standard
+// API requires a dev-mode flag or admin rights (unprivileged symlink creation
+// is not available at all), so the *mechanism* cannot be reproduced there.
+// The property — a candidate whose metadata could not be read must not
+// disappear from the count — is exercised on every platform at the store level
+// by B85's `a8_failed_sqlite_stat_cannot_form_a_fingerprint` and the b82
+// "unstattable is unknown, not absent" family, which reach the same
+// must-not-vanish boundary through paths Windows can express.
 #[cfg(unix)]
 #[test]
 fn c6_inbox_metadata_failure_is_an_ingest_error() {
