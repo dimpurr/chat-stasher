@@ -17,9 +17,9 @@ const MACHINE: &str = "b79-fixture-machine";
 const SESSION: &str = "opencode.b79-fixture.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
 
 const READ_DEFAULT_REPORT_SHA256: &str =
-    "c2eaaecc0e9e44dad216da4a0c194ec06d716c9067df1fb902d5e0e63c0f672d";
+    "c378728e0e2b5abdeebe2563da39949c1646c112e7ffc1e04ee7033919916e20";
 const VERIFY_DEFAULT_REPORT_SHA256: &str =
-    "16f7114258b5ffa74e18c746a5ed4d630fbb7f9d5647c0c03a1adad67f192250";
+    "97a18d6a512cc34f9e7a678525ed0c61dec92e3a1d6fe30fd0205212965d6353";
 
 struct Fixture {
     sandbox: tempfile::TempDir,
@@ -88,7 +88,7 @@ fn run_read(fixture: &Fixture, full_ids: bool) -> Result<Output, Box<dyn Error>>
         .arg(&fixture.repo)
         .args(["--key-file"])
         .arg(&fixture.key)
-        .args(["--no-reap"]);
+        .args(["--keep-ssh-masters"]);
     if full_ids {
         command.arg("--full-ids");
     }
@@ -104,7 +104,7 @@ fn run_verify(fixture: &Fixture, full_ids: bool) -> Result<Output, Box<dyn Error
         .arg(&fixture.repo)
         .args(["--key-file"])
         .arg(&fixture.key)
-        .args(["--machine", MACHINE, "--no-reap"]);
+        .args(["--machine", MACHINE, "--keep-ssh-masters"]);
     if full_ids {
         command.arg("--full-ids");
     }

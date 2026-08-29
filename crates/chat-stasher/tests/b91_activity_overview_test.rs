@@ -106,7 +106,7 @@ fn activity_index_then_push_then_overview_roundtrips() {
             key.to_str().unwrap(),
             "--machine",
             machine,
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     assert!(
@@ -127,7 +127,7 @@ fn activity_index_then_push_then_overview_roundtrips() {
             key.to_str().unwrap(),
             "--width",
             "80",
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     let stdout = String::from_utf8_lossy(&ov.stdout);
@@ -181,7 +181,7 @@ fn machine_with_snapshot_but_no_index_is_listed_missing() {
             key.to_str().unwrap(),
             "--machine",
             machine,
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     assert!(push.status.success(), "push failed: {:?}", push.status);
@@ -196,7 +196,7 @@ fn machine_with_snapshot_but_no_index_is_listed_missing() {
             key.to_str().unwrap(),
             "--width",
             "80",
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     let stdout = String::from_utf8_lossy(&ov.stdout);
@@ -231,7 +231,7 @@ fn unopenable_repo_is_exit_3_not_exit_1() {
             key.to_str().unwrap(),
             "--width",
             "80",
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     assert_eq!(

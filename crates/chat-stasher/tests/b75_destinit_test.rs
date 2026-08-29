@@ -103,7 +103,7 @@ fn run_empty_dest_init(
         .arg(repo)
         .args(["--key-file"])
         .arg(key)
-        .args(["--no-reap"]);
+        .args(["--keep-ssh-masters"]);
     command.output().unwrap()
 }
 
@@ -119,7 +119,7 @@ fn run_named_dest_init(root: &Path, registry: &Path, stage: &Path) -> Output {
             "--stage",
         ])
         .arg(stage)
-        .args(["--machine", MACHINE, "--no-reap"]);
+        .args(["--machine", MACHINE, "--keep-ssh-masters"]);
     command.output().unwrap()
 }
 
@@ -157,7 +157,7 @@ fn archive_gap_is_not_a_completed_union() {
             .args(["--key-file"])
             .arg(root.path().join("target-key.json"))
             .env("OPENCODE_DB", &db)
-            .args(["--no-reap"]);
+            .args(["--keep-ssh-masters"]);
         command.output().unwrap()
     };
     let (stdout, stderr) = text(&output);
@@ -248,7 +248,7 @@ fn local_collect_error_exits_one() {
         .args(["--key-file"])
         .arg(root.path().join("target-key.json"))
         .env("B75_SOURCE", source_root)
-        .args(["--no-reap"]);
+        .args(["--keep-ssh-masters"]);
     let output = command.output().unwrap();
     let (stdout, stderr) = text(&output);
     assert_eq!(

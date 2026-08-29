@@ -110,7 +110,7 @@ fn run_once_rebuilds_the_activity_index_before_push() {
             repo.to_str().unwrap(),
             "--key-file",
             key.to_str().unwrap(),
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);

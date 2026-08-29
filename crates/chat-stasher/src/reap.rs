@@ -66,7 +66,7 @@ pub fn reap_masters_for_host(host: &str) -> Result<usize, String> {
                         // nothing needs reaping and no user cares.
                         continue;
                     }
-                    eprintln!("reap: `-O exit` failed for {}: {}", sock, stderr.trim());
+                    eprintln!("reap: `ssh -O exit` failed for {}: {}", sock, stderr.trim());
                 }
             }
             Err(e) => eprintln!("reap: could not run ssh for {}: {e}", sock),

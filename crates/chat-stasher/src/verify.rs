@@ -370,7 +370,7 @@ pub fn load_expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpecta
 }
 
 /// Whether the staging tree still holds any sealed shard (the "body"). Once
-/// the archived body is reaped this is false, and L3 must fall back to the
+/// the archived body is reclaimed this is false, and L3 must fall back to the
 /// persisted summary.
 fn stage_body_present(stage: &Path) -> anyhow::Result<bool> {
     Ok(crate::store::sealed_shard_count(stage)? > 0)
@@ -533,7 +533,7 @@ mod tests {
         .unwrap();
         let rows = crate::manifest::generate_manifest_at(stage, machine, 1_736_944_496).unwrap();
         crate::manifest::write_manifest(stage, machine, &rows).unwrap();
-        // Reap the body: the session shard tree disappears entirely.
+        // Reclaim the body: the session shard tree disappears entirely.
         fs::remove_dir_all(stage.join(crate::store::SESSIONS_DIR)).unwrap();
 
         let expectations = load_expected_manifest(stage).unwrap();

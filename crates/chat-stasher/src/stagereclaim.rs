@@ -1,4 +1,4 @@
-//! stagereap — reclaim the sealed shard body from the staging tree.
+//! stagereclaim — reclaim the sealed shard body from the staging tree.
 //!
 //! The stage is an intentionally unbounded local full copy; nothing ever
 //! shrinks it. ADR-020 Phase 4 retires the shard body once the archive
@@ -10,7 +10,7 @@
 //! itself — never a local cursor, never "I pushed, so it should be there" —
 //! for each session's digest triple `(shard_count, concat_bytes,
 //! concat_sha256)` and matching it against the stage. A destination that
-//! cannot be consulted is *unproven*, which blocks the reap: it is never
+//! cannot be consulted is *unproven*, which blocks the reclaim: it is never
 //! treated as "does not have it" (that would delete data) nor as "has it"
 //! (that would guess).
 //!
@@ -30,8 +30,8 @@ use std::path::Path;
 use crate::manifest;
 use crate::store::{self, BackupStore, StoreConfig};
 
-/// One declared destination handed to the reap: its config plus its name for
-/// reporting. The masterkey is loaded by the reap itself, so a destination
+/// One declared destination handed to the reclaim: its config plus its name for
+/// reporting. The masterkey is loaded by the reclaim itself, so a destination
 /// whose key cannot be read is reported `Unreachable` rather than aborting.
 #[derive(Debug, Clone)]
 pub struct NamedStore {
@@ -49,7 +49,7 @@ pub struct Candidate {
     pub sha256: String,
 }
 
-/// Why the reap is refused. `sessions` / `bytes` count what is held back.
+/// Why the reclaim is refused. `sessions` / `bytes` count what is held back.
 #[derive(Debug, Clone)]
 pub struct Blocked {
     /// Destination that failed the proof.
@@ -84,16 +84,16 @@ pub struct Reclaimed {
     pub bytes: u64,
 }
 
-/// Full result of a proof (and optional reap).
+/// Full result of a proof (and optional reclaim).
 #[derive(Debug, Default)]
-pub struct ReapReport {
+pub struct ReclaimReport {
     /// Destination names consulted, in the order given.
     pub destinations: Vec<String>,
     /// Every session with a body in the stage, with its expected triple.
     pub candidates: Vec<Candidate>,
-    /// Sessions that have a stored summary but no body (already reaped).
-    pub already_reaped: usize,
-    /// Non-empty means the reap is refused and nothing was deleted.
+    /// Sessions that have a stored summary but no body (already reclaimed).
+    pub already_reclaimed: usize,
+    /// Non-empty means the reclaim is refused and nothing was deleted.
     pub blocked: Vec<Blocked>,
     /// Only populated when `apply` ran with an empty `blocked`.
     pub reclaimed: Vec<Reclaimed>,
@@ -101,29 +101,29 @@ pub struct ReapReport {
     pub candidate_bytes: u64,
 }
 
-impl ReapReport {
-    /// Whether the reap is refused (a proof failed on some destination).
+impl ReclaimReport {
+    /// Whether the reclaim is refused (a proof failed on some destination).
     pub fn blocked(&self) -> bool {
         !self.blocked.is_empty()
     }
 }
 
-/// Reap the stage body, proving every session against every destination first.
+/// Reclaim the stage body, proving every session against every destination first.
 ///
-/// Returns `Ok(report)` even when the reap is refused: the refusal lives in
-/// [`ReapReport::blocked`], and the caller decides the exit code from it.
-pub fn reap_stage(
+/// Returns `Ok(report)` even when the reclaim is refused: the refusal lives in
+/// [`ReclaimReport::blocked`], and the caller decides the exit code from it.
+pub fn reclaim_stage(
     stage: &Path,
     destinations: &[NamedStore],
     apply: bool,
-) -> anyhow::Result<ReapReport> {
-    let mut report = ReapReport {
+) -> anyhow::Result<ReclaimReport> {
+    let mut report = ReclaimReport {
         destinations: destinations.iter().map(|d| d.name.clone()).collect(),
         ..Default::default()
     };
 
     // Candidates: every session with a body in the stage. A session directory
-    // that holds only `shard-seq` (already reaped) has no body and is not a
+    // that holds only `shard-seq` (already reclaimed) has no body and is not a
     // candidate.
     for exp in crate::verify::expected_manifest(stage)? {
         if exp.shard_count == 0 {
@@ -139,7 +139,7 @@ pub fn reap_stage(
         });
     }
 
-    // Sessions with a stored summary but no body were reaped by an earlier
+    // Sessions with a stored summary but no body were reclaimed by an earlier
     // run; informational, and it must never make a missing baseline look like
     // zero sessions.
     if let Ok(stored) = manifest::stored_manifest_rows(stage) {
@@ -148,7 +148,7 @@ pub fn reap_stage(
             .iter()
             .map(|c| (c.machine.clone(), c.session_id.clone()))
             .collect();
-        report.already_reaped = stored
+        report.already_reclaimed = stored
             .rows
             .iter()
             .filter(|r| !body_keys.contains(&(r.machine.clone(), r.session_id.clone())))
@@ -175,7 +175,7 @@ pub fn reap_stage(
     }
 
     // Phase 1 — consult every destination. One unconsultable destination blocks
-    // the whole reap: nothing at all can be proven against it.
+    // the whole reclaim: nothing at all can be proven against it.
     let mut ready: Vec<(&NamedStore, BTreeMap<(String, String), Candidate>)> = Vec::new();
     for dest in destinations {
         let mk = match store::load_key_file(&dest.cfg) {
@@ -214,7 +214,7 @@ pub fn reap_stage(
 
     // Phase 2 — per-session proof across every destination. A session that any
     // destination fails to hold is held back, and one held-back session blocks
-    // the whole reap: nothing is deleted.
+    // the whole reclaim: nothing is deleted.
     let mut held: BTreeMap<&str, (usize, u64, BlockedKind)> = BTreeMap::new();
     for cand in &report.candidates {
         let key = (cand.machine.clone(), cand.session_id.clone());
@@ -261,7 +261,7 @@ pub fn reap_stage(
     }
 
     // The summary must land before the body goes: refresh each machine's
-    // manifest from the current body (preserving rows of already-reaped
+    // manifest from the current body (preserving rows of already-reclaimed
     // sessions), then delete session by session.
     let mut machines: BTreeMap<&str, Vec<&Candidate>> = BTreeMap::new();
     for cand in &report.candidates {
@@ -275,10 +275,10 @@ pub fn reap_stage(
             .with_context(|| format!("generate manifest for machine {machine}"))?;
         refresh_manifest(stage, machine, &fresh)?;
         for cand in cands {
-            let removed =
-                reap_session_body(stage, &cand.machine, &cand.session_id).with_context(|| {
+            let removed = reclaim_session_body(stage, &cand.machine, &cand.session_id)
+                .with_context(|| {
                     format!(
-                        "reap session `{}` on machine `{}`",
+                        "reclaim session `{}` on machine `{}`",
                         cand.session_id, cand.machine
                     )
                 })?;
@@ -334,7 +334,7 @@ fn consult_destination(dest: &NamedStore, mk: &MasterKey) -> DestinationRead {
 
 /// Merge freshly derived summaries into one machine's manifest file. Rows for
 /// sessions whose body is still present replace (or add) the stored row; rows
-/// for already-reaped sessions (no body, so `shard_count == 0` in the fresh
+/// for already-reclaimed sessions (no body, so `shard_count == 0` in the fresh
 /// derivation) are skipped so their stored baseline survives.
 fn refresh_manifest(
     stage: &Path,
@@ -361,11 +361,16 @@ fn refresh_manifest(
 /// never falls back onto archived shard names. Returns how many shard files
 /// were removed. Idempotent: a session whose body is already gone removes
 /// nothing.
-pub fn reap_session_body(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<usize> {
+pub fn reclaim_session_body(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<usize> {
     let dir = store::session_shard_dir(stage, machine, session_id);
     let entries = store::sealed_shard_entries(&dir)?;
     for (_, path) in &entries {
-        fs::remove_file(path).with_context(|| format!("remove reaped shard {}", path.display()))?;
+        fs::remove_file(path)
+            .with_context(|| format!("remove reclaimed shard {}", path.display()))?;
     }
     // Remove now-empty bucket directories. The session dir itself stays: it
     // holds `shard-seq`.
@@ -415,9 +420,9 @@ mod tests {
         }
     }
 
-    /// Reap keeps the session directory and its `shard-seq` counter.
+    /// Reclaim keeps the session directory and its `shard-seq` counter.
     #[test]
-    fn reap_session_body_removes_shards_but_keeps_counter() {
+    fn reclaim_session_body_removes_shards_but_keeps_counter() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path();
         let machine = "m-unit";
@@ -425,12 +430,12 @@ mod tests {
         write_session(stage, machine, session, 3);
         assert_eq!(shard_count(stage, machine, session), 3);
         let seq_file = store::shard_seq_file(stage, machine, session);
-        assert!(seq_file.is_file(), "counter must exist before the reap");
+        assert!(seq_file.is_file(), "counter must exist before the reclaim");
 
-        let removed = reap_session_body(stage, machine, session).unwrap();
+        let removed = reclaim_session_body(stage, machine, session).unwrap();
         assert_eq!(removed, 3);
         assert_eq!(shard_count(stage, machine, session), 0, "body gone");
-        assert!(seq_file.is_file(), "counter must survive the reap");
+        assert!(seq_file.is_file(), "counter must survive the reclaim");
         assert!(
             session_dir(stage, machine, session).is_dir(),
             "session dir must stay (it holds the counter)"
@@ -438,48 +443,48 @@ mod tests {
         drop(dir);
     }
 
-    /// Reaping an already-reaped session is a no-op (idempotent re-run).
+    /// Reclaiming an already-reclaimed session is a no-op (idempotent re-run).
     #[test]
-    fn reap_session_body_is_idempotent() {
+    fn reclaim_session_body_is_idempotent() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path();
         let machine = "m-unit";
         let session = "s-unit";
         write_session(stage, machine, session, 2);
-        assert_eq!(reap_session_body(stage, machine, session).unwrap(), 2);
-        assert_eq!(reap_session_body(stage, machine, session).unwrap(), 0);
+        assert_eq!(reclaim_session_body(stage, machine, session).unwrap(), 2);
+        assert_eq!(reclaim_session_body(stage, machine, session).unwrap(), 0);
         drop(dir);
     }
 
-    /// A session with only a `shard-seq` counter (already reaped) is not a
+    /// A session with only a `shard-seq` counter (already reclaimed) is not a
     /// candidate: it has no body to reclaim.
     #[test]
-    fn reap_stage_skips_sessions_without_a_body() {
+    fn reclaim_stage_skips_sessions_without_a_body() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path();
         let machine = "m-unit";
         let session = "s-unit";
         write_session(stage, machine, session, 1);
         // Drop the body directly; the counter remains.
-        reap_session_body(stage, machine, session).unwrap();
-        let report = reap_stage(stage, &[], false).unwrap();
+        reclaim_session_body(stage, machine, session).unwrap();
+        let report = reclaim_stage(stage, &[], false).unwrap();
         assert!(report.candidates.is_empty());
         drop(dir);
     }
 
-    /// `refresh_manifest` must not clobber an already-reaped session's stored
+    /// `refresh_manifest` must not clobber an already-reclaimed session's stored
     /// summary with the zero triple its absent body would derive.
     #[test]
-    fn refresh_manifest_preserves_reaped_rows() {
+    fn refresh_manifest_preserves_reclaimed_rows() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path();
         let machine = "m-unit";
 
         // Session A: still has a body (1 shard).
         write_session(stage, machine, "s-a", 1);
-        // Session B: was already reaped; store its original summary.
+        // Session B: was already reclaimed; store its original summary.
         write_session(stage, machine, "s-b", 2);
-        reap_session_body(stage, machine, "s-b").unwrap();
+        reclaim_session_body(stage, machine, "s-b").unwrap();
         let stored = manifest::generate_manifest(stage, machine).unwrap();
         assert_eq!(stored.len(), 1, "only s-a still has a body");
         let original_b = manifest::SessionManifest {
@@ -506,7 +511,7 @@ mod tests {
         let b = by_id.remove("s-b").expect("s-b row must survive refresh");
         assert_eq!(
             b.shard_count, 2,
-            "reaped session keeps its stored shard count"
+            "reclaimed session keeps its stored shard count"
         );
         assert_eq!(b.concat_sha256, "b".repeat(64));
         let a = by_id.remove("s-a").expect("s-a row must be derived fresh");

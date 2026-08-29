@@ -1,5 +1,5 @@
 //! manifest — persistent per-session summaries so L3 can verify after the
-//! sealed shard body is reaped (ADR-020 Phase 3).
+//! sealed shard body is reclaimed (ADR-020 Phase 3).
 //!
 //! L3 reconcile currently derives its expected manifest by re-hashing the
 //! sealed shards still on the staging disk ([`crate::verify::expected_manifest`]).
@@ -123,11 +123,11 @@ pub fn generate_manifest_at(
         let shard_count = store::sealed_shard_entries(&entry.path())?.len();
         // A session directory with no sealed shard has no body to summarise.
         // Two ways to get here and both must be skipped:
-        //   * the body was reaped (`stagereap`) — the session dir deliberately
+        //   * the body was reclaimed (`stagereclaim`) — the session dir deliberately
         //     survives because it still holds `shard-seq`, and the authoritative
         //     summary for it now lives in the *stored* manifest, not on disk;
         //   * the session was just created and nothing has been sealed yet.
-        // Emitting a row here would overwrite a reaped session's real summary
+        // Emitting a row here would overwrite a reclaimed session's real summary
         // with an empty one — i.e. silently destroy the only remaining evidence
         // of what the archive is supposed to hold.
         if shard_count == 0 {

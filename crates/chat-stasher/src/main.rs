@@ -13,7 +13,7 @@ use chat_stasher::scanner;
 use chat_stasher::schedule;
 use chat_stasher::seal;
 use chat_stasher::sidecar;
-use chat_stasher::stagereap::{self, BlockedKind, NamedStore};
+use chat_stasher::stagereclaim::{self, BlockedKind, NamedStore};
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
@@ -79,9 +79,9 @@ enum Command {
         /// Do the cheap repository structure check (L1) after the cycle.
         #[arg(long)]
         verify: bool,
-        /// Disable ssh connection reaping after this run.
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Render a launchd plist or systemd user service/timer; never installs it.
     Schedule {
@@ -89,10 +89,10 @@ enum Command {
         #[arg(long, value_enum, default_value = "launchd")]
         format: schedule::Format,
         /// Which scheduled job to render. `run-once` (default) is the hourly
-        /// archive cycle. `reap-stage` is the weekly stage reclamation that
+        /// archive cycle. `reclaim-stage` is the weekly stage reclamation that
         /// deletes staged shard bodies once every destination proves it holds
-        /// them — a different "reap" from the ssh connection reaping that
-        /// `--no-reap` disables.
+        /// them — unrelated to the ssh connection reaping that
+        /// `--keep-ssh-masters` disables.
         #[arg(long, value_enum, default_value = "run-once")]
         unit: schedule::Unit,
         /// Stage path embedded in the one-shot command.
@@ -109,15 +109,15 @@ enum Command {
         binary: Option<PathBuf>,
         /// Named destination forwarded to `run-once`. Required once the config
         /// declares any destination (unless `--repo` is given). Not valid with
-        /// `--unit reap-stage`.
+        /// `--unit reclaim-stage`.
         #[arg(long)]
         destination: Option<String>,
         /// Repository path override forwarded to the scheduled command
-        /// (`reap-stage` honours it for a single-destination config only).
+        /// (`reclaim-stage` honours it for a single-destination config only).
         #[arg(long)]
         repo: Option<String>,
         /// Masterkey file override forwarded to the scheduled command
-        /// (`reap-stage` honours it for a single-destination config only).
+        /// (`reclaim-stage` honours it for a single-destination config only).
         #[arg(long)]
         key_file: Option<String>,
         /// Concurrency cap override forwarded to the scheduled command.
@@ -136,11 +136,12 @@ enum Command {
         /// Add the cheap L1 verify pass after each archive cycle.
         #[arg(long)]
         verify: bool,
-        /// Disable ssh connection reaping after the scheduled command runs
-        /// (troubleshooting). This is ssh connection reaping only — it never
-        /// disables the stage reclamation that `--unit reap-stage` performs.
+        /// Keep the ssh ControlMaster processes open after the scheduled command
+        /// runs (do not shut them down). This is about ssh connection masters
+        /// only — it never disables the stage reclamation that `--unit
+        /// reclaim-stage` performs.
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Move a batch of sealed session shards into the rustic repository.
     ///
@@ -176,9 +177,9 @@ enum Command {
         /// Backend option `key=value`, repeatable (e.g. `--option endpoint=ssh://host:23`).
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run (for troubleshooting).
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Is the scheduled archive actually working? Plus what the local harness
     /// scanner finds (read-only).
@@ -260,9 +261,9 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run (for troubleshooting).
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Diagnostic: does any harness on this machine silently delete its
     /// sessions? Read-only (paths/counts/bytes/timestamps only).
@@ -311,9 +312,9 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run (for troubleshooting).
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Initialise a new destination as a *full extra copy* (ADR-013).
     ///
@@ -356,9 +357,9 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run.
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Search one destination's archive by session metadata.
     ///
@@ -407,9 +408,9 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run.
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Open an ephemeral local web view of one destination's session list.
     ///
@@ -463,9 +464,9 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run.
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
@@ -568,8 +569,9 @@ enum Command {
     /// never the local cursor — for every session's digest triple (shard
     /// count / concatenated bytes / concatenated sha256) and matching it
     /// against the stage. A destination that cannot be consulted is
-    /// "unproven" and blocks the reap: it is never treated as "does not have
-    /// it". Every declared destination must prove it holds each session, or
+    /// "unproven" and blocks the reclaim: it is never treated as "does not
+    /// have it". Every declared destination must prove it holds each session,
+    /// or
     /// nothing is deleted.
     ///
     /// Default is a dry run that reports what would be reclaimed and deletes
@@ -581,7 +583,7 @@ enum Command {
     /// Exit codes: 0 = reclaimable (dry run) or reclaimed (apply); 1 =
     /// blocked — at least one destination is unreachable, partial, or fails
     /// to hold a session, so nothing was deleted; 2 = usage error.
-    ReapStage {
+    ReclaimStage {
         /// Stage directory that holds the sealed `sessions/` tree.
         #[arg(long)]
         stage: PathBuf,
@@ -600,9 +602,9 @@ enum Command {
         /// Backend option `key=value`, repeatable (single-destination config only).
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run (for troubleshooting).
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
     /// Register this executable as the browsers' Native Messaging host
     /// (ADR-014 step 2) — or, with `--uninstall`, remove that registration.
@@ -812,9 +814,9 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Disable ssh connection reaping after this run.
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
-        no_reap: bool,
+        keep_ssh_masters: bool,
     },
 }
 
@@ -892,7 +894,7 @@ fn run() -> ExitCode {
             connections,
             options,
             verify,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_run_once(
             &stage,
             machine,
@@ -903,7 +905,7 @@ fn run() -> ExitCode {
             connections,
             &options,
             verify,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Schedule {
             unit,
@@ -919,7 +921,7 @@ fn run() -> ExitCode {
             machine,
             shard_bucket_cap,
             verify,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_schedule(
             unit,
             format,
@@ -934,7 +936,7 @@ fn run() -> ExitCode {
             machine,
             shard_bucket_cap,
             verify,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Push {
             stage,
@@ -945,7 +947,7 @@ fn run() -> ExitCode {
             machine,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_push(
             &stage,
             inbox,
@@ -955,7 +957,7 @@ fn run() -> ExitCode {
             machine,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Status { sessions, json } => cmd_status(sessions, json),
         Command::Read {
@@ -969,7 +971,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_read(
             &stage,
             &session,
@@ -981,7 +983,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Doctor { json } => cmd_doctor(json),
         Command::Verify {
@@ -994,7 +996,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_verify(
             level,
             &stage,
@@ -1005,7 +1007,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Ingest {
             inbox,
@@ -1038,7 +1040,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_dest_init(
             destination,
             &stage,
@@ -1049,7 +1051,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Search {
             destination,
@@ -1062,7 +1064,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_search(
             destination,
             session,
@@ -1074,7 +1076,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::View {
             destination,
@@ -1086,7 +1088,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_view(
             destination,
             machine,
@@ -1097,7 +1099,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::Seal {
             harness,
@@ -1114,22 +1116,22 @@ fn run() -> ExitCode {
             session.as_deref(),
             shard_bucket_cap,
         ),
-        Command::ReapStage {
+        Command::ReclaimStage {
             stage,
             apply,
             repo,
             key_file,
             connections,
             options,
-            no_reap,
-        } => cmd_reap_stage(
+            keep_ssh_masters,
+        } => cmd_reclaim_stage(
             &stage,
             apply,
             repo,
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
         Command::InstallNativeHost {
             browsers,
@@ -1171,7 +1173,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         } => cmd_overview(
             destination,
             width,
@@ -1180,7 +1182,7 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
-            no_reap,
+            keep_ssh_masters,
         ),
     }
 }
@@ -1967,7 +1969,7 @@ fn cmd_overview(
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
@@ -1995,7 +1997,7 @@ fn cmd_overview(
             let msg = format!("{e:#}");
             eprintln!("overview: {msg}");
             eprintln!("overview: without the key nothing was read — this is not an empty result");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             if json {
                 println!("{}", json_string(&overview::overview_error_json(3, msg)));
             }
@@ -2013,7 +2015,7 @@ fn cmd_overview(
             eprintln!(
                 "overview: the archive was not read to completion — this is not an empty result"
             );
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             if json {
                 println!("{}", json_string(&overview::overview_error_json(3, msg)));
             }
@@ -2056,7 +2058,7 @@ fn cmd_overview(
             exit_code,
         );
         println!("{}", json_string(&value));
-        reap_remote(&cfg, no_reap);
+        reap_remote(&cfg, keep_ssh_masters);
         return ExitCode::from(exit_code);
     }
 
@@ -2101,7 +2103,7 @@ fn cmd_overview(
         println!(
             "overview: the destination was read in full and contains no activity index (no `meta/*/activity-v1.jsonl` anywhere)"
         );
-        reap_remote(&cfg, no_reap);
+        reap_remote(&cfg, keep_ssh_masters);
         return ExitCode::from(1);
     }
 
@@ -2113,7 +2115,7 @@ fn cmd_overview(
         row.machine = display(&row.machine);
     }
     println!("{}", overview::render_overview(&display_rows, width));
-    reap_remote(&cfg, no_reap);
+    reap_remote(&cfg, keep_ssh_masters);
     ExitCode::SUCCESS
 }
 
@@ -2235,7 +2237,7 @@ fn cmd_search(
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
@@ -2264,7 +2266,7 @@ fn cmd_search(
         Err(e) => {
             eprintln!("search: {e}");
             eprintln!("search: without the key nothing was read — this is not an empty result");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             // Deliberately 3, not 1. A missing key means the archive was never
             // consulted, which belongs with "could not finish reading", not
             // with "read it all and nothing matched". Reusing 1 here would make
@@ -2294,7 +2296,7 @@ fn cmd_search(
             // never be rendered as "nothing matched".
             eprintln!("search: cannot read `{}`: {e}", cfg.repo_root);
             eprintln!("search: this is not an empty destination — the archive was not read");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         }
     };
@@ -2354,7 +2356,7 @@ fn cmd_search(
         println!("  (not performed — full-text matching is not implemented)");
     }
 
-    reap_remote(&cfg, no_reap);
+    reap_remote(&cfg, keep_ssh_masters);
     code
 }
 
@@ -2381,7 +2383,7 @@ fn cmd_view(
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
@@ -2410,7 +2412,7 @@ fn cmd_view(
         Err(e) => {
             eprintln!("view: {e}");
             eprintln!("view: without the key nothing was read — this is not an empty result");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             // 3, not 1: the archive was never consulted. Same reasoning as
             // `search` — a lost key must not be indistinguishable from an
             // archive that genuinely holds nothing.
@@ -2430,13 +2432,13 @@ fn cmd_view(
         Err(e) => {
             eprintln!("view: cannot read `{}`: {e}", cfg.repo_root);
             eprintln!("view: this is not an empty destination — the archive was not read");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         }
     };
     // ssh masters are reaped before the server starts, not after: the serve loop
     // can sit idle for minutes, and there is nothing left to read by then.
-    reap_remote(&cfg, no_reap);
+    reap_remote(&cfg, keep_ssh_masters);
 
     for path in &report.unreadable {
         println!("  !! unreadable: {path}");
@@ -2676,7 +2678,7 @@ fn cmd_dest_init(
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
@@ -2941,7 +2943,7 @@ fn cmd_dest_init(
             }
         }
     }
-    reap_remote(&target, no_reap);
+    reap_remote(&target, keep_ssh_masters);
 
     // `diff_complete` is an aggregate bit, not an exit-code meaning. Its
     // false cases split into sources we could not read (`Unknown` or
@@ -3223,7 +3225,7 @@ fn cmd_run_once(
     connections: Option<usize>,
     options: &[String],
     verify: bool,
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let started = std::time::Instant::now();
     let (code, mut state) = run_once_pass(
@@ -3236,7 +3238,7 @@ fn cmd_run_once(
         connections,
         options,
         verify,
-        no_reap,
+        keep_ssh_masters,
     );
     state.duration_ms = started.elapsed().as_millis() as u64;
     let state_dir = chat_stasher::collect::default_state_dir();
@@ -3257,7 +3259,7 @@ fn run_once_pass(
     connections: Option<usize>,
     options: &[String],
     verify: bool,
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> (ExitCode, chat_stasher::runstate::RunState) {
     use chat_stasher::runstate::{RunOutcome, RunState};
 
@@ -3358,7 +3360,7 @@ fn run_once_pass(
                         key_file,
                         connections,
                         options,
-                        no_reap,
+                        keep_ssh_masters,
                     );
                     if code != ExitCode::SUCCESS {
                         eprintln!("[run-once] result: ERROR exit_code=1 verify=l1");
@@ -3424,7 +3426,7 @@ fn run_once_pass(
         machine.clone(),
         connections,
         options,
-        no_reap,
+        keep_ssh_masters,
     );
     if push_code != ExitCode::SUCCESS {
         eprintln!("[run-once] result: ERROR exit_code=1 push_failed");
@@ -3443,7 +3445,7 @@ fn run_once_pass(
             key_file,
             connections,
             options,
-            no_reap,
+            keep_ssh_masters,
         );
         if code != ExitCode::SUCCESS {
             eprintln!("[run-once] result: ERROR exit_code=1 verify=l1");
@@ -3473,11 +3475,11 @@ fn cmd_schedule(
     machine: Option<String>,
     shard_bucket_cap: Option<usize>,
     verify: bool,
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
 
-    // The run-once timer's cadence comes from the config; the reap-stage timer
+    // The run-once timer's cadence comes from the config; the reclaim-stage timer
     // is a fixed weekly slot, so no interval is resolved for it (`render`
     // ignores the value for that unit).
     let interval = match unit {
@@ -3488,10 +3490,10 @@ fn cmd_schedule(
                 return ExitCode::FAILURE;
             }
         },
-        schedule::Unit::ReapStage => 0,
+        schedule::Unit::ReclaimStage => 0,
     };
 
-    // `reap-stage` proves against *every* declared destination, so the
+    // `reclaim-stage` proves against *every* declared destination, so the
     // run-once "must name a destination" rule does not apply to it.
     if unit == schedule::Unit::RunOnce
         && destination.is_none()
@@ -3509,12 +3511,12 @@ fn cmd_schedule(
     }
 
     // Only `run-once` takes the run-once-only forwarding slots; reject them
-    // loudly for the reap-stage unit instead of silently dropping them.
-    if unit == schedule::Unit::ReapStage
+    // loudly for the reclaim-stage unit instead of silently dropping them.
+    if unit == schedule::Unit::ReclaimStage
         && (destination.is_some() || machine.is_some() || shard_bucket_cap.is_some() || verify)
     {
         eprintln!(
-            "schedule: `--unit reap-stage` does not forward `--destination` / `--machine` / `--shard-bucket-cap` / `--verify` (those are `run-once` slots). `--repo` / `--key-file` / `--connections` / `--option` / `--no-reap` are forwarded to `reap-stage`."
+            "schedule: `--unit reclaim-stage` does not forward `--destination` / `--machine` / `--shard-bucket-cap` / `--verify` (those are `run-once` slots). `--repo` / `--key-file` / `--connections` / `--option` / `--keep-ssh-masters` are forwarded to `reclaim-stage`."
         );
         return ExitCode::from(2);
     }
@@ -3546,15 +3548,15 @@ fn cmd_schedule(
         options: options.clone(),
         machine,
         shard_bucket_cap,
-        no_reap,
+        keep_ssh_masters,
         verify,
     };
-    let reap_args = schedule::ReapStageArgs {
+    let reclaim_args = schedule::ReclaimStageArgs {
         repo,
         key_file,
         connections,
         options,
-        no_reap,
+        keep_ssh_masters,
     };
     let files = schedule::render(
         unit,
@@ -3563,7 +3565,7 @@ fn cmd_schedule(
         &stage,
         interval,
         &args,
-        &reap_args,
+        &reclaim_args,
         &config::home_dir(),
     );
     let paths = match output {
@@ -3589,10 +3591,10 @@ fn cmd_schedule(
     };
     match unit {
         schedule::Unit::RunOnce => println!("[schedule] interval_secs: {interval}"),
-        schedule::Unit::ReapStage => println!(
+        schedule::Unit::ReclaimStage => println!(
             "[schedule] cadence: weekly — Sun {:02}:{:02} local",
-            schedule::REAP_STAGE_HOUR,
-            schedule::REAP_STAGE_MINUTE
+            schedule::RECLAIM_STAGE_HOUR,
+            schedule::RECLAIM_STAGE_MINUTE
         ),
     }
     println!("[schedule] install is NOT automatic.");
@@ -4027,18 +4029,18 @@ fn masterkey(config: &StoreConfig) -> anyhow::Result<(MasterKey, bool)> {
 }
 
 /// Reap the ssh ControlPersist masters left behind for the backend `endpoint`
-/// host of this run. No-op when `--no-reap` is set or no `endpoint` option was
-/// given (a local repo has no ssh masters to reap).
-fn reap_remote(cfg: &StoreConfig, no_reap: bool) {
-    if no_reap {
-        println!("[reap] skipped (--no-reap)");
+/// host of this run. No-op when `--keep-ssh-masters` is set or no `endpoint`
+/// option was given (a local repo has no ssh masters to reap).
+fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
+    if keep_ssh_masters {
+        println!("[reap] skipped (--keep-ssh-masters)");
         return;
     }
     let Some(endpoint) = cfg.options.get("endpoint") else {
         return;
     };
     let Some(host) = reap::host_of_endpoint(endpoint) else {
-        eprintln!("[reap] cannot parse endpoint `{endpoint}`, nothing reaped");
+        eprintln!("[reap] cannot parse endpoint `{endpoint}`, no ssh master reaped");
         return;
     };
     match reap::reap_masters_for_host(&host) {
@@ -4058,7 +4060,7 @@ fn cmd_push(
     machine: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     let machine = match resolve_machine("push", &config, machine.as_deref()) {
@@ -4198,7 +4200,7 @@ fn cmd_push(
                  here instead of producing one. Fix the key file location (--key-file) and re-run; \
                  the stage is untouched."
             );
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             // Deliberately 3, not 1, and certainly not 0. Same family as
             // `cmd_search` and `cmd_collect`: 3 == did not finish / never
             // started, 1 == finished and failed. Nothing was pushed and nothing
@@ -4225,14 +4227,18 @@ fn cmd_push(
         store::DEFAULT_CONNECTIONS
     );
     println!(
-        "[push] reap           : {}",
-        if no_reap { "OFF (--no-reap)" } else { "ON" }
+        "[push] ssh reap       : {}",
+        if keep_ssh_masters {
+            "OFF (--keep-ssh-masters)"
+        } else {
+            "ON"
+        }
     );
     let summary = match store.push(stage, &mk) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("push: {e:#}");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::FAILURE;
         }
     };
@@ -4265,7 +4271,7 @@ fn cmd_push(
         store::machine_fingerprint(&summary.snapshot_host)
     );
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
-    reap_remote(&cfg, no_reap);
+    reap_remote(&cfg, keep_ssh_masters);
     ExitCode::SUCCESS
 }
 
@@ -4280,7 +4286,7 @@ fn cmd_read(
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     let machine = if all_machines {
@@ -4307,7 +4313,7 @@ fn cmd_read(
         Ok(mk) => mk,
         Err(e) => {
             eprintln!("read: {e}");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             // Deliberately 3, not 1. A missing key means the archive was never
             // consulted, which is "did not finish / never started", not
             // "read it all and failed". Keep `read` aligned with `search` and
@@ -4322,14 +4328,14 @@ fn cmd_read(
     } else {
         let Some(machine) = machine.as_deref() else {
             eprintln!("read: local machine identity is required unless --all-machines is set");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         };
         let stage = match stage {
             Some(s) => s,
             None => {
                 eprintln!("read: `--stage` is required unless `--all-machines` is set");
-                reap_remote(&cfg, no_reap);
+                reap_remote(&cfg, keep_ssh_masters);
                 // Deliberately 2, not 1 or 3. The command is missing required
                 // syntax, so this is a usage error before any archive read;
                 // repository semantics reserve 2 for usage errors.
@@ -4340,7 +4346,7 @@ fn cmd_read(
             Some(s) => s,
             None => {
                 eprintln!("read: `--session` is required unless `--all-machines` is set");
-                reap_remote(&cfg, no_reap);
+                reap_remote(&cfg, keep_ssh_masters);
                 // Deliberately 2, not 1 or 3. The command is missing required
                 // syntax, so this is a usage error before any archive read;
                 // repository semantics reserve 2 for usage errors.
@@ -4350,14 +4356,18 @@ fn cmd_read(
         println!("[read] machine        : {machine}");
         println!("[read] repo           : {}", store.cfg.repo_root);
         println!(
-            "[read] reap           : {}",
-            if no_reap { "OFF (--no-reap)" } else { "ON" }
+            "[read] ssh reap       : {}",
+            if keep_ssh_masters {
+                "OFF (--keep-ssh-masters)"
+            } else {
+                "ON"
+            }
         );
         let (bytez, hashes) = match store.read_session_readback(stage, session, &mk) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("read: {e}");
-                reap_remote(&cfg, no_reap);
+                reap_remote(&cfg, keep_ssh_masters);
                 // Deliberately 3, not 1. A session readback that does not
                 // finish cannot claim a complete result; this is the same
                 // "did not finish" family as `search` and `collect`, while 1
@@ -4381,7 +4391,7 @@ fn cmd_read(
         );
         ExitCode::SUCCESS
     };
-    reap_remote(&cfg, no_reap);
+    reap_remote(&cfg, keep_ssh_masters);
     code
 }
 
@@ -4460,7 +4470,7 @@ fn cmd_verify(
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     let machine = query_machine(&config, machine);
@@ -4480,7 +4490,7 @@ fn cmd_verify(
         Ok(mk) => mk,
         Err(e) => {
             eprintln!("verify: {e}");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::FAILURE;
         }
     };
@@ -4489,7 +4499,7 @@ fn cmd_verify(
         (true, Some(s)) => s.clone(),
         (true, None) => {
             eprintln!("verify: `--stage` is required for level l3 / all");
-            reap_remote(&cfg, no_reap);
+            reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::FAILURE;
         }
         (false, _) => PathBuf::from("."),
@@ -4501,8 +4511,12 @@ fn cmd_verify(
         machine.as_deref().unwrap_or(UNRESOLVED_MACHINE)
     );
     println!(
-        "[verify] reap           : {}",
-        if no_reap { "OFF (--no-reap)" } else { "ON" }
+        "[verify] ssh reap       : {}",
+        if keep_ssh_masters {
+            "OFF (--keep-ssh-masters)"
+        } else {
+            "ON"
+        }
     );
 
     let mut failed = 0usize;
@@ -4521,7 +4535,7 @@ fn cmd_verify(
         }
     }
 
-    reap_remote(&cfg, no_reap);
+    reap_remote(&cfg, keep_ssh_masters);
     if failed == 0 {
         println!("[verify] RESULT         : OK");
         ExitCode::SUCCESS
@@ -4635,29 +4649,30 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     );
 }
 
-/// `reap-stage` — reclaim the sealed shard body once every declared
+/// `reclaim-stage` — reclaim the sealed shard body once every declared
 /// destination proves it holds each session (ADR-020 Phase 4).
 ///
 /// The destination set is the whole debt set: with a `destinations` table the
 /// command proves against *every* declared destination; without one it proves
 /// against the single default repository. A destination that is unreachable or
-/// read only partially is "unproven" and blocks the reap — never "does not
-/// have it" and never "has it". A blocked reap deletes nothing and exits 1.
-fn cmd_reap_stage(
+/// read only partially is "unproven" and blocks the reclaim — never "does
+/// not have it" and never "has it". A blocked reclaim deletes nothing and
+/// exits 1.
+fn cmd_reclaim_stage(
     stage: &PathBuf,
     apply: bool,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
-    no_reap: bool,
+    keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
     let multi = !config.destinations.is_empty();
     if multi {
         if repo.is_some() || key_file.is_some() {
             eprintln!(
-                "reap-stage: `--repo` / `--key-file` only apply to a single-destination config; ignoring them (this run proves every declared destination)"
+                "reclaim-stage: `--repo` / `--key-file` only apply to a single-destination config; ignoring them (this run proves every declared destination)"
             );
         }
     }
@@ -4679,13 +4694,13 @@ fn cmd_reap_stage(
     let mut destinations = destinations;
     destinations.sort_by(|a, b| a.name.cmp(&b.name));
 
-    println!("[reap-stage] stage        : {}", stage.display());
+    println!("[reclaim-stage] stage        : {}", stage.display());
     println!(
-        "[reap-stage] mode         : {}",
+        "[reclaim-stage] mode         : {}",
         if apply { "apply" } else { "dry-run" }
     );
     println!(
-        "[reap-stage] destinations : {}",
+        "[reclaim-stage] destinations : {}",
         destinations
             .iter()
             .map(|d| d.name.as_str())
@@ -4693,29 +4708,29 @@ fn cmd_reap_stage(
             .join(", ")
     );
 
-    let report = match stagereap::reap_stage(stage, &destinations, apply) {
+    let report = match stagereclaim::reclaim_stage(stage, &destinations, apply) {
         Ok(report) => report,
         Err(e) => {
-            eprintln!("reap-stage: {e:#}");
+            eprintln!("reclaim-stage: {e:#}");
             for dest in &destinations {
-                reap_remote(&dest.cfg, no_reap);
+                reap_remote(&dest.cfg, keep_ssh_masters);
             }
             return ExitCode::FAILURE;
         }
     };
     for dest in &destinations {
-        reap_remote(&dest.cfg, no_reap);
+        reap_remote(&dest.cfg, keep_ssh_masters);
     }
 
     println!(
-        "[reap-stage] candidates   : {} session(s) / {}",
+        "[reclaim-stage] candidates   : {} session(s) / {}",
         report.candidates.len(),
         fmt_bytes(report.candidate_bytes)
     );
-    if report.already_reaped > 0 {
+    if report.already_reclaimed > 0 {
         println!(
-            "[reap-stage] already reaped: {} session(s) (summary retained, no body)",
-            report.already_reaped
+            "[reclaim-stage] already reclaimed: {} session(s) (summary retained, no body)",
+            report.already_reclaimed
         );
     }
 
@@ -4744,25 +4759,25 @@ fn cmd_reap_stage(
             }
         }
         println!(
-            "[reap-stage] RESULT       : BLOCKED — nothing was deleted; fix the destination(s) above and re-run"
+            "[reclaim-stage] RESULT       : BLOCKED — nothing was deleted; fix the destination(s) above and re-run"
         );
         return ExitCode::FAILURE;
     }
 
     if !apply {
         println!(
-            "[reap-stage] reclaimable  : {} session(s) / {} — dry run, pass `--apply` to delete the body",
+            "[reclaim-stage] reclaimable  : {} session(s) / {} — dry run, pass `--apply` to delete the body",
             report.candidates.len(),
             fmt_bytes(report.candidate_bytes)
         );
-        println!("[reap-stage] RESULT       : OK (dry run)");
+        println!("[reclaim-stage] RESULT       : OK (dry run)");
         return ExitCode::SUCCESS;
     }
 
-    println!("[reap-stage] summary      : retained per-session summaries written before delete");
+    println!("[reclaim-stage] summary      : retained per-session summaries written before delete");
     for r in &report.reclaimed {
         println!(
-            "  reaped: {} {} {} shard(s) / {} (summary retained)",
+            "  reclaimed: {} {} {} shard(s) / {} (summary retained)",
             r.machine,
             short_session_id(&r.session_id),
             r.shard_count,
@@ -4770,14 +4785,14 @@ fn cmd_reap_stage(
         );
     }
     println!(
-        "[reap-stage] reclaimed    : {} session(s) / {}",
+        "[reclaim-stage] reclaimed    : {} session(s) / {}",
         report.reclaimed.len(),
         fmt_bytes(report.candidate_bytes)
     );
     println!(
-        "[reap-stage] next         : `verify --level l3 --stage <stage>` now reconciles against the retained summaries"
+        "[reclaim-stage] next         : `verify --level l3 --stage <stage>` now reconciles against the retained summaries"
     );
-    println!("[reap-stage] RESULT       : OK");
+    println!("[reclaim-stage] RESULT       : OK");
     ExitCode::SUCCESS
 }
 

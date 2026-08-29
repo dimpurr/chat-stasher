@@ -162,7 +162,7 @@ gate "step 1 OK · ${#sources[@]} sessions, ~$(du -sk "$STAGE" | awk '{print $1}
 # ------------------------------------------------------------------- step 2
 gate "step 2/8 · push -> fresh local repo"
 if ! out=$("$BIN" push --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
-              --machine "$MACHINE" --no-reap 2>&1); then
+              --machine "$MACHINE" --keep-ssh-masters 2>&1); then
   echo "$out"; echo "[gate] push failed"; fail_gate
 fi
 echo "$out" | sed 's/^/  /'
@@ -174,7 +174,7 @@ gate "step 2 OK · repo created, masterkey persisted"
 # ------------------------------------------------------------------- step 3
 gate "step 3/8 · repeat push -> assert data_added == 0 (idempotent)"
 if ! out=$("$BIN" push --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
-              --machine "$MACHINE" --no-reap 2>&1); then
+              --machine "$MACHINE" --keep-ssh-masters 2>&1); then
   echo "$out"; echo "[gate] repeat push failed"; fail_gate
 fi
 echo "$out" | sed 's/^/  /'
@@ -187,7 +187,7 @@ gate "step 3 OK · data_added=0"
 
 # ------------------------------------------------------------------- step 4
 gate "step 4/8 · read --all-machines -> assert per-session sha == source"
-if ! out=$("$BIN" read --all-machines --repo "$REPO" --key-file "$KEY" --no-reap 2>&1); then
+if ! out=$("$BIN" read --all-machines --repo "$REPO" --key-file "$KEY" --keep-ssh-masters 2>&1); then
   echo "$out"; echo "[gate] read --all-machines failed"; fail_gate
 fi
 echo "$out" | sed 's/^/  /'
@@ -216,7 +216,7 @@ gate "step 4 OK · ${seen}/${N_SESSIONS} sessions sha256 match source"
 # ------------------------------------------------------------------- step 5
 gate "step 5/8 · verify --level l1"
 if ! out=$("$BIN" verify --level l1 --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
-              --machine "$MACHINE" --no-reap 2>&1); then
+              --machine "$MACHINE" --keep-ssh-masters 2>&1); then
   echo "$out"; echo "[gate] verify l1 FAILED"; fail_gate
 fi
 echo "$out" | sed 's/^/  /'
@@ -226,7 +226,7 @@ gate "step 5 OK · l1 structure check passed"
 # ------------------------------------------------------------------- step 6
 gate "step 6/8 · verify --level l3"
 if ! out=$("$BIN" verify --level l3 --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
-              --machine "$MACHINE" --no-reap 2>&1); then
+              --machine "$MACHINE" --keep-ssh-masters 2>&1); then
   echo "$out"; echo "[gate] verify l3 FAILED"; fail_gate
 fi
 echo "$out" | sed 's/^/  /'
@@ -308,14 +308,14 @@ if [ "$SELFTEST" -eq 1 ]; then
 
   gate "SELFTEST · re-push (corrupted shard -> newest snapshot)"
   if ! out=$("$BIN" push --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
-                --machine "$MACHINE" --no-reap 2>&1); then
+                --machine "$MACHINE" --keep-ssh-masters 2>&1); then
     echo "$out"; echo "[gate] selftest push failed"; fail_gate
   fi
   echo "$out" | sed 's/^/  /'
 
   gate "SELFTEST · verify --level l3 against ORIGINAL golden (pristine staging)"
   if out=$("$BIN" verify --level l3 --stage "$GOLDEN" --repo "$REPO" --key-file "$KEY" \
-             --machine "$MACHINE" --no-reap 2>&1); then
+             --machine "$MACHINE" --keep-ssh-masters 2>&1); then
     rc=0
   else
     rc=$?

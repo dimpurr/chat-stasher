@@ -400,10 +400,27 @@ fn windows_shape_writes_json_and_prints_the_hkcu_registry_command() {
         "缺少 HKCU 注册命令:\n{text}"
     );
     assert!(!text.contains("HKLM"), "不该动 HKLM (需要提权):\n{text}");
-    assert!(
-        text.contains("registry NOT applied (not running on Windows)"),
-        "在 macOS 上必须明说注册表这步没做:\n{text}"
-    );
+    // The last line of this command is the one thing that genuinely differs by
+    // platform: off Windows there is no registry to write, so the tool must say
+    // so rather than imply it did something. Both arms assert — a one-sided
+    // `#[cfg]` guard here would mean the Windows arm is never checked at all,
+    // which is how a macOS-only `stat -f%z` guard sat in this repo silently
+    // never firing on Linux.
+    if cfg!(target_os = "windows") {
+        assert!(
+            !text.contains("registry NOT applied"),
+            "on Windows the registry write is real and must not be reported as skipped:\n{text}"
+        );
+        assert!(
+            text.contains("registry "),
+            "on Windows the applied registry command must still be reported:\n{text}"
+        );
+    } else {
+        assert!(
+            text.contains("registry NOT applied (not running on Windows)"),
+            "off Windows the tool must say plainly that the registry step was not done:\n{text}"
+        );
+    }
 }
 
 /// The stub the next ticket regresses against: one line, valid JSON, exit 0.

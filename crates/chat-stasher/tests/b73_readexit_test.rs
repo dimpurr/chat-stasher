@@ -37,7 +37,7 @@ fn isolated_read_command(sandbox: &Path, repo: &Path, key: &Path) -> Command {
         .arg(repo)
         .args(["--key-file"])
         .arg(key)
-        .args(["--no-reap"])
+        .args(["--keep-ssh-masters"])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
