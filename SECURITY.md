@@ -45,7 +45,7 @@ leave the report open indefinitely.
 | Version | Supported |
 |---|---|
 | `main` (unreleased) | Yes — this is the only line that receives fixes |
-| `0.1.0` (`crates/chat-stasher/Cargo.toml:3`) | Version number only; no release tag exists in this repository |
+| `0.2.0` (`crates/chat-stasher/Cargo.toml:3`) | Current version. `v0.1.0` was tagged and released on 2026-08-28; `0.2.0` is unreleased until a `v0.2.0` tag exists |
 
 There are no git tags and no published releases at the time of writing, so there
 are no older versions to backport to. If you are running this, you are running a

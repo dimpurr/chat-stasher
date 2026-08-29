@@ -69,37 +69,10 @@ jobs:
       - name: Gate — output inventory
         run: python3 scripts/output-inventory.py --check
 
-      # The rest of the release gate. It needs a debug binary (release-gate.sh
-      # shells out to target/debug/chat-stasher) and a synthetic harness fixture,
-      # so it costs a second build — worth it on the one path that publishes.
-      #
-      # ⚠️ These three steps are duplicated from ci.yml. That duplication is a
-      # real hazard: two copies of a gate drift apart, and the copy nobody looks
-      # at is the one that rots. The durable fix is for release-gate.sh to
-      # create its own fixture so both callers reduce to a single `bash
-      # scripts/release-gate.sh` line. Until then, changing one copy means
-      # changing the other.
-      - name: Build debug binary for the release gate
-        run: cargo build
-
-      - name: Create synthetic release-gate input
-        shell: bash
-        run: |
-          set -euo pipefail
-          fixture_root="$RUNNER_TEMP/chat-stasher-claude-projects"
-          mkdir -p "$fixture_root"
-          for n in 1 2 3; do
-            file="$fixture_root/synthetic-$n.jsonl"
-            : > "$file"
-            for i in $(seq 1 600); do
-              printf '{"synthetic":true,"session":%s,"event":%s}\n' "$n" "$i" >> "$file"
-            done
-          done
-
+      # One line: the script provides its own fixture and builds the debug
+      # binary it needs. Previously three steps duplicated from ci.yml, with a
+      # comment admitting the two copies would drift. They no longer exist.
       - name: Gate — full release gate
-        shell: bash
-        env:
-          CLAUDE_PROJECTS_DIR: ${{ runner.temp }}/chat-stasher-claude-projects
         run: bash scripts/release-gate.sh
 
       - name: Build release binary

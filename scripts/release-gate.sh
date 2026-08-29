@@ -15,9 +15,15 @@
 # Real conversation payloads are read as opaque fixture bytes and never shown.
 #
 # Usage:
-#   bash scripts/release-gate.sh                   # synthetic happy path
-#   bash scripts/release-gate.sh --selftest        # synthetic negative path
-#   bash scripts/release-gate.sh --real-data       # explicit real-data opt-in
+#   bash scripts/release-gate.sh                          # synthetic happy path
+#   CLAUDE_PROJECTS_DIR=<dir> bash scripts/release-gate.sh  # caller-supplied fixture
+#   bash scripts/release-gate.sh --selftest               # synthetic negative path
+#   bash scripts/release-gate.sh --real-data              # explicit real-data opt-in
+#
+# When CLAUDE_PROJECTS_DIR is unset the script generates its own deterministic
+# fixture under $TMP (removed on exit). When set, the caller's directory is
+# used as-is and is NEVER removed. `--real-data` is the explicit opt-in for
+# reading real conversation data from $HOME/.claude/projects.
 
 set -euo pipefail
 
@@ -42,7 +48,11 @@ done
 
 START=$(date +%s)
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# The self-built fixture lives under $TMP, so removing $TMP on exit also
+# removes it. A caller-supplied CLAUDE_PROJECTS_DIR lives OUTSIDE $TMP and is
+# only ever read (cp), never removed — even on failure/interrupt.
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT INT TERM
 
 STAGE="$TMP/stage"        # sealed staging tree (fed to push)
 REPO="$TMP/repo"          # brand-new local rustic repository
@@ -57,13 +67,28 @@ fail_gate() {
   exit 1
 }
 
-[ -x "$BIN" ] || { echo "[gate] binary not found: $BIN (run cargo build first)"; fail_gate; }
+# Build the debug binary on demand so `bash scripts/release-gate.sh` is one
+# line for a contributor and for both workflows.
+if [ ! -x "$BIN" ]; then
+  echo "[gate] debug binary not found: $BIN — building (cargo build)"
+  ( cd "$ROOT" && cargo build ) || { echo "[gate] cargo build failed"; fail_gate; }
+  [ -x "$BIN" ] || { echo "[gate] binary still missing after cargo build: $BIN"; fail_gate; }
+fi
 
 # ------------------------------------------------------------------ helpers
+# sha256 of stdin. Linux ships sha256sum (coreutils); macOS ships shasum
+# (Perl) and, on current releases, sha256sum too. Both print "<hex>  -" for
+# stdin, so the awk extraction is identical on every platform.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_of() { cat "$@" | sha256sum | awk '{print $1}'; }
+else
+  sha256_of() { cat "$@" | shasum -a 256 | awk '{print $1}'; }
+fi
+
 # sha256 of a session's concatenated shards (seq order = lexicographic, 6-pad).
 session_sha() {
   local dir="$1"
-  cat "$dir"/[0-9]*.jsonl | shasum -a 256 | awk '{print $1}'
+  sha256_of "$dir"/[0-9]*.jsonl
 }
 session_bytes() {
   local dir="$1"
@@ -73,10 +98,34 @@ shard_count() {
   ls "$1"/[0-9]*.jsonl 2>/dev/null | wc -l | tr -d ' '
 }
 
+# Portable file size in bytes. BSD stat formats with `-f %z`; GNU stat uses
+# `-c %s` (`stat -f %z` is exactly the macOS-only flag that broke the ubuntu
+# CI cell for two days on 2026-08-28). Probe once and reuse — never branch
+# per call site.
+if stat -c %s / >/dev/null 2>&1; then
+  file_size() { stat -c %s "$1"; }
+elif stat -f %z / >/dev/null 2>&1; then
+  file_size() { stat -f %z "$1"; }
+else
+  file_size() { wc -c < "$1"; }
+fi
+
 # ------------------------------------------------------------------- step 1
 gate "step 1/8 · build fixtures (JSONL -> sealed shards)"
 mkdir -p "$STAGE"
 sources=()
+
+# Pick the N largest *.jsonl under a directory (the "sessions" for this gate).
+# Both BSD and GNU find support -print0; read -d '' handles paths with spaces.
+collect_sources() {
+  local root="$1"
+  while IFS= read -r p; do sources+=("$p"); done < <(
+    find "$root" -name '*.jsonl' -type f -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do printf '%s %s\n' "$(file_size "$f")" "$f"; done \
+      | sort -rn -k1,1 | head -n "$N_SESSIONS" | cut -d' ' -f2-
+  )
+}
+
 if [ "$REAL_DATA" -eq 1 ]; then
   SRC_ROOT="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
   if [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
@@ -84,16 +133,31 @@ if [ "$REAL_DATA" -eq 1 ]; then
   else
     SRC_LABEL='$HOME/.claude/projects'
   fi
-  while IFS= read -r p; do sources+=("$p"); done < <(
-    find "$SRC_ROOT" -name '*.jsonl' -type f -exec stat -f '%z %N' {} \; 2>/dev/null \
-      | sort -rn | head -n "$N_SESSIONS" | awk '{print $2}'
-  )
+  collect_sources "$SRC_ROOT"
   if [ "${#sources[@]}" -lt "$N_SESSIONS" ]; then
     echo "[gate] only ${#sources[@]} candidate sessions found under $SRC_LABEL"
     fail_gate
   fi
   gate "!!! REAL DATA OPT-IN: cp ${#sources[@]} files from $SRC_LABEL (cp only; no mv) !!!"
+elif [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
+  # Caller-supplied fixture directory (CI harness, or a contributor pointing at
+  # a checked-out fixture). Treated as synthetic input: shape checks run and
+  # doctor uses an isolated HOME. Files are cp'd, never moved; the directory
+  # itself is OUTSIDE $TMP and is never removed.
+  SRC_ROOT="$CLAUDE_PROJECTS_DIR"
+  collect_sources "$SRC_ROOT"
+  if [ "${#sources[@]}" -lt "$N_SESSIONS" ]; then
+    echo "[gate] only ${#sources[@]} candidate sessions found under \$CLAUDE_PROJECTS_DIR"
+    fail_gate
+  fi
+  gate "caller-supplied fixture: ${#sources[@]} JSONL sessions from \$CLAUDE_PROJECTS_DIR (cp only; dir never removed)"
 else
+  # Self-built synthetic fixture, generated under $TMP so the existing cleanup
+  # trap removes it. Kept at SYNTH_LINES=20000 lines: after the 4-way shard
+  # split each shard is ~370 KiB, which is what the >16 KiB shape check below
+  # exists to guarantee. (A 600-line fixture — the old ci.yml fixture — yields
+  # ~6 KiB shards and would fail that check; it was never actually read by
+  # this script, so the gate was always validated against THIS fixture.)
   SYNTH_ROOT="$TMP/synthetic-sources"
   mkdir -p "$SYNTH_ROOT"
   for ((n = 1; n <= N_SESSIONS; n++)); do
@@ -104,7 +168,7 @@ else
     }' > "$synth"
     sources+=("$synth")
   done
-  gate "synthetic mode: generated ${#sources[@]} deterministic JSONL sessions; no real-data directory access"
+  gate "synthetic mode: generated ${#sources[@]} deterministic JSONL sessions under \$TMP; cleaned up on exit"
 fi
 
 # session metadata: (id, shard_count, bytes, sha) — the golden manifest.
@@ -149,13 +213,13 @@ if [ "$REAL_DATA" -eq 0 ]; then
   for sid in "${SESS_IDS[@]}"; do
     sdir="$STAGE/sessions/$MACHINE/$sid"
     shards=$(shard_count "$sdir")
-    [ "$shards" -ge 3 ] || { echo "[gate] synthetic $sid has $shards shards (expected >= 3)"; fail_gate; }
+    [ "$shards" -ge 3 ] || { echo "[gate] fixture $sid has $shards shards (expected >= 3)"; fail_gate; }
     session_max=$(find "$sdir" -name '*.jsonl' -type f -exec wc -c {} \; | awk 'max < $1 { max = $1 } END { print max + 0 }')
     [ "$session_max" -gt "$max_shard_bytes" ] && max_shard_bytes="$session_max"
-    gate "  synthetic shape $sid  shards=$shards  max_shard_bytes=$session_max"
+    gate "  fixture shape $sid  shards=$shards  max_shard_bytes=$session_max"
   done
-  [ "$max_shard_bytes" -gt 16384 ] || { echo "[gate] synthetic max shard is $max_shard_bytes bytes (expected > 16384)"; fail_gate; }
-  gate "synthetic shape OK · every session has >=3 shards; max shard >16 KiB"
+  [ "$max_shard_bytes" -gt 16384 ] || { echo "[gate] fixture max shard is $max_shard_bytes bytes (expected > 16384)"; fail_gate; }
+  gate "fixture shape OK · every session has >=3 shards; max shard >16 KiB"
 fi
 gate "step 1 OK · ${#sources[@]} sessions, ~$(du -sk "$STAGE" | awk '{print $1}') KiB staging"
 
@@ -298,7 +362,7 @@ if [ "$SELFTEST" -eq 1 ]; then
   # Pick one sealed shard in the LIVE staging tree and XOR one byte at its
   # midpoint (guarantees the byte changes -> sha256 must change).
   target=$(find "$STAGE/sessions" -name '*.jsonl' | sort | head -1)
-  size=$(stat -f %z "$target")
+  size=$(file_size "$target")
   pos=$(( size / 2 ))
   orig=$(dd if="$target" bs=1 skip="$pos" count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
   new=$(( orig ^ 0x01 ))

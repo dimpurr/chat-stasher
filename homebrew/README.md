@@ -35,7 +35,7 @@ Verify the install:
 
 ```sh
 chat-stasher --version
-# chat-stasher 0.1.0
+# chat-stasher 0.2.0
 
 chat-stasher doctor
 ```
@@ -84,7 +84,7 @@ brew untap dimpurr/chat-stasher
 
 | Target | Status |
 | --- | --- |
-| macOS arm64 (Apple Silicon) | ✅ prebuilt, v0.1.0 |
+| macOS arm64 (Apple Silicon) | ✅ prebuilt, v0.2.0 |
 | macOS x86_64 (Intel) | ⏳ not shipped yet — the formula already carries the branch |
 | Linux | ❌ not shipped — no prebuilt binary, no source build path in this tap |
 
