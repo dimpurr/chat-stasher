@@ -314,6 +314,9 @@ fn opencode_time(value: &serde_json::Value) -> LineTime {
             let last = session.get("time_updated").and_then(one_ts_value);
             let invalid = (has_created && first.is_none()) || (has_updated && last.is_none());
             let rfc =
+                // reason: a missing session timestamp is simply not RFC3339; the
+                // distinct "field present but unparseable" case is tracked by the
+                // `invalid` tally below, so false is an honest "no timestamp".
                 first.map(|(_, r)| r).unwrap_or(false) || last.map(|(_, r)| r).unwrap_or(false);
             (
                 first.map(|(t, _)| t),
@@ -400,6 +403,9 @@ fn gemini_time(value: &serde_json::Value) -> LineTime {
     let has_top = value.get("startTime").is_some() || value.get("lastUpdated").is_some();
     let invalid = has_top && (start.is_none() || last_updated.is_none());
     let rfc =
+        // reason: absent startTime/lastUpdated means "no timestamp", hence not
+        // RFC3339; a field that exists but fails to parse is flagged separately
+        // by the `invalid` tally, so false is an honest absence, not a lie.
         start.map(|(_, r)| r).unwrap_or(false) || last_updated.map(|(_, r)| r).unwrap_or(false);
     let sf = start.map(|(t, _)| t);
     let sl = last_updated.map(|(t, _)| t);

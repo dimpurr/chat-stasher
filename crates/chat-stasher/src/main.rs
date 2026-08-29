@@ -1528,7 +1528,19 @@ fn rebuild_activity_index(
                         )));
                     }
                 };
-                if session.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                // A dirent whose type cannot be read is not "not a session":
+                // skipping it would silently under-count the index. Same read
+                // failure family as the entry error above.
+                let file_type = match session.file_type() {
+                    Ok(ft) => ft,
+                    Err(e) => {
+                        return Err(ActivityIndexError::Read(format!(
+                            "cannot read the type of {}: {e}",
+                            session.path().display()
+                        )));
+                    }
+                };
+                if file_type.is_dir() {
                     session_dirs.push(session.path());
                 }
             }
@@ -1548,6 +1560,9 @@ fn rebuild_activity_index(
         let session_id = session_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
+            // reason: a read_dir entry always has a file_name; even the impossible
+            // empty id falls through infer_harness → None → counted in
+            // skipped_sessions, so an unknown id is tallied, never silently indexed.
             .unwrap_or_default();
         let Some(harness) = sidecar::infer_harness(&session_id) else {
             skipped_sessions += 1;
@@ -1804,6 +1819,9 @@ fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        // reason: the only way to reach here is a system clock before the epoch
+        // (a broken host); 0 is the honest "no meaningful timestamp" fallback,
+        // never a path a sane host takes.
         .unwrap_or(0)
 }
 
@@ -3924,6 +3942,8 @@ fn resolve_store_config(
             .as_deref()
             .or(config.rustic_cache_dir.as_deref())
             .map(|raw| PathBuf::from(expand_path_arg("cache_dir", raw))),
+        // reason: an unset Option<bool> here means "use the default (cache on)" —
+        // a config default, not an unknown read result being collapsed to false.
         no_cache: entry.no_cache.or(config.rustic_no_cache).unwrap_or(false),
     }
     .with_capped_connections(
@@ -3972,6 +3992,8 @@ fn store_config_from(
                     .rustic_cache_dir
                     .as_deref()
                     .map(|raw| PathBuf::from(expand_path_arg("cache_dir", raw))),
+                // reason: rustic_no_cache unset = rustic's own default (cache on);
+                // a config default, never an unknown collapsed to false.
                 no_cache: config.rustic_no_cache.unwrap_or(false),
             }
             .with_capped_connections(connections.or(config.rustic_connections))
@@ -5359,6 +5381,37 @@ mod decision_surface_tests {
                 assert!(message.contains("cannot create"), "message: {message}");
             }
             other => panic!("expected a Write error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuild_activity_index_unreadable_sessions_root_is_a_read_error() {
+        // The fix this pins: a dirent whose type cannot be determined must be a
+        // hard `ActivityIndexError::Read`, never silently skipped as "not a
+        // session". `DirEntry::file_type()` itself cannot be made to fail
+        // deterministically in a single-threaded test — on unix it is served
+        // from readdir's `d_type` (no syscall) and only falls back to `lstat`
+        // on filesystems reporting `DT_UNKNOWN`, which user-space cannot force.
+        // So we pin the reachable neighbour, the same read-failure family: a
+        // `sessions/<machine>` root that cannot be read at all is an error,
+        // never an empty index.
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        fs::create_dir_all(stage.join(store::SESSIONS_DIR)).unwrap();
+        // A regular file where the sessions root must be a directory: read_dir
+        // fails with NotADirectory (never NotFound), which is the enumeration
+        // failure family the fixed code joins.
+        let sessions_root = stage.join(store::SESSIONS_DIR).join(machine);
+        fs::write(&sessions_root, "not a directory").unwrap();
+        match rebuild_activity_index(&stage, machine, false) {
+            Err(ActivityIndexError::Read(message)) => {
+                assert!(
+                    message.contains("cannot read"),
+                    "expected the read-failure family, got: {message}"
+                );
+            }
+            other => panic!("expected a Read error, got {other:?}"),
         }
     }
 }
