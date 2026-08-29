@@ -37,7 +37,7 @@ fn build_repo(dir: &Path, connections: usize) -> (StoreConfig, MasterKey, PathBu
         key_file: dir.join("masterkey.json"),
         connections,
         options: Default::default(),
-        cache_dir: None,
+        cache_dir: Some(dir.join("cache")),
         no_cache: false,
     };
     let mk = MasterKey::new();
@@ -45,6 +45,51 @@ fn build_repo(dir: &Path, connections: usize) -> (StoreConfig, MasterKey, PathBu
     let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
     bs.push(&stage, &mk).unwrap();
     (cfg, mk, stage)
+}
+
+/// A located data blob within its on-disk pack file.
+#[derive(Debug, Clone)]
+struct DataBlobTarget {
+    pack_path: PathBuf,
+    offset: usize,
+    length: usize,
+}
+
+/// Query rustic's index to locate every Data blob's exact offset and length
+/// within its pack file on disk. This is 100% deterministic and does not rely
+/// on guesswork about pack file layout or blob order.
+fn locate_data_blobs(cfg: &StoreConfig, mk: &MasterKey) -> Vec<DataBlobTarget> {
+    use rustic_core::repofile::{BlobType, IndexFile, IndexId};
+
+    let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
+    let (repo, _) = bs.open_or_init(mk).expect("open repo to inspect index");
+    let index_ids: Vec<IndexId> = repo.list::<IndexId>().expect("list index").collect();
+    let repo_root = Path::new(&cfg.repo_root);
+    let all_packs = collect_files(&repo_root.join("data"));
+
+    let mut targets = Vec::new();
+    for id in index_ids {
+        let index: IndexFile = repo.get_file::<IndexFile>(&id).expect("get index file");
+        for pack in index.packs {
+            let pack_hex = pack.id.to_hex();
+            let pack_name = pack_hex.as_str();
+            let pack_path = all_packs
+                .iter()
+                .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(pack_name))
+                .unwrap_or_else(|| panic!("pack file {pack_name} not found in data/"));
+
+            for blob in pack.blobs {
+                if blob.tpe == BlobType::Data {
+                    targets.push(DataBlobTarget {
+                        pack_path: pack_path.clone(),
+                        offset: blob.location.offset as usize,
+                        length: blob.location.length as usize,
+                    });
+                }
+            }
+        }
+    }
+    targets
 }
 
 #[test]
@@ -65,7 +110,7 @@ fn consumed_hash_audit_distinguishes_archived_and_missing_repo_records() {
         key_file: dir.path().join("masterkey.json"),
         connections: 1,
         options: Default::default(),
-        cache_dir: None,
+        cache_dir: Some(dir.path().join("cache")),
         no_cache: false,
     };
     let mk = MasterKey::new();
@@ -144,21 +189,20 @@ fn l1_catches_a_missing_pack() {
 
 #[test]
 fn l2_and_l3_catch_a_payload_byte_flip() {
-    // Flip one byte inside every pack (headers sit at the end, so byte 1 is
-    // inside blob payloads). rustic_core serves *some* packs from an on-disk
-    // cache, so to be certain at least the data pack is hit we corrupt all of
-    // them — every one must then be re-verified (L2) or re-read (L3).
+    // Locate every data blob via rustic's index and flip one byte strictly
+    // inside each data blob's ciphertext payload. Tree blobs, index files, and
+    // pack headers remain pristine.
     let dir = tempfile::TempDir::new().unwrap();
     let (cfg, mk, stage) = build_repo(dir.path(), 4);
     let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
 
-    let repo_root = Path::new(&cfg.repo_root);
-    let packs = collect_files(&repo_root.join("data"));
-    assert!(!packs.is_empty());
-    for pack in &packs {
-        let mut bytes = fs::read(pack).unwrap();
-        bytes[1] ^= 0x01;
-        fs::write(pack, &bytes).unwrap();
+    let data_blobs = locate_data_blobs(&cfg, &mk);
+    assert!(!data_blobs.is_empty(), "expected at least one data blob");
+    for target in &data_blobs {
+        let mut bytes = fs::read(&target.pack_path).unwrap();
+        let flip_idx = target.offset + (target.length / 2);
+        bytes[flip_idx] ^= 0x01;
+        fs::write(&target.pack_path, &bytes).unwrap();
     }
 
     // L2 re-hashes every pack, so this must fail.
@@ -176,33 +220,23 @@ fn l2_and_l3_catch_a_payload_byte_flip() {
 
 #[test]
 fn l1_does_not_verify_payload_bytes_but_l2_does() {
-    // rust_core serves some packs from an on-disk cache, so first locate a
-    // *data-bearing* pack: corrupting it makes the read-back fail. Then, with
-    // a one-byte payload flip in place, L1 (structure) must still pass while
-    // L2 (content) must fail.
+    // Locate a data blob via the index and flip a single byte strictly inside
+    // its payload ciphertext. Because only a data blob (and no tree blob,
+    // pack size, or pack header) is modified, L1 (structural metadata check)
+    // must still pass, while L2 (content verification) must detect the
+    // corruption and fail.
     let dir = tempfile::TempDir::new().unwrap();
-    let (cfg, mk, stage) = build_repo(dir.path(), 4);
+    let (cfg, mk, _stage) = build_repo(dir.path(), 4);
     let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
 
-    let repo_root = Path::new(&cfg.repo_root);
-    let packs = collect_files(&repo_root.join("data"));
-    let mut data_pack = None;
-    for pack in &packs {
-        let mut bytes = fs::read(pack).unwrap();
-        bytes[1] ^= 0x01;
-        fs::write(pack, &bytes).unwrap();
-        let hit = bs.reconcile_manifest(&mk, &stage).is_err();
-        bytes[1] ^= 0x01;
-        fs::write(pack, &bytes).unwrap();
-        if hit {
-            data_pack = Some(pack.clone());
-            break;
-        }
-    }
-    let pack = data_pack.expect("no data-bearing pack found");
-    let mut bytes = fs::read(&pack).unwrap();
-    bytes[1] ^= 0x01;
-    fs::write(&pack, &bytes).unwrap();
+    let data_blobs = locate_data_blobs(&cfg, &mk);
+    assert!(!data_blobs.is_empty(), "expected at least one data blob");
+    let target = &data_blobs[0];
+
+    let mut bytes = fs::read(&target.pack_path).unwrap();
+    let flip_idx = target.offset + (target.length / 2);
+    bytes[flip_idx] ^= 0x01;
+    fs::write(&target.pack_path, &bytes).unwrap();
 
     let l1 = bs.check_repo(&mk, false).unwrap();
     assert!(
