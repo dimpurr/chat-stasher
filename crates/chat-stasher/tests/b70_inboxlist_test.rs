@@ -71,7 +71,7 @@ fn run_push(sandbox: &Path, stage: &Path, machine: &str) -> Output {
         .arg(sandbox.join("repo"))
         .arg("--key-file")
         .arg(sandbox.join("keys").join("masterkey.json"))
-        .args(["--machine", machine, "--no-reap"])
+        .args(["--machine", machine, "--keep-ssh-masters"])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))

@@ -111,6 +111,28 @@ RULES = [
             "缺失）是另一种语义，不受本规则约束。"
         ),
     },
+    {
+        "id": "T4",
+        "name": "one-word-one-meaning-reap",
+        "patterns": [
+            {
+                "forbidden": r"\breap(?:ed|ing|s)?\b",
+                # "reap" applied to processes is standard Unix terminology: it stays
+                # legal for killing leaked ssh ControlMaster processes — but the SAME
+                # string must carry an ssh/connection/master-family word to say so.
+                # Any other "reap" is stage shard-body reclamation and must say reclaim.
+                "not_context": (
+                    r"\b(?:ssh|sftp|connection|connections|master|masters|"
+                    r"control|socket)\b"
+                ),
+            },
+        ],
+        "suggestion": (
+            "『reap』只许在 ssh 连接回收语境出现（同一字符串里要有 ssh / master / "
+            "connection / socket 等词，否则读的人不知道是哪种 reap）。stage 分片体回收"
+            "统一说 reclaim / reclaimed。若这条确实是 ssh 语义，请把 ssh / master 写明白。"
+        ),
+    },
 ]
 
 
@@ -178,6 +200,12 @@ FIXTURE_VIOLATING = {
         '    eprintln!("shard missing from archive");\n'
         '}\n'
     ),
+    "t4_violation.rs": (
+        'pub fn bad_reap() {\n'
+        '    println!("reap-stage: dry run reports what would be reclaimed");\n'
+        '    eprintln!("the reap is blocked: nothing was deleted");\n'
+        '}\n'
+    ),
     "clap_help_violation.rs": (
         '#[derive(Parser)]\n'
         'struct Args {\n'
@@ -206,6 +234,12 @@ FIXTURE_CLEAN = {
         'pub fn good_unarchived() {\n'
         '    println!("missing file: {}", path);\n'
         '    bail!("bundle sessionId is missing");\n'
+        '}\n'
+    ),
+    "t4_clean.rs": (
+        'pub fn good_reap() {\n'
+        '    println!("[reap] ssh masters shut down: {n}");\n'
+        '    eprintln!("reap: `ssh -O exit` failed");\n'
         '}\n'
     ),
     "clap_help_clean.rs": (
@@ -254,13 +288,14 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        expect("FAILED:8" in report, "violating tree reports exactly 8 violations")
+        expect("FAILED:10" in report, "violating tree reports exactly 10 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
+        expect("t4_violation.rs" in report, "T4 fixture is named in the report")
         expect("clap_help_violation.rs" in report, "clap-help surface fixture is named in the report")
-        expect("[T1 " in report and "[T2 " in report and "[T3 " in report,
-               "each of T1/T2/T3 is named with its suggestion")
+        expect("[T1 " in report and "[T2 " in report and "[T3 " in report and "[T4 " in report,
+               "each of T1/T2/T3/T4 is named with its suggestion")
 
         # -- clean fixtures must NOT appear
         for name in FIXTURE_CLEAN:

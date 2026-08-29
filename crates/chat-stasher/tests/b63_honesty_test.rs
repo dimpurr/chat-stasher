@@ -55,7 +55,7 @@ fn push_does_not_call_an_unresolved_scan_empty() {
             repo.to_str().unwrap(),
             "--key-file",
             key_file.to_str().unwrap(),
-            "--no-reap",
+            "--keep-ssh-masters",
         ])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", sandbox.path().join("config"))

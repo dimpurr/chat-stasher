@@ -53,7 +53,7 @@ fn run_push(sandbox: &Path, stage: &Path, repo: &Path, key_file: &Path, machine:
         .arg(repo)
         .arg("--key-file")
         .arg(key_file)
-        .args(["--machine", machine, "--no-reap"])
+        .args(["--machine", machine, "--keep-ssh-masters"])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))

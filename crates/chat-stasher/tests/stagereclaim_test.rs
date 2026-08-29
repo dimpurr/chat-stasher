@@ -1,16 +1,16 @@
-//! Black-box stagereap tests (ADR-020 Phase 4): build a synthetic repository
-//! via a real push, then exercise the proof and the reap.
+//! Black-box stagereclaim tests (ADR-020 Phase 4): build a synthetic repository
+//! via a real push, then exercise the proof and the reclaim.
 //!
 //! Everything is local + synthetic, in temp dirs. The five acceptance
 //! criteria map to:
-//!   * a) `apply_reaps_body_but_keeps_summary`
-//!   * b) `verify_l3_still_runs_after_reap_on_retained_summary`
-//!   * c) `reap_then_new_shards_do_not_collide_and_read_back_identical`
+//!   * a) `apply_reclaims_body_but_keeps_summary`
+//!   * b) `verify_l3_still_runs_after_reclaim_on_retained_summary`
+//!   * c) `reclaim_then_new_shards_do_not_collide_and_read_back_identical`
 //!   * d) `two_destinations_one_pushed_is_blocked_and_names_it`
 //!   * e) `unreachable_destination_blocks_and_exits_nonzero`
 
 use chat_stasher::manifest;
-use chat_stasher::stagereap::{self, BlockedKind, NamedStore};
+use chat_stasher::stagereclaim::{self, BlockedKind, NamedStore};
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
@@ -24,7 +24,7 @@ fn store_config(dir: &Path, repo_name: &str) -> StoreConfig {
         connections: 1,
         options: BTreeMap::new(),
         // Tests must not share the user's rustic cache: a cached pack would let
-        // a corrupted or reaped body still read back clean.
+        // a corrupted or reclaimed body still read back clean.
         cache_dir: None,
         no_cache: true,
     }
@@ -107,12 +107,12 @@ fn isolated_command(sandbox: &Path) -> std::process::Command {
 
 // ------------------------------------------------------------- acceptance a
 
-/// (a) push -> reap-stage --apply -> body gone, summary still there.
+/// (a) push -> reclaim-stage --apply -> body gone, summary still there.
 #[test]
-fn apply_reaps_body_but_keeps_summary() {
+fn apply_reclaims_body_but_keeps_summary() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
-    let machine = "m-reap";
+    let machine = "m-reclaim";
     let session = "s-aaa";
     write_session(&stage, machine, session, 2);
     let cfg = store_config(dir.path(), "repo-a");
@@ -120,7 +120,7 @@ fn apply_reaps_body_but_keeps_summary() {
     let dests = vec![named(dir.path(), "repo-a")];
 
     // Dry run first: proves but deletes nothing.
-    let report = stagereap::reap_stage(&stage, &dests, false).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, false).unwrap();
     assert!(
         !report.blocked(),
         "dry run must not be blocked: {:?}",
@@ -135,7 +135,7 @@ fn apply_reaps_body_but_keeps_summary() {
     );
 
     // Apply: body goes, summary stays, counter survives.
-    let report = stagereap::reap_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(
         !report.blocked(),
         "apply must not be blocked: {:?}",
@@ -152,16 +152,16 @@ fn apply_reaps_body_but_keeps_summary() {
     assert_eq!(summary.shard_count, 2);
     assert!(
         store::shard_seq_file(&stage, machine, session).is_file(),
-        "shard-seq counter must survive the reap"
+        "shard-seq counter must survive the reclaim"
     );
     drop(dir);
 }
 
 // ------------------------------------------------------------- acceptance b
 
-/// (b) after the reap, L3 verify still runs against the retained summary.
+/// (b) after the reclaim, L3 verify still runs against the retained summary.
 #[test]
-fn verify_l3_still_runs_after_reap_on_retained_summary() {
+fn verify_l3_still_runs_after_reclaim_on_retained_summary() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
     let machine = "m-verify";
@@ -170,7 +170,7 @@ fn verify_l3_still_runs_after_reap_on_retained_summary() {
     let cfg = store_config(dir.path(), "repo-b");
     let mk = init_and_push(&cfg, machine, &stage);
     let dests = vec![named(dir.path(), "repo-b")];
-    let report = stagereap::reap_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(!report.blocked());
     assert_eq!(report.reclaimed.len(), 1);
 
@@ -191,10 +191,10 @@ fn verify_l3_still_runs_after_reap_on_retained_summary() {
 
 // ------------------------------------------------------------- acceptance c
 
-/// (c) reap, then write new shards: the sequence must not reset onto archived
+/// (c) reclaim, then write new shards: the sequence must not reset onto archived
 /// shard names, and read-back must be byte-identical to the new source.
 #[test]
-fn reap_then_new_shards_do_not_collide_and_read_back_identical() {
+fn reclaim_then_new_shards_do_not_collide_and_read_back_identical() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
     let machine = "m-seq";
@@ -203,7 +203,7 @@ fn reap_then_new_shards_do_not_collide_and_read_back_identical() {
     let cfg = store_config(dir.path(), "repo-c");
     let mk = init_and_push(&cfg, machine, &stage);
     let dests = vec![named(dir.path(), "repo-c")];
-    let report = stagereap::reap_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(!report.blocked());
     assert_eq!(report.reclaimed.len(), 1);
 
@@ -242,7 +242,7 @@ fn reap_then_new_shards_do_not_collide_and_read_back_identical() {
 
 // ------------------------------------------------------------- acceptance d
 
-/// (d) two declared destinations, only one pushed: the reap is refused and
+/// (d) two declared destinations, only one pushed: the reclaim is refused and
 /// the owing destination is named.
 #[test]
 fn two_destinations_one_pushed_is_blocked_and_names_it() {
@@ -263,10 +263,10 @@ fn two_destinations_one_pushed_is_blocked_and_names_it() {
         named(dir.path(), "repo-primary"),
         named(dir.path(), "repo-secondary"),
     ];
-    let report = stagereap::reap_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(
         report.blocked(),
-        "a destination not holding the session must block the reap"
+        "a destination not holding the session must block the reclaim"
     );
     assert!(
         report.reclaimed.is_empty(),
@@ -299,7 +299,7 @@ fn two_destinations_one_pushed_is_blocked_and_names_it() {
 
 // ------------------------------------------------------------- acceptance e
 
-/// (e) an unreachable destination refuses the reap and exits non-zero — never
+/// (e) an unreachable destination refuses the reclaim and exits non-zero — never
 /// silently treated as "can delete".
 #[test]
 fn unreachable_destination_blocks_and_exits_nonzero() {
@@ -311,19 +311,19 @@ fn unreachable_destination_blocks_and_exits_nonzero() {
     let key = sandbox.path().join("key-not-created.json");
 
     let output = isolated_command(sandbox.path())
-        .args(["reap-stage", "--stage"])
+        .args(["reclaim-stage", "--stage"])
         .arg(&stage)
         .args(["--repo"])
         .arg(&repo)
         .args(["--key-file"])
         .arg(&key)
-        .args(["--no-reap"])
+        .args(["--keep-ssh-masters"])
         .output()
         .unwrap();
     assert_ne!(
         output.status.code(),
         Some(0),
-        "a blocked reap must exit non-zero"
+        "a blocked reclaim must exit non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -356,13 +356,13 @@ fn cli_dry_run_reports_reclaimable_and_exits_zero() {
     init_and_push(&cfg, machine, &stage);
 
     let output = isolated_command(sandbox.path())
-        .args(["reap-stage", "--stage"])
+        .args(["reclaim-stage", "--stage"])
         .arg(&stage)
         .args(["--repo"])
         .arg(&cfg.repo_root)
         .args(["--key-file"])
         .arg(&cfg.key_file)
-        .args(["--no-reap"])
+        .args(["--keep-ssh-masters"])
         .output()
         .unwrap();
     assert_eq!(
@@ -387,13 +387,13 @@ fn cli_dry_run_reports_reclaimable_and_exits_zero() {
     drop(sandbox);
 }
 
-/// `reap_stage` must not delete anything when the stage holds no shards.
+/// `reclaim_stage` must not delete anything when the stage holds no shards.
 #[test]
 fn empty_stage_is_a_noop() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
     let dests = vec![named(dir.path(), "repo-empty")];
-    let report = stagereap::reap_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(!report.blocked());
     assert!(report.candidates.is_empty());
     assert!(report.reclaimed.is_empty());

@@ -15,16 +15,16 @@ pub const LAUNCHD_LABEL: &str = "com.chat-stasher.run-once";
 pub const SYSTEMD_SERVICE: &str = "chat-stasher-run-once.service";
 pub const SYSTEMD_TIMER: &str = "chat-stasher-run-once.timer";
 
-/// Weekly `reap-stage` unit names. Deliberately separate from the run-once
+/// Weekly `reclaim-stage` unit names. Deliberately separate from the run-once
 /// names above: a launchd label / systemd unit name is the identity a restart
 /// or teardown command refers to, so two timers must never share one.
-pub const LAUNCHD_LABEL_REAP_STAGE: &str = "com.chat-stasher.reap-stage";
-pub const SYSTEMD_SERVICE_REAP_STAGE: &str = "chat-stasher-reap-stage.service";
-pub const SYSTEMD_TIMER_REAP_STAGE: &str = "chat-stasher-reap-stage.timer";
+pub const LAUNCHD_LABEL_RECLAIM_STAGE: &str = "com.chat-stasher.reclaim-stage";
+pub const SYSTEMD_SERVICE_RECLAIM_STAGE: &str = "chat-stasher-reclaim-stage.service";
+pub const SYSTEMD_TIMER_RECLAIM_STAGE: &str = "chat-stasher-reclaim-stage.timer";
 
-/// The weekly `reap-stage` slot: Sunday 03:17 local time.
+/// The weekly `reclaim-stage` slot: Sunday 03:17 local time.
 ///
-/// `reap-stage` proves every archived shard against its destination before
+/// `reclaim-stage` proves every archived shard against its destination before
 /// deleting the staged body — measured at ~20 min wall-clock, ~4% CPU, almost
 /// entirely network (it reads the archive back). It is deliberately *not* on
 /// the hourly run-once cadence.
@@ -37,19 +37,19 @@ pub const SYSTEMD_TIMER_REAP_STAGE: &str = "chat-stasher-reap-stage.timer";
 /// minute marks that cron-style maintenance jobs cluster on. launchd has no
 /// native jitter for `StartCalendarInterval`, so the fixed off-boundary minute
 /// *is* the stagger lever; systemd gets real jitter via `RandomizedDelaySec`
-/// ([`REAP_STAGE_RANDOMIZED_DELAY_SECS`]). The hourly run-once uses
+/// ([`RECLAIM_STAGE_RANDOMIZED_DELAY_SECS`]). The hourly run-once uses
 /// `StartInterval`, whose phase is relative to load time, so no single minute
 /// is guaranteed collision-free — but a weekly ~20 minute network-bound pass
 /// occasionally overlapping the hourly pass is a non-event compared with
 /// running it on top of interactive work.
-pub const REAP_STAGE_WEEKDAY: u8 = 0; // launchd: 0 and 7 both mean Sunday.
-pub const REAP_STAGE_HOUR: u8 = 3;
-pub const REAP_STAGE_MINUTE: u8 = 17;
+pub const RECLAIM_STAGE_WEEKDAY: u8 = 0; // launchd: 0 and 7 both mean Sunday.
+pub const RECLAIM_STAGE_HOUR: u8 = 3;
+pub const RECLAIM_STAGE_MINUTE: u8 = 17;
 
 /// systemd `RandomizedDelaySec` for the weekly timer, in seconds: up to 15
 /// minutes of random start delay so a fleet of machines does not all hit their
 /// destination at 03:17:00 on the same second.
-pub const REAP_STAGE_RANDOMIZED_DELAY_SECS: u64 = 15 * 60;
+pub const RECLAIM_STAGE_RANDOMIZED_DELAY_SECS: u64 = 15 * 60;
 
 /// Cap for the launchd stdout/stderr logs, in bytes. Beyond this the log is
 /// truncated to empty in place at the start of the next run (see
@@ -72,11 +72,11 @@ pub enum Format {
 pub enum Unit {
     /// Hourly `run-once` archive cycle (the original behaviour).
     RunOnce,
-    /// Weekly `reap-stage --apply` stage reclamation. "Reap" here is stage
+    /// Weekly `reclaim-stage --apply` stage reclamation. This is stage
     /// reclamation (delete staged shard bodies once the archive proves it
-    /// holds them) — unrelated to the ssh connection reaping that `--no-reap`
-    /// disables.
-    ReapStage,
+    /// holds them) — unrelated to the ssh connection reaping that
+    /// `--keep-ssh-masters` disables.
+    ReclaimStage,
 }
 
 #[derive(Debug, Clone)]
@@ -99,22 +99,22 @@ pub struct RunOnceArgs {
     pub options: Vec<String>,
     pub machine: Option<String>,
     pub shard_bucket_cap: Option<usize>,
-    pub no_reap: bool,
+    pub keep_ssh_masters: bool,
     pub verify: bool,
 }
 
-/// Arguments forwarded from `schedule --unit reap-stage` to the embedded
-/// `reap-stage` command. The stage path is separate — it is required in both
+/// Arguments forwarded from `schedule --unit reclaim-stage` to the embedded
+/// `reclaim-stage` command. The stage path is separate — it is required in both
 /// units — and `--apply` is always embedded (a weekly timer that only dry-ran
 /// would report forever and delete nothing). The overrides here mirror
-/// `reap-stage`'s own single-destination-only slots.
+/// `reclaim-stage`'s own single-destination-only slots.
 #[derive(Debug, Clone, Default)]
-pub struct ReapStageArgs {
+pub struct ReclaimStageArgs {
     pub repo: Option<String>,
     pub key_file: Option<String>,
     pub connections: Option<usize>,
     pub options: Vec<String>,
-    pub no_reap: bool,
+    pub keep_ssh_masters: bool,
 }
 
 /// Resolve the configured cadence. Zero is rejected because it would create
@@ -130,8 +130,8 @@ pub fn interval_secs(config: &Config) -> Result<u64> {
 }
 
 /// Render the templates for one scheduled job. `unit` picks which job; the
-/// run-once renderers take `args` (and `interval`), the reap-stage renderers
-/// take `reap_args` (the weekly slot is fixed, so `interval` is unused there).
+/// run-once renderers take `args` (and `interval`), the reclaim-stage renderers
+/// take `reclaim_args` (the weekly slot is fixed, so `interval` is unused there).
 pub fn render(
     unit: Unit,
     format: Format,
@@ -139,12 +139,12 @@ pub fn render(
     stage: &Path,
     interval: u64,
     args: &RunOnceArgs,
-    reap_args: &ReapStageArgs,
+    reclaim_args: &ReclaimStageArgs,
     home: &Path,
 ) -> Vec<TemplateFile> {
     match unit {
         Unit::RunOnce => render_run_once(format, binary, stage, interval, args, home),
-        Unit::ReapStage => render_reap_stage(format, binary, stage, reap_args, home),
+        Unit::ReclaimStage => render_reclaim_stage(format, binary, stage, reclaim_args, home),
     }
 }
 
@@ -174,26 +174,26 @@ fn render_run_once(
     }
 }
 
-fn render_reap_stage(
+fn render_reclaim_stage(
     format: Format,
     binary: &Path,
     stage: &Path,
-    args: &ReapStageArgs,
+    args: &ReclaimStageArgs,
     home: &Path,
 ) -> Vec<TemplateFile> {
     match format {
         Format::Launchd => vec![TemplateFile {
-            name: format!("{LAUNCHD_LABEL_REAP_STAGE}.plist"),
-            content: render_launchd_reap_stage(binary, stage, args, home),
+            name: format!("{LAUNCHD_LABEL_RECLAIM_STAGE}.plist"),
+            content: render_launchd_reclaim_stage(binary, stage, args, home),
         }],
         Format::Systemd => vec![
             TemplateFile {
-                name: SYSTEMD_SERVICE_REAP_STAGE.to_string(),
-                content: render_systemd_service_reap_stage(binary, stage, args),
+                name: SYSTEMD_SERVICE_RECLAIM_STAGE.to_string(),
+                content: render_systemd_service_reclaim_stage(binary, stage, args),
             },
             TemplateFile {
-                name: SYSTEMD_TIMER_REAP_STAGE.to_string(),
-                content: render_systemd_timer_reap_stage(),
+                name: SYSTEMD_TIMER_RECLAIM_STAGE.to_string(),
+                content: render_systemd_timer_reclaim_stage(),
             },
         ],
     }
@@ -204,21 +204,21 @@ fn render_reap_stage(
 pub fn launchd_label(unit: Unit) -> &'static str {
     match unit {
         Unit::RunOnce => LAUNCHD_LABEL,
-        Unit::ReapStage => LAUNCHD_LABEL_REAP_STAGE,
+        Unit::ReclaimStage => LAUNCHD_LABEL_RECLAIM_STAGE,
     }
 }
 
 pub fn systemd_service_name(unit: Unit) -> &'static str {
     match unit {
         Unit::RunOnce => SYSTEMD_SERVICE,
-        Unit::ReapStage => SYSTEMD_SERVICE_REAP_STAGE,
+        Unit::ReclaimStage => SYSTEMD_SERVICE_RECLAIM_STAGE,
     }
 }
 
 pub fn systemd_timer_name(unit: Unit) -> &'static str {
     match unit {
         Unit::RunOnce => SYSTEMD_TIMER,
-        Unit::ReapStage => SYSTEMD_TIMER_REAP_STAGE,
+        Unit::ReclaimStage => SYSTEMD_TIMER_RECLAIM_STAGE,
     }
 }
 
@@ -345,20 +345,20 @@ fn run_once_argv(binary: &Path, stage: &Path, args: &RunOnceArgs) -> Vec<String>
     if args.verify {
         argv.push("--verify".to_string());
     }
-    if args.no_reap {
-        argv.push("--no-reap".to_string());
+    if args.keep_ssh_masters {
+        argv.push("--keep-ssh-masters".to_string());
     }
     argv
 }
 
-/// Build the `reap-stage` argument vector that both launchd and systemd embed.
+/// Build the `reclaim-stage` argument vector that both launchd and systemd embed.
 /// The weekly timer is *always* an apply: a timer that only dry-ran would
 /// report forever and delete nothing. Paths and values are kept as separate
 /// tokens so each renderer can quote them in its own dialect.
-fn reap_stage_argv(binary: &Path, stage: &Path, args: &ReapStageArgs) -> Vec<String> {
+fn reclaim_stage_argv(binary: &Path, stage: &Path, args: &ReclaimStageArgs) -> Vec<String> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
-        "reap-stage".to_string(),
+        "reclaim-stage".to_string(),
         "--stage".to_string(),
         stage.to_string_lossy().into_owned(),
         "--apply".to_string(),
@@ -379,8 +379,8 @@ fn reap_stage_argv(binary: &Path, stage: &Path, args: &ReapStageArgs) -> Vec<Str
         argv.push("--option".to_string());
         argv.push(opt.clone());
     }
-    if args.no_reap {
-        argv.push("--no-reap".to_string());
+    if args.keep_ssh_masters {
+        argv.push("--keep-ssh-masters".to_string());
     }
     argv
 }
@@ -451,17 +451,17 @@ fn render_launchd(
     )
 }
 
-fn render_launchd_reap_stage(
+fn render_launchd_reclaim_stage(
     binary: &Path,
     stage: &Path,
-    args: &ReapStageArgs,
+    args: &ReclaimStageArgs,
     home: &Path,
 ) -> String {
-    let argv = reap_stage_argv(binary, stage, args);
+    let argv = reclaim_stage_argv(binary, stage, args);
 
     let log_dir = home.join("Library/Logs/chat-stasher");
-    let stdout_log = log_dir.join("reap-stage.log");
-    let stderr_log = log_dir.join("reap-stage.err.log");
+    let stdout_log = log_dir.join("reclaim-stage.log");
+    let stderr_log = log_dir.join("reclaim-stage.err.log");
 
     // Same in-place-truncate cap as run-once: launchd opens the log fds before
     // our process starts and its fds follow the inode, so truncating *in place*
@@ -488,22 +488,22 @@ fn render_launchd_reap_stage(
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- chat-stasher reap-stage is a weekly one-shot: exit 0 is success (reclaimed, or nothing to reclaim); exit 1 means BLOCKED (a destination could not be proven) and nothing was deleted; non-zero is error. -->
+  <!-- chat-stasher reclaim-stage is a weekly one-shot: exit 0 is success (reclaimed, or nothing to reclaim); exit 1 means BLOCKED (a destination could not be proven) and nothing was deleted; non-zero is error. -->
   <key>Label</key>
-  <string>{LAUNCHD_LABEL_REAP_STAGE}</string>
+  <string>{LAUNCHD_LABEL_RECLAIM_STAGE}</string>
   <key>ProgramArguments</key>
   <array>
 {arguments}
   </array>
-  <!-- Sunday 03:17 local; :17 dodges the :00/:15/:30/:45 minutes cron-style jobs cluster on (launchd has no StartCalendarInterval jitter of its own, so the off-boundary minute is the stagger lever). See REAP_STAGE_HOUR / REAP_STAGE_MINUTE. -->
+  <!-- Sunday 03:17 local; :17 dodges the :00/:15/:30/:45 minutes cron-style jobs cluster on (launchd has no StartCalendarInterval jitter of its own, so the off-boundary minute is the stagger lever). See RECLAIM_STAGE_HOUR / RECLAIM_STAGE_MINUTE. -->
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
-    <integer>{REAP_STAGE_WEEKDAY}</integer>
+    <integer>{RECLAIM_STAGE_WEEKDAY}</integer>
     <key>Hour</key>
-    <integer>{REAP_STAGE_HOUR}</integer>
+    <integer>{RECLAIM_STAGE_HOUR}</integer>
     <key>Minute</key>
-    <integer>{REAP_STAGE_MINUTE}</integer>
+    <integer>{RECLAIM_STAGE_MINUTE}</integer>
   </dict>
   <key>RunAtLoad</key>
   <false/>
@@ -575,8 +575,12 @@ WantedBy=timers.target
     )
 }
 
-fn render_systemd_service_reap_stage(binary: &Path, stage: &Path, args: &ReapStageArgs) -> String {
-    let argv = reap_stage_argv(binary, stage, args);
+fn render_systemd_service_reclaim_stage(
+    binary: &Path,
+    stage: &Path,
+    args: &ReclaimStageArgs,
+) -> String {
+    let argv = reclaim_stage_argv(binary, stage, args);
     let args = argv
         .iter()
         .map(|arg| systemd_quote_arg(arg))
@@ -599,7 +603,7 @@ StandardError=journal
     )
 }
 
-fn render_systemd_timer_reap_stage() -> String {
+fn render_systemd_timer_reclaim_stage() -> String {
     format!(
         r#"[Unit]
 Description=Weekly chat-stasher stage reclamation
@@ -611,12 +615,12 @@ Description=Weekly chat-stasher stage reclamation
 OnCalendar=Sun *-*-* 03:17:00
 RandomizedDelaySec={delay}s
 Persistent=true
-Unit={SYSTEMD_SERVICE_REAP_STAGE}
+Unit={SYSTEMD_SERVICE_RECLAIM_STAGE}
 
 [Install]
 WantedBy=timers.target
 "#,
-        delay = REAP_STAGE_RANDOMIZED_DELAY_SECS,
+        delay = RECLAIM_STAGE_RANDOMIZED_DELAY_SECS,
     )
 }
 
@@ -675,7 +679,7 @@ mod tests {
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
             &args,
-            &ReapStageArgs::default(),
+            &ReclaimStageArgs::default(),
             Path::new("/home/tester"),
         );
         let plist = &launchd[0].content;
@@ -760,7 +764,7 @@ mod tests {
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
             &args,
-            &ReapStageArgs::default(),
+            &ReclaimStageArgs::default(),
             Path::new("/home/tester"),
         );
         assert_eq!(files.len(), 2);
@@ -775,7 +779,7 @@ mod tests {
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
             &args,
-            &ReapStageArgs::default(),
+            &ReclaimStageArgs::default(),
             Path::new("/home/tester"),
         );
         assert!(launchd[0]
@@ -798,7 +802,7 @@ mod tests {
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
             &args,
-            &ReapStageArgs::default(),
+            &ReclaimStageArgs::default(),
             Path::new("/home/tester"),
         );
         let plist = &launchd[0].content;
@@ -818,7 +822,7 @@ mod tests {
             Path::new("/var/lib/chat-stasher/stage"),
             3600,
             &args,
-            &ReapStageArgs::default(),
+            &ReclaimStageArgs::default(),
             Path::new("/home/tester"),
         );
         let service = &systemd[0].content;
@@ -830,41 +834,41 @@ mod tests {
         assert!(service.contains("\"2\""));
     }
 
-    /// The weekly unit must embed the `reap-stage` subcommand, the stage path
+    /// The weekly unit must embed the `reclaim-stage` subcommand, the stage path
     /// and `--apply` in *both* formats. This is the regression guard for the
     /// class of bug that once shipped `schedule` without `--destination`:
     /// string-containment alone missed it, so this test also checks the
     /// machine-facing shape of each renderer (calendar keys for launchd,
     /// unit names + OnCalendar for systemd).
     #[test]
-    fn reap_stage_templates_embed_stage_and_subcommand_in_both_formats() {
-        let reap_args = ReapStageArgs {
+    fn reclaim_stage_templates_embed_stage_and_subcommand_in_both_formats() {
+        let reclaim_args = ReclaimStageArgs {
             repo: Some("backup-repo".to_string()),
             connections: Some(3),
-            ..ReapStageArgs::default()
+            ..ReclaimStageArgs::default()
         };
 
         let launchd = render(
-            Unit::ReapStage,
+            Unit::ReclaimStage,
             Format::Launchd,
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
             0,
             &RunOnceArgs::default(),
-            &reap_args,
+            &reclaim_args,
             Path::new("/home/tester"),
         );
         assert_eq!(launchd.len(), 1);
-        assert_eq!(launchd[0].name, "com.chat-stasher.reap-stage.plist");
+        assert_eq!(launchd[0].name, "com.chat-stasher.reclaim-stage.plist");
         let plist = &launchd[0].content;
-        assert!(plist.contains("&apos;reap-stage&apos;"));
+        assert!(plist.contains("&apos;reclaim-stage&apos;"));
         assert!(plist.contains("&apos;/var/lib/chat-stasher/stage&apos;"));
         assert!(plist.contains("&apos;--apply&apos;"));
         assert!(plist.contains("&apos;--repo&apos;"));
         assert!(plist.contains("&apos;backup-repo&apos;"));
         // Logs sit next to the run-once logs but in separate files.
-        assert!(plist.contains("reap-stage.log"));
-        assert!(plist.contains("reap-stage.err.log"));
+        assert!(plist.contains("reclaim-stage.log"));
+        assert!(plist.contains("reclaim-stage.err.log"));
         assert!(!plist.contains("run-once.log"));
         // The weekly slot is a fixed calendar interval, never StartInterval.
         assert!(plist.contains("<key>StartCalendarInterval</key>"));
@@ -874,21 +878,21 @@ mod tests {
         assert!(plist.contains("<integer>17</integer>")); // Minute
 
         let systemd = render(
-            Unit::ReapStage,
+            Unit::ReclaimStage,
             Format::Systemd,
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
             0,
             &RunOnceArgs::default(),
-            &reap_args,
+            &reclaim_args,
             Path::new("/home/tester"),
         );
         assert_eq!(systemd.len(), 2);
-        assert_eq!(systemd[0].name, "chat-stasher-reap-stage.service");
-        assert_eq!(systemd[1].name, "chat-stasher-reap-stage.timer");
+        assert_eq!(systemd[0].name, "chat-stasher-reclaim-stage.service");
+        assert_eq!(systemd[1].name, "chat-stasher-reclaim-stage.timer");
         let service = &systemd[0].content;
         assert!(service.contains("ExecStart="));
-        assert!(service.contains("\"reap-stage\""));
+        assert!(service.contains("\"reclaim-stage\""));
         assert!(service.contains("\"/var/lib/chat-stasher/stage\""));
         assert!(service.contains("\"--apply\""));
         assert!(service.contains("\"--repo\""));
@@ -896,27 +900,30 @@ mod tests {
         let timer = &systemd[1].content;
         assert!(timer.contains("OnCalendar=Sun *-*-* 03:17:00"));
         assert!(timer.contains("RandomizedDelaySec=900s"));
-        assert!(timer.contains("Unit=chat-stasher-reap-stage.service"));
+        assert!(timer.contains("Unit=chat-stasher-reclaim-stage.service"));
         assert!(!timer.contains("chat-stasher-run-once.timer"));
     }
 
     #[test]
-    fn reap_stage_unit_names_do_not_collide_with_run_once() {
-        assert_ne!(launchd_label(Unit::RunOnce), launchd_label(Unit::ReapStage));
+    fn reclaim_stage_unit_names_do_not_collide_with_run_once() {
+        assert_ne!(
+            launchd_label(Unit::RunOnce),
+            launchd_label(Unit::ReclaimStage)
+        );
         assert_ne!(
             systemd_service_name(Unit::RunOnce),
-            systemd_service_name(Unit::ReapStage)
+            systemd_service_name(Unit::ReclaimStage)
         );
         assert_ne!(
             systemd_timer_name(Unit::RunOnce),
-            systemd_timer_name(Unit::ReapStage)
+            systemd_timer_name(Unit::ReclaimStage)
         );
         // The install commands must target the unit they belong to.
         let run = install_command_for_saved(Unit::RunOnce, Format::Systemd);
-        let reap = install_command_for_saved(Unit::ReapStage, Format::Systemd);
+        let reclaim = install_command_for_saved(Unit::ReclaimStage, Format::Systemd);
         assert!(run.contains("chat-stasher-run-once.timer"));
-        assert!(!run.contains("chat-stasher-reap-stage.timer"));
-        assert!(reap.contains("chat-stasher-reap-stage.timer"));
-        assert!(!reap.contains("chat-stasher-run-once.timer"));
+        assert!(!run.contains("chat-stasher-reclaim-stage.timer"));
+        assert!(reclaim.contains("chat-stasher-reclaim-stage.timer"));
+        assert!(!reclaim.contains("chat-stasher-run-once.timer"));
     }
 }

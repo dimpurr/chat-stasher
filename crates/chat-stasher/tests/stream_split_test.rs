@@ -132,7 +132,7 @@ fn push_summary_is_data_and_stays_on_stdout() {
             "fixture-machine",
             "--connections",
             "1",
-            "--no-reap",
+            "--keep-ssh-masters",
         ],
     );
     let (stdout, stderr) = streams(&out);

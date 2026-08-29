@@ -312,7 +312,7 @@ fn a_debt_the_archive_settles_is_not_reread() {
     let session = fx.session_id();
     let archived = fact_of(&fx.stage, &session);
 
-    // Push happened, then the stage was reaped: the archive is now the only
+    // Push happened, then the stage was reclaimed: the archive is now the only
     // authority left.
     fs::remove_dir_all(&fx.stage).unwrap();
     let mut facts = ArchiveFacts::new();
