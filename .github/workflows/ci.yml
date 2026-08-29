@@ -184,6 +184,53 @@ jobs:
           CLAUDE_PROJECTS_DIR: ${{ runner.temp }}/chat-stasher-claude-projects
         run: bash scripts/release-gate.sh
 
+  # ---------------------------------------------------------------------------
+  # Source-text gates. Pure Python, no build, seconds to run — so they belong on
+  # EVERY push rather than at the end of the pipeline.
+  #
+  # 🔴 2026-08-29 — this job exists because two of these gates sat RED and unseen
+  # for a long time. They lived only inside scripts/release-gate.sh, which runs
+  # only on macOS, which runs only on a tag. During normal development they
+  # never executed once. By the time anyone looked, check-semantic-defaults had
+  # 22 violations (one of them a real defect: a dirent whose type could not be
+  # read was being silently treated as "not a directory") and check-citation-drift
+  # had 57 drifted anchors.
+  #
+  # The lesson worth keeping is not "someone forgot to run them". It is that a
+  # gate placed at the last possible moment has only two outcomes: it blocks you
+  # at the worst time, or — as happened here — it is bypassable and therefore
+  # blocks nothing at all. A gate whose failure stops nothing is not a gate, it
+  # is a log line. So they move to the earliest moment instead.
+  #
+  # Only the portable Python checkers move here. scripts/release-gate.sh as a
+  # whole stays macOS-only: it shells out to the built binary and uses BSD
+  # `stat -f`. Splitting these checkers out of it (B93) is what makes this
+  # possible without duplicating their logic.
+  gates:
+    name: gates (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Semantic defaults (unknown must not become a value)
+        run: python3 scripts/check-semantic-defaults.py
+
+      - name: Terminology consistency
+        run: python3 scripts/check-terminology.py
+
+      # The lint's own self-test runs too: a lint that cannot prove it still
+      # catches anything is worth nothing, and it is cheap to prove here.
+      - name: Terminology lint self-test
+        run: python3 scripts/check-terminology.py --selftest
+
+      - name: Citation anchors still point at what the docs claim
+        run: python3 scripts/check-citation-drift.py
+
+      - name: Output inventory is up to date
+        run: python3 scripts/output-inventory.py --check
+
   extension:
     # COVERAGE HOLE (deliberate): the extension is built and tested on Linux
     # only. WXT/vitest on macOS and Windows runners are NOT covered by CI.
