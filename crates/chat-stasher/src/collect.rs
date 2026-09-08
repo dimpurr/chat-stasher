@@ -269,6 +269,9 @@ pub enum DebtVerdict {
     OwedOnStage,
     /// The debt was settled: the destination's archive holds exactly it.
     SettledInArchive,
+    /// The debt was settled and reclaimed: the stage body was deleted after
+    /// being proven, and the local manifest records the matching fact triple.
+    SettledReclaimed,
     Unverifiable(&'static str),
 }
 
@@ -282,6 +285,33 @@ fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Re
         concat_bytes: concat.len() as u64,
         concat_sha256: sha256_hex(&concat),
     })
+}
+
+/// Read the local manifest baseline for one machine into a session lookup map,
+/// if the manifest exists and is valid. Missing or corrupt files yield `None`.
+fn load_local_manifest_facts(stage: &Path, machine: &str) -> Option<BTreeMap<String, ShardFact>> {
+    match crate::manifest::read_manifest(stage, machine) {
+        Ok(crate::manifest::ManifestFileState::Loaded(rows)) => {
+            let mut map = BTreeMap::new();
+            for row in rows {
+                if row.machine == machine {
+                    map.insert(
+                        row.session_id,
+                        ShardFact {
+                            shard_count: row.shard_count,
+                            concat_bytes: row.concat_bytes,
+                            concat_sha256: row.concat_sha256,
+                        },
+                    );
+                }
+            }
+            Some(map)
+        }
+        Ok(
+            crate::manifest::ManifestFileState::Missing | crate::manifest::ManifestFileState::Empty,
+        ) => None,
+        Err(_) => None,
+    }
 }
 
 /// Does the stage still hold, unmodified, everything `fact` accounts for?
@@ -313,13 +343,14 @@ fn stage_covers(
     Ok(sha256_hex(&concat[..covered]) == fact.concat_sha256)
 }
 
-/// Discharge a stored cursor against the two authorities that can speak for
+/// Discharge a stored cursor against the authorities that can speak for
 /// this destination — never against the cursor itself.
 fn verify_debt(
     entry: &DebtEntry,
     machine: &str,
     stage: &Path,
     destination: &DestinationView<'_>,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<DebtVerdict> {
     if entry.machine != machine {
         return Ok(DebtVerdict::Unverifiable(
@@ -328,6 +359,14 @@ fn verify_debt(
     }
     if stage_covers(stage, machine, &entry.session_id, &entry.shards)? {
         return Ok(DebtVerdict::OwedOnStage);
+    }
+    let dir = store::session_shard_dir(stage, machine, &entry.session_id);
+    if store::sealed_shard_entries(&dir)?.is_empty() {
+        if let Some(facts) = manifest_facts {
+            if facts.get(&entry.session_id) == Some(&entry.shards) {
+                return Ok(DebtVerdict::SettledReclaimed);
+            }
+        }
     }
     let Some(facts) = destination.facts() else {
         return Ok(DebtVerdict::Unverifiable(
@@ -607,18 +646,21 @@ pub fn collect_scan_report(
         });
     }
 
+    let manifest_facts = load_local_manifest_facts(stage, machine);
     let mut records = scan.records.clone();
     records.sort_by(|a, b| a.absolute_path.cmp(&b.absolute_path));
     for record in records {
         let key = state_key(&record);
         let stored = debts.get(&key).cloned();
         // A stored cursor is a claim, not a fact. It is only reused once it has
-        // discharged itself against the stage or against this destination's
-        // own archive.
+        // discharged itself against the stage, the local reclaim manifest, or
+        // this destination's own archive.
         let mut unverifiable = None;
         if let Some(entry) = stored.as_ref() {
-            match verify_debt(entry, machine, stage, destination)? {
-                DebtVerdict::OwedOnStage | DebtVerdict::SettledInArchive => {}
+            match verify_debt(entry, machine, stage, destination, manifest_facts.as_ref())? {
+                DebtVerdict::OwedOnStage
+                | DebtVerdict::SettledInArchive
+                | DebtVerdict::SettledReclaimed => {}
                 DebtVerdict::Unverifiable(reason) => unverifiable = Some(reason),
             }
         }
