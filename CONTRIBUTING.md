@@ -25,14 +25,38 @@ From the repository root, run:
 
 ```sh
 cargo fmt --check
-cargo build
+cargo clippy --all-targets -- -D clippy::let_underscore_must_use
+cargo clippy --lib --bins -- -D clippy::unwrap_used
 cargo test
+python3 scripts/check-semantic-defaults.py
+python3 scripts/check-terminology.py
+python3 scripts/check-citation-drift.py
+python3 scripts/output-inventory.py --check
 bash scripts/release-gate.sh
 ```
 
-The release gate expects the debug binary at `target/debug/chat-stasher`, so
-the build must pass first. The gate prints only privacy-preserving summary
-fields and should end with `GATE: PASS` and exit 0 on the happy path.
+Every one of these must exit 0. They are the same checks CI runs, listed here
+so that a green local run means a green pull request; if this list and CI ever
+disagree, that is a bug in this document.
+
+The release gate builds `target/debug/chat-stasher` if it is missing and
+generates its own synthetic fixtures, so it needs no arguments and no setup. It
+prints only privacy-preserving summary fields and should end with `GATE: PASS`
+and exit 0 on the happy path.
+
+Four of these checks guard properties that are easy to break without noticing:
+
+- `check-semantic-defaults.py` requires a `// reason:` note wherever production
+  code turns an unknown into a concrete value (`unwrap_or(0)` and friends). The
+  rule is not "avoid defaults" but "say why this default is honest".
+- `check-terminology.py` keeps one word to one meaning in user-visible strings,
+  and keeps absence, read failure, and unknown from being worded as each other.
+- `check-citation-drift.py` verifies that every `file:line` citation in the
+  documentation still points at the content it was written about. Re-locate the
+  citation and confirm the sentence still holds before running `--update`;
+  updating the lockfile without reading the code defeats the check.
+- `output-inventory.py --check` pins the inventory of user-visible strings, so
+  a change to what the tool says is visible in review rather than incidental.
 
 The negative check is also useful when changing verification logic:
 
@@ -67,4 +91,4 @@ Describe:
 
 If a report needs to refer to a sensitive failure, provide counts, byte sizes,
 timestamps, hashes, or redacted identifiers only. Never paste conversation
-正文, a real account, or a key.
+text, a real account, or a key.
