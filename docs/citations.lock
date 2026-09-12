@@ -349,15 +349,15 @@ crates/chat-stasher/src/main.rs:4188-4219  cdab9c643514  lines=32
   <- README.md:69, README.md:116, docs/threat-model.md:328  :: consumed.unique_sha256(),
 crates/chat-stasher/src/main.rs:4201-4210  81fc257f8aff  lines=10
   <- SECURITY.md:67  :: if missing_files > 0 || archive_error {
-crates/chat-stasher/src/main.rs:5439-5440  f1874a8a7735  lines=2
+crates/chat-stasher/src/main.rs:5460-5461  f1874a8a7735  lines=2
   <- docs/install.md:257  :: let info = run_state_info(&config);
-crates/chat-stasher/src/main.rs:5507-5514  eca125d7dad8  lines=8
+crates/chat-stasher/src/main.rs:5528-5535  eca125d7dad8  lines=8
   <- docs/install.md:286  :: let exit_code = match &scan {
-crates/chat-stasher/src/main.rs:5649-5659  97e315c1453c  lines=11
+crates/chat-stasher/src/main.rs:5670-5680  97e315c1453c  lines=11
   <- docs/install.md:273  :: /// Default (`sessions = false`) is deliberately *fixed-siz…
-crates/chat-stasher/src/main.rs:5658-5659  15fe28d563a0  lines=2
+crates/chat-stasher/src/main.rs:5679-5680  15fe28d563a0  lines=2
   <- docs/install.md:252  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:5763-5790  c8adfb5aa224  lines=28
+crates/chat-stasher/src/main.rs:5784-5811  c8adfb5aa224  lines=28
   <- README.md:63, README.md:69  :: out.push_str(&format!(
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs/threat-model.md:69, docs/threat-model.md:232  :: //! Connection reaping for remote SSH backends.

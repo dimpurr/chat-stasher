@@ -252,3 +252,258 @@ fn l1_does_not_verify_payload_bytes_but_l2_does() {
     );
     drop(dir);
 }
+
+#[test]
+fn core_e2e_reclaimed_session_survives_subsequent_push_and_matches_l3() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-verify";
+    let session_1 = "s-reclaimed";
+    let session_2 = "s-active";
+
+    // 1. Write session 1 to stage
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        &stage,
+        machine,
+        session_1,
+        &[r#"{"seq":1,"msg":"hello from reclaimed session"}"#.to_string()],
+    )
+    .unwrap();
+
+    let cfg = StoreConfig {
+        repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+        key_file: dir.path().join("masterkey.json"),
+        connections: 1,
+        options: Default::default(),
+        cache_dir: Some(dir.path().join("cache")),
+        no_cache: false,
+    };
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let bs = BackupStore::new(cfg.clone(), machine.to_string());
+
+    // 2. Initial push: snapshot 1 contains session 1
+    bs.push(&stage, &mk).unwrap();
+
+    // 3. Reclaim session 1
+    let dests = vec![chat_stasher::stagereclaim::NamedStore {
+        name: "local-repo".to_string(),
+        cfg: cfg.clone(),
+    }];
+    let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    assert!(!reclaim_report.blocked());
+    assert_eq!(reclaim_report.reclaimed.len(), 1);
+
+    // Verify session 1 body is gone from stage
+    assert_eq!(
+        store::sealed_shard_entries(&store::session_shard_dir(&stage, machine, session_1))
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // 4. Now stage a new session 2
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        &stage,
+        machine,
+        session_2,
+        &[r#"{"seq":1,"msg":"hello from active session"}"#.to_string()],
+    )
+    .unwrap();
+
+    // Second push: snapshot 2 contains session 2, but NOT session 1!
+    bs.push(&stage, &mk).unwrap();
+
+    // 5. Verify L3 reconcile
+    let rep = bs.reconcile_manifest(&mk, &stage).unwrap();
+
+    let s1_row = rep
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_1)
+        .expect("session_1 must be in expected manifest rows");
+
+    assert_eq!(
+        s1_row.outcome,
+        verify::SessionOutcome::Match,
+        "ADR-021: reclaimed session must match via cumulative search, but got: {:?}",
+        s1_row.outcome
+    );
+    assert_eq!(s1_row.basis, verify::ExpectationBasis::StoredManifest);
+
+    let s2_row = rep
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_2)
+        .expect("session_2 must be in expected manifest rows");
+    assert_eq!(s2_row.outcome, verify::SessionOutcome::Match);
+    assert_eq!(s2_row.basis, verify::ExpectationBasis::DerivedFromStageBody);
+
+    assert!(rep.ok(), "L3 reconcile should pass: {:?}", rep.rows);
+    drop(dir);
+}
+
+#[test]
+fn core_e2e_reclaimed_session_missing_in_all_snapshots_reports_missing_in_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-verify";
+    let session_1 = "s-reclaimed";
+    let session_2 = "s-active";
+
+    // 1. Setup session 1 on stage
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        &stage,
+        machine,
+        session_1,
+        &[r#"{"seq":1,"msg":"hello from session 1"}"#.to_string()],
+    )
+    .unwrap();
+
+    let cfg = StoreConfig {
+        repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+        key_file: dir.path().join("masterkey.json"),
+        connections: 1,
+        options: Default::default(),
+        cache_dir: Some(dir.path().join("cache")),
+        no_cache: false,
+    };
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let bs = BackupStore::new(cfg.clone(), machine.to_string());
+
+    // 2. Initial push: snapshot 1 contains session 1
+    bs.push(&stage, &mk).unwrap();
+
+    // 3. Reclaim session 1
+    let dests = vec![chat_stasher::stagereclaim::NamedStore {
+        name: "local-repo".to_string(),
+        cfg: cfg.clone(),
+    }];
+    let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    assert!(!reclaim_report.blocked());
+    assert_eq!(reclaim_report.reclaimed.len(), 1);
+
+    // 4. Now stage a new session 2
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        &stage,
+        machine,
+        session_2,
+        &[r#"{"seq":1,"msg":"hello from active session"}"#.to_string()],
+    )
+    .unwrap();
+
+    // Second push: snapshot 2 contains session 2
+    bs.push(&stage, &mk).unwrap();
+
+    // Delete snapshot 1 to simulate true loss of historical snapshot
+    let snaps_dir = dir.path().join("repo").join("snapshots");
+    let mut snap_files: Vec<_> = fs::read_dir(&snaps_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    snap_files.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).unwrap());
+    assert_eq!(snap_files.len(), 2);
+    fs::remove_file(&snap_files[0]).unwrap();
+
+    // 5. Verify L3 reconcile
+    let rep = bs.reconcile_manifest(&mk, &stage).unwrap();
+
+    let s1_row = rep
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_1)
+        .expect("session_1 must be in expected manifest rows");
+
+    assert_eq!(
+        s1_row.outcome,
+        verify::SessionOutcome::MissingInArchive,
+        "Reclaimed session absent from all remaining snapshots must report MissingInArchive"
+    );
+    assert_eq!(s1_row.basis, verify::ExpectationBasis::StoredManifest);
+
+    let s2_row = rep
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_2)
+        .expect("session_2 must be in expected manifest rows");
+    assert_eq!(s2_row.outcome, verify::SessionOutcome::Match);
+    assert_eq!(s2_row.basis, verify::ExpectationBasis::DerivedFromStageBody);
+
+    assert_eq!(rep.failed(), 1);
+    assert_eq!(rep.unverifiable(), 0);
+    assert_eq!(rep.matched(), 1);
+    assert!(!rep.ok());
+    drop(dir);
+}
+
+#[test]
+fn core_e2e_reclaimed_session_corrupt_manifest_reports_unverifiable() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-verify";
+    let session_1 = "s-reclaimed";
+
+    // 1. Setup session 1 on stage
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        &stage,
+        machine,
+        session_1,
+        &[r#"{"seq":1,"msg":"hello from session 1"}"#.to_string()],
+    )
+    .unwrap();
+
+    let cfg = StoreConfig {
+        repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+        key_file: dir.path().join("masterkey.json"),
+        connections: 1,
+        options: Default::default(),
+        cache_dir: Some(dir.path().join("cache")),
+        no_cache: false,
+    };
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let bs = BackupStore::new(cfg.clone(), machine.to_string());
+
+    // 2. Initial push: snapshot 1 contains session 1
+    bs.push(&stage, &mk).unwrap();
+
+    // 3. Reclaim session 1
+    let dests = vec![chat_stasher::stagereclaim::NamedStore {
+        name: "local-repo".to_string(),
+        cfg: cfg.clone(),
+    }];
+    let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    assert!(!reclaim_report.blocked());
+    assert_eq!(reclaim_report.reclaimed.len(), 1);
+
+    // 4. Corrupt the manifest file for machine m-verify
+    let manifest_path = stage.join("meta").join(machine).join("manifest-v1.jsonl");
+    fs::write(&manifest_path, "this is corrupt json\n").unwrap();
+
+    // 5. Verify L3 reconcile
+    let rep = bs.reconcile_manifest(&mk, &stage).unwrap();
+
+    let s1_row = rep
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_1)
+        .expect("session_1 must be in expected manifest rows");
+
+    assert!(
+        matches!(s1_row.outcome, verify::SessionOutcome::Unverifiable { .. }),
+        "Corrupted manifest must report Unverifiable, got {:?}",
+        s1_row.outcome
+    );
+    assert_eq!(s1_row.basis, verify::ExpectationBasis::StoredManifest);
+
+    assert_eq!(rep.unverifiable(), 1);
+    assert_eq!(rep.failed(), 0);
+    assert!(!rep.ok());
+    drop(dir);
+}

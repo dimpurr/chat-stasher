@@ -302,12 +302,19 @@ enum DestinationRead {
 }
 
 /// Ask one destination for the digest triple of every session it holds. The
-/// answer comes from the archive itself (`read_all_machines`, newest snapshot
+/// answer comes from the archive itself (`read_latest_per_machine`, newest snapshot
 /// per machine), never from a local cursor. A read that did not finish is a
 /// `PartialRead` — its absences prove nothing.
+///
+/// Note on latest snapshot sufficiency (ADR-021 Decision 1 / Task 6):
+/// Reclaim candidates are all present in the stage right now (only sessions with
+/// un-reclaimed bodies in the stage are candidates). Therefore, if a candidate
+/// has been pushed to a destination, it is guaranteed to be present in that
+/// destination's newest snapshot. Consulting older snapshots is unnecessary for
+/// un-reclaimed stage candidates and would add redundant tree walks.
 fn consult_destination(dest: &NamedStore, mk: &MasterKey) -> DestinationRead {
     let store = BackupStore::for_metadata_query(dest.cfg.clone());
-    let report = match store.read_all_machines(mk) {
+    let report = match store.read_latest_per_machine(mk) {
         Ok(r) => r,
         Err(e) => return DestinationRead::Unreachable(format!("{e:#}")),
     };

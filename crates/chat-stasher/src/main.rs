@@ -15,7 +15,7 @@ use chat_stasher::seal;
 use chat_stasher::sidecar;
 use chat_stasher::stagereclaim::{self, BlockedKind, NamedStore};
 use chat_stasher::store::{self, BackupStore, StoreConfig};
-use chat_stasher::verify::{CheckSummary, ReconcileReport, SessionOutcome};
+use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, NodeType};
 use rustic_core::{Credentials, LsOptions, Repository};
@@ -4631,16 +4631,23 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     );
     for row in &r.rows {
         let session = display_session_id(&row.session_id, full_ids);
-        let mark = if row.outcome == SessionOutcome::Match {
-            "ok "
-        } else {
-            "!! "
+        let mark = match &row.outcome {
+            SessionOutcome::Match => "ok ",
+            SessionOutcome::Unverifiable { .. } => "?? ",
+            _ => "!! ",
         };
         match &row.outcome {
-            SessionOutcome::Match => println!(
-                "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}",
-                row.machine, session, row.observed_shards, row.observed_bytes, row.observed_sha
-            ),
+            SessionOutcome::Match => {
+                let note = if row.basis == ExpectationBasis::StoredManifest {
+                    " [stored-manifest]"
+                } else {
+                    ""
+                };
+                println!(
+                    "  {mark} {:<12} {:<20} shards={:<2} bytes={:<10} sha={}{note}",
+                    row.machine, session, row.observed_shards, row.observed_bytes, row.observed_sha
+                );
+            }
             SessionOutcome::MissingInArchive => println!(
                 "  {mark} {:<12} {:<20} MISSING IN ARCHIVE",
                 row.machine, session
@@ -4657,6 +4664,10 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
                 "  {mark} {:<12} {:<20} SHA MISMATCH\n      expected={expected}\n      observed={observed}",
                 row.machine, session
             ),
+            SessionOutcome::Unverifiable { reason } => println!(
+                "  {mark} {:<12} {:<20} UNVERIFIABLE ({reason})",
+                row.machine, session
+            ),
         }
     }
     for (m, s) in &r.extra_in_archive {
@@ -4665,10 +4676,20 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
             display_session_id(s, full_ids)
         );
     }
-    println!(
-        "[verify] L3 verdict       : {}",
-        if r.ok() { "OK" } else { "FAILED" }
-    );
+    let verdict = if r.ok() {
+        "OK".to_string()
+    } else {
+        let u = r.unverifiable();
+        let f = r.failed();
+        if u > 0 && f > 0 {
+            format!("FAILED (failed={f}, unverifiable={u})")
+        } else if u > 0 {
+            format!("FAILED (unverifiable={u})")
+        } else {
+            "FAILED".to_string()
+        }
+    };
+    println!("[verify] L3 verdict       : {verdict}");
 }
 
 /// `reclaim-stage` — reclaim the sealed shard body once every declared
