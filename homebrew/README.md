@@ -11,11 +11,10 @@ your `PATH`.
 
 ## Requirements
 
-- macOS on **Apple Silicon (arm64)** — this is the only platform that ships a
-  prebuilt binary today. Intel macOS and Linux are not available yet (see
+- macOS on **Apple Silicon (arm64)** or **Intel (x86_64)** — prebuilt binaries
+  are shipped for both architectures. Linux is not available yet (see
   [What this tap does not ship](#what-this-tap-does-not-ship)).
-- [Homebrew](https://brew.sh) (works on both Intel and Apple Silicon Homebrew;
-  only the *formula* is arm64-only).
+- [Homebrew](https://brew.sh) (works on both Intel and Apple Silicon Homebrew).
 
 ## Install
 
@@ -42,7 +41,7 @@ chat-stasher doctor
 
 ## What you get
 
-- `/opt/homebrew/bin/chat-stasher` (Apple Silicon Homebrew prefix) — the CLI.
+- `/opt/homebrew/bin/chat-stasher` (Apple Silicon) or `/usr/local/bin/chat-stasher` (Intel) — the CLI.
 - The binary is verified against a pinned `sha256` in the formula, so a
   corrupted or tampered download fails the install instead of landing on your
   machine.
@@ -85,7 +84,7 @@ brew untap dimpurr/chat-stasher
 | Target | Status |
 | --- | --- |
 | macOS arm64 (Apple Silicon) | ✅ prebuilt, v0.2.0 |
-| macOS x86_64 (Intel) | ⏳ not shipped yet — the formula already carries the branch |
+| macOS x86_64 (Intel) | ✅ prebuilt, v0.2.0 |
 | Linux | ❌ not shipped — no prebuilt binary, no source build path in this tap |
 
 For a platform without a prebuilt binary, build from source:

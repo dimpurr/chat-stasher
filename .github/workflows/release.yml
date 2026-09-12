@@ -3,11 +3,9 @@
 # Runs ONLY when a version tag (`v*`) is pushed. A release is an event — the
 # tag — not a manual toggle, so there is no workflow_dispatch here.
 #
-# The whole workflow is pinned to the one platform scripts/install.sh ships a
-# prebuilt binary for. install.sh (scripts/install.sh:41-58) hard-refuses every
-# target except darwin-arm64, so building anything else would produce an asset
-# the official installer cannot use. That also keeps billing honest: macOS
-# runners bill at ×10, and this job is the only one the release needs.
+# The workflow builds prebuilt binaries for supported macOS platforms
+# (darwin-arm64 and darwin-x86_64) and bundles a single SHA256SUMS covering both.
+# Gates run once before building to ensure only verified code is released.
 name: Release
 
 on:
@@ -27,20 +25,19 @@ permissions:
 
 jobs:
   build-and-release:
-    name: build + release (aarch64-apple-darwin)
+    name: build + release (macOS arm64 + x86_64)
     runs-on: macos-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install stable Rust with aarch64-apple-darwin target
-        # Mirrors .github/workflows/ci.yml:89 (dtolnay/rust-toolchain@stable).
-        # The explicit `targets` input makes the built binary arm64 whether the
-        # runner is natively arm64 or x86_64 cross-compiling it.
+      - name: Install stable Rust with arm64 and x86_64 targets
+        # Mirrors .github/workflows/ci.yml:109 (dtolnay/rust-toolchain@stable).
+        # Adds both aarch64-apple-darwin and x86_64-apple-darwin targets.
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       # -----------------------------------------------------------------------
       # Verify BEFORE building anything that could be published.
@@ -75,29 +72,35 @@ jobs:
       - name: Gate — full release gate
         run: bash scripts/release-gate.sh
 
-      - name: Build release binary
-        run: cargo build --release --target aarch64-apple-darwin
+      - name: Build release binaries (aarch64 + x86_64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
 
-      - name: Stage artifacts (binary + SHA256SUMS)
+      - name: Stage artifacts (binaries + SHA256SUMS)
         run: |
           set -euo pipefail
 
-          # The artifact name is the install.sh contract, byte for byte
-          # (scripts/install.sh:36-60):
-          #   TARGET   = "$(uname -s)-$(uname -m)" → darwin-arm64
+          # The artifact names follow the install.sh contract, byte for byte
+          # (scripts/install.sh):
+          #   TARGET   = "$(uname -s)-$(uname -m)" → darwin-arm64, darwin-x86_64
           #   ARTIFACT = "chat-stasher-${TARGET}"
-          # install.sh downloads exactly "$BASE_URL/$ARTIFACT", so renaming here
-          # would make the installer 404.
-          ARTIFACT="chat-stasher-darwin-arm64"
+          ARTIFACT_ARM64="chat-stasher-darwin-arm64"
+          ARTIFACT_X86="chat-stasher-darwin-x86_64"
 
           mkdir -p dist
-          cp "target/aarch64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT"
+          cp "target/aarch64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_ARM64"
+          cp "target/x86_64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_X86"
 
-          # Guard against a mislabeled binary: assert the Mach-O is really arm64
-          # regardless of the runner's native architecture.
-          file "dist/$ARTIFACT" | grep -q 'arm64' || {
+          # Guard against a mislabeled binary: assert each Mach-O is really its architecture
+          file "dist/$ARTIFACT_ARM64" | grep -q 'arm64' || {
             echo "error: built binary is not arm64:" >&2
-            file "dist/$ARTIFACT" >&2
+            file "dist/$ARTIFACT_ARM64" >&2
+            exit 1
+          }
+          file "dist/$ARTIFACT_X86" | grep -q 'x86_64' || {
+            echo "error: built binary is not x86_64:" >&2
+            file "dist/$ARTIFACT_X86" >&2
             exit 1
           }
 
@@ -106,15 +109,17 @@ jobs:
           # one "<hex>  <filename>" line per asset. `shasum -a 256` emits the
           # same two-space separator release-artifacts.sh produces locally
           # (scripts/release-artifacts.sh:52).
-          ( cd dist && shasum -a 256 "$ARTIFACT" > SHA256SUMS )
+          ( cd dist && shasum -a 256 "$ARTIFACT_ARM64" "$ARTIFACT_X86" > SHA256SUMS )
 
-          # Self-check with install.sh's own awk: the digest for our artifact
+          # Self-check with install.sh's own awk: the digest for each artifact
           # must be present, or installs would hard-fail at install.sh:81-84.
-          EXPECTED="$(awk -v a="$ARTIFACT" '$2 == a { print $1 }' dist/SHA256SUMS)"
-          [ -n "$EXPECTED" ] || {
-            echo "error: SHA256SUMS has no entry for '${ARTIFACT}'" >&2
-            exit 1
-          }
+          for art in "$ARTIFACT_ARM64" "$ARTIFACT_X86"; do
+            EXPECTED="$(awk -v a="$art" '$2 == a { print $1 }' dist/SHA256SUMS)"
+            [ -n "$EXPECTED" ] || {
+              echo "error: SHA256SUMS has no entry for '${art}'" >&2
+              exit 1
+            }
+          done
 
           echo "staged:"
           ls -l dist
@@ -140,5 +145,5 @@ jobs:
             echo "Creating Release ${TAG}."
             gh release create "$TAG" dist/* \
               --title "chat-stasher v${VERSION}" \
-              --notes "Prebuilt binary for Apple Silicon macOS (aarch64-apple-darwin) plus SHA256SUMS. See docs/install.md for installation."
+              --notes "Prebuilt binaries for macOS (aarch64-apple-darwin and x86_64-apple-darwin) plus SHA256SUMS. See docs/install.md for installation."
           fi
