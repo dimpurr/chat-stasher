@@ -45,7 +45,7 @@ use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::OnceCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -231,14 +231,14 @@ pub fn archive_facts_from_readback(report: &crate::readback::ReadAllReport) -> A
 /// unverifiable means reread.
 pub struct DestinationView<'a> {
     id: String,
-    probe: Box<dyn Fn() -> anyhow::Result<ArchiveFacts> + 'a>,
+    probe: Box<dyn Fn(&BTreeSet<(String, String)>) -> anyhow::Result<ArchiveFacts> + 'a>,
     cache: OnceCell<Option<ArchiveFacts>>,
 }
 
 impl<'a> DestinationView<'a> {
     pub fn new(
         id: impl Into<String>,
-        probe: impl Fn() -> anyhow::Result<ArchiveFacts> + 'a,
+        probe: impl Fn(&BTreeSet<(String, String)>) -> anyhow::Result<ArchiveFacts> + 'a,
     ) -> Self {
         DestinationView {
             id: id.into(),
@@ -249,15 +249,26 @@ impl<'a> DestinationView<'a> {
 
     /// A destination whose archive cannot be consulted at all.
     pub fn unreachable(id: impl Into<String>) -> Self {
-        DestinationView::new(id, || Err(anyhow!("destination archive is not reachable")))
+        DestinationView::new(id, |_| Err(anyhow!("destination archive is not reachable")))
     }
 
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    fn facts(&self) -> Option<&ArchiveFacts> {
-        self.cache.get_or_init(|| (self.probe)().ok()).as_ref()
+    /// Probe the archive for `wanted`, once.
+    ///
+    /// The result is cached for the life of this view, and `wanted` is honoured
+    /// only on the **first** call: any later call returns that first result
+    /// whatever set it is given. Callers must therefore collect the complete set
+    /// of sessions that need remote proof before calling this, and call it once.
+    /// A second call site with a different set would read a stale answer, find
+    /// its session absent, and turn that absence into `Unverifiable` — which is
+    /// how already-archived content ends up re-staged.
+    pub fn facts(&self, wanted: &BTreeSet<(String, String)>) -> Option<&ArchiveFacts> {
+        self.cache
+            .get_or_init(|| (self.probe)(wanted).ok())
+            .as_ref()
     }
 }
 
@@ -343,32 +354,54 @@ fn stage_covers(
     Ok(sha256_hex(&concat[..covered]) == fact.concat_sha256)
 }
 
+/// Check if a stored debt can be discharged locally without consulting the destination archive.
+///
+/// A debt is proved locally if:
+/// - the machine partition does not match (fails locally as Unverifiable);
+/// - the stage still covers the claimed shard prefix (OwedOnStage);
+/// - the stage body was reclaimed, its shard directory is empty, and the local manifest
+///   matches the claimed shard triple (SettledReclaimed).
+///
+/// Returns `Some(verdict)` if the debt was settled locally, or `None` if remote archive
+/// verification is required.
+fn debt_settled_locally(
+    entry: &DebtEntry,
+    machine: &str,
+    stage: &Path,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+) -> anyhow::Result<Option<DebtVerdict>> {
+    if entry.machine != machine {
+        return Ok(Some(DebtVerdict::Unverifiable(
+            "cursor was written for a different machine partition",
+        )));
+    }
+    if stage_covers(stage, machine, &entry.session_id, &entry.shards)? {
+        return Ok(Some(DebtVerdict::OwedOnStage));
+    }
+    let dir = store::session_shard_dir(stage, machine, &entry.session_id);
+    if store::sealed_shard_entries(&dir)?.is_empty() {
+        if let Some(facts) = manifest_facts {
+            if facts.get(&entry.session_id) == Some(&entry.shards) {
+                return Ok(Some(DebtVerdict::SettledReclaimed));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Discharge a stored cursor against the authorities that can speak for
 /// this destination — never against the cursor itself.
 fn verify_debt(
     entry: &DebtEntry,
     machine: &str,
     stage: &Path,
-    destination: &DestinationView<'_>,
+    remote_facts: Option<&ArchiveFacts>,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<DebtVerdict> {
-    if entry.machine != machine {
-        return Ok(DebtVerdict::Unverifiable(
-            "cursor was written for a different machine partition",
-        ));
+    if let Some(verdict) = debt_settled_locally(entry, machine, stage, manifest_facts)? {
+        return Ok(verdict);
     }
-    if stage_covers(stage, machine, &entry.session_id, &entry.shards)? {
-        return Ok(DebtVerdict::OwedOnStage);
-    }
-    let dir = store::session_shard_dir(stage, machine, &entry.session_id);
-    if store::sealed_shard_entries(&dir)?.is_empty() {
-        if let Some(facts) = manifest_facts {
-            if facts.get(&entry.session_id) == Some(&entry.shards) {
-                return Ok(DebtVerdict::SettledReclaimed);
-            }
-        }
-    }
-    let Some(facts) = destination.facts() else {
+    let Some(facts) = remote_facts else {
         return Ok(DebtVerdict::Unverifiable(
             "shards left the stage and the destination archive cannot be consulted",
         ));
@@ -649,6 +682,20 @@ pub fn collect_scan_report(
     let manifest_facts = load_local_manifest_facts(stage, machine);
     let mut records = scan.records.clone();
     records.sort_by(|a, b| a.absolute_path.cmp(&b.absolute_path));
+    let mut wanted = BTreeSet::new();
+    for record in &records {
+        let key = state_key(record);
+        if let Some(entry) = debts.get(&key) {
+            if debt_settled_locally(entry, machine, stage, manifest_facts.as_ref())?.is_none() {
+                wanted.insert((machine.to_string(), entry.session_id.clone()));
+            }
+        }
+    }
+    let remote_facts = if wanted.is_empty() {
+        None
+    } else {
+        destination.facts(&wanted)
+    };
     for record in records {
         let key = state_key(&record);
         let stored = debts.get(&key).cloned();
@@ -657,7 +704,7 @@ pub fn collect_scan_report(
         // this destination's own archive.
         let mut unverifiable = None;
         if let Some(entry) = stored.as_ref() {
-            match verify_debt(entry, machine, stage, destination, manifest_facts.as_ref())? {
+            match verify_debt(entry, machine, stage, remote_facts, manifest_facts.as_ref())? {
                 DebtVerdict::OwedOnStage
                 | DebtVerdict::SettledInArchive
                 | DebtVerdict::SettledReclaimed => {}

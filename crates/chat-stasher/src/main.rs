@@ -2646,13 +2646,13 @@ fn destination_view<'a>(
 ) -> chat_stasher::collect::DestinationView<'a> {
     chat_stasher::collect::DestinationView::new(
         chat_stasher::collect::destination_id(&cfg.repo_root),
-        move || {
+        move |wanted| {
             let store = BackupStore::new(cfg.clone(), machine.to_string());
             if !store.repository_exists()? {
                 anyhow::bail!("destination repository is not initialised");
             }
             let mk = store::load_key_file(cfg)?;
-            let observation = store.read_all_machines(&mk)?;
+            let observation = store.read_cumulative_sessions(&mk, Some(wanted))?;
             Ok(chat_stasher::collect::archive_facts_from_readback(
                 &observation,
             ))

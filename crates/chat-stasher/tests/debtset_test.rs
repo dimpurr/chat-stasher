@@ -60,7 +60,7 @@ fn unreachable<'a>(id: &str) -> DestinationView<'a> {
 
 /// A destination whose archive answers with exactly `facts`.
 fn holding<'a>(id: &str, facts: ArchiveFacts) -> DestinationView<'a> {
-    DestinationView::new(id.to_string(), move || Ok(facts.clone()))
+    DestinationView::new(id.to_string(), move |_| Ok(facts.clone()))
 }
 
 fn fact_of(stage: &Path, session_id: &str) -> ShardFact {
@@ -529,4 +529,156 @@ fn manifest_missing_or_corrupt_falls_back_to_unverifiable() {
     );
     assert_eq!(report_missing.reset_records, 1);
     assert!(report_missing.errors.is_empty());
+}
+
+struct MultiFixture {
+    _dir: tempfile::TempDir,
+    source_root: std::path::PathBuf,
+    stage: std::path::PathBuf,
+    state: std::path::PathBuf,
+}
+
+fn multi_fixture(sessions: &[(&str, &[u8])]) -> MultiFixture {
+    let dir = tempfile::TempDir::new().unwrap();
+    let source_root = dir.path().join("source");
+    fs::create_dir_all(&source_root).unwrap();
+    for (name, content) in sessions {
+        fs::write(source_root.join(format!("{name}.jsonl")), content).unwrap();
+    }
+    MultiFixture {
+        source_root,
+        stage: dir.path().join("stage"),
+        state: dir.path().join("state"),
+        _dir: dir,
+    }
+}
+
+impl MultiFixture {
+    fn collect(&self, destination: &DestinationView<'_>) -> collect::CollectReport {
+        collect::collect_scan_report(
+            &scan(&self.source_root),
+            &self.stage,
+            MACHINE,
+            &self.state,
+            20,
+            destination,
+        )
+        .unwrap()
+    }
+
+    fn session_id_for(&self, name: &str) -> String {
+        let scan_report = scan(&self.source_root);
+        scan_report
+            .records
+            .iter()
+            .find(|r| r.absolute_path.ends_with(format!("{name}.jsonl")))
+            .unwrap()
+            .id
+            .clone()
+    }
+}
+
+/// Verify that the remote probe is only queried for sessions that genuinely need it:
+/// - Session A: reclaimed (manifest only), proved locally -> not queried.
+/// - Session B: reclaimed, then grew (incremental shard on stage) -> queried.
+/// - Session C: never reclaimed, proved on stage -> not queried.
+/// - When all sessions are proven locally, remote probe is called 0 times.
+/// - When remote probe fails, only Session B is marked Unverifiable.
+#[test]
+fn remote_query_scopes_to_only_needed_sessions() {
+    let fx = multi_fixture(&[
+        ("session_a", b"a-line-1\n"),
+        ("session_b", b"b-line-1\n"),
+        ("session_c", b"c-line-1\n"),
+    ]);
+    let initial = fx.collect(&unreachable("dest-a"));
+    assert_eq!(initial.lines_written, 3);
+    assert_eq!(initial.unverified_cursors, 0);
+
+    let id_a = fx.session_id_for("session_a");
+    let id_b = fx.session_id_for("session_b");
+    let _id_c = fx.session_id_for("session_c");
+
+    let b_fact = fact_of(&fx.stage, &id_b);
+
+    // Reclaim session A: write manifest, delete shard body.
+    let manifest = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &manifest).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &id_a).unwrap();
+
+    // Reclaim session B: delete shard body, manifest retains B's initial fact.
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &id_b).unwrap();
+
+    // Session B grows: stage has incremental shard only (e.g. shard 2), so stage does not cover
+    // the whole prefix, and shard dir is not empty (skipping manifest check).
+    let b_dir = store::session_shard_dir(&fx.stage, MACHINE, &id_b);
+    fs::create_dir_all(&b_dir).unwrap();
+    fs::write(b_dir.join("000002.jsonl"), b"b-line-2-increment\n").unwrap();
+
+    // Session C remains intact on stage.
+
+    // 1. Assert remote query scope contains ONLY session B.
+    let queried_sessions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let queried_clone = queried_sessions.clone();
+    let probe_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_count_clone = probe_count.clone();
+
+    let b_id_for_closure = id_b.clone();
+    let dest = DestinationView::new("dest-a", move |wanted| {
+        probe_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut list: Vec<(String, String)> = wanted.iter().cloned().collect();
+        list.sort();
+        *queried_clone.lock().unwrap() = list;
+        let mut facts = ArchiveFacts::new();
+        facts.insert(
+            (MACHINE.to_string(), b_id_for_closure.clone()),
+            b_fact.clone(),
+        );
+        Ok(facts)
+    });
+
+    let second = fx.collect(&dest);
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let requested = queried_sessions.lock().unwrap().clone();
+    assert_eq!(
+        requested,
+        vec![(MACHINE.to_string(), id_b.clone())],
+        "remote query must only ask for session B, not A or C"
+    );
+    assert_eq!(second.unverified_cursors, 0, "session B settled in archive");
+
+    // 2. Assert when everything is locally proven, remote probe is never called (0 calls).
+    fs::remove_dir_all(&b_dir).unwrap();
+    let probe_count_local = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_count_local_clone = probe_count_local.clone();
+    let dest_local = DestinationView::new("dest-a", move |_wanted| {
+        probe_count_local_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ArchiveFacts::new())
+    });
+    let third = fx.collect(&dest_local);
+    assert_eq!(
+        probe_count_local.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "when all sessions are proven locally, remote probe must never be called"
+    );
+    assert_eq!(third.unverified_cursors, 0);
+
+    // 3. Assert probe error makes only sessions needing remote verification Unverifiable,
+    // while locally-proven sessions remain unaffected.
+    fs::create_dir_all(&b_dir).unwrap();
+    fs::write(b_dir.join("000002.jsonl"), b"b-line-2-increment\n").unwrap();
+
+    let dest_err = DestinationView::new("dest-a", move |_wanted| {
+        anyhow::bail!("simulated remote failure");
+    });
+    let report_err = fx.collect(&dest_err);
+    assert_eq!(
+        report_err.unverified_cursors, 1,
+        "only session B should be unverifiable when probe fails"
+    );
+    assert_eq!(report_err.reconciliations.len(), 1);
+    assert_eq!(
+        report_err.reconciliations[0].session_prefix,
+        chat_stasher::id::short_session_id(&id_b),
+    );
 }
