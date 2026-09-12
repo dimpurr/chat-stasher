@@ -66,7 +66,7 @@ async function popupNow(opts: { enabled: boolean; hasHttp: boolean; hasTargets: 
   const block = await tickBlockReason({
     hasStore: true,
     isEnabled: () => opts.enabled,
-    isDownloadPaused: () => false,
+    isHostPaused: () => false,
     hasHttp: opts.hasHttp,
     hasTargets: targets.length > 0,
   });
@@ -74,7 +74,6 @@ async function popupNow(opts: { enabled: boolean; hasHttp: boolean; hasTargets: 
   const view = renderPopup({
     enabled: opts.enabled,
     block,
-    guard: null,
     state: null,
     target: null,
     failures: NO_FAILURES,

@@ -83,6 +83,21 @@ export interface SinkOutcome {
    * 出口不报这个字段（undefined）⇒ 不做这项校验，行为与 C19 逐字一致。
    */
   sessionId?: string;
+  /**
+   * 🔴 W2 · **「这一次没送出去，但它不该被划掉。」**
+   *
+   * 与 saved:false 是两件不同的事，必须分开：
+   *  · saved:false（不带这个字段）= 这一笔【已经判死】：不重试、进失败清单、
+   *    从 pending 里拿掉。适用于「这一条会话本身有问题」（起不出安全文件名、
+   *    主机明确 nack 说它不合法）。
+   *  · retryLater:true = 出口【暂时】够不着（本机 host 不在）。会话本身没问题，
+   *    所以：欠账原样留在 pending 里、不进失败清单、这条腿立刻停下并留痕，
+   *    等下一次心跳 `hello` 成功之后从同一笔继续。
+   *
+   * 少了这一位，「host 不在」就会被记成「这一笔处理完了」—— 正是本项目
+   * 最不能接受的那种静默丢失（欠账被划掉、再也不会重试、也没有人知道）。
+   */
+  retryLater?: boolean;
 }
 
 /**
@@ -97,17 +112,33 @@ export interface SinkOutcome {
  *    这个洞会重新出现。要彻底堵死就得让 sink 的返回类型变成必填 —— 那会一次性
  *    弄红全部既有测试夹具，超出本任务的范围，所以这里选择【写明】而不是【偷偷收紧】。
  */
-function sinkVerdict(
-  outcome: SinkOutcome | void | undefined,
-  debtId: string,
-): { ok: true } | { ok: false; reason: FailureReason; detail: string } {
+type SinkVerdict =
+  | { ok: true }
+  /** 这一笔判死（进失败清单、不重试、不再排队）。 */
+  | { ok: false; fatal: true; reason: FailureReason; detail: string }
+  /** 出口暂时够不着：欠账原样留着，这条腿停下。（W2） */
+  | { ok: false; fatal: false; reason: string; detail: string };
+
+function sinkVerdict(outcome: SinkOutcome | void | undefined, debtId: string): SinkVerdict {
   if (!outcome) return { ok: true };
+  if (outcome.retryLater === true) {
+    return {
+      ok: false,
+      fatal: false,
+      reason: outcome.reason ?? 'host-unavailable',
+      detail: 'the delivery destination is temporarily unreachable; the debt stays open',
+    };
+  }
   if (outcome.saved !== true) {
-    return { ok: false, reason: 'not-saved', detail: outcome.reason ?? 'sink reported saved:false' };
+    return {
+      ok: false, fatal: true, reason: 'not-saved',
+      detail: outcome.reason ?? 'sink reported saved:false',
+    };
   }
   if (outcome.sessionId !== undefined && outcome.sessionId !== debtId) {
     return {
       ok: false,
+      fatal: true,
       reason: 'identity-mismatch',
       // 只放长度，不放两个 id 本身：完整会话 id 不进任何日志。
       detail: `debt key (len ${debtId.length}) != file identity (len ${outcome.sessionId.length})`,
@@ -147,13 +178,6 @@ export interface BackfillOptions {
    *    把 HandledResult 丢在地上，于是「没落盘」和「落盘了」在欠账账本上是同一个结果。
    */
   sink?: (captured: CapturedFetch) => Promise<SinkOutcome | void> | SinkOutcome | void;
-  /**
-   * C12 下载停滞守卫的闸门：返回 true 表示「已熔断」，这条腿必须暂停。
-   * 🔴 只暂停回溯腿（慢爬）。实时腿走 entrypoints/background.ts 的
-   *    onMessage → handleCaptured，完全不经过这里，所以不受影响。
-   * 不注入就等于没有守卫 —— 与 C11 的行为逐字一致。
-   */
-  downloadGuard?: () => boolean | Promise<boolean>;
 }
 
 export interface RunReport {
@@ -341,11 +365,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // 上一次已经停下留痕了：要人来看过、清掉 halted 才继续，绝不自己重试打平台。
   if (state.halted) return report('halted');
 
-  /** 熔断态 ⇒ 立刻收手。欠账不动、不落盘任何新状态：暂停不是失败。 */
-  const guardTripped = async (): Promise<boolean> =>
-    opts.downloadGuard ? await opts.downloadGuard() : false;
-  if (await guardTripped()) return report('download-paused');
-
   const platformRow = getPlatformByOrigin(opts.origin);
   if (!platformRow) {
     return halt('shape-changed', `origin ${opts.origin} is not in the platform table`);
@@ -382,7 +401,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       : `list offset=${state.enumCursor.offset}`;
   while (!state.enumCursor.complete && state.enumCursor.truncated === undefined) {
     if (opts.shouldAbort?.()) return report('aborted');
-    if (await guardTripped()) return report('download-paused');
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
     const url = cursorMode
@@ -500,8 +518,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
   while (state.pending.length > 0) {
     if (opts.shouldAbort?.()) return report('aborted');
-    // 跑到一半才熔断也要立刻收手：每清一笔账都已落盘，停在这里不丢任何进度。
-    if (await guardTripped()) return report('download-paused');
     if (archivedThisRun.length >= budget) return report('budget-exhausted');
     if (dailyCap !== null && state.detailToday.count >= dailyCap) return report('daily-cap');
 
@@ -590,6 +606,17 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     //   存下来了 ⇒ settleDebt（清账，进 archived）
     //   没存下来 ⇒ recordFailure（进失败清单，🔴 不清账、不进 archived、不重试）
     const verdict = sinkVerdict(await opts.sink?.(captured), id);
+
+    if (!verdict.ok && !verdict.fatal) {
+      // 🔴 W2 · 出口暂时够不着（本机 host 不在）。这一笔【不许】被划掉：
+      //    不进 archived、不进失败清单、不从 pending 里拿掉。
+      //    已经真的发出去的那次请求仍然计入今天的配额（下面的 count += 1），
+      //    然后这条腿立刻停下 —— 下一次心跳会先用 hello 问一次主机在不在。
+      state.detailToday.count += 1;
+      await persist(store, state);
+      console.warn(`[chat-stasher] backfill paused: ${verdict.reason} — ${verdict.detail}`);
+      return report('host-unavailable');
+    }
 
     if (verdict.ok) {
       settleDebt(state, id);

@@ -76,12 +76,6 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    async download() { return 1; },
-    onChanged: { addListener() {} },
-    async removeFile() {},
-    async erase() {},
-  },
   alarms: {
     create(name: string, info: any) { alarmBook.set(name, info); },
     async clear(name: string) { return alarmBook.delete(name); },
@@ -174,7 +168,7 @@ describe('C29-NOENUM · 仅打开标签页但未发生过实时对话时，闹�
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => true,
-      isDownloadPaused: () => false,
+      isHostPaused: () => false,
       hasHttp: statusReply.transportWired,
       hasTargets: targets.length > 0,
     });
@@ -186,7 +180,6 @@ describe('C29-NOENUM · 仅打开标签页但未发生过实时对话时，闹�
     const view = renderPopup({
       enabled: true,
       block,
-      guard: null,
       state: pickBackfillState(snapshot),
       target: null,
       failures: collectFailures(snapshot),

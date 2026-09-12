@@ -19,21 +19,24 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
+import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 // ---------------------------------------------------------------------------
-// 假浏览器（与 c17 / c20 同构）
+// 假浏览器（与 c17 / c20 同构）。W2：落盘通道 = 合成 native host，
+// 「写出去的到底是什么」由 host 收到的 name/payload 说了算。
 // ---------------------------------------------------------------------------
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
-const downloadCalls: Array<{ id: number; filename: string; url: string }> = [];
-const changeListeners: Array<(d: any) => void> = [];
+let host: SyntheticHost;
 
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
+    sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
   },
   storage: {
     local: {
@@ -48,17 +51,6 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    async download(opts: any) {
-      const id = downloadCalls.length + 1;
-      downloadCalls.push({ id, filename: opts.filename, url: opts.url });
-      setTimeout(() => { for (const fn of changeListeners) fn({ id, state: { current: 'complete' } }); }, 0);
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
-  },
 };
 
 /** 合成「服务器」。绝不碰网络：就是一个 (url) => {status,text} 的纯函数。 */
@@ -117,15 +109,15 @@ async function bootAndDispatch(payload: CapturedFetch): Promise<any> {
 const STATE_KEY = 'cs_backfill_v1:chatgpt:acct-fixture-1';
 const stateOf = (): any => store[STATE_KEY] ?? null;
 
-/** 最终文件（去掉 .part 那一半）。 */
-const finalFiles = (): string[] =>
-  downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename);
+/** host 那边真正落下来的名字（§6.2 的 name）。 */
+const finalFiles = (): string[] => host.names();
 
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
-  downloadCalls.length = 0;
-  changeListeners.length = 0;
+  host = createSyntheticHost({ up: true });
+  // 每个用例一个全新的空库：发件箱是持久化的，跨用例残留会让断言失真。
+  (globalThis as any).indexedDB = new IDBFactory();
   fakeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', fakeBrowser);
   vi.stubGlobal('chrome', fakeBrowser);
@@ -214,7 +206,7 @@ describe('C21-2 · 文件名不安全的 id ⇒ 不落盘、进失败清单', ()
 // 用例 3 · 🔴 实时腿的既有行为没被改变
 // ===========================================================================
 describe('C21-3 · 实时腿（没有枚举给的 id）行为逐字未变', () => {
-  it('仍然从 URL 抠 id、仍然存成同一个文件名、仍然回 saved:true', async () => {
+  it('仍然从 URL 抠 id、仍然用同一个名字、仍然回 saved:true（且只有 ack 之后才是 true）', async () => {
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(undefined);   // 回溯腿不接线 ⇒ 只剩实时腿这一条路
     const payload = liveCapture();
@@ -225,14 +217,19 @@ describe('C21-3 · 实时腿（没有枚举给的 id）行为逐字未变', () =
     await mod.backfillTickSettled();
 
     console.log('[C21-3] 实时腿的返回:', result);
-    console.log('[C21-3] 实时腿写出的文件:', finalFiles());
+    console.log('[C21-3] 实时腿交出去的名字:', finalFiles());
 
     expect(result.ok).toBe(true);
     expect(result.saved).toBe(true);
-    // 🔴 与 C20 之前逐字相同的文件名：平台前缀 + 从 URL 抠出来的 sessionId
-    expect(result.finalName).toBe(`chat-stasher/inbox/chatgpt-${LIVE_SID}.json`);
+    // 🔴 与 C20 之前同一个身份：平台前缀 + 从 URL 抠出来的 sessionId。
+    //    W2 去掉了 `chat-stasher/inbox/` 前缀 —— 那是 chrome.downloads 的目录约定，
+    //    现在名字由 §6.2 定义（它成了主机那边分片的 source_file）。
+    expect(result.finalName).toBe(`chatgpt-${LIVE_SID}.json`);
     expect(result.sessionId).toBe(LIVE_SID);
-    expect(finalFiles()).toEqual([`chat-stasher/inbox/chatgpt-${LIVE_SID}.json`]);
+    expect(finalFiles()).toEqual([`chatgpt-${LIVE_SID}.json`]);
+    // 而且这条名字是【被 ack 过】的：主机真的收到了它。
+    expect(host.deliveries).toHaveLength(1);
+    expect(host.sessionIds()).toEqual([LIVE_SID]);
   });
 
   it('🔴 页面【不许】自己指定身份：带 sessionId 的页面载荷一律不认', async () => {

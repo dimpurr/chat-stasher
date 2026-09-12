@@ -67,17 +67,6 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    // 真实浏览器会异步回一条 complete；不回的话落盘那一步会一直等下去。
-    async download() {
-      const id = 1;
-      setTimeout(() => { for (const fn of changeListeners) fn({ id, state: { current: 'complete' } }); }, 0);
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
-  },
   alarms: {
     create(name: string, info: any) { alarmBook.set(name, info); },
     async clear(name: string) { return alarmBook.delete(name); },
@@ -128,7 +117,7 @@ async function popupNow(transportWired: boolean) {
   const block = await tickBlockReason({
     hasStore: s !== null,
     isEnabled: () => true,
-    isDownloadPaused: () => false,
+    isHostPaused: () => false,
     hasHttp: transportWired,
     hasTargets: targets.length > 0,
   });
@@ -136,7 +125,6 @@ async function popupNow(transportWired: boolean) {
   const view = renderPopup({
     enabled: true,
     block,
-    guard: null,
     state: pickBackfillState(snapshot),
     target: null,
     failures: collectFailures(snapshot),

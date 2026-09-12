@@ -1,119 +1,118 @@
 /**
- * Q2 visibility: one source of truth for the toolbar badge.
+ * The toolbar badge. One source of truth: the outbox.
  *
- * DESIGN DECISION — stale badge after SW death:
- *  - A service worker's badge is native UI: once set, it stays even after the
- *    SW is killed. If we only ever incremented it, a dead worker would leave an
- *    out-of-date number behind and the user couldn't tell capture had stopped.
- *  - Fix chosen: persist {lastCaptureAt, count} to storage.local on every
- *    successful capture. Whenever the SW materialises (startup / onStartup /
- *    next capture) we compare lastCaptureAt against now (>5 min = stale) and,
- *    if stale, CLEAR the badge (empty text) and reset the counters. Empty text
- *    was chosen over a grey badge: badge colour renders differently across
- *    browser themes and a greyed digit could still read as "quietly running";
- *    an empty badge is the only unambiguous "off" signal.
- *  - While the SW is dead the badge natively keeps its last value — nothing can
- *    repaint it without waking the SW. The rule re-asserts correctness the
- *    moment any capture event or startup fires again.
+ * What it says now (this replaced the old "captures in the last 5 minutes"
+ * counter, which belonged to the automatic-download channel):
+ *
+ *   • nothing waiting              → no badge
+ *   • N captures waiting           → the number N
+ *   • something rejected, or the   → the alert mark, with a title that spells out
+ *     outbox is full                 how many are waiting, how many were
+ *                                    rejected, and whether it is full
+ *
+ * 🔴 Why the alert outranks the number: a number means "work in progress, the
+ *    host will take these". A rejection or a full outbox means *nothing will
+ *    move without you*; showing "3" for that case would read as normality.
+ *
+ * The old staleness rule is gone with the counter it guarded. It existed because
+ * a count kept in `storage.local` could outlive the worker that wrote it; the
+ * outbox is the durable record and the badge is now derived from it, so a badge
+ * that disagrees with the outbox is impossible by construction rather than
+ * corrected five minutes later.
  */
 
-export const BADGE_STALE_MS = 5 * 60 * 1000;
-export const BADGE_KEY_COUNT = 'cs_count';
-export const BADGE_KEY_LAST_AT = 'cs_last_capture_at';
-export const BADGE_COLOR_ACTIVE = '#c1353c';
+import { summary, type OutboxSummary, type OutboxOptions } from './outbox';
+import { badgeTitle } from './ui-strings';
 
-export function isStale(
-  lastCaptureAt: number | undefined,
-  now: number,
-  staleMs: number = BADGE_STALE_MS,
-): boolean {
-  if (lastCaptureAt == null) return true;
-  return now - lastCaptureAt > staleMs;
+/** Number-of-waiting background. */
+export const BADGE_COLOR_WAITING = '#c1353c';
+/** Something needs the user: rejected entries or a full outbox. */
+export const BADGE_COLOR_ALERT = '#8b0000';
+
+/** The badge mark used for the alert state. Not a digit, so it cannot be read as a count. */
+export const BADGE_ALERT_TEXT = '!';
+
+export interface BadgePlan {
+  text: string;
+  color: string;
+  title: string;
 }
 
-export interface BadgeState {
-  count: number;
-  lastCaptureAt: number | undefined;
+/**
+ * Pure: outbox summary → what the badge should look like.
+ * `null` means "the badge must be empty" (an unambiguous off signal; a grey
+ * badge renders differently across themes and can still read as "running").
+ */
+export function badgeFor(state: OutboxSummary | null): BadgePlan | null {
+  if (state === null) {
+    // 🔴 「读不出发件箱」不是「没有待送」。两者在角标上也不能长得一样：
+    //    数字/空角标都在说「我知道现状」，而这里我们确实不知道。
+    return {
+      text: BADGE_ALERT_TEXT,
+      color: BADGE_COLOR_ALERT,
+      title: 'chat-stasher: the outbox cannot be read in this browser context — '
+        + 'the extension cannot say what is queued. Nothing has been deleted.',
+    };
+  }
+  const alert = state.rejected > 0 || state.full;
+  if (alert) {
+    return {
+      text: BADGE_ALERT_TEXT,
+      color: BADGE_COLOR_ALERT,
+      title: badgeTitle(state.pending, state.rejected, state.full),
+    };
+  }
+  if (state.pending > 0) {
+    return {
+      text: String(state.pending),
+      color: BADGE_COLOR_WAITING,
+      title: badgeTitle(state.pending, 0, false),
+    };
+  }
+  return null;
 }
 
-/** Signature-agnostic small helpers so tests can stub only what they use. */
-function storageApi() {
-  // Badge is cosmetic: if the storage/action surface is absent on this browser
-  // build (or in a test mock), every helper becomes a silent no-op.
-  return ((browser as { storage?: { local?: unknown } }).storage?.local ?? null) as {
-    get: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
-    set: (v: Record<string, unknown>) => Promise<void>;
-    remove: (k: string[]) => Promise<void>;
-  } | null;
+type ActionApi = {
+  setBadgeText: (o: { text: string }) => Promise<void>;
+  setBadgeBackgroundColor?: (o: { color: string }) => Promise<void>;
+  setTitle?: (o: { title: string }) => Promise<void>;
+};
+
+function actionApi(): ActionApi | null {
+  const action = (globalThis as { browser?: { action?: ActionApi } }).browser?.action;
+  return action && typeof action.setBadgeText === 'function' ? action : null;
 }
 
-async function getLocal(defaults: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const api = storageApi();
-  if (!api || typeof api.get !== 'function') return defaults;
-  return await api.get(defaults);
-}
-
-async function setLocal(values: Record<string, unknown>): Promise<void> {
-  const api = storageApi();
-  if (!api || typeof api.set !== 'function') return;
-  await api.set(values);
-}
-
-async function removeLocal(keys: readonly string[]): Promise<void> {
-  const api = storageApi();
-  if (!api || typeof api.remove !== 'function') return;
-  await api.remove(keys as string[]);
-}
-
-export async function loadBadgeState(): Promise<BadgeState> {
-  const got = await getLocal(
-    { [BADGE_KEY_COUNT]: 0, [BADGE_KEY_LAST_AT]: 0 },
-  );
-  const count = typeof got[BADGE_KEY_COUNT] === 'number' ? (got[BADGE_KEY_COUNT] as number) : 0;
-  const lastCaptureAt = typeof got[BADGE_KEY_LAST_AT] === 'number'
-    ? (got[BADGE_KEY_LAST_AT] as number)
-    : undefined;
-  return { count, lastCaptureAt };
-}
-
-export async function setActiveBadge(count: number): Promise<void> {
-  const action = (browser as { action?: { setBadgeText: (o: { text: string }) => Promise<void>; setBadgeBackgroundColor: (o: { color: string }) => Promise<void> } }).action;
-  if (!action) return; // e.g. Firefox MV2 alias — badge is cosmetic, never fatal
-  await action.setBadgeText({ text: String(count) });
-  await action.setBadgeBackgroundColor({ color: BADGE_COLOR_ACTIVE });
-}
-
+/** Cosmetic: a missing action surface is never fatal. */
 export async function clearBadge(): Promise<void> {
-  const action = (browser as { action?: { setBadgeText: (o: { text: string }) => Promise<void> } }).action;
+  const action = actionApi();
   if (!action) return;
   await action.setBadgeText({ text: '' });
 }
 
-/**
- * Called once per successful capture: bump the count, stamp the time, paint the
- * badge. Storage keys live in the same session namespace so a mid-session SW
- * recycle restores the visible count instead of starting over.
- */
-export async function recordCapture(): Promise<void> {
-  const prev = await loadBadgeState();
-  const count = prev.count + 1;
-  const now = Date.now();
-  await setLocal({ [BADGE_KEY_COUNT]: count, [BADGE_KEY_LAST_AT]: now });
-  await setActiveBadge(count);
+async function paint(plan: BadgePlan | null): Promise<void> {
+  const action = actionApi();
+  if (!action) return;
+  if (plan === null) {
+    await action.setBadgeText({ text: '' });
+    return;
+  }
+  await action.setBadgeText({ text: plan.text });
+  await action.setBadgeBackgroundColor?.({ color: plan.color });
+  await action.setTitle?.({ title: plan.title });
 }
 
 /**
- * Re-assert the badge's truth on every SW wake. Stale (or never-tracked) =>
- * clear badge + reset session counters; fresh => repaint the persisted count.
+ * Re-derive the badge from the outbox. Safe to call on every worker wake and
+ * after every drain: it is a read plus a paint, and it never throws.
  */
-export async function refreshBadge(): Promise<void> {
-  const state = await loadBadgeState();
-  if (isStale(state.lastCaptureAt, Date.now())) {
-    await removeLocal([BADGE_KEY_COUNT, BADGE_KEY_LAST_AT]);
-    await clearBadge();
-  } else if (state.count > 0) {
-    await setActiveBadge(state.count);
-  } else {
-    await clearBadge();
+export async function refreshBadge(options: OutboxOptions = {}): Promise<BadgePlan | null> {
+  try {
+    const plan = badgeFor(await summary(options));
+    await paint(plan);
+    return plan;
+  } catch (err) {
+    console.warn('[chat-stasher] badge update failed', (err as Error).message);
+    return null;
   }
 }

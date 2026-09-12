@@ -13,7 +13,9 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
+import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 // ---- 把引擎换成 spy（只在本文件生效）----
 const runBackfillSpy = vi.fn(async (opts: any) => ({
@@ -37,8 +39,9 @@ vi.mock('../lib/backfill/engine', async (importOriginal) => {
 // ---- 假浏览器：storage.local / downloads / action / runtime ----
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
-const downloadCalls: any[] = [];
-const changeListeners: Array<(d: any) => void> = [];
+let host: SyntheticHost;
+/** 主机整个下线（本机没装 host / 答不上话）。 */
+let hostDown = false;
 
 const fakeBrowser: any = {
   runtime: {
@@ -46,6 +49,11 @@ const fakeBrowser: any = {
     onStartup: { addListener() {} },
     onMessage: {
       addListener(fn: any) { runtimeListeners.push(fn); },
+    },
+    // W2：实时腿的落盘通道 = 合成 native host。
+    sendNativeMessage: (h: string, m: unknown) => {
+      if (hostDown) throw new Error('Specified native messaging host not found.');
+      return host.sendNativeMessage(h, m);
     },
   },
   storage: {
@@ -63,21 +71,6 @@ const fakeBrowser: any = {
     async setBadgeText() {},
     async setBadgeBackgroundColor() {},
     async setTitle() {},
-  },
-  downloads: {
-    // 立刻把这次下载报成 complete —— 本文件测的是接线，不是下载通道
-    //（下载通道由 chain.test.ts 用真实文件系统覆盖）。
-    async download(opts: any) {
-      downloadCalls.push(opts);
-      const id = downloadCalls.length;
-      setTimeout(() => {
-        for (const fn of changeListeners) fn({ id, state: { current: 'complete' } });
-      }, 0);
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
   },
 };
 
@@ -113,8 +106,9 @@ async function bootBackgroundAndDispatch(payload: CapturedFetch): Promise<any> {
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
-  downloadCalls.length = 0;
-  changeListeners.length = 0;
+  host = createSyntheticHost({ up: true });
+  hostDown = false;
+  (globalThis as any).indexedDB = new IDBFactory();
   runBackfillSpy.mockClear();
   vi.stubGlobal('browser', fakeBrowser);
   vi.stubGlobal('chrome', fakeBrowser);
@@ -141,21 +135,24 @@ describe('C13 · 回溯腿接进运行时', () => {
     const opts = runBackfillSpy.mock.calls[0]![0];
     expect(opts.origin).toBe('https://chatgpt.com');
     expect(opts.platform).toBe('chatgpt');
-    expect(typeof opts.downloadGuard).toBe('function'); // C12 闸门被接上
     expect(typeof opts.sink).toBe('function');         // 归档出口不分叉
     expect(opts.maxDetails).toBe(1);                   // 定速：一次 tick 只清一笔账
+    // 🔴 W2：暂停闸门【不在】engine 里。engine 只认出口回答的 retryLater，
+    //    「现在要不要开跑」由 schedule.ts 的闸门回答 —— 所以这里断言它确实没被传进来。
+    expect('downloadGuard' in opts).toBe(false);
     console.log('[C13] runtime message -> runBackfill called with', {
       platform: opts.platform, origin: opts.origin, maxDetails: opts.maxDetails,
     });
   });
 
-  it('🔴 判据 3：C12 熔断态（download-paused）下，同一条真实路径【不】启动回溯', async () => {
+  it('🔴 判据 3：主机暂停且主机答不上话 ⇒ 同一条真实路径【不】启动回溯', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
-    const { GUARD_KEY, initialGuardState } = await import('../lib/download-guard');
+    const { HOST_PAUSE_KEY, HOST_UNAVAILABLE } = await import('../lib/host-status');
     await setBackfillEnabled(browserLocalStore(), true);
-    // 直接把守卫写成熔断态。
-    store[GUARD_KEY] = { ...initialGuardState(), tripped: true, trippedAt: 1, consecutiveStalls: 3 };
+    // 上一次投递失败留下的暂停记录（真的那条路径写的就是这个键）。
+    store[HOST_PAUSE_KEY] = { reason: HOST_UNAVAILABLE, at: 1, detail: 'timeout' };
+    hostDown = true;
 
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(async () => ({ status: 200, text: '{"items":[],"total":0}' }));
@@ -163,8 +160,30 @@ describe('C13 · 回溯腿接进运行时', () => {
     await bootBackgroundAndDispatch(fakeCapture());
 
     expect(runBackfillSpy).not.toHaveBeenCalled();
-    expect(mod.lastBackfillTick()?.reason).toBe('download-paused');
-    console.log('[C13] guard tripped -> tick reason =', mod.lastBackfillTick()?.reason);
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
+    // 🔴 暂停记录没有被悄悄清掉：hello 没成功就不许恢复。
+    expect(store[HOST_PAUSE_KEY]).toMatchObject({ reason: HOST_UNAVAILABLE });
+    console.log('[C13] host paused -> tick reason =', mod.lastBackfillTick()?.reason);
+  });
+
+  it('🔴 判据 4：主机暂停但 hello 答了话 ⇒ 闸门自己放行（§10 的恢复动作）', async () => {
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { HOST_PAUSE_KEY, HOST_UNAVAILABLE } = await import('../lib/host-status');
+    await setBackfillEnabled(browserLocalStore(), true);
+    store[HOST_PAUSE_KEY] = { reason: HOST_UNAVAILABLE, at: 1, detail: 'timeout' };
+    // 主机这次在（hostDown 默认 false）。
+    const beforeHello = host.helloCount();
+
+    const mod: any = await import('../entrypoints/background');
+    mod.configureBackfillTransport(async () => ({ status: 200, text: '{"items":[],"total":0}' }));
+
+    await bootBackgroundAndDispatch(fakeCapture());
+
+    expect(runBackfillSpy).toHaveBeenCalledTimes(1);
+    expect(host.helloCount()).toBe(beforeHello + 1);  // 恢复动作真的问了一次主机
+    expect(store[HOST_PAUSE_KEY]).toBeNull();         // 答话了 ⇒ 暂停被清掉
+    console.log('[C13] host answered -> pause cleared, tick reason =', mod.lastBackfillTick()?.reason);
   });
 
   it('默认【关】：什么都不设，同一条路径走到最后一道闸也不会跑', async () => {

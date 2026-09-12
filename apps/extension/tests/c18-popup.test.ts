@@ -112,17 +112,15 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
     const { setBackfillEnabled, isBackfillEnabled, tickBlockReason } =
       await import('../lib/backfill/schedule');
-    const { loadGuardState, isGuardTripped } = await import('../lib/download-guard');
     const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
 
     // 用户在 Popup 上把开关打开了。
     await setBackfillEnabled(browserLocalStore(), true);
 
-    const guard = await loadGuardState(browserLocalStore()!);
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => isBackfillEnabled(browserLocalStore()),
-      isDownloadPaused: () => isGuardTripped(guard),
+      isHostPaused: () => false,
       // 🔴 生产构建里就是这个值：没有任何代码注入 http 端口。
       hasHttp: false,
     });
@@ -133,7 +131,6 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     const view = renderPopup({
       enabled: true,
       block,
-      guard,
       state,
       target: state ? { platform: state.platform, scope: state.scope } : null,
       // C20：走真实的汇总函数，不写死 —— 本用例的夹具里没有失败项，所以它是空的。
@@ -180,12 +177,12 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => false,
-      isDownloadPaused: () => false,
+      isHostPaused: () => false,
       hasHttp: false,
     });
     expect(block).toBe('disabled');
     const out = popupText(renderPopup({
-      enabled: false, block, guard: null, state: null, target: null, failures: NO_FAILURES,
+      enabled: false, block, state: null, target: null, failures: NO_FAILURES,
     }));
     expect(out).toContain('未在运行');
     expect(out).toContain('开关没有打开');
@@ -194,48 +191,49 @@ describe('C18-2 · 开着但取数通道没接上', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3 · 熔断态
+// 3 · 主机暂停态（W2 取代了 C12 的熔断态）
 // ---------------------------------------------------------------------------
-describe('C18-3 · 熔断态', () => {
-  it('显示告警，并且开关仍然可切', async () => {
+describe('C18-3 · 主机暂停态', () => {
+  it('显示暂停行与具名原因，并且开关仍然可切', async () => {
     seedState();
     const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
     const { setBackfillEnabled, isBackfillEnabled, tickBlockReason } =
       await import('../lib/backfill/schedule');
-    const { recordDownloadOutcome, stalledResult, loadGuardState, isGuardTripped } =
-      await import('../lib/download-guard');
+    const { HOST_PAUSE_KEY, HOST_UNAVAILABLE } = await import('../lib/host-status');
     const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
 
     await setBackfillEnabled(browserLocalStore(), true);
-    // 真把守卫打到熔断：连续 3 次停滞。
-    for (let i = 0; i < 3; i += 1) {
-      await recordDownloadOutcome(browserLocalStore(), stalledResult(15_000), { now: 1_000 + i });
-    }
-    const guard = await loadGuardState(browserLocalStore()!);
-    expect(isGuardTripped(guard)).toBe(true);
+    // 真把暂停记下来：这正是回溯腿投递失败时写的那条记录。
+    store[HOST_PAUSE_KEY] = { reason: HOST_UNAVAILABLE, at: 1_700_000_000_000, detail: 'timeout' };
+    const { loadHostPause } = await import('../lib/host-status');
+    const pause = await loadHostPause(browserLocalStore());
 
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => isBackfillEnabled(browserLocalStore()),
-      isDownloadPaused: () => isGuardTripped(guard),
+      isHostPaused: () => pause !== null,
       hasHttp: false,
     });
-    expect(block).toBe('download-paused');
+    expect(block).toBe('host-paused');
 
     const snapshot = await browserLocalSnapshot();
     const state = pickBackfillState(snapshot);
     const view = renderPopup({
-      enabled: true, block, guard, state,
+      enabled: true, block, state,
+      hostPause: pause,
       target: state ? { platform: state.platform, scope: state.scope } : null,
       failures: collectFailures(snapshot),
     });
     const out = popupText(view);
 
-    expect(view.status).toContain('停滞');
+    expect(view.status).toContain('host 够不着');
     expect(view.running).toContain('未在运行');
-    expect(out).toContain('已暂停自动回溯');
-    expect(out).toContain('数据没有丢');
-    // 🔴 熔断不剥夺用户切开关的权利。
+    // 🔴 暂停是一个【具名】结局：说清是哪一台主机不够得着、欠账没丢、什么时候发现的。
+    expect(view.pause).not.toBeNull();
+    expect(view.pause!).toContain('PAUSED');
+    expect(view.pause!).toContain(HOST_UNAVAILABLE);
+    expect(view.pause!).toContain('untouched');
+    // 🔴 暂停不剥夺用户切开关的权利。
     expect(view.toggle.disabled).toBe(false);
     expect(view.toggle.checked).toBe(true);
     expect(out).not.toContain('%');
@@ -257,7 +255,7 @@ describe('C18-4 · 进度文案守 C11 的规矩', () => {
       detailToday: { day: '2026-08-17', count: 3 }, halted: null,
     };
     const view = renderPopup({
-      enabled: true, block: 'no-http-port', guard: null, state: trusted,
+      enabled: true, block: 'no-http-port', state: trusted,
       target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
     expect(view.progress).toBe(`进度：${formatProgress(trusted)}`);
@@ -274,7 +272,7 @@ describe('C18-4 · 进度文案守 C11 的规矩', () => {
       detailToday: { day: '', count: 0 }, halted: null,
     };
     const view = renderPopup({
-      enabled: true, block: 'no-http-port', guard: null, state: untrusted,
+      enabled: true, block: 'no-http-port', state: untrusted,
       target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
     expect(view.progress).not.toContain('%');

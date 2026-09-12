@@ -271,7 +271,7 @@ describe('C22-5 · Popup 的诚实说明', () => {
 
   it('这一行出现在 popupText 里，且名单不是手写的', () => {
     const out = popupText(renderPopup({
-      enabled: true, block: 'no-http-port', guard: null, state: null, target: null,
+      enabled: true, block: 'no-http-port', state: null, target: null,
       failures: NO_FAILURES,
     }));
     expect(out).toContain(coverageLine());
@@ -285,7 +285,6 @@ describe('C22-5 · Popup 的诚实说明', () => {
     const view = renderPopup({
       enabled: true,
       block: null,
-      guard: null,
       state: {
         v: 1, platform: 'deepseek', scope: 'acct-ds', totalKnown: null, totalSource: 'unknown',
         enumCursor: { offset: 0, complete: false }, pending: [], archived: [],

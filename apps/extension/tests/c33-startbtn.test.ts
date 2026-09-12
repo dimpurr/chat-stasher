@@ -83,17 +83,6 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    async download(opts: any) {
-      const id = downloadCalls.length + 1;
-      downloadCalls.push({ id, filename: opts.filename });
-      setTimeout(() => { for (const fn of changeListeners) fn({ id, state: { current: 'complete' } }); }, 0);
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
-  },
   alarms: {
     create(name: string, info: any) { alarmBook.set(name, info); },
     async clear(name: string) { return alarmBook.delete(name); },
@@ -172,14 +161,13 @@ async function popupNow(mod: any) {
   const block = await tickBlockReason({
     hasStore: s !== null,
     isEnabled: () => enabled,
-    isDownloadPaused: () => false,
+    isHostPaused: () => false,
     hasHttp: runtime.transportWired,
     hasTargets: targets.length > 0,
   });
   const view = renderPopup({
     enabled,
     block,
-    guard: null,
     state: pickBackfillState(snapshot),
     target: null,
     failures: collectFailures(snapshot),

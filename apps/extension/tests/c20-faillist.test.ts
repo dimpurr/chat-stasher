@@ -14,25 +14,28 @@
  * 用例 1/2 都从【真实生产入口】出发：runtime.onMessage('chat-captured')
  *  → handleCaptured → kickBackfill → tickBackfill → runBackfill → sink。
  * 全程零真实网络、零登录态：http 端口是本文件里的一个纯函数，
- * browser.downloads 只是把 filename 记进数组。
+ * 落盘通道是一个合成 native host（tests/synthetic-native-host.ts）。
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
+import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 // ---------------------------------------------------------------------------
 // 假浏览器（与 c17 同构）。storage 跨 resetModules 存活 = 「浏览器重启」的模型。
+// W2：落盘通道 = 合成 native host（只认匹配的 ack）。
 // ---------------------------------------------------------------------------
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
-const downloadCalls: Array<{ id: number; filename: string }> = [];
-const changeListeners: Array<(d: any) => void> = [];
+let host: SyntheticHost;
 
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
+    sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
   },
   storage: {
     local: {
@@ -47,18 +50,10 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    async download(opts: any) {
-      const id = downloadCalls.length + 1;
-      downloadCalls.push({ id, filename: opts.filename });
-      setTimeout(() => { for (const fn of changeListeners) fn({ id, state: { current: 'complete' } }); }, 0);
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
-  },
 };
+
+/** 主机真的收下并 ack 过的名字。 */
+const deliveredFiles = (): string[] => host.names();
 
 /** 合成「服务器」。绝不碰网络：就是一个 (url) => {status,text} 的纯函数。 */
 function makeServer(ids: string[], total: number | null = ids.length) {
@@ -119,24 +114,23 @@ const stateOf = (): any => store[STATE_KEY] ?? null;
 async function popupNow(): Promise<{ view: any; text: string }> {
   const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
   const { isBackfillEnabled, tickBlockReason } = await import('../lib/backfill/schedule');
-  const { loadGuardState, isGuardTripped } = await import('../lib/download-guard');
   const { renderPopup, popupText, pickBackfillState, collectFailures } =
     await import('../lib/popup-view');
 
   const st = browserLocalStore();
   const snapshot = await browserLocalSnapshot();
-  const guard = st ? await loadGuardState(st) : null;
   const enabled = await isBackfillEnabled(st);
   const state = pickBackfillState(snapshot);
   const block = await tickBlockReason({
     hasStore: st !== null,
     isEnabled: () => enabled,
-    isDownloadPaused: () => (guard ? isGuardTripped(guard) : false),
+    // 本用例不制造主机暂停（那是 w2-backfill-host.test.ts 的事）。
+    isHostPaused: () => false,
     // 用例里取数通道是注入的显式 transport ⇒ 这一位在 Popup 眼里是 true。
     hasHttp: true,
   });
   const view = renderPopup({
-    enabled, block, guard, state,
+    enabled, block, state,
     target: state ? { platform: state.platform, scope: state.scope } : null,
     failures: collectFailures(snapshot),
   });
@@ -146,8 +140,8 @@ async function popupNow(): Promise<{ view: any; text: string }> {
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
-  downloadCalls.length = 0;
-  changeListeners.length = 0;
+  host = createSyntheticHost({ up: true });
+  (globalThis as any).indexedDB = new IDBFactory();
   fakeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', fakeBrowser);
   vi.stubGlobal('chrome', fakeBrowser);
@@ -175,7 +169,7 @@ describe('C20-1 · sink 成功 ⇒ 欠账被清、失败清单为空', () => {
     await bootAndDispatch(liveCapture());
 
     const s = stateOf();
-    const files = downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename);
+    const files = deliveredFiles();
     console.log('[C20-1] 落盘的最终文件:', files.filter((f) => f.includes('b1111111')));
     console.log('[C20-1] 欠账账本:', { pending: s.pending, archived: s.archived, failures: s.failures });
     console.log('[C20-1] 进度文案:', mod.lastBackfillTick()!.report!.progress);
@@ -206,12 +200,11 @@ describe('C20-2 · sink 失败 ⇒ 欠账不被清、进失败清单、Popup 文
     const server = makeServer(['shortid']);
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
-    downloadCalls.length = 0;
 
     await bootAndDispatch(liveCapture());
 
     const s = stateOf();
-    const files = downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename);
+    const files = deliveredFiles();
     console.log('[C20-2] detail 请求:', server.calls.filter((u) => u.includes('/conversation/')));
     console.log('[C20-2] 与 shortid 有关的落盘文件:', files.filter((f) => f.includes('shortid')));
     console.log('[C20-2] 欠账账本:', { pending: s.pending, archived: s.archived });
@@ -330,7 +323,7 @@ describe('C20-3 · 失败清单达到上限 ⇒ 丢最旧的，并把丢掉的�
 
     // 🔴 绝不静默截断：文案必须把「另有 5 条更早的不在清单里」说出来。
     const view = renderPopup({
-      enabled: true, block: null, guard: null, state,
+      enabled: true, block: null, state,
       target: { platform: 'chatgpt', scope: 'cap-fixture' },
       failures: { entries: state.failures, dropped: state.failuresDropped },
     });
@@ -341,7 +334,7 @@ describe('C20-3 · 失败清单达到上限 ⇒ 丢最旧的，并把丢掉的�
 
     // 仪器自证：同一个渲染器在空清单下【看不见】这一行。
     expect(renderPopup({
-      enabled: true, block: null, guard: null, state,
+      enabled: true, block: null, state,
       target: { platform: 'chatgpt', scope: 'cap-fixture' }, failures: NO_FAILURES,
     }).failures).toBeNull();
   });

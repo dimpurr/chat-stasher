@@ -123,12 +123,13 @@ export type StopReason =
   | 'daily-cap'
   | 'aborted'
   /**
-   * C12：下载停滞守卫处于熔断态 ⇒ 这条腿暂停。
+   * W2：落盘出口（本机 native host）够不着 ⇒ 这条腿暂停。
    * 与 'halted' 的区别：halted 是这条腿【自己】出了问题需要人看一眼；
-   * download-paused 是落盘出口出了问题，腿本身是健康的，欠账原封不动，
-   * 清掉熔断态（resumeAfterGuard）就能从断点继续。
+   * host-unavailable 是落盘出口暂时不在，腿本身是健康的，欠账原封不动，
+   * 下一次心跳 `hello` 成功之后就从这个断点继续 —— 不会重头再来。
+   * 🔴 它绝不允许被记成「这一笔已经处理完了」：见 engine.ts 的 retryLater 分支。
    */
-  | 'download-paused'
+  | 'host-unavailable'
   | 'halted';
 
 /** total 的来源。只有 'response-total' 才配当进度条的分母。 */

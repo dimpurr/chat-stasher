@@ -14,7 +14,7 @@
  *  3. 不出现任何「预计剩余 X 天 / X 小时」。我们没有速率模型，编一个就是骗人。
  */
 
-import { formatProgress, computeProgress } from './backfill/progress';
+import { formatProgress } from './backfill/progress';
 import {
   describeFailureReason,
   droppedOf,
@@ -35,10 +35,10 @@ import {
 import { DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import { stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
-import { guardAlertDetail, type GuardState } from './download-guard';
-import { POPUP_CHANNEL_NM, POPUP_CHANNEL_FALLBACK } from './native-host';
-
-export { POPUP_CHANNEL_NM, POPUP_CHANNEL_FALLBACK };
+import type { HostPauseRecord, HostStatusRecord } from './host-status';
+import type { LastExport, OutboxEntry } from './outbox';
+import { OUTBOX_CAPACITY_BYTES } from './outbox';
+import * as ui from './ui-strings';
 
 /**
  * Popup ↔ background 的消息类型。
@@ -77,8 +77,12 @@ export interface BackfillRuntimeStatus {
    * null = 没有活着的通道，或者拿到的源不在平台表里 —— 两种情况下都不许显示按钮。
    */
   liveTarget?: { platform: string; origin: string } | null;
-  /** ADR-014: Native Messaging host 状态 */
-  nativeHost?: { connected: boolean; reason?: string } | null;
+  /**
+   * 🔴 W2 · 最近一次 `hello` 的结论（§6.1），由 background 问完写进 storage。
+   * 它是**一次问答的记录**，带时间戳 —— Popup 显示的是「上一次问到的答案」，
+   * 不是「此刻的猜测」。null / 省略 = 从来没有问过。
+   */
+  nativeHost?: HostStatusRecord | null;
 }
 
 export interface PopupModel {
@@ -90,8 +94,6 @@ export interface PopupModel {
    * null 表示四道全过。
    */
   block: TickBlockReason | null;
-  /** C12 守卫状态；拿不到就是 null。 */
-  guard: GuardState | null;
   /** 欠账集合。null 表示 storage 里还没有这个集合（一次都没跑过）。 */
   state: BackfillState | null;
   /** 这份进度是哪个平台/哪个账号的。认不出来就是 null。 */
@@ -120,8 +122,67 @@ export interface PopupModel {
    * 于是按钮不出现 —— 老调用点（含既有测试）一个字都不用改，也不会凭空多一个按钮。
    */
   targetCount?: number;
-  /** ADR-014: NM vs downloads 通道事实 */
-  nativeHost?: { connected: boolean; reason?: string } | null;
+  /**
+   * 🔴 W2 · 最近一次 `hello` 的事实（§6.1）。
+   * null / 省略 ⇒ 从来没有问过 ⇒ 文案照实说「还没问过」，绝不猜一个。
+   */
+  nativeHost?: HostStatusRecord | null;
+  /**
+   * 🔴 W2 · 发件箱现状。null = 读不出来（IndexedDB 不可用）⇒ 照实说读不出来。
+   * 省略 ⇒ 按「空」处理：老调用点（含既有测试）一个字都不用改，
+   * 而空发件箱本来就是「一条待送都没有」。
+   */
+  outbox?: PopupOutbox | null;
+  /** 🔴 W2 · 回溯因为主机够不着而暂停的那条记录；null = 没暂停。 */
+  hostPause?: HostPauseRecord | null;
+  /** 🔴 W2 · 最近一次导出（storage.local 里读的）；null = 没导出过。 */
+  lastExport?: LastExport | null;
+}
+
+/** 发件箱的展现形态：只放 UI 需要的那几个数，不把 payload 带进渲染层。 */
+export interface PopupOutbox {
+  pending: number;
+  rejected: number;
+  bytes: number;
+  capacityBytes: number;
+  full: boolean;
+  rejectedKinds: Array<{ kind: string; count: number }>;
+  rejectedSamples: Array<{ kind: string; detail: string }>;
+}
+
+/** 被拒条目在人话里最多列几条 —— 再多就该去看导出文件了，不是在弹窗里数。 */
+export const MAX_REJECTED_SAMPLES = 5;
+
+/**
+ * 🔴 纯函数：发件箱条目 → 弹窗要显示的那几个数。
+ * 不在渲染层里遍历条目，也不把 payload 带过去：文案只需要计数和 kind。
+ */
+export function summarizeOutbox(
+  entries: readonly OutboxEntry[],
+  capacityBytes: number = OUTBOX_CAPACITY_BYTES,
+): PopupOutbox {
+  const rejected = entries.filter((e) => e.state === 'rejected');
+  const counts = new Map<string, number>();
+  for (const entry of rejected) {
+    const kind = entry.rejectKind ?? entry.lastError ?? 'unknown';
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  const bytes = entries.reduce((sum, e) => sum + (Number.isFinite(e.bytes) ? e.bytes : 0), 0);
+  return {
+    pending: entries.filter((e) => e.state === 'pending').length,
+    rejected: rejected.length,
+    bytes,
+    capacityBytes,
+    full: bytes >= capacityBytes,
+    rejectedKinds: [...counts.entries()]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => (b.count - a.count) || a.kind.localeCompare(b.kind)),
+    rejectedSamples: rejected.slice(0, MAX_REJECTED_SAMPLES).map((entry) => ({
+      kind: entry.rejectKind ?? 'unknown',
+      // 摘要：只留理由码本身。🔴 绝不放 payload / URL / 会话正文。
+      detail: (entry.lastError ?? 'no detail recorded').slice(0, 200),
+    })),
+  };
 }
 
 /** 汇总后的失败清单。entries 已按时间从新到旧排好。 */
@@ -134,8 +195,19 @@ export interface FailureSummary {
 export interface PopupView {
   /** 第一行：开关本身处在什么状态。 */
   status: string;
-  /** ADR-014：落盘通道状态（NM 主通道 vs downloads 降级）。 */
+  /**
+   * W2：落盘通道状态。**英文**（见 lib/ui-strings.ts）。
+   * 已连接 ⇒ stage / machine / host 版本；未连接 ⇒ 具名原因 + 修复命令。
+   */
   channel: string;
+  /** W2：发件箱那一行（待送 / 被拒 / 容量）。**英文**。空发件箱且未满时是 null。 */
+  outbox: string | null;
+  /** W2：回溯暂停那一行（主机够不着）。**英文**。没暂停时是 null。 */
+  pause: string | null;
+  /** W2：导出按钮的措辞与可见性。 */
+  exportFile: { label: string; visible: boolean };
+  /** W2：最近一次导出的说明；从没导出过时是一句「还没有」。**英文**。 */
+  lastExport: string;
   /**
    * 🔴 C20 · 第二行：**有东西没存下来的时候，这一行必须出现。**
    * 没有失败项时是 null（那时候「一切正常」才是实话）。
@@ -199,11 +271,41 @@ export function canStartBackfillHere(model: PopupModel): boolean {
   return model.targetCount === 0;
 }
 
+/**
+ * 落盘通道那一行。
+ * 🔴 三种取值，一种都不许混：
+ *  · 上一次问过、host 答了话 ⇒ 如实报 stage / machine / 版本；
+ *  · 上一次问过、host 没答话 ⇒ 具名原因 + 修复命令（stage 用「上一次知道的」）；
+ *  · 从来没问过 ⇒ 照实说「还没问过」，绝不猜一个"大概是好的"。
+ */
 export function channelLine(model: PopupModel): string {
-  if (model.nativeHost?.connected) {
-    return POPUP_CHANNEL_NM;
+  const status = model.nativeHost;
+  if (!status) return ui.CHANNEL_NO_CHECK;
+  return status.ok ? ui.channelConnected(status) : ui.channelDisconnected(status);
+}
+
+/** 发件箱那一行。空且未满 ⇒ null（那时候「没什么要送的」才是实话，不必占一行）。 */
+export function outboxLine(model: PopupModel): string | null {
+  const box = model.outbox;
+  if (box === undefined) return null;
+  if (box === null) {
+    return 'Outbox: unreadable — this browser context has no IndexedDB, so the extension '
+      + 'cannot say what is queued. Nothing has been deleted.';
   }
-  return POPUP_CHANNEL_FALLBACK;
+  if (box.pending === 0 && box.rejected === 0 && !box.full) return null;
+  return ui.outboxLine(box);
+}
+
+/** 回溯暂停那一行。没暂停 ⇒ null。 */
+export function pauseLine(model: PopupModel): string | null {
+  const pause = model.hostPause;
+  if (!pause) return null;
+  return ui.backfillPaused(pause.at, pause.reason, pause.detail);
+}
+
+export function exportLine(model: PopupModel): string {
+  const rec = model.lastExport;
+  return rec ? ui.exportNote(rec) : ui.EXPORT_NO_HISTORY;
 }
 
 export function renderPopup(model: PopupModel): PopupView {
@@ -213,10 +315,17 @@ export function renderPopup(model: PopupModel): PopupView {
   const missing = missingLine(model) || null;
   const progress = progressLine(model);
   const hasFailures = model.failures.entries.length > 0 || model.failures.dropped > 0;
+  const box = model.outbox ?? null;
+  const hasUndelivered = box !== null && (box.pending > 0 || box.rejected > 0);
 
   return {
     status,
     channel,
+    outbox: outboxLine(model),
+    pause: pauseLine(model),
+    // 「导出未送达的会话」：有东西没送到才出现 —— 空的按钮只会变成噪声。
+    exportFile: { label: ui.EXPORT_BUTTON_LABEL, visible: hasUndelivered },
+    lastExport: exportLine(model),
     failures: hasFailures ? failuresLine(model.failures) : null,
     running,
     missing,
@@ -228,7 +337,7 @@ export function renderPopup(model: PopupModel): PopupView {
     toggle: {
       label: TOGGLE_LABEL,
       checked: model.enabled,
-      // 🔴 熔断态下开关【仍然可切】：熔断是落盘出口的问题，不是"用户不许反悔"。
+      // 🔴 暂停态下开关【仍然可切】：暂停是落盘出口的问题，不是"用户不许反悔"。
       // 只有存储不可用时切了也存不住，那才禁用 —— 并且 missing 行会说清原因。
       disabled: model.block === 'no-store',
     },
@@ -236,8 +345,8 @@ export function renderPopup(model: PopupModel): PopupView {
 }
 
 function statusLine(model: PopupModel): string {
-  if (model.block === 'download-paused') {
-    return '状态：开关是开的，但已因归档写入连续停滞而自动暂停';
+  if (model.block === 'host-paused') {
+    return '状态：开关是开的，但本机 host 够不着，回溯已自动暂停（欠账一条没动）';
   }
   if (model.enabled) return '状态：开关是开的';
   return '状态：开关是关的（这是默认值，需要你手动打开）';
@@ -253,8 +362,11 @@ function runningLine(model: PopupModel): string {
       return '运行：未在运行 —— 浏览器存储不可用。';
     case 'disabled':
       return '运行：未在运行 —— 开关没有打开。';
-    case 'download-paused':
-      return '运行：未在运行 —— 已经暂停，欠账原封不动地留着。';
+    case 'host-paused':
+      // 🔴 W2 · 这一条取代了 C12 的 download-paused：暂停的原因现在只有一个 ——
+      //    本机 host 够不着。欠账一条都没动，主机一答话就从同一笔继续。
+      return '运行：未在运行 —— 本机 host 够不着，已经暂停；欠账原封不动地留着，'
+        + '下一次心跳会先问一次主机在不在，答话了就从同一笔接着做。';
     case 'no-targets':
       // 🔴 C30 · 这一条与 'no-http-port' 是【两件事】，必须说成两句话：
       //    通道可能好端端地接着（平台页面就开着），但我们连"从哪个账号、
@@ -324,8 +436,10 @@ function missingLine(model: PopupModel): string {
         + '在你真的用过一次之前，我们既不会去猜一个账号，也不会把整个平台的会话都翻一遍。\n'
         + '（补完要多久取决于你自己有多少历史、页面开着多久 —— 这里不给时间承诺，'
         + '进度会一笔一笔显示在下面。）';
-    case 'download-paused':
-      return '缺：需要你先确认下面的写入问题，然后手动恢复。';
+    case 'host-paused':
+      return '缺：本机那个 chat-stasher host 答不上话。'
+        + '它由 `chat-stasher install-native-host --stage <你的 stage 路径>` 装好并指向一个存在的目录；'
+        + '装好之后这条腿会自己恢复（心跳会先问一次主机在不在），不需要你手动点任何东西。';
     case 'disabled':
     case null:
       return '';
@@ -407,8 +521,8 @@ export function describeTickReason(reason: string): string {
       return '开关当时是关的';
     case 'no-store':
       return '浏览器存储当时不可用';
-    case 'download-paused':
-      return '归档写入连续停滞，这条腿已被自动暂停';
+    case 'host-paused':
+      return '本机 host 够不着，这条腿在等到它答话之前暂停了';
     case 'already-running':
       return '上一跳还没结束，这一跳直接让路了';
     case 'ran':
@@ -489,12 +603,6 @@ function notesFor(model: PopupModel): string[] {
     );
   }
 
-  if (model.block === 'download-paused' && model.guard) {
-    const p = computeProgress(model.state ?? emptyStateFor(model));
-    // 复用 C12 已经写好的告警正文，不另写一份。
-    notes.push(guardAlertDetail(model.guard, { archived: p.archived, pending: p.pending }));
-  }
-
   if (model.state?.halted) {
     // 🔴 C22 · 'unsupported-platform' 不是「出故障停下了」，是「这个平台我们还没写」。
     //    两者都要留痕，但绝不能说成同一句话。
@@ -526,31 +634,21 @@ function notesFor(model: PopupModel): string[] {
   return notes;
 }
 
-function emptyStateFor(model: PopupModel): BackfillState {
-  return {
-    v: BACKFILL_STATE_VERSION,
-    platform: model.target?.platform ?? 'unknown',
-    scope: model.target?.scope ?? 'default',
-    totalKnown: null,
-    totalSource: 'unknown',
-    enumCursor: { offset: 0, complete: false },
-    pending: [],
-    archived: [],
-    detailToday: { day: '', count: 0 },
-    halted: null,
-  };
-}
-
 /** 把一份 view 拍平成纯文本 —— 测试断言和「贴出完整文案」都用它。 */
 export function popupText(view: PopupView): string {
   const lines = [view.status];
   if (view.channel) lines.push(view.channel);
+  // 🔴 W2：暂停行紧跟在通道行之后 —— 它是通道坏掉的下一个后果，两句话要挨着读。
+  if (view.pause) lines.push(view.pause);
+  if (view.outbox) lines.push(view.outbox);
+  lines.push(view.lastExport);
   if (view.failures) lines.push(view.failures);
   lines.push(view.running);
   if (view.missing) lines.push(view.missing);
   // 🔴 C33：按钮在屏幕上是一个真的可点的东西，拍平的文本里也必须看得见它 ——
   //    否则「它到底出没出现」在测试里就断言不了。
   if (view.startBackfill.visible) lines.push(`[按钮] ${view.startBackfill.label}`);
+  if (view.exportFile.visible) lines.push(`[按钮] ${view.exportFile.label}`);
   lines.push(view.progress);
   lines.push(view.coverage);
   for (const n of view.notes) lines.push('', n);
