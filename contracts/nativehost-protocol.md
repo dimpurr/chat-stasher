@@ -84,6 +84,12 @@ sequence number. The wait is bounded (10 seconds); on timeout the answer is
 
 Every message carries `"protocol": 1` and a `"type"`.
 
+**Unknown fields.** The host ignores request fields this document does not
+define. Rejecting them would be `bad-request`, an item-scope refusal, and would
+reject a real conversation for a reason no document states. Responses are the
+other way round: they carry exactly the fields listed here, and the extension
+treats any extra or missing field as a malformed response.
+
 ### 6.1 `hello` — is the host there, and where does it write?
 
 Request:

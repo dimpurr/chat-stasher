@@ -4,78 +4,207 @@
   "title": "chat-stasher native messaging message (protocol 1)",
   "description": "Every request and response exchanged between the extension and the chat-stasher native host. Normative text: nativehost-protocol.md. Changing this file requires changing that document, apps/extension/lib/native-host.ts and crates/chat-stasher/src/nativehost.rs together.",
   "oneOf": [
-    { "$ref": "#/$defs/helloRequest" },
-    { "$ref": "#/$defs/deliverRequest" },
-    { "$ref": "#/$defs/helloResponse" },
-    { "$ref": "#/$defs/ack" },
-    { "$ref": "#/$defs/nack" }
+    {
+      "$ref": "#/$defs/helloRequest"
+    },
+    {
+      "$ref": "#/$defs/deliverRequest"
+    },
+    {
+      "$ref": "#/$defs/helloResponse"
+    },
+    {
+      "$ref": "#/$defs/ack"
+    },
+    {
+      "$ref": "#/$defs/nack"
+    }
   ],
   "$defs": {
-    "protocol": { "const": 1 },
-    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "protocol": {
+      "const": 1
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "helloRequest": {
       "type": "object",
-      "required": ["protocol", "type"],
-      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "type"
+      ],
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "hello" }
-      }
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "hello"
+        }
+      },
+      "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
     },
     "deliverRequest": {
       "type": "object",
-      "required": ["protocol", "type", "request_id", "name", "payload", "sha256"],
-      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "type",
+        "request_id",
+        "name",
+        "payload",
+        "sha256"
+      ],
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "deliver" },
-        "request_id": { "$ref": "#/$defs/requestId" },
-        "name": { "type": "string", "pattern": "^[a-z0-9]+-[^/\\\\]+\\.json$" },
-        "payload": { "type": "string", "description": "The inbox bundle serialised with JSON.stringify; see inbox.schema.json." },
-        "sha256": { "$ref": "#/$defs/sha256", "description": "SHA-256 of the UTF-8 bytes of payload." }
-      }
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "deliver"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+-[^/\\\\]+\\.json$"
+        },
+        "payload": {
+          "type": "string",
+          "description": "The inbox bundle serialised with JSON.stringify; see inbox.schema.json."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 of the UTF-8 bytes of payload."
+        }
+      },
+      "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
     },
     "helloResponse": {
       "type": "object",
-      "required": ["protocol", "type", "ok", "host_version", "machine", "stage"],
+      "required": [
+        "protocol",
+        "type",
+        "ok",
+        "host_version",
+        "machine",
+        "stage"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "hello" },
-        "ok": { "const": true },
-        "host_version": { "type": "string" },
-        "machine": { "type": "string" },
-        "stage": { "type": "string", "description": "Absolute path of the stage the host writes to." }
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "hello"
+        },
+        "ok": {
+          "const": true
+        },
+        "host_version": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string",
+          "description": "Absolute path of the stage the host writes to."
+        }
       }
     },
     "ack": {
       "type": "object",
-      "required": ["protocol", "type", "request_id", "status", "sha256", "shard"],
+      "required": [
+        "protocol",
+        "type",
+        "request_id",
+        "status",
+        "sha256",
+        "shard"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "ack" },
-        "request_id": { "$ref": "#/$defs/requestId" },
-        "status": { "enum": ["stored", "duplicate"] },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "shard": { "type": "string" }
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "ack"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "status": {
+          "enum": [
+            "stored",
+            "duplicate"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "shard": {
+          "type": "string"
+        }
       }
     },
     "nack": {
       "type": "object",
-      "required": ["protocol", "type", "request_id", "kind", "retryable", "detail"],
+      "required": [
+        "protocol",
+        "type",
+        "request_id",
+        "kind",
+        "retryable",
+        "detail"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "nack" },
-        "request_id": { "oneOf": [{ "$ref": "#/$defs/requestId" }, { "type": "null" }] },
-        "kind": {
-          "enum": ["protocol-version", "bad-request", "too-large", "integrity", "invalid-bundle", "config", "stage-unavailable", "io"]
+        "protocol": {
+          "$ref": "#/$defs/protocol"
         },
-        "retryable": { "type": "boolean" },
-        "detail": { "type": "string", "maxLength": 4096 },
-        "supported": { "type": "array", "items": { "type": "integer" }, "description": "Present on kind protocol-version." }
+        "type": {
+          "const": "nack"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/requestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "protocol-version",
+            "bad-request",
+            "too-large",
+            "integrity",
+            "invalid-bundle",
+            "config",
+            "stage-unavailable",
+            "io"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "supported": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Present on kind protocol-version."
+        }
       }
     }
   }
