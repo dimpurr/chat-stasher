@@ -35,6 +35,13 @@ python3 scripts/output-inventory.py --check
 bash scripts/release-gate.sh
 ```
 
+The browser extension is a second project with its own toolchain. Its checks are
+the same three CI runs for it, and they must exit 0 too:
+
+```sh
+cd apps/extension && pnpm -s compile && pnpm -s test && pnpm -s build
+```
+
 Every one of these must exit 0. They are the same checks CI runs, listed here
 so that a green local run means a green pull request; if this list and CI ever
 disagree, that is a bug in this document.

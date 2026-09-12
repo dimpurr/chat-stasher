@@ -18,7 +18,7 @@ It is not one app, it is **two pieces**, each doing its own job:
 | Part | What it does | Where it lives |
 | --- | --- | --- |
 | **CLI (command-line program `chat-stasher`)** | Scans the session records left behind by various AI coding tools on your machine and collects them into an append-only encrypted archive | Your computer, run from the terminal |
-| **Browser extension (Chat Stasher)** | Saves your conversations from **web-based** chats as files into your download directory, waiting for the CLI to collect them | Your browser |
+| **Browser extension (Chat Stasher)** | Saves your conversations from **web-based** chats and hands them straight to the CLI over Native Messaging | Your browser |
 
 **On the CLI side:** its self-description is "Append-only archive for every LLM
 conversation, across harnesses." (`crates/chat-stasher/src/main.rs:34`). It
@@ -29,15 +29,29 @@ read-only (`crates/chat-stasher/src/main.rs:502`).
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`)
-(`apps/extension/lib/contract.ts:69-70,112-113,128-129,144-145,160-161,222-231`).
-It requests only three permissions: `downloads`, `storage` and `alarms`
-(`apps/extension/wxt.config.ts:35`). It writes captured conversations as JSON
-files at `chat-stasher/inbox/<name>.json` under the download directory
-(`apps/extension/lib/contract.ts:324`, `apps/extension/lib/download.ts:91`).
+(`apps/extension/lib/contract.ts:70,113,131,147,163,233`).
+It requests four permissions — `nativeMessaging`, `storage`, `alarms` and
+`unlimitedStorage` — and **no host permissions at all**
+(`apps/extension/wxt.config.ts:63`). There is no `downloads` permission and no
+automatic download anywhere.
 
-**How the two sides connect:** the extension only writes files to disk; the CLI
-takes them away with `ingest --inbox <your-inbox> --stage <your-stage>`
-(`crates/chat-stasher/src/main.rs:477-499`).
+**How the two sides connect:** the extension sends each captured conversation to
+a **Native Messaging host**, which is the `chat-stasher` binary you registered
+by hand with `chat-stasher install-native-host --stage <your-stage>`
+(`crates/chat-stasher/src/main.rs:638-680`). The protocol both sides implement
+is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md).
+
+🔴 **A conversation counts as delivered only when the host answers an `ack`
+whose `request_id` and `sha256` equal the ones the extension sent**
+(`apps/extension/lib/native-host.ts:451-460`). Everything else — a `nack`, a
+timeout, a disconnect — is *not delivered*, and the capture stays in the
+extension's own outbox until a matching `ack` deletes it
+(`apps/extension/lib/outbox.ts:379-394`). There is no "probably delivered".
+
+If you would rather not register the host at all, the extension can instead
+export everything it has not delivered as one file, which you feed to the CLI by
+hand: `chat-stasher ingest --inbox <directory> --stage <your-stage>`. Section 3.3
+covers that.
 
 🔴 **"Recognizing the platform" does not mean "it can recover your history on
 that platform."** The extension has two legs; please read them separately:
@@ -45,12 +59,13 @@ that platform."** The extension has two legs; please read them separately:
 - **Passive capture** (on by default): the conversation you are currently
   viewing is saved as a side effect when the page fetches its own data. Each
   platform registers in that table which route, method, and response shape
-  count (`apps/extension/lib/contract.ts:69-303`).
+  count (`apps/extension/lib/contract.ts:67-306`).
   🔴 **Perplexity is an exception; read it as it is:** its row registers only
   the **conversation-list** route, and registers no rule for recognizing a
-  session id from a URL (`apps/extension/lib/contract.ts:113-122`). Reading the
+  session id from a URL (`apps/extension/lib/contract.ts:112-127`; the empty
+  list is `apps/extension/lib/contract.ts:124`). Reading the
   code, passive capture on Perplexity **cannot recognize a session id and
-  therefore saves no files** (`apps/extension/lib/contract.ts:517-519`) — this
+  therefore delivers nothing** (`apps/extension/lib/contract.ts:531-559`) — this
   is a conclusion drawn from reading the code; **we have not tested it on a
   real perplexity.ai page**.
 - **History backfill** (off by default; see section 6): digs up your **past**
@@ -60,12 +75,12 @@ that platform."** The extension has two legs; please read them separately:
 ### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
 
 The list below comes directly from the two tables in the code, not from
-marketing (`apps/extension/lib/backfill/enumerate.ts:762`, `:774`, `:643`):
+marketing (`apps/extension/lib/backfill/enumerate.ts:880-886`, `:894-900`, `:752`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
-| **Can recover the actual history text** | **ChatGPT** | Conversations are listed one by one, and their content is fetched one by one and saved as files. This tier is the one that means "your history is backed up." |
-| **🔴 Can only list conversations, saves none of their content** | **DeepSeek**, **Perplexity** | The extension can list which historical conversations you have, but **will not fetch each conversation's content**, so **not a single file lands in your download directory**. Your DeepSeek / Perplexity history is **not backed up**. |
+| **Can recover the actual history text** | **ChatGPT** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up." |
+| **🔴 Can only list conversations, saves none of their content** | **DeepSeek**, **Perplexity** | The extension can list which historical conversations you have, but **will not fetch each conversation's content**, so **not one of them is delivered or queued**. Your DeepSeek / Perplexity history is **not backed up**. |
 | **Not implemented** | **Gemini**, **Claude**, **Kimi** | The backfill leg stops before issuing any request. Nothing happens. |
 
 🔴 **The middle tier is the easiest to misunderstand, so say it again**:
@@ -77,8 +92,8 @@ the extension holds only their ids, not their content.
 
 🔴 **Perplexity gets one more sentence:** per the passive-capture note above,
 its row cannot recognize a session id even for passive capture. Which means —
-going by the code — **Perplexity currently leaves you no files from either
-leg**: backfill only lists, and passive capture saves nothing either. It appears
+going by the code — **Perplexity currently archives nothing from either leg**:
+backfill only lists, and passive capture delivers nothing either. It appears
 in the list because the extension runs on that site; it does **not** mean what
 is there is backed up.
 
@@ -86,17 +101,17 @@ The reason is written in the code, not because we are lazy: the
 **conversation-list endpoints** for these two platforms have multiple
 independent open-source implementations that cross-check one another, but the
 **endpoint for fetching a single conversation's content has none**
-(`apps/extension/lib/backfill/enumerate.ts:538-548`, `:603-611`). We will not
+(`apps/extension/lib/backfill/enumerate.ts:545-556`, `:630-640`). We will not
 guess a content-endpoint address — a wrong guess would not error; it would save
 only the first few turns of every conversation while you believed you had it
 all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:498-514`).
+(`apps/extension/lib/popup-view.ts:610-623`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the six platforms above are each registered in the table at
-`apps/extension/lib/contract.ts:69-303`, a separate matter from backfill.)
+`apps/extension/lib/contract.ts:67-306`, a separate matter from backfill.)
 
 ---
 
@@ -148,9 +163,77 @@ and pnpm; **the exact minimum versions are not declared in the repository —
 unverified**.)
 
 The build output lands in `apps/extension/.output/` (that directory is excluded
-by `.gitignore`, `.gitignore:15`). Then **how to load that directory into your
-browser** — each browser's "Load unpacked extension" menu path — see the next
-section; we have not tested each one, and marked them "unverified".
+by `.gitignore`, `.gitignore:15`). Load that directory into your browser with
+its "Load unpacked extension" menu — we have not tested each browser's menu
+path, and section 8 marks them "unverified".
+
+### 3.1 Register the Native Messaging host
+
+The extension on its own can capture conversations but cannot archive them: it
+has to hand each one to the `chat-stasher` binary, and the browser only allows
+that for a host the browser has been told about. One command does both halves of
+that registration — it records the stage in your config and writes the host
+manifest into each installed browser's discovery directory:
+
+```sh
+chat-stasher install-native-host --stage <your-stage>
+```
+
+`--stage` must be an **absolute path to a directory that already exists**: the
+host never creates a stage, because a stage that appears because a host was
+pointed at it is a stage nothing pushes
+(`crates/chat-stasher/src/nativehost.rs:923-934`). The stage is the same staging
+directory you use for `collect` / `seal` / `ingest`.
+
+The command is idempotent — run it twice and there is exactly one manifest per
+browser, byte-identical, exit 0 both times — and it prints every path it wrote,
+left alone, skipped or removed, absolutely (`crates/chat-stasher/src/main.rs:615-637`).
+It is per-user; nothing needs elevation. `--uninstall` removes exactly the files
+it wrote and nothing else.
+
+**What the browser asks you at install time.** Registering the host does not
+remove any browser prompt, but it changes which one you see. The extension
+declares `nativeMessaging`, so Chrome shows *"communicate with cooperating
+native applications"* on its details page. It no longer declares `downloads`, so
+the *"Manage your downloads"* warning is gone
+(`apps/extension/wxt.config.ts:63`).
+
+### 3.2 Confirm the popup says "connected"
+
+Click the extension's toolbar icon. The popup asks the host one `hello` question
+and renders the answer — **the stage it writes to, the machine id, and the host
+version** — or the reason it could not, with the command that fixes it
+(`apps/extension/lib/ui-strings.ts:80-100`;
+`apps/extension/entrypoints/background.ts:370-377`).
+
+If it does **not** say connected, the popup prints the named reason (the host's
+own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
+about, and the fix command with that path already filled in
+(`apps/extension/lib/ui-strings.ts:34-36`, `:89-100`). Nothing is delivered
+while this is the case: captures wait in the extension's outbox instead, and the
+toolbar badge shows how many (`apps/extension/lib/badge.ts:46-73`).
+
+### 3.3 If you never register the host: the export file
+
+The popup has an **"export undelivered captures"** button. It appears only when
+something has not been delivered, and it writes one file named
+`chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl` into your download directory —
+one line per undelivered capture, each line being exactly the payload that would
+have been sent to the host (`apps/extension/lib/outbox.ts:439-475`).
+
+Feed that directory to the CLI:
+
+```sh
+chat-stasher ingest --inbox <directory-holding-the-export> --stage <your-stage>
+```
+
+`ingest` accepts `*.jsonl` export files next to `*.json` bundles, and treats
+each line as one bundle content-addressed by the SHA-256 of the line without its
+trailing newline — the same key the host would have used, so a line that was in
+fact delivered is recognised as a duplicate rather than archived twice
+(`crates/chat-stasher/src/inbox.rs:59-60`;
+`contracts/nativehost-protocol.md` §8). Exporting does not remove anything from
+the outbox (`apps/extension/lib/outbox.ts:457-464`).
 
 ---
 
@@ -158,53 +241,39 @@ section; we have not tested each one, and marked them "unverified".
 
 The following things, you do **once at install time and then never again**.
 
-### 4.1 🔴 Turn off the browser's "Ask where to save each file before downloading"
+### 4.1 🔴 Decide the stage directory, and keep it
 
-**This one matters most; please do not skip it.**
+The `--stage` you gave `install-native-host` (section 3.1) is the same directory
+`collect`, `seal` and `ingest` write sealed shards into. It is a real directory
+on your disk, and it must exist *before* you point the host at it: the host
+never creates a stage, and a stage that appears because a host was pointed at it
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:923-934`).
 
-**Why turn it off:** the extension saves conversations through the browser's
-download channel (`apps/extension/lib/download.ts:117-121,130-134`). And if you
-have "ask where to save each file before downloading" on, the browser may pop a
-system "Save As" dialog for every file it saves. Our target scenario is
-archiving **thousands of conversations** over a few days — the number of dialogs
-in that situation is not one you want to experience.
+Two properties of that directory, both from
+[`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
 
-**🔴 Please read the strength of the evidence for this item honestly:**
+- **The host and `ingest` take an exclusive lock on `<stage>/.ingest.lock`
+  before they allocate a shard sequence number**, so two browsers, two profiles,
+  or a host racing a manual `ingest` cannot pick the same number. The wait is
+  bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:853-881`).
+- **A stage the host cannot use is reported, not replaced.** A missing or
+  relative `[native_host] stage` is a `config` refusal, and a path that is not a
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:875-935`);
+  if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
+  other write error is `io`, and neither acknowledges anything
+  (`crates/chat-stasher/src/nativehost.rs:1113-1117`). In every case the reason
+  names the fix.
 
-- **Verified:** Chrome does have this setting, and its key in the config file is
-  `download.prompt_for_download`. We read the key directly in our machine's
-  Chrome `Preferences` file, and its value at the time was `true` (on). This is
-  **first-hand evidence**, but it only proves "this setting exists", not how it
-  affects the extension.
-- **Code fact:** when the extension calls the download API it passes
-  `saveAs: false`, meaning the code **asks** for no Save-As dialog
-  (`apps/extension/lib/download.ts:121`, `:134`).
-- **🔴 What we do not know:** **whether `saveAs: false` is forcibly overridden
-  by this browser setting — we have not tested it ourselves.** External reports
-  and a Chromium issue point to "it is overridden", but that is **second-hand
-  evidence**, and we have not reproduced it.
+Put it somewhere you will not delete: these shards are the archive's input, and
+`push` is what moves them into the encrypted repository.
 
-**So this is an operational recommendation, not a behavior guarantee:** please
-turn this setting off, to **try to avoid** dialogs interrupting the archiving
-process. We do not promise that no dialog will ever appear with it off, nor that
-dialogs will definitely appear with it on — we are not yet in a position to
-claim either.
-
-**Where to click:**
-
-- **Chrome:** in Settings, the "Downloads" section has an "Ask where to save
-  each file before downloading" toggle; turn it off. **The exact menu hierarchy
-  and wording — unverified** (we only verified the existence of the config key
-  `download.prompt_for_download`; we did not actually click through the UI, and
-  the wording may change across browser versions).
-- **Edge:** **unverified**. Edge is also Chromium-based, so the setting most
-  likely exists with a similar name, but we have not verified any menu path on
-  Edge, so we give no path here.
-- **Firefox:** **unverified**. We have not verified the setting's location on
-  Firefox, nor its effect on the extension's downloads.
-
-(We would rather have you search your own settings for the word "download" than
-invent a menu path here that might be wrong.)
+**The host never invents a machine identity either.** It resolves the machine id
+exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
+that names the fix, rather than minting a second identity — which would silently
+put every delivered shard in a different machine's archive partition
+(`crates/chat-stasher/src/nativehost.rs:940-969`). Run any archiving command
+once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
 
@@ -420,15 +489,15 @@ confirmed in the code, not a temporary disclaimer.
 
 - **History backfill takes days, not minutes.** The backfill leg's rate limit
   for fetching content is **at most 200 per day**, with at least 20 seconds
-  between two requests (`apps/extension/lib/backfill/pace.ts:42`; comment at
-  `:15`). At that cap, a thousand conversations take at least 5 days. This is
-  deliberately slow, not a bug.
+  between two requests (`apps/extension/lib/backfill/pace.ts:49`; the arithmetic
+  behind both numbers is the comment at `:16-22`). At that cap, a thousand
+  conversations take at least 5 days. This is deliberately slow, not a bug.
 
 - **Backfill is off by default.** The default is off
-  (`apps/extension/lib/backfill/schedule.ts:32`), and the source states the
+  (`apps/extension/lib/backfill/schedule.ts:40`), and the source states the
   reason for enabling it clearly: backfill uses your logged-in session to walk
-  your whole account and write hundreds or thousands of files into the download
-  directory, so there must first be an explicit turn-on.
+  your whole account and fetch hundreds or thousands of conversations, so there
+  must first be an explicit turn-on.
   ⚠️ **An earlier version of this document said "there is no on/off UI"; that
   sentence is now outdated:** clicking the extension icon in your browser
   toolbar now opens a small panel with a checkbox to turn it on
@@ -441,9 +510,9 @@ confirmed in the code, not a temporary disclaimer.
   Perplexity **only list conversations, saving none of their content**;
   Gemini / Claude / Kimi are entirely unsupported. See section 1.1 for the list
   and the detailed explanation (list from
-  `apps/extension/lib/backfill/enumerate.ts:762`, `:774`, `:643`). This tier is
-  the one most likely to make you think "I've backed it up", so it gets its own
-  bullet here.
+  `apps/extension/lib/backfill/enumerate.ts:880-886`, `:894-900`, `:752`). This
+  tier is the one most likely to make you think "I've backed it up", so it gets
+  its own bullet here.
 
 - **The extension is not on a store yet; you install it manually.** The
   repository has no store listing material and no store extension ID;
@@ -451,10 +520,12 @@ confirmed in the code, not a temporary disclaimer.
   and the build scripts produce a local directory and a zip
   (`apps/extension/package.json:10-13`). See section 3 for how to install.
 
-- **Captured conversations lie in plaintext in your download directory until
-  `ingest` takes them away.** (`apps/extension/lib/download.ts:91`; the
-  "Security and privacy" section of `README.md` says the same.) Other programs
-  on the same machine can read them.
+- **A captured conversation is plaintext until the host acknowledges it.** A
+  live capture is written into the extension's own IndexedDB outbox before any
+  delivery is attempted and deleted only on a matching `ack`
+  (`apps/extension/lib/outbox.ts:309-377`, `:379-394`); the popup's export file
+  contains the same bodies. Other programs running as you can read all of it.
+  (The "Security and privacy" section of `README.md` says the same.)
 
 - **Zed and Cursor conversation enumeration is not implemented** (see the
   "What this does not do / current limits" section of `README.md` and the
@@ -477,7 +548,8 @@ touch it again.**
 
 **Do once** (the ones in section 4):
 
-- Turn off the browser's "ask where to save each file before downloading"
+- 🔴 Decide the stage directory and register the Native Messaging host
+  (section 3.1), then confirm the popup says "connected" (section 3.2)
 - `chat-stasher init`
 - Decide where the archive lives
 - 🔴 Back up the master key file
@@ -501,10 +573,11 @@ not need you to confirm anything.
 - Run `doctor` occasionally, to check whether any tool has started deleting
   your history.
 
-**This is not "zero config."** Those six things above genuinely require you (the
-host-key one only if your destination is remote), and the ones about backing up
-the key and checking a fingerprint are things no one can do for you. But it is
-indeed **one-time** — once done, you do not have to think about it again.
+**This is not "zero config."** Those seven things above genuinely require you
+(the host-key one only if your destination is remote), and the ones about
+backing up the key and checking a fingerprint are things no one can do for you.
+But it is indeed **one-time** — once done, you do not have to think about it
+again.
 
 ---
 
@@ -514,17 +587,16 @@ Collected in one place, so you know which spots to double-check yourself:
 
 | Item | Status |
 | --- | --- |
-| Whether `saveAs: false` is overridden by the browser's "ask where to save each file before downloading" | **Unverified** (we did not test it; external reports and a Chromium issue point to "yes", which is **second-hand evidence**) |
-| Chrome's **menu path and wording** for turning that setting off | **Unverified** (only verified that the config key `download.prompt_for_download` exists in this machine's Chrome `Preferences`, with value `true`) |
-| Edge's location for that setting | **Unverified** |
-| Firefox's location for that setting and its effect on extension downloads | **Unverified** |
+| Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:63`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
+| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:200-289`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
+| Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:16`; we did not test every browser's locale resolution) |
 | Each browser's menu path for "Load unpacked extension" | **Unverified** |
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |
 | The minimum Node / pnpm version to build the extension | **Unverified** (the repository does not declare it) |
 | The concrete installation steps for a launchd / systemd timer | **Unverified** (`schedule` only renders templates, does not install) |
 | How `known_hosts_strategy` behaves against a real server | **Partly verified** (the three values and their `StrictHostKeyChecking` equivalents were read from the pinned dependency's source — opendal-service-sftp 0.57.0 `src/backend.rs` lines 148-165 and the `openssh` crate it maps onto — but we have not exercised `add` or `accept` against a live host. Section 4.4 describes what each one gives up.) |
-| Whether passive capture actually saves anything on Perplexity | **Unverified** (reading the code, the conclusion is "cannot recognize a session id, therefore saves nothing"; see section 1. We have not tried it on a real page.) |
-| Whether the DeepSeek / Perplexity conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:549-557`, `:612-621`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
+| Whether passive capture actually delivers anything on Perplexity | **Unverified** (reading the code, the conclusion is "cannot recognize a session id, therefore delivers nothing"; see section 1. We have not tried it on a real page.) |
+| Whether the DeepSeek / Perplexity conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:545-556`, `:630-640`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
 
 "Unverified" = we have not tested it; it does not mean it does not exist, and
 it does not mean it does not work. The things in section 6 above that are

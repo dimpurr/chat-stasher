@@ -17,8 +17,8 @@ The useful first question is therefore not “is the archive elegant?” It is: 
 
 If you are installing this to use it rather than to work on it, read
 **[`docs/install.md`](docs/install.md)** instead: it covers both halves (CLI and
-browser extension), the one-time setup list — including turning off the
-browser's "ask where to save each file before downloading" setting — how to
+browser extension), the one-time setup list — including registering the Native
+Messaging host with `chat-stasher install-native-host --stage <path>` — how to
 confirm the archive is actually running, and what does not exist yet.
 
 The developer path, using your own repository URL and a directory you choose:
@@ -48,11 +48,11 @@ The Rust source is the current command definition; the descriptions below were c
 - `dest-init` — initialises a new destination as a full extra copy from local and existing destinations. (`main.rs:319-369`.)
 - `search` — searches one destination's archive by session metadata. (`main.rs:370-420`.)
 - `view` — opens an ephemeral local web view of one destination's session list on 127.0.0.1. (`main.rs:421-476`.)
-- `ingest --inbox <your-inbox> --stage <your-stage>` — consumes complete `deepseek-<sessionId>.json` exports, skips `.part` files, creates sealed staging shards, retires consumed inputs, and deduplicates identical bytes. (`main.rs:476-498`.)
+- `ingest --inbox <your-inbox> --stage <your-stage>` — consumes complete `deepseek-<sessionId>.json` bundles, skips `.part` files, also accepts the multi-bundle `*.jsonl` files the extension's "export undelivered captures" button produces, creates sealed staging shards, retires consumed inputs, and deduplicates identical bytes. (`main.rs:476-498`; `crates/chat-stasher/src/inbox.rs:56-60`.)
 - `collect --stage <your-stage>` — reads every scanner session into staging shards without mutating harness sources. (`main.rs:499-534`.)
 - `seal --harness <id> --active <your-active-file> --stage <your-stage>` — seals one file already inside `--stage` into the next sealed-shard slot; never renames a harness-owned path. (`main.rs:535-567`.)
-- `install-native-host` — writes the Native Messaging host manifest into each installed browser's discovery directory so the extension can hand conversations to this binary directly instead of through the download folder; `--uninstall` removes exactly those files and nothing else, and every path touched is printed. Per-user, no elevation. (`main.rs:615-672`.)
-- `native-host --self-test` — prints one line of JSON and exits; it is the check that the host process starts. The framed stdio message loop is **not implemented in this version**, and the subcommand exits 2 rather than pretending to serve a connection. (`main.rs:673-689`.)
+- `install-native-host --stage <absolute path>` — writes the Native Messaging host manifest into each installed browser's discovery directory so the extension can hand conversations to this binary directly, and records the stage the browser-spawned host is allowed to write to as `[native_host] stage` in your config; the stage must already exist, because the host never creates one. `--uninstall` removes exactly those files and nothing else, and every path touched is printed. Per-user, no elevation. (`main.rs:638-680`.)
+- `native-host` — the host loop itself: it reads one length-prefixed request frame from stdin, writes exactly one response frame to stdout, and exits 0. A frame that ends early — EOF inside the length prefix or the body — is answered with silence and a non-zero exit, never with a response, because a stray byte on stdout corrupts the frame. `--self-test` is the smaller check that the process starts at all: one line of JSON, exit 0. (`main.rs:681-702`, `:1565-1575`.)
 
 There is no `scan` subcommand in the current source; `status` is the scanner-facing command. (`main.rs:183-221`.)
 
@@ -78,10 +78,10 @@ This section is intentionally blunt:
 - **Claude Code on Windows has an unresolved path-sanitize detail.** The registry says the exact handling of the drive-letter colon and backslash in the short-path form is not determined and needs a real Windows test. (`crates/chat-stasher/data/harness-registry-v1.json:28`.)
 - **`ingest` is not a generic import API.** Its documented input is complete `deepseek-<sessionId>.json` exports; `.part` files are skipped, and the source notes that bundles carry no account field. (`main.rs:476-498`.)
 - **The browser extension's history backfill works on exactly one platform, and "lists your conversations" is not the same as "saves them."** There are three tiers, and the middle one is the easy one to misread:
-  - **Backfill can recover the actual conversation text: ChatGPT only.** (`apps/extension/lib/backfill/enumerate.ts:762`.)
-  - **Backfill can list your conversations but saves none of their content: DeepSeek and Perplexity.** (`apps/extension/lib/backfill/enumerate.ts:774`.) With backfill enabled on these two, the extension enumerates your existing conversations and shows a pending count — **and then writes nothing to disk.** No file lands in your download directory, so **your DeepSeek and Perplexity history is not backed up.** The reason is recorded in the code: the *list* endpoint for each has cross-checked open-source provenance, the *single-conversation* endpoint has none, and we will not guess one — a wrong guess would not error, it would silently archive the first few turns of every chat while you believed it had them all (`apps/extension/lib/backfill/enumerate.ts:538-548`, `:603-611`).
-  - **Backfill is not implemented at all: Gemini, Claude, Kimi.** The leg halts before issuing any request (`apps/extension/lib/backfill/enumerate.ts:643`).
-  The extension's popup states the same three tiers in the same terms (`apps/extension/lib/popup-view.ts:498-514`). This limit is about **backfill of past conversations**; passive capture of the conversation currently open in your browser is a separate leg with its own per-platform table (`apps/extension/lib/contract.ts:69-303`).
+  - **Backfill can recover the actual conversation text: ChatGPT only.** (`apps/extension/lib/backfill/enumerate.ts:880-886`.)
+  - **Backfill can list your conversations but saves none of their content: DeepSeek and Perplexity.** (`apps/extension/lib/backfill/enumerate.ts:894-900`.) With backfill enabled on these two, the extension enumerates your existing conversations and shows a pending count — **and then delivers nothing to the archive.** Nothing is queued in the outbox and no shard is sealed, so **your DeepSeek and Perplexity history is not backed up.** The reason is recorded in the code: the *list* endpoint for each has cross-checked open-source provenance, the *single-conversation* endpoint has none, and we will not guess one — a wrong guess would not error, it would silently archive the first few turns of every chat while you believed it had them all (`apps/extension/lib/backfill/enumerate.ts:545-556`, `:630-640`).
+  - **Backfill is not implemented at all: Gemini, Claude, Kimi.** The leg halts before issuing any request (`apps/extension/lib/backfill/enumerate.ts:752`).
+  The extension's popup states the same three tiers in the same terms (`apps/extension/lib/popup-view.ts:610-623`). This limit is about **backfill of past conversations**; passive capture of the conversation currently open in your browser is a separate leg with its own per-platform table (`apps/extension/lib/contract.ts:67-306`).
 - **`seal` is not a universal file-renaming tool.** It is gated by the registry’s `seal_policy`, evidence, and platform confidence; fd-holder harnesses such as Codex are refused because renaming can strand later writes in the old inode. (`main.rs:535-567`; `crates/chat-stasher/data/harness-registry-v1.json:71-72`.)
 - **The release gate is not a substitute for installation.** `scripts/release-gate.sh` builds `target/debug/chat-stasher` if it is missing and generates its own synthetic opaque fixtures, so a contributor can run it with no arguments and no setup (`--real-data` opts into local Claude sessions instead). It exercises push/read/verify/doctor. (`scripts/release-gate.sh:3-21`.)
 - **License.** The project is licensed under the Apache License 2.0 (`LICENSE:2-3`; `crates/chat-stasher/Cargo.toml:5`).
@@ -95,8 +95,8 @@ cannot recreate:
   what*: us (nothing — there is no server in this design), your destination
   provider (encrypted objects, but your backup rhythm and volume leak as
   metadata), other programs on your machine (they can read the **plaintext**
-  files the extension drops in your download directory, and your master key
-  file), the chat platforms, and one row we honestly could not resolve: what
+  captures waiting in the extension's outbox, the staged shards, and your master
+  key file), the chat platforms, and one row we honestly could not resolve: what
   other browser extensions can observe. It also lists the weaknesses and the
   threats we do **not** defend against.
 - **[`docs/privacy.md`](docs/privacy.md)** — the store-listing privacy policy:
@@ -115,8 +115,12 @@ Three things worth knowing before reading either:
 - **There is no restore command.** `read` returns one session at a time to
   stdout (`crates/chat-stasher/src/main.rs:223-225,4294-4325`); bulk restore is not
   implemented.
-- **Captured conversations are plaintext on disk** in your download directory
-  until `ingest` consumes them (`apps/extension/lib/download.ts:91-93`).
+- **Captured conversations are plaintext until they are delivered.** A live
+  capture is written into the extension's own IndexedDB outbox *before* any
+  delivery is attempted, and is removed only when the host answers with a
+  matching `ack` (`apps/extension/lib/outbox.ts:309-377`, `:379-394`;
+  `apps/extension/entrypoints/background.ts:160-177`). A delivery the host never
+  confirms stays there, and the popup's export file contains the same bodies.
 
 ## Development status
  
