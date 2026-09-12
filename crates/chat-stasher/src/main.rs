@@ -669,19 +669,32 @@ enum Command {
         /// Windows only: skip the `reg.exe` step and only write the JSON.
         #[arg(long)]
         no_registry: bool,
+        /// Stage the browser-spawned host is allowed to write to. Recorded in
+        /// the config as `[native_host] stage`. The directory must already
+        /// exist and be a directory: the host never creates a stage, and a
+        /// stage that appears because a host was pointed at it is a stage
+        /// nothing pushes. The edit preserves the config file's comments and
+        /// everything else in it.
+        #[arg(long)]
+        stage: Option<PathBuf>,
     },
     /// The Native Messaging host process itself.
     ///
-    /// The framed stdio message loop is NOT implemented in this build. This
-    /// subcommand exists so that the registration above points at something
-    /// verifiable: `--self-test` prints one line of JSON on stdout and exits 0,
-    /// which is how "does the host actually start?" is answered on a real
-    /// machine and in later tickets. Without `--self-test` it exits 2 rather
-    /// than pretending to serve a connection.
+    /// Runs the same one-request-one-response loop the browser launch uses:
+    /// reads one length-prefixed request frame from stdin, writes one response
+    /// frame to stdout, exits 0. Useful for driving the host by hand before any
+    /// browser is involved. Each process serves exactly one request — the
+    /// browser starts one process per message, and the host is built for that.
     ///
-    /// Nothing but that one line may ever reach stdout: Chromium reads stdout
+    /// Nothing but that one frame may ever reach stdout: Chromium reads stdout
     /// as a `u32` frame length, so a stray log line is read as a multi-gigabyte
-    /// frame and kills the pipe. Diagnostics go to stderr.
+    /// frame and kills the pipe. Diagnostics go to stderr. A frame that ends
+    /// early (EOF inside the length prefix or the body) is answered with
+    /// silence and a non-zero exit, never with a response.
+    ///
+    /// `--self-test` prints one line of JSON on stdout and exits 0, unchanged:
+    /// it answers "does the host process start at all?" without needing a
+    /// request.
     NativeHost {
         /// Print one line of JSON describing this host, then exit 0.
         #[arg(long)]
@@ -887,6 +900,27 @@ fn main() -> ExitCode {
 }
 
 fn run() -> ExitCode {
+    // Before clap, not after: a browser starts this binary with no subcommand
+    // and with arguments (an origin, or a manifest path and an add-on id) that
+    // clap would reject as unknown. `nativehost-protocol.md` §3 makes this
+    // recognition the *first* thing the process does, and the two refusals here
+    // are refusals to be a host — never a fallthrough into command parsing,
+    // which would answer a browser with a usage error on stderr and nothing at
+    // all on stdout.
+    match nativehost::detect_launch(&std::env::args_os().collect::<Vec<_>>()) {
+        nativehost::Launch::Host => return nativehost::serve_stdin(),
+        nativehost::Launch::Foreign { origin } => {
+            eprintln!(
+                "refusing to serve {origin}: this build is the Native Messaging host for \
+                 chrome-extension://{}/ and {}",
+                nativehost::CHROME_EXTENSION_ID,
+                nativehost::FIREFOX_EXTENSION_ID
+            );
+            return ExitCode::from(2);
+        }
+        nativehost::Launch::CommandLine => {}
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Command::Init => cmd_init(),
@@ -1151,6 +1185,7 @@ fn run() -> ExitCode {
             firefox_extension_id,
             uninstall,
             no_registry,
+            stage,
         } => cmd_install_native_host(
             &browsers,
             target_root,
@@ -1161,6 +1196,7 @@ fn run() -> ExitCode {
             &firefox_extension_id,
             uninstall,
             no_registry,
+            stage,
         ),
         Command::NativeHost { self_test } => cmd_native_host(self_test),
         Command::ActivityIndex { stage, machine } => cmd_activity_index(&stage, machine.as_deref()),
@@ -1213,8 +1249,55 @@ fn cmd_install_native_host(
     firefox_extension_id: &str,
     uninstall: bool,
     no_registry: bool,
+    stage: Option<PathBuf>,
 ) -> ExitCode {
     const TAG: &str = "[install-native-host]";
+
+    // `--stage` is validated before anything at all is written, and before the
+    // banner: a path that is not a directory is a mistake in the invocation,
+    // and a command that had already rewritten a browser manifest by the time
+    // it noticed would have left the machine in a state the user did not ask
+    // for. Nothing here creates the directory — a stage is the user's to make.
+    let stage_to_record: Option<PathBuf> = match &stage {
+        None => None,
+        Some(_) if uninstall => {
+            eprintln!(
+                "install-native-host: --stage cannot be combined with --uninstall; \
+                 nothing was written and the config was not changed"
+            );
+            return ExitCode::from(2);
+        }
+        Some(path) => {
+            let expanded = match config::expand_and_verify(&path.to_string_lossy()) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("install-native-host: --stage: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let resolved = absolute_path(&expanded);
+            match fs::metadata(&resolved) {
+                Ok(meta) if meta.is_dir() => Some(resolved),
+                Ok(_) => {
+                    eprintln!(
+                        "install-native-host: --stage {} exists but is not a directory; \
+                         nothing was written and the config was not changed",
+                        resolved.display()
+                    );
+                    return ExitCode::from(2);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "install-native-host: --stage {} is not usable: {e}; \
+                         nothing was written and the config was not changed",
+                        resolved.display()
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    };
+
     let platform = platform.unwrap_or_else(nativehost::Platform::current);
     let root = match target_root {
         Some(root) => absolute_path(&root),
@@ -1283,6 +1366,31 @@ fn cmd_install_native_host(
     if !uninstall {
         println!("{TAG} chromium allowlist: chrome-extension://{extension_id}/");
         println!("{TAG} gecko allowlist: {firefox_extension_id}");
+    }
+
+    // Before the manifests, because this is the half the host cannot run
+    // without: a registration whose host has no stage answers every `deliver`
+    // with `nack config`, while a configured stage nobody registered is inert.
+    if let Some(path) = &stage_to_record {
+        let value = path.to_string_lossy().into_owned();
+        match Config::set_native_host_stage(&value) {
+            Ok(config::StageKeyWrite::Unchanged) => println!(
+                "{TAG} stage: {value} already recorded in {} — config not rewritten",
+                config::config_path().display()
+            ),
+            Ok(config::StageKeyWrite::Added) => println!(
+                "{TAG} stage: recorded {value} in {}",
+                config::config_path().display()
+            ),
+            Ok(config::StageKeyWrite::Updated { previous }) => println!(
+                "{TAG} stage: {} was {previous}, is now {value}",
+                config::config_path().display()
+            ),
+            Err(e) => {
+                eprintln!("install-native-host: cannot record --stage: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     let mut wrote = 0usize;
@@ -1427,31 +1535,43 @@ fn cmd_install_native_host(
         return ExitCode::FAILURE;
     }
     if live == 0 {
-        eprintln!(
-            "install-native-host: nothing was written — no known browser directory under {}",
-            root.display()
-        );
+        if stage_to_record.is_some() {
+            eprintln!(
+                "install-native-host: no browser manifest was written — no known browser \
+                 directory under {} (the config stage key above was written)",
+                root.display()
+            );
+        } else {
+            eprintln!(
+                "install-native-host: nothing was written — no known browser directory under {}",
+                root.display()
+            );
+        }
         return ExitCode::from(3);
     }
     println!("{TAG} next: reload the extension, then connect to {host_name}.");
     ExitCode::SUCCESS
 }
 
-/// `native-host` — the host process. B98 ships the self-test stub only.
+/// `native-host` — the host process.
+///
+/// Without `--self-test` this serves one request on stdin and answers it on
+/// stdout, which is exactly what the browser launch path does
+/// ([`nativehost::serve_stdin`]). It exists so the loop can be driven by hand —
+/// `printf` a frame into it — without registering anything with a browser; a
+/// second implementation for manual testing would be a second thing to be wrong.
+///
+/// `--self-test` is unchanged: one line of JSON, exit 0.
 fn cmd_native_host(self_test: bool) -> ExitCode {
-    if !self_test {
-        eprintln!(
-            "native-host: the stdio message loop is not implemented in this build; \
-             run `native-host --self-test` to check that the host starts."
+    if self_test {
+        // Exactly one line, on stdout, and nothing else ever.
+        println!(
+            "{}",
+            nativehost::self_test_line(nativehost::HOST_NAME, env!("CARGO_PKG_VERSION"))
         );
-        return ExitCode::from(2);
+        return ExitCode::SUCCESS;
     }
-    // Exactly one line, on stdout, and nothing else ever.
-    println!(
-        "{}",
-        nativehost::self_test_line(nativehost::HOST_NAME, env!("CARGO_PKG_VERSION"))
-    );
-    ExitCode::SUCCESS
+    nativehost::serve_stdin()
 }
 
 /// Outcome of a full activity-index rebuild for one machine partition.
@@ -3889,8 +4009,20 @@ fn print_ingest(report: &chat_stasher::inbox::IngestReport, machine: &str) {
             short_session_id(&d.id),
         );
     }
+    if report.export_files_seen > 0 {
+        println!(
+            "[ingest] export files    : {} (blank lines skipped: {})",
+            report.export_files_seen, report.export_blank_lines
+        );
+    }
     if !report.errors.is_empty() {
+        // The entries, not just the count. For an export file the `source_file`
+        // is `<name>#<line>`, and a count with no line number would leave the
+        // user with a file that did not retire and no way to find out why.
         println!("[ingest] errors           : {}", report.errors.len());
+        for entry in &report.errors {
+            println!("  ! {}: {}", entry.source_file, entry.message);
+        }
     }
     println!(
         "[ingest] staging machine   : sha256={}",
@@ -3923,15 +4055,10 @@ dedup key - ids stay `platform.sessionId`)"
     }
 }
 
-/// Local data dir used for the default repository + key file.
+/// Local data dir used for the default repository + key file. Delegated to
+/// `config` so this path has one definition rather than three.
 fn data_root() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("chat-stasher");
-    }
-    config::home_dir()
-        .join(".local")
-        .join("share")
-        .join("chat-stasher")
+    config::default_data_root()
 }
 
 /// Expand `~`/`~/` in a repo / key-file / option string and reject any

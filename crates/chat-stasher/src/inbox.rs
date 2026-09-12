@@ -45,8 +45,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::fs::TryLockError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::store;
 
@@ -54,6 +56,20 @@ use crate::store;
 pub const PART_SUFFIX: &str = ".part";
 /// Subdirectory of the inbox where consumed files are retired to.
 pub const CONSUMED_DIR: &str = "consumed";
+/// Suffix of a multi-bundle export file (`nativehost-protocol.md` §8).
+pub const EXPORT_SUFFIX: &str = ".jsonl";
+/// Name of the stage-wide exclusive write lock (protocol §5).
+///
+/// It lives at the *stage root*, not inside `sessions/`, so nothing that walks
+/// the shard tree — `verify`, `push`, `stagereclaim`, the audit scans — can
+/// mistake it for shard content.
+pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
+/// How long a writer waits for the stage lock before giving up (protocol §5).
+pub const STAGE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Poll interval while waiting for the lock. `try_lock` is the only form with
+/// a deadline — the blocking `lock` has none — so the wait is a poll loop, and
+/// this is how coarse that poll is.
+const STAGE_LOCK_POLL: Duration = Duration::from_millis(25);
 /// Staging shard line schema (same as the bundle schema).
 pub const SCHEMA: &str = "chat-stasher/inbox@1";
 /// Leftover temp name pattern for a half-written shard (`000123.jsonl.tmp`).
@@ -108,6 +124,11 @@ pub struct IngestReport {
     pub total_inbox_files: usize,
     /// `.part` files skipped (mid-write).
     pub part_files_seen: usize,
+    /// Candidate files that were multi-bundle exports (`*.jsonl`).
+    pub export_files_seen: usize,
+    /// Blank lines inside export files, skipped and counted. A count of zero
+    /// here means "the exports had no blank lines", not "nothing was read".
+    pub export_blank_lines: usize,
     pub consumed: Vec<Consumed>,
     pub duplicates: Vec<Duplicate>,
     pub errors: Vec<ErrorEntry>,
@@ -525,9 +546,21 @@ pub fn ingest_with_cap(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        if name.ends_with(EXPORT_SUFFIX) {
+            ingest_export_file(
+                &name,
+                path,
+                stage,
+                machine,
+                &consumed_dir,
+                bucket_cap,
+                &mut report,
+            );
+            continue;
+        }
         match consume_one(&name, path, stage, machine, &consumed_dir, bucket_cap) {
-            Ok(Outcome::Consumed(c)) => report.consumed.push(c),
-            Ok(Outcome::Duplicate(d)) => report.duplicates.push(d),
+            Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
+            Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
             Err(e) => report.errors.push(ErrorEntry {
                 source_file: name,
                 message: e.to_string(),
@@ -537,32 +570,92 @@ pub fn ingest_with_cap(
     Ok(report)
 }
 
-enum Outcome {
-    Consumed(Consumed),
+/// One candidate file, from its bytes to a sealed shard — or to the identical
+/// bytes already sealed.
+///
+/// This is the **single** code path `ingest` and the Native Messaging host
+/// share (`nativehost-protocol.md` §4: "Payloads go through the same code path
+/// as `ingest`"). It deliberately takes *bytes*, not a path: the host has no
+/// file to read, and a second implementation for the in-memory case is exactly
+/// the drift the shared function exists to prevent.
+///
+/// `source_file` is recorded verbatim as the shard's `source_file` — the file
+/// name for a file, the request's `name` for a delivery, `<file>#<line>` for an
+/// export line.
+#[derive(Debug)]
+pub enum SealOutcome {
+    /// A new shard was sealed. The payload is durable before this is returned.
+    Stored(Consumed),
+    /// These exact bytes were already sealed; `matched_shard` names that shard.
     Duplicate(Duplicate),
 }
 
-fn consume_one(
-    name: &str,
-    path: &Path,
+/// Why [`seal_payload`] could not answer.
+///
+/// The two variants exist because the caller has to answer differently: the
+/// host must tell the extension `stage-unavailable` for the first and `io` for
+/// the second (`nativehost-protocol.md` §6.3). Both are `retryable: true` and
+/// in both cases nothing was acknowledged.
+#[derive(Debug)]
+pub enum SealError {
+    /// The stage write lock could not be taken inside
+    /// [`STAGE_LOCK_TIMEOUT`], or the lock file itself could not be opened.
+    Lock(anyhow::Error),
+    /// Parsing or sealing failed.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for SealError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SealError::Lock(e) => write!(f, "{e:#}"),
+            SealError::Other(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SealError {}
+
+/// Parse → duplicate check → seal, holding the stage write lock across the
+/// decision and the write.
+///
+/// The lock is taken **before** the duplicate scan, not just before the write.
+/// §5 asks for the lock around "allocate a shard sequence number and seal";
+/// taking it one step earlier is what keeps §7 true ("exactly one shard
+/// exists") when two hosts deliver the *same* bytes at the same moment. With
+/// the scan outside the lock, both would find no match and both would seal.
+///
+/// `StageWriter::Ingest` is asserted here rather than only at the entry of
+/// [`ingest_with_cap`], because the host does not go through that entry: it
+/// reaches the stage writer from `nativehost::deliver`. The registry's rule is
+/// that a caller must name itself and have a reconciliation hook before it can
+/// touch stage, and putting the check on the one function that actually writes
+/// is what makes that true of every caller instead of the ones that remember.
+/// The registration is honest for the host: it seals through `Ingest`'s
+/// semantics and reconciles through the same content-addressed `file_sha256`
+/// lookup.
+pub fn seal_payload(
+    source_file: &str,
+    bytes: &[u8],
     stage: &Path,
     machine: &str,
-    consumed_dir: &Path,
     bucket_cap: usize,
-) -> anyhow::Result<Outcome> {
-    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let file_sha256 = sha256_hex(&bytes);
+) -> Result<SealOutcome, SealError> {
+    store::assert_stage_writer_audited(store::StageWriter::Ingest).map_err(SealError::Other)?;
+
+    let file_sha256 = sha256_hex(bytes);
     let file_bytes = bytes.len() as u64;
 
-    let parsed = parse_bundle(name, &bytes)?;
+    let parsed = parse_bundle(source_file, bytes).map_err(SealError::Other)?;
+
+    let _lock = lock_stage(stage).map_err(SealError::Lock)?;
     let session_dir = store::session_shard_dir(stage, machine, &parsed.id);
 
     // Content-addressed idempotency: identical raw bytes already archived?
-    let known = existing_file_shas(&session_dir)?;
+    let known = existing_file_shas(&session_dir).map_err(SealError::Other)?;
     if let Some(matched_shard) = known.get(&file_sha256) {
-        retire(name, path, consumed_dir)?; // still retire, so it is not rescanned
-        return Ok(Outcome::Duplicate(Duplicate {
-            source_file: name.to_string(),
+        return Ok(SealOutcome::Duplicate(Duplicate {
+            source_file: source_file.to_string(),
             id: parsed.id.clone(),
             file_sha256,
             matched_shard: matched_shard.clone(),
@@ -575,24 +668,25 @@ fn consume_one(
         id: parsed.id.clone(),
         platform: parsed.platform,
         session_id: parsed.session_id,
-        source_file: name.to_string(),
+        source_file: source_file.to_string(),
         file_sha256: file_sha256.clone(),
         file_bytes,
         captured_at: parsed.captured_at,
         parsed: parsed.parsed,
         raw: parsed
             .raw
-            .ok_or_else(|| anyhow::anyhow!("bundle raw envelope is missing"))?,
+            .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
         identity: parsed.identity,
     };
-    let line = serde_json::to_string(&record).context("serialise shard record")?;
+    let line = serde_json::to_string(&record)
+        .context("serialise shard record")
+        .map_err(SealError::Other)?;
 
-    // Seal first, retire second.
-    let shard = write_shard_atomic(stage, machine, &parsed.id, &[line], bucket_cap)?;
-    retire(name, path, consumed_dir)?;
+    let shard = write_shard_atomic(stage, machine, &parsed.id, &[line], bucket_cap)
+        .map_err(SealError::Other)?;
 
-    Ok(Outcome::Consumed(Consumed {
-        source_file: name.to_string(),
+    Ok(SealOutcome::Stored(Consumed {
+        source_file: source_file.to_string(),
         id: parsed.id,
         shard,
         file_bytes,
@@ -600,6 +694,190 @@ fn consume_one(
         kind: record.kind.to_string(),
         identity_level: record.identity.as_ref().map(|i| i.level.clone()),
     }))
+}
+
+/// Is `bytes` a bundle that would be archived as a `kind: "bundle"` record —
+/// i.e. would it *survive* `parse_bundle` without degrading to the raw-only
+/// fallback?
+///
+/// This is a question `ingest` never has to ask: an inbox file that does not
+/// parse is archived anyway, with its whole body preserved in `raw.text`. The
+/// two channels that are *machine-fed* — a `deliver` payload and one line of an
+/// export file — do have to ask, because `nativehost-protocol.md` §6.3 has a
+/// `invalid-bundle` answer for them and §8 requires the export file to stay put
+/// when a line cannot be sealed.
+///
+/// It answers by calling the same parser rather than by re-implementing its
+/// conditions, so the two can never disagree about which inputs are bundles.
+pub fn check_bundle(bytes: &[u8]) -> Result<(), String> {
+    match parse_bundle("(validation)", bytes) {
+        Ok(parsed) if parsed.kind == "bundle" => Ok(()),
+        Ok(_) => Err(
+            "payload is not a valid inbox bundle: not JSON (it would be archived raw-only)"
+                .to_string(),
+        ),
+        Err(e) => Err(format!("payload is not a valid inbox bundle: {e}")),
+    }
+}
+
+/// Consume one plain `*.json` bundle file: read, seal through the shared core,
+/// then retire.
+fn consume_one(
+    name: &str,
+    path: &Path,
+    stage: &Path,
+    machine: &str,
+    consumed_dir: &Path,
+    bucket_cap: usize,
+) -> anyhow::Result<SealOutcome> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap)?;
+    // Seal first, retire second.
+    retire(name, path, consumed_dir)?;
+    Ok(outcome)
+}
+
+/// Consume one `*.jsonl` export file (`nativehost-protocol.md` §8).
+///
+/// One line = one bundle, content-addressed by the SHA-256 of the line without
+/// its trailing newline — the same key `deliver` uses, so a payload that
+/// already arrived over Native Messaging is recognised here as a duplicate
+/// rather than archived a second time.
+///
+/// The file is retired **only when every line was sealed or recognised as a
+/// duplicate**. A line that cannot be sealed leaves the file in the inbox, with
+/// one error entry naming the line number, so the user can look at that line
+/// instead of at a file that vanished. A re-run is safe: every line that did
+/// land is content-addressed and reports as a duplicate.
+///
+/// Blank lines are skipped and counted, never sealed and never an error.
+fn ingest_export_file(
+    name: &str,
+    path: &Path,
+    stage: &Path,
+    machine: &str,
+    consumed_dir: &Path,
+    bucket_cap: usize,
+    report: &mut IngestReport,
+) {
+    report.export_files_seen += 1;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            report.errors.push(ErrorEntry {
+                source_file: name.to_string(),
+                message: format!("read {}: {e}", path.display()),
+            });
+            return;
+        }
+    };
+
+    let errors_before = report.errors.len();
+    let mut line_no = 0usize;
+    let mut rest: &[u8] = &bytes;
+    while !rest.is_empty() {
+        let (line, tail) = match rest.iter().position(|byte| *byte == b'\n') {
+            Some(idx) => (&rest[..idx], &rest[idx + 1..]),
+            None => (rest, &rest[rest.len()..]),
+        };
+        rest = tail;
+        line_no += 1;
+
+        if line.is_empty() {
+            report.export_blank_lines += 1;
+            continue;
+        }
+        // `<export file name>#<line number>`, one-based, as §8 specifies.
+        let source_file = format!("{name}#{line_no}");
+        if let Err(message) = check_bundle(line) {
+            report.errors.push(ErrorEntry {
+                source_file,
+                message,
+            });
+            continue;
+        }
+        match seal_payload(&source_file, line, stage, machine, bucket_cap) {
+            Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
+            Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
+            Err(e) => report.errors.push(ErrorEntry {
+                source_file,
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    if report.errors.len() == errors_before {
+        if let Err(e) = retire(name, path, consumed_dir) {
+            report.errors.push(ErrorEntry {
+                source_file: name.to_string(),
+                message: e.to_string(),
+            });
+        }
+    }
+}
+
+/// The stage-wide exclusive write lock, held for as long as this value lives.
+///
+/// The lock is released by [`Drop`] and, failing that, by the process exiting:
+/// `File::lock` is `flock`/`LockFileEx`, both of which the kernel drops when
+/// the last handle closes. That is why a host killed mid-write cannot wedge the
+/// stage for the next one.
+#[derive(Debug)]
+pub struct StageLock {
+    file: fs::File,
+}
+
+impl Drop for StageLock {
+    fn drop(&mut self) {
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "Releasing the lock happens anyway when the handle closes; a failure here has no recoverable action and must not turn an already-successful seal into an error."
+        )]
+        let _ = self.file.unlock();
+    }
+}
+
+/// Open (creating if needed) the stage lock file. Never creates the stage
+/// itself: a missing stage is reported, not manufactured.
+fn open_stage_lock(stage: &Path) -> anyhow::Result<fs::File> {
+    let path = stage.join(STAGE_LOCK_FILE);
+    fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open stage write lock {}", path.display()))
+}
+
+/// Take the stage write lock, waiting at most [`STAGE_LOCK_TIMEOUT`].
+///
+/// Bounded on purpose: an unbounded wait inside a browser-spawned host would
+/// hold the extension's 60 s request timeout open and answer nothing, and
+/// "nothing" is the one answer the protocol cannot recover from. A timeout is
+/// a `nack` the extension can retry.
+pub fn lock_stage(stage: &Path) -> anyhow::Result<StageLock> {
+    let path = stage.join(STAGE_LOCK_FILE);
+    let file = open_stage_lock(stage)?;
+    let deadline = Instant::now() + STAGE_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(StageLock { file }),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "stage write lock {} was still held after {} s",
+                        path.display(),
+                        STAGE_LOCK_TIMEOUT.as_secs()
+                    );
+                }
+                std::thread::sleep(STAGE_LOCK_POLL);
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("lock {}", path.display()));
+            }
+        }
+    }
 }
 
 /// Scan a session's existing sealed shards, mapping each archived

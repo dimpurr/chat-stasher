@@ -801,6 +801,11 @@ pub struct DoctorReport {
     /// somebody probed (see [`probe_destinations`]), which is why it is filled
     /// in by the CLI rather than by [`run()`].
     pub destinations: Vec<DestinationProbe>,
+    /// D8 — the Native Messaging registration on this machine and the stage
+    /// `[native_host]` points at. `None` when the caller did not ask (the plain
+    /// [`run()`] entry point fills it in; the field is an `Option` so a caller
+    /// can distinguish "checked and found nothing" from "not checked").
+    pub native_host: Option<NativeHostCheck>,
 }
 
 /// What one read-only connection to a declared destination answered.
@@ -1032,6 +1037,9 @@ pub fn run() -> DoctorReport {
     // D6
     let cache = inspect_cache(&config);
 
+    // D8 — read-only, opens nothing but the manifests themselves.
+    let native_host = inspect_native_host(&config, &home);
+
     let probes = scan.probes;
     DoctorReport {
         config_source: config.source,
@@ -1048,6 +1056,7 @@ pub fn run() -> DoctorReport {
         // Filled in by the CLI: connecting to a destination is a real network
         // action and this entry point is called directly by the test suite.
         destinations: Vec::new(),
+        native_host: Some(native_host),
     }
 }
 
@@ -1409,15 +1418,316 @@ pub fn inspect_cache(config: &Config) -> CacheCheck {
     }
 }
 
-/// Default data dir for the repository + key file (mirrors main.rs).
+/// Default data dir for the repository + key file. Delegated to `config` so
+/// the CLI, `doctor` and the Native Messaging host cannot disagree on where
+/// this machine's identity file lives.
 fn default_data_root() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("chat-stasher");
+    crate::config::default_data_root()
+}
+
+// ---------------------------------------------------------------------------
+// D8 — is the Native Messaging host actually usable? (protocol v1)
+// ---------------------------------------------------------------------------
+
+/// What `doctor` found about one browser's registered host manifest.
+///
+/// Every non-`Ok` state is a *different* finding, because the fix differs:
+/// not being registered is a choice, a manifest pointing at a deleted binary
+/// is a stale install, and a manifest pointing into `target/` works today and
+/// stops working the next time anybody runs `cargo clean`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostManifestState {
+    /// No manifest at this browser's discovery path.
+    NotRegistered,
+    /// A manifest is there and could not be read.
+    Unreadable { error: String },
+    /// A manifest is there and is not JSON, or carries no usable `path`.
+    Invalid { error: String },
+    /// `path` names nothing on this machine.
+    PathMissing { path: PathBuf },
+    /// `path` exists but is not executable (Unix mode bits).
+    PathNotExecutable { path: PathBuf },
+    /// `path` exists and is executable, but sits inside a Cargo `target/`
+    /// tree: it is a build artifact and will vanish on `cargo clean`.
+    BuildArtifact { path: PathBuf },
+    /// Registered, present, executable, and not a build artifact.
+    Ok { path: PathBuf },
+}
+
+impl HostManifestState {
+    /// Short machine-readable tag, mirrored by `native_host_json`.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            HostManifestState::NotRegistered => "not_registered",
+            HostManifestState::Unreadable { .. } => "unreadable",
+            HostManifestState::Invalid { .. } => "invalid",
+            HostManifestState::PathMissing { .. } => "path_missing",
+            HostManifestState::PathNotExecutable { .. } => "path_not_executable",
+            HostManifestState::BuildArtifact { .. } => "build_artifact",
+            HostManifestState::Ok { .. } => "ok",
+        }
     }
-    crate::config::home_dir()
-        .join(".local")
-        .join("share")
-        .join("chat-stasher")
+}
+
+/// One browser's manifest, read-only.
+#[derive(Debug, Clone)]
+pub struct HostManifestCheck {
+    pub browser: String,
+    pub manifest: PathBuf,
+    pub state: HostManifestState,
+}
+
+/// The `[native_host] stage` key, in the same tri-state style as the rest of
+/// this file: "no key written" and "the config could not be read" are two
+/// different findings and neither is "the path is gone".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageConfigCheck {
+    /// The key is absent. The host answers every request `nack config`.
+    NotConfigured,
+    /// The config exists but could not be read or parsed, so whether the key is
+    /// there is *unknown*, not absent.
+    ConfigUnreadable { error: String },
+    /// Configured, and the directory is there.
+    Present { path: PathBuf },
+    /// Configured, and nothing is at that path.
+    Missing { path: PathBuf },
+    /// Configured, and the path is something other than a directory.
+    NotADirectory { path: PathBuf },
+}
+
+impl StageConfigCheck {
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            StageConfigCheck::NotConfigured => "not_configured",
+            StageConfigCheck::ConfigUnreadable { .. } => "config_unreadable",
+            StageConfigCheck::Present { .. } => "present",
+            StageConfigCheck::Missing { .. } => "missing",
+            StageConfigCheck::NotADirectory { .. } => "not_a_directory",
+        }
+    }
+}
+
+/// D8 — the Native Messaging registration and the stage it writes to.
+#[derive(Debug, Clone)]
+pub struct NativeHostCheck {
+    pub manifests: Vec<HostManifestCheck>,
+    /// Never optional: [`inspect_native_host`] always has an answer, and the
+    /// absent-key answer (`NotConfigured`) is a finding, not a gap.
+    pub stage: StageConfigCheck,
+}
+
+/// Does this path sit inside a Cargo `target/` tree?
+///
+/// The same question `schedule` asks about the binary it embeds (see
+/// `is_build_artifact` in `main.rs`), asked here about the binary a browser
+/// manifest points at. It is narrower than "the file exists": a path under
+/// `target/` works until somebody runs `cargo clean`, and then the host stops
+/// being found with no error anywhere the user would look.
+fn looks_like_build_artifact(path: &Path) -> bool {
+    let parts: Vec<&str> = path
+        .iter()
+        .filter_map(|component| component.to_str())
+        .collect();
+    parts
+        .windows(2)
+        .any(|window| window[0] == "target" && (window[1] == "debug" || window[1] == "release"))
+}
+
+/// Is `path` executable *as far as this platform can say without running it*?
+///
+/// Unix answers from the mode bits. Windows has no such bit — executability
+/// there is decided by the extension and by the loader — so the honest answer
+/// is "the question does not exist on this platform", and a one-sided `cfg`
+/// returning `false` would report every Windows registration as broken.
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::metadata(path) {
+            Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Read one browser's host manifest, if it is there.
+fn inspect_host_manifest(browser: crate::nativehost::Browser, root: &Path) -> HostManifestCheck {
+    let manifest = match crate::nativehost::target(
+        crate::nativehost::Platform::current(),
+        root,
+        browser,
+        crate::nativehost::HOST_NAME,
+    ) {
+        Some(target) => target.manifest,
+        // No discovery path is known for this combination. Reported as not
+        // registered rather than as an error: this build simply does not look
+        // there, which is a fact about the build.
+        None => {
+            return HostManifestCheck {
+                browser: browser.id().to_string(),
+                manifest: PathBuf::new(),
+                state: HostManifestState::NotRegistered,
+            }
+        }
+    };
+
+    let text = match fs::read_to_string(&manifest) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return HostManifestCheck {
+                browser: browser.id().to_string(),
+                manifest,
+                state: HostManifestState::NotRegistered,
+            }
+        }
+        Err(e) => {
+            return HostManifestCheck {
+                browser: browser.id().to_string(),
+                manifest,
+                state: HostManifestState::Unreadable {
+                    error: e.to_string(),
+                },
+            }
+        }
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(e) => {
+            return HostManifestCheck {
+                browser: browser.id().to_string(),
+                manifest,
+                state: HostManifestState::Invalid {
+                    error: e.to_string(),
+                },
+            }
+        }
+    };
+    let Some(declared) = value.get("path").and_then(|path| path.as_str()) else {
+        return HostManifestCheck {
+            browser: browser.id().to_string(),
+            manifest,
+            state: HostManifestState::Invalid {
+                error: "manifest has no string `path`".to_string(),
+            },
+        };
+    };
+    let path = PathBuf::from(declared);
+
+    let state = if !path.exists() {
+        HostManifestState::PathMissing { path }
+    } else if !is_executable_file(&path) {
+        HostManifestState::PathNotExecutable { path }
+    } else if looks_like_build_artifact(&path) {
+        HostManifestState::BuildArtifact { path }
+    } else {
+        HostManifestState::Ok { path }
+    };
+    HostManifestCheck {
+        browser: browser.id().to_string(),
+        manifest,
+        state,
+    }
+}
+
+/// D8 — read every browser's host manifest and the configured stage. Read-only:
+/// it opens files and stats paths, and creates nothing at all.
+pub fn inspect_native_host(config: &Config, home: &Path) -> NativeHostCheck {
+    let root = crate::nativehost::default_root(crate::nativehost::Platform::current(), home);
+    let manifests = crate::nativehost::Browser::ALL
+        .iter()
+        .map(|browser| inspect_host_manifest(*browser, &root))
+        .collect();
+
+    let stage = if config.source.is_error_fallback() {
+        StageConfigCheck::ConfigUnreadable {
+            error: format!(
+                "config {} could not be read or parsed",
+                crate::config::config_path().display()
+            ),
+        }
+    } else {
+        match config
+            .native_host
+            .as_ref()
+            .and_then(|section| section.stage.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            None => StageConfigCheck::NotConfigured,
+            Some(declared) => {
+                let path = PathBuf::from(declared);
+                match fs::metadata(&path) {
+                    Ok(meta) if meta.is_dir() => StageConfigCheck::Present { path },
+                    Ok(_) => StageConfigCheck::NotADirectory { path },
+                    Err(_) => StageConfigCheck::Missing { path },
+                }
+            }
+        }
+    };
+
+    NativeHostCheck { manifests, stage }
+}
+
+/// D8 JSON. Public so the shape can be asserted without running the whole
+/// report — `doctor::run()` reads the real home directory, which a test must
+/// not do.
+pub fn native_host_json(check: &NativeHostCheck) -> serde_json::Value {
+    let manifests: Vec<serde_json::Value> = check
+        .manifests
+        .iter()
+        .map(|entry| {
+            let mut value = serde_json::json!({
+                "browser": entry.browser,
+                "manifest": entry.manifest.display().to_string(),
+                "kind": entry.state.kind_label(),
+            });
+            match &entry.state {
+                HostManifestState::Unreadable { error } | HostManifestState::Invalid { error } => {
+                    value["error"] = serde_json::json!(error);
+                }
+                HostManifestState::PathMissing { path }
+                | HostManifestState::PathNotExecutable { path }
+                | HostManifestState::BuildArtifact { path }
+                | HostManifestState::Ok { path } => {
+                    value["path"] = serde_json::json!(path.display().to_string());
+                }
+                HostManifestState::NotRegistered => {}
+            }
+            value
+        })
+        .collect();
+
+    let stage = {
+        let mut value = serde_json::json!({"kind": check.stage.kind_label()});
+        match &check.stage {
+            StageConfigCheck::ConfigUnreadable { error } => {
+                value["error"] = serde_json::json!(error);
+            }
+            StageConfigCheck::Present { path }
+            | StageConfigCheck::Missing { path }
+            | StageConfigCheck::NotADirectory { path } => {
+                value["path"] = serde_json::json!(path.display().to_string());
+            }
+            StageConfigCheck::NotConfigured => {}
+        }
+        value
+    };
+
+    serde_json::json!({
+        "checked": true,
+        "registered": check
+            .manifests
+            .iter()
+            .filter(|entry| entry.state != HostManifestState::NotRegistered)
+            .count(),
+        "manifests": manifests,
+        "stage": stage,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,6 +1753,11 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
+        "native_host": match &r.native_host {
+            Some(check) => native_host_json(check),
+            // Not the same as "there is no registration": this run did not look.
+            None => serde_json::json!({"checked": false}),
+        },
     })
 }
 
@@ -1813,6 +2128,12 @@ pub fn print_report(r: &DoctorReport) {
         print_cache(&r.cache);
         eprintln!();
         print_destinations(&r.destinations);
+        // D8 does not depend on the scan at all — it reads the browser
+        // manifests and the config — so it is reported on this path too.
+        if let Some(check) = &r.native_host {
+            eprintln!();
+            print_native_host(check);
+        }
         return;
     }
 
@@ -1895,6 +2216,97 @@ pub fn print_report(r: &DoctorReport) {
 
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
+
+    // D8 — is the browser-side host actually usable?
+    if let Some(check) = &r.native_host {
+        eprintln!();
+        print_native_host(check);
+    }
+}
+
+/// D8 printing. Read-only findings about the browser registration and the stage
+/// the host would write to. No count here is a fallback: a browser with no
+/// manifest says so, and "the config could not be read" is never printed as
+/// "no stage is set".
+fn print_native_host(check: &NativeHostCheck) {
+    eprintln!("D8 · Native Messaging host (protocol v1)");
+    eprintln!("     read-only: doctor never writes a manifest, and never creates the stage.");
+
+    let registered = check
+        .manifests
+        .iter()
+        .filter(|entry| entry.state != HostManifestState::NotRegistered)
+        .count();
+    for entry in &check.manifests {
+        match &entry.state {
+            HostManifestState::NotRegistered => {
+                eprintln!("  {:<12} not registered", entry.browser);
+            }
+            HostManifestState::Ok { path } => {
+                eprintln!("  {:<12} ok — {}", entry.browser, path.display());
+            }
+            HostManifestState::BuildArtifact { path } => {
+                eprintln!(
+                    "  {:<12} ⚠ {} is a build artifact under target/ — it stops existing after `cargo clean`, and the browser then reports the host as missing",
+                    entry.browser,
+                    path.display()
+                );
+            }
+            HostManifestState::PathMissing { path } => {
+                eprintln!(
+                    "  {:<12} 🔴 {} — registered, but that path does not exist",
+                    entry.browser,
+                    path.display()
+                );
+            }
+            HostManifestState::PathNotExecutable { path } => {
+                eprintln!(
+                    "  {:<12} 🔴 {} — registered, but not executable",
+                    entry.browser,
+                    path.display()
+                );
+            }
+            HostManifestState::Unreadable { error } => {
+                eprintln!(
+                    "  {:<12} manifest {} could not be read: {error}",
+                    entry.browser,
+                    entry.manifest.display()
+                );
+            }
+            HostManifestState::Invalid { error } => {
+                eprintln!(
+                    "  {:<12} manifest {} is not a usable host manifest: {error}",
+                    entry.browser,
+                    entry.manifest.display()
+                );
+            }
+        }
+    }
+    eprintln!(
+        "  registered browsers: {registered}/{}",
+        check.manifests.len()
+    );
+
+    match &check.stage {
+        StageConfigCheck::NotConfigured => eprintln!(
+            "  stage: no `[native_host] stage` in {} — every delivery answers nack config",
+            crate::config::config_path().display()
+        ),
+        StageConfigCheck::ConfigUnreadable { error } => eprintln!(
+            "  stage: UNKNOWN — {error}, so whether the key is set cannot be answered"
+        ),
+        StageConfigCheck::Present { path } => {
+            eprintln!("  stage: {} (present)", path.display())
+        }
+        StageConfigCheck::Missing { path } => eprintln!(
+            "  stage: 🔴 {} — configured but not on disk; every delivery answers nack stage-unavailable",
+            path.display()
+        ),
+        StageConfigCheck::NotADirectory { path } => eprintln!(
+            "  stage: 🔴 {} — configured but is not a directory",
+            path.display()
+        ),
+    }
 }
 
 /// D7 printing — shared by the normal path and the scan-failed early return.
@@ -2506,6 +2918,7 @@ mod json_tests {
             archive_gaps: Vec::new(),
             scan_failed: false,
             destinations: Vec::new(),
+            native_host: None,
         }
     }
 
@@ -2515,6 +2928,10 @@ mod json_tests {
     /// ADR-023 added `destinations`, and this list is the place that change is
     /// forced to be visible: it is a new key, not a renamed or removed one, so
     /// a script that reads the keys it already knew about keeps working.
+    ///
+    /// The Native Messaging work added `native_host` under the same rule. The
+    /// assertion below is unchanged — the same exact-list comparison — so the
+    /// addition could not have been made quietly.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -2530,6 +2947,7 @@ mod json_tests {
                 "destinations",
                 "footprints",
                 "gemini",
+                "native_host",
                 "other_present",
                 "probes",
                 "reclaim",

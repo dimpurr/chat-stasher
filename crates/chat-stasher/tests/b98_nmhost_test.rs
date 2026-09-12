@@ -461,18 +461,93 @@ fn native_host_self_test_prints_exactly_one_json_line() {
     assert_eq!(value["message_loop"], "not-implemented");
 }
 
-/// Without `--self-test` the host must refuse rather than pretend to serve.
+/// Without `--self-test` the subcommand runs the protocol loop.
+///
+/// **This pair replaces `native_host_without_self_test_refuses_with_exit_2`,
+/// which asserted that the subcommand exits 2 with "not implemented" on
+/// stderr.** That was true of the build before the framed loop existed; the
+/// contract now says bare `native-host` "runs the same one-request loop on
+/// stdin/stdout for manual testing" (`contracts/nativehost-protocol.md` §3), so
+/// the old stderr line would be a false statement about the binary — the exact
+/// failure mode this repository's invariants forbid.
+///
+/// The old test's purpose — the subcommand must never silently do nothing — is
+/// kept and made stronger: a real request is served, and an unreadable stdin
+/// produces silence *and* a non-zero status rather than a quiet success.
 #[test]
-fn native_host_without_self_test_refuses_with_exit_2() {
+fn native_host_serves_one_request_on_stdin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let stage = tmp.path().join("stage");
+    fs::create_dir_all(&stage).unwrap();
+    write_stage_config(&home, &stage);
+
+    let body = serde_json::to_vec(&serde_json::json!({"protocol": 1, "type": "hello"})).unwrap();
+    let mut frame = (body.len() as u32).to_ne_bytes().to_vec();
+    frame.extend_from_slice(&body);
+
+    let mut child = cli(&home)
+        .arg("native-host")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(&frame).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(
+        code(&output),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let raw = output.stdout;
+    assert!(raw.len() >= 4, "stdout is not a frame: {raw:?}");
+    let declared = u32::from_ne_bytes(raw[..4].try_into().unwrap()) as usize;
+    assert_eq!(raw.len(), 4 + declared, "stdout is not exactly one frame");
+    let response: serde_json::Value = serde_json::from_slice(&raw[4..]).unwrap();
+    assert_eq!(response["type"], "hello");
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["stage"], stage.to_string_lossy().as_ref());
+}
+
+/// Empty stdin is EOF inside the length prefix: nothing to answer, and no
+/// answer is written. Silence must never be exit 0.
+#[test]
+fn native_host_on_empty_stdin_writes_nothing_and_exits_non_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     fs::create_dir_all(&home).unwrap();
 
     let output = run(cli(&home).arg("native-host"));
-    assert_eq!(code(&output), 2);
+    assert_ne!(
+        code(&output),
+        0,
+        "a host that answered nothing must not report success"
+    );
     assert!(
         stdout(&output).is_empty(),
         "diagnostic info must not go to stdout"
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not implemented"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).is_empty(),
+        "the refusal must be explained on stderr"
+    );
+}
+
+/// Write the one line the host needs to be able to serve anything.
+fn write_stage_config(home: &Path, stage: &Path) {
+    let dir = home.join("config").join("chat-stasher");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.toml"),
+        format!(
+            "[native_host]\nstage = {}\n",
+            serde_json::to_string(&stage.to_string_lossy()).unwrap()
+        ),
+    )
+    .unwrap();
 }
