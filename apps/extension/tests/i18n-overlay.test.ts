@@ -80,7 +80,10 @@ describe('i18n overlay · a chosen locale', () => {
     const { t, applyUiLocale, renderMessage } = await overlay();
     await applyUiLocale('en');
     vi.stubGlobal('browser', browserFor('en'));
-    const { i18n } = await import('#i18n');
+    // The same object the shipped overlay uses (lib/i18n.ts explains why it is
+    // built with createI18n() rather than imported through `#i18n`).
+    const { createI18n } = await import('@wxt-dev/i18n');
+    const i18n = createI18n();
 
     const cases: Array<[string, unknown[]]> = [
       ['export.note', [{ at: '2026-01-02 03:04:05 UTC', entries: 4, bytes: '2.0 KiB', filename: 'f.jsonl' }]],

@@ -61,7 +61,23 @@
  * behaviour, never a blank string.
  */
 
-import { i18n } from '#i18n';
+import { createI18n } from '@wxt-dev/i18n';
+
+/**
+ * The package's own translator.
+ *
+ * The WXT module also generates a typed copy behind the `#i18n` alias
+ * (`.wxt/i18n/index.ts`, node_modules/@wxt-dev/i18n/dist/module.mjs:69-80), and
+ * that is the documented way to import it. It cannot be used here: the file
+ * only exists once `wxt prepare` has finished, while `wxt prepare` already
+ * loads the entrypoints that import this module. On a fresh clone that is a
+ * cycle, and `pnpm install` fails with "Cannot find module '#i18n'".
+ *
+ * The generated file is exactly `createI18n<GeneratedI18nStructure>()`. The
+ * type parameter is erased at runtime and `t` is cast to an untyped signature
+ * below anyway, so this is the same object without the cycle.
+ */
+const i18n = createI18n();
 
 /** Where the popup's Language selector stores its choice. */
 export const UI_LOCALE_KEY = 'cs_ui_locale';

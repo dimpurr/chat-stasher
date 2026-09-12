@@ -3,8 +3,9 @@ import { defineConfig } from 'wxt';
 export default defineConfig({
   // `@wxt-dev/i18n` (module source: node_modules/@wxt-dev/i18n/dist/module.mjs:10-93)
   // compiles `locales/<locale>.yml` into the `_locales/<locale>/messages.json`
-  // catalog the browser ships with the extension, and exposes the typed
-  // `i18n.t` through the `#i18n` alias (module.mjs:80). It refuses to run at all
+  // catalog the browser ships with the extension. It also generates a typed
+  // `#i18n` alias (module.mjs:80), which this extension deliberately does not
+  // import — see the comment above `createI18n()` in lib/i18n.ts. It refuses to run at all
   // unless `manifest.default_locale` is set (module.mjs:18-21), which is why the
   // two lines below are a pair.
   modules: ['@wxt-dev/i18n/module'],

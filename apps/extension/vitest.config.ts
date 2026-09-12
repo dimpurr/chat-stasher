@@ -1,17 +1,6 @@
-import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  resolve: {
-    // `#i18n` is the alias `@wxt-dev/i18n`'s WXT module registers
-    // (node_modules/@wxt-dev/i18n/dist/module.mjs:80). WXT itself adds it to the
-    // Vite build and to `.wxt/tsconfig.json`; vitest runs outside that build, so
-    // it is repeated here. It points at the generated module, which is why tests
-    // exercise the same `createI18n()` instance the extension ships.
-    alias: {
-      '#i18n': fileURLToPath(new URL('./.wxt/i18n/index.ts', import.meta.url)),
-    },
-  },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
