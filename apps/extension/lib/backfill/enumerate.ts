@@ -1,69 +1,95 @@
 /**
- * 枚举段：拿会话列表 + total。
+ * The enumeration segment: fetch the conversation list + total.
  *
- * ## C22 · 这个文件从「一个平台的实现」变成「一张表 + 一份诚实的空缺清单」
+ * ## C22 · How this file went from "one platform's implementation" to "a table
+ * plus an honest list of the gaps"
  *
- * 修改前：这里只有 ChatGPT 那一套常量与解析器，engine 直接引用。
- * 后果不是「别的平台不动」，而是**别的平台会被拿 ChatGPT 的路径去打**：
- * engine 用 listPageUrl(origin) 拼出 `https://chat.deepseek.com/backend-api/conversations`，
- * 内容脚本的 isAllowedBackfillUrl 只比对路径、不比对平台，于是它会真的发出去，
- * 拿回 404 ⇒ halt('shape-changed')。用户看到的是「接口改了」，
- * 而真相是「我们压根没写过 DeepSeek 的列表入口」。这两句话对用户的含义完全不同。
+ * Before: only ChatGPT's constants and parser lived here, referenced directly by
+ * the engine. The consequence was not "other platforms do not move", it was
+ * **other platforms getting hit with ChatGPT's path**: the engine used
+ * listPageUrl(origin) to build `https://chat.deepseek.com/backend-api/conversations`,
+ * the content script's isAllowedBackfillUrl compared paths but not platforms, so
+ * the request really went out, came back 404 ⇒ halt('shape-changed'). What the
+ * user saw was "the API changed" when the truth was "we never wrote DeepSeek's
+ * list endpoint at all". Those two sentences mean completely different things to
+ * a user.
  *
- * 所以现在：
- *  · 能回溯的平台 ⇒ 在 BACKFILL_PLANS 里有一条完整的 plan（下面那张表的每一项都齐）；
- *  · 不能回溯的平台 ⇒ 在 BACKFILL_UNSUPPORTED 里有一条【明写缺哪几项】的记录，
- *    engine 在发出任何请求【之前】就 halt('unsupported-platform')，Popup 照实说。
- *  · 平台表里的每一行必须恰好落在其中一侧 —— tests/c22-enumplat.test.ts 会盯着。
+ * So now:
+ *  · a platform that can be backfilled ⇒ has a complete plan in BACKFILL_PLANS
+ *    (every item of the table below is filled in);
+ *  · a platform that cannot ⇒ has a record in BACKFILL_UNSUPPORTED that **names
+ *    what is missing**, and the engine halts with 'unsupported-platform' **before
+ *    issuing any request**, which the popup then says plainly;
+ *  · every row of the platform table must land on exactly one of those two sides
+ *    — tests/c22-enumplat.test.ts keeps an eye on it.
  *
- * ## 一个平台要被回溯，最少必须声明哪几项（= BackfillEnumPlan 的字段）
- *  1. listPath      列表入口的路径
- *  2. listUrl       分页方式（怎么把 offset/limit 变成一个【GET】URL）
- *  3. parseListPage 列表响应的形状判据：从哪儿取 ids、从哪儿取 total
- *  4. detailPath    正文入口的路径前缀（🔴 C26：允许 null = 正文段还没有出处）
- *  5. detailUrl     会话 id → 正文 URL（同上，允许 null）
- *  6. 正文形状判据  —— 不在这张表里：直接复用 lib/contract.ts 的 responseShape
- *                     （engine.ts:348 的 matchesResponseShape），实时腿与回溯腿同一把尺。
- *  7. provenance    出处，口径与 contract.ts 的 credibility 一致（源码 · 仓库/文件行 · license · 日期）
+ * ## What a platform must declare at minimum to be backfillable (= the fields
+ * ## of BackfillEnumPlan)
+ *  1. listPath      the path of the list endpoint
+ *  2. listUrl       the paging scheme (how offset/limit become a **GET** URL)
+ *  3. parseListPage the list response's shape test: where the ids come from and where total comes from
+ *  4. detailPath    the path prefix of the body endpoint (🔴 C26: null is allowed = no source for the body segment yet)
+ *  5. detailUrl     conversation id → body URL (same; null is allowed)
+ *  6. the body shape test — not a field of this table: it reuses lib/contract.ts's
+ *                     responseShape (engine.ts:348, matchesResponseShape), the
+ *                     same yardstick for the live leg and the backfill leg.
+ *  7. provenance    the source, with the same standard as contract.ts's credibility
+ *                   (source · repo/file line · license · date)
  *
- * 🔴 C23 之前的结构性约束（已解除，保留原文以便对照）：
- *    ~~HttpPort 的签名是 `(url: string) => Promise<HttpResponse>`（engine.ts:37），
- *    只有 URL，没有 method/body ⇒ **只能 GET**。~~
- *    C23 把 HttpPort 扩成 `(url, init?: BackfillRequestInit)`，plan 现在可以用
- *    `listPost` / `detailPost` 声明「这一段是 POST，body 长这样，顶层键只有这几个」。
- *    🔴 **但本任务【没有】给任何平台填这个声明** —— kimi / gemini 的列表形状
- *    仍然是「未找到出处 / 只有一半」，填了就是编。所以下面的 missing 里，
- *    「结构性阻塞」那一条被改写成「通道已经能发，但参数仍然没有出处」。
+ * 🔴 The structural constraint from before C23 (now lifted; the original text is
+ *    kept so the comparison is possible):
+ *    ~~HttpPort's signature was `(url: string) => Promise<HttpResponse>` (engine.ts:37),
+ *    URL only, no method/body ⇒ **GET only**.~~
+ *    C23 widened HttpPort to `(url, init?: BackfillRequestInit)`, so a plan can
+ *    now declare `listPost` / `detailPost` — "this segment is POST, the body
+ *    looks like this, and its top-level keys are only these".
+ *    🔴 **But this change fills that declaration in for no platform at all** —
+ *    kimi / gemini still have "no source found / only half" list shapes, and
+ *    filling one in would be inventing it. So in the `missing` lists below, the
+ *    "structural blocker" entry is rewritten as "the channel can send it now, but
+ *    the parameters still have no source".
  *
- * ## 事实与复核状态（诚实标注，沿用本文件原有口径）
- *  · ChatGPT 的会话列表是 GET /backend-api/conversations?offset=&limit=，响应里自带 total。
- *    **这一条没有被复核** —— 本任务禁止真调平台接口，也没有登录态。
- *    所以 items / total 这两个字段名属于**待验证的假设**，不是实测结果。
- *  · 因此解析器写成「形状不合就报 shape-changed 并停」，而不是尽力猜。
- *    假设错了会立刻变成一条留痕的停机记录，不会变成静默爬不动，也不会变成假进度。
- *  · lib/contract.ts:114 登记的 chatgpt pathHints 是 '/backend-api/conversation/'
- *    （单数，取正文用）；列表是 '/backend-api/conversations'（复数），两者不同。
+ * ## Facts and review status (marked honestly, same standard as the rest of the file)
+ *  · ChatGPT's conversation list is GET /backend-api/conversations?offset=&limit=
+ *    and the response carries its own total.
+ *    **This has not been re-reviewed** — this change forbids calling any platform
+ *    API for real, and there is no logged-in session. So the field names `items`
+ *    and `total` are **an assumption awaiting verification**, not a measurement.
+ *  · The parser is therefore written as "shape mismatch ⇒ report shape-changed
+ *    and stop" rather than a best-effort guess. A wrong assumption turns into a
+ *    traced halt record immediately; it does not turn into a silently crawling
+ *    leg, and it does not turn into fake progress.
+ *  · The chatgpt pathHints registered at lib/contract.ts:114 is
+ *    '/backend-api/conversation/' (singular, used for bodies); the list is
+ *    '/backend-api/conversations' (plural). They are not the same.
  *
- * ## C26 · DeepSeek 那一格从「未知」变成「有出处」，并顺手长出两样新东西
+ * ## C26 · DeepSeek's cell went from "unknown" to "sourced", and grew two new things
  *
- *  1. **游标式翻页**（listCursorUrl / EnumPage.nextCursor / EnumPage.hasMore）。
- *     C22 的 plan 只会 offset 翻页，因为当时表里只有 ChatGPT。DeepSeek 是
- *     `count` + `before_seq_id`（游标 = 上一页里最小的 seq_id），offset 那套在它身上
- *     压根不成立（page/offset/limit 在五个来源里一次都没出现）。
- *     🔴 这条分支的每一处「读不到」都落在具名结局上，见 types.ts 的 EnumTruncation：
- *     读不到 seq_id ⇒ 'cursor-missing'（只回溯到这一页，**不是**枚举完）；
- *     读不到 has_more ⇒ 'has-more-missing'（**不许**当成没有下一页）。
+ *  1. **Cursor paging** (listCursorUrl / EnumPage.nextCursor / EnumPage.hasMore).
+ *     C22's plan could only page by offset, because ChatGPT was the only row in
+ *     the table. DeepSeek uses `count` + `before_seq_id` (cursor = the smallest
+ *     seq_id on the previous page), and the offset scheme simply does not hold on
+ *     it (page/offset/limit appeared in none of the five sources).
+ *     🔴 Every "cannot read it" on this branch lands on a named outcome; see
+ *     EnumTruncation in types.ts: cannot read seq_id ⇒ 'cursor-missing' (backfill
+ *     reached this page only, **not** "enumeration finished"); cannot read
+ *     has_more ⇒ 'has-more-missing' (**never** treat it as "no next page").
  *
- *  2. **半条腿是可以被写出来的**（detailPath/detailUrl 允许 null + partial）。
- *     DeepSeek 的列表段有四源交叉的出处，正文段没有。以前这种情况只能二选一：
- *     要么整个平台继续记成「不支持」（明明列表已经会读了），
- *     要么编一个正文路由把 plan 填满（那才是真正危险的那种谎）。
- *     现在它有第三种写法，并且对应一个独立的 halt 理由 'detail-unsupported'——
- *     它与 'unsupported-platform' 的差别是：后者一个请求都没发过。
+ *  2. **Half a leg can now be written down** (detailPath/detailUrl may be null,
+ *     plus `partial`). DeepSeek's list segment has a four-source provenance; its
+ *     body segment has none. Previously that left only two options: keep calling
+ *     the whole platform "unsupported" (even though the list is readable), or
+ *     invent a body route to fill the plan in (which is the genuinely dangerous
+ *     kind of lie). There is now a third way to write it, and it corresponds to a
+ *     separate halt reason, 'detail-unsupported', whose difference from
+ *     'unsupported-platform' is that the latter never issued a single request.
  *
- *  🔴 与 C22 一样，本任务同样【没有联网、没有登录态、没有对 deepseek.com 发过任何请求】。
- *     DeepSeek 那格的出处来自 R25 调研单的**多源交叉**，不是官方文档，也未经实测复核 ——
- *     完整的「知道什么 / 不知道什么 / 时效风险」写在 DEEPSEEK_PLAN 头上，不许只留结论。
+ *  🔴 As with C22, this change **did not go online, has no logged-in session, and
+ *     sent no request to deepseek.com**. DeepSeek's cell comes from the
+ *     **multi-source cross-check** in research ticket R25, not from official
+ *     documentation, and has not been verified end to end — the full "what we
+ *     know / what we do not / how stale it might be" is at the head of
+ *     DEEPSEEK_PLAN, and must not be reduced to the conclusion alone.
  */
 
 import { PLATFORMS } from '../contract';
@@ -72,30 +98,33 @@ import type { DetailOutcome } from './types';
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
 export const CHATGPT_DETAIL_PATH = '/backend-api/conversation/';
 
-/** 一页拿多少条。28 是列表接口常见的默认页大小；1000 条 ≈ 36 页仍属「便宜」。 */
+/** How many rows one page holds. 28 is the common default page size for list APIs; 1000 rows ≈ 36 pages is still "cheap". */
 export const DEFAULT_LIST_LIMIT = 100;
 
 export interface EnumPage {
   ids: string[];
-  /** 接口直给的总数；拿不到就是 null。 */
+  /** The total the API gave us directly; null when it did not. */
   total: number | null;
   /**
-   * 🔴 C26 · 游标式翻页专用：下一页的游标。
-   * `null` = **本页没能给出游标**（记录里没有游标字段）⇒ engine 只能停在这一页，
-   * 并把 enumCursor.truncated 记成 'cursor-missing'。
-   * `undefined` = 这个平台压根不是游标翻页（ChatGPT），engine 不看这一项。
+   * 🔴 C26 · For cursor paging: the cursor of the next page.
+   * `null` = **this page could not supply a cursor** (no cursor field in the
+   * record) ⇒ the engine can only stop here and record enumCursor.truncated as
+   * 'cursor-missing'.
+   * `undefined` = this platform does not page by cursor at all (ChatGPT), and
+   * the engine does not look at this field.
    */
   nextCursor?: number | null;
   /**
-   * 🔴 C26 · 接口自报「还有没有下一页」。
-   * `undefined` = 响应里没有这个信号 ⇒ engine **不许当成 false**，
-   * 只能停下并记 'has-more-missing'。
+   * 🔴 C26 · Whether the API itself says there is another page.
+   * `undefined` = the response carries no such signal ⇒ the engine **must not**
+   * treat it as false; it can only stop and record 'has-more-missing'.
    */
   hasMore?: boolean;
   /**
-   * 🔴 C26 · 本页里最新的一条更新时间戳，**原样的数值**，不做任何时区/格式转换。
-   * 拿不到就是 null。写在这里是为了让「updated_at 是数值不是 ISO 串」这件事
-   * 有一个可断言的落点 —— 见 parseDeepSeekListPage 的说明。
+   * 🔴 C26 · The newest update timestamp on this page, **as the raw number**,
+   * with no timezone or format conversion. null when unavailable. It is recorded
+   * here so that "updated_at is a number, not an ISO string" has an assertable
+   * landing place — see the note on parseDeepSeekListPage.
    */
   newestUpdatedAt?: number | null;
 }
@@ -105,67 +134,75 @@ export type ParseResult =
   | { ok: false; detail: string };
 
 // ---------------------------------------------------------------------------
-// 🔴 C23 · 通道能力的【闭集声明】
+// 🔴 C23 · The channel's capabilities as a **closed-set declaration**
 //
-// 这一段是「让通道能表达 POST」与「不让通道变成通用代理」的同一个落点：
-// method、Content-Type、body 的顶层键 —— 三样东西都在这里写成**枚举**，
-// 内容脚本侧（lib/backfill/tab-port.ts 的 checkBackfillRequest）逐条比对。
+// This section is the single place where "let the channel express POST" and
+// "do not let the channel become a general-purpose proxy" meet: the method, the
+// Content-Type and the top-level keys of the body are all written here as
+// **enumerations**, and the content-script side (lib/backfill/tab-port.ts's
+// checkBackfillRequest) compares against them one by one.
 //
-// 为什么闭集必须长在 plan 上、而不是长在消息里：
-// 消息是「谁来问」，plan 是「我们自己写过什么」。只有后者能当白名单 ——
-// 白名单如果来自请求本身，那就不是白名单，是自证。
+// Why the closed set has to live on the plan and not in the message: a message
+// is "who is asking", a plan is "what we ourselves have written". Only the
+// latter can serve as an allowlist — an allowlist that comes from the request
+// itself is not an allowlist, it is self-certification.
 // ---------------------------------------------------------------------------
 
-/** 🔴 允许的 HTTP 方法。**闭集**，只有这两个。 */
+/** 🔴 The permitted HTTP methods. A **closed set** of exactly these two. */
 export const ALLOWED_BACKFILL_METHODS = ['GET', 'POST'] as const;
 export type BackfillMethod = (typeof ALLOWED_BACKFILL_METHODS)[number];
 
-/** 🔴 允许的请求 Content-Type。**闭集**，只有一个。 */
+/** 🔴 The permitted request Content-Types. A **closed set** of exactly one. */
 export const ALLOWED_BACKFILL_CONTENT_TYPES = ['application/json'] as const;
 export type BackfillContentType = (typeof ALLOWED_BACKFILL_CONTENT_TYPES)[number];
 
 /**
- * 🔴 请求 body 的字节上限。回溯腿的 body 只可能是「翻页游标 / 会话 id」这种
- * 几十字节的东西；给到 4 KiB 已经宽得离谱。这条线不是为了省流量，
- * 是为了让「借这个通道往外送东西」在体量上先不成立。
+ * 🔴 The byte ceiling for a request body. A backfill body can only ever be
+ * something like "a page cursor / a conversation id", tens of bytes; 4 KiB is
+ * already absurdly generous. This line is not about saving bandwidth, it is
+ * about making "use this channel to ship something out" not hold up
+ * volumetrically in the first place.
  */
 export const MAX_REQUEST_BODY_BYTES = 4096;
 
-/** 一次回溯请求除 URL 之外的全部可变量。省略 = GET 且无 body。 */
+/** Everything variable about one backfill request besides the URL. Omitted = GET with no body. */
 export interface BackfillRequestInit {
   method: BackfillMethod;
-  /** 只有 POST 段才允许有；且必须过 bodyKeys 闭集校验。 */
+  /** Only a POST segment may have one, and it must pass the bodyKeys closed-set check. */
   body?: string;
   contentType?: BackfillContentType;
 }
 
 /**
- * 🔴 某一段（列表 / 正文）是 POST 时，必须一次性声明清楚的三件事。
- * 缺任意一项就不是一条合法的 POST 声明 —— 也就发不出去。
+ * 🔴 The three things that must be declared at once when a segment (list /
+ * detail) is a POST. Missing any one of them means it is not a legal POST
+ * declaration — and therefore cannot be sent.
  */
 export interface BackfillPostSpec<Args extends unknown[]> {
   contentType: BackfillContentType;
   /**
-   * 🔴 body 顶层允许出现的键。**闭集。**
-   * 内容脚本会 JSON.parse 收到的 body，逐个顶层键比对：
-   * 多出一个键就整条拒发。值只允许 string / number / boolean / null
-   * —— 不许嵌套对象或数组，免得「一个闭集的键」底下挂一整棵任意结构。
+   * 🔴 The top-level keys the body may contain. **A closed set.**
+   * The content script JSON.parses the body it received and compares top-level
+   * keys one by one: one extra key rejects the whole request. Values may only be
+   * string / number / boolean / null — no nested objects or arrays, so that "a
+   * closed set of keys" cannot have an arbitrary tree hanging under it.
    */
   bodyKeys: readonly string[];
-  /** 我们【自己】构造 body 的那个函数。生产路径上 body 只可能出自这里。 */
+  /** The function that builds the body **ourselves**. On the production path the body can only come from here. */
   body(...args: Args): string;
 }
 
-/** 列表段的 POST 声明形状。 */
+/** The shape of the list segment's POST declaration. */
 export type ListPostSpec = BackfillPostSpec<[origin: string, offset: number, limit: number]>;
-/** 正文段的 POST 声明形状。 */
+/** The shape of the detail segment's POST declaration. */
 export type DetailPostSpec = BackfillPostSpec<[origin: string, conversationId: string]>;
 
 export type BackfillSegment = 'list' | 'detail';
 
 /**
- * 正文解析器的结果。'non-empty' 不是一个要落盘的结局，只是表示继续走现有
- * sink；两个 detail-empty-* 才是 C28 要求可观察、可落盘的具名值。
+ * The result of a body parser. 'non-empty' is not an outcome to persist, it just
+ * means carrying on into the existing sink; the two detail-empty-* values are
+ * the named, observable, persistable ones C28 requires.
  */
 export type DetailParseResult =
   | { ok: true; outcome: 'non-empty' }
@@ -173,109 +210,133 @@ export type DetailParseResult =
   | { ok: false; detail: string };
 
 /**
- * 🔴 回溯一个平台所需的【最小声明集】。填满这七项就能被回溯；缺一项就不能。
- * 加一个平台 = 加一条这个结构，不需要动 engine 一行。
+ * 🔴 The **minimal declaration set** needed to backfill a platform. Fill in all
+ * seven and it can be backfilled; miss one and it cannot.
+ * Adding a platform = adding one of these structures, with no engine change.
  */
 export interface BackfillEnumPlan {
-  /** 必须逐字等于 lib/contract.ts 平台表里的 id。 */
+  /** Must equal the id in lib/contract.ts's platform table, character for character. */
   platform: string;
-  /** 1 · 列表入口（路径，用来给内容脚本做白名单比对，必须是精确路径）。 */
+  /** 1 · The list endpoint (a path, used for the content script's allowlist comparison; must be exact). */
   listPath: string;
   /**
-   * 2 · 分页方式（URL 部分）。
-   * 🔴 C23：**不再等于「只能 GET」**。省略 listPost ⇒ 这一段是 GET，
-   *    翻页参数全在 query 里（ChatGPT 就是这样，行为一个字不变）；
-   *    声明了 listPost ⇒ 这一段是 POST，翻页参数在 body 里，这里只给路由。
+   * 2 · The paging scheme (the URL part).
+   * 🔴 C23: this is **no longer the same as "GET only"**. Omitting listPost ⇒
+   *    this segment is a GET and the paging parameters are all in the query
+   *    (which is how ChatGPT works, byte for byte unchanged); declaring listPost
+   *    ⇒ this segment is a POST, the paging parameters are in the body, and this
+   *    function only supplies the route.
    */
   listUrl(origin: string, offset: number, limit: number): string;
-  /** 2b · 🔴 C23 新增（可选）。声明了就代表列表段用 POST 发。 */
+  /** 2b · 🔴 New in C23 (optional). Declaring it means the list segment is sent as a POST. */
   listPost?: ListPostSpec;
   /**
-   * 2c · 🔴 C26 新增（可选）· **游标式翻页**。
+   * 2c · 🔴 New in C26 (optional) · **cursor paging**.
    *
-   * 声明了它就代表这个平台【不是 offset 翻页】：下一页要从上一页的内容里读出一个游标
-   * （DeepSeek 是 `before_seq_id` = 上一页里最小的 `seq_id`）。engine 于是走游标那条分支，
-   * listUrl 在这条分支上【一次都不会被调用】—— 但接口仍然要求填 listUrl，
-   * 因为它同时是「offset 语义下这个平台长什么样」的书面记录，也是 back-compat 的落点。
+   * Declaring it means this platform does **not** page by offset: the next page
+   * needs a cursor read out of the previous page's content (for DeepSeek that is
+   * `before_seq_id` = the smallest `seq_id` on the previous page). The engine then
+   * takes the cursor branch, and on that branch listUrl is **never called** — but
+   * the interface still requires it, because it is simultaneously the written
+   * record of "what this platform looks like under offset semantics" and the
+   * back-compat landing place.
    *
-   * cursor === null ⇒ 第一页（还没有游标）。
+   * cursor === null ⇒ the first page (no cursor yet).
    */
   listCursorUrl?(origin: string, cursor: number | null, limit: number): string;
-  /** 3 · 列表响应的形状判据。不认识就返回 {ok:false}，engine 会 halt 留痕。 */
+  /** 3 · The shape test for the list response. Unrecognised ⇒ {ok:false}, and the engine halts with a trace. */
   parseListPage(text: string): ParseResult;
   /**
-   * 4 · 正文入口（路径前缀）。
-   * 🔴 C26：允许为 **null** —— 「列表段有出处、正文段还没有」是一个真实存在的中间态
-   *    （DeepSeek 就是），它必须能被写出来，而不是逼着人去编一个正文路由。
-   *    null ⇒ 内容脚本不会为这个平台放行任何正文 URL（tab-port.ts 的第 4 条），
-   *    engine 也会在发出任何一条正文请求【之前】halt('detail-unsupported')。
+   * 4 · The body endpoint (path prefix).
+   * 🔴 C26: **null is allowed** — "the list segment is sourced, the body segment
+   *    is not" is a real intermediate state (DeepSeek is in it), and it must be
+   *    writable rather than forcing someone to invent a body route.
+   *    null ⇒ the content script allows no body URL for this platform (rule 4 of
+   *    tab-port.ts), and the engine halts with 'detail-unsupported' **before
+   *    issuing a single body request**.
    */
   detailPath: string | null;
-  /** 5 · 会话 id → 正文 URL。🔴 C26：与 detailPath 同生共死，要么都有，要么都是 null。 */
+  /** 5 · conversation id → body URL. 🔴 C26: lives and dies with detailPath — either both or neither. */
   detailUrl: ((origin: string, conversationId: string) => string) | null;
-  /** 5b · 🔴 C23 新增（可选）。声明了就代表正文段用 POST 发。 */
+  /** 5b · 🔴 New in C23 (optional). Declaring it means the body segment is sent as a POST. */
   detailPost?: DetailPostSpec;
   /**
-   * 🔴 C28 · 可选的正文内容判定钩子；不声明就保持现有行为。
+   * 🔴 C28 · An optional hook deciding whether a body's content is real; not
+   * declared keeps the existing behaviour.
    *
-   * 这不是正文 URL 或白名单声明，生产 plan 目前一个也没有接上。等某个平台的
-   * 正文段真正有出处时，在这里（最终由 engine.ts 的正文循环调用）区分：
-   *   · HTTP 成功但内容为空 ⇒ detail-empty-unverified，停下且不清 pending；
-   *   · 有可靠证据证明合法空会话 ⇒ detail-empty-confirmed，才可按完成处理。
+   * This is not a body-URL or allowlist declaration, and no production plan
+   * connects one yet. When some platform's body segment really has a source, this
+   * is where (ultimately called by the body loop in engine.ts) to distinguish:
+   *   · HTTP succeeded but the content is empty ⇒ detail-empty-unverified, stop
+   *     and leave pending untouched;
+   *   · reliable evidence that an empty conversation is legitimate ⇒
+   *     detail-empty-confirmed, only then may it be treated as complete.
    *
-   * 🔴 已知有一个来源观察到 DeepSeek「二次访问同一会话时返回空」，但两源对
-   * 那个字段的写法冲突（`cacheControl` / `cache_control`），所以字段名本身
-   * 被判为未找到：这里不读取它，也不把任一拼法写成已知契约。若将来拿到原始
-   * payload，应在这个 parser 的实现处加判断；engine.ts 的接入点是
-   * `runBackfill` 正文循环中 `matchesResponseShape` 之后、构造 `CapturedFetch`
-   * 之前。到那时仍须保留 detailPath/detailUrl 的出处与白名单边界。
+   * 🔴 One source is known to have observed DeepSeek "returning empty on a second
+   * visit to the same conversation", but two sources disagree on how that field
+   * is spelled (`cacheControl` / `cache_control`), so the field name itself is
+   * judged not found: it is not read here, and neither spelling is written down
+   * as a known contract. If the raw payload becomes available later, the check
+   * belongs in this parser's implementation; the engine.ts hook point is in
+   * `runBackfill`'s body loop after `matchesResponseShape` and before building
+   * the `CapturedFetch`. Even then, detailPath/detailUrl's provenance and the
+   * allowlist boundary must be kept.
    */
   parseDetailPage?: (text: string) => DetailParseResult;
   /**
-   * 6b · 🔴 C26（可选）· 这条 plan **只覆盖了一半**时，缺的那一半写在这里。
-   * 口径与 UnsupportedBackfill 完全一致（missing + 给用户的一句人话），
-   * 因为它回答的是同一个问题：「你到底还有哪儿不会」。
-   * 没有这个字段 = 这条 plan 是完整的（列表 + 正文都能走）。
+   * 6b · 🔴 C26 (optional) · When this plan **covers only half** the job, the
+   * missing half is written here. The standard is identical to
+   * UnsupportedBackfill (missing + one plain sentence for the user), because it
+   * answers the same question: "what exactly do you still not know how to do?"
+   * No such field = this plan is complete (both list and body work).
    */
   partial?: PartialBackfill;
-  /** 7 · 出处。口径与 contract.ts 的 credibility 注释一致。 */
+  /** 7 · Provenance. Same standard as the credibility note in contract.ts. */
   provenance: string;
 }
 
-/** 🔴 C26 · 「列表能列、正文还取不到」这种半条腿的显式记录。 */
+/** 🔴 C26 · The explicit record of a half leg: "the list can be listed, the bodies cannot be fetched yet". */
 export interface PartialBackfill {
-  /** 还缺哪几项（对应上面那七项之一）。 */
+  /** What is still missing (one of the seven items above). */
   missing: readonly string[];
-  /** 给用户看的一句话。不含技术黑话，也不许暗示「它在补」。 */
-  userNote: string;
+  /**
+   * Catalog key for the one sentence shown to the user (see locales/en.yml).
+   * 🔴 A key, not the sentence: this table is built once at module load, while
+   *    the popup may render in either language, so the wording has to be resolved
+   *    at paint time. No jargon, and it must not hint that the platform is being
+   *    backfilled right now.
+   */
+  userNoteKey: string;
 }
 
 /**
- * 🔴 「这个平台暂时回溯不了」的**显式记录**。
+ * 🔴 The **explicit record** of "this platform cannot be backfilled for now".
  *
- * 为什么必须是一条数据而不是「表里没有它」：
- * 「没有历史」和「我们还不会读你的历史」对用户是完全不同的两件事。
- * 前者是枚举出 0 条，后者必须是一句「还没支持」。没有这条记录，
- * 两者在 UI 上会长得一模一样。
+ * Why it must be a piece of data rather than "it is not in the table":
+ * "there is no history" and "we do not know how to read your history yet" are
+ * completely different things to a user. The first is enumerating 0 rows; the
+ * second must be a sentence saying "not supported yet". Without this record the
+ * two look identical in the UI.
  */
 export interface UnsupportedBackfill {
   platform: string;
-  /** 已经有出处的部分。可能是空数组（= 什么都没查到）。 */
+  /** The part that already has a source. May be an empty array (= nothing found). */
   known: readonly string[];
-  /** 🔴 还缺哪几项。缺任意一项就填不了 —— 每一项都对应上面那七项之一。 */
+  /** 🔴 What is still missing. Any one of them missing means it cannot be filled in — each corresponds to one of the seven items above. */
   missing: readonly string[];
-  /** 给用户看的一句话（Popup 用）。不含技术黑话，也不许暗示「它在补」。 */
-  userNote: string;
+  /** Catalog key for the one sentence shown to the user (the popup uses it). Same rule as PartialBackfill.userNoteKey. */
+  userNoteKey: string;
 }
 
 // ---------------------------------------------------------------------------
-// 列表解析器
+// List parsers
 // ---------------------------------------------------------------------------
 
 /**
- * 解析一页会话列表（ChatGPT 形状）。
- * 严格：items 必须是数组、每个元素必须有 string 的 id；
- * total 只有是非负整数时才认，否则 total = null（⇒ 进度走「总数未知」分支）。
+ * Parse one page of a conversation list (ChatGPT shape).
+ * Strict: `items` must be an array and every element must have a string `id`;
+ * `total` is only accepted when it is a non-negative integer, otherwise
+ * total = null (⇒ progress takes the "total unknown" branch).
  */
 export function parseConversationListPage(text: string): ParseResult {
   let body: unknown;
@@ -310,29 +371,39 @@ export function parseConversationListPage(text: string): ParseResult {
 }
 
 /**
- * 解析一页 DeepSeek 会话列表。
+ * Parse one page of a DeepSeek conversation list.
  *
- * ## 🔴 这个函数是「带着『它可能是错的』去写」的落点
- * 下面认的那几个字段名不是官方文档，是 R25 从**四个互不相干的开源实现**里交叉出来的
- * （出处见 DEEPSEEK_PLAN.provenance）。逆向来的形状随时可能被平台改掉。
- * 所以每一处「读不到」都必须落到一个**具名的、不同于「空」的**结局上：
+ * ## 🔴 This function is where "written knowing it might be wrong" lives
+ * The field names recognised below are not from official documentation; they are
+ * the cross-check of **four independent open-source implementations** by R25
+ * (provenance on DEEPSEEK_PLAN.provenance). A reverse-engineered shape can be
+ * changed by the platform at any time.
+ * So every "cannot read it" must land on a **named outcome different from
+ * "empty"**:
  *
- *  · 读不到 `data.biz_data.chat_sessions` ⇒ `{ok:false}` ⇒ engine halt('shape-changed')。
- *    🔴 **绝不返回 `{ok:true, ids:[]}`** —— 那会让回溯腿以为「这个用户没有会话」，
- *    把 enumCursor 标成 complete，然后安安静静地宣布自己干完了。
- *    「接口变了」和「你没有历史」对用户是完全不同的两句话。
- *  · 读不到 `seq_id` ⇒ 形状还认得，只是**翻不了页** ⇒ nextCursor=null，
- *    engine 停在这一页并记 truncated='cursor-missing'（≠ 枚举完）。
- *  · 读不到 `has_more` ⇒ hasMore=undefined，engine 记 'has-more-missing' 后停，
- *    同样【不许】当成「没有下一页」。
+ *  · cannot read `data.biz_data.chat_sessions` ⇒ `{ok:false}` ⇒ engine
+ *    halt('shape-changed').
+ *    🔴 **Never return `{ok:true, ids:[]}`** — that would make the backfill leg
+ *    believe "this user has no conversations", mark enumCursor complete, and then
+ *    quietly announce it had finished.
+ *    "The API changed" and "you have no history" are completely different
+ *    sentences to a user.
+ *  · cannot read `seq_id` ⇒ the shape is still recognised, it simply **cannot
+ *    page** ⇒ nextCursor=null, the engine stops at this page and records
+ *    truncated='cursor-missing' (≠ enumeration finished).
+ *  · cannot read `has_more` ⇒ hasMore=undefined, the engine records
+ *    'has-more-missing' and stops, likewise **never** treating it as "no next page".
  *
- * ## `updated_at` 是**数值**，不是 ISO 串
- * 三个源都显示它是数值型时间戳。所以这里：
- *  · 是有限数值 ⇒ 原样收下（不 new Date、不换算单位、不猜秒还是毫秒）；
- *  · **存在但不是数值**（例如变成了 ISO 串）⇒ 直接判 `{ok:false}`。
- *    这一条是故意的：字段类型变了就是 wire 形状变了，与其用 `new Date(string)`
- *    把它「宽容」过去，不如当场停下留痕。
- *  · 整个字段缺席 ⇒ 容忍（枚举并不需要它），newestUpdatedAt=null。
+ * ## `updated_at` is a **number**, not an ISO string
+ * All three sources show it is a numeric timestamp. So here:
+ *  · a finite number ⇒ taken as-is (no new Date, no unit conversion, no guessing
+ *    seconds vs milliseconds);
+ *  · **present but not a number** (say it turned into an ISO string) ⇒ judged
+ *    `{ok:false}` immediately. That is deliberate: the field's type changing means
+ *    the wire shape changed, and stopping on the spot to leave a trace beats
+ *    "being lenient" with `new Date(string)`.
+ *  · the whole field absent ⇒ tolerated (enumeration does not need it),
+ *    newestUpdatedAt=null.
  */
 export function parseDeepSeekListPage(text: string): ParseResult {
   let body: unknown;
@@ -344,7 +415,8 @@ export function parseDeepSeekListPage(text: string): ParseResult {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { ok: false, detail: 'deepseek list response is not a JSON object' };
   }
-  // 信封：data.biz_data（5 源一致）。🔴 顶层业务码（code / biz_code）两源打架，**不看它**。
+  // Envelope: data.biz_data (5 sources agree). 🔴 The top-level business code
+  // (code / biz_code) has two sources in conflict, so **it is not read**.
   const data = (body as Record<string, unknown>).data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { ok: false, detail: 'deepseek list response has no `data` object (envelope changed?)' };
@@ -356,7 +428,8 @@ export function parseDeepSeekListPage(text: string): ParseResult {
   const bizRecord = biz as Record<string, unknown>;
   const sessions = bizRecord.chat_sessions;
   if (!Array.isArray(sessions)) {
-    // 🔴 就是这一行在守「不能把未知当成空」：没有这个数组 = 形状变了，不是没有会话。
+    // 🔴 This is the line that guards "do not record an unknown as empty":
+    //    no such array = the shape changed, not "there are no conversations".
     return { ok: false, detail: 'deepseek list response has no `data.biz_data.chat_sessions` array (shape changed?)' };
   }
 
@@ -380,7 +453,8 @@ export function parseDeepSeekListPage(text: string): ParseResult {
     if (typeof seqId === 'number' && Number.isFinite(seqId)) {
       minSeqId = minSeqId === null ? seqId : Math.min(minSeqId, seqId);
     } else {
-      // 🔴 有一条读不出游标，整页的游标就不可信了：宁可停，不许翻错页漏掉会话。
+      // 🔴 One unreadable cursor makes the whole page's cursor untrustworthy:
+      //    better to stop than to page wrong and skip conversations.
       seqIdMissing = true;
     }
 
@@ -401,8 +475,9 @@ export function parseDeepSeekListPage(text: string): ParseResult {
     ok: true,
     page: {
       ids,
-      // 🔴 DeepSeek 的列表响应里**没有**总数字段的出处 ⇒ total 恒 null ⇒
-      //    进度那边走「总数未知」分支，绝不显示百分比。不许拿 ids.length 冒充分母。
+      // 🔴 There is **no** source for a total field in DeepSeek's list response
+      //    ⇒ total is always null ⇒ progress takes the "total unknown" branch and
+      //    never shows a percentage. ids.length must not be passed off as a denominator.
       total: null,
       nextCursor: seqIdMissing ? null : minSeqId,
       hasMore: typeof rawHasMore === 'boolean' ? rawHasMore : undefined,
@@ -412,17 +487,19 @@ export function parseDeepSeekListPage(text: string): ParseResult {
 }
 
 /**
- * 解析一页 Perplexity 会话列表。
+ * Parse one page of a Perplexity conversation list.
  *
- * 🔴 R26 的三条独立来源都把这个接口当成「返回一个列表」来消费；本解析器
- * 只认顶层数组和数组项里的 `thread_id`，拿不到数组或会话 id 就报
- * `shape-changed`，绝不把未知响应折叠成空列表。total / has_more / count
- * 都没有出处，所以这里不会读取它们。
+ * 🔴 All three independent sources in R26 consume this endpoint as "returns a
+ * list"; this parser recognises only a top-level array and the `thread_id`
+ * inside each element. No array or no conversation id ⇒ `shape-changed`; an
+ * unknown response is never folded into an empty list. total / has_more / count
+ * have no source, so they are not read here.
  *
- * 🔴 这里故意不读取任何时间字段。R26 的三个来源对时间字段名互相冲突：
- * `last_query_datetime` 只有单源，`inserted_at || created_at || new Date()`
- * 是作者自己的三重猜测，第三个来源根本不取时间；没有名字达到两个独立来源，
- * 所以一个也不写进解析器。
+ * 🔴 No time field is read here, deliberately. R26's three sources conflict on
+ * the time field's name: `last_query_datetime` has a single source,
+ * `inserted_at || created_at || new Date()` is the author's own three-way guess,
+ * and the third source does not read a time at all; no name reaches two
+ * independent sources, so not one of them is written into the parser.
  */
 export function parsePerplexityListPage(text: string): ParseResult {
   let body: unknown;
@@ -450,10 +527,10 @@ export function parsePerplexityListPage(text: string): ParseResult {
 }
 
 // ---------------------------------------------------------------------------
-// 能回溯的平台
+// Platforms that can be backfilled
 // ---------------------------------------------------------------------------
 
-/** ChatGPT 的正文 URL 构造器。抽成常量只是为了 back-compat 的 detailUrl() 能复用它。 */
+/** ChatGPT's body URL builder. Pulled out as a constant only so the back-compat detailUrl() can reuse it. */
 const chatgptDetailUrl = (origin: string, id: string): string =>
   `${origin}${CHATGPT_DETAIL_PATH}${encodeURIComponent(id)}`;
 
@@ -465,126 +542,153 @@ export const CHATGPT_PLAN: BackfillEnumPlan = {
   parseListPage: parseConversationListPage,
   detailPath: CHATGPT_DETAIL_PATH,
   detailUrl: chatgptDetailUrl,
-  // 出处：**没有外部出处**。这一套是 C11 交给上一位 worker 的「已查到的事实」，
-  // 当时就没有复核，本任务也没有复核（禁止联网、无登录态）。
-  // 所以它的可信度等级是【待验证假设】，不是 'from-source'。
-  // 之所以仍然保留为「能回溯」，是因为它已经带着完整的七项声明 + 形状判据：
-  // 假设错了会立刻 halt('shape-changed') 留痕，不会变成假进度。
+  // Provenance: **no external source**. This set is the "facts already researched"
+  // handed to the previous worker by C11; it was not re-reviewed then, and this
+  // change did not re-review it either (no network, no logged-in session).
+  // So its credibility level is [unverified assumption], not 'from-source'.
+  // It is still kept as "backfillable" because it already carries the full
+  // seven-item declaration plus a shape test: a wrong assumption halts
+  // ('shape-changed') with a trace immediately, and never becomes fake progress.
   provenance:
     'unverified-assumption · GET /backend-api/conversations?offset=&limit= with {items[].id, total};'
-    + ' 无外部源码出处，未做真实端到端验证（本任务禁止联网与登录态）',
+    + ' no external source-code provenance, no real end-to-end verification'
+    + ' (this change forbids network access and a logged-in session)',
 };
 
 export const DEEPSEEK_LIST_PATH = '/api/v0/chat_session/fetch_page';
 
 /**
- * 🔴 C26 · DeepSeek 的会话列表。**只有列表段**；正文段仍然没有出处（见 partial）。
+ * 🔴 C26 · DeepSeek's conversation list. **The list segment only**; the body
+ * segment still has no source (see `partial`).
  *
- * ## 这一格是怎么从「未知」变成「有出处」的
- * C22 时这里写着「分页参数名与请求方法未知，我没有出处」。R25 调研单（2026-08-17）
- * 把出处补上了，且**每一项都是多源交叉**、不是单源孤证：
+ * ## How this cell went from "unknown" to "sourced"
+ * Under C22 this said "the paging parameter names and the request method are
+ * unknown, I have no source". Research ticket R25 (2026-08-17) supplied the
+ * sources, and **every one of them is a multi-source cross-check**, not a single
+ * witness:
  *
- *   列表接口   GET https://chat.deepseek.com/api/v0/chat_session/fetch_page  · 4 源
- *   每页条数   count                                                          · 2 源
- *   翻页游标   before_seq_id，值 = 上一页里【最小】的 seq_id                   · 2 源（取法一致）
- *   响应信封   data.biz_data                                                  · 5 源
- *   列表数组   biz_data.chat_sessions                                         · 4 源
- *   还有下页   biz_data.has_more（boolean，与数组同级）                        · 3 源
- *   记录·id    id                                                             · 3 源
- *   记录·标题  title                                                          · 2 源
- *   记录·时间  updated_at 🔴 数值型时间戳，不是 ISO 串                          · 3 源
- *   记录·游标  seq_id（数值）                                                  · 2 源
+ *   list endpoint   GET https://chat.deepseek.com/api/v0/chat_session/fetch_page  · 4 sources
+ *   page size       count                                                        · 2 sources
+ *   page cursor     before_seq_id, value = the **smallest** seq_id on the previous page · 2 sources (same derivation)
+ *   response env.   data.biz_data                                                · 5 sources
+ *   list array      biz_data.chat_sessions                                       · 4 sources
+ *   has next page   biz_data.has_more (boolean, sibling of the array)            · 3 sources
+ *   record · id     id                                                           · 3 sources
+ *   record · title  title                                                        · 2 sources
+ *   record · time   updated_at 🔴 a numeric timestamp, not an ISO string          · 3 sources
+ *   record · cursor seq_id (numeric)                                             · 2 sources
  *
- * 其中路由这一条与本仓库 lib/contract.ts:90-96 已登记的 from-source 证据
- *（deepseek-pp，Apache-2.0，commit 0a02c72b…，2026-08-14）互相印证。
+ * The route among these corroborates the from-source evidence already registered
+ * at lib/contract.ts:90-96 (deepseek-pp, Apache-2.0, commit 0a02c72b…, 2026-08-14).
  *
- * ## 🔴 同样重要：**没有**出处的东西一个都没写进来
- *  · `count` 的服务端上限/默认值 —— 未找到 ⇒ 这里只发我们自己选的 DEFAULT_LIST_LIMIT，
- *    **绝不把 200 之类的数字当成上限写死**，也绝不假设「返回条数 < count ⇒ 最后一页」
- *    （那是拿未知当已知）。是不是最后一页只认 has_more。
- *  · 完整响应字段清单 —— 没有任何一份公开的完整 JSON 样例 ⇒ 解析器只认它用得上的那几个键，
- *    多出来的键一律不管（不当成形状变了）。
- *  · pinned / inserted_at / title_type / model_type —— 单源或防御式写法 ⇒ 不读。
- *  · 顶层业务码叫 code 还是 biz_code —— 两源打架 ⇒ **不依赖**（parseDeepSeekListPage 里
- *    一次都没有读过它）。
- *  · lte_cursor.updated_at / lte_cursor.pinned —— 一源且与另两源矛盾 ⇒ 排除。
- *  · page / offset / cursor / limit / page_size —— 五个来源里一次都没出现 ⇒ 排除。
+ * ## 🔴 Just as important: **nothing** that lacks a source was written in
+ *  · `count`'s server-side maximum/default — not found ⇒ we only ever send our
+ *    own DEFAULT_LIST_LIMIT, and **never** hardcode a number like 200 as the
+ *    limit, and never assume "returned fewer than count ⇒ last page" (that would
+ *    be treating an unknown as a known). The only signal for "last page" is has_more.
+ *  · The complete response field list — no public complete JSON sample exists ⇒
+ *    the parser recognises only the keys it needs, and extra keys are ignored
+ *    (not treated as a shape change).
+ *  · pinned / inserted_at / title_type / model_type — single source or defensive
+ *    spelling ⇒ not read.
+ *  · Whether the top-level business code is called code or biz_code — two sources
+ *    conflict ⇒ **not depended on** (parseDeepSeekListPage never reads it once).
+ *  · lte_cursor.updated_at / lte_cursor.pinned — one source and contradicting the
+ *    other two ⇒ excluded.
+ *  · page / offset / cursor / limit / page_size — absent from all five sources ⇒ excluded.
  *
- * ## ⚠️ 时效与风险（照实写，不许粉饰）
- * 响应形状有 2026-08-17 的旁证；但**分页参数的实测证据最新只到 2025-12**，
- * 且那位作者提到 DeepSeek 已上线原生会话搜索 ⇒ 这个接口最近很可能动过。
- * 因此本 plan 的可信度是【多源交叉的逆向结论】，不是官方契约：
- * 猜错的后果被压在 parseDeepSeekListPage 的三条具名结局里
- *（shape-changed / cursor-missing / has-more-missing），不会变成假进度。
+ * ## ⚠️ Staleness and risk (written as it is, not dressed up)
+ * The response shape has circumstantial evidence dated 2026-08-17; but **the
+ * newest measured evidence for the paging parameters only goes to 2025-12**, and
+ * that author mentions DeepSeek having shipped native conversation search ⇒ this
+ * endpoint has very likely moved recently.
+ * So this plan's credibility is [a multi-source reverse-engineered conclusion],
+ * not an official contract: the consequences of being wrong are contained by
+ * parseDeepSeekListPage's three named outcomes
+ * (shape-changed / cursor-missing / has-more-missing), and never become fake progress.
  */
 export const DEEPSEEK_PLAN: BackfillEnumPlan = {
   platform: 'deepseek',
   listPath: DEEPSEEK_LIST_PATH,
-  // 🔴 offset 语义在 DeepSeek 上【不成立】（page/offset/limit 五源皆无）。
-  //    这里仍然给出一个 listUrl 是因为接口要求它必填，但 engine 走的是 listCursorUrl
-  //    那条分支（声明了 listCursorUrl ⇒ 游标翻页），listUrl 一次都不会被调用。
-  //    它只发第一页 —— 万一将来有人误用，拿到的也是「第一页」这个安全的东西，
-  //    而不是一个我们编出来的 offset 参数。
+  // 🔴 Offset semantics **do not hold** on DeepSeek (page/offset/limit absent from
+  //    all five sources). A listUrl is still given because the interface requires
+  //    it, but the engine takes the listCursorUrl branch (declaring listCursorUrl
+  //    ⇒ cursor paging) and listUrl is never called.
+  //    It only fetches the first page — so if someone misuses it in future, what
+  //    they get is the safe thing ("the first page"), not an invented offset parameter.
   listUrl: (origin, _offset, limit) => `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}`,
   listCursorUrl: (origin, cursor, limit) =>
     cursor === null
       ? `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}`
       : `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}&before_seq_id=${cursor}`,
   parseListPage: parseDeepSeekListPage,
-  // 🔴 正文段：**没有出处，所以是 null**，不是「先随便填一个」。
-  //    详见 partial.missing。
+  // 🔴 The body segment: **no source, so null** — not "fill in anything for now".
+  //    See partial.missing.
   detailPath: null,
   detailUrl: null,
   partial: {
     missing: [
-      'detailPath / detailUrl：取【单条会话正文】的路由与参数没有多源出处。'
-      + '仓库内 lib/contract.ts:90-96 记过 /api/v0/chat/history_messages 这个名字，'
-      + '但它要哪些参数、正文是不是也要翻页（翻页参数又叫什么）都没有出处 —— '
-      + '猜一个的后果不是报错，而是每条对话只存下前几轮、用户还以为存全了。',
+      'detailPath / detailUrl: the route and parameters for fetching a SINGLE '
+      + 'conversation body have no multi-source provenance. lib/contract.ts:90-96 '
+      + 'in this repository records the name /api/v0/chat/history_messages, but '
+      + 'which parameters it needs, and whether the body also pages (and what that '
+      + 'paging parameter is called), have no source — and the consequence of '
+      + 'guessing is not an error but every conversation storing only its first few '
+      + 'turns while the user believes it is complete.',
     ],
-    userNote:
-      'DeepSeek：还不能回溯历史正文。已经能列出你的历史会话了，'
-      + '但还不会去取每条会话的内容，所以暂时一条也不会存下来。',
+    userNoteKey: 'platformNote.deepseek.partial',
   },
   provenance:
-    'cross-source reverse-engineering (R25 调研单, 2026-08-17；四个互不相干的开源实现交叉一致) · '
-    + 'GET /api/v0/chat_session/fetch_page?count=&before_seq_id= · 4 源；'
-    + 'count 2 源；before_seq_id(=上一页最小 seq_id) 2 源；data.biz_data 5 源；'
-    + 'chat_sessions 4 源；has_more 3 源；id 3 源；seq_id 2 源；updated_at(数值) 3 源。'
-    + '路由与 lib/contract.ts:90-96 的 from-source 证据（deepseek-pp, Apache-2.0, '
-    + 'commit 0a02c72b135bf2936e11aa78fd6136931ed65908, 2026-08-14）互相印证。'
-    + '🔴 非官方文档；分页参数的实测证据最新只到 2025-12，接口可能已改动。'
-    + '本任务未做任何真实端到端验证（禁止联网与登录态）。',
+    'cross-source reverse-engineering (research ticket R25, 2026-08-17; four mutually '
+    + 'independent open-source implementations agreeing) · '
+    + 'GET /api/v0/chat_session/fetch_page?count=&before_seq_id= · 4 sources; '
+    + 'count 2 sources; before_seq_id (= smallest seq_id on the previous page) 2 sources; '
+    + 'data.biz_data 5 sources; chat_sessions 4 sources; has_more 3 sources; id 3 sources; '
+    + 'seq_id 2 sources; updated_at (numeric) 3 sources. '
+    + 'The route corroborates the from-source evidence at lib/contract.ts:90-96 '
+    + '(deepseek-pp, Apache-2.0, commit 0a02c72b135bf2936e11aa78fd6136931ed65908, 2026-08-14). '
+    + '🔴 Not official documentation; the newest measured evidence for the paging '
+    + 'parameters only goes to 2025-12, so the endpoint may have changed. '
+    + 'No real end-to-end verification was done by this change (network access and a '
+    + 'logged-in session are forbidden).',
 };
 
 export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
 
 /**
- * 🔴 C27 · Perplexity 的会话列表。**只有列表段**；正文段仍然没有出处。
+ * 🔴 C27 · Perplexity's conversation list. **The list segment only**; the body
+ * segment still has no source.
  *
- * 请求事实（R26 调研，2026-08-17；本任务不联网、不登录、不对 perplexity.ai
- * 发请求）逐项保留独立来源数：
- *   POST /rest/thread/list_ask_threads?version=2.18&source=default  · 3 源
- *   body.limit（每页条数）                                               · 3 源
- *   body.offset（整数偏移；客户端 offset += limit）                      · 3 源
- *   body.ascending=false                                                  · 3 源
- *   body.search_term=""                                                   · 3 源
+ * Request facts (R26 research, 2026-08-17; this change does not go online, does
+ * not log in, and sends no request to perplexity.ai), each with its independent
+ * source count:
+ *   POST /rest/thread/list_ask_threads?version=2.18&source=default  · 3 sources
+ *   body.limit (page size)                                          · 3 sources
+ *   body.offset (an integer offset; the client does offset += limit) · 3 sources
+ *   body.ascending=false                                            · 3 sources
+ *   body.search_term=""                                             · 3 sources
  *
- * 🔴 三源都没有读取 total / has_more / count；也没有可靠的时间字段名。
- * 因此 engine 只能把空页和短页当作两种**客户端推断**的停点，不能写成接口
- * 明确说「到底了」。它们分别落到 empty-page-inferred / short-page-inferred，
- * 并且 complete 保持 false；如果哪天确认响应里其实有终止字段，改动点就是
- * engine.ts 枚举分支里 Perplexity 的这两个长度判断：改为读取该字段，并只在
- * 字段明确为 false 时把 state.enumCursor.complete 置为 true。
+ * 🔴 None of the three sources reads total / has_more / count, and none supplies a
+ * reliable time field name. So the engine can only treat an empty page and a short
+ * page as two **client-inferred** stopping points, and must not write them as the
+ * API clearly saying "that is the end". They land on empty-page-inferred /
+ * short-page-inferred respectively, and `complete` stays false; if it is ever
+ * confirmed that the response does carry a termination field, the change is in
+ * the engine's enumeration branch, at these two Perplexity length checks: read
+ * that field, and set state.enumCursor.complete to true only when it is
+ * explicitly false.
  *
- * 🔴 通道 B（GraphQL）需要随前端发版变化的 sha256 持久化查询哈希，没有公开
- * 稳定值，所以不走；Space / Collection 的 threads 路由只有路径，没有参数与
- * 响应出处，本单也不做。正文段没有出处，detailPath/detailUrl 必须保持 null。
+ * 🔴 Channel B (GraphQL) needs a sha256 persisted-query hash that changes with
+ * every front-end release and has no public stable value, so it is not used; the
+ * Space / Collection threads routes have only paths, no parameters and no
+ * response provenance, so they are not done either. The body segment has no
+ * source, so detailPath/detailUrl must stay null.
  */
 export const PERPLEXITY_PLAN: BackfillEnumPlan = {
   platform: 'perplexity',
   listPath: PERPLEXITY_LIST_PATH,
-  // 参数全在 JSON body；URL 只保留已查证的固定版本与来源 query。
+  // The parameters are all in the JSON body; the URL keeps only the verified
+  // fixed version and source query.
   listUrl: (origin) => `${origin}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`,
   listPost: {
     contentType: 'application/json',
@@ -597,113 +701,125 @@ export const PERPLEXITY_PLAN: BackfillEnumPlan = {
     }),
   },
   parseListPage: parsePerplexityListPage,
-  // 🔴 正文段：没有任何出处，本单不猜路径或参数。
+  // 🔴 Body segment: no source whatsoever, and this change guesses neither path nor parameters.
   detailPath: null,
   detailUrl: null,
   partial: {
     missing: [
-      'detailPath / detailUrl：单条 thread 的正文路由与参数本单没有任何出处；'
-      + '正文段不猜，所以 Perplexity 只进入 LIST_ONLY。',
+      'detailPath / detailUrl: this change has no source at all for the route and '
+      + 'parameters of a single thread\'s body; the body segment is not guessed, so '
+      + 'Perplexity only enters LIST_ONLY.',
     ],
-    userNote:
-      'Perplexity：还不能回溯历史正文。已经能列出你的历史会话了，'
-      + '但还不会去取每条会话的内容，所以暂时一条也不会存下来。',
+    userNoteKey: 'platformNote.perplexity.partial',
   },
   provenance:
-    'cross-source reverse-engineering (R26 调研, 2026-08-17；三个独立的「自己构造请求」实现逐字一致；'
-    + '非官方文档，未做真实端到端验证) · '
-    + 'POST /rest/thread/list_ask_threads?version=2.18&source=default：3 源；'
-    + 'body.limit：3 源；body.offset（客户端 offset += limit）：3 源；'
-    + 'body.ascending=false：3 源；body.search_term=""：3 源。'
-    + 'total / has_more / count：三源均未读取，不能当作接口字段；'
-    + 'GraphQL 通道需要无公开稳定值的 sha256 持久化查询哈希，未采用；'
-    + 'Space / Collection threads 只有路径没有参数与响应出处，未采用；'
-    + '单条正文段没有出处，detailPath/detailUrl 保持 null。',
+    'cross-source reverse-engineering (R26 research, 2026-08-17; three independent '
+    + '"build the request yourself" implementations agreeing character for character; '
+    + 'not official documentation, not verified end to end) · '
+    + 'POST /rest/thread/list_ask_threads?version=2.18&source=default: 3 sources; '
+    + 'body.limit: 3 sources; body.offset (client does offset += limit): 3 sources; '
+    + 'body.ascending=false: 3 sources; body.search_term="": 3 sources. '
+    + 'total / has_more / count: read by none of the three sources, so they cannot be '
+    + 'treated as API fields; the GraphQL channel needs a sha256 persisted-query hash '
+    + 'with no public stable value, so it is not used; the Space / Collection threads '
+    + 'routes have only paths and no parameters or response provenance, so they are not '
+    + 'used; the single-body segment has no source, so detailPath/detailUrl stay null.',
 };
 
 const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, PERPLEXITY_PLAN, CHATGPT_PLAN];
 
 // ---------------------------------------------------------------------------
-// 🔴 填不了 / 只能填一半的平台 —— 逐条写明缺什么
+// 🔴 Platforms that cannot be filled in, or only half filled in — each says what
+//    is missing
 //
-// 检索范围（诚实交代）：**只检索了本仓库内已经记录的出处**
-// （lib/contract.ts 各行的 external source evidence 注释，那是上几位 worker 在
-//  允许联网时留下的、带 commit / license / 日期的源码级引用）。
-// 🔴 本任务【明令禁止发起任何真实网络请求】，所以我没有做任何联网检索：
-//    没有打开 GitHub，没有打开任何平台页面，没有登录态。
-//    因此下面每一条 missing 的含义都是「**在允许的检索范围内未找到**」，
-//    而不是「不存在」—— 这两件事必须分开写。
+// Search scope (stated honestly): **only the provenance already recorded in this
+// repository** was searched (the external source evidence notes on the rows of
+// lib/contract.ts, left by earlier workers when network access was allowed, with
+// commit / license / date).
+// 🔴 This change **forbids issuing any real network request**, so no online search
+//    was done either: no GitHub, no platform page, no logged-in session.
+//    So every `missing` below means "**not found within the search scope
+//    available**", not "does not exist" — the two must be written separately.
 // ---------------------------------------------------------------------------
 
-// 🔴 C26 · deepseek 这一条【被移走了】，不是被删掉不管了：
-//    R25 调研单补齐了列表段的多源出处，所以它现在是 DEEPSEEK_PLAN 的一条 plan
-//    （列表段完整 + partial 里写明正文段仍然缺什么）。
-//    C22 定下的规矩没有松：平台表里每一行仍然恰好落在「有 plan」或「登记为暂时不能」
-//    其中一侧，tests/c22-enumplat.test.ts 仍然盯着。
+// 🔴 C26 · The deepseek row was **moved out**, not deleted and forgotten:
+//    research ticket R25 supplied the list segment's multi-source provenance, so
+//    it is now a plan on DEEPSEEK_PLAN (list segment complete + a partial that
+//    names what the body segment still lacks).
+//    The rule C22 set still holds: every row of the platform table lands on
+//    exactly one of "has a plan" / "registered as temporarily impossible", and
+//    tests/c22-enumplat.test.ts still watches it.
 export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
   {
     platform: 'claude',
     known: [
-      // lib/contract.ts:148-153 明确写了 conversation-LIST 路由是 '/chat_conversations'
-      // （不带尾斜杠那条），并在 176-184 记录了 claude-chat-exporter（MIT，
-      // commit 12da324dd158e9472251590d89d957fc767c0d85，2026-08-08）请求的是
-      // /api/organizations/<org>/chat_conversations/<uuid>。
-      'listPath 有出处：/api/organizations/<org>/chat_conversations（lib/contract.ts:148-153、176-184 转引 claude-chat-exporter，MIT，2026-08-08）',
+      // lib/contract.ts:148-153 states the conversation-LIST route is
+      // '/chat_conversations' (the one without the trailing slash), and 176-184
+      // records that claude-chat-exporter (MIT, commit
+      // 12da324dd158e9472251590d89d957fc767c0d85, 2026-08-08) requests
+      // /api/organizations/<org>/chat_conversations/<uuid>.
+      'listPath is sourced: /api/organizations/<org>/chat_conversations (lib/contract.ts:148-153, 176-184, quoting claude-chat-exporter, MIT, 2026-08-08)',
     ],
     missing: [
-      'listUrl：路由里那个 <org> 组织 id 从哪来【没有出处】—— 它不在页面 URL 里，得先调另一个接口拿；那个接口我没有出处，编一个就是让用户以为在补历史',
-      'listUrl：分页参数名未知',
-      'parseListPage：列表响应的会话数组 / total 字段名未知（仓库内记录的 chat_messages 是【正文】那条路由的字段，不是列表的）',
+      'listUrl: where the <org> organization id in the route comes from has NO source — it is not in the page URL and has to be fetched from another endpoint first; we have no source for that endpoint, and inventing one would make the user believe history is being backfilled',
+      'listUrl: the paging parameter names are unknown',
+      'parseListPage: the conversation array / total field names of the list response are unknown (the chat_messages recorded in this repository belongs to the BODY route, not the list)',
     ],
-    userNote: 'Claude：还不能回溯历史。列表接口的地址里有一段组织编号，我们没有可靠办法拿到它。',
+    userNoteKey: 'platformNote.claude.unsupported',
   },
   {
     platform: 'kimi',
     known: [
-      // lib/contract.ts:220-224 写明 conversation-INDEX 路由是 '.../ListChats'，
-      // 且整个 ChatService 是 Connect 风格 unary RPC：POST + JSON body。
-      'listPath 有出处：.../ChatService/ListChats（lib/contract.ts:220-224）',
-      '请求形态有出处：Connect 风格 unary RPC = POST + JSON body（lib/contract.ts:226-229）',
+      // lib/contract.ts:220-224 states the conversation-INDEX route is
+      // '.../ListChats', and that the whole ChatService is a Connect-style unary
+      // RPC: POST + JSON body.
+      'listPath is sourced: .../ChatService/ListChats (lib/contract.ts:220-224)',
+      'the request shape is sourced: Connect-style unary RPC = POST + JSON body (lib/contract.ts:226-229)',
     ],
     missing: [
-      // 🔴 C23 前这里写的是「结构性阻塞：HttpPort 只有 url，就算知道参数也发不出去」。
-      //    通道已经扩好了（listPost + BackfillRequestInit），那堵墙没了。
-      //    但**剩下的两条一个字都没少** —— 参数仍然没有出处，所以仍然填不了。
-      'listPost.body：翻页游标在 body 里，字段名未知（通道已能发 POST，但我们不知道该发什么；编一个就是让用户以为在补历史）',
-      'listPost.bodyKeys：同上 —— 顶层键闭集必须来自出处，不能靠猜',
-      'parseListPage：列表响应的会话数组 / total 字段名未知',
+      // 🔴 Before C23 this said "structural blocker: HttpPort only has a url, so
+      //    even knowing the parameters we could not send it". The channel has been
+      //    widened (listPost + BackfillRequestInit) and that wall is gone.
+      //    But **the remaining two lost not one character** — the parameters still
+      //    have no source, so it still cannot be filled in.
+      'listPost.body: the paging cursor is in the body and its field name is unknown (the channel can send a POST now, but we do not know what to send; inventing one would make the user believe history is being backfilled)',
+      'listPost.bodyKeys: same — the closed set of top-level keys must come from a source, it cannot be guessed',
+      'parseListPage: the conversation array / total field names of the list response are unknown',
     ],
-    userNote: 'Kimi：还不能回溯历史。我们不知道它的列表接口要什么参数，也不会去猜一个。',
+    userNoteKey: 'platformNote.kimi.unsupported',
   },
   {
     platform: 'gemini',
     known: [],
     missing: [
-      'listPath：❌ 未找到出处。检索范围 = 本仓库全部代码与注释（lib/contract.ts 的 gemini 行只有 /_/BardChatUi/data/batchexecute 这一条 RPC 端点，没有任何「会话列表」的记录）；未做联网检索（本任务禁止）',
-      // 🔴 C23：POST 这一半的墙拆了（见 listPost），但 batchexecute 还有另外两半：
-      //    ① RPC id 没有出处；② 响应是 ")]}'" 前缀的分块文本，不是 JSON，
-      //    parseListPage 得另写一个解析器，而写它同样需要出处。
-      'listUrl / parseListPage：batchexecute 把 RPC id 和参数编进 body，响应是分块的 ")]}\'" 前缀文本而非 JSON —— C23 之后通道能发 POST 了，但 RPC id 与响应分块格式仍无出处',
-      'listPost.contentType：batchexecute 的请求 Content-Type 未找到出处（仓库内没有记录，本任务禁止联网检索）。本通道的 Content-Type 闭集目前只有 application/json（ALLOWED_BACKFILL_CONTENT_TYPES）—— 若它不是 json，还得先【有出处地】扩这个闭集',
-      'detailUrl：同上',
+      'listPath: ❌ not found. Search scope = all of this repository\'s code and comments (the gemini row of lib/contract.ts has only /_/BardChatUi/data/batchexecute, one RPC endpoint, and no record of any "conversation list"); no online search was done (forbidden by this change)',
+      // 🔴 C23: the POST half of the wall came down (see listPost), but
+      //    batchexecute still has the other two halves:
+      //    ① the RPC id has no source; ② the response is chunked text with a
+      //    ")]}'" prefix, not JSON, so parseListPage needs a parser of its own —
+      //    and writing that needs a source too.
+      'listUrl / parseListPage: batchexecute packs the RPC id and parameters into the body, and the response is chunked ")]}\'"-prefixed text rather than JSON — the channel can send a POST since C23, but the RPC id and the chunked response format still have no source',
+      'listPost.contentType: no source was found for batchexecute\'s request Content-Type (nothing recorded in this repository, and online search is forbidden by this change). This channel\'s Content-Type closed set currently holds only application/json (ALLOWED_BACKFILL_CONTENT_TYPES) — if it is not json, that closed set has to be widened **with a source** first',
+      'detailUrl: same as above',
     ],
-    userNote: 'Gemini：还不能回溯历史。我们没有找到可靠的「列出历史对话」接口出处，不会去猜一个。',
+    userNoteKey: 'platformNote.gemini.unsupported',
   },
 ];
 
 // ---------------------------------------------------------------------------
-// 查询
+// Queries
 // ---------------------------------------------------------------------------
 
-/** 能回溯就返回 plan，否则 null。 */
+/** The plan if it can be backfilled, otherwise null. */
 export function backfillPlanFor(platform: string): BackfillEnumPlan | null {
   return PLANS.find((p) => p.platform === platform) ?? null;
 }
 
 /**
- * 🔴 C23 · 某一段的 POST 声明。没有就是 null（= 这一段是 GET）。
- * **engine 与内容脚本用的是同一个函数**，所以「发出去的」和「被允许的」
- * 不可能各说各话 —— 白名单不是另抄一份，是同一份。
+ * 🔴 C23 · The POST declaration for a segment. None means null (= the segment is a GET).
+ * **The engine and the content script call this same function**, so "what is
+ * sent" and "what is allowed" cannot tell different stories — the allowlist is
+ * not a second copy, it is the same one.
  */
 export function postSpecFor(
   plan: BackfillEnumPlan,
@@ -712,12 +828,12 @@ export function postSpecFor(
   return (segment === 'list' ? plan.listPost : plan.detailPost) ?? null;
 }
 
-/** 🔴 某一段【唯一允许】的方法。plan 说了算，请求说了不算。 */
+/** 🔴 The **only permitted** method for a segment. The plan decides, the request does not. */
 export function expectedMethodFor(plan: BackfillEnumPlan, segment: BackfillSegment): BackfillMethod {
   return postSpecFor(plan, segment) ? 'POST' : 'GET';
 }
 
-/** 列表段的完整请求参数。没有 listPost ⇒ `{method:'GET'}`，与 C22 逐字一致。 */
+/** The full request parameters for the list segment. No listPost ⇒ `{method:'GET'}`, byte-identical to C22. */
 export function listRequestInit(
   plan: BackfillEnumPlan,
   origin: string,
@@ -729,7 +845,7 @@ export function listRequestInit(
   return { method: 'POST', body: spec.body(origin, offset, limit), contentType: spec.contentType };
 }
 
-/** 正文段的完整请求参数。没有 detailPost ⇒ `{method:'GET'}`，与 C22 逐字一致。 */
+/** The full request parameters for the body segment. No detailPost ⇒ `{method:'GET'}`, byte-identical to C22. */
 export function detailRequestInit(
   plan: BackfillEnumPlan,
   origin: string,
@@ -740,24 +856,26 @@ export function detailRequestInit(
   return { method: 'POST', body: spec.body(origin, conversationId), contentType: spec.contentType };
 }
 
-/** 明确登记为「暂时回溯不了」的那条记录；不在清单里就是 null。 */
+/** The record explicitly registered as "cannot be backfilled for now"; null when it is not on the list. */
 export function unsupportedBackfillFor(platform: string): UnsupportedBackfill | null {
   return BACKFILL_UNSUPPORTED.find((u) => u.platform === platform) ?? null;
 }
 
 /**
- * 🔴 C26 · 「这条 plan 能不能真的把历史【正文】补回来」。
- * 只有列表段的 plan（DeepSeek）在这一问上必须回答 false —— 它列得出会话，
- * 但一条正文都取不到，对用户而言历史仍然没补回来。
+ * 🔴 C26 · "Can this plan really get past conversation **bodies** back?"
+ * A plan with only the list segment (DeepSeek) must answer false here — it can
+ * list conversations but cannot fetch a single body, and to the user the history
+ * still has not been backfilled.
  */
 export function canBackfillDetail(plan: BackfillEnumPlan): boolean {
   return plan.detailPath !== null && plan.detailUrl !== null;
 }
 
 /**
- * 能把历史**补回来**的平台 id（按平台表顺序）。
- * 🔴 判据是「列表 + 正文都能走」，不是「有没有 plan」——
- *    只能列出会话、取不到正文的平台【不算】能补回历史，否则 Popup 那一行会说谎。
+ * The ids of platforms that **can** have their history backfilled (in platform-table order).
+ * 🔴 The test is "both list and body work", not "has a plan" — a platform that
+ *    can only list conversations and cannot fetch bodies does **not** count as
+ *    backfillable, or that popup line would be telling a lie.
  */
 export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[] = PLATFORMS
   .map((p) => p.id)
@@ -767,9 +885,11 @@ export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[] = PLATFORMS
   });
 
 /**
- * 🔴 C26 新增 · **只列得出会话、还取不到正文**的平台 id。
- * 它既不属于「能补回历史」，也不等于「什么都不会」——
- * 中间态必须有自己的名字，否则只能被四舍五入成其中一边。
+ * 🔴 New in C26 · The ids of platforms that **can only list conversations and
+ * cannot fetch bodies yet**.
+ * They are neither "can backfill history" nor "does nothing at all" — the
+ * intermediate state has to have a name of its own, or it can only be rounded
+ * into one of the two sides.
  */
 export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[] = PLATFORMS
   .map((p) => p.id)
@@ -778,12 +898,12 @@ export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[] = PLATFORMS
     return plan !== null && !canBackfillDetail(plan);
   });
 
-/** 暂时补不回历史的平台 id（按平台表顺序）。🔴 含上面那些「只能列出」的。 */
+/** The ids of platforms that cannot be backfilled for now (in platform-table order). 🔴 Includes the list-only ones above. */
 export const BACKFILL_UNSUPPORTED_PLATFORMS: readonly string[] = PLATFORMS
   .map((p) => p.id)
   .filter((id) => !BACKFILL_SUPPORTED_PLATFORMS.includes(id));
 
-/** 只有一半的 plan 的那半条腿缺什么（按平台表顺序）。给 Popup 用。 */
+/** What the missing half of a half plan lacks (in platform-table order). For the popup. */
 export const BACKFILL_PARTIAL: readonly (PartialBackfill & { platform: string })[] =
   BACKFILL_LIST_ONLY_PLATFORMS
     .map((id) => {
@@ -793,7 +913,7 @@ export const BACKFILL_PARTIAL: readonly (PartialBackfill & { platform: string })
     .filter((x): x is PartialBackfill & { platform: string } => x !== null);
 
 // ---------------------------------------------------------------------------
-// back-compat：ChatGPT 的两个 URL 构造器。既有测试与接线仍在用。
+// back-compat: ChatGPT's two URL builders. Existing tests and wiring still use them.
 // ---------------------------------------------------------------------------
 
 export function listPageUrl(origin: string, offset: number, limit = DEFAULT_LIST_LIMIT): string {

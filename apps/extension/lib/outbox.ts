@@ -191,10 +191,11 @@ function txDone(tx: IDBTransaction): Promise<void> {
 }
 
 /**
- * 🔴 `null` 是「读不出来」，不是「空」。
- * 这个模块的每一个读接口都遵守这一条：IndexedDB 打不开时**绝不**返回一个空集合 ——
- * 「一条待送都没有」和「我不知道有没有」在这个项目里必须是两个状态
- * （CLAUDE.md 的不变量 1：未知绝不许被记成空）。
+ * 🔴 `null` means "could not be read", not "empty".
+ * Every read interface in this module obeys that: when IndexedDB cannot be
+ * opened it **never** returns an empty collection — "not one item is waiting" and
+ * "I do not know whether any are" must be two different states in this project
+ * (CLAUDE.md invariant 1: an unknown must never be recorded as empty).
  */
 async function readAll(): Promise<OutboxEntry[] | null> {
   const db = await openDb();
@@ -231,7 +232,7 @@ export async function listEntries(): Promise<OutboxEntry[] | null> {
   return await readAll();
 }
 
-/** 查一条的结果。三态：查得到 / 确实没有 / 读不出来。 */
+/** The result of looking one entry up. Three states: found / genuinely absent / could not be read. */
 export type EntryLookup =
   | { ok: true; entry: OutboxEntry | null }
   | { ok: false; reason: 'outbox-unavailable' };
@@ -338,9 +339,10 @@ export async function enqueue(
       requestToPromise(stateIndex.count('pending')),
       requestToPromise(stateIndex.count('rejected')),
     ]);
-    // 不 abort：这个事务从头到尾只读过，提交等于什么都没做。
-    // （对已经自动提交的事务调 abort() 会抛 InvalidStateError —— 那会把
-    //  「拒收」变成一次抛错，正好是这条路径最不该有的结局。）
+    // No abort: this transaction has only ever read, so committing does nothing.
+    // (Calling abort() on a transaction that has already auto-committed throws
+    // InvalidStateError — which would turn "refused" into a thrown error, exactly
+    // the outcome this path must not have.)
     return {
       accepted: false,
       reason: 'outbox-full',

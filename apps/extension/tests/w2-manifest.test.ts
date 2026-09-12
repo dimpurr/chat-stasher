@@ -1,16 +1,17 @@
 /**
- * W2 · 权限表：`downloads` 必须消失，`unlimitedStorage` 必须出现。
+ * W2 · The permission list: `downloads` must be gone and `unlimitedStorage` must be there.
  *
- * 这条用例为什么值得存在：权限表是**声明式**的。删掉 `lib/download.ts` 之后，
- * 如果 manifest 还留着 `downloads`，浏览器会继续弹「管理你的下载内容」，
- * 而代码里已经一个字都用不到它 —— 用户为一项不存在的功能付了代价，
- * 而没有任何测试会红。
+ * Why this case is worth having: the permission list is **declarative**. After lib/download.ts
+ * was deleted, a leftover `downloads` in the manifest would keep showing "Manage your
+ * downloads" while not one line of code can use it — the user paying for a feature that no
+ * longer exists, with no test going red.
  *
- * 🔴 断言分三层，缺一层都不够：
- *   1. `wxt.config.ts` 里的 permissions 数组本身（构建的输入）；
- *   2. 源码里再也找不到 downloads API 的调用点（构建的原料）；
- *   3. 构建产物 `.output/chrome-mv3/manifest.json` 如果存在，必须与 1 一致
- *      （构建的输出）—— 收口时 `pnpm -s build` 之后它就存在，那时这一层是真的在跑。
+ * 🔴 The assertions come in three layers, and missing one is not enough:
+ *   1. the permissions array in `wxt.config.ts` itself (the build's input);
+ *   2. no call site of the downloads API exists anywhere in the source (the build's material);
+ *   3. if the build output `.output/chrome-mv3/manifest.json` exists, it must agree with 1
+ *      (the build's output) — it exists after `pnpm -s build` at closing time, which is when
+ *      this layer really runs.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -23,7 +24,7 @@ function read(rel: string): string {
   return readFileSync(join(ROOT, rel), 'utf8');
 }
 
-/** wxt.config.ts 里的 permissions 数组，逐字读出来（不 import：那是构建期的配置）。 */
+/** The permissions array in wxt.config.ts, read out byte for byte (not imported: that is build-time config). */
 function configuredPermissions(): string[] {
   const src = read('wxt.config.ts');
   const match = /permissions:\s*\[([^\]]*)\]/.exec(src);
@@ -31,7 +32,7 @@ function configuredPermissions(): string[] {
   return [...match[1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!);
 }
 
-/** 源码文件清单（不带 .wxt / node_modules / tests）。 */
+/** The source file list (without .wxt / node_modules / tests). */
 function sourceFiles(dir = ROOT, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (['node_modules', '.wxt', '.output', 'tests', '.git'].includes(name)) continue;
@@ -43,32 +44,32 @@ function sourceFiles(dir = ROOT, out: string[] = []): string[] {
 }
 
 describe('W2-MANIFEST · permissions', () => {
-  it('🔴 不含 downloads', () => {
+  it('🔴 does not contain downloads', () => {
     const permissions = configuredPermissions();
-    console.log('[W2-MANIFEST] 配置里的 permissions:', permissions);
+    console.log('[W2-MANIFEST] permissions in the config:', permissions);
     expect(permissions).not.toContain('downloads');
   });
 
-  it('🔴 含 unlimitedStorage / nativeMessaging，并保留 storage 与 alarms', () => {
+  it('🔴 contains unlimitedStorage / nativeMessaging, and keeps storage and alarms', () => {
     const permissions = configuredPermissions();
     expect(permissions).toContain('unlimitedStorage');
     expect(permissions).toContain('nativeMessaging');
     expect(permissions).toContain('storage');
     expect(permissions).toContain('alarms');
-    // 闭集：多出来的每一项都要有理由（理由写在 wxt.config.ts 的注释里）。
+    // A closed set: every extra item needs a reason (the reasons are in wxt.config.ts's comments).
     expect([...permissions].sort()).toEqual(
       ['alarms', 'nativeMessaging', 'storage', 'unlimitedStorage'].sort(),
     );
   });
 
-  it('🔴 注释里逐项解释了这几个权限（省得以后有人凭感觉加一个）', () => {
+  it('🔴 the comments explain each of these permissions (so nobody adds one on a hunch later)', () => {
     const src = read('wxt.config.ts');
     for (const why of ['unlimitedStorage', 'storage', 'alarms', 'nativeMessaging']) {
       expect([why, new RegExp(`Why '${why}'`).test(src)]).toEqual([why, true]);
     }
   });
 
-  it('🔴 源码里再也没有任何 downloads 调用点', () => {
+  it('🔴 there is no downloads call site left anywhere in the source', () => {
     const offenders: string[] = [];
     for (const file of sourceFiles()) {
       const text = readFileSync(file, 'utf8');
@@ -76,20 +77,20 @@ describe('W2-MANIFEST · permissions', () => {
         offenders.push(file.replace(ROOT, ''));
       }
     }
-    console.log('[W2-MANIFEST] 引用 downloads API 的文件:', offenders);
+    console.log('[W2-MANIFEST] files referencing the downloads API:', offenders);
     expect(offenders).toEqual([]);
   });
 
-  it('🔴 被删掉的两个模块确实不在了', () => {
+  it('🔴 the two deleted modules really are gone', () => {
     expect(existsSync(join(ROOT, 'lib/download.ts'))).toBe(false);
     expect(existsSync(join(ROOT, 'lib/download-guard.ts'))).toBe(false);
   });
 
-  it('🔴 传输层用的是 sendNativeMessage，不是 connectNative（§2）', () => {
+  it('🔴 the transport uses sendNativeMessage, not connectNative (§2)', () => {
     const src = read('lib/native-host.ts');
     expect(src).toContain('sendNativeMessage');
-    // 注释里提到 connectNative 是可以的（那里正是在说"不用它"）；
-    // 这里禁的是**调用**。
+    // Mentioning connectNative in a comment is fine (that is precisely where it says "do not use it");
+    // what is forbidden here is **calling** it.
     expect(src).not.toMatch(/\.connectNative\s*\(/);
     for (const file of sourceFiles()) {
       const text = readFileSync(file, 'utf8');
@@ -99,15 +100,15 @@ describe('W2-MANIFEST · permissions', () => {
     }
   });
 
-  it('构建产物存在时，它的 permissions 必须与配置一致', () => {
+  it('when the build output exists, its permissions must agree with the config', () => {
     const built = join(ROOT, '.output/chrome-mv3/manifest.json');
     if (!existsSync(built)) {
-      console.log('[W2-MANIFEST] .output 还不存在（测试跑在 build 之前）—— 这一层本次未验；'
-        + '收口时用 `pnpm -s build` 的产物人工核对。');
+      console.log('[W2-MANIFEST] .output does not exist yet (tests run before build) — this layer was not exercised;'
+        + ' check it by hand against the `pnpm -s build` output at closing time.');
       return;
     }
     const manifest = JSON.parse(readFileSync(built, 'utf8')) as { permissions?: string[] };
-    console.log('[W2-MANIFEST] 构建产物的 permissions:', manifest.permissions);
+    console.log('[W2-MANIFEST] permissions in the build output:', manifest.permissions);
     expect(manifest.permissions).not.toContain('downloads');
     expect(manifest.permissions).toContain('unlimitedStorage');
     expect(manifest.permissions).toContain('nativeMessaging');

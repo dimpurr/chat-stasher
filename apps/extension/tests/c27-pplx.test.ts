@@ -1,8 +1,8 @@
 /**
- * C27 · Perplexity 会话列表：没有 has_more，只能把空页与短页作为两种
- * 不可靠但可留痕的客户端推断。
+ * C27 · Perplexity's conversation list: there is no has_more, so an empty page and a short page
+ * can only be two unreliable but traceable client inferences.
  *
- * 全部 HTTP 都是合成夹具；本文件不会登录或向 perplexity.ai 发请求。
+ * Every HTTP interaction is a synthetic fixture; this file neither logs in nor sends a request to perplexity.ai.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -32,7 +32,7 @@ function thread(n: number): { thread_id: string } {
 }
 
 function pageBody(items: Array<{ thread_id: string }>): string {
-  // R26 的列表结局只依赖返回数组长度；没有 total / has_more / count。
+  // R26's list outcome depends only on the returned array's length; there is no total / has_more / count.
   return JSON.stringify(items);
 }
 
@@ -69,8 +69,8 @@ function requestBody(offset: number): string {
   return JSON.stringify({ limit: LIMIT, offset, ascending: false, search_term: '' });
 }
 
-describe('C27-1 · POST 分页参数', () => {
-  it('两页请求：第二页 offset=limit，固定参数原样保留', async () => {
+describe('C27-1 · POST paging parameters', () => {
+  it('two pages requested: the second page has offset=limit, and the fixed parameters are kept as-is', async () => {
     const { report, calls } = await run(
       memoryStore(),
       [pageBody([thread(1), thread(2)]), pageBody([thread(3)])],
@@ -92,7 +92,7 @@ describe('C27-1 · POST 分页参数', () => {
     expect(report.newDebts).toBe(3);
   });
 
-  it('plan 的 URL 不偷塞分页 query，body 键闭集与固定值可逐项核对', () => {
+  it('the plan URL smuggles in no paging query, and the body closed key set and fixed values can be checked item by item', () => {
     expect(backfillPlanFor('perplexity')).toBe(PERPLEXITY_PLAN);
     expect(PERPLEXITY_PLAN.listUrl(ORIGIN, 999, LIMIT))
       .toBe(`${ORIGIN}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`);
@@ -106,8 +106,8 @@ describe('C27-1 · POST 分页参数', () => {
   });
 });
 
-describe('C27-2 · 没有终止字段时，空页与短页必须分开留痕', () => {
-  it('空页停：记录 empty-page-inferred，且 complete 不为真', async () => {
+describe('C27-2 · with no termination field, an empty page and a short page must be traced separately', () => {
+  it('stops on an empty page: records empty-page-inferred, and complete is not true', async () => {
     const store = memoryStore();
     const { report, calls } = await run(
       store,
@@ -129,7 +129,7 @@ describe('C27-2 · 没有终止字段时，空页与短页必须分开留痕', (
     });
   });
 
-  it('短页停：记录 short-page-inferred；它与空页不是同一个结局', async () => {
+  it('stops on a short page: records short-page-inferred, which is not the same outcome as an empty page', async () => {
     const { report } = await run(
       memoryStore(),
       [pageBody([thread(1), thread(2)]), pageBody([thread(3)])],
@@ -140,13 +140,13 @@ describe('C27-2 · 没有终止字段时，空页与短页必须分开留痕', (
     expect(report.state.enumCursor.truncated).toBe('short-page-inferred');
     expect(report.enumTruncated).not.toBe('empty-page-inferred');
     expect(report.state.enumCursor.complete).toBe(false);
-    // 列表段确实读到了，但正文段没有出处，所以不是“用户没有会话”。
+    // The list segment really was read, but the body segment has no source, so this is not "the user has no conversations".
     expect(report.halted?.reason).toBe('detail-unsupported');
   });
 });
 
-describe('C27-3 · 形状漂移与没有会话必须可区分', () => {
-  it('拿不到顶层数组 ⇒ shape-changed，不能当成用户没有会话', async () => {
+describe('C27-3 · shape drift and "no conversations" must be distinguishable', () => {
+  it('no top-level array ⇒ shape-changed, which must not be taken as the user having no conversations', async () => {
     const store = memoryStore();
     const { report, calls } = await run(store, [JSON.stringify({ threads: [] })], 'acct-shape');
 
@@ -161,7 +161,7 @@ describe('C27-3 · 形状漂移与没有会话必须可区分', () => {
       .toBe('shape-changed');
   });
 
-  it('真正的空数组是推断停点，不是 shape-changed', async () => {
+  it('a genuinely empty array is an inferred stopping point, not shape-changed', async () => {
     const { report } = await run(memoryStore(), [pageBody([])], 'acct-no-history');
     expect(report.halted).toBeNull();
     expect(report.stopped).toBe('queue-empty');
@@ -169,7 +169,7 @@ describe('C27-3 · 形状漂移与没有会话必须可区分', () => {
     expect(report.state.enumCursor.complete).toBe(false);
   });
 
-  it('解析器只认列表数组与 thread_id，不读取未经证实的时间字段', () => {
+  it('the parser recognises only the list array and thread_id, and reads no unverified time field', () => {
     expect(parsePerplexityListPage(pageBody([thread(1)]) )).toEqual({
       ok: true,
       page: { ids: ['pplx-0001-aaaaaaaa'], total: null },
@@ -179,8 +179,8 @@ describe('C27-3 · 形状漂移与没有会话必须可区分', () => {
   });
 });
 
-describe('C27-4 · Perplexity 回溯白名单', () => {
-  it('精确列表路径 + 正确 POST 放行；相似前缀、正文路径、跨源拒发', () => {
+describe('C27-4 · the Perplexity backfill allowlist', () => {
+  it('the exact list path + a correct POST is allowed; a similar prefix, a body path and cross-origin are refused', () => {
     const listUrl = `${ORIGIN}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`;
     const valid = {
       url: listUrl,
@@ -203,7 +203,7 @@ describe('C27-4 · Perplexity 回溯白名单', () => {
     }, ORIGIN).ok).toBe(false);
   });
 
-  it('平台名单：Perplexity 只列得出会话，supported 仍只有 ChatGPT', () => {
+  it('the platform lists: Perplexity can only list conversations, and supported still holds ChatGPT alone', () => {
     expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['deepseek', 'perplexity']);
     expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
   });

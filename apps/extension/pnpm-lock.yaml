@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@wxt-dev/i18n':
+        specifier: 0.2.7
+        version: 0.2.7(wxt@0.21.4(eslint@9.39.4(jiti@2.7.0))(rolldown@1.2.4)(typescript@5.9.3)(vite@8.2.1(@types/node@26.2.0)(jiti@2.7.0))(web-ext@10.6.0(jiti@2.7.0)))
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
@@ -346,6 +349,14 @@ packages:
 
   '@wxt-dev/browser@0.2.6':
     resolution: {integrity: sha512-rQMn4gr36988e3RYVxsr0Qvy6A/9bIcA0meQvGtfQcEPmRJ73SU3xkHh6eX2yjv/j1QkMLacdzES/jf9xqz5/A==}
+
+  '@wxt-dev/i18n@0.2.7':
+    resolution: {integrity: sha512-aBhWJ2GFMtjyWK8Qcq83pf7WA88Iu6SwRWdZl7TrDM6lAC0RV5uLuFUrX72GwO1ZuZHuN80FQVVGnK1MHDTjcA==}
+    peerDependencies:
+      wxt: '>=0.19.7'
+    peerDependenciesMeta:
+      wxt:
+        optional: true
 
   '@wxt-dev/storage@1.2.9':
     resolution: {integrity: sha512-dh9TJwvLBM2x4wyy9nE7eYE3wA8pgz1TXSyz7RbdjkJxLfFfWkbeIqiU7VkGy7Vx8sJBmQjoSpk9zSUb3Bjy0Q==}
@@ -2254,6 +2265,15 @@ snapshots:
     dependencies:
       '@types/filesystem': 0.0.36
       '@types/har-format': 1.2.16
+
+  '@wxt-dev/i18n@0.2.7(wxt@0.21.4(eslint@9.39.4(jiti@2.7.0))(rolldown@1.2.4)(typescript@5.9.3)(vite@8.2.1(@types/node@26.2.0)(jiti@2.7.0))(web-ext@10.6.0(jiti@2.7.0)))':
+    dependencies:
+      '@wxt-dev/browser': 0.2.6
+      chokidar: 5.0.0
+      confbox: 0.2.4
+      tinyglobby: 0.2.17
+    optionalDependencies:
+      wxt: 0.21.4(eslint@9.39.4(jiti@2.7.0))(rolldown@1.2.4)(typescript@5.9.3)(vite@8.2.1(@types/node@26.2.0)(jiti@2.7.0))(web-ext@10.6.0(jiti@2.7.0))
 
   '@wxt-dev/storage@1.2.9':
     dependencies:

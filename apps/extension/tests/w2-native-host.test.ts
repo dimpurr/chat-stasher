@@ -1,19 +1,20 @@
 /**
- * W2 · 传输层：唯一算数的成功 = 匹配的 ack。
+ * W2 · The transport layer: the only success that counts is a matching ack.
  *
- * 规范 §1：
+ * Spec §1:
  *   「A conversation counts as delivered only when the extension holds an `ack`
  *     whose `request_id` and `sha256` equal the ones it sent.」
  *
- * 🔴 这个文件里【每一个】反面用例，都同时钉两件事：
- *      · 传输层必须报 `delivered:false`（不是 true，也不是"大概成了"）；
- *      · 每一种未送达都必须有一个具名 `reason`（不许静默吞错）。
+ * 🔴 **Every** negative case in this file pins two things at once:
+ *      · the transport must report `delivered:false` (not true, and not "probably worked");
+ *      · every non-delivery must have a named `reason` (silently swallowing an error is not allowed).
  *
- * 全程零真实进程、零真实浏览器：`runtime.sendNativeMessage` 是本文件里的一个
- * 可编程桩，要什么回答就给什么回答。
+ * Zero real processes and zero real browser throughout: `runtime.sendNativeMessage` is a
+ * programmable stub in this file that answers whatever it is told to.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import {
   deliver,
   hello,
@@ -40,7 +41,7 @@ const fakeBrowser: any = {
       if (outcome.via === 'throw') throw new Error(outcome.error);
       if (outcome.via === 'silent') return undefined;
       if (outcome.via === 'promise') return Promise.resolve(outcome.response);
-      // Chrome 形状：lastError 只在回调的那一拍有效。
+      // Chrome's shape: lastError is only valid in the callback's own beat.
       fakeBrowser.runtime.lastError = outcome.lastError ? { message: outcome.lastError } : undefined;
       callback(outcome.response);
       fakeBrowser.runtime.lastError = undefined;
@@ -52,7 +53,7 @@ const fakeBrowser: any = {
 beforeEach(() => {
   sent = [];
   responder = () => ({ via: 'callback', response: undefined });
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   fakeBrowser.runtime.lastError = undefined;
 });
@@ -62,12 +63,13 @@ afterEach(() => {
 });
 
 /**
- * 等到「请求真的发出去了」。
+ * Wait until "the request really went out".
  *
- * 🔴 为什么需要它：`deliver` 先用 `crypto.subtle` 算 SHA-256，而那是**真实的**
- *    异步（libuv 线程池），假定时器管不到它。先推时间再等 digest 完成的话，
- *    60 秒的超时定时器会被建在一个已经过去的时刻上，测试就会挂住。
- *    所以：假定时器只接管 setTimeout，先把真实的那一步等完，再推时间。
+ * 🔴 Why it is needed: `deliver` computes the SHA-256 with `crypto.subtle` first, and that is
+ *    **really** asynchronous (the libuv thread pool); fake timers cannot reach it. Advancing
+ *    time before the digest completes would create the 60-second timeout timer at an instant
+ *    already in the past and the test would hang. So: fake timers take over setTimeout only,
+ *    and the real step is awaited first, then time is advanced.
  */
 async function waitUntilSent(): Promise<void> {
   for (let i = 0; i < 1000 && sent.length === 0; i += 1) {
@@ -76,7 +78,7 @@ async function waitUntilSent(): Promise<void> {
   if (sent.length === 0) throw new Error('the request was never sent');
 }
 
-/** 一条 §6.2 里完全合法的 ack，字段可被覆盖以制造反面。 */
+/** A fully conforming §6.2 ack whose fields can be overridden to build the negative cases. */
 function ackFor(message: Record<string, unknown>, overrides: Record<string, unknown> = {}): unknown {
   return {
     protocol: 1,
@@ -92,17 +94,17 @@ function ackFor(message: Record<string, unknown>, overrides: Record<string, unkn
 const NAME = 'chatgpt-11111111-2222-3333-4444-555555555555.json';
 const PAYLOAD = JSON.stringify({ schema: 'chat-stasher/inbox@2', sessionId: 'x', raw: { text: 'hi' } });
 
-/** 用独立实现算一次 hash，证明 deliver 报出去的确实是 payload 字节的 SHA-256。 */
+/** Compute the hash with an independent implementation, proving deliver really reports the SHA-256 of the payload bytes. */
 async function independentSha256(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ===========================================================================
-// 1 · 请求本身
+// 1 · The request itself
 // ===========================================================================
-describe('W2 · deliver 发出去的请求', () => {
-  it('逐字符合 §6.2：protocol/type/request_id/name/payload/sha256，且 sha256 是 payload UTF-8 字节的 SHA-256', async () => {
+describe('W2 · the request deliver sends', () => {
+  it('conforms to §6.2 byte for byte — protocol/type/request_id/name/payload/sha256 — and the sha256 is the SHA-256 of the payload UTF-8 bytes', async () => {
     responder = (message) => ({ via: 'callback', response: ackFor(message) });
 
     const result = await deliver(NAME, PAYLOAD);
@@ -116,34 +118,34 @@ describe('W2 · deliver 发出去的请求', () => {
     expect(req.protocol).toBe(PROTOCOL);
     expect(req.type).toBe('deliver');
     expect(req.name).toBe(NAME);
-    expect(req.payload).toBe(PAYLOAD);                       // 原样，一个字节都不动
+    expect(req.payload).toBe(PAYLOAD);                       // verbatim, not one byte touched
     expect(req.sha256).toBe(await independentSha256(PAYLOAD));
     expect(String(req.request_id)).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
-    console.log('[W2-NM] 请求:', { ...req, payload: `<${PAYLOAD.length} chars>` });
+    console.log('[W2-NM] request:', { ...req, payload: `<${PAYLOAD.length} chars>` });
   });
 
-  it('两条请求的 request_id 不相同（randomUUID，不是常量）', async () => {
+  it('two requests have different request_ids (randomUUID, not a constant)', async () => {
     responder = (message) => ({ via: 'callback', response: ackFor(message) });
     await deliver(NAME, PAYLOAD);
     await deliver(NAME, PAYLOAD);
     expect(sent[0]!.request_id).not.toBe(sent[1]!.request_id);
   });
 
-  it('§6.2 的 name 规则逐字实现（不合规的名字会被自己挡下来）', () => {
+  it('§6.2 name rule implemented byte for byte (a non-conforming name is stopped by ourselves)', () => {
     expect(isValidDeliverName('chatgpt-abc.json')).toBe(true);
     expect(isValidDeliverName('deepseek-c622b5dd-0000-4000-8000-00000000abcd.json')).toBe(true);
-    expect(isValidDeliverName('ChatGPT-abc.json')).toBe(false);   // 平台段必须小写
-    expect(isValidDeliverName('chatgpt-a/b.json')).toBe(false);   // 不许带路径
+    expect(isValidDeliverName('ChatGPT-abc.json')).toBe(false);   // the platform segment must be lowercase
+    expect(isValidDeliverName('chatgpt-a/b.json')).toBe(false);   // no path may appear
     expect(isValidDeliverName('chatgpt-abc.txt')).toBe(false);
     expect(isValidDeliverName('chatgpt-abc')).toBe(false);
   });
 });
 
 // ===========================================================================
-// 2 · 🔴 只有完全匹配的 ack 才算送达
+// 2 · 🔴 only a fully matching ack counts as delivered
 // ===========================================================================
-describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
-  it('完全匹配的 ack ⇒ delivered:true，并带上主机的 status 与 shard', async () => {
+describe('W2 · 🔴 regression: without a matching ack it is never delivered', () => {
+  it('a fully matching ack ⇒ delivered:true, carrying the host status and shard', async () => {
     responder = (message) => ({
       via: 'callback',
       response: ackFor(message, { status: 'duplicate', shard: '0007-x.json' }),
@@ -158,7 +160,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     });
   });
 
-  it('超时（§2 的 60 秒内没有任何回答）⇒ timeout，且【绝不】是 delivered', async () => {
+  it('a timeout (no answer within §2\'s 60 seconds) ⇒ timeout, and **never** delivered', async () => {
     responder = () => ({ via: 'silent' });
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const pending = deliver(NAME, PAYLOAD);
@@ -168,10 +170,10 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
 
     expect(result.delivered).toBe(false);
     expect(result).toMatchObject({ reason: 'timeout', retryable: true });
-    console.log('[W2-NM] 超时:', result);
+    console.log('[W2-NM] timeout:', result);
   });
 
-  it('runtime.lastError ⇒ send-failed（具名，不是静默）', async () => {
+  it('runtime.lastError ⇒ send-failed (named, not silent)', async () => {
     responder = () => ({ via: 'callback', response: undefined, lastError: 'Specified native messaging host not found.' });
     const result = await deliver(NAME, PAYLOAD);
     expect(result.delivered).toBe(false);
@@ -182,19 +184,19 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     });
   });
 
-  it('调用直接抛错 ⇒ send-failed', async () => {
+  it('the call throwing outright ⇒ send-failed', async () => {
     responder = () => ({ via: 'throw', error: 'boom' });
     const result = await deliver(NAME, PAYLOAD);
     expect(result).toMatchObject({ delivered: false, reason: 'send-failed' });
   });
 
-  it('既没有回答也没有 lastError ⇒ send-failed（沉默不是成功）', async () => {
+  it('neither an answer nor lastError ⇒ send-failed (silence is not success)', async () => {
     responder = () => ({ via: 'callback', response: undefined });
     const result = await deliver(NAME, PAYLOAD);
     expect(result).toMatchObject({ delivered: false, reason: 'send-failed' });
   });
 
-  it('ack 的 request_id 不符 ⇒ malformed-response，条目不许被当成已送达', async () => {
+  it('the ack\'s request_id does not match ⇒ malformed-response, and the entry may not be treated as delivered', async () => {
     responder = (message) => ({
       via: 'callback',
       response: ackFor(message, { request_id: 'some-other-request' }),
@@ -205,7 +207,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     expect((result as { detail?: string }).detail).toContain('request_id');
   });
 
-  it('ack 的 sha256 不符 ⇒ malformed-response', async () => {
+  it('the ack\'s sha256 does not match ⇒ malformed-response', async () => {
     responder = (message) => ({
       via: 'callback',
       response: ackFor(message, { sha256: 'f'.repeat(64) }),
@@ -216,7 +218,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     expect((result as { detail?: string }).detail).toContain('sha256');
   });
 
-  it('响应缺字段 ⇒ malformed-response', async () => {
+  it('the response is missing a field ⇒ malformed-response', async () => {
     responder = (message) => {
       const ack = ackFor(message) as Record<string, unknown>;
       delete ack.shard;
@@ -227,7 +229,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     });
   });
 
-  it('响应多字段 ⇒ malformed-response（schema 的 additionalProperties:false）', async () => {
+  it('the response has an extra field ⇒ malformed-response (the schema\'s additionalProperties:false)', async () => {
     responder = (message) => ({
       via: 'callback',
       response: ackFor(message, { extra: 'not in the schema' }),
@@ -237,7 +239,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     expect((result as { detail?: string }).detail).toContain('unexpected field');
   });
 
-  it('字段类型错 ⇒ malformed-response', async () => {
+  it('a field has the wrong type ⇒ malformed-response', async () => {
     const cases: Array<Record<string, unknown>> = [
       { status: 42 },
       { status: 'ok' },
@@ -253,7 +255,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     }
   });
 
-  it('响应不是对象（字符串 / 数组 / null）⇒ malformed-response', async () => {
+  it('the response is not an object (string / array / null) ⇒ malformed-response', async () => {
     for (const response of ['an ack, trust me', [1, 2, 3], null, 7]) {
       responder = () => ({ via: 'callback', response });
       const result = await deliver(NAME, PAYLOAD);
@@ -262,7 +264,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     }
   });
 
-  it('type 既不是 ack 也不是 nack ⇒ malformed-response', async () => {
+  it('type is neither ack nor nack ⇒ malformed-response', async () => {
     responder = (message) => ({
       via: 'callback',
       response: { ...(ackFor(message) as object), type: 'ok' },
@@ -272,7 +274,7 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     });
   });
 
-  it('协议版本不符 ⇒ malformed-response（本扩展只说 protocol 1，§9）', async () => {
+  it('the protocol version does not match ⇒ malformed-response (this extension speaks protocol 1 only, §9)', async () => {
     responder = (message) => ({
       via: 'callback',
       response: ackFor(message, { protocol: 2 }),
@@ -282,16 +284,16 @@ describe('W2 · 🔴 回归：没有匹配的 ack 就绝不算送达', () => {
     });
   });
 
-  it('Promise 形状（Firefox）同样被认：匹配的 ack 仍然 ⇒ delivered:true', async () => {
+  it('the Promise shape (Firefox) is recognised too: a matching ack still ⇒ delivered:true', async () => {
     responder = (message) => ({ via: 'promise', response: ackFor(message) });
     expect(await deliver(NAME, PAYLOAD)).toMatchObject({ delivered: true, status: 'stored' });
   });
 });
 
 // ===========================================================================
-// 3 · nack：永远不是送达，但它的 kind / retryable 要原样带出来
+// 3 · nack: never a delivery, but its kind / retryable must come through as-is
 // ===========================================================================
-describe('W2 · nack 的分类', () => {
+describe('W2 · classifying a nack', () => {
   it('retryable nack ⇒ reason:nack + kind + retryable:true', async () => {
     responder = (message) => ({
       via: 'callback',
@@ -305,7 +307,7 @@ describe('W2 · nack 的分类', () => {
     });
   });
 
-  it('非 retryable nack ⇒ retryable:false（条目会被判死，但仍保留）', async () => {
+  it('a non-retryable nack ⇒ retryable:false (the entry is judged dead but still kept)', async () => {
     responder = (message) => ({
       via: 'callback',
       response: {
@@ -318,7 +320,7 @@ describe('W2 · nack 的分类', () => {
     });
   });
 
-  it('request_id 为 null 的 nack 仍然算数（§6.3：读不到就是 null）', async () => {
+  it('a nack with a null request_id still counts (§6.3: unreadable means null)', async () => {
     responder = () => ({
       via: 'callback',
       response: {
@@ -331,7 +333,7 @@ describe('W2 · nack 的分类', () => {
     });
   });
 
-  it('🔴 request_id 是【别人的】的 nack ⇒ malformed-response（不能拿它判死用户的数据）', async () => {
+  it('🔴 a nack whose request_id belongs to **someone else** ⇒ malformed-response (it must not be used to judge the user\'s data dead)', async () => {
     responder = () => ({
       via: 'callback',
       response: {
@@ -344,7 +346,7 @@ describe('W2 · nack 的分类', () => {
     expect(result).not.toMatchObject({ kind: 'invalid-bundle' });
   });
 
-  it('形状不合法的 nack ⇒ malformed-response（不认它说的 kind）', async () => {
+  it('a malformed nack ⇒ malformed-response (its claimed kind is not believed)', async () => {
     responder = (message) => ({
       via: 'callback',
       response: {
@@ -359,16 +361,16 @@ describe('W2 · nack 的分类', () => {
 });
 
 // ===========================================================================
-// 4 · 连 runtime API 都没有
+// 4 · Not even the runtime API is there
 // ===========================================================================
-describe('W2 · 没有 API 的环境', () => {
-  it('没有 runtime.sendNativeMessage ⇒ no-runtime-api（什么都没尝试，也绝不假装成功）', async () => {
+describe('W2 · an environment with no API', () => {
+  it('no runtime.sendNativeMessage ⇒ no-runtime-api (nothing was attempted, and no faking success)', async () => {
     const saved = fakeBrowser.runtime.sendNativeMessage;
     delete (fakeBrowser.runtime as any).sendNativeMessage;
     try {
       const result = await deliver(NAME, PAYLOAD);
       expect(result).toMatchObject({ delivered: false, reason: 'no-runtime-api' });
-      expect(sent).toEqual([]);            // 一个字节都没发出去
+      expect(sent).toEqual([]);            // not one byte went out
       expect(await hello()).toMatchObject({ ok: false, reason: 'no-runtime-api' });
     } finally {
       fakeBrowser.runtime.sendNativeMessage = saved;
@@ -380,7 +382,7 @@ describe('W2 · 没有 API 的环境', () => {
 // 5 · hello（§6.1）
 // ===========================================================================
 describe('W2 · hello', () => {
-  it('合法回答 ⇒ {ok:true, machine, stage, hostVersion}', async () => {
+  it('a conforming answer ⇒ {ok:true, machine, stage, hostVersion}', async () => {
     responder = () => ({
       via: 'callback',
       response: {
@@ -390,11 +392,11 @@ describe('W2 · hello', () => {
     });
     const result = await hello();
     expect(result).toEqual({ ok: true, machine: 'm-1', stage: '/Users/x/stage', hostVersion: '0.3.0' });
-    // 请求逐字是 §6.1 的那一条。
+    // The request is §6.1's one, byte for byte.
     expect(sent[0]).toEqual({ protocol: 1, type: 'hello' });
   });
 
-  it('nack ⇒ {ok:false, reason:nack, kind, detail}（并带上修复线索）', async () => {
+  it('a nack ⇒ {ok:false, reason:nack, kind, detail} (carrying the repair hint)', async () => {
     responder = () => ({
       via: 'callback',
       response: {
@@ -409,7 +411,7 @@ describe('W2 · hello', () => {
     expect((result as { detail?: string }).detail).toContain('install-native-host');
   });
 
-  it('形状不合法的 hello 回答 ⇒ malformed-response', async () => {
+  it('a malformed hello answer ⇒ malformed-response', async () => {
     responder = () => ({
       via: 'callback',
       response: { protocol: 1, type: 'hello', ok: true, host_version: '0.3.0', machine: 'm', stage: 42 },
@@ -417,7 +419,7 @@ describe('W2 · hello', () => {
     expect(await hello()).toMatchObject({ ok: false, reason: 'malformed-response' });
   });
 
-  it('ok:true 以外（ok:false 的伪 hello 回答）⇒ malformed-response，绝不当成连上了', async () => {
+  it('anything but ok:true (a pseudo-hello answering ok:false) ⇒ malformed-response, never treated as connected', async () => {
     responder = () => ({
       via: 'callback',
       response: { protocol: 1, type: 'hello', ok: false, host_version: '0', machine: 'm', stage: '/s' },
@@ -425,7 +427,7 @@ describe('W2 · hello', () => {
     expect(await hello()).toMatchObject({ ok: false, reason: 'malformed-response' });
   });
 
-  it('hello 的探测窗口可以被调用方缩短（Popup 用 3 秒，投递恒为 60 秒）', async () => {
+  it('the hello probe window can be shortened by the caller (the popup uses 3 seconds; delivery is always 60)', async () => {
     responder = () => ({ via: 'silent' });
     vi.useFakeTimers();
     const pending = hello({ timeoutMs: 3_000 });
@@ -435,10 +437,10 @@ describe('W2 · hello', () => {
 });
 
 // ===========================================================================
-// 6 · 主机名
+// 6 · The host name
 // ===========================================================================
-describe('W2 · 主机名', () => {
-  it('用的就是契约里那个钉死的名字', async () => {
+describe('W2 · the host name', () => {
+  it('it uses exactly the name pinned in the contract', async () => {
     let host = '';
     fakeBrowser.runtime.sendNativeMessage = (h: string, message: Record<string, unknown>, cb: (r: unknown) => void) => {
       host = h;

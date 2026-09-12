@@ -1,23 +1,25 @@
 /**
- * C13 · 「运行时真的会跑回溯腿」的测试。
+ * C13 · Testing that "the backfill leg really does run at runtime".
  *
- * 🔴 这个文件存在的理由：C11/C12 的测试全绿，但它们全都是【自己 import runBackfill
- *    再调用它】—— 绿灯只证明了模块能跑，没有证明【浏览器会跑】。
- *    所以这里一条断言都不许直接调 runBackfill / tickBackfill：
- *    每个用例都必须从 **entrypoints/background.ts 的真实入口** 出发 ——
- *      defineBackground 的回调 → browser.runtime.onMessage 派发 'chat-captured'
- *    这正是内容脚本在真实浏览器里走的那条路 —— 然后再去看回溯腿有没有被碰到。
+ * 🔴 Why this file exists: C11/C12's tests are all green, but every one of them **imports
+ *    runBackfill and calls it** — green only proves the module runs, not that the browser
+ *    will run it. So not one assertion here may call runBackfill / tickBackfill directly:
+ *    every case has to start from **entrypoints/background.ts's real entry point** —
+ *      defineBackground's callback → browser.runtime.onMessage dispatching 'chat-captured',
+ *    which is exactly the path a content script takes in a real browser — and only then
+ *    look at whether the backfill leg was touched.
  *
- * runBackfill 被 vi.mock 换成 spy：我们要断言的是"到达"，不是引擎行为
- *（引擎行为已经由 c11/c12 覆盖）。绝无任何真实网络行为、绝无登录态。
+ * runBackfill is replaced by a spy via vi.mock: what we assert is "was it reached", not
+ * engine behaviour (already covered by c11/c12). No real network activity, no logged-in state.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
-// ---- 把引擎换成 spy（只在本文件生效）----
+// ---- Replace the engine with a spy (in this file only) ----
 const runBackfillSpy = vi.fn(async (opts: any) => ({
   stopped: 'queue-empty',
   enumeratedPages: 0,
@@ -36,11 +38,11 @@ vi.mock('../lib/backfill/engine', async (importOriginal) => {
   return { ...actual, runBackfill: (opts: any) => runBackfillSpy(opts) };
 });
 
-// ---- 假浏览器：storage.local / downloads / action / runtime ----
+// ---- A fake browser: storage.local / downloads / action / runtime ----
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 let host: SyntheticHost;
-/** 主机整个下线（本机没装 host / 答不上话）。 */
+/** The host is entirely down (not installed on this machine / does not answer). */
 let hostDown = false;
 
 const fakeBrowser: any = {
@@ -50,7 +52,7 @@ const fakeBrowser: any = {
     onMessage: {
       addListener(fn: any) { runtimeListeners.push(fn); },
     },
-    // W2：实时腿的落盘通道 = 合成 native host。
+    // W2: the live leg's write-down channel = a synthetic native host.
     sendNativeMessage: (h: string, m: unknown) => {
       if (hostDown) throw new Error('Specified native messaging host not found.');
       return host.sendNativeMessage(h, m);
@@ -74,7 +76,7 @@ const fakeBrowser: any = {
   },
 };
 
-/** 真实的 'chat-captured' 载荷（合成夹具，不是任何真人的对话）。 */
+/** A real 'chat-captured' payload (a synthetic fixture, not anybody's actual conversation). */
 function fakeCapture(): CapturedFetch {
   return {
     url: 'https://chatgpt.com/backend-api/conversation/abcdef0123456789',
@@ -87,18 +89,18 @@ function fakeCapture(): CapturedFetch {
 }
 
 /**
- * 走真实入口：加载 background 模块 → 执行 defineBackground 的回调
- * → 拿到它注册的 onMessage 监听器 → 像内容脚本那样派发一条消息。
+ * Take the real entry point: load the background module → run defineBackground's callback
+ * → get the onMessage listener it registered → dispatch a message the way a content script does.
  */
 async function bootBackgroundAndDispatch(payload: CapturedFetch): Promise<any> {
   const mod: any = await import('../entrypoints/background');
-  await mod.default();                       // defineBackground 被 stub 成恒等函数
+  await mod.default();                       // defineBackground is stubbed to the identity function
   expect(runtimeListeners.length).toBeGreaterThan(0);
   const responded = await new Promise<any>((resolve) => {
     const ret = runtimeListeners[0]!({ type: 'chat-captured', payload }, { id: 's' }, resolve);
-    expect(ret).toBe(true);                  // MV3 异步 sendResponse 契约
+    expect(ret).toBe(true);                  // the MV3 async sendResponse contract
   });
-  // 接线是 fire-and-forget（绝不允许拖慢落盘），等它自己结束。
+  // The wiring is fire-and-forget (it must never slow the write-down), so wait for it to finish on its own.
   await mod.backfillTickSettled();
   return responded;
 }
@@ -110,7 +112,7 @@ beforeEach(async () => {
   hostDown = false;
   (globalThis as any).indexedDB = new IDBFactory();
   runBackfillSpy.mockClear();
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
   vi.resetModules();
@@ -118,39 +120,39 @@ beforeEach(async () => {
   resetTickLockForTest();
 });
 
-describe('C13 · 回溯腿接进运行时', () => {
-  it('🔴 判据 2：实时腿的真实消息路径会唤起回溯腿（开关打开 + 有 http 端口 ⇒ runBackfill 真的被调用）', async () => {
+describe('C13 · the backfill leg wired into the runtime', () => {
+  it('🔴 criterion 2: the live leg real message path wakes the backfill leg (switch on + an http port ⇒ runBackfill really is called)', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), true);
 
     const mod: any = await import('../entrypoints/background');
-    // 合成 http 端口：只回固定字符串，不碰网络。
+    // A synthetic http port: it returns a fixed string and never touches the network.
     mod.configureBackfillTransport(async () => ({ status: 200, text: '{"items":[],"total":0}' }));
 
     const res = await bootBackgroundAndDispatch(fakeCapture());
-    expect(res.ok).toBe(true);                       // 实时腿照存，不被回溯腿拖累
+    expect(res.ok).toBe(true);                       // the live leg still stores, not dragged down by the backfill leg
 
-    expect(runBackfillSpy).toHaveBeenCalledTimes(1); // ← 这一行就是"运行时会跑"的证据
+    expect(runBackfillSpy).toHaveBeenCalledTimes(1); // ← this line is the evidence that "it runs at runtime"
     const opts = runBackfillSpy.mock.calls[0]![0];
     expect(opts.origin).toBe('https://chatgpt.com');
     expect(opts.platform).toBe('chatgpt');
-    expect(typeof opts.sink).toBe('function');         // 归档出口不分叉
-    expect(opts.maxDetails).toBe(1);                   // 定速：一次 tick 只清一笔账
-    // 🔴 W2：暂停闸门【不在】engine 里。engine 只认出口回答的 retryLater，
-    //    「现在要不要开跑」由 schedule.ts 的闸门回答 —— 所以这里断言它确实没被传进来。
+    expect(typeof opts.sink).toBe('function');         // the archive exit does not fork
+    expect(opts.maxDetails).toBe(1);                   // pacing: one tick clears exactly one debt
+    // 🔴 W2: the pause gate is **not** in the engine. The engine only knows the exit's
+    //    retryLater answer; "should it run right now" is answered by schedule.ts's gate —
     expect('downloadGuard' in opts).toBe(false);
     console.log('[C13] runtime message -> runBackfill called with', {
       platform: opts.platform, origin: opts.origin, maxDetails: opts.maxDetails,
     });
   });
 
-  it('🔴 判据 3：主机暂停且主机答不上话 ⇒ 同一条真实路径【不】启动回溯', async () => {
+  it('🔴 criterion 3: host paused and the host does not answer ⇒ the same real path does NOT start a backfill', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { HOST_PAUSE_KEY, HOST_UNAVAILABLE } = await import('../lib/host-status');
     await setBackfillEnabled(browserLocalStore(), true);
-    // 上一次投递失败留下的暂停记录（真的那条路径写的就是这个键）。
+    // The pause record left by the last failed delivery (the real path writes exactly this key).
     store[HOST_PAUSE_KEY] = { reason: HOST_UNAVAILABLE, at: 1, detail: 'timeout' };
     hostDown = true;
 
@@ -161,18 +163,18 @@ describe('C13 · 回溯腿接进运行时', () => {
 
     expect(runBackfillSpy).not.toHaveBeenCalled();
     expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
-    // 🔴 暂停记录没有被悄悄清掉：hello 没成功就不许恢复。
+    // 🔴 The pause record was not quietly cleared: without a successful hello there is no resuming.
     expect(store[HOST_PAUSE_KEY]).toMatchObject({ reason: HOST_UNAVAILABLE });
     console.log('[C13] host paused -> tick reason =', mod.lastBackfillTick()?.reason);
   });
 
-  it('🔴 判据 4：主机暂停但 hello 答了话 ⇒ 闸门自己放行（§10 的恢复动作）', async () => {
+  it('🔴 criterion 4: host paused but hello answered ⇒ the gate lets it through itself (§10 resume action)', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { HOST_PAUSE_KEY, HOST_UNAVAILABLE } = await import('../lib/host-status');
     await setBackfillEnabled(browserLocalStore(), true);
     store[HOST_PAUSE_KEY] = { reason: HOST_UNAVAILABLE, at: 1, detail: 'timeout' };
-    // 主机这次在（hostDown 默认 false）。
+    // The host is there this time (hostDown defaults to false).
     const beforeHello = host.helloCount();
 
     const mod: any = await import('../entrypoints/background');
@@ -181,12 +183,12 @@ describe('C13 · 回溯腿接进运行时', () => {
     await bootBackgroundAndDispatch(fakeCapture());
 
     expect(runBackfillSpy).toHaveBeenCalledTimes(1);
-    expect(host.helloCount()).toBe(beforeHello + 1);  // 恢复动作真的问了一次主机
-    expect(store[HOST_PAUSE_KEY]).toBeNull();         // 答话了 ⇒ 暂停被清掉
+    expect(host.helloCount()).toBe(beforeHello + 1);  // the resume action really asked the host once
+    expect(store[HOST_PAUSE_KEY]).toBeNull();         // it answered ⇒ the pause was cleared
     console.log('[C13] host answered -> pause cleared, tick reason =', mod.lastBackfillTick()?.reason);
   });
 
-  it('默认【关】：什么都不设，同一条路径走到最后一道闸也不会跑', async () => {
+  it('off by default: with nothing set, the same path reaches the last gate without running', async () => {
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(async () => ({ status: 200, text: '{}' }));
     await bootBackgroundAndDispatch(fakeCapture());
@@ -195,24 +197,24 @@ describe('C13 · 回溯腿接进运行时', () => {
     console.log('[C13] default state -> tick reason =', mod.lastBackfillTick()?.reason);
   });
 
-  it('生产现状：开关开了但没人注入 http 端口 ⇒ no-http-port，绝不会有网络行为', async () => {
+  it('the production state: switch on but nobody injected an http port ⇒ no-http-port, never any network activity', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), true);
 
-    const mod: any = await import('../entrypoints/background');   // 不 configure
+    const mod: any = await import('../entrypoints/background');   // no configure call
     await bootBackgroundAndDispatch(fakeCapture());
     expect(runBackfillSpy).not.toHaveBeenCalled();
     expect(mod.lastBackfillTick()?.reason).toBe('no-http-port');
     console.log('[C13] no transport wired -> tick reason =', mod.lastBackfillTick()?.reason);
   });
 
-  it('MV3 现实：tick 之间没有任何内存态被依赖 —— 欠账集合只在 storage 里', async () => {
+  it('the MV3 reality: no in-memory state is relied on between ticks — the debt set lives only in storage', async () => {
     const { BACKFILL_ENABLED_KEY } = await import('../lib/backfill/schedule');
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), true);
-    // 开关本身也是持久的：SW 被回收再醒来，用户不必重新点一次。
+    // The switch itself is persistent too: when the SW is reclaimed and wakes again, the user need not click it a second time.
     expect(store[BACKFILL_ENABLED_KEY]).toBe(true);
     console.log('[C13] enabled flag persisted in storage.local =', store[BACKFILL_ENABLED_KEY]);
   });

@@ -1,46 +1,58 @@
 /**
- * C19 · 让回溯腿【自己醒】。
+ * C19 · Let the backfill leg **wake up on its own**.
  *
- * ## 为什么必须加闹钟
- * C13 选的心跳是「实时腿捕到一条时顺带踢一脚」。那个选择在当时是对的
- * （零成本、目标信息现成、时机温和），但它有一个致命推论：
- * 🔴 **一个装了扩展之后再也不打开那个网站的用户，历史永远补不完** ——
- *    因为再也不会有第二条实时捕获来踢它。
- * 回溯腿的产品承诺是「好几天之后慢慢全部补上」，靠一个只在用户主动聊天时
- * 才响一下的心跳是兑现不了的。
+ * ## Why an alarm was unavoidable
+ * C13's heartbeat was "the live leg kicks it whenever it captures one". That was
+ * the right choice then (zero cost, target information ready to hand, gentle
+ * timing), but it has one fatal corollary:
+ * 🔴 **a user who installs the extension and never opens that site again would
+ *    never finish backfilling** — because no second live capture would ever kick
+ *    it.
+ * The backfill leg's product promise is "everything slowly gets filled in over
+ * several days", and that cannot be delivered by a heartbeat that only fires when
+ * the user is actively chatting.
  *
- * ## 代价（已查证，2026-08-17）
- * Chrome 的权限警告清单里，`alarms` 与 `storage` 一样【不弹任何安装警告】；
- * 会弹的是我们已经有的 `downloads`（「管理你的下载内容」）。
- * ⇒ 加这一个权限对用户是无感的，而它换来的是「这条腿真的会自己往前走」。
+ * ## The cost (checked, 2026-08-17)
+ * In Chrome's permission-warning list, `alarms` — like `storage` — **raises no
+ * install warning at all**; what does raise one is the `downloads` we used to
+ * have ("Manage your downloads").
+ * ⇒ Adding this permission is invisible to the user, and what it buys is "this
+ * leg really does move forward on its own".
  *
- * ## 🔴 默认仍然是关的
- * BACKFILL_DEFAULT_ENABLED 一个字都没改（仍然是 false）。
- * **闹钟只在开关打开时才创建，关掉时立刻清掉** —— 没同意就没有闹钟，
- * 也就没有任何周期性行为。
+ * ## 🔴 Still off by default
+ * BACKFILL_DEFAULT_ENABLED did not change a character (still false).
+ * **The alarm is only created when the switch is on, and cleared the moment it is
+ * turned off** — no consent, no alarm, and therefore no periodic behaviour at all.
  */
 
 import type { BackfillStore } from './store';
 import type { TickReason } from './schedule';
 
-/** 闹钟名。同一个名字重复 create 会覆盖，天然幂等。 */
+/** The alarm name. Creating the same name twice overwrites, so it is naturally idempotent. */
 export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
 
 /**
- * 🔴 周期 = 5 分钟。这个数是算出来的，不是拍的：
+ * 🔴 Period = 5 minutes. This number is derived, not picked out of the air:
  *
- *  · **下限**：Chrome 对 MV3 打包扩展的 alarm 周期有最小值（1 分钟）；比它小的
- *    值会被浏览器悄悄抬上去，写一个抬不上去的数只会让代码和实际行为对不上。
- *  · **上限由日上限决定**：一次 tick 只清 1 笔账（DEFAULT_TICK_DETAILS = 1），
- *    而每天的配额是 DEFAULT_DETAIL_PACE.maxPerDay = 200 条。
- *    5 分钟一次 ⇒ 一天最多醒 288 次 > 200 ⇒ **真正卡住速度的是「每天上限」，
- *    不是闹钟**。这正是产品主人定的方向：温和度以每天上限为主。
- *    （若周期取 10 分钟，一天只有 144 次 < 200，闹钟反而成了瓶颈，
- *      1000 条要拖到 7 天以上，且日上限形同虚设。）
- *  · **与每条间隔不打架**：300 秒 ≫ 每条 20 秒的最小间隔 ⇒ 闹钟路径上
- *    间隔闸门永远是 0 等待；间隔真正起作用的是实时腿连着踢的时候（C19 任务 3）。
- *  · 每次醒来只做一件很小的事（读 storage、最多取 1 条），对 MV3 的 SW 生命周期
- *    友好 —— 短 tick × 很多次，与长 tick 在进度上等价，但更温和。
+ *  · **The floor**: Chrome imposes a minimum alarm period for packaged MV3
+ *    extensions (1 minute); anything smaller is silently rounded up by the
+ *    browser, and writing a number that cannot take effect only leaves code that
+ *    disagrees with reality.
+ *  · **The ceiling follows from the daily cap**: one tick clears exactly 1 debt
+ *    (DEFAULT_TICK_DETAILS = 1), and the daily quota is
+ *    DEFAULT_DETAIL_PACE.maxPerDay = 200.
+ *    Once every 5 minutes ⇒ at most 288 wakes a day > 200 ⇒ **what actually caps
+ *    the speed is the daily limit, not the alarm**. That is exactly the direction
+ *    the product owner set: gentleness is governed by the daily cap.
+ *    (A 10-minute period would give only 144 wakes a day < 200, making the alarm
+ *     the bottleneck instead; 1000 conversations would drag past 7 days and the
+ *     daily cap would be meaningless.)
+ *  · **It does not fight the per-item interval**: 300 seconds ≫ the 20-second
+ *    per-item minimum ⇒ on the alarm's path the interval gate is always a 0 wait;
+ *    the interval only bites when the live leg kicks repeatedly (C19 task 3).
+ *  · Each wake does one very small thing (read storage, fetch at most 1), which is
+ *    friendly to MV3's SW lifecycle — short ticks × many, equivalent in progress
+ *    to long ticks but gentler.
  */
 export const BACKFILL_ALARM_PERIOD_MINUTES = 5;
 
@@ -53,10 +65,13 @@ export interface AlarmsApi {
 export type AlarmSyncResult = 'created' | 'kept' | 'cleared' | 'unavailable';
 
 /**
- * 让闹钟与开关保持一致。**这是闹钟生命周期的唯一入口。**
- *  · 开关开 ⇒ 有闹钟（已经有的就不动，免得每次 SW 醒来都把周期从头计时）；
- *  · 开关关 ⇒ 清掉。
- * 拿不到 alarms API（比如 node 测试环境）返回 'unavailable'，绝不假装成功。
+ * Keep the alarm in step with the switch. **This is the only entry point to the
+ * alarm's lifecycle.**
+ *  · switch on ⇒ an alarm exists (an existing one is left alone, so every SW wake
+ *    does not restart the period from zero);
+ *  · switch off ⇒ cleared.
+ * Without an alarms API (say, the node test environment) it returns 'unavailable'
+ * and never pretends to have succeeded.
  */
 export async function syncBackfillAlarm(
   alarms: AlarmsApi | null | undefined,
@@ -78,12 +93,14 @@ export async function syncBackfillAlarm(
 }
 
 // ---------------------------------------------------------------------------
-// 回溯目标登记表
+// The backfill target registry
 //
-// 闹钟醒来时 SW 是全新的：没有当前 tab、没有账号、什么都不知道 ——
-// 这正是 C13 当初拒绝用定时器的理由之一。解法不是去猜，而是把实时腿【已经
-// 现成带着】的那份目标（platform / origin / scope）在踢那一脚时顺手记下来。
-// 于是闹钟用的永远是"用户真的用过的那个账号"，一个字都不用编。
+// When the alarm wakes, the SW is brand new: no current tab, no account, nothing.
+// That was one of the reasons C13 refused to use a timer. The answer is not to
+// guess but to record, on the live leg's kick, the target (platform / origin /
+// scope) it **already has to hand**.
+// So the alarm always uses "the account the user really did use", and not one
+// character has to be invented.
 // ---------------------------------------------------------------------------
 
 export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1';
@@ -93,7 +110,7 @@ export interface BackfillTarget {
   platform: string;
   origin: string;
   scope: string;
-  /** 最近一次见到这个目标的时刻。只用来排序。 */
+  /** When this target was last seen. Used for ordering only. */
   at: number;
 }
 
@@ -112,7 +129,7 @@ export async function loadTargets(store: BackfillStore | null): Promise<Backfill
   return Array.isArray(raw) ? raw.filter(isTarget) : [];
 }
 
-/** 记一个目标（platform+scope 去重，最近的排最前）。 */
+/** Record one target (deduplicated by platform+scope, most recent first). */
 export async function rememberTarget(
   store: BackfillStore | null,
   target: BackfillTarget,
@@ -127,29 +144,31 @@ export async function rememberTarget(
 }
 
 // ---------------------------------------------------------------------------
-// C30 · 闹钟这一跳的【留痕】
+// C30 · The **trace** of the alarm's tick
 //
-// 缺陷现场（C29 复现、真机实测）：闹钟每 5 分钟醒一次，每次都因为登记表是空的
-// 而【什么都没做】—— 没有报错、没有日志、存储里没有任何痕迹。用户看到的是
-// 「正在归档」+「一条都还没有枚举过」，两句话互相打架，而没有任何东西能告诉他
-// 到底发生了什么。
+// The defect as seen on a real machine (reproduced in C29): the alarm woke every
+// 5 minutes and, because the registry was empty, **did nothing at all** — no
+// error, no log, no trace in storage. What the user saw was "archiving" next to
+// "not one conversation has been enumerated yet", two sentences contradicting
+// each other, and nothing anywhere to say what had actually happened.
 //
-// 🔴 所以：**每一次闹钟醒来，无论跑没跑，都要把「做了什么、为什么」写下来。**
-//    写进 storage 而不是内存：MV3 的 SW 一空闲就被回收，内存里的 lastTick
-//    在用户点开 Popup 之前早就没了 —— 那正是真机上看到的「什么都查不到」。
+// 🔴 So: **every alarm wake, whether it ran or not, writes down what it did and
+//    why.** Into storage, not into memory: an MV3 SW is reclaimed the moment it
+//    goes idle, and an in-memory lastTick is long gone before the user opens the
+//    popup — which is exactly the "nothing can be found out" seen on a real machine.
 // ---------------------------------------------------------------------------
 
-/** 最近一次闹钟跳动的留痕。cs_* 前缀同族，不新增权限。 */
+/** The trace of the alarm's most recent tick. Same cs_* key family; no new permission. */
 export const BACKFILL_LAST_TICK_KEY = 'cs_backfill_lasttick_v1';
 
 export interface BackfillTickRecord {
-  /** 这一跳发生在什么时候（Date.now()）。 */
+  /** When this tick happened (Date.now()). */
   at: number;
-  /** 有没有真的跑起来（reason === 'ran'）。 */
+  /** Whether it actually ran (reason === 'ran'). */
   ran: boolean;
-  /** 具名结局。与 tickBackfill / Popup 用的是同一套取值。 */
+  /** The named outcome. The same set of values tickBackfill and the popup use. */
   reason: TickReason;
-  /** 这一跳醒来时登记表里有几个回溯目标。0 就是 0，不修饰。 */
+  /** How many backfill targets the registry held when this tick woke. 0 is 0, undecorated. */
   targets: number;
 }
 
@@ -162,7 +181,7 @@ function isTickRecord(v: unknown): v is BackfillTickRecord {
     && typeof r.targets === 'number';
 }
 
-/** 读留痕。读不出来 / 结构不对 ⇒ null（「我不知道」也是实话，不编一条）。 */
+/** Read the trace. Unreadable / wrong shape ⇒ null ("I do not know" is also the truth; do not invent a row). */
 export async function loadLastTick(store: BackfillStore | null): Promise<BackfillTickRecord | null> {
   if (!store) return null;
   const raw = await store.load(BACKFILL_LAST_TICK_KEY);
@@ -170,8 +189,9 @@ export async function loadLastTick(store: BackfillStore | null): Promise<Backfil
 }
 
 /**
- * 写留痕。**best-effort**：写不下去只进 console.warn ——
- * 留痕是为了让人看得见，它自己绝不能成为挡住这条腿的新理由。
+ * Write the trace. **Best-effort**: a failed write only reaches console.warn —
+ * the trace exists so that a human can see what happened, and it must never
+ * itself become a new reason to block this leg.
  */
 export async function saveLastTick(
   store: BackfillStore | null,

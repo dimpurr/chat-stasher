@@ -1,26 +1,33 @@
 /**
- * 节流 —— 必须是【可观测的数字】，不是「感觉上慢一点」。
+ * Throttling — it has to be an **observable number**, not "it feels a bit slower".
  *
- * 为什么枚举和取正文要分开定速：
- *  · ChatGPT 的会话列表是 GET /backend-api/conversations?offset=&limit=，
- *    响应自带 total，1000 条大约 10 页就枚举完 ⇒ 枚举总共约 10 次请求，很便宜。
- *  · 真正要「温和」的是随后逐条取正文的那 1000 次。
- *  两段用同一个速率，要么枚举被拖到没必要的慢，要么取正文快到不像人。
+ * Why enumeration and body-fetching are paced separately:
+ *  · ChatGPT's conversation list is GET /backend-api/conversations?offset=&limit=,
+ *    the response carries its own total, and 1000 conversations enumerate in about
+ *    10 pages ⇒ enumeration is about 10 requests in total, which is cheap.
+ *  · What really has to be "gentle" is the 1000 body fetches that follow.
+ *  Using one rate for both would either drag enumeration out to needlessly slow,
+ *  or make body-fetching look nothing like a person.
  *
- * 默认值与理由（可配置，这里只是默认）：
- *  · 枚举 minIntervalMs = 2000（每 2 秒一页）
- *      ⇒ 1000 条 ≈ 10 页 ≈ 20 秒枚举完。比人手滚动侧边栏还慢，且总量只有 10 次。
- *  · 取正文 minIntervalMs = 20000（每 20 秒一条）
- *      ⇒ 比任何真人连续点开对话都慢一个量级，不可能被当成脉冲式抓取。
- *  · 取正文 maxPerDay = 200（每天最多 200 条）
- *      ⇒ 1000 条对话正好摊到 5 天，与产品要的「好几天之后慢慢全部索引进来」一致；
- *        200 × 20s ≈ 67 分钟/天的稀疏活动，落在正常使用者的日活范围内。
+ * The defaults and their reasoning (configurable; these are only the defaults):
+ *  · enumerate minIntervalMs = 2000 (one page every 2 seconds)
+ *      ⇒ 1000 conversations ≈ 10 pages ≈ 20 seconds to enumerate. Slower than a
+ *        human scrolling the sidebar, and only 10 requests in total.
+ *  · detail minIntervalMs = 20000 (one conversation every 20 seconds)
+ *      ⇒ an order of magnitude slower than any real person clicking through
+ *        conversations one after another; it cannot read as burst fetching.
+ *  · detail maxPerDay = 200 (at most 200 a day)
+ *      ⇒ 1000 conversations spread over exactly 5 days, matching the product's
+ *        "everything slowly gets indexed over several days"; 200 × 20s ≈ 67
+ *        minutes of sparse activity a day, inside a normal user's daily range.
  *
- * ⚠️ 这些数字是【按上述算术选的默认值】，**不是**对平台限流阈值的实测结果 ——
- *    我们没有登录态，也不该去试探阈值。真正的阈值只能靠 halt-on-429 兜底。
+ * ⚠️ These numbers are **defaults chosen by the arithmetic above**, **not**
+ *    measurements of the platform's rate limits — we have no logged-in session
+ *    and should not go probing for thresholds. The real threshold can only be
+ *    caught by halting on 429.
  */
 
-/** 可注入的时钟：测试用假时钟数 sleep，不真的等。 */
+/** An injectable clock: tests count sleeps on a fake clock instead of really waiting. */
 export interface Clock {
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -32,9 +39,9 @@ export const systemClock: Clock = {
 };
 
 export interface PacePlan {
-  /** 两次请求之间的最小间隔（毫秒）。 */
+  /** The minimum interval between two requests, in milliseconds. */
   minIntervalMs: number;
-  /** 每天上限；null = 不限（枚举那段就是 null）。 */
+  /** The daily cap; null = no cap (which is what the enumeration segment uses). */
   maxPerDay: number | null;
 }
 
@@ -52,16 +59,21 @@ export const DEFAULT_PACE: BackfillPace = {
 };
 
 /**
- * 一段的节流器。第一次请求不等（没有「上一次」可言），之后每次都补足最小间隔。
- * 记录 waits/totalWaitedMs，好让「节流真的生效」是可以被贴出来的数字。
+ * The throttler for one segment. The first request does not wait (there is no
+ * "previous one" to speak of); after that it makes up the full minimum interval.
+ * It records waits/totalWaitedMs so that "the throttling really took effect" is a
+ * number that can be pasted into a report.
  *
- * 🔴 C19 · BUG-3 的修法就在 `seedLastAt` 这一个参数上：
- *    Pacer 本身是 per-run 的（每次 runBackfill 都 new 一个），而运行时一次 tick
- *    只清 1 笔账 ⇒ 每次 gate() 都是那个 run 的第一次 ⇒ 恒等 0 ⇒
- *    pace.ts 写的 20 秒最小间隔【在浏览器里一次都没生效过】(C17-3.B2 实测)。
- *    这里让调用方把「上一次真实取数的时刻」（存在 BackfillState.lastFetchAt 里、
- *    跨 tick 跨重启存活）喂进来当种子，间隔就跨 tick 生效了。
- *    seedLastAt = null ⇒ 行为与 C11 逐字一致（真的从来没取过数）。
+ * 🔴 C19 · BUG-3's fix is this one parameter, `seedLastAt`:
+ *    A Pacer is per-run (runBackfill constructs a new one each time), and at
+ *    runtime a tick clears only 1 debt ⇒ every gate() call was that run's first
+ *    ⇒ identically 0 ⇒ the 20-second minimum interval written in pace.ts
+ *    **never once took effect in the browser** (measured in C17-3.B2).
+ *    Here the caller feeds in "the moment of the last real fetch" (stored in
+ *    BackfillState.lastFetchAt, surviving across ticks and restarts) as the seed,
+ *    and the interval takes effect across ticks.
+ *    seedLastAt = null ⇒ behaviour byte-identical to C11 (a genuine "we have never
+ *    fetched anything").
  */
 export class Pacer {
   private last: number | null;
@@ -76,7 +88,7 @@ export class Pacer {
     this.last = seedLastAt;
   }
 
-  /** 上一次「放行」的时刻。调用方要把它落盘，才能跨 tick 续上。 */
+  /** The moment of the last "go-ahead". The caller must persist it for the interval to survive across ticks. */
   get lastAt(): number | null {
     return this.last;
   }
@@ -85,7 +97,7 @@ export class Pacer {
     return this.waits.reduce((a, b) => a + b, 0);
   }
 
-  /** 在每次真实请求之前调用。返回实际等待的毫秒数。 */
+  /** Call before every real request. Returns the milliseconds actually waited. */
   async gate(): Promise<number> {
     const now = this.clock.now();
     if (this.last === null) {

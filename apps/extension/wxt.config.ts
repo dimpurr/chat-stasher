@@ -1,9 +1,25 @@
 import { defineConfig } from 'wxt';
 
 export default defineConfig({
+  // `@wxt-dev/i18n` (module source: node_modules/@wxt-dev/i18n/dist/module.mjs:10-93)
+  // compiles `locales/<locale>.yml` into the `_locales/<locale>/messages.json`
+  // catalog the browser ships with the extension, and exposes the typed
+  // `i18n.t` through the `#i18n` alias (module.mjs:80). It refuses to run at all
+  // unless `manifest.default_locale` is set (module.mjs:18-21), which is why the
+  // two lines below are a pair.
+  modules: ['@wxt-dev/i18n/module'],
   manifest: {
-    name: 'Chat Stasher',
-    description: 'Capture selected web chat sessions to files on your own machine.',
+    // The catalog is keyed by locale code, and `en` is both the file we generate
+    // the compile-time types from (module.mjs:51-58) and the language we fall
+    // back to when the browser asks for something we have not translated.
+    default_locale: 'en',
+    // 🔴 `__MSG_*__` is Chrome's manifest localization form — the browser
+    // substitutes it from `_locales/<resolved locale>/messages.json` before the
+    // extension ever sees the manifest. WXT ships the compiled catalog as a
+    // public asset, so this needs no extra wiring here:
+    // https://developer.chrome.com/docs/extensions/reference/manifest/name
+    name: '__MSG_extName__',
+    description: '__MSG_extDescription__',
     // Minimal permission set. No <all_urls>; content-script matches stay on the
     // explicit platform table in lib/contract.ts.
     //

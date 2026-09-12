@@ -1,22 +1,24 @@
 /**
- * C32-COLDSTART · 冷启动那句「你要做什么才会开始」。
+ * C32-COLDSTART · The cold-start sentence "what do you have to do before it starts".
  *
- * 真机上的场景：新用户把开关打开、也打开了一个受支持平台的页面，
- * 于是取数通道是通的（transportWired = true），但回溯目标登记表是空的 ——
- * 登记只发生在「实时腿真的归档过一次对话」的那一脚上。
- * 结果：闹钟每次醒来都无事可做，而**用户不知道自己要做什么**。
+ * The scene on a real machine: a new user turns the switch on and also opens a page on a
+ * supported platform, so the fetch channel is up (transportWired = true) — but the backfill
+ * target registry is empty, because registration only happens on the kick from "the live leg
+ * really archived one conversation once".
  *
- * 🔴 这是【有意的设计】，不是 bug（lib/backfill/alarm.ts:80-87）：
- *    闹钟醒来时 SW 是全新的，没有 tab、没有账号；解法不是去猜一个，
- *    而是只用「用户真的用过的那个账号」。docs/privacy.md:112 —— 扩展没有任何
- *    host 权限，只在用户自己已有的登录态里取数。
- * ⇒ 所以本文件【不碰任何判定逻辑】，只钉死一件事：那句引导语必须存在、
- *   必须说清具体动作与理由，且**在健康机器上不许响**。
+ * 🔴 This is **deliberate design**, not a bug (lib/backfill/alarm.ts:80-87):
+ *    when the alarm wakes, the SW is brand new with no tab and no account; the answer is not to
+ *    guess one, but to use only "the account the user really did use". docs/privacy.md:112 —
+ *    the extension has no host permissions and fetches only inside the user's own login.
+ * ⇒ So this file **touches no decision logic** and pins one thing: that guidance sentence has to
+ *   exist, has to spell out the concrete action and the reason, and **must not fire on a healthy
+ *   machine**.
  *
- * 全程零网络、零登录态：只有假的 browser.* 和纯函数。
+ * Zero network and zero logged-in state throughout: only a fake browser.* and pure functions.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 
 const store: Record<string, unknown> = {};
 
@@ -40,14 +42,14 @@ beforeEach(() => {
   for (const k of Object.keys(store)) delete store[k];
   vi.resetModules();
   vi.unstubAllGlobals();
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
 });
 
 /**
- * 按真机那条链子算一遍 Popup：开关 → 目标登记表 → tickBlockReason → renderPopup。
- * 🔴 用的是 entrypoints/popup/main.ts 调的那**同一个** tickBlockReason，
- *    不在测试里另写一份闸门判断 —— 另写一份就等于自己给自己打分。
+ * Compute the popup down the real machine's chain: switch → target registry → tickBlockReason → renderPopup.
+ * 🔴 It uses the **same** tickBlockReason entrypoints/popup/main.ts calls, and does not write a
+ *    second gate decision in the test — a second copy would be marking its own homework.
  */
 async function popupNow(opts: { enabled: boolean; hasHttp: boolean; hasTargets: boolean }) {
   const { browserLocalStore } = await import('../lib/backfill/store');
@@ -82,61 +84,61 @@ async function popupNow(opts: { enabled: boolean; hasHttp: boolean; hasTargets: 
   return { block, view, text: popupText(view) };
 }
 
-/** 引导语必须说清的【具体动作】。措辞可以变，这几件事不许消失。 */
-const ACTION_PHRASES = ['发一条消息', '打开一条'];
-/** 引导语必须说清的【理由】—— 它把一个像缺陷的限制还原成隐私承诺。 */
-const REASON_PHRASES = ['不猜你的账号', 'host 权限'];
-/** 🔴 绝不许出现的时间承诺：我们没有速率模型，编一个就是骗人。 */
-const FORBIDDEN_PROMISES = ['分钟内', '几分钟', '很快', '马上', '立刻就会开始', '预计'];
+/** The **concrete actions** the guidance must spell out. The wording may change; these must not vanish. */
+const ACTION_PHRASES = ['send a message', 'open a conversation'];
+/** The **reason** the guidance must spell out — it restores what looks like a defect into a privacy promise. */
+const REASON_PHRASES = ['do not guess your account', 'host permissions'];
+/** 🔴 Time promises that must never appear: we have no rate model, and inventing one is a lie. */
+const FORBIDDEN_PROMISES = ['within minutes', 'in a few minutes', 'shortly', 'soon', 'starts right away', 'estimated', 'time remaining'];
 
-describe('C32-COLDSTART · 有通道、没目标时必须把话说全', () => {
-  it('🔴 反证：transport 通着、一个目标都没有 ⇒ 必须说清用户要做的那一件事和为什么', async () => {
+describe('C32-COLDSTART · with a channel and no target, the whole thing has to be said', () => {
+  it('🔴 the counter-proof: transport up and not one target ⇒ it must spell out the one thing to do and why', async () => {
     const { block, view, text } = await popupNow({
       enabled: true, hasHttp: true, hasTargets: false,
     });
-    console.log('[C32-EVIDENCE 冷启动 · 有通道没目标]\n' + text);
+    console.log('[C32-EVIDENCE cold start · channel but no target]\n' + text);
 
-    // 前提没被改动：这仍然是 'no-targets'，闸门判定一个字都没动。
+    // The premise is unchanged: this is still 'no-targets', and not one character of the gate decision moved.
     expect(block).toBe('no-targets');
-    expect(view.running).toContain('未在运行');
-    expect(text).not.toContain('正在归档');
+    expect(view.running).toContain('NOT running');
+    expect(text).not.toContain('Running: archiving');
 
-    // 1 · 具体动作。「请稍候」这种废话不算数。
+    // 1 · The concrete action. A platitude like "please wait" does not count.
     expect(view.missing).not.toBeNull();
     for (const phrase of ACTION_PHRASES) expect(view.missing!).toContain(phrase);
 
-    // 2 · 为什么要这样 —— 隐私承诺，不是「系统限制」。
+    // 2 · Why it has to be this way — a privacy promise, not a "system limitation".
     for (const phrase of REASON_PHRASES) expect(view.missing!).toContain(phrase);
 
-    // 3 · 不许承诺我们做不到的事。
+    // 3 · No promising what we cannot do.
     for (const promise of FORBIDDEN_PROMISES) expect(text).not.toContain(promise);
     expect(text).not.toContain('%');
   });
 
-  it('🟢 健康路径守卫：目标确实存在时，那句引导语【一个字都不许出现】', async () => {
+  it('🟢 healthy-path guard: with a target really present, that guidance **may not appear at all**', async () => {
     const { block, view, text } = await popupNow({
       enabled: true, hasHttp: true, hasTargets: true,
     });
-    console.log('[C32-EVIDENCE 健康机器 · 有目标有通道]\n' + text);
+    console.log('[C32-EVIDENCE healthy machine · target and channel]\n' + text);
 
     expect(block).toBeNull();
     expect(view.missing).toBeNull();
-    // 🔴 本仓的规矩：新加的提示要在健康机器上验一次「它不响」。
-    // 否则它会变成永远挂着的噪声，用户下次真需要看它的时候已经不看了。
+    // 🔴 This repository's rule: a newly added hint is verified once on a healthy machine for "it stays quiet".
+    // Otherwise it becomes permanent noise, and by the time the user really needs it they have stopped reading.
     for (const phrase of [...ACTION_PHRASES, ...REASON_PHRASES]) {
       expect(text).not.toContain(phrase);
     }
   });
 
-  it('🟢 守卫二：卡在别的闸门时也不许说这句 —— 那会是**错的**建议', async () => {
-    // 开关没打开：此时该做的是打开开关，不是去发消息。
+  it('🟢 guard two: stuck on another gate, this sentence is not allowed either — it would be the **wrong** advice', async () => {
+    // The switch is off: what is needed here is to turn the switch on, not to send a message.
     const off = await popupNow({ enabled: false, hasHttp: true, hasTargets: false });
     expect(off.block).toBe('disabled');
     for (const phrase of [...ACTION_PHRASES, ...REASON_PHRASES]) {
       expect(off.text).not.toContain(phrase);
     }
 
-    // 有目标但没通道：此时该做的是把平台页面开着，不是去发消息。
+    // A target but no channel: what is needed here is to leave a platform page open, not to send a message.
     const noPort = await popupNow({ enabled: true, hasHttp: false, hasTargets: true });
     expect(noPort.block).toBe('no-http-port');
     for (const phrase of REASON_PHRASES) expect(noPort.text).not.toContain(phrase);

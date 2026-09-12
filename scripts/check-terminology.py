@@ -21,8 +21,10 @@ semantic constraints this repo will not bend on (they are spec, not style):
        (a missing JSON field) is NOT an archive claim and stays silent.
   T4 · one-word-one-meaning-reap. "reap" is only permitted in ssh master connection
        reclaim context; all stage shard-body reclamation must say reclaim.
-  T5 · no-cjk-characters.       Source code and tests under crates/ must not
-       contain Chinese characters in comments or code strings.
+  T5 · no-cjk-characters.       Source code and tests under crates/ and under
+       apps/extension/ must not contain Chinese characters in comments or code
+       strings. The extension's Chinese lives in apps/extension/locales/zh_CN.yml
+       and nowhere else; T5_SCOPES below lists what is scanned and what is not.
 
 Output format mirrors scripts/check-semantic-defaults.py:
     FAILED:<n>
@@ -145,11 +147,45 @@ RULES = [
             {"forbidden": r"[\u4e00-\u9fff]"},
         ],
         "suggestion": (
-            "crates/ 下源码与测试中禁止出现中文字符（注释与代码均包含）；"
-            "请替换为地道、准确的英文。"
+            "crates/ 与 apps/extension/ 下源码与测试中禁止出现中文字符（注释与代码均"
+            "包含）；请替换为地道、准确的英文。中文词条只允许出现在 "
+            "apps/extension/locales/zh_CN.yml 里。"
         ),
     },
 ]
+
+# ------------------------------------------------------------------ T5 scope
+# T5 covers two source trees, and they are different surfaces that happen to
+# share one rule:
+#
+#   crates/          the CLI. .rs and .json, at any depth.
+#   apps/extension/  the browser extension. .ts, .json and .html.
+#
+# What is deliberately NOT covered, and why:
+#   · .yml under apps/extension/locales — that is where the Chinese lives on
+#     purpose. en.yml is a .yml too, so it is out of scope by extension and not
+#     by a special case; zh_CN.yml is ALSO named explicitly below, so that if
+#     anyone ever adds a locale file in a scanned format the exclusion is
+#     already written down rather than discovered by a red build.
+#   · node_modules, .output, .wxt and dist — installed dependencies and build
+#     artifacts. They are generated from the sources that ARE scanned, so
+#     scanning them would report the same fact twice and make the gate's output
+#     depend on whether someone had built recently.
+#   · pnpm-lock.yaml and other non-source files — not scanned formats.
+T5_SCOPES = (
+    {
+        "dir": "crates",
+        "extensions": (".rs", ".json"),
+        "skip_dirs": frozenset(),
+        "skip_files": frozenset(),
+    },
+    {
+        "dir": os.path.join("apps", "extension"),
+        "extensions": (".ts", ".json", ".html"),
+        "skip_dirs": frozenset({"node_modules", ".output", ".wxt", "dist", "build", "coverage"}),
+        "skip_files": frozenset({os.path.join("apps", "extension", "locales", "zh_CN.yml")}),
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -160,24 +196,34 @@ class FileLineHit:
 
 
 def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
-    """Scan all .rs and .json files under crates/ for CJK characters line by line.
+    """Scan the T5_SCOPES source trees for CJK characters, line by line.
 
-    `.json` is included because the harness registry under crates/ ships with the
-    binary and some of its fields reach users; it is as much part of the public
-    English surface as the source. A file that cannot be read or decoded is
-    reported, not skipped: a gate that treats "could not look" as "clean" is the
-    exact failure this repository exists to refuse.
+    `.json` is included under crates/ because the harness registry there ships
+    with the binary and some of its fields reach users; it is as much part of the
+    public English surface as the source. The extension side adds `.ts` and
+    `.html` for the same reason — those are the popup's markup and the code that
+    fills it.
+
+    A file that cannot be read or decoded is reported, not skipped: a gate that
+    treats "could not look" as "clean" is the exact failure this repository
+    exists to refuse.
     """
     out: list[tuple[FileLineHit, dict]] = []
-    crates_dir = os.path.join(root, "crates")
-    if not os.path.isdir(crates_dir):
-        return out
     pat = re.compile(rule["patterns"][0]["forbidden"])
-    for dirpath, _, filenames in os.walk(crates_dir):
-        for fname in sorted(filenames):
-            if fname.endswith((".rs", ".json")):
+    for scope in T5_SCOPES:
+        base_dir = os.path.join(root, scope["dir"])
+        if not os.path.isdir(base_dir):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base_dir):
+            # Pruned in place so os.walk does not descend into them at all.
+            dirnames[:] = sorted(d for d in dirnames if d not in scope["skip_dirs"])
+            for fname in sorted(filenames):
+                if not fname.endswith(scope["extensions"]):
+                    continue
                 full_path = os.path.join(dirpath, fname)
                 rel_path = os.path.relpath(full_path, root)
+                if rel_path in scope["skip_files"]:
+                    continue
                 try:
                     with open(full_path, "r", encoding="utf-8") as fh:
                         for lineno, line in enumerate(fh, start=1):
@@ -281,6 +327,47 @@ FIXTURE_VIOLATING = {
     ),
 }
 
+# The extension half of T5. These live under apps/extension/, so they are written
+# with their directory prefix rather than into the crates/ source directory.
+FIXTURE_VIOLATING_EXTENSION = {
+    os.path.join("apps", "extension", "lib", "t5_violation.ts"): (
+        '// 这是扩展里的中文注释\n'
+        'export const bad = 1;\n'
+    ),
+    os.path.join("apps", "extension", "entrypoints", "popup", "t5_violation.html"): (
+        '<div id="status">中文</div>\n'
+    ),
+    # Would be caught if T5_SCOPES' extensions ever widened to .yml, so the
+    # skip_files entry is exercised rather than merely documented. Today the
+    # extension filter is what keeps it out; both mechanisms are asserted below.
+    os.path.join("apps", "extension", "locales", "zh_CN.yml"): (
+        'extDescription: 这是唯一允许出现中文的文件。\n'
+    ),
+}
+
+# Near-misses on the extension side: everything here must stay out of the report.
+FIXTURE_CLEAN_EXTENSION = {
+    os.path.join("apps", "extension", "locales", "en.yml"): (
+        'extName: Chat Stasher\n'
+    ),
+    os.path.join("apps", "extension", "lib", "t5_clean.ts"): (
+        '// English comments only\n'
+        'export const good = 1;\n'
+    ),
+    # Installed dependencies and build artifacts: excluded directories, so the
+    # Chinese inside them is nobody's business — they are generated from the
+    # sources that ARE scanned.
+    os.path.join("apps", "extension", "node_modules", "dep", "t5_violation.ts"): (
+        '// 依赖里的中文\n'
+    ),
+    os.path.join("apps", "extension", ".output", "chrome-mv3", "t5_violation.ts"): (
+        '// 构建产物里的中文\n'
+    ),
+    os.path.join("apps", "extension", ".wxt", "t5_violation.ts"): (
+        '// 生成目录里的中文\n'
+    ),
+}
+
 # Near-misses: same words, but the OTHER meaning. The lint must stay silent on these.
 FIXTURE_CLEAN = {
     "t1_clean.rs": (
@@ -329,7 +416,9 @@ FIXTURE_CLEAN = {
 
 def _write_fixtures(src_dir: str, fixtures: dict) -> None:
     for name, content in fixtures.items():
-        with open(os.path.join(src_dir, name), "w", encoding="utf-8") as fh:
+        path = os.path.join(src_dir, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
 
 
@@ -362,6 +451,8 @@ def selftest() -> int:
         # which blocks too, but would mask what this fixture is here to prove.)
         with open(os.path.join(src, "t5_undecodable.json"), "wb") as fh:
             fh.write(b"{\"note\": \"\xff\xfe not valid utf-8\"}\n")
+        _write_fixtures(tmp, FIXTURE_VIOLATING_EXTENSION)
+        _write_fixtures(tmp, FIXTURE_CLEAN_EXTENSION)
         proc = subprocess.run([sys.executable, script, tmp], capture_output=True, text=True)
         report = proc.stdout + proc.stderr
         say(f"violating tree -> exit {proc.returncode}")
@@ -369,7 +460,8 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        expect("FAILED:13" in report, "violating tree reports exactly 13 violations")
+        # 13 from crates/ (unchanged) + 2 from apps/extension/.
+        expect("FAILED:15" in report, "violating tree reports exactly 15 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
@@ -388,14 +480,44 @@ def selftest() -> int:
             "each of T1/T2/T3/T4/T5 is named with its suggestion",
         )
 
+        # -- the extension half of T5
+        expect(
+            os.path.join("apps", "extension", "lib", "t5_violation.ts") in report,
+            "T5 also covers .ts under apps/extension/",
+        )
+        expect(
+            os.path.join("apps", "extension", "entrypoints", "popup", "t5_violation.html") in report,
+            "T5 also covers .html under apps/extension/",
+        )
+        # The path also appears inside T5's own suggestion text, so this looks
+        # for a violation REPORT line for it rather than for the string.
+        expect(
+            f"  ! {os.path.join('apps', 'extension', 'locales', 'zh_CN.yml')}:" not in report,
+            "the Chinese locale file is excluded from T5",
+        )
+
         # -- clean fixtures must NOT appear
         for name in FIXTURE_CLEAN:
             expect(name not in report, f"clean fixture {name} stays out of the report")
+        for name in FIXTURE_CLEAN_EXTENSION:
+            expect(
+                name not in report,
+                f"extension near-miss {name} stays out of the report",
+            )
 
         # -- half: clean fixtures only -> must pass
         src2 = os.path.join(tmp, "clean", "crates", "chat-stasher", "src")
         os.makedirs(src2)
         _write_fixtures(src2, FIXTURE_CLEAN)
+        # The extension half of the clean tree. It deliberately includes the
+        # Chinese locale file and the Chinese inside node_modules/.output/.wxt:
+        # if any of those exclusions were wrong, this half would not exit 0.
+        _write_fixtures(os.path.join(tmp, "clean"), FIXTURE_CLEAN_EXTENSION)
+        _write_fixtures(os.path.join(tmp, "clean"), {
+            path: content
+            for path, content in FIXTURE_VIOLATING_EXTENSION.items()
+            if path in T5_SCOPES[1]["skip_files"]
+        })
         proc2 = subprocess.run([sys.executable, script, os.path.join(tmp, "clean")],
                                capture_output=True, text=True)
         say(f"clean tree -> exit {proc2.returncode} ({proc2.stdout.strip()})")

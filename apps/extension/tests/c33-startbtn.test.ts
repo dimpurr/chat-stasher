@@ -1,28 +1,30 @@
 /**
- * C33-STARTBTN · 「开始回溯这个平台」——【显式知情同意】那条登记入口。
+ * C33-STARTBTN · "Start backfilling this platform" — the registration entry point for **explicit informed consent**.
  *
- * ## 缺陷现场（真机复现）
- * 新用户把开关打开、也开着一个受支持平台的页面（取数通道是通的），
- * 但回溯【永远不会开始】：唯一登记回溯目标的地方是 kickBackfill，
- * 而它要求**先有一次实时对话被捕获**。
+ * ## The defect as seen on a real machine
+ * A new user turns the switch on and has a supported platform's page open (the fetch channel is
+ * up), but backfill **never starts**: the only place a backfill target is registered is
+ * kickBackfill, and that requires **one live conversation to have been captured first**.
  *
- * 🔴 那个限制是【有意的设计】，本文件一个字都没去改它
- *    （lib/backfill/alarm.ts:80-87：闹钟醒来时 SW 是全新的，没有 tab 也没有账号，
- *      唯一不用编的信息就是实时腿现成攥着的那一个；docs/privacy.md —— 扩展没有
- *      任何 host 权限）。
- * ⇒ 本单加的是**另一条登记入口**：用户在 Popup 上点一下，明确说「就补这个平台」。
- *   「不去猜」这条原则不变 —— 变的只是多了一个「用户自己说」的来源。
+ * 🔴 That limitation is **deliberate design** and this file does not change a character of it
+ *    (lib/backfill/alarm.ts:80-87: when the alarm wakes the SW is brand new with no tab and no
+ *      account, and the only information that does not have to be invented is the one the live
+ *      leg is holding; docs/privacy.md — the extension has no host permissions).
+ * ⇒ What this change adds is **one more registration entry point**: the user clicks once in the
+ *   popup and says outright "backfill this platform". The "we do not guess" principle is
+ *   unchanged — what changed is that there is now a "the user said so" source as well.
  *
- * ## 这里钉死四件事
- *  1. 🔴 反证：有通道、无目标时，点了按钮之后 cs_backfill_targets_v1 里出现一条目标；
- *  2. 已经有目标时按钮【不出现】（否则它是永远挂着的噪声）；
- *  3. 没有通道时按钮【不出现】（点了也没用）；
- *  4. 登记之后闹钟那一跳【不再报 no-targets】——用真实的 runAlarmTick 走一遍。
+ * ## Four things are pinned here
+ *  1. 🔴 the counter-proof: with a channel and no target, clicking the button puts a target into cs_backfill_targets_v1;
+ *  2. with a target already present the button **does not appear** (otherwise it is permanent noise);
+ *  3. with no channel the button **does not appear** (clicking it would do nothing);
+ *  4. after registration the alarm tick **no longer reports no-targets** — walked through with the real runAlarmTick.
  *
- * 全程零真实网络、零登录态：只有假的 browser.* 和一个合成 fetch。
+ * Zero real network and zero logged-in state throughout: only a fake browser.* and a synthetic fetch.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { readFileSync } from 'node:fs';
 import { handleBackfillMessage } from '../lib/backfill/tab-port';
 
@@ -37,7 +39,7 @@ const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const downloadCalls: Array<{ id: number; filename: string }> = [];
 const changeListeners: Array<(d: any) => void> = [];
 const alarmBook = new Map<string, unknown>();
-/** 现在"开着"的平台标签页。删掉一个，ping 自然就不通了。 */
+/** The platform tabs that are "open" right now. Delete one and its ping naturally fails. */
 const liveTabs = new Map<number, string>();
 const contentFetches: string[] = [];
 
@@ -100,7 +102,7 @@ const fakeBrowser: any = {
   },
 };
 
-/** 假时钟走 background 的测试接缝，免得测试真的睡满 20 秒。 */
+/** A fake clock through background's test seam, so the test does not really sleep 20 seconds. */
 let runtimeNow = 1_700_000_000_000;
 const runtimeClock = {
   now: () => runtimeNow,
@@ -114,7 +116,7 @@ async function bootBackground(): Promise<any> {
   return mod;
 }
 
-/** 像 Popup 那样派发一条消息（Popup 没有 sender.tab）。 */
+/** Dispatch a message the way the popup does (the popup has no sender.tab). */
 async function dispatch(message: unknown): Promise<any> {
   return await new Promise((resolve) => {
     const ret = runtimeListeners[0]!(message, { id: 'popup' }, resolve);
@@ -122,7 +124,7 @@ async function dispatch(message: unknown): Promise<any> {
   });
 }
 
-/** 内容脚本报到：这就是「有一个开着的平台页面」在生产里的样子。 */
+/** A content script checking in: this is what "there is an open platform page" looks like in production. */
 async function tabHello(tabId: number): Promise<void> {
   const { BACKFILL_TAB_HELLO_MESSAGE } = await import('../lib/backfill/tab-port');
   liveTabs.set(tabId, ORIGIN);
@@ -143,8 +145,8 @@ async function enableBackfill(): Promise<void> {
 }
 
 /**
- * Popup 生产路径的等价物：与 entrypoints/popup/main.ts 读的是同一批事实、
- * 同一个 tickBlockReason、同一个 renderPopup。不在测试里另写一份判断。
+ * The equivalent of the popup's production path: it reads the same facts,
+ * the same tickBlockReason and the same renderPopup entrypoints/popup/main.ts does. No second decision is written in the test.
  */
 async function popupNow(mod: any) {
   const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
@@ -187,7 +189,7 @@ beforeEach(async () => {
   alarmBook.clear();
   liveTabs.clear();
   runtimeNow = 1_700_000_000_000;
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
   vi.resetModules();
@@ -195,48 +197,48 @@ beforeEach(async () => {
   resetTickLockForTest();
 });
 
-describe('C33-STARTBTN · 显式知情同意的那条登记入口', () => {
-  it('🔴 反证：有通道、无目标 ⇒ 点了按钮之后 cs_backfill_targets_v1 里出现一条目标', async () => {
+describe('C33-STARTBTN · the registration entry point for explicit informed consent', () => {
+  it('🔴 the counter-proof: channel, no target ⇒ after clicking the button a target appears in cs_backfill_targets_v1', async () => {
     const { BACKFILL_TARGETS_KEY } = await import('../lib/backfill/alarm');
     const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
 
     await enableBackfill();
     const mod = await bootBackground();
-    await tabHello(7);                       // 用户开着一个已登录的 chatgpt 页面
+    await tabHello(7);                       // the user has a logged-in chatgpt page open
 
     const before = await popupNow(mod);
-    console.log('[C33-EVIDENCE 点击前]\n' + before.text);
-    // 前提：通道是通的、目标是空的 —— 这正是真机上那个死结。
+    console.log('[C33-EVIDENCE before the click]\n' + before.text);
+    // The premise: the channel is up and the targets are empty — exactly the deadlock seen on a real machine.
     expect(before.runtime.transportWired).toBe(true);
     expect(before.targets).toEqual([]);
     expect(before.block).toBe('no-targets');
     expect(store[BACKFILL_TARGETS_KEY]).toBeUndefined();
-    // 🔴 按钮必须【出现】，否则用户永远解不开这个死结。
+    // 🔴 The button **must appear**, or the user can never break that deadlock.
     expect(before.view.startBackfill.visible).toBe(true);
-    console.log('[C33-EVIDENCE 按钮文案]', before.view.startBackfill.label);
+    console.log('[C33-EVIDENCE button wording]', before.view.startBackfill.label);
 
-    // === 点一下 ===（走真实的 runtime.onMessage 入口，不直接调内部函数）
+    // === The click === (through the real runtime.onMessage entry point, not by calling an internal function)
     const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
-    console.log('[C33-EVIDENCE 点击回执]', JSON.stringify(reply));
+    console.log('[C33-EVIDENCE click reply]', JSON.stringify(reply));
     expect(reply?.ok).toBe(true);
 
     const written = store[BACKFILL_TARGETS_KEY] as any[];
-    console.log('[C33-EVIDENCE 登记表]', JSON.stringify(written));
+    console.log('[C33-EVIDENCE registry]', JSON.stringify(written));
     expect(Array.isArray(written)).toBe(true);
     expect(written.length).toBe(1);
     expect(written[0]).toMatchObject({ platform: 'chatgpt', origin: ORIGIN });
     expect(typeof written[0].scope).toBe('string');
     expect(written[0].scope.length).toBeGreaterThan(0);
 
-    // 🔴 点完【立刻】重画一次就该看得见变化，不需要用户手动刷新。
+    // 🔴 One immediate repaint must show the change; the user should not have to refresh by hand.
     const after = await popupNow(mod);
-    console.log('[C33-EVIDENCE 点击后]\n' + after.text);
+    console.log('[C33-EVIDENCE after the click]\n' + after.text);
     expect(after.targets.length).toBe(1);
     expect(after.block).not.toBe('no-targets');
     expect(after.view.startBackfill.visible).toBe(false);
   });
 
-  it('🟢 守卫一：已经有目标时按钮【不出现】（不许变成永远挂着的噪声）', async () => {
+  it('🟢 guard one: with a target already present the button **does not appear** (it must not become permanent noise)', async () => {
     await enableBackfill();
     const mod = await bootBackground();
     await tabHello(7);
@@ -247,20 +249,20 @@ describe('C33-STARTBTN · 显式知情同意的那条登记入口', () => {
     });
 
     const now = await popupNow(mod);
-    console.log('[C33-EVIDENCE 已有目标]\n' + now.text);
+    console.log('[C33-EVIDENCE a target already exists]\n' + now.text);
     expect(now.runtime.transportWired).toBe(true);
     expect(now.targets.length).toBe(1);
     expect(now.view.startBackfill.visible).toBe(false);
     expect(now.text).not.toContain(now.view.startBackfill.label);
   });
 
-  it('🟢 守卫二：没有通道时按钮【不出现】（点了也没用）', async () => {
+  it('🟢 guard two: with no channel the button **does not appear** (clicking it would do nothing)', async () => {
     await enableBackfill();
     const mod = await bootBackground();
-    // 一个平台页面都没开着 ⇒ 没有可用取数通道。
+    // Not one platform page is open ⇒ no usable fetch channel.
 
     const now = await popupNow(mod);
-    console.log('[C33-EVIDENCE 无通道]\n' + now.text);
+    console.log('[C33-EVIDENCE no channel]\n' + now.text);
     expect(now.runtime.transportWired).toBe(false);
     expect(now.runtime.liveTarget ?? null).toBeNull();
     expect(now.targets).toEqual([]);
@@ -268,36 +270,36 @@ describe('C33-STARTBTN · 显式知情同意的那条登记入口', () => {
     expect(now.text).not.toContain(now.view.startBackfill.label);
   });
 
-  it('🔴 登记之后，闹钟那一跳不再报 no-targets（走真实的 runAlarmTick）', async () => {
+  it('🔴 after registration the alarm tick no longer reports no-targets (through the real runAlarmTick)', async () => {
     const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
     await enableBackfill();
     const mod = await bootBackground();
     await tabHello(7);
 
-    // 登记之前：闹钟醒来什么都做不了，理由就是 no-targets。
+    // Before registration: the alarm wakes with nothing to do, and the reason is no-targets.
     const dry = await mod.runAlarmTick();
-    console.log('[C33-EVIDENCE 登记前的闹钟一跳]', dry.reason);
+    console.log('[C33-EVIDENCE alarm tick before registration]', dry.reason);
     expect(dry.reason).toBe('no-targets');
 
     await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
 
     const wet = await mod.runAlarmTick();
-    console.log('[C33-EVIDENCE 登记后的闹钟一跳]', wet.reason,
-      '| 内容脚本代发的 URL:', contentFetches,
-      '| 落盘:', downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename));
+    console.log('[C33-EVIDENCE alarm tick after registration]', wet.reason,
+      '| URLs the content script sent on our behalf:', contentFetches,
+      '| written down:', downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename));
     expect(wet.reason).not.toBe('no-targets');
-    // 通道也确实是通的 ⇒ 这一跳真的跑了，而不是换了一种卡住的说法。
+    // The channel really is up too ⇒ this tick really ran, rather than the stuck-ness being reworded.
     expect(wet.reason).toBe('ran');
     expect(contentFetches.length).toBeGreaterThan(0);
   });
 
-  it('接线守卫：popup 的 HTML 里真的有这个按钮，main.ts 真的挂了它并在点完之后重画', async () => {
+  it('wiring guard: the popup HTML really has this button, and main.ts really attaches it and repaints after the click', async () => {
     const html = readFileSync(new URL('../entrypoints/popup/index.html', import.meta.url), 'utf8');
     const main = readFileSync(new URL('../entrypoints/popup/main.ts', import.meta.url), 'utf8');
-    // 🔴 真机装的是构建产物：HTML 里没有这个元素，按钮就永远不会出现在屏幕上。
+    // 🔴 What gets installed on a real machine is the build output: with no such element in the HTML, the button can never appear on screen.
     expect(html).toContain('id="start-backfill"');
     expect(main).toContain("getElementById('start-backfill')");
-    // 点完必须自己重画 —— 「立刻反映」不许靠用户手动关掉再打开。
+    // It must repaint itself after the click — "immediate" may not depend on the user closing and reopening by hand.
     expect(main).toMatch(/onStartBackfill[\s\S]*refresh\(\)/);
   });
 });

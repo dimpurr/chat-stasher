@@ -8,14 +8,15 @@ import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backf
 import { parseConversationListPage } from '../lib/backfill/enumerate';
 
 /**
- * C11 回溯腿骨架测试。
- * 🔴 全部用合成夹具 —— 没有任何一行会真的碰平台接口（http 端口是注入的，
- *    不注入就是 notWiredHttp，调用即抛错）。夹具里没有任何真实对话正文。
+ * C11 backfill-leg skeleton tests.
+ * 🔴 Everything uses synthetic fixtures — not one line really touches a platform endpoint (the
+ *    http port is injected; without one it is notWiredHttp and calling it throws). No fixture
+ *    contains a real conversation body.
  */
 
 const ORIGIN = 'https://chatgpt.com';
 
-/** 假时钟：sleep 不真的等，只把虚拟时间往前推并记账。 */
+/** A fake clock: sleep does not really wait, it only advances virtual time and records it. */
 function fakeClock(): Clock & { sleeps: number[]; nowMs: () => number } {
   let t = Date.parse('2026-08-17T00:00:00.000Z');
   const sleeps: number[] = [];
@@ -30,7 +31,7 @@ function fakeClock(): Clock & { sleeps: number[]; nowMs: () => number } {
   };
 }
 
-/** 合成的会话列表页。withTotal=false 用来构造「拿不到分母」的场景。 */
+/** A synthetic conversation list page. withTotal=false builds the "no denominator available" case. */
 function listBody(ids: string[], total: number | null): string {
   const body: Record<string, unknown> = {
     items: ids.map((id) => ({ id, title: 'synthetic-fixture', create_time: 0 })),
@@ -41,7 +42,7 @@ function listBody(ids: string[], total: number | null): string {
   return JSON.stringify(body);
 }
 
-/** 合成的会话正文。满足 lib/contract.ts 里 chatgpt 的 mapping + current_node。 */
+/** A synthetic conversation body. Satisfies chatgpt's mapping + current_node in lib/contract.ts. */
 function detailBody(id: string): string {
   return JSON.stringify({
     title: 'synthetic-fixture',
@@ -54,7 +55,7 @@ function ids(n: number, from = 0): string[] {
   return Array.from({ length: n }, (_, i) => `conv-${String(i + from).padStart(4, '0')}-aaaaaaaa`);
 }
 
-/** 合成后端：一份 id 列表 + 分页，记录每一次被请求的 URL。 */
+/** A synthetic backend: a list of ids + paging, recording every URL that was requested. */
 function fakeBackend(allIds: string[], opts: { total?: number | null; pageSize?: number } = {}) {
   const pageSize = opts.pageSize ?? 100;
   const total = opts.total === undefined ? allIds.length : opts.total;
@@ -73,8 +74,8 @@ function fakeBackend(allIds: string[], opts: { total?: number | null; pageSize?:
   return { http, calls, detailCalls };
 }
 
-describe('C11 判据 1 · 可断可续', () => {
-  it('跑一半被打断，重启后从断点继续而不是从头', async () => {
+describe('C11 criterion 1 · stop-and-resume', () => {
+  it('interrupted half way, a restart carries on from the breakpoint instead of from the start', async () => {
     const store = memoryStore();
     const backend = fakeBackend(ids(30));
 
@@ -85,12 +86,12 @@ describe('C11 判据 1 · 可断可续', () => {
       store,
       http: backend.http,
       clock: fakeClock(),
-      maxDetails: 3, // 模拟「做了 3 条就被打断」
+      maxDetails: 3, // simulate "interrupted after 3 items"
     });
     console.log('[C11-1] run1 stopped =', run1.stopped, '| archived =', run1.archivedThisRun.join(','));
     console.log('[C11-1] run1 progress =', run1.progress);
 
-    // 第二次进来是全新的 run（新 Pacer、新时钟），只共享落盘状态。
+    // The second entry is a brand-new run (new Pacer, new clock) sharing only the persisted state.
     const run2 = await runBackfill({
       platform: 'chatgpt',
       origin: ORIGIN,
@@ -105,17 +106,17 @@ describe('C11 判据 1 · 可断可续', () => {
 
     expect(run1.archivedThisRun).toHaveLength(3);
     expect(run2.archivedThisRun).toHaveLength(3);
-    // 断点续跑：run2 一条都不能和 run1 重合
+    // Resuming from the breakpoint: run2 may not repeat a single one of run1's items
     expect(run2.archivedThisRun).not.toEqual(run1.archivedThisRun);
     expect(run2.state.archived).toHaveLength(6);
     expect(run2.state.pending).toHaveLength(24);
-    // 枚举不重跑：run2 没有再打列表接口
+    // Enumeration does not re-run: run2 did not hit the list endpoint again
     expect(run2.enumeratedPages).toBe(0);
   });
 });
 
-describe('C11 判据 2 · 不重复抓', () => {
-  it('已归档的绝不再入队，也绝不再取一次正文', async () => {
+describe('C11 criterion 2 · fetch nothing twice', () => {
+  it('an archived id is never enqueued again and its body is never fetched again', async () => {
     const store = memoryStore();
     const backend = fakeBackend(ids(10));
 
@@ -125,7 +126,7 @@ describe('C11 判据 2 · 不重复抓', () => {
     });
     const firstBatch = backend.detailCalls().slice();
 
-    // 模拟「过了一天又枚举一遍」：把枚举游标重置，重新枚举同一批 id。
+    // Simulate "a day later, enumerate again": reset the enumeration cursor and re-enumerate the same ids.
     const st = await loadState(store, 'chatgpt', 'acct-fixture');
     st.enumCursor = { offset: 0, complete: false };
     await store.save(stateKey('chatgpt', 'acct-fixture'), st);
@@ -135,40 +136,40 @@ describe('C11 判据 2 · 不重复抓', () => {
       http: backend.http, clock: fakeClock(), maxDetails: 4,
     });
 
-    console.log('[C11-2] 重新枚举 10 条：新入队 =', run2.newDebts,
-      '| 因已归档被挡掉 =', run2.skippedAlreadyArchived,
-      '| 因已在欠账里被挡掉 =', run2.skippedAlreadyPending);
+    console.log('[C11-2] re-enumerating 10 rows: newly enqueued =', run2.newDebts,
+      '| blocked as already archived =', run2.skippedAlreadyArchived,
+      '| blocked as already pending =', run2.skippedAlreadyPending);
     const secondBatch = backend.detailCalls().slice(firstBatch.length);
-    console.log('[C11-2] run1 取正文 =', firstBatch.length, '条；run2 取正文 =', secondBatch.length, '条');
+    console.log('[C11-2] run1 bodies fetched =', firstBatch.length, '; run2 bodies fetched =', secondBatch.length);
     const overlap = secondBatch.filter((u) => firstBatch.includes(u));
-    console.log('[C11-2] 两次取正文的 URL 交集 =', overlap.length);
+    console.log('[C11-2] intersection of the two body-fetch URL sets =', overlap.length);
 
     expect(run1.archivedThisRun).toHaveLength(4);
-    expect(run2.skippedAlreadyArchived).toBe(4); // 4 条已清账 => 绝不再入队
-    expect(run2.skippedAlreadyPending).toBe(6); // 6 条还欠着 => 也不重复入队
+    expect(run2.skippedAlreadyArchived).toBe(4); // 4 already settled => never enqueued again
+    expect(run2.skippedAlreadyPending).toBe(6); // 6 still owed => not enqueued twice either
     expect(run2.newDebts).toBe(0);
     expect(overlap).toHaveLength(0);
-    // 已归档的 id 一个都没回到欠账里
+    // Not one archived id came back into the debt set
     for (const done of run1.archivedThisRun) {
       expect(run2.state.pending).not.toContain(done);
     }
   });
 
-  it('enqueueDebts 纯函数层面就挡住重复', () => {
+  it('enqueueDebts blocks duplicates at the pure-function level', () => {
     const st = initialState('chatgpt', 'acct-fixture');
     enqueueDebts(st, ['a', 'b', 'c']);
     settleDebt(st, 'b');
     const added = enqueueDebts(st, ['a', 'b', 'c', 'd']);
-    expect(added).toEqual(['d']); // a/c 已在欠账，b 已清账
+    expect(added).toEqual(['d']); // a and c are already pending, b is already settled
     expect(st.pending).toEqual(['a', 'c', 'd']);
     expect(st.archived).toEqual(['b']);
   });
 });
 
-describe('C11 判据 3 · 分母未知时绝不显示百分比（一票否决）', () => {
-  it('列表接口不给 total ⇒ 输出里不含 % 字符', async () => {
+describe('C11 criterion 3 · never show a percentage when the denominator is unknown (a veto)', () => {
+  it('the list endpoint gives no total ⇒ the output contains no % character', async () => {
     const store = memoryStore();
-    // total 缺失；最后补一个空页让枚举知道到头了。
+    // total is missing; an empty page is appended at the end so enumeration knows it is done.
     const backend = fakeBackend(ids(5), { total: null, pageSize: 5 });
 
     const run = await runBackfill({
@@ -176,29 +177,29 @@ describe('C11 判据 3 · 分母未知时绝不显示百分比（一票否决）
       http: backend.http, clock: fakeClock(), maxDetails: 2,
     });
 
-    console.log('[C11-3] 分母未知时的进度原文 =>', run.progress);
+    console.log('[C11-3] progress text with an unknown denominator =>', run.progress);
     expect(run.state.totalSource).toBe('unknown');
     expect(run.state.totalKnown).toBeNull();
     expect(computeProgress(run.state).percent).toBeNull();
     expect(run.progress).not.toContain('%');
-    expect(run.progress).toContain('总数未知');
+    expect(run.progress).toContain('total unknown');
   });
 
-  it('枚举整段失败（一页都没拿到）⇒ 仍然不含 %', async () => {
+  it('the whole enumeration segment fails (not one page fetched) ⇒ still no %', async () => {
     const store = memoryStore();
     const run = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'enum-dead', store,
       http: async () => ({ status: 429, text: '' }),
       clock: fakeClock(),
     });
-    console.log('[C11-3] 枚举被限流时的进度原文 =>', run.progress);
+    console.log('[C11-3] progress text while enumeration is rate-limited =>', run.progress);
     expect(run.stopped).toBe('halted');
     expect(run.progress).not.toContain('%');
   });
 
-  it('假分母的三种来路都被拒：非接口 total / 非正整数 / 已归档超过 total', () => {
+  it('all three bogus denominators are refused: a non-API total / a non-positive integer / archived exceeding total', () => {
     const a = initialState('chatgpt', 'x');
-    a.totalKnown = 100; // 有数字，但来源不是接口
+    a.totalKnown = 100; // there is a number, but it did not come from the API
     a.totalSource = 'unknown';
     expect(computeProgress(a).percent).toBeNull();
     expect(formatProgress(a)).not.toContain('%');
@@ -217,44 +218,44 @@ describe('C11 判据 3 · 分母未知时绝不显示百分比（一票否决）
     expect(formatProgress(c)).not.toContain('%');
   });
 
-  it('分母真的来自接口时，才允许出现百分比', () => {
+  it('a percentage is allowed only when the denominator really came from the API', () => {
     const st = initialState('chatgpt', 'x');
     st.totalSource = 'response-total';
     st.totalKnown = 1000;
     st.archived = ids(120);
     st.pending = ids(10, 900);
-    console.log('[C11-3] 分母可信时的进度原文 =>', formatProgress(st));
+    console.log('[C11-3] progress text with a trustworthy denominator =>', formatProgress(st));
     expect(computeProgress(st).percent).toBe(12);
     expect(formatProgress(st)).toContain('12%');
   });
 });
 
-describe('C11 判据 4 · 节流生效（枚举与取正文分开定速）', () => {
-  it('取正文按 20s/条 走，枚举按 2s/页 走，两段互不干扰', async () => {
+describe('C11 criterion 4 · throttling takes effect (enumeration and body-fetching paced separately)', () => {
+  it('bodies go at 20s each and enumeration at 2s per page, the two segments not interfering', async () => {
     const store = memoryStore();
     const clock = fakeClock();
-    const backend = fakeBackend(ids(6), { pageSize: 2 }); // 6 条 => 3 页
+    const backend = fakeBackend(ids(6), { pageSize: 2 }); // 6 rows => 3 pages
 
     const run = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'pace', store,
       http: backend.http, clock, maxDetails: 4,
     });
 
-    console.log('[C11-4] 默认值：枚举', DEFAULT_ENUM_PACE.minIntervalMs, 'ms/页；取正文',
-      DEFAULT_DETAIL_PACE.minIntervalMs, 'ms/条，每天上限', DEFAULT_DETAIL_PACE.maxPerDay, '条');
-    console.log('[C11-4] 枚举实际等待序列(ms) =', JSON.stringify(run.paceTrace.enumerate));
-    console.log('[C11-4] 取正文实际等待序列(ms) =', JSON.stringify(run.paceTrace.detail));
-    console.log('[C11-4] 虚拟时钟共前进 =', clock.nowMs() - Date.parse('2026-08-17T00:00:00.000Z'), 'ms');
+    console.log('[C11-4] defaults: enumerate', DEFAULT_ENUM_PACE.minIntervalMs, 'ms/page; detail',
+      DEFAULT_DETAIL_PACE.minIntervalMs, 'ms/item, daily cap', DEFAULT_DETAIL_PACE.maxPerDay);
+    console.log('[C11-4] actual enumerate wait sequence (ms) =', JSON.stringify(run.paceTrace.enumerate));
+    console.log('[C11-4] actual detail wait sequence (ms) =', JSON.stringify(run.paceTrace.detail));
+    console.log('[C11-4] total virtual-clock advance =', clock.nowMs() - Date.parse('2026-08-17T00:00:00.000Z'), 'ms');
 
-    // 3 页：第一次不等，之后每次补足 2000ms
+    // 3 pages: the first does not wait, each later one makes up the full 2000ms
     expect(run.paceTrace.enumerate).toEqual([0, 2000, 2000]);
-    // 4 条正文：第一次不等，之后每次补足 20000ms
+    // 4 bodies: the first does not wait, each later one makes up the full 20000ms
     expect(run.paceTrace.detail).toEqual([0, 20000, 20000, 20000]);
-    // 全程没有真的等待：虚拟时间前进 = 所有 sleep 之和
+    // Nothing really waited: the virtual-clock advance = the sum of all sleeps
     expect(clock.sleeps.reduce((a, b) => a + b, 0)).toBe(4000 + 60000);
   });
 
-  it('每天上限到了就温和停下（不是 halt，是 daily-cap）', async () => {
+  it('hitting the daily cap stops gently (not a halt — a daily-cap)', async () => {
     const store = memoryStore();
     const backend = fakeBackend(ids(10));
     const run = await runBackfill({
@@ -262,15 +263,15 @@ describe('C11 判据 4 · 节流生效（枚举与取正文分开定速）', () 
       http: backend.http, clock: fakeClock(),
       pace: { enumerate: DEFAULT_ENUM_PACE, detail: { minIntervalMs: 20_000, maxPerDay: 3 } },
     });
-    console.log('[C11-4] 每天上限 3 条 => stopped =', run.stopped, '| 今日已取 =', run.state.detailToday.count);
+    console.log('[C11-4] daily cap of 3 => stopped =', run.stopped, '| fetched today =', run.state.detailToday.count);
     expect(run.stopped).toBe('daily-cap');
     expect(run.archivedThisRun).toHaveLength(3);
-    expect(run.halted).toBeNull(); // 正常的温和停顿，不该留 halt 痕迹
+    expect(run.halted).toBeNull(); // a normal gentle pause should leave no halt trace
   });
 });
 
-describe('C11 · 被限流 / 形状变了 必须停下留痕', () => {
-  it('取正文时 429 => halt(rate-limited) 并落盘，下一次 run 拒绝继续', async () => {
+describe('C11 · a rate limit / a shape change must stop with a trace', () => {
+  it('a 429 while fetching a body => halt(rate-limited) persisted, and the next run refuses to continue', async () => {
     const store = memoryStore();
     const all = ids(5);
     let detailHits = 0;
@@ -285,13 +286,13 @@ describe('C11 · 被限流 / 形状变了 必须停下留痕', () => {
     const run = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'limited', store, http, clock: fakeClock(),
     });
-    console.log('[C11-halt] halt 记录 =', JSON.stringify(run.halted));
-    console.log('[C11-halt] 停机后的进度原文 =>', run.progress);
+    console.log('[C11-halt] halt record =', JSON.stringify(run.halted));
+    console.log('[C11-halt] progress text after the halt =>', run.progress);
     expect(run.stopped).toBe('halted');
     expect(run.halted?.reason).toBe('rate-limited');
-    expect(run.progress).toContain('已停止');
+    expect(run.progress).toContain('stopped');
 
-    // 留痕必须是持久的：重启后不自己重试打平台
+    // The trace must be persistent: after a restart it does not retry against the platform on its own
     const again = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'limited', store,
       http: async () => { throw new Error('MUST NOT be called after halt'); },
@@ -299,57 +300,57 @@ describe('C11 · 被限流 / 形状变了 必须停下留痕', () => {
     });
     expect(again.stopped).toBe('halted');
     expect(again.halted?.reason).toBe('rate-limited');
-    console.log('[C11-halt] 重启后 =', again.stopped, '（没有再打任何接口）');
+    console.log('[C11-halt] after restart =', again.stopped, '(no endpoint was hit again)');
   });
 
-  it('列表形状变了 => halt(shape-changed)，不猜、不静默', async () => {
+  it('the list shape changed => halt(shape-changed), no guessing and no silence', async () => {
     const store = memoryStore();
     const run = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'shape', store,
       http: async () => ({ status: 200, text: JSON.stringify({ conversations: [] }) }),
       clock: fakeClock(),
     });
-    console.log('[C11-halt] 形状不认识 =>', JSON.stringify(run.halted));
+    console.log('[C11-halt] unrecognised shape =>', JSON.stringify(run.halted));
     expect(run.halted?.reason).toBe('shape-changed');
     expect(run.progress).not.toContain('%');
   });
 
-  it('正文形状变了 => 也 halt（复用实时腿的 matchesResponseShape）', async () => {
+  it('the body shape changed => also halts (reusing the live leg matchesResponseShape)', async () => {
     const store = memoryStore();
     const all = ids(2);
     const http = async (url: string): Promise<HttpResponse> =>
       url.includes('/backend-api/conversations')
         ? { status: 200, text: listBody(all, all.length) }
-        : { status: 200, text: JSON.stringify({ nodes: [], head: 'x' }) }; // 缺 mapping/current_node
+        : { status: 200, text: JSON.stringify({ nodes: [], head: 'x' }) }; // missing mapping/current_node
     const run = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'shape2', store, http, clock: fakeClock(),
     });
-    console.log('[C11-halt] 正文形状不匹配 =>', JSON.stringify(run.halted));
+    console.log('[C11-halt] body shape mismatch =>', JSON.stringify(run.halted));
     expect(run.halted?.reason).toBe('shape-changed');
   });
 
-  it('没有可持久化的存储 => 直接 halt，不假装在跑', async () => {
+  it('no persistent storage => halts outright rather than pretending to run', async () => {
     const run = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'nostore', store: null,
       http: async () => { throw new Error('MUST NOT be called without storage'); },
       clock: fakeClock(),
     });
-    console.log('[C11-halt] 无存储 =>', JSON.stringify(run.halted));
-    console.log('[C11-halt] 无存储时的进度原文 =>', run.progress);
+    console.log('[C11-halt] no store =>', JSON.stringify(run.halted));
+    console.log('[C11-halt] progress text with no store =>', run.progress);
     expect(run.stopped).toBe('halted');
     expect(run.halted?.reason).toBe('storage-unavailable');
     expect(run.progress).not.toContain('%');
   });
 });
 
-describe('C11 · 不接线就绝不发请求 + 落盘出口与实时腿同形', () => {
-  it('默认 http 端口调用即抛错（结构性保证：没有登录态也不会去试）', async () => {
+describe('C11 · no wiring means no request, and the write-down exit has the live leg shape', () => {
+  it('the default http port throws when called (a structural guarantee: with no login it will not even try)', async () => {
     await expect(notWiredHttp(`${ORIGIN}/backend-api/conversations?offset=0&limit=100`)).rejects.toThrow(
       /not wired/,
     );
   });
 
-  it('sink 收到的是 CapturedFetch 同形对象，可以直接走实时腿的落盘链路', async () => {
+  it('the sink receives a CapturedFetch-shaped object that can go straight down the live leg write-down path', async () => {
     const store = memoryStore();
     const backend = fakeBackend(ids(1));
     const seen: Array<{ url: string; method: string; status: number; pageUrl?: string }> = [];
@@ -358,13 +359,13 @@ describe('C11 · 不接线就绝不发请求 + 落盘出口与实时腿同形', 
       http: backend.http, clock: fakeClock(),
       sink: (c) => { seen.push({ url: c.url, method: c.method, status: c.status, pageUrl: c.pageUrl }); },
     });
-    console.log('[C11-sink] sink 收到 =', JSON.stringify(seen[0]));
+    console.log('[C11-sink] the sink received =', JSON.stringify(seen[0]));
     expect(seen).toHaveLength(1);
     expect(seen[0]!.method).toBe('GET');
     expect(seen[0]!.url).toContain('/backend-api/conversation/');
   });
 
-  it('parseConversationListPage 对畸形输入一律 ok:false', () => {
+  it('parseConversationListPage answers ok:false for every malformed input', () => {
     expect(parseConversationListPage('not json').ok).toBe(false);
     expect(parseConversationListPage('[]').ok).toBe(false);
     expect(parseConversationListPage('{"items":{}}').ok).toBe(false);

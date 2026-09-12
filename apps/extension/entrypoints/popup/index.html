@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Chat Stasher</title>
     <style>
-      /* 全部内联 —— 不引外部字体/CSS，popup 页面零网络请求。 */
+      /* All inline — no external fonts/CSS, so the popup page makes zero network requests. */
       :root { color-scheme: light dark; }
       body {
         margin: 0;
@@ -18,38 +18,45 @@
       .row label { cursor: pointer; user-select: none; }
       #status { font-weight: 600; }
       #channel { margin: 6px 0; font-size: 12px; opacity: .9; }
-      /* W2：回溯因主机够不着而暂停。它是「什么都没在做」的原因，必须显眼。 */
+      /* W2: backfill paused because the host is unreachable. It is the reason
+         "nothing is happening", so it has to be prominent. */
       #pause {
         margin: 8px 0; padding: 8px 10px; font-weight: 600;
         border-left: 3px solid #b7791f; background: rgba(183,121,31,.12);
         white-space: pre-wrap; font-size: 12px;
       }
-      /* W2：发件箱现状（待送 / 被拒 / 容量）。被拒时是告警态，全空时不显示。 */
+      /* W2: the outbox as it stands (waiting / rejected / capacity). An alert
+         state when something was rejected; hidden when it is empty. */
       #outbox {
         margin: 8px 0; padding: 6px 8px; font-size: 12px;
         border-left: 3px solid rgba(128,128,128,.55); white-space: pre-wrap;
       }
-      /* W2：最近一次导出。永远显示 —— 「有没有导出过、什么时候」本身是事实。 */
+      /* W2: the most recent export. Always shown — "whether one happened, and
+         when" is itself a fact. */
       #last-export { margin: 6px 0; font-size: 12px; opacity: .85; white-space: pre-wrap; }
       #export-file {
         display: block; margin: 8px 0; padding: 6px 12px;
         font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
       }
       #running { margin: 6px 0; }
-      /* C32：这一行现在会分几段说（缺什么 / 你要做什么 / 为什么），
-         不保留换行的话三件事会挤成一坨，用户读不出「要我做的那一件事」在哪。 */
+      /* C32: this line now says several things in sequence (what is missing /
+         what you have to do / why), and without preserving line breaks the three
+         would run together and the reader could not find "the one thing I have to do". */
       #missing { margin: 6px 0; opacity: .85; white-space: pre-wrap; }
       #progress { margin: 6px 0; }
-      /* C22：回溯覆盖那一行。不是错误提示，所以不做成红框；但也不许弱到看不见。 */
+      /* C22: the backfill coverage line. Not an error, so no red box — but not so
+         faint that it cannot be read either. */
       #coverage { margin: 8px 0; padding: 6px 8px; font-size: 12px;
                   border-left: 3px solid rgba(128,128,128,.55); opacity: .95; }
-      /* C20：失败清单那一行。刻意最显眼 —— 有东西没存下来时不许看起来一切正常。 */
+      /* C20: the failure-list line. Deliberately the most prominent thing on the
+         page — when something was not stored it must not look like everything is fine. */
       #failures {
         margin: 8px 0; padding: 8px 10px; font-weight: 600;
         border-left: 3px solid #c0392b; background: rgba(192,57,43,.10);
       }
-      /* C33：「开始回溯这个平台」。它是一个【动作】，所以比清空按钮更显眼一点；
-         但它只在「有通道、没目标」时出现，不许变成永远挂着的噪声。 */
+      /* C33: "start backfilling this platform". It is an ACTION, so it is a
+         little more prominent than the clear button; but it only appears when
+         there is a channel and no targets, and must not become permanent noise. */
       #start-backfill {
         display: block; margin: 8px 0; padding: 6px 12px;
         font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
@@ -57,6 +64,10 @@
       #clear-failures {
         margin: 0 0 8px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer;
       }
+      /* The language selector. Pushed to the end of the page and kept quiet:
+         it is a setting, not part of what the popup has to report. */
+      .row.locale { margin: 14px 0 0; font-size: 12px; opacity: .9; }
+      #locale { font: inherit; font-size: 12px; }
       .notes { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid rgba(128,128,128,.35); }
       .notes p { margin: 8px 0; white-space: pre-wrap; opacity: .8; font-size: 12px; }
     </style>
@@ -65,13 +76,13 @@
     <h1>Chat Stasher</h1>
     <div id="status"></div>
     <div id="channel"></div>
-    <!-- W2：回溯暂停（主机够不着）。没有暂停时整块隐藏。 -->
+    <!-- W2: backfill paused (host unreachable). The whole block is hidden when it is not paused. -->
     <div id="pause" hidden></div>
-    <!-- W2：发件箱现状。空且未满时隐藏。 -->
+    <!-- W2: the outbox as it stands. Hidden when empty and not full. -->
     <div id="outbox" hidden></div>
-    <!-- W2：最近一次导出（永远显示，它本身是一个事实）。 -->
+    <!-- W2: the most recent export (always shown; it is a fact in itself). -->
     <div id="last-export"></div>
-    <!-- W2：「导出未送达的会话」。Blob + <a download>，不用 downloads 权限。 -->
+    <!-- W2: "export undelivered captures". Blob + <a download>, no downloads permission. -->
     <button type="button" id="export-file" hidden></button>
     <div id="failures" hidden></div>
     <button type="button" id="clear-failures" hidden></button>
@@ -85,6 +96,12 @@
       <label for="toggle" id="toggle-label"></label>
     </div>
     <div class="notes" id="notes"></div>
+    <!-- The language selector. Its options are built by main.ts from the
+         catalog, each option labelled in its own language script. -->
+    <div class="row locale">
+      <label for="locale" id="locale-label"></label>
+      <select id="locale"></select>
+    </div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

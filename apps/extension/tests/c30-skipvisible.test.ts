@@ -1,17 +1,20 @@
 /**
- * C30 · 「跳过」必须是可观察的。
+ * C30 · A "skip" has to be observable.
  *
- * C29 精确复现了时序：有 transport、没有 target ⇒ 闹钟每次醒来都静默跳过。
- * 但 C29 只把那个假象【钉住】（断言 popup 说「正在归档」、断言 reason 是
- * 'no-http-port'），它把错的现状写成了期望。本文件反过来：
+ * C29 reproduced the sequencing precisely: transport present, target absent ⇒ the alarm silently
+ * skipped on every wake.
+ * But C29 only **pinned the illusion** (asserting that the popup said "archiving" and that the
+ * reason was 'no-http-port'), writing the wrong current state down as the expectation. This file
+ * does the opposite:
  *
- *  1. 🔴 有 transport 但没有 target 时，popup 【不许】宣称正在归档；
- *  2. 🔴 这一跳为什么什么都没做，必须【写进存储】，而不是只留在内存里；
- *  3. 🔴 结局必须具名到能分辨：没目标 ≠ 没通道；
- *  4. 🔴 健康路径守卫：目标确实存在 + 通道活着 ⇒ 仍然说「正在归档」。
+ *  1. 🔴 with transport but no target, the popup must **not** claim it is archiving;
+ *  2. 🔴 why this tick did nothing must be **written into storage**, not left in memory;
+ *  3. 🔴 the outcome must be named precisely enough to distinguish: no target ≠ no channel;
+ *  4. 🔴 a healthy-path guard: a target really exists + the channel is live ⇒ it still says "archiving".
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { handleBackfillMessage } from '../lib/backfill/tab-port';
 import type { BackfillRuntimeStatus } from '../lib/popup-view';
 
@@ -105,7 +108,7 @@ async function dispatch(message: unknown, tabId?: number): Promise<any> {
   });
 }
 
-/** Popup 生产路径的等价物：与 entrypoints/popup/main.ts 读的是同一批事实。 */
+/** The equivalent of the popup's production path: it reads the same facts entrypoints/popup/main.ts does. */
 async function popupNow(transportWired: boolean) {
   const { tickBlockReason } = await import('../lib/backfill/schedule');
   const { loadTargets, loadLastTick } = await import('../lib/backfill/alarm');
@@ -142,7 +145,7 @@ beforeEach(async () => {
   liveTabs.clear();
   changeListeners.length = 0;
   runtimeNow = 1_700_000_000_000;
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
   vi.resetModules();
@@ -150,8 +153,8 @@ beforeEach(async () => {
   resetTickLockForTest();
 });
 
-describe('C30-SKIPVISIBLE · 跳过必须可观察，且原因必须具名', () => {
-  it('🔴 反证：有 transport 但一个回溯目标都没有时，popup 不得宣称正在归档', async () => {
+describe('C30-SKIPVISIBLE · a skip must be observable and its reason must be named', () => {
+  it('🔴 the counter-proof: with transport but no backfill target at all, the popup may not claim it is archiving', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
 
@@ -160,7 +163,7 @@ describe('C30-SKIPVISIBLE · 跳过必须可观察，且原因必须具名', () 
     const mod = await bootBackground();
     await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 101);
 
-    // 真机快照：有开关、有 tabs、没有 targets。
+    // The real machine's snapshot: a switch, tabs, no targets.
     expect(store).toHaveProperty('cs_backfill_tabs_v1');
     expect(store).not.toHaveProperty('cs_backfill_targets_v1');
 
@@ -168,19 +171,19 @@ describe('C30-SKIPVISIBLE · 跳过必须可观察，且原因必须具名', () 
     expect(statusReply.transportWired).toBe(true);
 
     const { block, view, text } = await popupNow(statusReply.transportWired);
-    console.log('[C30-EVIDENCE 没有目标]\n' + text);
+    console.log('[C30-EVIDENCE no targets]\n' + text);
 
-    // 🔴 核心反证：transport 一个人撑不起「正在归档」这句话。
-    expect(view.running).not.toContain('正在归档');
-    expect(text).not.toContain('正在归档');
-    expect(view.running).toContain('未在运行');
-    // 🔴 用户读完必须知道「他要做什么才会开始」。
+    // 🔴 The core counter-proof: transport alone cannot carry the sentence "archiving".
+    expect(view.running).not.toContain('Running: archiving');
+    expect(text).not.toContain('Running: archiving');
+    expect(view.running).toContain('NOT running');
+    // 🔴 After reading it the user must know what they have to do to make it start.
     expect(view.missing).not.toBeNull();
-    expect(view.missing!).toContain('实时归档');
+    expect(view.missing!).toContain('archived LIVE');
     expect(block).toBe('no-targets');
   });
 
-  it('🔴 闹钟每一次跳过都要写进存储，且结局具名为 no-targets（不是 no-http-port）', async () => {
+  it('🔴 every alarm skip must be written into storage, with the outcome named no-targets (not no-http-port)', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { BACKFILL_LAST_TICK_KEY, loadLastTick } = await import('../lib/backfill/alarm');
@@ -194,21 +197,21 @@ describe('C30-SKIPVISIBLE · 跳过必须可观察，且原因必须具名', () 
     await mod.backfillTickSettled();
 
     expect(mod.lastBackfillTick()).toEqual({ ran: false, reason: 'no-targets', report: null });
-    expect(contentFetches).toEqual([]);            // 行为没变：仍然一条都不枚举
+    expect(contentFetches).toEqual([]);            // the behaviour is unchanged: still not one enumerated
 
-    // 🔴 (a)：这一跳什么都没做，以及为什么，必须留在存储里。
+    // 🔴 (a): that this tick did nothing, and why, must stay in storage.
     expect(store).toHaveProperty(BACKFILL_LAST_TICK_KEY);
     const rec = await loadLastTick(browserLocalStore());
     expect(rec).toMatchObject({ ran: false, reason: 'no-targets', targets: 0 });
     expect(typeof rec!.at).toBe('number');
 
-    // popup 要把这条记录说出来（「闹钟真的醒过、真的什么都没做」）。
+    // The popup has to say this record out loud ("the alarm really did wake and really did nothing").
     const { text } = await popupNow(true);
-    expect(text).toContain('闹钟');
-    expect(text).not.toContain('正在归档');
+    expect(text).toContain('Alarm');
+    expect(text).not.toContain('Running: archiving');
   });
 
-  it('🔴 两种结局说的话必须不一样：没有目标 vs 没有通道', async () => {
+  it('🔴 the two outcomes must be worded differently: no targets vs no channel', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), true);
@@ -223,10 +226,10 @@ describe('C30-SKIPVISIBLE · 跳过必须可观察，且原因必须具名', () 
     expect(noPort.block).toBe('no-http-port');
     expect(noTargets.view.running).not.toBe(noPort.view.running);
     expect(noTargets.view.missing).not.toBe(noPort.view.missing);
-    expect(noPort.view.missing!).toContain('页面');
+    expect(noPort.view.missing!).toContain('page');
   });
 
-  it('🟢 健康路径守卫：目标确实存在且通道活着时，popup 仍然说「正在归档」', async () => {
+  it('🟢 healthy-path guard: with a target really present and the channel live, the popup still says "archiving"', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), true);
@@ -241,12 +244,12 @@ describe('C30-SKIPVISIBLE · 跳过必须可观察，且原因必须具名', () 
     expect(statusReply.transportWired).toBe(true);
 
     const { block, view, text } = await popupNow(statusReply.transportWired);
-    console.log('[C30-EVIDENCE 健康路径]\n' + text);
+    console.log('[C30-EVIDENCE healthy path]\n' + text);
     expect(block).toBeNull();
-    expect(view.running).toContain('正在归档');
+    expect(view.running).toContain('archiving');
     expect(view.missing).toBeNull();
 
-    // 闹钟这一跳是真的跑了 —— 存储里的记录也必须是 ran。
+    // The alarm tick really ran — so the record in storage must say ran too.
     alarmListeners[0]!({ name: 'cs-backfill-tick' });
     await mod.backfillTickSettled();
     expect(mod.lastBackfillTick()?.reason).toBe('ran');

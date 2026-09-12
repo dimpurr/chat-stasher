@@ -1,21 +1,24 @@
 /**
- * C18 · Popup —— 回溯腿第一个用户真的能打开的入口。
+ * C18 · The popup — the first entry point to the backfill leg a user can really open.
  *
- * 这里验三件事，一件都不许含糊：
- *  1. 打开开关会【持久化】，浏览器重启（模块状态清零、storage 留着）之后仍然是开的；
- *  2. 🔴 开着但取数通道没接上时，文案必须说【未在运行】并说清缺什么，
- *     且【整段文本不含 '%' 字符】；绝不许出现「正在归档」这类说法；
- *  3. 熔断态下要出告警，并且开关【仍然可切】。
+ * Three things are verified here, none of them vaguely:
+ *  1. turning the switch on **persists**: after a browser restart (module state cleared, storage
+ *     kept) it is still on;
+ *  2. 🔴 with the switch on but no fetch channel, the wording must say **NOT running** and spell
+ *     out what is missing, and **the whole text must contain no '%' character**; nothing like
+ *     "archiving" may appear;
+ *  3. in the paused state an alert appears, and the switch **stays operable**.
  *
- * 全程零网络、零登录态：只有假的 browser.* 和纯函数。
+ * Zero network and zero logged-in state throughout: only a fake browser.* and pure functions.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import type { BackfillState } from '../lib/backfill/types';
 import { stateKey } from '../lib/backfill/types';
 
 // ---------------------------------------------------------------------------
-// 假浏览器。storage 跨 vi.resetModules() 存活 —— 这就是「浏览器重启」的模型。
+// A fake browser. Storage survives vi.resetModules() — that is the model of a "browser restart".
 // ---------------------------------------------------------------------------
 const store: Record<string, unknown> = {};
 
@@ -39,11 +42,11 @@ beforeEach(() => {
   for (const k of Object.keys(store)) delete store[k];
   vi.resetModules();
   vi.unstubAllGlobals();
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
 });
 
-/** 一份「跑过一点、但接口没给 total」的欠账集合 —— 正是不许出现百分比的那种。 */
+/** A debt set that "has run a little, but the API gave no total" — exactly the kind that may not show a percentage. */
 function seedState(platform = 'chatgpt', scope = 'acct-1'): BackfillState {
   const state: BackfillState = {
     v: 1,
@@ -62,28 +65,28 @@ function seedState(platform = 'chatgpt', scope = 'acct-1'): BackfillState {
 }
 
 // ---------------------------------------------------------------------------
-// 1 · 开关持久化
+// 1 · Switch persistence
 // ---------------------------------------------------------------------------
-describe('C18-1 · 打开开关会持久化，重启后仍是开的', () => {
-  it('默认是关的；setBackfillEnabled(true) 之后，重新加载模块仍然读到开', async () => {
+describe('C18-1 · turning the switch on persists, and it is still on after a restart', () => {
+  it('off by default; after setBackfillEnabled(true), reloading the module still reads on', async () => {
     const first = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
 
-    // 🔴 默认值本身没有被改动。
+    // 🔴 The default itself was not changed.
     expect(first.BACKFILL_DEFAULT_ENABLED).toBe(false);
     expect(await first.isBackfillEnabled(browserLocalStore())).toBe(false);
 
-    // Popup 上那一次点击做的就是这一件事。
+    // That one click in the popup does exactly this.
     await first.setBackfillEnabled(browserLocalStore(), true);
     expect(store[first.BACKFILL_ENABLED_KEY]).toBe(true);
 
-    // 「浏览器重启」：模块状态清零，storage.local 留着。
+    // "A browser restart": module state cleared, storage.local kept.
     vi.resetModules();
     const second = await import('../lib/backfill/schedule');
     const { browserLocalStore: store2 } = await import('../lib/backfill/store');
     expect(await second.isBackfillEnabled(store2())).toBe(true);
 
-    // 关掉也要立刻持久化。
+    // Turning it off has to persist immediately too.
     await second.setBackfillEnabled(store2(), false);
     vi.resetModules();
     const third = await import('../lib/backfill/schedule');
@@ -91,9 +94,9 @@ describe('C18-1 · 打开开关会持久化，重启后仍是开的', () => {
     expect(await third.isBackfillEnabled(store3())).toBe(false);
   });
 
-  it('🔴 Chrome 形状（只有 globalThis.chrome，没有 browser）下也能存住', async () => {
+  it('🔴 it can persist in the Chrome shape too (only globalThis.chrome, no browser)', async () => {
     vi.unstubAllGlobals();
-    vi.stubGlobal('chrome', fakeBrowser); // 不 stub browser —— 这就是 Chrome MV3
+    vi.stubGlobal('chrome', fakeBrowser); // browser is deliberately not stubbed — this is Chrome MV3
     vi.resetModules();
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { setBackfillEnabled, isBackfillEnabled } = await import('../lib/backfill/schedule');
@@ -104,24 +107,24 @@ describe('C18-1 · 打开开关会持久化，重启后仍是开的', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2 · 🔴 开着但没端口
+// 2 · 🔴 on, but with no port
 // ---------------------------------------------------------------------------
-describe('C18-2 · 开着但取数通道没接上', () => {
-  it('文案必须说「未在运行」并说清缺什么，且整段不含百分号', async () => {
+describe('C18-2 · on, but the fetch channel is not connected', () => {
+  it('the wording must say "NOT running", spell out what is missing, and the whole text must contain no percent sign', async () => {
     seedState();
     const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
     const { setBackfillEnabled, isBackfillEnabled, tickBlockReason } =
       await import('../lib/backfill/schedule');
     const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
 
-    // 用户在 Popup 上把开关打开了。
+    // The user turned the switch on in the popup.
     await setBackfillEnabled(browserLocalStore(), true);
 
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => isBackfillEnabled(browserLocalStore()),
       isHostPaused: () => false,
-      // 🔴 生产构建里就是这个值：没有任何代码注入 http 端口。
+      // 🔴 This is the value in a production build: no code injects an http port.
       hasHttp: false,
     });
     expect(block).toBe('no-http-port');
@@ -133,28 +136,28 @@ describe('C18-2 · 开着但取数通道没接上', () => {
       block,
       state,
       target: state ? { platform: state.platform, scope: state.scope } : null,
-      // C20：走真实的汇总函数，不写死 —— 本用例的夹具里没有失败项，所以它是空的。
+      // C20: it goes through the real aggregation function rather than a hardcoded value — this case's fixture has no failures, so it is empty.
       failures: collectFailures(snapshot),
     });
     const out = popupText(view);
 
-    // 🔴 三条判据。
-    expect(view.running).toContain('未在运行');
+    // 🔴 The three criteria.
+    expect(view.running).toContain('NOT running');
     expect(view.missing).not.toBeNull();
-    expect(view.missing!).toContain('取数通道');
+    expect(view.missing!).toContain('fetch channel');
     expect(out).not.toContain('%');
 
-    // 🔴 绝不许出现的说法。
-    for (const forbidden of ['正在归档', '正在回溯', '正在运行', '预计剩余']) {
+    // 🔴 The things that must never appear.
+    for (const forbidden of ['Running: archiving', 'backfilling now', 'is now running', 'estimated remaining']) {
       expect(out).not.toContain(forbidden);
     }
 
-    // 开关本身要如实显示成「开」，不能因为跑不动就假装是关的。
+    // The switch itself must honestly show as ON; it must not pretend to be off because nothing can run.
     expect(view.toggle.checked).toBe(true);
-    expect(view.status).toContain('开关是开的');
+    expect(view.status).toContain('the switch is ON');
   });
 
-  it('闸门判断与 tickBackfill 是同一个函数 —— 真跑一次 tick 得到同样的结论', async () => {
+  it('the gate decision is the same function tickBackfill uses — really running one tick reaches the same conclusion', async () => {
     seedState();
     const { browserLocalStore } = await import('../lib/backfill/store');
     const schedule = await import('../lib/backfill/schedule');
@@ -166,12 +169,12 @@ describe('C18-2 · 开着但取数通道没接上', () => {
       platform: 'chatgpt',
       origin: 'https://chatgpt.com',
       scope: 'acct-1',
-      // http 不注入 —— 与生产构建一致。
+      // No http injection — consistent with a production build.
     });
     expect(tick).toEqual({ ran: false, reason: 'no-http-port', report: null });
   });
 
-  it('开关是关的时候，文案说的是「开关没有打开」而不是缺端口', async () => {
+  it('with the switch off, the wording says "the switch is off" rather than a missing port', async () => {
     const { tickBlockReason } = await import('../lib/backfill/schedule');
     const { renderPopup, popupText, NO_FAILURES } = await import('../lib/popup-view');
     const block = await tickBlockReason({
@@ -184,17 +187,17 @@ describe('C18-2 · 开着但取数通道没接上', () => {
     const out = popupText(renderPopup({
       enabled: false, block, state: null, target: null, failures: NO_FAILURES,
     }));
-    expect(out).toContain('未在运行');
-    expect(out).toContain('开关没有打开');
+    expect(out).toContain('NOT running');
+    expect(out).toContain('the switch is off');
     expect(out).not.toContain('%');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3 · 主机暂停态（W2 取代了 C12 的熔断态）
+// 3 · The host-paused state (W2 replaced C12's download-stall state)
 // ---------------------------------------------------------------------------
-describe('C18-3 · 主机暂停态', () => {
-  it('显示暂停行与具名原因，并且开关仍然可切', async () => {
+describe('C18-3 · the host-paused state', () => {
+  it('it shows the pause line and a named reason, and the switch stays operable', async () => {
     seedState();
     const { browserLocalStore, browserLocalSnapshot } = await import('../lib/backfill/store');
     const { setBackfillEnabled, isBackfillEnabled, tickBlockReason } =
@@ -203,7 +206,7 @@ describe('C18-3 · 主机暂停态', () => {
     const { renderPopup, popupText, pickBackfillState, collectFailures } = await import('../lib/popup-view');
 
     await setBackfillEnabled(browserLocalStore(), true);
-    // 真把暂停记下来：这正是回溯腿投递失败时写的那条记录。
+    // Really record the pause: this is exactly the record the backfill leg writes when a delivery fails.
     store[HOST_PAUSE_KEY] = { reason: HOST_UNAVAILABLE, at: 1_700_000_000_000, detail: 'timeout' };
     const { loadHostPause } = await import('../lib/host-status');
     const pause = await loadHostPause(browserLocalStore());
@@ -226,14 +229,14 @@ describe('C18-3 · 主机暂停态', () => {
     });
     const out = popupText(view);
 
-    expect(view.status).toContain('host 够不着');
-    expect(view.running).toContain('未在运行');
-    // 🔴 暂停是一个【具名】结局：说清是哪一台主机不够得着、欠账没丢、什么时候发现的。
+    expect(view.status).toContain('host is unreachable');
+    expect(view.running).toContain('NOT running');
+    // 🔴 A pause is a **named** outcome: it says which machine's host cannot be reached, that no debt was lost, and when it was noticed.
     expect(view.pause).not.toBeNull();
     expect(view.pause!).toContain('PAUSED');
     expect(view.pause!).toContain(HOST_UNAVAILABLE);
     expect(view.pause!).toContain('untouched');
-    // 🔴 暂停不剥夺用户切开关的权利。
+    // 🔴 A pause does not take away the user's right to flip the switch.
     expect(view.toggle.disabled).toBe(false);
     expect(view.toggle.checked).toBe(true);
     expect(out).not.toContain('%');
@@ -241,10 +244,10 @@ describe('C18-3 · 主机暂停态', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4 · 进度文案必须来自 C11，不许另写一份
+// 4 · The progress wording must come from C11; a second copy is not allowed
 // ---------------------------------------------------------------------------
-describe('C18-4 · 进度文案守 C11 的规矩', () => {
-  it('分母可信时才出现百分比，且与 formatProgress 逐字一致', async () => {
+describe('C18-4 · the progress wording obeys C11\'s rules', () => {
+  it('a percentage appears only with a trustworthy denominator, and it matches formatProgress byte for byte', async () => {
     const { renderPopup, NO_FAILURES } = await import('../lib/popup-view');
     const { formatProgress } = await import('../lib/backfill/progress');
     const trusted: BackfillState = {
@@ -258,11 +261,11 @@ describe('C18-4 · 进度文案守 C11 的规矩', () => {
       enabled: true, block: 'no-http-port', state: trusted,
       target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
-    expect(view.progress).toBe(`进度：${formatProgress(trusted)}`);
+    expect(view.progress).toBe(`Progress: ${formatProgress(trusted)}`);
     expect(view.progress).toContain('30%');
   });
 
-  it('分母不可信时 progress 行不含百分号', async () => {
+  it('with an untrustworthy denominator the progress line contains no percent sign', async () => {
     const { renderPopup, NO_FAILURES } = await import('../lib/popup-view');
     const untrusted: BackfillState = {
       v: 1, platform: 'chatgpt', scope: 'acct-1',
@@ -276,10 +279,10 @@ describe('C18-4 · 进度文案守 C11 的规矩', () => {
       target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
     expect(view.progress).not.toContain('%');
-    expect(view.progress).toContain('总数未知');
+    expect(view.progress).toContain('total unknown');
   });
 
-  it('pickBackfillState 只认键与值对得上的集合', async () => {
+  it('pickBackfillState accepts only sets whose key and value agree', async () => {
     const { pickBackfillState } = await import('../lib/popup-view');
     const good = seedState('chatgpt', 'acct-1');
     expect(pickBackfillState({ ...store, 'cs_backfill_v1:bogus:x': { v: 1 } })).toEqual(good);

@@ -1,29 +1,30 @@
 /**
- * W2 · 实时腿的四种结局，一个都不许混。
+ * W2 · The live leg's four outcomes, none of which may be confused with another.
  *
- *   delivered —— 收到了匹配的 ack ⇒ saved:true
- *   queued    —— 已写进发件箱、还没被确认 ⇒ saved:false（可区分，角标据此计数）
- *   rejected  —— 主机明确 nack 且不可重试 ⇒ 保留、可见、不再自动重试
- *   refused   —— 我们连收都没收下（发件箱满 / 读不出来 / 起不出名字）⇒ 具名原因
+ *   delivered — a matching ack arrived ⇒ saved:true
+ *   queued    — written into the outbox but not yet confirmed ⇒ saved:false (distinguishable; the badge counts it)
+ *   rejected  — the host explicitly nacked it and it is not retryable ⇒ kept, visible, never retried automatically
+ *   refused   — we did not even take it in (outbox full / unreadable / no name could be produced) ⇒ a named reason
  *
- * 🔴 这个文件里最重要的一条是 write-ahead：
- *    投递【发生的那一刻】，payload 必须已经在发件箱里躺着。
- *    断言方式是：桩在收到投递请求时去读发件箱，必须读得到这一条。
+ * 🔴 The most important thing in this file is write-ahead:
+ *    at the very moment delivery happens, the payload must already be lying in the outbox.
+ *    The way it is asserted: the stub reads the outbox when the delivery request arrives, and it must find that entry.
  *
- * 全程走【真实的 background 入口】（runtime.onMessage('chat-captured')），
- * 只把 browser.* 与主机换成可编程的桩。
+ * Everything goes through the **real background entry point** (runtime.onMessage('chat-captured')),
+ * swapping only browser.* and the host for programmable stubs.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 
-/** 主机每一刻的行为。 */
+/** What the host does at each moment. */
 let hostMode: 'up' | 'down' | 'nack-nonretryable' | 'nack-retryable';
-/** 投递请求到达时，发件箱里有没有这一条（write-ahead 的直接证据）。 */
+/** Whether the entry was in the outbox when the delivery request arrived (the direct evidence for write-ahead). */
 let outboxHadPayloadAtDelivery: boolean | null = null;
 let deliveries: Array<{ name: string; payload: string }> = [];
 let lastCapturedAt = 1_700_000_000_000;
@@ -40,7 +41,7 @@ const fakeBrowser: any = {
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
     async sendNativeMessage(host: string, message: Record<string, any>) {
       if (message.type === 'deliver') {
-        // 🔴 write-ahead 的检查点：投递【就在此刻】发生 —— 主机是死是活都一样。
+        // 🔴 The write-ahead checkpoint: delivery happens **right now** — the host being alive or dead makes no difference.
         const { getEntry } = await import('../lib/outbox');
         const lookup = await getEntry(message.sha256);
         outboxHadPayloadAtDelivery = lookup.ok && lookup.entry !== null;
@@ -113,11 +114,11 @@ async function dispatch(payload: CapturedFetch): Promise<any> {
 }
 
 /**
- * 把发件箱的「已用字节」写到只差 1 字节就满。
+ * Nudge the outbox's "bytes used" to one byte short of full.
  *
- * 用的是模块自己导出的库名/仓库名/计数器键 —— 不是另一份实现，只是把那个
- * 计数器直接推到上限，好让真实的判断分支（`used + bytes > capacity`）真的走到。
- * 真写 256 MiB 也可以，但那只是更慢更脆的同一条断言。
+ * It uses the module's own exported database name / store name / counter key — not a second
+ * implementation, just pushing that counter to the limit so the real branch
+ * (`used + bytes > capacity`) really runs. Really writing 256 MiB would also work, but that is the same assertion, slower and more fragile.
  */
 async function fillCounterToCapacity(): Promise<void> {
   const { OUTBOX_DB_NAME, OUTBOX_DB_VERSION, OUTBOX_META_STORE, OUTBOX_META_BYTES_KEY, OUTBOX_CAPACITY_BYTES } =
@@ -146,13 +147,13 @@ beforeEach(() => {
   deliveries = [];
   lastCapturedAt = 1_700_000_000_000;
   fakeBrowser.action.badgeText = '';
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
 });
 
 describe('W2-LIVE · delivered', () => {
-  it('🔴 匹配的 ack ⇒ saved:true、status:delivered；而且【投递时 payload 已经在发件箱里】', async () => {
+  it('🔴 a matching ack ⇒ saved:true, status:delivered; and **the payload was already in the outbox at delivery time**', async () => {
     const result = await dispatch(capture());
 
     expect(result.ok).toBe(true);
@@ -162,26 +163,26 @@ describe('W2-LIVE · delivered', () => {
     expect(result.finalName).toBe(`chatgpt-${SID}.json`);
     expect(deliveries).toHaveLength(1);
 
-    // 🔴 write-ahead：桩在投递那一刻读发件箱，条目必须已经在那儿。
+    // 🔴 write-ahead: the stub reads the outbox at the moment of delivery, and the entry must already be there.
     expect(outboxHadPayloadAtDelivery).toBe(true);
 
-    // ack 之后条目被删掉，角标回到空。
+    // After the ack the entry is deleted and the badge goes back to empty.
     const { listEntries } = await import('../lib/outbox');
     expect(await listEntries()).toEqual([]);
     expect(fakeBrowser.action.badgeText).toBe('');
   });
 });
 
-describe('W2-LIVE · queued（已入队、未确认）', () => {
-  it('🔴 主机不在 ⇒ saved:false、status:queued（不是成功，也不是失败），条目留在发件箱，角标显示 1', async () => {
+describe('W2-LIVE · queued (enqueued, not confirmed)', () => {
+  it('🔴 the host is absent ⇒ saved:false, status:queued (neither success nor failure), the entry stays in the outbox and the badge shows 1', async () => {
     hostMode = 'down';
     const result = await dispatch(capture());
 
-    expect(result.ok).toBe(false);          // ok === saved，两者都不许说谎
+    expect(result.ok).toBe(false);          // ok === saved, and neither may lie
     expect(result.saved).toBe(false);
     expect(result.status).toBe('queued');
     expect(result.reason).toBe('send-failed');
-    expect(outboxHadPayloadAtDelivery).toBe(true);   // 同样先落盘再尝试
+    expect(outboxHadPayloadAtDelivery).toBe(true);   // written down before the attempt here too
 
     const { listEntries } = await import('../lib/outbox');
     const entries = (await listEntries())!;
@@ -190,7 +191,7 @@ describe('W2-LIVE · queued（已入队、未确认）', () => {
     expect(fakeBrowser.action.badgeText).toBe('1');
   });
 
-  it('主机回来之后，下一次心跳就把这条送出去并销账（角标清空）', async () => {
+  it('once the host is back, the next heartbeat sends it and clears the ledger (badge emptied)', async () => {
     hostMode = 'down';
     await dispatch(capture());
     const { listEntries } = await import('../lib/outbox');
@@ -198,7 +199,7 @@ describe('W2-LIVE · queued（已入队、未确认）', () => {
 
     hostMode = 'up';
     const { drainOutbox } = await import('../lib/outbox');
-    // 下一次心跳：退避窗口早就过去了（真实的闹钟是 5 分钟一跳）。
+    // The next heartbeat: the backoff window is long past (a real alarm ticks every 5 minutes).
     const report = await drainOutbox({ now: () => Date.now() + 10 * 60_000 });
     expect(report).toMatchObject({ delivered: 1, stoppedBy: 'drained' });
     expect(await listEntries()).toEqual([]);
@@ -206,8 +207,8 @@ describe('W2-LIVE · queued（已入队、未确认）', () => {
   });
 });
 
-describe('W2-LIVE · rejected（主机明确说这条不行）', () => {
-  it('🔴 非 retryable nack ⇒ saved:false、status:rejected、带上 kind，条目【保留】', async () => {
+describe('W2-LIVE · rejected (the host says outright that this one will not do)', () => {
+  it('🔴 a non-retryable nack ⇒ saved:false, status:rejected, carrying the kind, and the entry is **kept**', async () => {
     hostMode = 'nack-nonretryable';
     const result = await dispatch(capture());
 
@@ -220,14 +221,14 @@ describe('W2-LIVE · rejected（主机明确说这条不行）', () => {
     const entries = (await listEntries())!;
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ state: 'rejected', rejectKind: 'invalid-bundle' });
-    expect(fakeBrowser.action.badgeText).toBe('!');   // 告警态，不是数字
+    expect(fakeBrowser.action.badgeText).toBe('!');   // the alert state, not a number
   });
 
-  it('retryable nack ⇒ 仍然只是 queued（主机说"再试试"，不是"这条不行"）', async () => {
+  it('a retryable nack ⇒ still only queued (the host said "try again", not "this one will not do")', async () => {
     hostMode = 'nack-retryable';
     const result = await dispatch(capture());
     expect(result).toMatchObject({ saved: false, status: 'queued' });
-    // 结局是「还没送达」，理由是主机给的那个（kind 就在里面），不是被判死。
+    // The outcome is "not delivered yet", with the reason the host gave (kind included), not a death sentence.
     expect(result.reason).toContain('nack');
     expect(result.reason).toContain('integrity');
     expect(result.kind).toBeUndefined();
@@ -236,10 +237,10 @@ describe('W2-LIVE · rejected（主机明确说这条不行）', () => {
   });
 });
 
-describe('W2-LIVE · refused（我们连收都没收下）', () => {
-  it('🔴 发件箱满了 ⇒ 这次抓取被拒、原因可见；已排队的一条不少、一个字节不改', async () => {
+describe('W2-LIVE · refused (we did not even take it in)', () => {
+  it('🔴 the outbox is full ⇒ this capture is refused with a visible reason; the queued entries are all there, not one byte changed', async () => {
     const ob = await import('../lib/outbox');
-    // 先真的放一条进去（这样"旧的没被动过"才有东西可指）。主机先下线 ⇒ 它留在队里。
+    // Really put one in first (so "the old ones were not touched" has something to point at). The host goes offline ⇒ it stays in the queue.
     hostMode = 'down';
     const firstResult = await dispatch(capture());
     expect(firstResult).toMatchObject({ saved: false, status: 'queued' });
@@ -247,8 +248,8 @@ describe('W2-LIVE · refused（我们连收都没收下）', () => {
     expect(before).toHaveLength(1);
     hostMode = 'up';
 
-    // 把「已用字节」直接推到上限：meta 里的那个计数器就是唯一的帐。
-    // （比真写 256 MiB 更快、更稳，也同样是走真实的判断分支。）
+    // Push "bytes used" straight to the limit: the counter in meta is the only ledger there is.
+    // (Faster and steadier than really writing 256 MiB, and it takes the same real branch.)
     await fillCounterToCapacity();
 
     const result = await dispatch(capture());
@@ -257,11 +258,11 @@ describe('W2-LIVE · refused（我们连收都没收下）', () => {
     expect(result.reason).toBe('outbox-full');
 
     const after = await ob.listEntries();
-    expect(after).toEqual(before);   // 🔴 一条不少、一个字节不改
-    console.log('[W2-LIVE] 满了之后拒收的返回:', result);
+    expect(after).toEqual(before);   // 🔴 all there, not one byte changed
+    console.log('[W2-LIVE] the refusal returned after it filled up:', result);
   });
 
-  it('🔴 起不出会话身份 ⇒ refused，一个字节都不进发件箱', async () => {
+  it('🔴 no conversation identity can be produced ⇒ refused, with not one byte entering the outbox', async () => {
     const result = await dispatch(capture({
       url: 'https://chatgpt.com/backend-api/conversation/shortid',
       pageUrl: undefined,
@@ -273,12 +274,12 @@ describe('W2-LIVE · refused（我们连收都没收下）', () => {
     expect(deliveries).toEqual([]);
   });
 
-  it('🔴 IndexedDB 读不出来 ⇒ refused/queued 且写明 outbox-unavailable，绝不冒充成功', async () => {
+  it('🔴 IndexedDB cannot be read ⇒ refused/queued naming outbox-unavailable, never passed off as success', async () => {
     delete (globalThis as any).indexedDB;
     vi.resetModules();
     const result = await dispatch(capture());
     expect(result.saved).toBe(false);
     expect(result.reason).toBe('outbox-unavailable');
-    expect(deliveries).toEqual([]);            // 没写进发件箱就不投递
+    expect(deliveries).toEqual([]);            // nothing goes into the outbox, so nothing is delivered
   });
 });

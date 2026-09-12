@@ -1,8 +1,10 @@
 /**
- * C28 · 正文接口返回成功但内容为空时，不能把空当成「没有东西」。
+ * C28 · When the body endpoint succeeds but the content is empty, that empty must not be
+ * taken as "there is nothing".
  *
- * 全部是合成夹具：只给 engine 注入一个测试 plan 来演示未来 detail parser 的
- * 接缝，不改变生产 plan，不给 DeepSeek 增加正文路径，也不向任何平台发请求。
+ * All fixtures are synthetic: a test plan is injected into the engine only to demonstrate the
+ * seam for a future detail parser. No production plan changes, no body route is added for
+ * DeepSeek, and no request goes to any platform.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -24,7 +26,7 @@ function listBody(): string {
   return JSON.stringify({ items: [{ id: ID }], total: 1 });
 }
 
-/** 结构是好的；C28 测的是「结构好但内容空」，不是 shape-changed。 */
+/** The structure is good; C28 tests "good structure but empty content", not shape-changed. */
 function detailBody(): string {
   return JSON.stringify({ mapping: {}, current_node: 'synthetic-node' });
 }
@@ -65,8 +67,8 @@ async function run(
   return { report, persisted };
 }
 
-describe('C28 · 正文空护栏', () => {
-  it('HTTP 200 + 形状正确 + 内容为空 ⇒ 具名停机，欠账原封不动且正文 complete=false', async () => {
+describe('C28 · the empty-body guardrail', () => {
+  it('HTTP 200 + correct shape + empty content ⇒ a named halt, the debt untouched and the body complete=false', async () => {
     const { report, persisted } = await run('detail-empty-unverified', 'acct-c28-unverified');
 
     expect(report.stopped).toBe('halted');
@@ -84,7 +86,7 @@ describe('C28 · 正文空护栏', () => {
     expect(persisted.detailOutcomes).toEqual(report.detailOutcomes);
   });
 
-  it('「本来就是合法空会话」是另一个具名值，且与未证实空在报告/落盘状态中可分辨', async () => {
+  it('"it was a legitimately empty conversation" is a different named value, and is distinguishable from an unverified empty in both the report and the persisted state', async () => {
     const { report, persisted } = await run('detail-empty-confirmed', 'acct-c28-confirmed');
 
     expect(report.halted).toBeNull();

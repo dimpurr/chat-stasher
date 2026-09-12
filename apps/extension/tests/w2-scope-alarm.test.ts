@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import type { DeliverResult, NackKind } from '../lib/native-host';
@@ -278,7 +279,7 @@ describe('outbox alarm · background wiring (backfill switch OFF)', () => {
     alarmListeners = [];
     deliveries = [];
     alarms = fakeAlarms();
-    const b = makeBrowser();
+    const b = withI18n(makeBrowser());
     vi.stubGlobal('browser', b);
     vi.stubGlobal('chrome', b);
     vi.stubGlobal('defineBackground', (cb: any) => cb);

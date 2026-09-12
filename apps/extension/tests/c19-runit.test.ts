@@ -1,16 +1,17 @@
 /**
- * C19 · 让回溯腿真的自己跑起来。
+ * C19 · Making the backfill leg really run on its own.
  *
- * 三件事，一件都不许含糊：
- *  1. 闹钟（chrome.alarms）：开关打开 ⇒ 创建；关掉 ⇒ 清除。默认仍然是关的。
- *  2. http 端口在【生产代码里】被注入 —— 且取数发生在用户已登录的页面上下文里
- *     （内容脚本同源 fetch），不新增任何 host 权限。
- *  3. 🔴 BUG-3：取正文的最小间隔【跨 tick】也生效。
+ * Three things, none of them vague:
+ *  1. the alarm (chrome.alarms): switch on ⇒ created; off ⇒ cleared. Still off by default.
+ *  2. the http port is injected **in production code** — and fetching happens inside the user's
+ *     logged-in page context (a same-origin fetch from the content script), with no new host permission.
+ *  3. 🔴 BUG-3: the body-fetch minimum interval takes effect **across ticks** too.
  *
- * 全程零真实网络、零登录态：fetch 是本文件里的一个纯函数。
+ * Zero real network and zero logged-in state throughout: fetch is a pure function in this file.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import { runBackfill } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
@@ -26,7 +27,7 @@ const IDS = [
   'c3333333-0000-4000-8000-000000000003',
 ];
 
-/** 合成"服务器"：一个纯函数，绝不碰网络。 */
+/** A synthetic "server": a pure function that never touches the network. */
 function syntheticPort() {
   const calls: string[] = [];
   return {
@@ -57,7 +58,7 @@ function syntheticPort() {
   };
 }
 
-/** 假时钟：sleep 不真的等，只把 now 往前推 —— 于是"等了多久"是可断言的数字。 */
+/** A fake clock: sleep does not really wait, it only advances now — so "how long it waited" is an assertable number. */
 function fakeClock(startMs = 1_700_000_000_000): Clock & { readonly at: () => number } {
   let now = startMs;
   return {
@@ -67,8 +68,8 @@ function fakeClock(startMs = 1_700_000_000_000): Clock & { readonly at: () => nu
   };
 }
 
-describe('C19 任务 3 · BUG-3：取正文的最小间隔必须【跨 tick】生效', () => {
-  it('🔴 第二次 tick（新的一次 runBackfill，同一份 storage）必须补足 20 秒', async () => {
+describe('C19 task 3 · BUG-3: the body-fetch minimum interval must take effect **across ticks**', () => {
+  it('🔴 the second tick (a new runBackfill, the same storage) must make up the full 20 seconds', async () => {
     const store = memoryStore();
     const server = syntheticPort();
     const clock = fakeClock();
@@ -80,31 +81,31 @@ describe('C19 任务 3 · BUG-3：取正文的最小间隔必须【跨 tick】�
       store,
       http: server.port,
       clock,
-      maxDetails: 1,   // 与运行时一致：一次 tick 只清 1 笔账
+      maxDetails: 1,   // consistent with runtime: one tick clears exactly 1 debt
     });
 
     const r1 = await tick();
     const r2 = await tick();
     const r3 = await tick();
 
-    console.log('[C19-3] tick1 detail 等待序列(ms) =', JSON.stringify(r1.paceTrace.detail));
-    console.log('[C19-3] tick2 detail 等待序列(ms) =', JSON.stringify(r2.paceTrace.detail));
-    console.log('[C19-3] tick3 detail 等待序列(ms) =', JSON.stringify(r3.paceTrace.detail));
+    console.log('[C19-3] tick1 detail wait sequence (ms) =', JSON.stringify(r1.paceTrace.detail));
+    console.log('[C19-3] tick2 detail wait sequence (ms) =', JSON.stringify(r2.paceTrace.detail));
+    console.log('[C19-3] tick3 detail wait sequence (ms) =', JSON.stringify(r3.paceTrace.detail));
 
-    // 第一次没有"上一次"可言 ⇒ 等 0，这是对的。
+    // The first has no "previous one" to speak of ⇒ it waits 0, which is correct.
     expect(r1.paceTrace.detail).toEqual([0]);
-    // 🔴 第二、三次是【新的 runBackfill】，但上次取数的时刻已经落盘 ⇒ 必须补足间隔。
+    // 🔴 The second and third are **new runBackfills**, but the moment of the last fetch is already persisted ⇒ the interval must be made up.
     expect(r2.paceTrace.detail).toEqual([DEFAULT_DETAIL_PACE.minIntervalMs]);
     expect(r3.paceTrace.detail).toEqual([DEFAULT_DETAIL_PACE.minIntervalMs]);
 
-    // 三笔账都清了，一共 3 次取正文，彼此间隔 20 秒。
+    // All three debts were cleared: 3 body fetches in total, 20 seconds apart.
     expect(store.data['cs_backfill_v1:chatgpt:acct-fixture-1']).toMatchObject({
       archived: IDS,
       pending: [],
     });
   });
 
-  it('闹钟按 5 分钟醒一次时不会被间隔挡住（elapsed 已经远超 20 秒）', async () => {
+  it('an alarm waking every 5 minutes is not held up by the interval (elapsed is far past 20 seconds)', async () => {
     const store = memoryStore();
     const server = syntheticPort();
     const clock = fakeClock();
@@ -115,13 +116,13 @@ describe('C19 任务 3 · BUG-3：取正文的最小间隔必须【跨 tick】�
     });
 
     await tick();
-    await clock.sleep(5 * 60_000);   // 闹钟周期
+    await clock.sleep(5 * 60_000);   // the alarm period
     const r2 = await tick();
-    console.log('[C19-3] 隔 5 分钟之后的 tick2 detail 等待序列(ms) =', JSON.stringify(r2.paceTrace.detail));
+    console.log('[C19-3] tick2 detail wait sequence after 5 minutes (ms) =', JSON.stringify(r2.paceTrace.detail));
     expect(r2.paceTrace.detail).toEqual([0]);
   });
 
-  it('日上限仍然生效（间隔生效不许把已经在跑的日上限弄坏）', async () => {
+  it('the daily cap still holds (making the interval work must not break the daily cap that already worked)', async () => {
     const store = memoryStore();
     const server = syntheticPort();
     const clock = fakeClock();
@@ -131,25 +132,25 @@ describe('C19 任务 3 · BUG-3：取正文的最小间隔必须【跨 tick】�
       store, http: server.port, clock,
       pace: { enumerate: { minIntervalMs: 0, maxPerDay: null }, detail: { minIntervalMs: 20_000, maxPerDay: 2 } },
     });
-    console.log('[C19-3] 日上限 2 时的停止原因 =', r.stopped, '已清 =', r.archivedThisRun.length);
+    console.log('[C19-3] stop reason with a daily cap of 2 =', r.stopped, 'cleared =', r.archivedThisRun.length);
     expect(r.stopped).toBe('daily-cap');
     expect(r.archivedThisRun.length).toBe(2);
   });
 });
 
 // ===========================================================================
-// 任务 1 + 2 · 运行时：闹钟会醒，端口在生产代码里被注入
+// Tasks 1 + 2 · the runtime: the alarm wakes, and the port is injected in production code
 //
-// 🔴 这一段一条断言都不许直接调 runBackfill / tickBackfill。
-//    每个用例都从【真实入口】出发：
-//      · 实时腿：browser.runtime.onMessage 收到 'chat-captured'
-//      · 闹钟：  browser.alarms.onAlarm 触发
-//    然后去看回溯腿有没有真的取到数。
+// 🔴 Not one assertion in this section may call runBackfill / tickBackfill directly.
+//    Every case starts from a **real entry point**:
+//      · the live leg: browser.runtime.onMessage receiving 'chat-captured'
+//      · the alarm: browser.alarms.onAlarm firing
+//    and only then does it look at whether the backfill leg really fetched anything.
 //
-// 🔴 取数这一段也走【真实的内容脚本处理函数】handleBackfillMessage ——
-//    假 tabs.sendMessage 把消息交给它，它再调一个合成 fetch。
-//    也就是说 background → tabs.sendMessage → 内容脚本 → 同源 fetch
-//    这条链在测试里是真的被走了一遍的，只有最后那个 fetch 是合成的。
+// 🔴 The fetching also goes through the **real content-script handler**, handleBackfillMessage —
+//    the fake tabs.sendMessage hands it the message, and it then calls a synthetic fetch.
+//    That is, background → tabs.sendMessage → content script → same-origin fetch
+//    is really walked in the test; only the final fetch is synthetic.
 // ===========================================================================
 
 const store: Record<string, unknown> = {};
@@ -157,13 +158,13 @@ const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];
 let host: SyntheticHost;
 
-/** 闹钟登记簿：assert「开 ⇒ 创建 / 关 ⇒ 清除」就看它。 */
+/** The alarm register: "on ⇒ created / off ⇒ cleared" is asserted against it. */
 const alarmBook = new Map<string, { periodInMinutes?: number }>();
 const alarmLog: string[] = [];
 
-/** 现在"开着"的平台标签页。关掉一个就从这里删，ping 自然就不通了。 */
+/** The platform tabs that are "open" right now. Delete one and its ping naturally fails. */
 const liveTabs = new Map<number, string>();
-/** 内容脚本代发过的 URL —— 取数确实发生在页面上下文里的证据。 */
+/** The URLs the content script sent on our behalf — the evidence that fetching really happens in the page context. */
 const contentFetches: string[] = [];
 
 function syntheticPageFetch(url: string) {
@@ -195,7 +196,7 @@ const fakeBrowser: any = {
     id: 'mock-extension-id',
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
-    // W2：落盘通道 = 合成 native host。
+    // W2: the write-down channel = a synthetic native host.
     sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
   },
   storage: {
@@ -219,8 +220,8 @@ const fakeBrowser: any = {
   },
   tabs: {
     /**
-     * 🔴 这里就是「background → 已登录的页面」那一跳。
-     * 标签页不在 liveTabs 里 ⇒ 抛错，与真实浏览器里"标签页已关"的行为一致。
+     * 🔴 This is the "background → logged-in page" hop.
+     * A tab not in liveTabs ⇒ throw, matching how "the tab is closed" behaves in a real browser.
      */
     async sendMessage(tabId: number, message: unknown) {
       const origin = liveTabs.get(tabId);
@@ -232,7 +233,7 @@ const fakeBrowser: any = {
   },
 };
 
-/** 假时钟走 background 的测试接缝，免得测试真的睡满 20 秒。 */
+/** A fake clock through background's test seam, so the test does not really sleep 20 seconds. */
 let runtimeNow = 1_700_000_000_000;
 const runtimeClock = {
   now: () => runtimeNow,
@@ -258,7 +259,7 @@ async function bootBackground(): Promise<any> {
   return mod;
 }
 
-/** 像内容脚本那样派发一条消息，sender.tab.id 由"浏览器"填。 */
+/** Dispatch a message the way a content script does; sender.tab.id is filled in by the "browser". */
 async function dispatch(message: unknown, tabId?: number): Promise<any> {
   const sender = tabId === undefined ? { id: 's' } : { id: 's', tab: { id: tabId } };
   return await new Promise((resolve) => {
@@ -284,7 +285,7 @@ beforeEach(async () => {
   alarmLog.length = 0;
   liveTabs.clear();
   runtimeNow = 1_700_000_000_000;
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
   vi.resetModules();
@@ -292,64 +293,64 @@ beforeEach(async () => {
   resetTickLockForTest();
 });
 
-describe('C19 任务 1 · 闹钟：开 ⇒ 创建，关 ⇒ 清除', () => {
-  it('🔴 默认（关）下 SW 启动【不会】创建闹钟，只会确保它不存在', async () => {
+describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
+  it('🔴 with the default (off), an SW start **does not** create an alarm; it only makes sure none exists', async () => {
     const { BACKFILL_DEFAULT_ENABLED } = await import('../lib/backfill/schedule');
-    expect(BACKFILL_DEFAULT_ENABLED).toBe(false);   // 🔴 默认值一个字都没改
+    expect(BACKFILL_DEFAULT_ENABLED).toBe(false);   // 🔴 the default did not change a character
 
     await bootBackground();
-    console.log('[C19-1] 默认态 SW 启动后的闹钟操作:', alarmLog, '现存闹钟:', [...alarmBook.keys()]);
+    console.log('[C19-1] alarm operations after an SW start in the default state:', alarmLog, 'alarms now:', [...alarmBook.keys()]);
     expect([...alarmBook.keys()]).toEqual([]);
     expect(alarmLog.every((l) => l.startsWith('clear'))).toBe(true);
   });
 
-  it('开关打开 ⇒ 创建闹钟；关掉 ⇒ 清除', async () => {
+  it('switch on ⇒ the alarm is created; off ⇒ it is cleared', async () => {
     const { syncBackfillAlarm, BACKFILL_ALARM_NAME, BACKFILL_ALARM_PERIOD_MINUTES } =
       await import('../lib/backfill/alarm');
 
     const created = await syncBackfillAlarm(fakeBrowser.alarms, true);
-    console.log('[C19-1] 打开开关 ->', created, '现存闹钟:', [...alarmBook.entries()]);
+    console.log('[C19-1] switch on ->', created, 'alarms now:', [...alarmBook.entries()]);
     expect(created).toBe('created');
     expect(alarmBook.get(BACKFILL_ALARM_NAME)).toEqual({
       periodInMinutes: BACKFILL_ALARM_PERIOD_MINUTES,
     });
 
-    // 再同步一次不该把周期从头计时（每次 SW 醒来都会走这条路）。
+    // Syncing again must not restart the period from zero (every SW wake goes down this path).
     expect(await syncBackfillAlarm(fakeBrowser.alarms, true)).toBe('kept');
 
     const cleared = await syncBackfillAlarm(fakeBrowser.alarms, false);
-    console.log('[C19-1] 关掉开关 ->', cleared, '现存闹钟:', [...alarmBook.keys()]);
+    console.log('[C19-1] switch off ->', cleared, 'alarms now:', [...alarmBook.keys()]);
     expect(cleared).toBe('cleared');
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
   });
 
-  it('开关已经开着时 SW 启动会把闹钟补上（重启之后不用用户再点一次）', async () => {
+  it('when the switch is already on, an SW start restores the alarm (no second click after a restart)', async () => {
     await enableBackfill();
     await bootBackground();
     const mod = await import('../entrypoints/background');
     await (mod as any).syncAlarmWithSwitch();
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
-    console.log('[C19-1] 开关持久为开 + SW 启动 -> 现存闹钟:', [...alarmBook.keys()]);
+    console.log('[C19-1] switch persisted on + SW start -> alarms now:', [...alarmBook.keys()]);
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
   });
 });
 
-describe('C19 任务 2 · http 端口：生产代码里真的被注入了', () => {
-  it('🔴 实时腿的真实消息路径：不调 configureBackfillTransport，也真的取到了正文', async () => {
+describe('C19 task 2 · the http port: really injected in production code', () => {
+  it('🔴 the live leg\'s real message path: with no configureBackfillTransport call, it really does fetch bodies', async () => {
     await enableBackfill();
-    liveTabs.set(42, ORIGIN);                 // 用户开着一个已登录的 chatgpt 页面
+    liveTabs.set(42, ORIGIN);                 // the user has a logged-in chatgpt page open
     const mod = await bootBackground();
-    // 🔴 故意【不】调用 mod.configureBackfillTransport —— 这就是生产状态。
+    // 🔴 mod.configureBackfillTransport is deliberately **not** called — this is the production state.
 
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     await mod.backfillTickSettled();
 
-    console.log('[C19-2] tick 结论:', mod.lastBackfillTick()?.reason);
-    console.log('[C19-2] 内容脚本在页面上下文里代发的 URL:', contentFetches);
-    console.log('[C19-2] 主机 ack 过的名字:', host.names());
+    console.log('[C19-2] tick conclusion:', mod.lastBackfillTick()?.reason);
+    console.log('[C19-2] URLs the content script sent from the page context:', contentFetches);
+    console.log('[C19-2] names the host acked:', host.names());
 
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
-    // 枚举 1 页 + 取 1 条正文，全部经由内容脚本的同源 fetch。
+    // One page enumerated + one body fetched, all through the content script's same-origin fetch.
     expect(contentFetches.some((u) => u.includes('/backend-api/conversations'))).toBe(true);
     expect(contentFetches.filter((u) => u.includes('/backend-api/conversation/')).length).toBe(1);
     const s: any = store['cs_backfill_v1:chatgpt:acct-fixture-1'];
@@ -357,19 +358,19 @@ describe('C19 任务 2 · http 端口：生产代码里真的被注入了', () =
     expect(s.pending.length).toBe(IDS.length - 1);
   });
 
-  it('🔴 闹钟路径：没有任何实时捕获，闹钟自己醒来也清得动账', async () => {
+  it('🔴 the alarm path: with no live capture at all, the alarm waking on its own still clears a debt', async () => {
     await enableBackfill();
     liveTabs.set(7, ORIGIN);
     const mod = await bootBackground();
 
-    // 先让内容脚本报到 —— 闹钟醒来时 SW 只有这张登记表可用。
+    // First let the content script check in — when the alarm wakes, the SW has only this registry to work from.
     await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 7);
-    // 目标登记：由一次真实捕获留下（这是"用户至少用过一次"的最低前提）。
+    // Target registration: left by one real capture (the minimum premise of "the user used it at least once").
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 7);
     await mod.backfillTickSettled();
     const before = (store['cs_backfill_v1:chatgpt:acct-fixture-1'] as any).archived.length;
 
-    // 现在什么捕获都不发，只让闹钟响。
+    // Now send no capture at all, and only let the alarm fire.
     contentFetches.length = 0;
     runtimeNow += 5 * 60_000;
     expect(alarmListeners.length).toBeGreaterThan(0);
@@ -378,73 +379,73 @@ describe('C19 任务 2 · http 端口：生产代码里真的被注入了', () =
     await mod.backfillTickSettled();
 
     const after = (store['cs_backfill_v1:chatgpt:acct-fixture-1'] as any).archived.length;
-    console.log('[C19-2] 闹钟醒来一次:', { reason: mod.lastBackfillTick()?.reason, before, after });
-    console.log('[C19-2] 闹钟这一脚代发的 URL:', contentFetches);
+    console.log('[C19-2] one alarm wake:', { reason: mod.lastBackfillTick()?.reason, before, after });
+    console.log('[C19-2] URLs this alarm tick sent on our behalf:', contentFetches);
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
-    expect(after).toBe(before + 1);           // 🔴 没有任何实时捕获，账也少了一笔
+    expect(after).toBe(before + 1);           // 🔴 with no live capture at all, one debt was still cleared
   });
 
-  it('🔴 没有开着的平台页面 ⇒ 仍然如实返回 no-http-port（不许假装在跑）', async () => {
+  it('🔴 with no open platform page ⇒ it still returns no-http-port faithfully (never pretending to run)', async () => {
     await enableBackfill();
     const mod = await bootBackground();
-    // 先报到，再把标签页"关掉"。
+    // Check in first, then "close" the tab.
     await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 9);
     liveTabs.set(9, ORIGIN);
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 9);
     await mod.backfillTickSettled();
-    liveTabs.delete(9);                        // 用户关掉了页面
+    liveTabs.delete(9);                        // the user closed the page
 
     contentFetches.length = 0;
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
     alarmListeners[0]!({ name: BACKFILL_ALARM_NAME });
     await mod.backfillTickSettled();
 
-    console.log('[C19-2] 页面关掉后闹钟的结论:', mod.lastBackfillTick()?.reason, '代发 URL:', contentFetches);
+    console.log('[C19-2] the alarm\'s conclusion after the page closed:', mod.lastBackfillTick()?.reason, 'URLs sent:', contentFetches);
     expect(mod.lastBackfillTick()?.reason).toBe('no-http-port');
-    expect(contentFetches).toEqual([]);        // 一个请求都没发出去
+    expect(contentFetches).toEqual([]);        // not one request went out
     expect(await mod.backfillRuntimeStatus()).toEqual({
       transportWired: false,
       lastTickReason: 'no-http-port',
-      // 🔴 C33 新增的一位：没有活着的通道 ⇒ 也答不上"是哪个平台" ⇒ null。
-      //    通道判定本身一个字都没改（仍然是上面那次 ping 的结果）。
+      // 🔴 A field added by C33: no live channel ⇒ it cannot answer "which platform" either ⇒ null.
+      //    The channel decision itself did not change a character (it is still the result of the ping above).
       liveTarget: null,
     });
   });
 
-  it('🔴 内容脚本只肯代发【同源 + 平台表内 + 回溯腿那两条路径】的 URL', async () => {
+  it('🔴 the content script sends only URLs that are **same-origin + in the platform table + one of the backfill leg\'s two paths**', async () => {
     const { isAllowedBackfillUrl, serveBackfillFetch } = await import('../lib/backfill/tab-port');
     const cases: Array<[string, boolean]> = [
       [`${ORIGIN}/backend-api/conversations?offset=0&limit=100`, true],
       [`${ORIGIN}/backend-api/conversation/abc`, true],
-      [`${ORIGIN}/backend-api/accounts/check`, false],        // 平台内但不是回溯腿的路径
-      ['https://evil.example.com/steal', false],              // 跨源
-      ['https://claude.ai/backend-api/conversations', false], // 别的平台（对本页面是跨源）
+      [`${ORIGIN}/backend-api/accounts/check`, false],        // in the platform, but not one of the backfill leg\'s paths
+      ['https://evil.example.com/steal', false],              // cross-origin
+      ['https://claude.ai/backend-api/conversations', false], // another platform (cross-origin from this page)
       ['not a url', false],
     ];
     for (const [url, allowed] of cases) {
       expect([url, isAllowedBackfillUrl(url, ORIGIN)]).toEqual([url, allowed]);
     }
     const refused = await serveBackfillFetch('https://evil.example.com/steal', ORIGIN, syntheticPageFetch as any);
-    console.log('[C19-2] 越权 URL 的回复:', refused);
+    console.log('[C19-2] replies for out-of-scope URLs:', refused);
     expect(refused).toEqual({ ok: false, error: 'refused: url is not a same-origin backfill endpoint' });
-    expect(contentFetches).toEqual([]);        // 🔴 连 fetch 都没被调用
+    expect(contentFetches).toEqual([]);        // 🔴 fetch was not even called
   });
 
-  it('🔴 开关是关的时候，有页面开着也一条都不取', async () => {
+  it('🔴 with the switch off, an open page still fetches nothing at all', async () => {
     liveTabs.set(42, ORIGIN);
     const mod = await bootBackground();
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     await mod.backfillTickSettled();
-    console.log('[C19-2] 默认（关）+ 有页面开着 ->', mod.lastBackfillTick()?.reason, '代发 URL:', contentFetches);
+    console.log('[C19-2] default (off) + a page open ->', mod.lastBackfillTick()?.reason, 'URLs sent:', contentFetches);
     expect(mod.lastBackfillTick()?.reason).toBe('disabled');
     expect(contentFetches).toEqual([]);
   });
 });
 
 // ===========================================================================
-// 任务 4 · Popup 的三种状态必须与实际一致
+// Task 4 · the popup's three states must agree with reality
 // ===========================================================================
-describe('C19 任务 4 · Popup 说的话与实际状态一致', () => {
+describe('C19 task 4 · what the popup says agrees with the real state', () => {
   async function viewFor(opts: { enabled: boolean; transportWired: boolean }) {
     const { tickBlockReason, setBackfillEnabled, isBackfillEnabled } =
       await import('../lib/backfill/schedule');
@@ -467,36 +468,36 @@ describe('C19 任务 4 · Popup 说的话与实际状态一致', () => {
     return { view, text: popupText(view) };
   }
 
-  it('状态一 · 关：说的是「开关没有打开」，绝不提端口', async () => {
+  it('state one · off: it says "the switch is off" and never mentions a port', async () => {
     const { view, text } = await viewFor({ enabled: false, transportWired: false });
-    console.log('[C19-4 · 关]\n' + text + '\n');
-    expect(view.running).toContain('未在运行');
-    expect(view.running).toContain('开关没有打开');
-    expect(text).not.toContain('正在归档');
+    console.log('[C19-4 · off]\n' + text + '\n');
+    expect(view.running).toContain('NOT running');
+    expect(view.running).toContain('the switch is off');
+    expect(text).not.toContain('Running: archiving');
   });
 
-  it('🔴 状态二 · 开但没有可用页面：必须仍然是「未在运行 + 缺什么」', async () => {
+  it('🔴 state two · on but no usable page: it must still say "NOT running + what is missing"', async () => {
     const { view, text } = await viewFor({ enabled: true, transportWired: false });
-    console.log('[C19-4 · 开但没端口]\n' + text + '\n');
-    expect(view.running).toContain('未在运行');
-    expect(view.missing).toContain('取数通道');
-    // 🔴 C18 的诚实不许被破坏。
-    for (const forbidden of ['正在归档', '正在回溯', '预计剩余']) {
+    console.log('[C19-4 · on but no port]\n' + text + '\n');
+    expect(view.running).toContain('NOT running');
+    expect(view.missing).toContain('fetch channel');
+    // 🔴 C18's honesty must not be broken.
+    for (const forbidden of ['Running: archiving', 'backfilling now', 'estimated remaining']) {
       expect(text).not.toContain(forbidden);
     }
   });
 
-  it('🔴 状态三 · 真的在跑：只有四道闸门全过才允许出现「正在归档」', async () => {
+  it('🔴 state three · really running: "Running: archiving" may appear only with every gate passed', async () => {
     const { view, text } = await viewFor({ enabled: true, transportWired: true });
-    console.log('[C19-4 · 真的在跑]\n' + text + '\n');
-    expect(view.running).toContain('正在归档');
+    console.log('[C19-4 · really running]\n' + text + '\n');
+    expect(view.running).toContain('Running: archiving');
     expect(view.missing).toBeNull();
-    expect(view.running).toContain('5 分钟');
+    expect(view.running).toContain('5 minutes');
     expect(view.running).toContain('200');
-    expect(text).not.toContain('预计剩余');
+    expect(text).not.toContain('estimated remaining');
   });
 
-  it('🔴 background 报给 Popup 的 transportWired 是【现场 ping 出来的】，不是静态标志', async () => {
+  it('🔴 the transportWired background reports to the popup is **pinged on the spot**, not a static flag', async () => {
     await enableBackfill();
     const mod = await bootBackground();
     await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 5);
@@ -505,7 +506,7 @@ describe('C19 任务 4 · Popup 说的话与实际状态一致', () => {
     const open = await mod.backfillRuntimeStatus();
     liveTabs.delete(5);
     const closed = await mod.backfillRuntimeStatus();
-    console.log('[C19-4] 页面开着 ->', open, ' 页面关掉 ->', closed);
+    console.log('[C19-4] page open ->', open, ' page closed ->', closed);
     expect(open.transportWired).toBe(true);
     expect(closed.transportWired).toBe(false);
   });
