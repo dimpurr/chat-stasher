@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dimpurr/chat-stasher/contracts/inbox.schema.json",
   "title": "chat-stasher inbox bundle",
-  "description": "扩展落盘给 CLI 消费的单个捕获包。🔴 这是两端共享的单一真相源 —— 改这里必须同时改 apps/extension/lib/contract.ts 与 crates/chat-stasher/src/inbox.rs。",
+  "description": "One captured conversation bundle handed from the extension to the CLI. This file is the single source of truth for both sides: changing it requires changing apps/extension/lib/contract.ts and crates/chat-stasher/src/inbox.rs together.",
   "type": "object",
   "required": [
     "schema",
@@ -16,7 +16,7 @@
         "chat-stasher/inbox@1",
         "chat-stasher/inbox@2"
       ],
-      "description": "@1 无 identity 字段；CLI 读到 @1 时视 identity 为 {level:'default',value:''}"
+      "description": "@1 has no identity field; the CLI reads an @1 bundle as identity {level:'default', value:''}."
     },
     "platform": {
       "type": "string",
@@ -42,7 +42,7 @@
     },
     "parsed": {
       "type": "object",
-      "description": "尽力而为的信封字段，🔴 非权威",
+      "description": "Best-effort envelope fields. Not authoritative.",
       "properties": {
         "hasJson": {
           "type": "boolean"
@@ -61,7 +61,7 @@
         "text",
         "bytes"
       ],
-      "description": "🔴 原始响应，authoritative —— 解析错了还能从这里重来",
+      "description": "The raw response. Authoritative: a wrong parse can always be redone from here.",
       "properties": {
         "text": {
           "type": "string"
@@ -77,7 +77,7 @@
         "level",
         "value"
       ],
-      "description": "@2 起。Web 平台的身份轴是【账号】不是机器（ADR-002）—— 两机抓同一会话必须得到相同 ID 才能去重。🔴 level='default' 表示身份不可靠，CLI 必须退回 platform:sessionId 做去重键。",
+      "description": "Since @2. For web platforms the identity axis is the account, not the machine (ADR-002): two machines capturing the same conversation must produce the same id so it dedups. level 'default' means the identity is unreliable, and the CLI must fall back to platform:sessionId as the dedup key.",
       "properties": {
         "level": {
           "enum": [
