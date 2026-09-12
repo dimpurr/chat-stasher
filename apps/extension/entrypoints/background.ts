@@ -10,13 +10,16 @@ import {
 } from '../lib/contract';
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
-import { deliver, isValidDeliverName } from '../lib/native-host';
+import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import {
   drainOutbox,
   enqueue,
   getEntry,
+  outboxApiPresent,
+  summary as outboxSummary,
   type EnqueueResult,
 } from '../lib/outbox';
+import { OUTBOX_ALARM_NAME, syncOutboxAlarm } from '../lib/outbox-alarm';
 import {
   HOST_UNAVAILABLE,
   checkHost,
@@ -165,6 +168,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
 
   // 入队后立刻尝试一次排空（任务 5 的第二个时机；第一个是闹钟心跳）。
   const drained = await drainSafely();
+  await syncOutboxAlarmSafely();
 
   const lookup = await getEntry(queued.sha256);
   await refreshBadgeSafely();
@@ -264,6 +268,26 @@ async function drainSafely(): Promise<Awaited<ReturnType<typeof drainOutbox>>> {
 }
 
 /**
+ * §10: keep the outbox's own retry timer while it holds pending items, and clear
+ * it once it is empty. Independent of the backfill switch. Never throws into a
+ * delivery path.
+ */
+async function syncOutboxAlarmSafely(): Promise<void> {
+  try {
+    // No IndexedDB API ⇒ the outbox cannot exist ⇒ 0 is certain, not assumed.
+    // A failed read with the API present stays unknown (null) and keeps the timer.
+    if (!outboxApiPresent()) {
+      await syncOutboxAlarm(alarmsApi(), 0);
+      return;
+    }
+    const s = await outboxSummary();
+    await syncOutboxAlarm(alarmsApi(), s === null ? null : s.pending);
+  } catch (err) {
+    console.warn('[chat-stasher] outbox alarm sync failed', (err as Error).message);
+  }
+}
+
+/**
  * 角标是装饰性的：它自己出错不许影响任何一条真实路径。
  * 🔴 但它**要被 await**：不等它，调用方拿到的就只是"角标即将被重画"，
  *    而角标说的正是「发件箱现在有几条待送」—— 那个数字必须与本次结果同拍。
@@ -284,8 +308,10 @@ async function refreshBadgeSafely(): Promise<void> {
  *
  * 三种结局，一种都不许混：
  *  · 匹配 ack          ⇒ saved:true，engine 清账；
- *  · 非 retryable nack ⇒ saved:false（判死）：engine 记进失败清单、继续下一笔；
- *  · 其余（超时 / 主机不在）⇒ retryLater：欠账原封不动，这条腿暂停，等 hello 成功。
+ *  · item-scope, non-retryable nack (§6.3, `isItemRejected`) ⇒ saved:false (judged dead):
+ *    the engine records a failure and moves on to the next item;
+ *  · everything else (timeout, host missing, host-scope nack such as `config`) ⇒ retryLater:
+ *    the debt stays untouched and this leg pauses until a `hello` succeeds.
  */
 export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
   saved: boolean;
@@ -300,7 +326,7 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
   if (result.delivered) {
     return { saved: true, sessionId: prepared.sessionId };
   }
-  if (!result.retryable) {
+  if (isItemRejected(result)) {
     return {
       saved: false,
       reason: `host rejected the delivery (${result.kind ?? result.reason})`,
@@ -563,6 +589,7 @@ export async function runAlarmTick(): Promise<TickResult> {
   //    而回溯腿补的是历史 —— 手上这条先送出去。两条腿互不影响。
   const drain = await drainSafely();
   markOutboxDrain(drain);
+  await syncOutboxAlarmSafely();
   await refreshBadgeSafely();
 
   const targets = await loadTargets(store);
@@ -617,6 +644,13 @@ async function isBackfillHostPaused(store: ReturnType<typeof browserLocalStore>)
  *    发件箱自己说了算，这里不承载任何真相。
  */
 let lastDrain: Awaited<ReturnType<typeof drainOutbox>> | null = null;
+
+/** The drain started by the most recent outbox alarm, so tests can await it. */
+let pendingOutboxAlarmDrain: Promise<unknown> | null = null;
+
+export function outboxAlarmSettled(): Promise<unknown> {
+  return pendingOutboxAlarmDrain ?? Promise.resolve(null);
+}
 
 function markOutboxDrain(report: Awaited<ReturnType<typeof drainOutbox>>): void {
   lastDrain = report;
@@ -767,6 +801,16 @@ export default defineBackground(async () => {
     alarms?: AlarmsApi & { onAlarm?: { addListener(fn: (a: { name?: string }) => void): void } };
   }).alarms;
   alarms?.onAlarm?.addListener((alarm) => {
+    if (alarm?.name === OUTBOX_ALARM_NAME) {
+      // §10: outbox retries do not depend on the backfill switch.
+      pendingOutboxAlarmDrain = drainSafely().then(async (report) => {
+        markOutboxDrain(report);
+        await refreshBadgeSafely();
+        await syncOutboxAlarmSafely();
+        return report;
+      });
+      return;
+    }
     if (alarm?.name !== BACKFILL_ALARM_NAME) return;
     pendingTick = runAlarmTick().catch((err) => {
       console.warn('[chat-stasher] backfill alarm tick failed', (err as Error).message);
@@ -787,9 +831,12 @@ export default defineBackground(async () => {
   await syncAlarmWithSwitch().catch((err) => {
     console.warn('[chat-stasher] backfill alarm sync failed', (err as Error).message);
   });
+  // The outbox timer follows the outbox, not the switch (§10).
+  await syncOutboxAlarmSafely();
   browser.runtime.onStartup.addListener(() => {
     void refreshBadge();
     void syncAlarmWithSwitch().catch(() => { /* 日志已在上面那条路径覆盖 */ });
+    void syncOutboxAlarmSafely();
   });
 
   console.log(

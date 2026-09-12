@@ -28,7 +28,7 @@
  * popup export what the worker queued.
  */
 
-import { deliver, sha256Hex, type DeliverResult } from './native-host';
+import { deliver, isItemRejected, sha256Hex, type DeliverResult } from './native-host';
 import type { BackfillStore } from './backfill/store';
 
 export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
@@ -155,6 +155,19 @@ function openDb(): Promise<IDBDatabase | null> {
     request.onblocked = () => resolve(null);
   });
   return dbPromise;
+}
+
+/**
+ * Does this context have an IndexedDB API at all?
+ *
+ * This is a different question from "can the outbox be read right now".
+ * Without the API the outbox cannot exist, so nothing can ever have been
+ * queued: "empty" is then a certainty, not an assumption. A failed read on a
+ * context that *does* have the API is unknown, and callers must keep treating
+ * that as unknown.
+ */
+export function outboxApiPresent(): boolean {
+  return idbFactory() !== null;
 }
 
 /** Only for tests that model a service-worker restart inside one process. */
@@ -592,17 +605,20 @@ async function runDrain(options: DrainOptions): Promise<DrainReport> {
       continue;
     }
 
+    // §6.3: scope, not `retryable` alone, decides the item's fate. A host-scope
+    // nack (e.g. `config`, retryable:false) keeps the item pending.
+    const itemRejected = isItemRejected(result);
     await recordFailure(entry.sha256, {
       reason: result.reason,
       kind: result.kind,
       at: now(),
-      retryable: result.retryable,
+      retryable: !itemRejected,
     });
     report.lastReason = result.reason;
     report.lastKind = result.kind;
     report.lastDetail = result.detail;
 
-    if (!result.retryable) {
+    if (itemRejected) {
       report.rejected += 1;
       continue; // this entry is at fault, not the host — try the next one
     }

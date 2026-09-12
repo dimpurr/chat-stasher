@@ -480,6 +480,27 @@ export async function deliver(name: string, payload: string): Promise<DeliverRes
   };
 }
 
+/**
+ * §6.3 scope column. A host-scope `nack` describes the host (not configured,
+ * wrong protocol, stage missing, sealing failed) and says nothing about the
+ * item, so the item must stay pending even when `retryable` is false: once a
+ * person fixes the host, every waiting item has to go through.
+ */
+export const HOST_SCOPE_KINDS: readonly NackKind[] = ['protocol-version', 'config', 'stage-unavailable', 'io'];
+
+/**
+ * 🔴 The only condition under which one item is given up on: the host answered
+ * an item-scope `nack` that is not retryable. Everything else — a host-scope
+ * nack, a timeout, a send failure, a missing runtime API, missing WebCrypto —
+ * is a statement about the environment, and the item stays pending.
+ */
+export function isItemRejected(result: DeliverResult): boolean {
+  if (result.delivered) return false;
+  if (result.reason !== 'nack' || result.kind === undefined) return false;
+  if ((HOST_SCOPE_KINDS as readonly string[]).includes(result.kind)) return false;
+  return !result.retryable;
+}
+
 /** The `name` field rule from §6.2, exposed so callers can fail early. */
 export const NAME_RE = /^[a-z0-9]+-[^/\\]+\.json$/;
 
