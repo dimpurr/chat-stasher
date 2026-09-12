@@ -23,7 +23,12 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 DIST="$TMP/dist"
-MOCK_BIN="$DIST/chat-stasher-darwin-arm64"
+HOST_OS="$(uname -s | tr 'A-Z' 'a-z')"
+HOST_ARCH="$(uname -m | tr 'A-Z' 'a-z')"
+[ "$HOST_ARCH" = "aarch64" ] && HOST_ARCH="arm64"
+HOST_TARGET="$HOST_OS-$HOST_ARCH"
+MOCK_ARTIFACT="chat-stasher-$HOST_TARGET"
+MOCK_BIN="$DIST/$MOCK_ARTIFACT"
 PASSED=0
 FAILED=0
 
@@ -37,7 +42,7 @@ printf '#!/bin/sh\necho fake-chat-stasher\n' > "$MOCK_BIN"
 chmod +x "$MOCK_BIN"
 # sha256 of the fake binary; install.sh should find this exact value.
 FAKE_HASH="$(shasum -a 256 "$MOCK_BIN" | awk '{print $1}')"
-( cd "$DIST" && printf '%s  %s\n' "$FAKE_HASH" "chat-stasher-darwin-arm64" > SHA256SUMS )
+( cd "$DIST" && printf '%s  %s\n' "$FAKE_HASH" "$MOCK_ARTIFACT" > SHA256SUMS )
 
 INSTALL_DIR="$TMP/install"
 BASE="file://$DIST"
@@ -67,9 +72,9 @@ fi
 # 3) bad hash: corrupt the served binary's checksum ---------------------------
 BAD_HASH_DIST="$TMP/dist-bad"
 mkdir -p "$BAD_HASH_DIST"
-cp "$MOCK_BIN" "$BAD_HASH_DIST/chat-stasher-darwin-arm64"
+cp "$MOCK_BIN" "$BAD_HASH_DIST/$MOCK_ARTIFACT"
 printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" \
-  "chat-stasher-darwin-arm64" > "$BAD_HASH_DIST/SHA256SUMS"
+  "$MOCK_ARTIFACT" > "$BAD_HASH_DIST/SHA256SUMS"
 
 BAD_DIR="$TMP/bad-install"
 if CHAT_STASHER_BASE_URL="file://$BAD_HASH_DIST" \
@@ -85,7 +90,7 @@ fi
 # 4) SHA256SUMS missing our artifact -----------------------------------------
 MISSING_DIST="$TMP/dist-missing"
 mkdir -p "$MISSING_DIST"
-cp "$MOCK_BIN" "$MISSING_DIST/chat-stasher-darwin-arm64"
+cp "$MOCK_BIN" "$MISSING_DIST/$MOCK_ARTIFACT"
 printf '%s  %s\n' "$FAKE_HASH" "some-other-file" > "$MISSING_DIST/SHA256SUMS"
 
 MISSING_DIR="$TMP/missing-install"

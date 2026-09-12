@@ -29,8 +29,8 @@ BASE_URL="${CHAT_STASHER_BASE_URL:-https://github.com/dimpurr/chat-stasher/relea
 INSTALL_DIR="${CHAT_STASHER_INSTALL_DIR:-$HOME/.local/bin}"
 
 # ---------------------------------------------------------------------------
-# 6. Detect platform. Only darwin-arm64 (Apple Silicon macOS) ships a prebuilt
-#    binary today; anything else gets a clear "unsupported" message instead of
+# 6. Detect platform. macOS (darwin-arm64 and darwin-x86_64) ships prebuilt
+#    binaries; anything else gets a clear "unsupported" message instead of
 #    a silently broken install.
 # ---------------------------------------------------------------------------
 OS="$(uname -s | tr 'A-Z' 'a-z')"
@@ -39,13 +39,13 @@ ARCH="$(uname -m | tr 'A-Z' 'a-z')"
 TARGET="$OS-$ARCH"
 
 case "$TARGET" in
-  darwin-arm64) : ;;
+  darwin-arm64|darwin-x86_64) : ;;
   *)
     cat >&2 <<EOF
 Unsupported platform: ${TARGET}
 
-chat-stasher currently ships prebuilt binaries only for darwin-arm64
-(Apple Silicon macOS). There is no working binary for your platform yet, so
+chat-stasher currently ships prebuilt binaries only for macOS
+(darwin-arm64 and darwin-x86_64). There is no working binary for your platform yet, so
 this installer refuses to write a broken one.
 
 To use chat-stasher on your platform, build from source:
