@@ -18,6 +18,23 @@
       .row label { cursor: pointer; user-select: none; }
       #status { font-weight: 600; }
       #channel { margin: 6px 0; font-size: 12px; opacity: .9; }
+      /* W2：回溯因主机够不着而暂停。它是「什么都没在做」的原因，必须显眼。 */
+      #pause {
+        margin: 8px 0; padding: 8px 10px; font-weight: 600;
+        border-left: 3px solid #b7791f; background: rgba(183,121,31,.12);
+        white-space: pre-wrap; font-size: 12px;
+      }
+      /* W2：发件箱现状（待送 / 被拒 / 容量）。被拒时是告警态，全空时不显示。 */
+      #outbox {
+        margin: 8px 0; padding: 6px 8px; font-size: 12px;
+        border-left: 3px solid rgba(128,128,128,.55); white-space: pre-wrap;
+      }
+      /* W2：最近一次导出。永远显示 —— 「有没有导出过、什么时候」本身是事实。 */
+      #last-export { margin: 6px 0; font-size: 12px; opacity: .85; white-space: pre-wrap; }
+      #export-file {
+        display: block; margin: 8px 0; padding: 6px 12px;
+        font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      }
       #running { margin: 6px 0; }
       /* C32：这一行现在会分几段说（缺什么 / 你要做什么 / 为什么），
          不保留换行的话三件事会挤成一坨，用户读不出「要我做的那一件事」在哪。 */
@@ -48,6 +65,14 @@
     <h1>Chat Stasher</h1>
     <div id="status"></div>
     <div id="channel"></div>
+    <!-- W2：回溯暂停（主机够不着）。没有暂停时整块隐藏。 -->
+    <div id="pause" hidden></div>
+    <!-- W2：发件箱现状。空且未满时隐藏。 -->
+    <div id="outbox" hidden></div>
+    <!-- W2：最近一次导出（永远显示，它本身是一个事实）。 -->
+    <div id="last-export"></div>
+    <!-- W2：「导出未送达的会话」。Blob + <a download>，不用 downloads 权限。 -->
+    <button type="button" id="export-file" hidden></button>
     <div id="failures" hidden></div>
     <button type="button" id="clear-failures" hidden></button>
     <div id="running"></div>

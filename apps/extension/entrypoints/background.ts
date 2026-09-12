@@ -8,9 +8,24 @@ import {
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
-import { writeCommitted } from '../lib/download';
-import { recordCapture, refreshBadge } from '../lib/badge';
+import { refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
+import { deliver, isValidDeliverName } from '../lib/native-host';
+import {
+  drainOutbox,
+  enqueue,
+  getEntry,
+  type EnqueueResult,
+} from '../lib/outbox';
+import {
+  HOST_UNAVAILABLE,
+  checkHost,
+  loadHostPause,
+  loadHostStatus,
+  setHostPause,
+  type HostStatusRecord,
+} from '../lib/host-status';
+import { HELLO_PROBE_TIMEOUT_MS } from '../lib/native-host';
 import {
   BACKFILL_ENABLED_KEY,
   isBackfillEnabled,
@@ -40,24 +55,21 @@ import {
   POPUP_STATUS_MESSAGE,
   type BackfillRuntimeStatus,
 } from '../lib/popup-view';
-import {
-  guardBadge,
-  isGuardTripped,
-  loadGuardState,
-  recordDownloadOutcome,
-  resumeAfterGuard,
-} from '../lib/download-guard';
-
-import {
-  deliverToNativeHost,
-  probeNativeHost,
-} from '../lib/native-host';
-
+/**
+ * 实时腿一次捕获的结局。
+ *
+ * 🔴 W2 · **唯一算「存下来了」的取值是 `saved:true`，而它只在收到匹配 ack 时出现。**
+ *    已入队但还没被确认是另一个可区分的结局（`status:'queued'`），
+ *    它既不是成功也不是失败 —— 角标按「待送数」计它。
+ */
 export interface HandledResult {
+  /** 🔴 true 当且仅当这一条 payload 收到了匹配的 `ack`（§1）。 */
   saved: boolean;
+  /** 四种互斥的结局，每一种都必须说得出口。 */
+  status: 'delivered' | 'queued' | 'rejected' | 'refused';
   reason?: string;
-  finalName?: string;
-  bytes?: number;
+  /** 被拒时的 `nack` kind（§6.3）。 */
+  kind?: string;
   /**
    * 🔴 C20：落盘时【实际用来命名】的那个身份。
    * 根因是「同一个身份被表达了两次」—— 欠账键来自列表接口的 items[].id，
@@ -66,7 +78,14 @@ export interface HandledResult {
    * saved:false 时为 undefined（根本没有命名过）。
    */
   sessionId?: string;
-  channel?: 'native-messaging' | 'downloads';
+  /** 这条 payload 在本机 host 那边的名字（§6.2 的 `name`，即分片的 source_file）。 */
+  finalName?: string;
+  bytes?: number;
+  /**
+   * 🔴 只有一条通道了。这个字段留着是为了让「没有降级通道」这件事在类型上
+   * 显式可见：`downloads` 这个取值连同整条自动下载通道已经被删除。
+   */
+  channel?: 'native-messaging';
 }
 
 /**
@@ -122,93 +141,194 @@ function resolveSessionId(captured: CapturedFetch): string | null {
 }
 
 export async function handleCaptured(captured: CapturedFetch): Promise<HandledResult> {
+  const prepared = preparePayload(captured);
+  if (!prepared.ok) {
+    return { saved: false, status: 'refused', reason: prepared.reason };
+  }
+  const { name, payload, bytes, sessionId } = prepared;
+
+  // 🔴 ADR-025 §10 · **write-ahead**：先落进发件箱，再做任何投递尝试。
+  //    在这两行之间 SW 被杀掉，会话仍然在盘上等着，下一次排空会把它送出去。
+  const queued: EnqueueResult = await enqueue(name, payload);
+  if (!queued.accepted || !queued.sha256) {
+    // 存不进发件箱 ⇒ 不投递。投出去的东西发件箱不知道，那正好是 write-ahead
+    // 要防的那件事；宁可如实报一次拒收，也不悄悄少一层保障。
+    return {
+      saved: false,
+      status: 'refused',
+      reason: queued.reason ?? 'outbox-unavailable',
+      finalName: name,
+      bytes,
+      sessionId,
+    };
+  }
+
+  // 入队后立刻尝试一次排空（任务 5 的第二个时机；第一个是闹钟心跳）。
+  const drained = await drainSafely();
+
+  const lookup = await getEntry(queued.sha256);
+  await refreshBadgeSafely();
+
+  if (!lookup.ok) {
+    // 🔴 「读不出来」不是「送达了」也不是「没送达」。这一条确实已经写进发件箱了，
+    //    但我们答不上它现在是什么状态 —— 那就照实说答不上来，绝不猜成 saved。
+    return {
+      saved: false,
+      status: 'queued',
+      reason: 'outbox-unavailable',
+      finalName: name,
+      bytes,
+      sessionId,
+    };
+  }
+  if (lookup.entry === null) {
+    // 🔴 只有匹配的 ack 才会删条目（§1），所以「查不到」= 这一条真的落盘了。
+    return {
+      saved: true,
+      status: 'delivered',
+      finalName: name,
+      bytes,
+      sessionId,
+      channel: 'native-messaging',
+    };
+  }
+  const entry = lookup.entry;
+  if (entry.state === 'rejected') {
+    return {
+      saved: false,
+      status: 'rejected',
+      reason: entry.lastError ?? 'host rejected this delivery',
+      kind: entry.rejectKind,
+      finalName: name,
+      bytes,
+      sessionId,
+    };
+  }
+  return {
+    saved: false,
+    status: 'queued',
+    reason: entry.lastError ?? (drained.stoppedBy === 'outbox-unavailable'
+      ? 'outbox-unavailable'
+      : 'not acknowledged yet (queued in the outbox)'),
+    finalName: name,
+    bytes,
+    sessionId,
+  };
+}
+
+/** 名字与载荷的唯一构造点。实时腿和回溯腿【共用】它，落盘逻辑不分叉。 */
+export type PreparedPayload =
+  | { ok: true; name: string; payload: string; bytes: number; sessionId: string }
+  | { ok: false; reason: string };
+
+function preparePayload(captured: CapturedFetch): PreparedPayload {
   const sessionId = resolveSessionId(captured);
   if (cancelledIdLike(sessionId)) {
     // Per-session naming is the inbox contract; a session-less capture has no
     // stable file name and is dropped rather than polluting the inbox.
-    return { saved: false, reason: 'no-session-id (skipped in report only)' };
+    return { ok: false, reason: 'no-session-id (skipped in report only)' };
   }
 
   const bundle = buildBundle(captured);
   // 🔴 C21 · 命名是【恒等映射】，不是「换掉不安全字符」：
-  //    sanitizePathSegment 是多对一的（'a b' 与 'a/b' 同名），而下载是 overwrite ⇒
-  //    两条不同的会话曾经能互相抹掉。起不出安全名字就当场收手、留痕，绝不硬塞。
+  //    sanitizePathSegment 是多对一的（'a b' 与 'a/b' 同名），以前下载是 overwrite ⇒
+  //    两条不同的会话能互相抹掉。起不出安全名字就当场收手、留痕，绝不硬塞。
   const named = pathSafeSessionId(bundle.sessionId);
   if (named === null) {
-    return { saved: false, reason: 'session id is not usable as a file name (refused, not collapsed)' };
+    return { ok: false, reason: 'session id is not usable as a file name (refused, not collapsed)' };
   }
-  const slug = `${bundle.platform}-${named}`;
-  const dataStr = JSON.stringify(bundle);
-
-  // ADR-014 主通道：优先尝试 Native Messaging 直接交由本地 CLI 归档
-  const nmResult = await deliverToNativeHost(bundle);
-  if (nmResult.ok) {
-    void recordCapture().catch((err) => {
-      console.warn('[chat-stasher] badge update failed', (err as Error).message);
-    });
-    return {
-      saved: true,
-      finalName: `nm://${slug}.json`,
-      bytes: nmResult.bytes,
-      sessionId: bundle.sessionId,
-      channel: 'native-messaging',
-    };
+  const name = `${bundle.platform}-${named}.json`;
+  // §6.2 的 name 规则。我们的构造器本来就只会产出合法的名字，这里是防御性的
+  // 最后一道：宁可当场拒收，也不把一个主机明确会 nack 的名字发出去。
+  if (!isValidDeliverName(name)) {
+    return { ok: false, reason: `refused to build a deliver name outside §6.2: ${named.length} chars` };
   }
+  const payload = JSON.stringify(bundle);
+  return {
+    ok: true,
+    name,
+    payload,
+    bytes: new TextEncoder().encode(payload).byteLength,
+    sessionId: bundle.sessionId,
+  };
+}
 
-  // 降级通道：NM 不可用时走原来的 chrome.downloads
-  const { finalName, bytes } = await writeCommitted(slug, dataStr, {
-    // C12：实时腿的每一次写入也喂给守卫（观测是共享的），
-    // 但【熔断只暂停回溯腿】—— 这里不做任何阻断，用户当前这条对话照存。
-    onOutcome: (result) => paintGuard(result),
-  });
-  // Badge is never allowed to take the save down: fire-and-forget, log-only.
-  void recordCapture().catch((err) => {
-    console.warn('[chat-stasher] badge update failed', (err as Error).message);
-  });
-  // 🔴 sessionId 报的是 bundle 里那个【真的用来拼文件名】的值，不是上面那个局部变量：
-  // 中间隔着 buildBundle 的一次重新抽取，报错了那一位才有意义。
-  return { saved: true, finalName, bytes, sessionId: bundle.sessionId, channel: 'downloads' };
+/** 排空：绝不允许它把「用户当前这条对话」这条路带下水。 */
+async function drainSafely(): Promise<Awaited<ReturnType<typeof drainOutbox>>> {
+  try {
+    return await drainOutbox();
+  } catch (err) {
+    console.warn('[chat-stasher] outbox drain failed', (err as Error).message);
+    return { attempted: 0, delivered: 0, rejected: 0, waiting: 0, stoppedBy: 'outbox-unavailable' };
+  }
 }
 
 /**
- * C12：记一次下载观测，并在熔断时把角标换成告警态。
- * 全程 best-effort —— 守卫是保护层，绝不允许它把落盘路径带下水。
+ * 角标是装饰性的：它自己出错不许影响任何一条真实路径。
+ * 🔴 但它**要被 await**：不等它，调用方拿到的就只是"角标即将被重画"，
+ *    而角标说的正是「发件箱现在有几条待送」—— 那个数字必须与本次结果同拍。
  */
-async function paintGuard(result: import('../lib/download-guard').DownloadResult): Promise<void> {
+async function refreshBadgeSafely(): Promise<void> {
   try {
-    const state = await recordDownloadOutcome(browserLocalStore(), result, { now: Date.now() });
-    if (!state) return;
-    const badge = guardBadge(state);
-    if (!badge) return;
-    const action = (browser as {
-      action?: {
-        setBadgeText: (o: { text: string }) => Promise<void>;
-        setTitle?: (o: { title: string }) => Promise<void>;
-      };
-    }).action;
-    if (!action) return;
-    await action.setBadgeText({ text: badge.text });
-    await action.setTitle?.({ title: badge.title });
+    await refreshBadge();
   } catch (err) {
-    console.warn('[chat-stasher] download guard update failed', (err as Error).message);
+    console.warn('[chat-stasher] badge update failed', (err as Error).message);
   }
 }
 
-/** 回溯腿的闸门：给 runBackfill 的 downloadGuard 用。 */
-export async function isBackfillPausedByDownloadGuard(): Promise<boolean> {
-  const store = browserLocalStore();
-  if (!store) return false;
-  return isGuardTripped(await loadGuardState(store));
+/**
+ * 🔴 W2 · **回溯腿的出口。它不进发件箱。**（§10）
+ *
+ * 理由：这条会话在平台上还在，欠账才是它该待的地方 —— 排队一份 payload 只会
+ * 让同一个会话在「欠账」和「发件箱」两本账上各存在一次。
+ *
+ * 三种结局，一种都不许混：
+ *  · 匹配 ack          ⇒ saved:true，engine 清账；
+ *  · 非 retryable nack ⇒ saved:false（判死）：engine 记进失败清单、继续下一笔；
+ *  · 其余（超时 / 主机不在）⇒ retryLater：欠账原封不动，这条腿暂停，等 hello 成功。
+ */
+export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
+  saved: boolean;
+  reason?: string;
+  sessionId?: string;
+  retryLater?: boolean;
+}> {
+  const prepared = preparePayload(captured);
+  if (!prepared.ok) return { saved: false, reason: prepared.reason };
+
+  const result = await deliver(prepared.name, prepared.payload);
+  if (result.delivered) {
+    return { saved: true, sessionId: prepared.sessionId };
+  }
+  if (!result.retryable) {
+    return {
+      saved: false,
+      reason: `host rejected the delivery (${result.kind ?? result.reason})`,
+      sessionId: prepared.sessionId,
+    };
+  }
+  // 🔴 出口够不着：欠账保持、暂停留痕（§10「visible reason」）。
+  await setHostPause(browserLocalStore(), {
+    reason: HOST_UNAVAILABLE,
+    at: Date.now(),
+    detail: result.detail ? `${result.reason}: ${result.detail}` : result.reason,
+  });
+  return { saved: false, reason: HOST_UNAVAILABLE, retryLater: true };
 }
 
-/** 显式恢复入口（不做 UI，函数即接口）。欠账集合不动 ⇒ 从断点继续。 */
-export async function resumeBackfillAfterDownloadGuard(): Promise<boolean> {
-  const store = browserLocalStore();
-  if (!store) return false;
-  await resumeAfterGuard(store);
-  const action = (browser as { action?: { setBadgeText: (o: { text: string }) => Promise<void> } }).action;
-  await action?.setBadgeText({ text: '' });
-  return true;
+/**
+ * Popup 打开时问一句「主机在不在、往哪儿写」。
+ * 探测窗口短（HELLO_PROBE_TIMEOUT_MS）：Popup 是界面，不许被一个卡住的主机吊住；
+ * 投递路径用的仍然是 §2 规定的 60 秒。结论会被写进 storage.local —— 写下来
+ * 才是「下一次打开 Popup 还看得见」的唯一办法。
+ */
+export async function hostStatusForPopup(): Promise<HostStatusRecord | null> {
+  try {
+    return await checkHost(browserLocalStore(), { timeoutMs: HELLO_PROBE_TIMEOUT_MS });
+  } catch (err) {
+    console.warn('[chat-stasher] host check failed', (err as Error).message);
+    return await loadHostStatus(browserLocalStore());
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +419,18 @@ export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
     lastTickReason: lastTick?.reason ?? null,
     liveTarget: live.target,
   };
+}
+
+/**
+ * 🔴 W2 · Popup 问的那一句「主机在不在」。
+ *
+ * 由 background 去问（而不是 Popup 自己探测）有两个理由：写完就落在
+ * storage.local 里，Popup 关掉再打开仍然看得见上一次的结论；而且只有这一处
+ * 会去碰主机，Popup 那边一行网络/socket 代码都没有。
+ */
+export async function popupHostStatus(): Promise<BackfillRuntimeStatus> {
+  const base = await backfillRuntimeStatus();
+  return { ...base, nativeHost: await hostStatusForPopup() };
 }
 
 /**
@@ -408,11 +540,10 @@ export async function kickBackfill(
     ...target,
     store,
     http: await resolveHttpPort(target.origin, senderTabId),
-    downloadGuard: isBackfillPausedByDownloadGuard,
-    // 归档出口 = 实时腿同一个落盘函数，逻辑不分叉。
+    // 归档出口 = 回溯腿自己的投递函数（**不进发件箱**，见 §10 与 deliverBackfillItem）。
     // 🔴 C20：**必须 return**。以前这里是 `{ await handleCaptured(c); }` —— 花括号
     //    把 HandledResult 吃掉了，于是 engine 拿不到任何异议，没落盘也照样清账。
-    sink: (c) => handleCaptured(c),
+    sink: (c) => deliverBackfillItem(c),
     ...(backfillPaceOverride ?? {}),
   });
   lastTick = result;
@@ -426,6 +557,14 @@ export async function kickBackfill(
  */
 export async function runAlarmTick(): Promise<TickResult> {
   const store = browserLocalStore();
+
+  // 🔴 W2 · 每一次闹钟醒来都先把发件箱送一遍（任务 5 的第一个时机）。
+  //    顺序放在回溯腿之前：spool 里躺着的是用户当时就看着的那条对话，
+  //    而回溯腿补的是历史 —— 手上这条先送出去。两条腿互不影响。
+  const drain = await drainSafely();
+  markOutboxDrain(drain);
+  await refreshBadgeSafely();
+
   const targets = await loadTargets(store);
 
   if (targets.length === 0) {
@@ -434,7 +573,7 @@ export async function runAlarmTick(): Promise<TickResult> {
     const blocked = await tickBlockReason({
       hasStore: store !== null,
       isEnabled: () => isBackfillEnabled(store),
-      isDownloadPaused: isBackfillPausedByDownloadGuard,
+      isHostPaused: () => isBackfillHostPaused(store),
       // 🔴 C30：这两个值都是【事实】。以前这里把 hasHttp 写死成 false 再兜底成
       //    'no-http-port'，于是「通道好端端接着、只是没有目标」被报成了端口坏了 ——
       //    排查的人顺着那句话去查端口，而端口根本没坏。
@@ -454,18 +593,43 @@ export async function runAlarmTick(): Promise<TickResult> {
       scope: target.scope,
       store,
       http: await resolveHttpPort(target.origin),
-      downloadGuard: isBackfillPausedByDownloadGuard,
       // 🔴 C20：闹钟那一脚同样必须 return（两条心跳走同一个出口，不许一条报一条不报）。
-      sink: (c) => handleCaptured(c),
+      sink: (c) => deliverBackfillItem(c),
       ...(backfillPaceOverride ?? {}),
     });
     last = result;
     lastTick = result;
-    // 跑动了就收手；被开关/存储/熔断挡住也没必要再试别的目标（结论一样）。
+    // 跑动了就收手；被开关/存储/主机暂停挡住也没必要再试别的目标（结论一样）。
     if (result.reason !== 'no-http-port') break;
   }
   await recordAlarmTick(store, last, targets.length);
   return last;
+}
+
+/** 闸门用的「现在是不是暂停态」——只读，不试恢复（恢复是 tickBackfill 的事）。 */
+async function isBackfillHostPaused(store: ReturnType<typeof browserLocalStore>): Promise<boolean> {
+  return (await loadHostPause(store)) !== null;
+}
+
+/**
+ * 最近一次发件箱排空的结论（内存态，只给测试与排查用）。
+ * 🔴 与回溯腿的 lastTick 一样：SW 被回收就没了 —— 发件箱里有什么从来只由
+ *    发件箱自己说了算，这里不承载任何真相。
+ */
+let lastDrain: Awaited<ReturnType<typeof drainOutbox>> | null = null;
+
+function markOutboxDrain(report: Awaited<ReturnType<typeof drainOutbox>>): void {
+  lastDrain = report;
+  if (report.attempted > 0 || report.stoppedBy === 'host-unavailable') {
+    console.log(
+      `[chat-stasher] outbox drain: attempted ${report.attempted},`
+      + ` delivered ${report.delivered}, rejected ${report.rejected}, stopped by ${report.stoppedBy}`,
+    );
+  }
+}
+
+export function lastOutboxDrain(): Awaited<ReturnType<typeof drainOutbox>> | null {
+  return lastDrain;
 }
 
 /**
@@ -525,11 +689,13 @@ export default defineBackground(async () => {
     (message: { type?: string; payload?: CapturedFetch }, sender, sendResponse) => {
       // C18：Popup 打开时问一句「取数通道接上没有」。
       // C19 起这个回答要现场 ping 一个标签页 ⇒ 变成异步，仍然 return true。
+      // 🔴 W2：同一个回答里带上「主机在不在」——由 background 去问主机并把结论
+      //    落盘，Popup 只负责把拿到的事实显示出来（它自己一行探测代码都没有）。
       if (message?.type === POPUP_STATUS_MESSAGE) {
-        backfillRuntimeStatus()
+        popupHostStatus()
           .then(sendResponse)
           // 问不出来就按最保守的方向答，绝不让 Popup 显示成"在跑"。
-          .catch(() => sendResponse({ transportWired: false, lastTickReason: null }));
+          .catch(() => sendResponse({ transportWired: false, lastTickReason: null, nativeHost: null }));
         return true;
       }
       // C19：内容脚本报到。tab id 由浏览器填在 sender 上（不需要 'tabs' 权限），
@@ -573,12 +739,17 @@ export default defineBackground(async () => {
             console.warn('[chat-stasher] backfill tick failed', (err as Error).message);
             return null;
           });
+          // Privacy rule: never the conversation content — ids/bytes only.
           if (result.saved) {
-            // Privacy rule: never the conversation content — ids/bytes only.
+            console.log(`[chat-stasher] acknowledged ${result.bytes} bytes as ${result.finalName}`);
+          } else {
             console.log(
-              `[chat-stasher] saved ${result.bytes} bytes -> ${result.finalName}`,
+              `[chat-stasher] not delivered yet (${result.status}: ${result.reason ?? 'no reason given'})`
+              + ` — ${result.bytes ?? 0} bytes`,
             );
           }
+          // 🔴 `ok` 仍然是 `saved` 的别名，但 payload 里多了可区分的 `status`：
+          //    调用方（内容脚本）再也看不到「没 ack 也算成功」这种回答了。
           sendResponse({ ok: result.saved, ...result });
         })
         .catch((err) => {
@@ -621,5 +792,8 @@ export default defineBackground(async () => {
     void syncAlarmWithSwitch().catch(() => { /* 日志已在上面那条路径覆盖 */ });
   });
 
-  console.log('[chat-stasher] background ready, captures go to Downloads/ for explicit platform origins');
+  console.log(
+    '[chat-stasher] background ready: captures are queued in the outbox and delivered'
+    + ' to the chat-stasher native host; nothing is ever downloaded',
+  );
 });

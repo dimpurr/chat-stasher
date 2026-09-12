@@ -90,12 +90,6 @@ const fakeBrowser: any = {
     async setBadgeBackgroundColor() {},
     async setTitle() {},
   },
-  downloads: {
-    async download() { return 1; },
-    onChanged: { addListener() {} },
-    async removeFile() {},
-    async erase() {},
-  },
 };
 
 function seedTargetAndLiveTab(): void {

@@ -11,11 +11,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import { runBackfill } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import { DEFAULT_DETAIL_PACE, type Clock } from '../lib/backfill/pace';
 import { handleBackfillMessage } from '../lib/backfill/tab-port';
 import type { CapturedFetch } from '../lib/contract';
+import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 const ORIGIN = 'https://chatgpt.com';
 const IDS = [
@@ -153,8 +155,7 @@ describe('C19 任务 3 · BUG-3：取正文的最小间隔必须【跨 tick】�
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];
-const downloadCalls: Array<{ id: number; filename: string }> = [];
-const changeListeners: Array<(d: any) => void> = [];
+let host: SyntheticHost;
 
 /** 闹钟登记簿：assert「开 ⇒ 创建 / 关 ⇒ 清除」就看它。 */
 const alarmBook = new Map<string, { periodInMinutes?: number }>();
@@ -194,6 +195,8 @@ const fakeBrowser: any = {
     id: 'mock-extension-id',
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
+    // W2：落盘通道 = 合成 native host。
+    sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
   },
   storage: {
     local: {
@@ -208,17 +211,6 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    async download(opts: any) {
-      const id = downloadCalls.length + 1;
-      downloadCalls.push({ id, filename: opts.filename });
-      setTimeout(() => { for (const fn of changeListeners) fn({ id, state: { current: 'complete' } }); }, 0);
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
-  },
   alarms: {
     create(name: string, info: any) { alarmBook.set(name, info); alarmLog.push(`create ${name} ${JSON.stringify(info)}`); },
     async clear(name: string) { const had = alarmBook.delete(name); alarmLog.push(`clear ${name}`); return had; },
@@ -285,8 +277,8 @@ beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
   alarmListeners.length = 0;
-  downloadCalls.length = 0;
-  changeListeners.length = 0;
+  host = createSyntheticHost({ up: true });
+  (globalThis as any).indexedDB = new IDBFactory();
   contentFetches.length = 0;
   alarmBook.clear();
   alarmLog.length = 0;
@@ -354,7 +346,7 @@ describe('C19 任务 2 · http 端口：生产代码里真的被注入了', () =
 
     console.log('[C19-2] tick 结论:', mod.lastBackfillTick()?.reason);
     console.log('[C19-2] 内容脚本在页面上下文里代发的 URL:', contentFetches);
-    console.log('[C19-2] 落盘的最终文件:', downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename));
+    console.log('[C19-2] 主机 ack 过的名字:', host.names());
 
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
     // 枚举 1 页 + 取 1 条正文，全部经由内容脚本的同源 fetch。
@@ -462,13 +454,13 @@ describe('C19 任务 4 · Popup 说的话与实际状态一致', () => {
     const block = await tickBlockReason({
       hasStore: true,
       isEnabled: () => isBackfillEnabled(browserLocalStore()),
-      isDownloadPaused: () => false,
+      isHostPaused: () => false,
       hasHttp: opts.transportWired,
     });
     const snapshot = await browserLocalSnapshot();
     const state = pickBackfillState(snapshot);
     const view = renderPopup({
-      enabled: opts.enabled, block, guard: null, state,
+      enabled: opts.enabled, block, state,
       target: state ? { platform: state.platform, scope: state.scope } : null,
       failures: collectFailures(snapshot),
     });

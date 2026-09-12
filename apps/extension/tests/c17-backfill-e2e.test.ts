@@ -13,24 +13,33 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
+import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 // ---------------------------------------------------------------------------
 // 假浏览器。storage 是【跨 resetModules 存活的】—— 这正是"浏览器重启"的模型：
 // 内存态（模块变量）清零，storage.local 留着。
+//
+// W2：落盘通道 = 合成 native host（tests/synthetic-native-host.ts）。
+// 「这一笔到底存下来了没有」不再看磁盘上有没有文件，而是看 host 有没有答 ack ——
+// 那本来就是规范里唯一算数的东西（§1）。
 // ---------------------------------------------------------------------------
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
-const downloadCalls: Array<{ id: number; filename: string }> = [];
-const changeListeners: Array<(d: any) => void> = [];
-/** 让某次下载不报 complete（用来真制造停滞）。 */
-let stallFilenames: string[] = [];
+let host: SyntheticHost;
+/** 让主机整个下线（模拟「本机没装 host / host 答不上话」）。 */
+let hostDown = false;
 
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
+    sendNativeMessage: (h: string, m: unknown) => {
+      if (hostDown) throw new Error('Specified native messaging host not found.');
+      return host.sendNativeMessage(h, m);
+    },
   },
   storage: {
     local: {
@@ -44,19 +53,6 @@ const fakeBrowser: any = {
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
-  downloads: {
-    async download(opts: any) {
-      const id = downloadCalls.length + 1;
-      downloadCalls.push({ id, filename: opts.filename });
-      if (!stallFilenames.includes(opts.filename)) {
-        setTimeout(() => { for (const fn of changeListeners) fn({ id, state: { current: 'complete' } }); }, 0);
-      }
-      return id;
-    },
-    onChanged: { addListener(fn: any) { changeListeners.push(fn); } },
-    async removeFile() {},
-    async erase() {},
-  },
 };
 
 // ---------------------------------------------------------------------------
@@ -138,8 +134,9 @@ function detailCalls(calls: string[]): string[] {
   return calls.filter((u) => u.includes('/backend-api/conversation/'));
 }
 
+/** 主机 ack 过的名字 —— 现在这就是「落盘」的唯一证据（§1）。 */
 function finalWrites(): string[] {
-  return downloadCalls.filter((d) => !d.filename.endsWith('.part')).map((d) => d.filename);
+  return host.names();
 }
 
 const UUIDS = [
@@ -164,9 +161,9 @@ const fakeClock = {
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
-  downloadCalls.length = 0;
-  changeListeners.length = 0;
-  stallFilenames = [];
+  host = createSyntheticHost({ up: true });
+  hostDown = false;
+  (globalThis as any).indexedDB = new IDBFactory();
   fakeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', fakeBrowser);
   vi.stubGlobal('chrome', fakeBrowser);
@@ -280,8 +277,8 @@ describe('C17 任务 2 · 反面 1：中途"浏览器重启"（清内存态、�
   });
 });
 
-describe('C17 任务 2 · 反面 2：中途熔断（download-paused）', () => {
-  it('熔断即停，欠账不动；resume 之后从断点继续', async () => {
+describe('C17 任务 2 · 反面 2：中途主机够不着（host-paused）', () => {
+  it('主机不在 ⇒ 立刻停、欠账不动；主机回来之后从断点继续', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 2 });
     const mod: any = await import('../entrypoints/background');
@@ -290,31 +287,39 @@ describe('C17 任务 2 · 反面 2：中途熔断（download-paused）', () => {
     const beforeTrip = stateOf();
     expect(beforeTrip.archived.length).toBe(1);
 
-    // 真制造熔断：连续 3 次停滞（下载不报终态）——走真实的 download.ts + guard。
-    const { recordDownloadOutcome, stalledResult, loadGuardState } =
-      await import('../lib/download-guard');
-    const { browserLocalStore } = await import('../lib/backfill/store');
-    const st = browserLocalStore()!;
-    for (let i = 0; i < 3; i += 1) await recordDownloadOutcome(st, stalledResult(15_000), { now: 1 });
-    const guard = await loadGuardState(st);
-    console.log('[C17-2.2] 守卫状态:', guard);
-    expect(guard.tripped).toBe(true);
+    // 🔴 W2 · 真制造这一次暂停：主机整个下线，下一笔欠账送不出去。
+    //    这不是「下载停滞」，是 §1 意义上的一次【未送达】——
+    //    唯一正确的反应是保持欠账 + 具名暂停，绝不当成"处理完了"。
+    hostDown = true;
+    await bootAndDispatch(liveCapture());
+    console.log('[C17-2.2] 主机不在时 tick reason =', mod.lastBackfillTick()?.reason);
+    const paused = stateOf();
+    console.log('[C17-2.2] 暂停后欠账:', { archived: paused.archived.length, pending: paused.pending.length });
+    expect(mod.lastBackfillTick()?.reason).toBe('ran');
+    expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
+    expect(paused.pending).toEqual(beforeTrip.pending);              // 欠账原封不动
+    expect(paused.archived).toEqual(beforeTrip.archived);            // 一条都没冒充成功
+    expect(paused.failures ?? []).toEqual([]);                       // 也没被判死
 
+    // 暂停态被写了下来（Popup 要显示的就是它）。
+    const { HOST_PAUSE_KEY } = await import('../lib/host-status');
+    expect(store[HOST_PAUSE_KEY]).toMatchObject({ reason: 'host-unavailable' });
+
+    // 主机还是不在 ⇒ 暂停继续，一个请求都不多发。
     const detailsBefore = detailCalls(server.calls).length;
     await bootAndDispatch(liveCapture());
-    console.log('[C17-2.2] 熔断态下 tick reason =', mod.lastBackfillTick()?.reason);
-    const paused = stateOf();
-    console.log('[C17-2.2] 熔断后欠账:', { archived: paused.archived.length, pending: paused.pending.length });
-    expect(mod.lastBackfillTick()?.reason).toBe('download-paused');
-    expect(detailCalls(server.calls).length).toBe(detailsBefore);   // 一个请求都没多发
-    expect(paused.pending).toEqual(beforeTrip.pending);             // 欠账原封不动
+    console.log('[C17-2.2] 主机仍不在时 tick reason =', mod.lastBackfillTick()?.reason);
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
+    expect(detailCalls(server.calls).length).toBe(detailsBefore);
 
-    // 显式恢复 → 从断点继续
-    await mod.resumeBackfillAfterDownloadGuard();
+    // 主机回来 ⇒ 下一次心跳先 hello，成功了才恢复；恢复后从断点继续。
+    hostDown = false;
     await bootAndDispatch(liveCapture());
     const resumed = stateOf();
     console.log('[C17-2.2] 恢复后:', { reason: mod.lastBackfillTick()?.reason, archived: resumed.archived });
-    expect(resumed.archived).toEqual([UUIDS[0], UUIDS[1]]);         // 接着第 2 条，不是重头
+    expect(mod.lastBackfillTick()?.reason).toBe('ran');
+    expect(store[HOST_PAUSE_KEY]).toBeNull();                        // 暂停被清掉了
+    expect(resumed.archived).toEqual([UUIDS[0], UUIDS[1]]);          // 接着第 2 条，不是重头
   });
 });
 
@@ -348,17 +353,20 @@ describe('C17 任务 2 · 反面 3：枚举给不出 total', () => {
 describe('C17 任务 2 · 反面 4：同一个会话被枚举两次', () => {
   it('不重复落盘 —— 且先证明仪器能看出重复', async () => {
     await enableBackfill();
-    // (a) 仪器自证：真的写两次同一个会话时，finalWrites() 【看得见】两条同名记录
+    // (a) 仪器自证：真的送两次同一个会话（名字逐字相同）时，
+    //     finalWrites() 【看得见】两条同名记录。
+    //     🔴 W2：载荷按内容去重（sha256 就是主键），所以这里必须让【字节】不同
+    //     —— 改一个 capturedAt 即可，名字一个字都不变。
     const mod: any = await import('../entrypoints/background');
     const dup = liveCapture();
     await bootAndDispatch(dup);
-    await mod.handleCaptured(dup);
+    await mod.handleCaptured({ ...dup, capturedAt: dup.capturedAt + 1_000 });
     const liveName = finalWrites().filter((f) => f.includes('aaaaaaaa-1111'));
-    console.log('[C17-2.4] 仪器自证（强行写两次同一 id）:', liveName);
+    console.log('[C17-2.4] 仪器自证（两次不同字节、同一个名字）:', liveName);
     expect(liveName.length).toBe(2);
 
     // (b) 真反面：第 0 页把 UUIDS[0] 再塞一遍
-    downloadCalls.length = 0;
+    host = createSyntheticHost({ up: true });
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 2, dupeOnPage: { page: 0, id: UUIDS[0]! } });
     mod.configureBackfillTransport(server.port);
     for (let i = 0; i < 4; i += 1) await bootAndDispatch(liveCapture());
@@ -388,7 +396,6 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
     const server = makeServer({ ids: ['shortid'], total: 1, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
-    downloadCalls.length = 0;
     await bootAndDispatch(liveCapture());
 
     const s = stateOf();
@@ -426,7 +433,6 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
     const server = makeServer({ ids, total: 2, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
-    downloadCalls.length = 0;
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
 
@@ -434,12 +440,12 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
     const files = finalWrites().filter((f) => f.includes('deadbeef01'));
     console.log('[C17-3.A2] 已归档:', s.archived);
     console.log('[C17-3.A2] 失败清单:', s.failures);
-    console.log('[C17-3.A2] 落盘文件名:', files);
-    expect(files.length).toBe(2);                         // 写了两次
-    expect(new Set(files).size).toBe(2);                  // 🔴 C21：两个【不同】的文件名
+    console.log('[C17-3.A2] 交出去的名字:', files);
+    expect(files.length).toBe(2);                         // 送出两次
+    expect(new Set(files).size).toBe(2);                  // 🔴 C21：两个【不同】的名字
     expect(files.sort()).toEqual([
-      'chat-stasher/inbox/chatgpt-deadbeef01-yyy.json',
-      'chat-stasher/inbox/chatgpt-deadbeef01-zzz.json',
+      'chatgpt-deadbeef01-yyy.json',
+      'chatgpt-deadbeef01-zzz.json',
     ]);
 
     // 历史：
@@ -454,24 +460,26 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
   });
 });
 
-describe('C17 任务 3 · 接缝 B：定速器与熔断谁优先 / 熔断时定速的计时', () => {
-  it('熔断优先于定速：熔断态下 gate() 一次都没被调用', async () => {
+describe('C17 任务 3 · 接缝 B：定速器与暂停谁优先 / 暂停时定速的计时', () => {
+  it('暂停优先于定速：暂停态下 gate() 一次都没被调用', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
     await bootAndDispatch(liveCapture());
 
-    const { recordDownloadOutcome, stalledResult } = await import('../lib/download-guard');
-    const { browserLocalStore } = await import('../lib/backfill/store');
-    for (let i = 0; i < 3; i += 1) {
-      await recordDownloadOutcome(browserLocalStore()!, stalledResult(15_000), { now: 1 });
-    }
+    // 主机下线 ⇒ 造出一次真的 host-unavailable 暂停（而不是假造一个状态位）。
+    hostDown = true;
+    await bootAndDispatch(liveCapture());
+    expect(store['cs_native_host_pause_v1']).toMatchObject({ reason: 'host-unavailable' });
+
+    const detailsBefore = detailCalls(server.calls).length;
     await bootAndDispatch(liveCapture());
     // schedule.ts 在 runBackfill 之前就挡住了 ⇒ 连 Pacer 都没被 new 出来。
-    console.log('[C17-3.B] 熔断态 tick:', mod.lastBackfillTick());
-    expect(mod.lastBackfillTick()?.reason).toBe('download-paused');
+    console.log('[C17-3.B] 暂停态 tick:', mod.lastBackfillTick());
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
     expect(mod.lastBackfillTick()?.report).toBeNull();
+    expect(detailCalls(server.calls).length).toBe(detailsBefore);
   });
 
   it('🔴 BUG-3【C19 已修】：取正文的 20s 最小间隔【跨 tick】生效', async () => {
@@ -501,7 +509,7 @@ describe('C17 任务 3 · 接缝 B：定速器与熔断谁优先 / 熔断时定�
 });
 
 describe('C17 任务 3 · 接缝 C：进度分母来自枚举，分子来自另一处', () => {
-  it('🔴 BUG-4：sink 抛错（下载真失败）时，整个 tick 抛出去被吞掉，既不 halt 也不留痕', async () => {
+  it('🔴 W2：主机够不着时 tick 有【具名结局】，既不清账也不把这一笔判死', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
@@ -512,26 +520,29 @@ describe('C17 任务 3 · 接缝 C：进度分母来自枚举，分子来自另�
     const ok = stateOf();
     expect(ok.archived.length).toBe(1);
 
-    // 现在让下一条的 .part 下载"永远不完成" ⇒ download.ts 抛 DownloadFailure
-    stallFilenames = [`chat-stasher/inbox/chatgpt-${UUIDS[1]}.json.part`];
-    vi.useFakeTimers();
-    const dispatched = bootAndDispatch(liveCapture());
-    await vi.advanceTimersByTimeAsync(20_000);
-    vi.useRealTimers();
-    await dispatched;
+    // 现在主机下线 ⇒ 下一条送不出去。
+    // 🔴 这条用例的前身是 C17-3.C「BUG-4」：那时候 sink 抛错会被整个吞掉，
+    //    既不 halt 也不留痕（欠账还在，但账本上看不出发生过什么）。
+    //    W2 之后 sink 不抛错，它【回答】—— 而答案有具名的第三种结局：
+    //    retryLater ⇒ 欠账保持 + 这条腿以 'host-unavailable' 停下并留痕。
+    hostDown = true;
+    await bootAndDispatch(liveCapture());
 
     const after = stateOf();
-    console.log('[C17-3.C] 下载停滞后:', {
+    console.log('[C17-3.C] 主机够不着时:', {
       archived: after.archived.length, pending: after.pending.length,
       halted: after.halted, lastTickReason: mod.lastBackfillTick()?.reason,
+      stopped: mod.lastBackfillTick()?.report?.stopped,
     });
-    // 好的一面：欠账没被清（没丢数据）
+    // 欠账没被清（没丢数据）—— 与 BUG-4 时代相同的一面。
     expect(after.archived.length).toBe(1);
     expect(after.pending[0]).toBe(UUIDS[1]);
-    // 🔴 坏的一面：state.halted 仍然是 null，lastTick 停留在上一次成功的结果 ——
-    // 运行时看不到"这次 tick 炸了"，只有一行 console.warn。
-    expect(after.halted).toBeNull();
+    // 与 BUG-4 时代【不同】的一面：这次 tick 的结局在运行时看得见，
+    // 而且它是具名的，不是一个"上一次成功"的残留。
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
+    expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
+    expect(after.halted).toBeNull();          // 不是这条腿自己坏了，不许留 halt
+    expect(after.failures ?? []).toEqual([]); // 也不许把这一笔判死
   });
 });
 

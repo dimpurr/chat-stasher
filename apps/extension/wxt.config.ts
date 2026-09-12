@@ -4,36 +4,46 @@ export default defineConfig({
   manifest: {
     name: 'Chat Stasher',
     description: 'Capture selected web chat sessions to files on your own machine.',
-    // Minimal permission set: the file-save channel, plus the local storage the
-    // debt set / backfill state / download guard are already built on.
-    // No <all_urls>. Content-script matches stay on the explicit platform table.
+    // Minimal permission set. No <all_urls>; content-script matches stay on the
+    // explicit platform table in lib/contract.ts.
     //
-    // Why 'storage' is here: seven call sites under lib/ and entrypoints/ use
-    // browser.storage.local (debt set, backfill enable flag, download-stall
-    // guard, badge state). Chrome's extension docs require the "storage"
-    // permission to expose chrome.storage at all. We have NOT empirically
-    // verified what a real browser does when it is missing -- the code already
-    // fails closed there (tickBackfill returns 'no-store', engine halts with
-    // 'storage-unavailable') rather than pretending to run. Declaring it is
-    // near-free: 'storage' shows no install-time warning to the user and needs
-    // no separate justification beyond "the tool remembers what it still owes".
-    // Omitting it risks every persistent thing silently not existing at runtime.
-    // The cost is asymmetric, so we declare it.
+    // 🔴 W2 removed 'downloads'. The extension no longer downloads anything:
+    // captures go to the native host (or wait in the outbox), and the one-file
+    // escape hatch is a Blob + <a download> click in the popup, which needs no
+    // permission at all. 'downloads' was also the only permission in this list
+    // that showed the user an install-time warning ("Manage your downloads.").
     //
-    // Why 'alarms' is here (C19): the backfill leg used to be kicked only when
-    // the realtime leg captured something. That means a user who installs the
-    // extension and never opens the site again would never finish backfilling
-    // -- the product promise ("quietly finish over several days") cannot be
-    // kept on that heartbeat alone. chrome.alarms gives it a heartbeat of its
-    // own (lib/backfill/alarm.ts documents the 5-minute period and why).
-    // Cost checked against Chrome's permission-warning list (2026-08-17):
-    // 'alarms' shows NO install-time warning, same as 'storage'; the one that
-    // does warn ("Manage your downloads.") is 'downloads', which we already
-    // have. So the user-visible cost of this line is zero.
-    // 🔴 Nothing else is added. No host permissions: the backfill leg fetches
-    // through the content script that is ALREADY injected on these origins,
-    // as a same-origin request in the user's own logged-in page context.
-    permissions: ['downloads', 'storage', 'alarms', 'nativeMessaging'],
+    // Why 'storage': the debt set, the backfill switch, the backfill tick
+    // record, the host status / pause records and the last-export stamp all
+    // live in browser.storage.local, and Chrome requires this permission to
+    // expose chrome.storage at all. The code fails closed without it
+    // (tickBackfill returns 'no-store'; the engine halts with
+    // 'storage-unavailable') rather than pretending to run. 'storage' shows no
+    // install-time warning, so declaring it costs the user nothing.
+    //
+    // Why 'alarms' (C19): the backfill leg must have a heartbeat of its own,
+    // otherwise a user who installs the extension and never opens the site
+    // again would never finish backfilling. lib/backfill/alarm.ts documents the
+    // 5-minute period and why. 'alarms' shows no install-time warning either.
+    // Since W2 the alarm is also when the outbox is drained.
+    //
+    // Why 'nativeMessaging' (ADR-025): this is the delivery channel. The host
+    // is the ordinary `chat-stasher` binary, registered by
+    // `chat-stasher install-native-host --stage <path>`; the extension talks to
+    // it with runtime.sendNativeMessage, one request per call. Without this
+    // permission nothing can ever be archived, so it is not optional.
+    //
+    // Why 'unlimitedStorage' (W2): the outbox is an IndexedDB queue of
+    // undelivered bundles (lib/outbox.ts, capped at 256 MiB by us). Chrome may
+    // evict best-effort IndexedDB data under disk pressure -- which would mean
+    // silently losing captures the user was told were queued. This permission
+    // removes that eviction path. It is the honest counterpart of the §10
+    // promise "the outbox never drops an item on its own".
+    //
+    // 🔴 Nothing else. No host permissions: the backfill leg fetches through
+    // the content script that is ALREADY injected on these origins, as a
+    // same-origin request in the user's own logged-in page context.
+    permissions: ['unlimitedStorage', 'storage', 'alarms', 'nativeMessaging'],
     // 🔴 ADR-014: this pins the Chrome extension ID to
     // gihmdkkmmmkeiagjjiimacmgkdilofhi on every machine and every unpacked
     // install. Without it Chrome derives the id from the install *path*, so it
