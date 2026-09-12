@@ -59,7 +59,7 @@ actually claims (each is derived from code in `docs/threat-model.md`):
 1. Conversation content reaching a network destination the user did not
    configure.
 2. The extension capturing traffic outside its declared platform origins
-   (`apps/extension/lib/contract.ts:53-125`).
+   (`apps/extension/lib/contract.ts:41-66`, `:310-312`).
 3. The CLI writing to, or otherwise mutating, a harness's own session store,
    which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
    `:1373-1376`).
@@ -70,7 +70,8 @@ actually claims (each is derived from code in `docs/threat-model.md`):
 [`docs/threat-model.md`](docs/threat-model.md) and we are not currently defending
 against them:
 
-- The plaintext window in your browser's download directory.
+- The plaintext window before delivery: a captured conversation sits unencrypted
+  in the extension's outbox until the native host acknowledges it.
 - The master key file being readable by anything running as your user.
 - Losing the key file, which makes the archive permanently unreadable.
 - Backup metadata (size and timing) visible to a remote destination provider.

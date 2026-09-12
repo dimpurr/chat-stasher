@@ -14,25 +14,34 @@ and the difference matters:
 We have not run an adversarial security assessment against this project. "We
 have not attacked this" is never written below as "this attack does not work".
 
-Line numbers were checked against commit `143cb79`. They drift as the code
-changes; if a citation no longer lands where this document says it does, trust
-the code and treat the sentence as unverified.
+Line numbers were checked against the code in this checkout. They drift as the
+code changes; if a citation no longer lands where this document says it does,
+trust the code and treat the sentence as unverified.
 
 ## How the data moves
 
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:53-120`,
+   the raw response text (`apps/extension/lib/contract.ts:41-66`, `:310-312`;
    `apps/extension/lib/page-hook.ts:217`, `:241`, `:282`).
-2. The extension writes that text, as a JSON bundle, to a file **in your
-   browser's download directory**, under `chat-stasher/inbox/`
-   (`apps/extension/lib/contract.ts:139`; `apps/extension/lib/download.ts:91-93`).
-   The delivery channel is `chrome.downloads`
-   (`apps/extension/lib/download.ts:28-32`).
-3. The Rust CLI reads those files (`ingest`) and/or reads local coding-harness
-   session stores (`collect`, `status`), and produces *sealed shards* in a stage
-   directory (`crates/chat-stasher/src/main.rs:477-535`).
+2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
+   outbox** inside your browser profile — before attempting any delivery, so a
+   service worker killed mid-flight cannot lose it without a trace
+   (`apps/extension/lib/outbox.ts:309-377`;
+   `apps/extension/entrypoints/background.ts:160-177`).
+3. The extension delivers the bundle to a **Native Messaging host** — the
+   `chat-stasher` binary you registered with
+   `chat-stasher install-native-host --stage <path>` — over
+   `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
+   shard*, through the same code path `ingest` uses
+   (`apps/extension/lib/native-host.ts:431-481`;
+   `crates/chat-stasher/src/nativehost.rs:1090-1117`). The bundle leaves the
+   outbox **only** on a matching `ack`
+   (`apps/extension/lib/native-host.ts:451-460`). Separately, the CLI reads
+   local coding-harness session stores (`collect`, `status`) and can take bundles
+   from a directory by hand (`ingest --inbox`)
+   (`crates/chat-stasher/src/main.rs:484-534`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
    (`crates/chat-stasher/src/main.rs:146-183`).
@@ -48,7 +57,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:39-41`, `:119`), and when wired it is restricted to an origin that must already be in the platform table (`apps/extension/lib/backfill/engine.ts:186-188`). The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:22`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:75-78`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's two exact paths, or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:212-250`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:63`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -87,23 +96,24 @@ answer.
 
 | | |
 |---|---|
-| **Can see** | The captured conversations **in plaintext**, in your browser's download directory; the master key that opens your entire archive; the staged shards before they are pushed; your config, including your destination address. |
+| **Can see** | The captured conversations **in plaintext**, in the extension's outbox inside your browser profile; the master key that opens your entire archive; the staged shards before they are pushed; your config, including your destination address. |
 | **Cannot see** | Nothing meaningful is withheld from a process running as your user. |
 
 Concretely, four separate plaintext exposures:
 
-1. **The download-directory window.** The extension writes each captured session
-   as an ordinary, unencrypted JSON file into your download directory at
-   `chat-stasher/inbox/<platform>-<sessionId>.json`
-   (`apps/extension/lib/contract.ts:139`;
-   `apps/extension/lib/download.ts:91-93`;
-   `apps/extension/entrypoints/background.ts:84-86`). The file contains the raw
-   response body — the conversation itself
-   (`apps/extension/lib/contract.ts:282-291`). It sits there, world-readable to
-   anything running as you, until the CLI consumes it. **We do not encrypt it,
-   we do not restrict its permissions, and we do not shorten that window.** How
-   long the window is depends entirely on how often you run `ingest`; if you
-   never run it, the plaintext stays indefinitely.
+1. **The outbox window, before delivery.** The extension writes each captured
+   session as an ordinary, unencrypted record into its outbox IndexedDB
+   database, inside your browser profile
+   (`apps/extension/lib/outbox.ts:64-80`, `:309-377`). The record's `raw.text`
+   field is the raw response body — the conversation itself
+   (`apps/extension/entrypoints/background.ts:104-132`). It sits there,
+   readable by anything running as you, until the host answers a matching `ack`
+   and the record is deleted (`apps/extension/lib/outbox.ts:379-394`). **We do
+   not encrypt it, we do not restrict its permissions, and we do not shorten
+   that window.** How long it is depends on how often the host is reachable; if
+   it never is, the plaintext stays indefinitely. A second plaintext copy exists
+   only if you press the popup's export button, which writes the same bodies
+   into an ordinary download file (`apps/extension/lib/outbox.ts:465-475`).
 
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
@@ -117,15 +127,13 @@ Concretely, four separate plaintext exposures:
    `push` encrypts them into the repository
    (`crates/chat-stasher/src/main.rs:146-150`).
 
-4. **Browser download history.** The two-phase write erases only the `.part`
-   entry from the download shelf; the final file's entry is not erased
-   (`apps/extension/lib/download.ts:129-141`). Your browser therefore retains a
-   history record whose filename embeds the platform name and the session id
-   (`apps/extension/entrypoints/background.ts:116-117`). That is metadata, not
-   content, but it is metadata about which conversations you archived, and it
-   may be synced by your browser to your browser vendor. **We have not
-   investigated** whether any particular browser syncs download history by
-   default.
+4. **The download-history entry for an export file.** If you press the popup's
+   export button, the browser records an ordinary download whose file name is
+   `chat-stasher-export-<UTC>.jsonl` (`apps/extension/lib/outbox.ts:442-446`).
+   That is metadata, not content — it says an export happened and when, not
+   which conversations were in it — and it may be synced by your browser to your
+   browser vendor. **We have not investigated** whether any particular browser
+   syncs download history by default.
 
 **We do not defend against a hostile process running as your user.** On a
 single-user desktop this is the normal situation and the exposure is
@@ -136,7 +144,7 @@ your user, it is the dominant risk in this document.
 
 | | |
 |---|---|
-| **Can see** | Everything the previous row lists, if the disk is not encrypted or is unlocked: the plaintext inbox files, the key file, the stage, the config. With the key file *and* the repository, they can read the entire archive. |
+| **Can see** | Everything the previous row lists, if the disk is not encrypted or is unlocked: the plaintext outbox records in your browser profile, the key file, the stage, the config. With the key file *and* the repository, they can read the entire archive. |
 | **Cannot see** | The repository contents alone, *without* the key file — a stolen remote-destination copy is encrypted (`crates/chat-stasher/src/store.rs:261-296`). |
 | **Evidence** | No at-rest protection is implemented by this project beyond the rustic repository itself; see the key-file citations above. |
 
@@ -154,12 +162,12 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:217`, `:241`, `:265-282`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:199-232`, `:260`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:217`, `:241`, `:265-282`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`). |
 
 **Caveat, stated honestly:** the passive hook adds no traffic, so there is
 nothing distinctive for the platform to observe from it. **Backfill is
 different** — it walks conversation lists and detail endpoints
-(`apps/extension/lib/backfill/engine.ts:199-232`, `:260`), which produces a
+(`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`), which produces a
 request pattern the platform can see and which does not look like a human
 reading their history. **We have not investigated** whether any platform's terms
 of service prohibit this, nor whether any platform rate-limits or flags such a
@@ -172,9 +180,9 @@ it bounds what you may safely assume is archived:
 
 | Platform | Requests the platform sees | What lands in your archive |
 |---|---|---|
-| **ChatGPT** | Conversation-list requests **and** one request per conversation | The conversation text (`apps/extension/lib/backfill/enumerate.ts:762`) |
-| **DeepSeek**, **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or written (`apps/extension/lib/backfill/enumerate.ts:774`, `:538-548`, `:603-611`) |
-| **Gemini**, **Claude**, **Kimi** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:643`) |
+| **ChatGPT** | Conversation-list requests **and** one request per conversation | The conversation text (`apps/extension/lib/backfill/enumerate.ts:880-886`) |
+| **DeepSeek**, **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:894-900`, `:545-556`, `:630-640`) |
+| **Gemini**, **Claude**, **Kimi** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:752`) |
 
 🔴 The middle row is the dangerous one to misread. On DeepSeek and Perplexity
 the extension *does* work — it enumerates your conversations and reports a
@@ -186,8 +194,9 @@ truncated version of every chat and still look like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:365-369`, `:418-433`). That value is written
-into the inbox bundle and therefore into your archive. It never leaves your
+(`apps/extension/lib/contract.ts:474-487`, `:633-649`). That value is written
+into the bundle and therefore into your archive
+(`apps/extension/entrypoints/background.ts:119-121`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 ### The browser extension ecosystem — other extensions installed alongside ours
@@ -200,20 +209,19 @@ machine, but it means your archive contains your account identifier.
 We did not test what a second, hostile extension can observe. The specific
 questions we did **not** answer, and which a reader should not assume are safe:
 
-- Whether an extension holding the `downloads` permission can enumerate or read
-  files that *our* extension downloaded. (Our own code notes only that an
-  extension may `removeFile` on downloads *it* initiated —
-  `apps/extension/lib/download.ts:44-54`, `:57-61` — which is a statement about
-  our deletions, not about another extension's reads.)
 - Whether an extension with broad host permissions on a chat origin can observe
   our MAIN-world hook, the `window.postMessage` traffic between the page hook
-  and the bridge (`apps/extension/lib/contract.ts:6-15`), or the page-world
-  marker we set (`apps/extension/lib/contract.ts:12-15`).
-- Whether download history is readable by other extensions.
+  and the bridge (`apps/extension/lib/contract.ts:6-17`), or the page-world
+  markers we set (`apps/extension/lib/contract.ts:19-21`).
+- Whether a second extension can reach another extension's IndexedDB — which is
+  where the outbox, and therefore the undelivered conversations, live
+  (`apps/extension/lib/outbox.ts:34-37`).
+- Whether the download-history entry for an export file is readable by other
+  extensions.
 
 The message contract does carry a token check on ready/verify messages
-(`apps/extension/lib/contract.ts:229-252`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:201-227`). Those
+(`apps/extension/lib/contract.ts:444-467`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:409-442`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.
@@ -222,6 +230,55 @@ Since the page-world hook communicates over `window.postMessage`, the
 conservative assumption is that content in transit is observable to anything
 else with script access to that page. Treat this row as **unresolved and
 potentially exposed**, not as safe.
+
+### The Native Messaging host — the boundary the browser enforces for us
+
+This is the newest boundary in the design, and one of the few that is enforced
+by something other than our own code.
+
+| | |
+|---|---|
+| **Can see** | Every bundle the extension delivers: the conversation text, the platform name, the session id, the account identity in it. It is the local process that writes your archive's input. |
+| **Cannot see** | Nothing is withheld from it: it sees every bundle it is asked to archive. But it is *not* a network service — it opens no socket, the browser starts one process per request, and it writes only into the stage you configured. |
+
+The properties that bound this boundary:
+
+- **The host manifest names exactly one allowed extension id.** Chrome's
+  `allowed_origins` and Firefox's `allowed_extensions` are rendered from two
+  pinned constants — `gihmdkkmmmkeiagjjiimacmgkdilofhi` and
+  `chat-stasher@team.iopho.com` — and the extension's own Chrome id is pinned by
+  a public key in its manifest, so it cannot vary per machine
+  (`crates/chat-stasher/src/nativehost.rs:64-77`, `:301-345`;
+  `apps/extension/wxt.config.ts:64-71`).
+- **The host refuses a launch from anyone else.** A `chrome-extension://` origin
+  carrying any other id, or a Firefox-shaped launch for any other add-on, gets
+  nothing on stdout, a line on stderr, and a non-zero exit
+  (`crates/chat-stasher/src/nativehost.rs:1150-1184`).
+- **The host never creates the stage, and never mints a machine identity.** A
+  missing `[native_host] stage`, a relative one, a path that is not a directory,
+  or no persisted identity are each a named refusal that says how to fix it —
+  never a silently created one
+  (`crates/chat-stasher/src/nativehost.rs:875-935`, `:940-969`).
+- **Concurrent writers are serialised.** The host and `ingest` both hold an
+  exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
+  number and seal the shard, with a bounded 10-second wait
+  (`crates/chat-stasher/src/inbox.rs:66-68`, `:853-881`). Two browsers, two
+  profiles, or a host racing a manual `ingest` therefore cannot pick the same
+  sequence number.
+- **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
+  payload bytes and refuses on a mismatch, and the extension counts a
+  conversation as delivered only when the `ack` carries back both the
+  `request_id` and the `sha256` it sent
+  (`crates/chat-stasher/src/nativehost.rs:1066-1075`;
+  `apps/extension/lib/native-host.ts:451-460`).
+- **The payload is checked before it is sealed**, and a bundle this channel
+  cannot archive is refused with a named `nack` rather than stored as raw bytes
+  (`crates/chat-stasher/src/nativehost.rs:1082-1088`).
+
+What this boundary does **not** buy you: the host is an ordinary binary running
+as you, so anything that can replace it can do anything it can — see "A replaced
+binary" below. And the registration is per-user, not per-machine: another user
+account on the same computer registers its own host, with its own stage.
 
 ### Anyone else on the network between you and your destination
 
@@ -298,12 +355,13 @@ a real limitation of the current code.
 
 ### Confirmed weaknesses
 
-1. **Plaintext window in the download directory.** Described in full above.
-   Captured conversations sit unencrypted, with default permissions, in your
-   browser's download directory until you run `ingest`
-   (`apps/extension/lib/download.ts:91-93`). **We do not currently defend this.**
-   Mitigation available to you today: run `ingest` promptly, and put your
-   download directory on an encrypted volume.
+1. **Plaintext window before delivery.** Described in full above. Captured
+   conversations sit unencrypted in the extension's outbox, inside your browser
+   profile, until the host answers a matching `ack`
+   (`apps/extension/lib/outbox.ts:309-377`, `:379-394`). **We do not currently
+   defend this.** Mitigation available to you today: keep the popup's channel
+   line healthy so deliveries go through, uninstall the extension when you are
+   done with it, and put your browser profile on an encrypted volume.
 
 2. **The master key file is plaintext on disk.** It is not passphrase-wrapped
    and not kept in an OS keychain. On Unix it is created `0600` in a `0700`
@@ -347,11 +405,11 @@ a real limitation of the current code.
 7. **Browser-side history backfill covers one platform, and one tier of it
    looks like coverage without being coverage.** Backfill recovers past
    conversation *text* on **ChatGPT** only
-   (`apps/extension/lib/backfill/enumerate.ts:762`). On **DeepSeek** and
+   (`apps/extension/lib/backfill/enumerate.ts:880-886`). On **DeepSeek** and
    **Perplexity** it enumerates your conversations and archives **none of
-   them** (`apps/extension/lib/backfill/enumerate.ts:774`); on **Gemini**,
+   them** (`apps/extension/lib/backfill/enumerate.ts:894-900`); on **Gemini**,
    **Claude**, and **Kimi** it does nothing
-   (`apps/extension/lib/backfill/enumerate.ts:643`). The user-visible symptom of
+   (`apps/extension/lib/backfill/enumerate.ts:752`). The user-visible symptom of
    the middle tier is *activity* — a growing pending count — with an empty
    result, so "the extension is clearly doing something" is not evidence your
    history is safe. See the platform table above.
@@ -390,8 +448,7 @@ the answer:
 
 - Cross-extension exposure, in all three forms listed in the extension-ecosystem
   row above.
-- Whether browsers sync download history containing our filenames to a vendor
-  account by default.
+- Whether browsers sync download history to a vendor account by default.
 - TLS and host-key verification behaviour across every opendal backend the
   config accepts.
 - Whether any chat platform's terms of service prohibit the capture or the
@@ -399,7 +456,7 @@ the answer:
   account flagging.
 - The behaviour of the extension when the `storage` permission is absent at
   runtime; the code is written to fail closed, but this was not verified against
-  a real browser (`apps/extension/wxt.config.ts:14-21`).
+  a real browser (`apps/extension/wxt.config.ts:33-39`).
 - Windows-specific path handling for at least one harness; see `README.md`.
 
 We have not commissioned or performed a formal security audit of this project.
@@ -410,8 +467,9 @@ Not a promise, just the honest best case with the current code:
 
 1. Use a **local destination on an encrypted volume**, which removes the
    destination-provider row entirely.
-2. Keep your **download directory on the same encrypted volume**, and run
-   `ingest` often to shorten the plaintext window.
+2. Keep your **browser profile on the same encrypted volume** (that is where the
+   outbox lives), and keep the host registered so deliveries actually leave it —
+   an undelivered capture sits in the plaintext window indefinitely.
 3. Store the **key file somewhere other than the repository**, and back it up —
    losing it is unrecoverable (weakness 3).
 4. On a platform without Unix file modes, check the key file's permissions
