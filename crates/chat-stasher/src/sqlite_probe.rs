@@ -225,19 +225,32 @@ pub struct OpenCodeSessionRow {
 }
 
 /// A deterministic high-water mark for one opencode session. SQLite has no
-/// file offset for logical rows, so the collector persists the database
-/// fingerprint plus row counts and the greatest `(time_updated, id)` key for
-/// both message tables. Any mismatch causes a complete session re-export,
-/// deliberately preferring a measurable duplicate over a silent omission.
+/// file offset for logical rows, so the collector persists row counts and the
+/// greatest `(time_updated, id)` key for both message tables. Any mismatch
+/// causes a complete session re-export, deliberately preferring a measurable
+/// duplicate over a silent omission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenCodeHighWater {
     pub time_updated: i64,
     pub id: String,
 }
 
+/// One session's logical cursor: the fields that can only move when *that*
+/// session moves.
+///
+/// The whole-store fingerprint deliberately does **not** live here. It used to
+/// be the first field, and `collect` decided "this session did not change" with
+/// `entry.opencode == Some(&cursor)` — so a single write anywhere in the store,
+/// including to a table no session export reads, made every session compare
+/// unequal and re-export a shard whose bytes were already staged. The
+/// fingerprint is still used, but as a *fast path* over the whole store
+/// (`collect::process_sqlite`): identical store means nothing moved, so no
+/// session moved. When it differs, the decision falls back to the per-session
+/// fields below. Keeping the store-wide value out of this type means the
+/// derived `==` is exactly the per-session comparison, and the wrong question
+/// can no longer be asked by accident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenCodeCursor {
-    pub store_fingerprint: String,
     pub session_time_updated: i64,
     /// Generic logical high-water data for one-row SQLite stores such as
     /// Cursor/Grok. For opencode these remain at their default values and the
@@ -736,7 +749,7 @@ pub fn opencode_session_cursor(db: &Path, session_id: &str) -> Result<OpenCodeCu
     ensure_opencode_schema(&conn)?;
     conn.execute_batch("BEGIN")
         .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
-    opencode_session_cursor_with_conn(&conn, db, session_id)
+    opencode_session_cursor_with_conn(&conn, session_id)
 }
 
 /// Export exactly one session as exactly one JSON line. The line is returned
@@ -753,7 +766,7 @@ pub fn read_opencode_session(
     ensure_opencode_schema(&conn)?;
     conn.execute_batch("BEGIN")
         .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
-    let cursor = opencode_session_cursor_with_conn(&conn, db, session_id)?;
+    let cursor = opencode_session_cursor_with_conn(&conn, session_id)?;
 
     let session = conn
         .query_row("SELECT * FROM session WHERE id = ?1", [session_id], |row| {
@@ -925,7 +938,6 @@ pub fn sqlite_session_cursor(
         id: session_id.to_string(),
     });
     Ok(OpenCodeCursor {
-        store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated: time_value,
         row_count: count as u64,
         row_high_water: high_water,
@@ -1056,7 +1068,6 @@ pub fn read_cursor_legacy_session(
         .and_then(Value::as_i64)
         .ok_or_else(|| "Cursor composer createdAt missing, cannot establish cursor".to_string())?;
     let cursor = OpenCodeCursor {
-        store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated: created_at,
         row_count: 1,
         row_high_water: Some(OpenCodeHighWater {
@@ -1228,7 +1239,6 @@ fn ensure_opencode_schema(conn: &Connection) -> Result<(), String> {
 
 fn opencode_session_cursor_with_conn(
     conn: &Connection,
-    db: &Path,
     session_id: &str,
 ) -> Result<OpenCodeCursor, String> {
     let session_time_updated = conn
@@ -1245,7 +1255,6 @@ fn opencode_session_cursor_with_conn(
     let part_count = count_rows(conn, "part", session_id)?;
     let part_high_water = high_water(conn, "part", session_id)?;
     Ok(OpenCodeCursor {
-        store_fingerprint: sqlite_store_fingerprint(db)?,
         session_time_updated,
         row_count: 0,
         row_high_water: None,

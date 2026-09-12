@@ -369,9 +369,9 @@ crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs/install.md:399  :: }
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:64, docs/threat-model.md:249  :: //! Read-only guarantee: every connection opens with `mode=…
-crates/chat-stasher/src/sqlite_probe.rs:1364-1367  b250c934a6e3  lines=4
+crates/chat-stasher/src/sqlite_probe.rs:1373-1376  b250c934a6e3  lines=4
   <- SECURITY.md:65, docs/threat-model.md:247  :: let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::S…
-crates/chat-stasher/src/sqlite_probe.rs:2001-2047  79eecb3f0cca  lines=47
+crates/chat-stasher/src/sqlite_probe.rs:2010-2056  79eecb3f0cca  lines=47
   <- docs/threat-model.md:250  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:2-3  1375b706fba2  lines=2
   <- docs/privacy.md:404  :: //! moved into an append-only rustic repository.

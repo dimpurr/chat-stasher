@@ -3,11 +3,17 @@
 //! A harness file is never renamed, opened for writing, or marked in the
 //! harness directory. File sources keep a byte offset and a SHA-256 of the
 //! committed prefix in a state file under chat-stasher's own data directory.
-//! The opencode SQLite source keeps a logical high-water cursor instead: the
-//! store fingerprint, session update time, row counts, and greatest
-//! `(time_updated, id)` key for message and part rows. Any mismatch resets the
-//! logical read to a complete session export, deliberately preferring a
-//! measurable duplicate over a silent omission.
+//! The opencode SQLite source keeps a logical high-water cursor instead:
+//! session update time, row counts, and the greatest `(time_updated, id)` key
+//! for message and part rows. Any mismatch resets the logical read to a
+//! complete session export, deliberately preferring a measurable duplicate
+//! over a silent omission.
+//!
+//! The store *and* the per-session cursor answer two different questions, and
+//! conflating them cost a full re-export of every session on every store write.
+//! Which session changed is decided by that session's own cursor; whether
+//! anything in the store moved at all is a separate, cheaper check that may
+//! only ever *skip* work (`process_sqlite`).
 //!
 //! # The state is a per-destination debt set, not a per-machine cursor
 //!
@@ -38,7 +44,8 @@ use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
-    read_opencode_session, read_sqlite_session, sqlite_session_cursor, OpenCodeCursor,
+    read_opencode_session, read_sqlite_session, sqlite_session_cursor, sqlite_store_fingerprint,
+    OpenCodeCursor,
 };
 use crate::store;
 use anyhow::{anyhow, Context};
@@ -73,6 +80,22 @@ pub struct OffsetEntry {
     /// compatibility with the state file written by the previous worker.
     #[serde(default)]
     pub opencode: Option<OpenCodeCursor>,
+    /// Whole-store fingerprint observed when this cursor was last confirmed.
+    ///
+    /// It is a **fast path over the store**, never part of one session's
+    /// identity: equal fingerprint means nothing in the store moved, so no
+    /// session moved and the whole pass can skip the store. It is checked in
+    /// `process_sqlite` *before* any per-session query, and a difference falls
+    /// through to the per-session comparison in `OpenCodeCursor`.
+    ///
+    /// `None` means "we have never recorded a fingerprint for this entry" —
+    /// which is what a state file written before this field existed looks
+    /// like. Unknown is not empty: `None` must never be compared as if it were
+    /// a fingerprint value, so the shortcut simply does not apply and the
+    /// per-session fields decide. That is what keeps a pre-change state file
+    /// from turning every session into "changed".
+    #[serde(default)]
+    pub store_fingerprint: Option<String>,
 }
 
 /// The evidence a cursor has to produce on demand: the sealed shard set it is
@@ -848,10 +871,39 @@ fn process_sqlite(
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<Processed> {
-    match layout {
-        SqliteSessionLayout::OpenCode => {
-            process_opencode(record, old, force_reset, stage, machine, bucket_cap)
+    // The whole-store fingerprint is a shortcut over the *store*, so it is
+    // checked once here, before any per-session query. Equal fingerprint means
+    // the store file has the same size and mtime as when this cursor was last
+    // confirmed, so nothing in it moved — including this session — and the
+    // whole store can be skipped.
+    //
+    // A *different* fingerprint proves nothing about any single session: one
+    // write anywhere in the store moves it. So a difference must never decide
+    // "this session changed"; it only means the shortcut is unavailable and the
+    // per-session fields below have to answer. That is the whole defect this
+    // ordering fixes — the fingerprint used to sit inside `OpenCodeCursor`, so
+    // it *was* the answer, and every session re-exported a shard whose bytes
+    // were already staged.
+    let store_fingerprint = sqlite_store_fingerprint(&record.absolute_path)
+        .map_err(|error| anyhow!("failed to fingerprint SQLite store: {error}"))?;
+    if let Some(entry) = old {
+        if !force_reset
+            && entry.opencode.is_some()
+            && entry.store_fingerprint.as_deref() == Some(store_fingerprint.as_str())
+        {
+            return Ok(unchanged_sqlite(record, entry, &store_fingerprint));
         }
+    }
+    match layout {
+        SqliteSessionLayout::OpenCode => process_opencode(
+            record,
+            old,
+            force_reset,
+            stage,
+            machine,
+            bucket_cap,
+            &store_fingerprint,
+        ),
         SqliteSessionLayout::CursorLegacy => {
             let session_id = native_session_id(record, "Cursor legacy")?;
             let snapshot = read_cursor_legacy_session(&record.absolute_path, &session_id).map_err(
@@ -866,6 +918,7 @@ fn process_sqlite(
                 bucket_cap,
                 snapshot.cursor,
                 snapshot.json_line,
+                &store_fingerprint,
             )
         }
         SqliteSessionLayout::CursorGlobal => {
@@ -874,7 +927,11 @@ fn process_sqlite(
             let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
                 .map_err(|error| anyhow!("failed to read Cursor session cursor: {error}"))?;
             if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
-                return Ok(unchanged_sqlite(record, old.expect("checked above")));
+                return Ok(unchanged_sqlite(
+                    record,
+                    old.expect("checked above"),
+                    &store_fingerprint,
+                ));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
                 .map_err(|error| anyhow!("failed to read Cursor session snapshot: {error}"))?;
@@ -887,6 +944,7 @@ fn process_sqlite(
                 bucket_cap,
                 snapshot.cursor,
                 snapshot.json_line,
+                &store_fingerprint,
             )
         }
         SqliteSessionLayout::Grok => {
@@ -895,7 +953,11 @@ fn process_sqlite(
             let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
                 .map_err(|error| anyhow!("failed to read Grok session cursor: {error}"))?;
             if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
-                return Ok(unchanged_sqlite(record, old.expect("checked above")));
+                return Ok(unchanged_sqlite(
+                    record,
+                    old.expect("checked above"),
+                    &store_fingerprint,
+                ));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
                 .map_err(|error| anyhow!("failed to read Grok session snapshot: {error}"))?;
@@ -908,6 +970,7 @@ fn process_sqlite(
                 bucket_cap,
                 snapshot.cursor,
                 snapshot.json_line,
+                &store_fingerprint,
             )
         }
     }
@@ -922,12 +985,31 @@ fn process_sqlite_snapshot(
     bucket_cap: usize,
     cursor: OpenCodeCursor,
     json_line: Vec<u8>,
+    store_fingerprint: &str,
 ) -> anyhow::Result<Processed> {
+    // This session's own fields, and nothing else. The whole-store fingerprint
+    // was removed from `OpenCodeCursor` precisely so that this comparison
+    // cannot be polluted by a write to some other session.
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
-        return Ok(unchanged_sqlite(record, old.expect("checked above")));
+        return Ok(unchanged_sqlite(
+            record,
+            old.expect("checked above"),
+            store_fingerprint,
+        ));
     }
     let source_bytes = json_line.len() as u64;
     let digest = sha256_hex(&json_line);
+    if let Some(entry) = old {
+        if !force_reset && export_content_matches(entry, source_bytes, &digest) {
+            return Ok(unchanged_content_sqlite(
+                record,
+                cursor,
+                store_fingerprint,
+                source_bytes,
+                &digest,
+            ));
+        }
+    }
     let shard = Some(store::write_sealed_shard_bytes_with_cap(
         store::StageWriter::Collect,
         stage,
@@ -943,6 +1025,7 @@ fn process_sqlite_snapshot(
             prefix_sha256: digest,
             compressed: false,
             opencode: Some(cursor),
+            store_fingerprint: Some(store_fingerprint.to_string()),
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -958,9 +1041,86 @@ fn process_sqlite_snapshot(
     })
 }
 
-fn unchanged_sqlite(record: &SessionRecord, old: &OffsetEntry) -> Processed {
+/// The safety net: are the bytes we are about to seal byte-for-byte the bytes
+/// this cursor already exported?
+///
+/// `false` is always the safe answer, so every uncertain case answers `false`:
+/// a missing or empty `prefix_sha256` (we never recorded a hash, or cannot read
+/// one), a length that disagrees with the cursor's own two length fields, or an
+/// entry that is not a SQLite session cursor at all. "We cannot tell" is never
+/// read as "identical" — that would turn an unknown into a silent omission,
+/// which is the one outcome this repository never trades away.
+fn export_content_matches(entry: &OffsetEntry, source_bytes: u64, digest: &str) -> bool {
+    entry.opencode.is_some()
+        && !entry.compressed
+        && entry.offset == source_bytes
+        && entry.prefix_len == source_bytes
+        && !entry.prefix_sha256.is_empty()
+        && entry.prefix_sha256 == digest
+}
+
+/// The session's cursor moved, but the export it produced is byte-identical to
+/// the one already staged. Advance the cursor and skip the write.
+///
+/// This is *not* an incremental model — that decision (one full snapshot per
+/// change) is untouched. It removes a provably duplicate write of the exact
+/// same bytes, and it is only reachable when the entry already carries the
+/// digest of that export. `force_reset` is excluded by the caller: an
+/// unverifiable cursor may mean the staged shard is gone, and "the bytes are
+/// the same so we need not write" would then keep the data out of the archive
+/// forever.
+///
+/// `bytes_read` reports the read that really happened — the session *was*
+/// read, that is how the digest was computed. `lines_written` is 0 and `shard`
+/// is `None` because nothing new was staged.
+fn unchanged_content_sqlite(
+    record: &SessionRecord,
+    cursor: OpenCodeCursor,
+    store_fingerprint: &str,
+    source_bytes: u64,
+    digest: &str,
+) -> Processed {
     Processed {
-        state: old.clone(),
+        state: OffsetEntry {
+            offset: source_bytes,
+            prefix_len: source_bytes,
+            prefix_sha256: digest.to_string(),
+            compressed: false,
+            opencode: Some(cursor),
+            store_fingerprint: Some(store_fingerprint.to_string()),
+        },
+        outcome: CollectOutcome {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+            source_bytes,
+            bytes_read: source_bytes,
+            prefix_bytes_validated: 0,
+            lines_written: 0,
+            shard: None,
+            reset: false,
+            compressed: false,
+        },
+    }
+}
+
+/// The session did not change. The cursor is carried over untouched; only the
+/// whole-store fingerprint is refreshed, because the caller has just observed
+/// the store and compared this session's fields against it. Recording that
+/// observation lets the next pass take the shortcut, and it claims nothing new:
+/// an equal fingerprint means the store file is the same size and mtime, so the
+/// session is still unchanged.
+///
+/// `old` is reused rather than rebuilt so a hand-edited or older entry keeps
+/// whatever else it carries.
+fn unchanged_sqlite(
+    record: &SessionRecord,
+    old: &OffsetEntry,
+    store_fingerprint: &str,
+) -> Processed {
+    let mut state = old.clone();
+    state.store_fingerprint = Some(store_fingerprint.to_string());
+    Processed {
+        state,
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
             source_path_sha256: path_digest(&record.absolute_path),
@@ -1003,6 +1163,7 @@ fn process_jsonl(
             prefix_sha256: sha256_hex(&[]),
             compressed: false,
             opencode: None,
+            store_fingerprint: None,
         })
     } else {
         plain_state(&record.absolute_path, new_offset)?
@@ -1042,6 +1203,7 @@ fn process_opencode(
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    store_fingerprint: &str,
 ) -> anyhow::Result<Processed> {
     let session_id = record
         .id
@@ -1050,29 +1212,31 @@ fn process_opencode(
         .ok_or_else(|| anyhow!("invalid opencode session id"))?;
     let cursor = opencode_session_cursor(&record.absolute_path, session_id)
         .map_err(|error| anyhow!("failed to read opencode session cursor: {error}"))?;
+    // This session's own fields, and nothing else — see
+    // `process_sqlite_snapshot` for why the store-wide fingerprint is not here.
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
-        // reason: precondition is old.is_some() == true; unwrap_or(0) is only type unpacking fallback, an offset is guaranteed present
-        let source_bytes = old.map(|entry| entry.offset).unwrap_or(0);
-        return Ok(Processed {
-            state: old.expect("checked above").clone(),
-            outcome: CollectOutcome {
-                session_prefix: id_prefix(&record.id),
-                source_path_sha256: path_digest(&record.absolute_path),
-                source_bytes,
-                bytes_read: 0,
-                prefix_bytes_validated: 0,
-                lines_written: 0,
-                shard: None,
-                reset: false,
-                compressed: false,
-            },
-        });
+        return Ok(unchanged_sqlite(
+            record,
+            old.expect("checked above"),
+            store_fingerprint,
+        ));
     }
 
     let snapshot = read_opencode_session(&record.absolute_path, session_id)
         .map_err(|error| anyhow!("failed to read opencode session snapshot: {error}"))?;
     let source_bytes = snapshot.json_line.len() as u64;
     let digest = sha256_hex(&snapshot.json_line);
+    if let Some(entry) = old {
+        if !force_reset && export_content_matches(entry, source_bytes, &digest) {
+            return Ok(unchanged_content_sqlite(
+                record,
+                snapshot.cursor,
+                store_fingerprint,
+                source_bytes,
+                &digest,
+            ));
+        }
+    }
     let lines = vec![snapshot.json_line];
     let shard = Some(store::write_sealed_shard_bytes_with_cap(
         store::StageWriter::Collect,
@@ -1089,6 +1253,7 @@ fn process_opencode(
             prefix_sha256: digest,
             compressed: false,
             opencode: Some(snapshot.cursor),
+            store_fingerprint: Some(store_fingerprint.to_string()),
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1154,6 +1319,7 @@ fn process_whole_file(
             prefix_sha256: digest,
             compressed: false,
             opencode: None,
+            store_fingerprint: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1219,6 +1385,7 @@ fn process_compressed(
             prefix_sha256: sha256_hex(&[]),
             compressed: true,
             opencode: None,
+            store_fingerprint: None,
         }
     } else {
         OffsetEntry {
@@ -1227,6 +1394,7 @@ fn process_compressed(
             prefix_sha256: digest,
             compressed: true,
             opencode: None,
+            store_fingerprint: None,
         }
     };
     Ok(Processed {
@@ -1354,6 +1522,7 @@ fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
         prefix_sha256: sha256_hex(&prefix),
         compressed: false,
         opencode: None,
+        store_fingerprint: None,
     })
 }
 
