@@ -573,9 +573,9 @@ pub fn apply_registry(command: &RegistryCommand) -> Result<()> {
 
 /// The single line `native-host --self-test` prints.
 ///
-/// One line, on stdout, then exit. It exists so that "the host process starts
-/// and can speak" is verifiable *before* the framed stdio loop is written —
-/// and so the next ticket has a fixed thing to regress against. Diagnostics
+/// One line, on stdout, then exit. It proves "the host process starts and can
+/// speak" without sending a request frame; `message_loop` states how the real
+/// loop runs (one request per process, `nativehost-protocol.md` §2). Diagnostics
 /// must never go to stdout: Chromium reads stdout as a `u32` length prefix, so
 /// a stray log line is parsed as a multi-gigabyte frame and the pipe dies.
 pub fn self_test_line(host_name: &str, version: &str) -> String {
@@ -584,7 +584,7 @@ pub fn self_test_line(host_name: &str, version: &str) -> String {
         "version": version,
         "protocol": HOST_TYPE,
         "mode": "self-test",
-        "message_loop": "not-implemented",
+        "message_loop": "one-request-per-process",
         "ok": true,
     });
     value.to_string()
@@ -934,12 +934,17 @@ fn resolve_target() -> HostTarget {
     }
 }
 
-/// The machine id, resolved the way `ingest` resolves it: an explicit config
-/// value wins, otherwise the persisted 128-bit identity, created on first use.
+/// The machine id: an explicit config value wins, otherwise the persisted
+/// 128-bit identity.
 ///
-/// The host does create this file — it is chat-stasher's own state, and
-/// `ingest` already creates it on first run. A stage is different: it is a
-/// directory the user chose and must fill, so the host never makes one.
+/// Unlike every CLI command, the host never *creates* the identity. The host
+/// is started by the browser, not by the user's shell, so it does not see
+/// environment variables a shell profile sets (such as `XDG_DATA_HOME`). If the
+/// CLI's identity lives under such a variable, the host would find nothing at
+/// the default path and mint a second identity, and every delivered shard
+/// would land in a different machine's archive partition without a word. A
+/// missing identity is therefore a `config` refusal that names the fix,
+/// exactly like a missing stage.
 fn resolve_machine(config: &Config) -> std::result::Result<String, String> {
     if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
         return Ok(machine.to_string());
@@ -947,14 +952,14 @@ fn resolve_machine(config: &Config) -> std::result::Result<String, String> {
     let path = crate::config::default_data_root().join("machine-identity");
     match crate::identity::load_identity_state(&path) {
         crate::identity::IdentityFileState::Loaded(id) => Ok(id.as_hex()),
-        crate::identity::IdentityFileState::Missing => crate::identity::load_or_create(&path)
-            .map(|(id, _created)| id.as_hex())
-            .map_err(|e| {
-                format!(
-                    "cannot persist a machine identity at {}: {e:#}",
-                    path.display()
-                )
-            }),
+        crate::identity::IdentityFileState::Missing => Err(format!(
+            "no machine identity at {}; the host never creates one. Run any archiving command \
+             once from your shell (for example `chat-stasher run-once ...`), or set `machine` \
+             in {}. If your shell sets XDG_DATA_HOME, the browser does not see it: set \
+             `machine` in the config instead",
+            path.display(),
+            crate::config::config_path().display()
+        )),
         crate::identity::IdentityFileState::Unusable(error) => Err(format!(
             "machine identity file {} is present but unusable ({error:?}); do not delete it — \
              it is the key to this machine's archive partition",

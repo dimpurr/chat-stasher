@@ -222,6 +222,16 @@ impl Fixture {
         let stage = dir.path().join("stage");
         fs::create_dir_all(&home).expect("home");
         fs::create_dir_all(&stage).expect("stage");
+        // A machine that has already run the CLI has an identity. The host
+        // itself never creates one (see `nativehost::resolve_machine`), so
+        // seed it the same way the CLI does.
+        chat_stasher::identity::load_or_create(
+            &home
+                .join("data")
+                .join("chat-stasher")
+                .join("machine-identity"),
+        )
+        .expect("seed machine identity");
         Fixture { dir, home, stage }
     }
 
@@ -874,4 +884,45 @@ fn eight_concurrent_hosts_for_one_session_seal_eight_distinct_shards() {
             "no shard record carries the hash of payload {index}"
         );
     }
+}
+
+#[test]
+fn a_machine_without_an_identity_is_a_config_nack_and_no_identity_is_created() {
+    let fixture = Fixture::new();
+    let identity = fixture
+        .home
+        .join("data")
+        .join("chat-stasher")
+        .join("machine-identity");
+    fs::remove_file(&identity).expect("drop the seeded identity");
+    fixture.configure_stage();
+
+    let out = fixture.chrome(&frame(&serde_json::json!({"protocol": 1, "type": "hello"})));
+    let response = one_frame(&out.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "config", "{response}");
+    assert_eq!(response["retryable"], false, "{response}");
+    let detail = response["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("never creates"),
+        "detail must say why: {detail}"
+    );
+    assert!(
+        detail.contains("XDG_DATA_HOME"),
+        "detail must name the likely cause: {detail}"
+    );
+
+    let response = deliver(&fixture, "r-no-id", "sess-no-identity", "hello");
+    assert_matches_schema(&response);
+    assert_eq!(response["kind"], "config", "{response}");
+
+    assert!(
+        !identity.exists(),
+        "the host must not mint a machine identity"
+    );
+    assert!(
+        !fixture.stage.join("sessions").exists(),
+        "nothing may be written when the machine is unknown"
+    );
 }

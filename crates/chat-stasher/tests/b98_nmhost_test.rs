@@ -458,7 +458,7 @@ fn native_host_self_test_prints_exactly_one_json_line() {
     assert_eq!(value["host"], "com.chat_stasher.host");
     assert_eq!(value["protocol"], "stdio");
     assert_eq!(value["mode"], "self-test");
-    assert_eq!(value["message_loop"], "not-implemented");
+    assert_eq!(value["message_loop"], "one-request-per-process");
 }
 
 /// Without `--self-test` the subcommand runs the protocol loop.
@@ -540,6 +540,16 @@ fn native_host_on_empty_stdin_writes_nothing_and_exits_non_zero() {
 
 /// Write the one line the host needs to be able to serve anything.
 fn write_stage_config(home: &Path, stage: &Path) {
+    // A machine configured for the native host has run the CLI before, so it
+    // has an identity. The host itself never creates one
+    // (`nativehost::resolve_machine`); seed it the way the CLI does.
+    chat_stasher::identity::load_or_create(
+        &home
+            .join("data")
+            .join("chat-stasher")
+            .join("machine-identity"),
+    )
+    .unwrap();
     let dir = home.join("config").join("chat-stasher");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
