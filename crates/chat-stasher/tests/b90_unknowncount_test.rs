@@ -1,22 +1,27 @@
-//! B90 — 「数不出来」被印成了一个具体的数字。
+//! B90 — "Uncountable" rendered as a concrete number.
 //!
-//! 这个仓最硬的规矩是「不能把未知当成空」。B90 收的是它的**计数**变体：
-//! 一个数不出来的量，落到屏幕上时变成了 `0` / `0 天`，读的人无法把它和
-//! 「真的是零」区分开。本文件收三处里能端到端复现的两处：
+//! The strictest invariant in this repository is "never treat unknown as empty".
+//! B90 addresses its **counting** variant:
+//! an uncountable quantity becomes `0` / `0 days` on screen, so readers cannot
+//! distinguish it from "genuinely zero". This file covers the two cases reproducible
+//! end-to-end:
 //!
-//!   * **B** —— `doctor` 的 Claude Code 风险行。`earliest` 是 `None` 时日期
-//!     诚实地印 `n/a`，天数却偷偷变成 `0.0`，于是同一句话里一半诚实一半是编的，
-//!     而且编出来的那一半是**让人立刻采取行动的假警报**：「你的历史只还剩约 0 天」。
-//!   * **C** —— `status --sessions` 的 mtime 列。取不到 / 早于纪元的 mtime
-//!     打成 `0`，与「真的等于 1970-01-01」不可分。这正是 `inbox.rs` 刚修掉的
-//!     那个 bug，只是没扫到这张表。
+//!   * **B** — `doctor`'s Claude Code risk line. When `earliest` is `None`, date
+//!     honestly prints `n/a`, but days silently become `0.0`, resulting in half
+//!     honest and half fabricated statements in the same sentence, and the fabricated
+//!     half is a **false alarm prompting immediate action**: "only about 0 days left".
+//!   * **C** — `status --sessions` mtime column. An unavailable / pre-epoch mtime
+//!     rendered as `0`, indistinguishable from "genuinely equal to 1970-01-01". This
+//!     is the exact bug just fixed in `inbox.rs`, but not yet swept in this table.
 //!
-//! （A —— `sqlite_probe::unreadable_candidate_count` 自己读不出来时报 `0` ——
-//! 需要让「第二次打开同一个库」失败，无法在一个进程里确定性地端到端复现，
-//! 反证测试放在 `src/sqlite_probe.rs` 与 `src/doctor.rs` 的单元测试里。）
+//! (A — `sqlite_probe::unreadable_candidate_count` reporting `0` when itself unreadable —
+//! requires making "opening the same db a second time" fail, which cannot be deterministically
+//! reproduced end-to-end in a single process; disproof tests reside in unit tests of
+//! `src/sqlite_probe.rs` and `src/doctor.rs`.)
 //!
-//! 全部只在 `tempfile` 临时目录里跑：HOME / XDG_* / CHAT_STASHER_REGISTRY /
-//! CURSOR_USER_DIR 全部改道进沙箱，绝不碰真实 harness 目录，也绝不读会话正文。
+//! Everything runs strictly in `tempfile` scratch directories: HOME / XDG_* /
+//! CHAT_STASHER_REGISTRY / CURSOR_USER_DIR are all diverted into the sandbox, never
+//! touching real harness directories and never reading session contents.
 
 use rusqlite::Connection;
 use std::fs;
@@ -24,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-/// `doctor::run()` 走的是进程级环境变量，而 cargo 在同一进程里并行跑测试。
+/// `doctor::run()` relies on process-level environment variables, whereas cargo runs tests in parallel in the same process.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn isolate_home(home: &Path) {
@@ -45,22 +50,27 @@ fn isolate_home(home: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// B —— 同一句话里一半诚实一半编的
+// B — Half honest, half fabricated in the same sentence
 // ---------------------------------------------------------------------------
 
-/// 取出 Claude Code 那条风险行。
+/// Extract the Claude Code risk line.
 fn claude_risk(report: &chat_stasher::doctor::DoctorReport) -> String {
     report
         .risks
         .iter()
         .find(|line| line.contains("Claude Code"))
         .cloned()
-        .unwrap_or_else(|| panic!("doctor 没有输出任何 Claude Code 风险行：{:?}", report.risks))
+        .unwrap_or_else(|| {
+            panic!(
+                "doctor did not output any Claude Code risk line: {:?}",
+                report.risks
+            )
+        })
 }
 
-/// **B 的反证。** 一台没有任何 Claude 会话的机器上：`earliest` 是 `None`，
-/// 于是「最早的会话是 n/a」是诚实的，「约 0 天前」「只还剩约 0 天」是编的。
-/// 改之前这个断言必须红——它断言的正是那个编出来的数字不许出现。
+/// **Disproof of B.** On a machine without any Claude sessions: `earliest` is `None`,
+/// so "earliest session is n/a" is honest, while "about 0 days ago" / "only about 0 days left" are fabricated.
+/// Before the fix, this assertion must fail — it asserts that the fabricated number must not appear.
 #[test]
 fn claude_risk_never_invents_a_day_count_it_does_not_have() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -72,16 +82,16 @@ fn claude_risk_never_invents_a_day_count_it_does_not_have() {
 
     assert!(
         !line.contains("0 days ago"),
-        "最早会话未知时不许印出「约 0 天前」这个编出来的数字；实际输出：\n{line}"
+        "fabricated 'about 0 days ago' must not be printed when earliest session is unknown; actual output:\n{line}"
     );
     assert!(
         !line.contains("only about 0 days left"),
-        "「只还剩约 0 天」是一句让人立刻采取行动的假警报；实际输出：\n{line}"
+        "'only about 0 days left' is a false alarm prompting immediate action; actual output:\n{line}"
     );
 }
 
-/// 编出来的数字被拿掉之后，这句话不许退化成沉默：风险本身（cleanupPeriodDays
-/// 未设置 → 默认 30 天）仍然存在，只是天数说成「未知」。
+/// After removing the fabricated number, this line must not degrade into silence: the risk itself (cleanupPeriodDays
+/// unset -> default 30 days) still exists, only the day count is stated as "unknown".
 #[test]
 fn claude_risk_still_says_the_retention_risk_and_names_the_unknown() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -93,22 +103,22 @@ fn claude_risk_still_says_the_retention_risk_and_names_the_unknown() {
 
     assert!(
         line.contains("cleanupPeriodDays is unset"),
-        "风险本身没有消失，仍然要说；实际输出：\n{line}"
+        "the risk itself did not disappear and must still be stated; actual output:\n{line}"
     );
     assert!(
         line.contains("unknown"),
-        "说不出天数就要明说「unknown」，而不是不吭声；实际输出：\n{line}"
+        "when day count cannot be determined it must explicitly state 'unknown' rather than staying silent; actual output:\n{line}"
     );
 }
 
-/// 体面的失败路径：一台**有**会话的机器上，这行还是要给出真实日期和天数。
-/// 这条同时是「健康机器上它不吵」的证据——未知分支没有污染已知分支。
+/// Dignified failure path: on a machine **with** sessions, this line must still give the real date and day count.
+/// This also serves as evidence that 'it stays quiet on healthy machines' — the unknown branch does not pollute the known branch.
 #[test]
 fn a_machine_with_sessions_still_gets_a_real_date_and_a_real_day_count() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let sandbox = tempfile::tempdir().expect("sandbox");
     isolate_home(sandbox.path());
-    // 一个真实形状的 claude-code 会话文件，mtime 就是现在。
+    // A realistically-shaped claude-code session file, mtime is now.
     let projects = sandbox.path().join(".claude").join("projects").join("p");
     fs::create_dir_all(&projects).expect("create claude projects dir");
     fs::write(projects.join("s.jsonl"), "{}\n").expect("write session file");
@@ -118,23 +128,23 @@ fn a_machine_with_sessions_still_gets_a_real_date_and_a_real_day_count() {
 
     assert!(
         !line.contains("n/a"),
-        "有会话时日期必须是真的；实际输出：\n{line}"
+        "date must be real when sessions exist; actual output:\n{line}"
     );
     assert!(
         line.contains("about 0 days ago"),
-        "有会话时天数必须照旧印出来（刚写的文件就是 0 天前）；实际输出：\n{line}"
+        "day count must still be printed when sessions exist (freshly written file is 0 days ago); actual output:\n{line}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// C —— status --sessions 的 mtime 列
+// C — status --sessions mtime column
 // ---------------------------------------------------------------------------
 
-/// 一条 `createdAt` 为负数的 Cursor composer：它的 mtime 早于纪元，
-/// `duration_since(UNIX_EPOCH)` 失败，旧代码把它打成 `0`。
+/// A Cursor composer with negative `createdAt`: its mtime predates the epoch,
+/// `duration_since(UNIX_EPOCH)` fails, and old code rendered it as `0`.
 const PRE_EPOCH_ROW: &str =
     r#"{"composerId":"a","createdAt":-1000,"fullConversationHeadersOnly":[{"bubbleId":"b"}]}"#;
-/// 同样合格、但时间戳正常的一条，用来证明正常行的显示没被改坏。
+/// An equally valid entry but with normal timestamp, used to prove normal row display is not broken.
 const NORMAL_ROW: &str = r#"{"composerId":"b","createdAt":1760000000000,"fullConversationHeadersOnly":[{"bubbleId":"b"}]}"#;
 
 fn plant_rows(user_dir: &Path, rows: &[(&str, &str)]) {
@@ -153,8 +163,8 @@ fn plant_rows(user_dir: &Path, rows: &[(&str, &str)]) {
     drop(conn);
 }
 
-/// 一个 harness 的 registry，三个平台槽位都放同一个 Cursor cell，
-/// 让 fixture 在任何 OS 上走同一条代码路径。
+/// A single-harness registry with the same Cursor cell in all three platform slots,
+/// allowing the fixture to execute the same code path on any OS.
 fn write_cursor_registry(base: &Path) -> PathBuf {
     let cursor = r#"{ "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
                       "env_override": "CURSOR_USER_DIR", "format": "sqlite",
@@ -179,7 +189,7 @@ fn write_cursor_registry(base: &Path) -> PathBuf {
     path
 }
 
-/// `status --sessions` 的表体（去掉 `[run-once]` 那行的墙钟内容）。
+/// Body of `status --sessions` (stripping wall-clock content from the `[run-once]` line).
 fn run_status_sessions(sandbox: &Path, rows: &[(&str, &str)]) -> String {
     let home = sandbox.join("home");
     let user_dir = home.join("Cursor").join("User");
@@ -210,7 +220,7 @@ fn run_status_sessions(sandbox: &Path, rows: &[(&str, &str)]) -> String {
         .collect()
 }
 
-/// 表里 mtime 那一列的所有取值。
+/// All values in the mtime column of the table.
 fn mtime_column(body: &str) -> Vec<String> {
     body.lines()
         .filter(|line| line.trim_start().starts_with("cursor "))
@@ -219,8 +229,8 @@ fn mtime_column(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// **C 的反证。** 一条早于纪元的 mtime 在表里被打成 `0`，和「真的等于纪元」
-/// 不可分。改之前这个断言必须红。
+/// **Disproof of C.** A pre-epoch mtime rendered as `0` in the table is indistinguishable
+/// from "genuinely equal to epoch". Before the fix this assertion must fail.
 #[test]
 fn status_sessions_never_prints_an_unknown_mtime_as_zero() {
     let sandbox = tempfile::tempdir().expect("sandbox");
@@ -230,28 +240,32 @@ fn status_sessions_never_prints_an_unknown_mtime_as_zero() {
     assert_eq!(
         column.len(),
         1,
-        "fixture 应当只产出一行；实际输出：\n{body}"
+        "fixture should produce exactly one row; actual output:\n{body}"
     );
     assert_ne!(
         column[0], "0",
-        "取不到 / 早于纪元的 mtime 不许打成 0——那和「真的等于 1970-01-01」不可分；实际输出：\n{body}"
+        "unavailable / pre-epoch mtime must not be rendered as 0 — indistinguishable from 'genuinely equal to 1970-01-01'; actual output:\n{body}"
     );
     assert!(
         column[0].contains("unknown"),
-        "它应当显示成「未知」；实际输出：\n{body}"
+        "it should be displayed as 'unknown'; actual output:\n{body}"
     );
 }
 
-/// 健康机器上「它不响」：时间戳正常的一行照旧印出秒数，一个字都不多。
+/// "It does not ring" on healthy machines: a row with a normal timestamp prints seconds as usual, without extra words.
 #[test]
 fn a_readable_mtime_still_prints_its_seconds() {
     let sandbox = tempfile::tempdir().expect("sandbox");
     let body = run_status_sessions(sandbox.path(), &[("composerData:bbb", NORMAL_ROW)]);
     let column = mtime_column(&body);
 
-    assert_eq!(column, vec!["1760000000".to_string()], "实际输出：\n{body}");
+    assert_eq!(
+        column,
+        vec!["1760000000".to_string()],
+        "actual output:\n{body}"
+    );
     assert!(
         !body.contains("unknown"),
-        "没有未知的东西时，输出里不许出现「unknown」；实际输出：\n{body}"
+        "when nothing is unknown, 'unknown' must not appear in output; actual output:\n{body}"
     );
 }

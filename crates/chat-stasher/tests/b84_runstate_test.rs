@@ -3,8 +3,8 @@
 //! The observation that opened this ticket was a real terminal session:
 //!
 //! ```text
-//! [run-once] 还没有任何运行记录：本机从未成功跑完一次 run-once（…）。
-//! [scan] 505 个会话（0 compressed）：…
+//! [run-once] No run record yet: this machine has never successfully completed run-once (...).
+//! [scan] 505 sessions (0 compressed): ...
 //! ```
 //!
 //! …reported alongside exit code 0. The code was never 0. `cmd_status` maps
@@ -33,7 +33,7 @@
 //! (`b80_exitfamily_test.rs`, `cmd_search` / `cmd_collect` comments):
 //!
 //! ```text
-//! 3 = 没读完 / 根本没读      1 = 读完了失败      2 = 用法错      0 = 干净
+//! 3 = did not read / never read      1 = finished and failed      2 = usage error      0 = clean
 //! ```
 //!
 //! Everything below runs the real binary inside a `tempfile` sandbox with
@@ -136,13 +136,13 @@ fn never_ran_exits_non_zero() {
 
     assert!(
         text.contains(NEVER_RAN),
-        "fixture 必须真的走到「从未跑过」那条判定；实际输出：\n{text}"
+        "fixture must reach the 'never ran' verdict branch; actual output:\n{text}"
     );
     assert_eq!(
         out.status.code(),
         Some(FINISHED_AND_FAILED),
-        "扫描读完了、定时器判定为不健康 = 1；把它改成 0 会让「定时器从没装」和\
-         「定时器装了但死了」在脚本眼里长得一样；实际输出：\n{text}"
+        "scan finished, timer evaluated as unhealthy = 1; changing it to 0 would make 'timer never installed' and \
+         'timer installed but dead' look identical to scripts; actual output:\n{text}"
     );
 }
 
@@ -157,7 +157,7 @@ fn never_ran_is_the_finished_and_failed_code_not_the_did_not_read_code() {
 
     assert!(
         !text.contains("status: scan failed"),
-        "这条 fixture 必须是「扫描成功了」的那条路径；实际输出：\n{text}"
+        "this fixture must take the 'scan succeeded' path; actual output:\n{text}"
     );
 }
 
@@ -174,7 +174,7 @@ fn a_recent_successful_run_still_exits_zero() {
     assert_eq!(
         out.status.code(),
         Some(CLEAN),
-        "上次运行成功且不过期 = 0；实际输出：\n{text}"
+        "last run succeeded and not stale = 0; actual output:\n{text}"
     );
 }
 
@@ -190,7 +190,7 @@ fn a_recorded_failure_exits_non_zero() {
     assert_eq!(
         out.status.code(),
         Some(FINISHED_AND_FAILED),
-        "上次运行失败 = 1；实际输出：\n{text}"
+        "last run failed = 1; actual output:\n{text}"
     );
 }
 
@@ -210,8 +210,8 @@ fn only_the_verdict_line_differs_between_the_two_exit_codes() {
     assert_eq!(
         body_without_verdict(&never_text),
         body_without_verdict(&healthy_text),
-        "去掉 [run-once] 那行之后两份报告必须逐字节相同；\
-         不同说明退出码之外还有别的东西跟着 run-state 变了：\n{never_text}\n---\n{healthy_text}"
+        "after stripping the [run-once] line both reports must be byte-identical; \
+         differences indicate something other than exit code changed with run-state:\n{never_text}\n---\n{healthy_text}"
     );
 }
 

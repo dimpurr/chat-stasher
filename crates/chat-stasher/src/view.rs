@@ -10,10 +10,10 @@
 //! * **Metadata tier only.** The page is rendered from one
 //!   [`crate::search::search_sessions`] report taken *before* the socket is
 //!   bound. No request touches the repository, so no request can be made to
-//!   fetch payload. The page says "正文未加载" out loud, and prints what a
+//!   fetch payload. The page says "payload not loaded" out loud, and prints what a
 //!   full-text pass *would* cost ([`crate::search::SearchReport::fulltext_cost`]),
 //!   because a full-text feature that ships silently becomes the default
-//!   expectation — and its price can turn "看归档" into "下载归档".
+//!   expectation — and its price can turn "view archive" into "download archive".
 //! * **Loopback is not a security boundary.** Every other program running as
 //!   any user on this machine can connect to `127.0.0.1`. So the server is not
 //!   "safe because it is local": it requires a per-launch random token, carried

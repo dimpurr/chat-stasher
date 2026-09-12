@@ -19,6 +19,10 @@ semantic constraints this repo will not bend on (they are spec, not style):
        "missing" (in an archive/backup context) are not. "missing" is only caught
        with a word-boundary archive-context word, so "bundle sessionId is missing"
        (a missing JSON field) is NOT an archive claim and stays silent.
+  T4 · one-word-one-meaning-reap. "reap" is only permitted in ssh master connection
+       reclaim context; all stage shard-body reclamation must say reclaim.
+  T5 · no-cjk-characters.       Source code and tests under crates/ must not
+       contain Chinese characters in comments or code strings.
 
 Output format mirrors scripts/check-semantic-defaults.py:
     FAILED:<n>
@@ -41,6 +45,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _user_strings as us  # noqa: E402
@@ -133,7 +138,55 @@ RULES = [
             "统一说 reclaim / reclaimed。若这条确实是 ssh 语义，请把 ssh / master 写明白。"
         ),
     },
+    {
+        "id": "T5",
+        "name": "no-cjk-characters",
+        "patterns": [
+            {"forbidden": r"[\u4e00-\u9fff]"},
+        ],
+        "suggestion": (
+            "crates/ 下源码与测试中禁止出现中文字符（注释与代码均包含）；"
+            "请替换为地道、准确的英文。"
+        ),
+    },
 ]
+
+
+@dataclass(frozen=True)
+class FileLineHit:
+    path: str
+    line: int
+    text: str
+
+
+def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
+    """Scan all .rs and .json files under crates/ for CJK characters line by line.
+
+    `.json` is included because the harness registry under crates/ ships with the
+    binary and some of its fields reach users; it is as much part of the public
+    English surface as the source. A file that cannot be read or decoded is
+    reported, not skipped: a gate that treats "could not look" as "clean" is the
+    exact failure this repository exists to refuse.
+    """
+    out: list[tuple[FileLineHit, dict]] = []
+    crates_dir = os.path.join(root, "crates")
+    if not os.path.isdir(crates_dir):
+        return out
+    pat = re.compile(rule["patterns"][0]["forbidden"])
+    for dirpath, _, filenames in os.walk(crates_dir):
+        for fname in sorted(filenames):
+            if fname.endswith((".rs", ".json")):
+                full_path = os.path.join(dirpath, fname)
+                rel_path = os.path.relpath(full_path, root)
+                try:
+                    with open(full_path, "r", encoding="utf-8") as fh:
+                        for lineno, line in enumerate(fh, start=1):
+                            line_content = line.rstrip("\r\n")
+                            if pat.search(line_content):
+                                out.append((FileLineHit(path=rel_path, line=lineno, text=line_content.strip()), rule))
+                except (OSError, UnicodeDecodeError) as exc:
+                    out.append((FileLineHit(path=rel_path, line=0, text=f"cannot read file: {exc}"), rule))
+    return out
 
 
 def run_rules(hits: list[us.Hit]) -> list[tuple[us.Hit, dict]]:
@@ -143,6 +196,8 @@ def run_rules(hits: list[us.Hit]) -> list[tuple[us.Hit, dict]]:
         if hit.in_test:
             continue
         for rule in RULES:
+            if rule["id"] == "T5":
+                continue
             for pat in rule["patterns"]:
                 if "exact" in pat:
                     fired = hit.unescaped.strip().lower() in {t.lower() for t in pat["exact"]}
@@ -165,6 +220,9 @@ def run_rules(hits: list[us.Hit]) -> list[tuple[us.Hit, dict]]:
 def check(root: str) -> int:
     hits = us.extract_all(root)
     violations = run_rules(hits)
+    t5_rule = next((r for r in RULES if r["id"] == "T5"), None)
+    if t5_rule:
+        violations.extend(check_cjk(root, t5_rule))
     if not violations:
         print("OK — no terminology violations")
         return 0
@@ -214,6 +272,13 @@ FIXTURE_VIOLATING = {
         '    retention: String,\n'
         '}\n'
     ),
+    "t5_violation.rs": (
+        '// 这是中文注释\n'
+        'pub fn bad_cjk() {}\n'
+    ),
+    "t5_violation.json": (
+        '{"display_name": "中文显示名"}\n'
+    ),
 }
 
 # Near-misses: same words, but the OTHER meaning. The lint must stay silent on these.
@@ -250,6 +315,15 @@ FIXTURE_CLEAN = {
         '    retention: String,\n'
         '}\n'
     ),
+    "t5_clean.rs": (
+        '// English comments only\n'
+        'pub fn good_english() {\n'
+        '    println!("pure english text");\n'
+        '}\n'
+    ),
+    "t5_clean.json": (
+        '{"display_name": "Plain English display name"}\n'
+    ),
 }
 
 
@@ -281,6 +355,13 @@ def selftest() -> int:
 
         # -- half: violating fixtures only
         _write_fixtures(src, FIXTURE_VIOLATING)
+        # A file check_cjk cannot decode must be reported, not skipped as clean.
+        # It is a .json on purpose: only check_cjk reads .json, so this exercises
+        # that branch directly. (An undecodable .rs also stops the gate, because
+        # the user-string extractor raises on it and the run exits non-zero —
+        # which blocks too, but would mask what this fixture is here to prove.)
+        with open(os.path.join(src, "t5_undecodable.json"), "wb") as fh:
+            fh.write(b"{\"note\": \"\xff\xfe not valid utf-8\"}\n")
         proc = subprocess.run([sys.executable, script, tmp], capture_output=True, text=True)
         report = proc.stdout + proc.stderr
         say(f"violating tree -> exit {proc.returncode}")
@@ -288,14 +369,24 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        expect("FAILED:10" in report, "violating tree reports exactly 10 violations")
+        expect("FAILED:13" in report, "violating tree reports exactly 13 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
         expect("t4_violation.rs" in report, "T4 fixture is named in the report")
+        expect("t5_violation.rs" in report, "T5 fixture is named in the report")
+        expect("t5_violation.json" in report, "T5 also covers .json under crates/")
+        expect("t5_undecodable.json" in report and "cannot read file" in report,
+               "an undecodable file is reported, not silently skipped")
         expect("clap_help_violation.rs" in report, "clap-help surface fixture is named in the report")
-        expect("[T1 " in report and "[T2 " in report and "[T3 " in report and "[T4 " in report,
-               "each of T1/T2/T3/T4 is named with its suggestion")
+        expect(
+            "[T1 " in report
+            and "[T2 " in report
+            and "[T3 " in report
+            and "[T4 " in report
+            and "[T5 " in report,
+            "each of T1/T2/T3/T4/T5 is named with its suggestion",
+        )
 
         # -- clean fixtures must NOT appear
         for name in FIXTURE_CLEAN:

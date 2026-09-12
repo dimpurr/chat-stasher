@@ -907,7 +907,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 统一的 `~` 展开（`expand_tilde` / `assert_no_literal_tilde`）
+    // Unified `~` expansion (`expand_tilde` / `assert_no_literal_tilde`)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -922,12 +922,12 @@ mod tests {
             expand_tilde_with_home("~/x/y", Some(&home_s)),
             Ok(home.path().join("x/y"))
         );
-        // Windows 的 `~\` 拼写也接受（在每个平台上都按家目录展开）。
+        // Windows `~\` spelling is also accepted (expanded to home directory on every platform).
         assert_eq!(
             expand_tilde_with_home("~\\x", Some(&home_s)),
             Ok(home.path().join("x"))
         );
-        // 不带 `~` 的路径原样返回。
+        // Paths without `~` are returned unchanged.
         assert_eq!(
             expand_tilde_with_home("/abs/path", Some(&home_s)),
             Ok(PathBuf::from("/abs/path"))
@@ -982,14 +982,14 @@ mod tests {
 
     #[test]
     fn assert_no_literal_tilde_rejects_unexpanded_component() {
-        // 人为构造的“展开漏网”路径：中间的 `~`、`~用户名` 组件都必须被拒。
+        // Synthetic "escaped expansion" paths: mid-path `~` and `~username` components must be rejected.
         assert!(assert_no_literal_tilde(Path::new("stash/~/x")).is_err());
         assert!(assert_no_literal_tilde(Path::new("/home/me/~alice")).is_err());
-        // 展开后的正常绝对路径必须放行。
+        // Normal absolute paths after expansion must be allowed.
         let home = tempfile::TempDir::new().unwrap();
         assert!(assert_no_literal_tilde(&home.path().join("x")).is_ok());
         assert!(assert_no_literal_tilde(Path::new("/home/me/real")).is_ok());
-        // 文件名里带 `~` 但不是组件开头，是合法文件名，不误伤。
+        // `~` inside a filename not at component start is a valid filename, do not false-positive.
         assert!(assert_no_literal_tilde(Path::new("/home/me/foo~bar")).is_ok());
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 载入时逐字段展开 + 缺失 `$HOME` 时按默认值处理
+    // Per-field expansion on load + fallback to defaults when `$HOME` is missing
     // -----------------------------------------------------------------------
 
     #[test]

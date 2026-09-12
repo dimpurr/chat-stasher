@@ -319,7 +319,7 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     assert_eq!(
         cleared.len(),
         1,
-        "rustic 一定建了缓存；这里清到 {} 个 = 没找到它。roots={:?}",
+        "rustic definitely created cache; cleared {} here = cache not found. roots={:?}",
         cleared.len(),
         store::rustic_cache_roots()
     );
@@ -373,7 +373,7 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     assert_eq!(
         cleared_again.len(),
         1,
-        "同上：清到 {} 个缓存目录 = 下面那条断言测的是缓存，不是仓库。roots={:?}",
+        "as above: cleared {} cache dirs = assertion below would test cache instead of repository. roots={:?}",
         cleared_again.len(),
         store::rustic_cache_roots()
     );

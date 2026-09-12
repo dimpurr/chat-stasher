@@ -521,7 +521,7 @@ pub fn ingest_with_cap(
     for path in &candidates {
         let name = path
             .file_name()
-            // reason: candidates 中的 path 均来自 read_dir 的 entry.path()，必有合法 file_name，保底为空字符串
+            // reason: all paths in candidates come from read_dir entry.path(), guaranteed to have valid file_name; empty string is safe fallback
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();

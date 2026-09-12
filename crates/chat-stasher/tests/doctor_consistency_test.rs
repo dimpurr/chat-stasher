@@ -156,7 +156,7 @@ fn plant_grok_db(home: &Path) {
 /// The fixture above plants Cursor and Grok at paths *it* chose, so the shipped
 /// registry's per-platform template is not what should decide whether they are
 /// found: on linux the Cursor cell points at `$XDG_CONFIG_HOME/Cursor/...` and
-/// the Grok cell is `未查明` (correctly refused as a guess). Writing the paths
+/// the Grok cell is `unascertained` (correctly refused as a guess). Writing the paths
 /// into `[harness_roots]` is the test stating what it did — the same thing a
 /// user with a non-default install does — so the fixture resolves identically
 /// on every platform. The known-count assertions below are unchanged: the
@@ -213,11 +213,11 @@ fn assert_report_self_consistent(report: &doctor::DoctorReport) {
         match (fp.session_count, probe.record_count) {
             (Some(a), Some(b)) => assert_eq!(
                 a, b,
-                "harness {fp_name} 自相矛盾: footprint 表会话 {a} vs registry 表会话 {b}"
+                "harness {fp_name} contradicts itself: footprint table sessions {a} vs registry table sessions {b}"
             ),
             (None, None) => {}
             (a, b) => panic!(
-                "harness {fp_name} 对会话数口径不一致: footprint={a:?} registry={b:?}（一个能枚举另一个不能，或反之）"
+                "harness {fp_name} inconsistent session counting: footprint={a:?} registry={b:?} (one can enumerate while the other cannot, or vice versa)"
             ),
         }
 
@@ -230,7 +230,7 @@ fn assert_report_self_consistent(report: &doctor::DoctorReport) {
             let scanner_files: BTreeSet<_> = probe.recognized_files.iter().collect();
             assert!(
                 doctor_files == scanner_files,
-                "harness {fp_name} 文件识别口径不一致: doctor={}/scanner={}",
+                "harness {fp_name} file recognition inconsistency: doctor={}/scanner={}",
                 doctor_files.len(),
                 scanner_files.len()
             );
@@ -241,7 +241,7 @@ fn assert_report_self_consistent(report: &doctor::DoctorReport) {
         if matches!(probe.state, scanner::ProbeState::FileTarget) {
             assert_eq!(
                 fp.total_bytes, probe.bytes,
-                "harness {fp_name} 字节口径不一致: footprint={:?} B vs registry={:?} B",
+                "harness {fp_name} byte count inconsistency: footprint={:?} B vs registry={:?} B",
                 fp.total_bytes, probe.bytes
             );
         }
@@ -287,7 +287,7 @@ fn doctor_tables_never_contradict_any_harness() {
     assert_eq!(
         gemini.session_count,
         Some(GEMINI_SESSIONS),
-        "doctor 假目录应同时识别 .json/.jsonl 会话并排除 settings.json"
+        "doctor dummy directory should recognize both .json/.jsonl sessions and exclude settings.json"
     );
 
     let opencode = report
@@ -298,7 +298,7 @@ fn doctor_tables_never_contradict_any_harness() {
     assert_eq!(
         opencode.session_count,
         Some(OPENCODE_SESSIONS),
-        "footprint 表带着已知真值自校：应认出我们种下的 {OPENCODE_SESSIONS} 个 SQLite 会话"
+        "footprint table self-check against known ground truth: should recognize our {OPENCODE_SESSIONS} planted SQLite sessions"
     );
     let cursor = report
         .footprints
@@ -308,12 +308,12 @@ fn doctor_tables_never_contradict_any_harness() {
     assert_eq!(
         cursor.session_count,
         Some(CURSOR_SESSIONS),
-        "footprint 表带着已知真值自校：应认出我们种下的 {CURSOR_SESSIONS} 个 cursorDiskKV 会话"
+        "footprint table self-check against known ground truth: should recognize our {CURSOR_SESSIONS} planted cursorDiskKV sessions"
     );
     let grok = report.footprints.iter().find(|f| f.name == "grok").unwrap();
     assert_eq!(
         grok.session_count,
         Some(GROK_SESSIONS),
-        "footprint 表带着已知真值自校：应认出我们种下的 {GROK_SESSIONS} 个 session_docs 会话"
+        "footprint table self-check against known ground truth: should recognize our {GROK_SESSIONS} planted session_docs sessions"
     );
 }

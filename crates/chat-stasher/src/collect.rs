@@ -442,7 +442,7 @@ pub struct CollectReport {
     pub scanner_unreadable_unknown: u64,
     pub scanner_unreadable_entry_count: u64,
     /// B82: harnesses this pass never got to look at (root un-stattable, wrong
-    /// type, template unresolvable, confidence `未查明`). They contribute no
+    /// type, template unresolvable, confidence `unascertained`). They contribute no
     /// records, and without this count a pass that skipped them reads as a
     /// pass that found them empty.
     pub scanner_unlooked_harnesses: usize,
@@ -585,7 +585,7 @@ pub fn collect_scan_report(
         .destinations
         .get(&destination_id)
         .cloned()
-        // reason: 新目标仓库首次归档时 runstate 中无该 destination 记录，欠债集合天然为空集合
+        // reason: on first archive to a new destination, runstate has no record for this destination, so the debt set is naturally empty
         .unwrap_or_default()
         .files;
     let legacy_state_ignored = state_dir.join(LEGACY_STATE_FILE).exists();
@@ -1004,7 +1004,7 @@ fn process_opencode(
     let cursor = opencode_session_cursor(&record.absolute_path, session_id)
         .map_err(|error| anyhow!("failed to read opencode session cursor: {error}"))?;
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
-        // reason: 前提是 old.is_some() 为 true，此处 unwrap_or(0) 仅为类型解包保底，实际必有 offset
+        // reason: precondition is old.is_some() == true; unwrap_or(0) is only type unpacking fallback, an offset is guaranteed present
         let source_bytes = old.map(|entry| entry.offset).unwrap_or(0);
         return Ok(Processed {
             state: old.expect("checked above").clone(),
@@ -1272,8 +1272,8 @@ fn read_jsonl_delta(
             // "validated bytes" for a prefix just proven wrong, which `collect`
             // prints as `prefix_validated=N`. Whichever way we arrive, the code
             // below re-reads the file whole from offset 0 and validates no prefix.
-            // reason: 走到这里意味着没有任何前缀通过校验——要么本就没有可复用条目，
-            //         要么可复用条目的前缀哈希刚刚校验失败；两种情况下已校验前缀字节数都是 0
+            // reason: reaching here means no prefix passed validation — either there was no reusable entry to begin with,
+            //         or the reusable entry's prefix hash just failed validation; in both cases validated prefix bytes are 0
             prefix_bytes_validated: 0,
             reset: old.is_some(),
         });

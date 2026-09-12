@@ -85,8 +85,8 @@ fn assert_absence_semantics_agree(report: &doctor::DoctorReport) {
         assert_eq!(
             fp.session_count.is_some(),
             pr.record_count.is_some(),
-            "harness {fp_name} 对「空」的口径不一致: footprint={:?} registry={:?} \
-             (probe state={:?}, installed_p={}) —— Some(0) 是「我看过，是空的」，None 是「我没能确定」",
+            "harness {fp_name} inconsistent counting of 'empty': footprint={:?} registry={:?} \
+             (probe state={:?}, installed_p={}) — Some(0) is 'I checked and it is empty', None is 'I could not determine'",
             fp.session_count,
             pr.record_count,
             pr.state,
@@ -95,7 +95,7 @@ fn assert_absence_semantics_agree(report: &doctor::DoctorReport) {
         assert_eq!(
             fp.installed,
             pr.installed_p(),
-            "harness {fp_name} 对「装没装」的口径不一致: footprint.installed={} registry.installed_p()={} \
+            "harness {fp_name} inconsistent judgement on 'whether installed': footprint.installed={} registry.installed_p()={} \
              (probe state={:?})",
             fp.installed,
             pr.installed_p(),
@@ -128,17 +128,17 @@ fn nothing_installed_reports_unknown_not_zero() {
         let pr = probe(&report, probe_id);
         assert!(
             !pr.installed_p(),
-            "隔离 HOME 下 {probe_id} 不该被判为已安装（state={:?}）—— 测试泄漏到了本机真实目录",
+            "under isolated HOME {probe_id} should not be judged as installed (state={:?}) — test leaked to machine's real directory",
             pr.state
         );
         assert_eq!(
             fp.session_count, None,
-            "空机器上 {fp_name} 的 footprint 会话数必须是「未知」，不是 {:?}",
+            "on empty machine {fp_name} footprint session count must be 'unknown', not {:?}",
             fp.session_count
         );
         assert!(
             !fp.installed,
-            "空机器上 {fp_name} 的 footprint 不该判为已安装"
+            "on empty machine {fp_name} footprint should not be judged as installed"
         );
     }
 }
@@ -169,7 +169,7 @@ fn existing_dir_the_registry_never_resolved_is_unknown_not_zero() {
     fs::create_dir_all(session.parent().unwrap()).unwrap();
     fs::write(&session, "{}\n").unwrap();
 
-    let unresolvable = "$CODEX_HOME/sessions/（默认 $HOME/.codex/sessions/）";
+    let unresolvable = "$CODEX_HOME/sessions/ (default $HOME/.codex/sessions/)";
     let registry_path = home.path().join("registry.json");
     let cell = format!(
         r#"{{ "template": "{unresolvable}", "env_override": "CODEX_HOME",
@@ -197,21 +197,27 @@ fn existing_dir_the_registry_never_resolved_is_unknown_not_zero() {
     assert_eq!(
         pr.state,
         scanner::ProbeState::SkipUnresolvable,
-        "前提失效：这条模板本应无法静态解析（note={}）",
+        "premise failed: this template should be statically unresolvable (note={})",
         pr.note
     );
-    assert_eq!(pr.record_count, None, "probe 侧必须是「未能确定」");
+    assert_eq!(
+        pr.record_count, None,
+        "probe side must be 'unable to determine'"
+    );
 
     // And the directory it was *about* is right there, non-empty — which is
     // exactly why printing 0 would be a lie rather than a harmless rounding.
-    assert!(session.is_file(), "测试自身的前提：目录确实存在且非空");
+    assert!(
+        session.is_file(),
+        "premise of test itself: directory indeed exists and is non-empty"
+    );
 
     assert_absence_semantics_agree(&report);
 
     let fp = footprint(&report, "codex");
     assert_eq!(
         fp.session_count, None,
-        "registry 从未解析出 codex 根路径，footprint 不得宣称会话数 {:?}",
+        "registry never resolved codex root path, footprint must not claim session count {:?}",
         fp.session_count
     );
 

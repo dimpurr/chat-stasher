@@ -56,7 +56,7 @@ fn windows_shaped_home(base: &Path) -> PathBuf {
     fs::create_dir_all(&home).unwrap();
     assert!(
         home.display().to_string().contains('\\'),
-        "仪器前提失效：模拟的 HOME 必须带反斜杠，实际是 {}",
+        "premise of instrument failed: simulated HOME must contain backslash, actual is {}",
         home.display()
     );
     home
@@ -83,12 +83,12 @@ fn isolate_home(home: &Path) {
 /// The shipped `cursor` / `grok` **Windows** cells, verbatim, in all three
 /// platform slots — the registry-swap trick that makes a foreign platform's
 /// shape reachable from any machine. Cursor's Windows template is `%APPDATA%`
-/// (unanchorable) and Grok's is `未查明`; both therefore have to be supplied by
+/// (unanchorable) and Grok's is `unascertained`; both therefore have to be supplied by
 /// the config, which is precisely what this test is about.
 fn write_windows_shaped_registry(home: &Path) -> PathBuf {
     let cursor = r#"{ "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
                       "env_override": "CURSOR_USER_DIR", "format": "sqlite",
-                      "confidence": "community-claim-unverified", "source": "B58 test: 出货 registry 的 cursor.windows 格",
+                      "confidence": "community-claim-unverified", "source": "B58 test: cursor.windows cell of shipped registry",
                       "sql_table": "cursorDiskKV", "sql_id_column": "key",
                       "sql_required_columns": ["key", "value"],
                       "sql_key_column": "key", "sql_key_pattern": "composerData:%",
@@ -96,7 +96,7 @@ fn write_windows_shaped_registry(home: &Path) -> PathBuf {
                       "sql_qualification": "cursor-composer-headers" }"#;
     let grok = r#"{ "template": "%USERPROFILE%\\.grok\\sessions\\session_search.sqlite",
                     "format": "sqlite", "confidence": "unascertained",
-                    "source": "B58 test: 出货 registry 的 grok.windows 格",
+                    "source": "B58 test: grok.windows cell of shipped registry",
                     "sql_table": "session_docs", "sql_id_column": "session_id",
                     "sql_required_columns": ["session_id", "updated_at"],
                     "sql_time_column": "updated_at", "sql_time_value_is_seconds": true }"#;
@@ -207,9 +207,18 @@ fn windows_shaped_home_still_honours_the_configured_root() {
 
     // Premises of the instrument itself, so a failure below cannot be blamed on
     // the fixture: the stores are really there and the config really names them.
-    assert!(cursor_db.is_file(), "仪器前提：种下的 cursor 存储必须存在");
-    assert!(grok_db.is_file(), "仪器前提：种下的 grok 存储必须存在");
-    assert!(config.is_file(), "仪器前提：配置文件必须写出来");
+    assert!(
+        cursor_db.is_file(),
+        "instrument premise: planted cursor store must exist"
+    );
+    assert!(
+        grok_db.is_file(),
+        "instrument premise: planted grok store must exist"
+    );
+    assert!(
+        config.is_file(),
+        "instrument premise: config file must be written out"
+    );
 
     let report = doctor::run();
     assert!(!report.scan_failed, "scratch registry must load");
@@ -222,13 +231,13 @@ fn windows_shaped_home_still_honours_the_configured_root() {
     assert_eq!(
         cursor.session_count,
         Some(CURSOR_SESSIONS),
-        "footprint 表带着已知真值自校：应认出我们种下的 {CURSOR_SESSIONS} 个 cursorDiskKV 会话"
+        "footprint table self-check against known ground truth: should recognize our {CURSOR_SESSIONS} planted cursorDiskKV sessions"
     );
     let grok = report.footprints.iter().find(|f| f.name == "grok").unwrap();
     assert_eq!(
         grok.session_count,
         Some(GROK_SESSIONS),
-        "footprint 表带着已知真值自校：应认出我们种下的 {GROK_SESSIONS} 个 session_docs 会话"
+        "footprint table self-check against known ground truth: should recognize our {GROK_SESSIONS} planted session_docs sessions"
     );
 
     std::env::remove_var("CHAT_STASHER_REGISTRY");

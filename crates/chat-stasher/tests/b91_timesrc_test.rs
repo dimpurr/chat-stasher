@@ -63,7 +63,7 @@ fn search_time_window_is_explicitly_named_archive_time() {
     let out = isolated_env(sandbox.path(), &["search", "--help"], &registry);
     let text = combined(&out);
     assert!(
-        text.contains("archive time") || text.contains("归档时间"),
+        text.contains("archive time"),
         "time-window help must identify archive time, not session activity time:\n{text}"
     );
 }
@@ -89,7 +89,7 @@ fn config_parse_fallback_is_visible_to_status_and_doctor() {
 }
 
 /// Health guard: a fully inspectable empty fixture must not acquire a cloud of
-/// new `未知` labels merely because byte provenance became explicit.
+/// new `unknown` labels merely because byte provenance became explicit.
 #[test]
 fn healthy_fixture_status_and_doctor_unknown_counts_are_stable() {
     let sandbox = tempfile::tempdir().unwrap();

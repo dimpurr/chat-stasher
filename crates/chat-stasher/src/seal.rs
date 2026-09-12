@@ -55,7 +55,7 @@ impl SealPolicy {
 ///   2. the harness's `seal_source` is non-empty — an attachable measurement
 ///      or source line is the required trailing evidence for a rename,
 ///   3. the current-platform cell's `source` is non-empty, and
-///   4. the platform cell's `confidence` is `源码确认` — a community claim or
+///   4. the platform cell's `confidence` is `source-confirmed` — a community claim or
 ///      an unrecognised confidence can never clear the gate.
 /// Every other combination — unconfirmed, uncredited, `no-rename`,
 /// `not-applicable`, unknown tokens — returns false, i.e. **no rename**.

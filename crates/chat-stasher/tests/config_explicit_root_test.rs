@@ -51,7 +51,7 @@ fn write_config(home: &Path, body: &str) {
     fs::write(&path, body).unwrap();
 }
 
-/// A one-harness registry whose codex cell is `未查明` on **every** platform —
+/// A one-harness registry whose codex cell is `unascertained` on **every** platform —
 /// the shape the shipped registry carries for grok on linux: a location we have
 /// no verified template for, so we refuse to guess one.
 ///
@@ -61,7 +61,7 @@ fn write_config(home: &Path, body: &str) {
 fn write_unascertained_registry(home: &Path) {
     let cell = r#"{ "template": "$NOWHERE_AT_ALL/sessions/",
                     "format": "jsonl", "confidence": "unascertained",
-                    "source": "B57 test: 未核实" }"#;
+                    "source": "B57 test: unverified" }"#;
     let path = home.join("registry.json");
     fs::write(
         &path,
@@ -112,25 +112,31 @@ fn no_registry_cell_no_config_and_no_directory_is_unknown_not_zero() {
     // a store we could have counted.
     assert!(
         !home.path().join(".codex/sessions").exists(),
-        "测试自身的前提：目录必须不存在"
+        "premise of test itself: directory must not exist"
     );
 
     let pr = probe(&report, "codex");
     assert_eq!(
         pr.state,
         scanner::ProbeState::SkipUnascertained,
-        "前提失效：未查明的格本应被跳过（note={}）",
+        "premise failed: unascertained cell should have been skipped (note={})",
         pr.note
     );
-    assert_eq!(pr.record_count, None, "probe 侧必须是「未能确定」");
+    assert_eq!(
+        pr.record_count, None,
+        "probe side must be 'unable to determine'"
+    );
 
     let fp = footprint(&report, "codex");
     assert_eq!(
         fp.session_count, None,
-        "没人看过这个位置，footprint 不得宣称会话数 {:?}（0 = 「我数过，是空的」）",
+        "no one inspected this location, footprint must not claim session count {:?} (0 = 'I checked and it is empty')",
         fp.session_count
     );
-    assert!(!fp.installed, "没人看过，就不能判为已安装");
+    assert!(
+        !fp.installed,
+        "no one inspected it, so it cannot be judged as installed"
+    );
 
     std::env::remove_var("CHAT_STASHER_REGISTRY");
 }
@@ -165,33 +171,39 @@ fn config_declared_root_with_sessions_reports_the_real_count() {
     assert!(!report.scan_failed, "scratch registry must load");
 
     // Premise: the store really is there and really is non-empty.
-    assert!(root.is_dir(), "测试自身的前提：配置指的目录确实存在");
+    assert!(
+        root.is_dir(),
+        "premise of test itself: directory specified in config indeed exists"
+    );
 
     let pr = probe(&report, "codex");
     assert_eq!(
         pr.state,
         scanner::ProbeState::Scanned,
-        "配置显式指了路径就必须真的去走它（note={}）",
+        "when config explicitly specifies a path it must actually walk it (note={})",
         pr.note
     );
     assert_eq!(
         pr.root.as_deref(),
         Some(root.as_path()),
-        "probe 必须落在配置给的路径上"
+        "probe must land on the path given by config"
     );
     assert_eq!(
         pr.record_count,
         Some(PLANTED),
-        "probe 侧应数出种下的 {PLANTED} 个会话"
+        "probe side should count the {PLANTED} planted sessions"
     );
 
     let fp = footprint(&report, "codex");
     assert_eq!(
         fp.session_count,
         Some(PLANTED),
-        "配置指了路径、位置存在、也真的数出来了 —— 报「不知道」同样是不实"
+        "config specified path, location exists, and was actually counted — reporting 'unknown' is also untrue"
     );
-    assert!(fp.installed, "真的走过并数出来了，就是已安装");
+    assert!(
+        fp.installed,
+        "actually walked and counted, so it is installed"
+    );
 
     std::env::remove_var("CHAT_STASHER_REGISTRY");
 }

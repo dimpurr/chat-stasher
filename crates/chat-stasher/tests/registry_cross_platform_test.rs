@@ -46,7 +46,7 @@ const BASE_MARKERS: [&str; 11] = [
 
 /// Normalise one cell template into its structural path-segment sequence.
 ///
-/// 1. Drop any trailing Chinese annotation (`（默认 …）`, `（项目级）…`) and any
+/// 1. Drop any trailing annotation (`(default ...)`, `(project-level)...`) and any
 ///    alternate / sidecar file (` + sessions.json`): the structure check only
 ///    cares about the primary path.
 /// 2. Strip home / env base markers (the machine-dependent root).
@@ -175,12 +175,12 @@ fn every_harness_os_cells_structurally_consistent() {
             continue; // all declared OS cells are structurally identical
         }
         if let Some(reason) = whitelist.get(h.id.as_str()) {
-            // A version/version difference is configuration drift, not a
+            // A version difference is configuration drift, not a
             // platform-specific directory convention; it must never excuse
             // structurally inconsistent registry cells.
             assert!(
-                !reason.contains("版本") && !reason.to_ascii_lowercase().contains("version"),
-                "whitelist reason for {} mentions version/version; fix the template instead",
+                !reason.to_ascii_lowercase().contains("version"),
+                "whitelist reason for {} mentions a version; fix the template instead",
                 h.id
             );
             whitelisted += 1;

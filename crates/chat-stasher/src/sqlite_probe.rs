@@ -4,8 +4,8 @@
 //! SQLite store" and "how big is a SQLite store on disk". Both the doctor
 //! footprint table and the registry-driven scanner table call into this module,
 //! so the two numbers `doctor` prints for the same harness can never drift
-//! apart again — that exact disagreement (opencode 会话 243 in the footprint
-//! table vs 会话=0 in the registry table) was a real bug, because the SQLite
+//! apart again — that exact disagreement (opencode sessions 243 in the footprint
+//! table vs sessions=0 in the registry table) was a real bug, because the SQLite
 //! enumeration was wired into only one of the two paths.
 //!
 //! Since B27 the probe is schema-driven: each harness's registry cell declares
@@ -381,7 +381,7 @@ fn unreadable_candidate_count(db: &Path, spec: &SqliteSchemaSpec<'_>) -> Option<
 /// then threw it away at the return — every failure path ended in
 /// `continue`/`None`, so a `workspaceStorage` whose every database refused to
 /// open came back indistinguishable from one that holds nothing, and the
-/// scanner printed "未找到可读 composer 数据". "I could not look" is not
+/// scanner printed "no readable composer data found". "I could not look" is not
 /// "there is nothing there"; the counts now leave the function so the display
 /// layer can say which one it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -802,7 +802,7 @@ pub fn read_opencode_session(
         .into_iter()
         .map(|(id, mut message)| {
             if let Value::Object(object) = &mut message {
-                // reason: 消息在 part 表中无对应条目时，parts 数组本身即为空列表 []
+                // reason: when a message has no corresponding entries in the part table, the parts array itself is empty list []
                 let parts = parts_by_message.remove(&id).unwrap_or_default();
                 object.insert("parts".to_string(), Value::Array(parts));
             }
@@ -988,7 +988,7 @@ pub fn enumerate_cursor_legacy_sessions(
         if !entry
             .file_type()
             .map(|file_type| file_type.is_dir())
-            // reason: 无法获取 entry 文件类型时跳过该 entry，视为非目录（CursorLegacyScan 在 probe 侧另有 unreadable_entries 计数）
+            // reason: skip entry when its file_type cannot be determined, treating it as non-directory (CursorLegacyScan tracks unreadable_entries on the probe side)
             .unwrap_or(false)
         {
             continue;
@@ -1550,7 +1550,7 @@ fn cursor_legacy_composer_verdict(value: &Value) -> LegacyComposerVerdict {
     if value
         .get("isArchived")
         .and_then(Value::as_bool)
-        // reason: isArchived 字段缺失或非 bool 时默认未归档（即处于活跃状态）
+        // reason: default to not archived (i.e. active) when isArchived field is missing or non-boolean
         .unwrap_or(false)
     {
         return LegacyComposerVerdict::Empty;
@@ -2093,11 +2093,11 @@ mod tests {
 mod b90_unreadable_count_tests {
     use super::*;
 
-    /// **B90 / A 的反证（一）：库根本没打开。**
+    /// **B90 / A counterproof (1): database never opened at all.**
     ///
-    /// `unreadable_candidate_count` 存在的意义就是数「有多少东西读不出来」。
-    /// 它自己读不出来时报 `0`，等于说「一条都没漏」—— 把一次失败的体检读成
-    /// 一次干净的体检。返回类型必须能说出「数不出来」。
+    /// The purpose of `unreadable_candidate_count` is counting "how many items could not be read".
+    /// Reporting `0` when it cannot itself read equals saying "not a single item was missed" — reading
+    /// a failed checkup as a clean bill of health. The return type must be able to say "could not count".
     #[test]
     fn a_store_that_never_opened_cannot_report_zero_unreadable_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -2109,16 +2109,16 @@ mod b90_unreadable_count_tests {
         );
     }
 
-    /// **B90 / A 的反证（二）：计数查询失败。**
+    /// **B90 / A counterproof (2): count query failed.**
     ///
-    /// 库打开了，但那条 `count(*)` 查询本身失败（这里：表不在）。旧代码
-    /// `.unwrap_or(0)` 把查询失败读成「零条读不出来」。
+    /// The database opened, but the `count(*)` query itself failed (here: table absent). Old code
+    /// `.unwrap_or(0)` treated query failure as "zero unreadable items".
     #[test]
     fn a_failed_count_query_cannot_report_zero_unreadable_rows() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("state.vscdb");
         let conn = Connection::open(&db).unwrap();
-        // 一个真的 SQLite 库，但没有 spec 声明的那张表：能打开，查询会失败。
+        // A real SQLite database, but lacking the table declared in spec: opens, but query fails.
         conn.execute_batch("CREATE TABLE unrelated(x INTEGER)")
             .unwrap();
         drop(conn);
@@ -2129,8 +2129,8 @@ mod b90_unreadable_count_tests {
         );
     }
 
-    /// 健康机器上「它不响」：库正常、行正常时，答案仍然是一个确定的数字
-    /// （包括确定的 `0`），不会凭空变成「未知」。
+    /// On a healthy machine "it stays silent": when store and rows are normal, answer remains a definite number
+    /// (including a definite `0`), never turning into "unknown" out of thin air.
     #[test]
     fn a_readable_store_still_answers_with_a_number() {
         let dir = tempfile::tempdir().unwrap();
@@ -2164,12 +2164,12 @@ mod b90_unreadable_count_tests {
         );
     }
 
-    /// 三态要一路走到 [`SqliteStoreProbe`]：一个能打开、schema 也认得、
-    /// 但计数查询失败的库，`unreadable_count` 必须是 `None`。
+    /// Three-state must carry through to [`SqliteStoreProbe`]: a database that opens and whose schema is recognized,
+    /// but whose count query fails, must have `unreadable_count: None`.
     ///
-    /// 这里用「schema 认得但 spec 声明的表不在」构造不出来（那会走
-    /// `SchemaMismatch`），所以这条只钉住类型层面的约定：readable store 的
-    /// `unreadable_count` 是 `Some(_)`，永远不会是一个来路不明的 0。
+    /// Cannot be constructed here with "schema recognized but table absent" (that triggers
+    /// `SchemaMismatch`), so this pins the type-level invariant: a readable store's
+    /// `unreadable_count` is `Some(_)`, never an unsourced 0.
     #[test]
     fn probe_carries_the_counted_number_when_it_really_counted() {
         let dir = tempfile::tempdir().unwrap();

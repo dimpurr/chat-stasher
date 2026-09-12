@@ -234,10 +234,10 @@ fn display_name(machine: &str, display_names: &BTreeMap<String, String>) -> Stri
         .unwrap_or_else(|| machine.to_string())
 }
 
-/// The machine × harness matrix. Each cell shows `N会话 · L行 · [span]`,
-/// where `span` is `最早~最晚` over that cell's known-time sessions, or `?`
+/// The machine × harness matrix. Each cell shows `N sessions · L lines · [span]`,
+/// where `span` is `earliest~latest` over that cell's known-time sessions, or `?`
 /// when the cell has sessions but none with a known time. A trailing
-/// `未知` column tallies each machine's time-unknown sessions so they are
+/// `unknown` column tallies each machine's time-unknown sessions so they are
 /// never folded into a time-based cell.
 pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
     let machines = distinct_labels(rows, |r| &r.machine);

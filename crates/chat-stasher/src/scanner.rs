@@ -441,11 +441,11 @@ pub enum ProbeState {
     /// all — the metadata call failed (permissions, I/O), the path exists but
     /// is not the kind of thing the registry declares, or the store's own
     /// walk could not enumerate. This used to collapse into [`Self::Missing`]
-    /// and print `不存在` / `0`, which turns "I could not confirm" into
+    /// and print `missing` / `0`, which turns "I could not confirm" into
     /// "confirmed nothing". The word `Indeterminate` is the one already used
     /// for the same distinction in `destinit.rs`.
     Indeterminate,
-    /// Skipped: confidence `未查明` — scanning a guessed path is forbidden.
+    /// Skipped: confidence `unascertained` — scanning a guessed path is forbidden.
     SkipUnascertained,
     /// Skipped: no registry cell for this platform.
     SkipWrongPlatform,
@@ -524,7 +524,7 @@ pub struct ScanReport {
     pub records: Vec<SessionRecord>,
     /// Roots (as resolved) that did not exist on this machine. Measured
     /// absence only — a root we could not look at goes in
-    /// [`Self::indeterminate_roots`], because "跳过 N 个不存在的来源根目录"
+    /// [`Self::indeterminate_roots`], because "skipped N non-existent source root(s)"
     /// must not count paths whose existence was never established.
     pub missing_roots: Vec<PathBuf>,
     /// Roots whose existence or type could not be established (permissions,
@@ -722,7 +722,7 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
         .filter_map(|p| p.unreadable_entry_count)
         .sum();
     // B90: harnesses that *were* enumerated but whose unreadable tally could
-    // not be taken — same set the human `unreadable_notice` names as 未知.
+    // not be taken — same set the human `unreadable_notice` names as unknown.
     let unreadable_uncounted: u64 = report
         .probes
         .iter()
@@ -751,8 +751,8 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
 ///
 /// The registry uses the precedence documented by [`load_registry_from_repo`].
 /// An explicit override that is missing or unparseable **errors** — no silent
-/// fallback. Any harness whose cell is confidence `未查明` is skipped;
-/// `仅社区说法未核实` cells are scanned but the probe is flagged
+/// fallback. Any harness whose cell is confidence `unascertained` is skipped;
+/// `community-claim-unverified` cells are scanned but the probe is flagged
 /// low-confidence.
 pub fn scan(config: &Config) -> io::Result<ScanReport> {
     let registry = load_registry_from_repo()?;
@@ -926,7 +926,7 @@ fn probe_harness(
             .as_deref()
             .filter(|_| used_env_override)
             .map(|name| format!("env_override=${name}; "))
-            // reason: 未使用环境变量覆盖时无额外备注，为空字符串
+            // reason: empty string when not using environment variable override, no extra note needed
             .unwrap_or_default()
     };
 
@@ -1081,7 +1081,7 @@ fn probe_harness(
                 }
                 probe
             }
-            // B82: this arm used to be a bare `_ => Missing("单文件不存在")`,
+            // B82: this arm used to be a bare `_ => Missing("single file does not exist")`,
             // so a `metadata` call that failed on permissions, and a path that
             // exists but is a directory, both reported the store as absent.
             // Only `NotFound` is an absence we measured.
@@ -1305,8 +1305,8 @@ fn sqlite_records_from_rows(
 ///
 /// `known` is the probe's post-filter count, `emitted` the records actually
 /// produced, `unreadable_rows` the candidates the probe itself already
-/// classified as undecodable. The sum is the answer to "已知 N 条，取回 M 条,
-/// K 条读不出来" — it never includes rows the qualification filter rejected
+/// classified as undecodable. The sum is the answer to "known N, retrieved M,
+/// K unreadable" — it never includes rows the qualification filter rejected
 /// after reading them, because those are not failures.
 ///
 /// B90: `unreadable_rows` is now itself three-state. When the probe could not
@@ -1319,7 +1319,7 @@ fn enumeration_gap(known: u64, emitted: usize, unreadable_rows: Option<u64>) -> 
 }
 
 /// The one-clause note appended when — and only when — something was in fact
-/// unreadable. An all-good scan appends nothing, so the "一切正常" output and
+/// unreadable. An all-good scan appends nothing, so the "all good" output and
 /// its exit code are byte-for-byte what they were.
 fn unreadable_note(
     unreadable: Option<u64>,
@@ -1543,10 +1543,10 @@ fn probe_cursor_harness(
     }
 
     let Some(info) = global_info else {
-        // B82: "globalStorage 不存在 + legacy 未找到" was printed even when the
+        // B82: "globalStorage missing + legacy not found" was printed even when the
         // legacy walk had been refused entry. An absence we could not verify
         // is not an absence; it is `Indeterminate`, and it keeps its unreadable
-        // entry count so `status` can say "会话数未知".
+        // entry count so `status` can say "session count unknown".
         if legacy_scan.saw_ignorance() {
             report.indeterminate_roots.push(workspace_storage.clone());
             return HarnessProbe {
@@ -1629,8 +1629,8 @@ fn probe_cursor_harness(
                 ..base
             }
         }
-        // Both tails end in "legacy workspaceStorage 未找到可读 composer
-        // 数据". B82: that sentence is only allowed when the legacy walk
+        // Both tails end in "legacy workspaceStorage no readable composer
+        // data found". B82: that sentence is only allowed when the legacy walk
         // actually completed; otherwise it says what it could not read.
         SqliteSessionProbe::SchemaMismatch { actual } => HarnessProbe {
             root: Some(global_db),
@@ -1673,7 +1673,7 @@ fn cursor_user_dir_from_global_db(global_db: &Path) -> Option<PathBuf> {
 /// location does. So a platform cell that omits `sql_table` is a gap in *that
 /// row*, not a claim that the schema differs — borrow the declaration from
 /// whichever cell carries one instead of falling back to opencode's default
-/// `session` schema and then reporting "表结构不认识" about a store we can
+/// `session` schema and then reporting "schema not recognized" about a store we can
 /// perfectly well read. A borrowed schema that genuinely does not fit still
 /// reports `SchemaMismatch` (unknown), never a count.
 fn schema_cell<'a>(h: &'a RegistryHarness, cell: &'a RegistryCell) -> &'a RegistryCell {
@@ -1691,7 +1691,7 @@ fn schema_cell<'a>(h: &'a RegistryHarness, cell: &'a RegistryCell) -> &'a Regist
 ///
 /// What is on disk decides, because that is the thing we are about to probe.
 /// When nothing is there the basename shape decides — and either answer then
-/// lands on `Missing`/`目录不存在`, i.e. an unknown count, never a fake `0`.
+/// lands on `Missing`/`directory does not exist`, i.e. an unknown count, never a fake `0`.
 fn explicit_root_is_file(root: &Path) -> bool {
     match fs::metadata(root) {
         Ok(md) => md.is_file(),
@@ -1758,7 +1758,7 @@ fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
                 // at all) and a template that *ends* in a variable, e.g. the
                 // whole template being `$XDG_DATA_HOME`. The second one is
                 // perfectly resolvable, and rejecting it reports a harness whose
-                // root IS knowable as `会话=未知`. That is this repo's rule run
+                // root IS knowable as `sessions=unknown`. That is this repo's rule run
                 // backwards: turning something already known into "unknown".
                 // No registry entry ends in a bare variable today, so this was
                 // unreachable — but the shape was wrong. `name_len == 1` is the
@@ -1953,7 +1953,7 @@ fn matches_session_pattern(name: &str, pattern: Option<&str>) -> bool {
         };
         cursor += offset + part.len();
     }
-    // reason: 前提已判断 parts.len() >= 2，parts.last() 必为 Some，unwrap_or_default 仅为类型保底
+    // reason: precondition checked parts.len() >= 2, parts.last() is guaranteed Some; unwrap_or_default is type-safety fallback
     name[cursor..].ends_with(parts.last().copied().unwrap_or_default())
 }
 

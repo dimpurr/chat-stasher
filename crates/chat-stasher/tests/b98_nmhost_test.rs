@@ -97,7 +97,7 @@ fn guard1_manifest_is_absent_before_install_and_exact_after() {
     // Counter-evidence: the old world, where no host is registered.
     assert!(
         !manifest.exists(),
-        "仪器前提失效：安装前 {} 就已经存在",
+        "fixture premise failed: {} already exists before install",
         manifest.display()
     );
 
@@ -108,12 +108,16 @@ fn guard1_manifest_is_absent_before_install_and_exact_after() {
         "install stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(manifest.is_file(), "安装后 {} 仍不存在", manifest.display());
+    assert!(
+        manifest.is_file(),
+        "{} still does not exist after install",
+        manifest.display()
+    );
 
     // The command must have said where it wrote, absolutely.
     assert!(
         stdout(&output).contains(&manifest.display().to_string()),
-        "输出里没有写入路径，等于静默成功:\n{}",
+        "output contains no written path, equivalent to silent success:\n{}",
         stdout(&output)
     );
 
@@ -126,12 +130,20 @@ fn guard1_manifest_is_absent_before_install_and_exact_after() {
             .as_str()
             .unwrap()
             .contains("chat-stasher"),
-        "description 缺失: {value}"
+        "description missing: {value}"
     );
     // `path` must be the absolute path of an existing executable.
     let path = PathBuf::from(value["path"].as_str().unwrap());
-    assert!(path.is_absolute(), "path 不是绝对路径: {}", path.display());
-    assert!(path.is_file(), "path 指向的文件不存在: {}", path.display());
+    assert!(
+        path.is_absolute(),
+        "path is not absolute: {}",
+        path.display()
+    );
+    assert!(
+        path.is_file(),
+        "file pointed to by path does not exist: {}",
+        path.display()
+    );
     // The whole point of ADR-014 step 1: this exact id, with the trailing slash.
     assert_eq!(
         value["allowed_origins"],
@@ -139,7 +151,7 @@ fn guard1_manifest_is_absent_before_install_and_exact_after() {
     );
     assert!(
         value.get("allowed_extensions").is_none(),
-        "Chromium manifest 不该带 allowed_extensions: {value}"
+        "Chromium manifest should not have allowed_extensions: {value}"
     );
 }
 
@@ -158,7 +170,7 @@ fn firefox_manifest_uses_allowed_extensions_with_the_gecko_id() {
     assert_eq!(value["allowed_extensions"], serde_json::json!([GECKO_ID]));
     assert!(
         value.get("allowed_origins").is_none(),
-        "Gecko manifest 不该带 allowed_origins: {value}"
+        "Gecko manifest should not have allowed_origins: {value}"
     );
 }
 
@@ -223,10 +235,10 @@ fn guard3_installing_twice_leaves_exactly_one_identical_manifest() {
     assert_eq!(code(&second), 0);
     let after_second = fs::read_to_string(chrome_dir(&root).join(HOST_FILE)).unwrap();
 
-    assert_eq!(after_first, after_second, "第二次安装改写了内容");
+    assert_eq!(after_first, after_second, "second install modified content");
     assert!(
         stdout(&second).contains("unchanged"),
-        "第二次安装没有报告 unchanged:\n{}",
+        "second install did not report unchanged:\n{}",
         stdout(&second)
     );
     // Exactly one manifest, and no temp file left behind.
@@ -246,11 +258,11 @@ fn browsers_that_are_not_installed_are_skipped_out_loud() {
     for absent in ["edge", "brave", "vivaldi", "chromium", "chrome-canary"] {
         assert!(
             text.contains(&format!("{absent}: skipped")),
-            "{absent} 被静默跳过了:\n{text}"
+            "{absent} was silently skipped:\n{text}"
         );
         assert!(
             !root.join("Microsoft Edge").exists(),
-            "跳过的浏览器目录被创建了出来"
+            "skipped browser directory was created"
         );
     }
 
@@ -281,12 +293,12 @@ fn an_empty_root_writes_nothing_and_says_so_with_exit_3() {
     fs::create_dir_all(&root).unwrap();
 
     let output = install(&home, &root);
-    assert_eq!(code(&output), 3, "空 root 必须是 3, 不是 0");
+    assert_eq!(code(&output), 3, "empty root must exit 3, not 0");
     assert!(String::from_utf8_lossy(&output.stderr).contains("nothing was written"));
     assert_eq!(
         list_dir(&root),
         Vec::<String>::new(),
-        "空 root 下不该有产物"
+        "no artifacts should exist under empty root"
     );
 }
 
@@ -399,9 +411,12 @@ fn windows_shape_writes_json_and_prints_the_hkcu_registry_command() {
         text.contains(
             "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.chat_stasher.host"
         ),
-        "缺少 HKCU 注册命令:\n{text}"
+        "missing HKCU registration command:\n{text}"
     );
-    assert!(!text.contains("HKLM"), "不该动 HKLM (需要提权):\n{text}");
+    assert!(
+        !text.contains("HKLM"),
+        "must not touch HKLM (requires privilege elevation):\n{text}"
+    );
     // The last line of this command is the one thing that genuinely differs by
     // platform: off Windows there is no registry to write, so the tool must say
     // so rather than imply it did something. Both arms assert — a one-sided
@@ -437,7 +452,7 @@ fn native_host_self_test_prints_exactly_one_json_line() {
     let text = stdout(&output);
     let lines: Vec<&str> = text.lines().collect();
     // Chromium reads stdout as a u32 frame length: a second line is a bug.
-    assert_eq!(lines.len(), 1, "stdout 不是恰好一行: {text:?}");
+    assert_eq!(lines.len(), 1, "stdout is not exactly one line: {text:?}");
     let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(value["ok"], true);
     assert_eq!(value["host"], "com.chat_stasher.host");
@@ -455,6 +470,9 @@ fn native_host_without_self_test_refuses_with_exit_2() {
 
     let output = run(cli(&home).arg("native-host"));
     assert_eq!(code(&output), 2);
-    assert!(stdout(&output).is_empty(), "诊断信息不许进 stdout");
+    assert!(
+        stdout(&output).is_empty(),
+        "diagnostic info must not go to stdout"
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("not implemented"));
 }

@@ -362,7 +362,7 @@ impl GeminiRetention {
 pub struct HarnessFootprint {
     pub name: String,
     /// `None` means the registry never resolved a path; it is not an empty
-    /// path and must not render as `未安装（）`.
+    /// path and must not render as `not installed ()`.
     pub root: Option<PathBuf>,
     /// False = not installed at all (NOT "0 sessions" — different meaning).
     pub installed: bool,
@@ -378,7 +378,7 @@ pub struct HarnessFootprint {
     /// B90: `None` means the tally was not taken — either nothing was
     /// enumerated at all (`session_count` is `None` too) or enumeration
     /// worked and only this count failed (`session_count` is `Some`). The
-    /// second one gets printed as 未知; see [`footprint_count_detail`].
+    /// second one gets printed as unknown; see [`footprint_count_detail`].
     pub unreadable_count: Option<u64>,
     /// Directory entries/subtrees that could not be inspected. The number of
     /// sessions behind them is unknown, so this is not folded into
@@ -500,7 +500,7 @@ fn fmt_bytes(b: u64) -> String {
 }
 
 /// Byte measurements use the same three-state vocabulary as session counts:
-/// a number when measured, `未知` when this installed store could not be
+/// a number when measured, `unknown` when this installed store could not be
 /// measured, and `N/A` when the harness does not apply on this machine.
 fn footprint_bytes_label(f: &HarnessFootprint) -> String {
     match f.total_bytes {
@@ -548,7 +548,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
 ///
 /// The probe is the only thing that actually touched the disk, so it decides
 /// both `installed` and whether a count may be claimed at all. A probe that
-/// never resolved a root (`未查明` cell, template not statically resolvable, no
+/// never resolved a root (`unascertained` cell, template not statically resolvable, no
 /// cell for this platform) or that found no root gets `session_count: None` —
 /// "unknown" — even when a directory happens to sit at the path this build
 /// would otherwise have guessed. Reporting `Some(0)` there would assert
@@ -648,8 +648,8 @@ fn build_risks(
                 // `Option` and disagree about whether it was known — the date
                 // printed an honest `n/a` while the day count quietly became
                 // `0`. The result was one sentence, half of it measured and
-                // half of it invented, and the invented half ("你的历史只还剩约
-                // 0 天") is the kind that makes a reader act *now*: it reads as
+                // half of it invented, and the invented half ("your history has only about
+                // 0 days left") is the kind that makes a reader act *now*: it reads as
                 // "your archive is deleted tomorrow".
                 //
                 // The risk itself does not depend on the earliest session —
@@ -712,7 +712,7 @@ fn build_risks(
         // B90: `(gem_earliest, gem_days)` are two `map`s over one `Option`, so
         // the `unwrap_or(0.0)` that used to sit in the `Some(date)` arm was
         // unreachable today — and was exactly the shape of the Claude bug
-        // above, one refactor away from printing an invented "0 天前". Matched
+        // above, one refactor away from printing an invented "0 days ago". Matched
         // as a pair, the fabricated default has nowhere left to live.
         risks.push(match (gem_earliest, gem_days) {
             (Some(date), Some(days)) => {
@@ -1548,7 +1548,7 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
         // to the counted-zero line above, i.e. it reads as "nothing missed" —
         // which is precisely the claim that was never earned. Rows that were
         // never enumerated at all keep quiet: `installed`/`session_count`
-        // already say so, and repeating it would put 未知 on every
+        // already say so, and repeating it would put unknown on every
         // not-installed harness of a healthy machine.
         None if f.session_count.is_some() => {
             parts.push("unreadable count unknown (it could not itself be counted)".to_string())
@@ -1904,7 +1904,7 @@ fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
 
 /// D3 supplement — the registry-driven probe table: every harness the
 /// registry listed for this platform, whether it was scanned / exists here,
-/// and which cells were flagged low-confidence or skipped (`未查明`, other
+/// and which cells were flagged low-confidence or skipped (`unascertained`, other
 /// platform, template not statically resolvable).
 fn print_probes(probes: &[scanner::HarnessProbe]) {
     if probes.is_empty() {
@@ -1948,14 +1948,14 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
             ),
             _ => String::new(),
         };
-        // 会话数，三态（与本文件其它表同一套词汇）：
-        //   数字   —— 枚举成功，这就是数
-        //   未知   —— 有理由认为可能有，但这次没能枚举出来
-        //   N/A    —— 这台机器上不适用（registry 没有本平台的 cell）
-        // B82: 以前除 Scanned/FileTarget 外一律印 "0"。跳过(未查明)、
-        // 跳过(模板)、查不出来 三种都是「我没看」，印 0 就是把没查过说成
-        // 查过且为空 —— 这正是本单要消灭的那句谎。「不存在」保留 0，因为
-        // 那是真的查过：路径不在。
+        // Session count, three-state (same vocabulary as other tables in this file):
+        //   number  —— enumeration succeeded, this is the count
+        //   unknown —— reason to believe it may exist, but could not be enumerated this time
+        //   N/A     —— not applicable on this machine (registry has no cell for this platform)
+        // B82: previously printed "0" across the board except for Scanned/FileTarget. skip(uncertain),
+        // skip(template), and could-not-determine are all "I didn't look"; printing 0 equates not-checked
+        // with checked-and-empty — exactly the falsehood eliminated here. "missing" retains 0 because
+        // it was genuinely checked: the path does not exist.
         let count = match p.state {
             scanner::ProbeState::FileTarget => match p.record_count {
                 Some(c) => c.to_string(),
@@ -2062,7 +2062,7 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
-    /// 正常：合法 JSON + 大 cleanupPeriodDays。
+    /// Normal: valid JSON + large cleanupPeriodDays.
     #[test]
     fn claude_large_value_is_safe() {
         let dir = tempfile::tempdir().unwrap();
@@ -2081,7 +2081,7 @@ mod tests {
         assert!(!check.verdict.is_dangerous());
     }
 
-    /// 缺失：整个 settings 树都不存在 → UnsetDefault（不是"0"，是"默认 30 天"）。
+    /// Missing: entire settings tree absent → UnsetDefault (not "0", but "default 30 days").
     #[test]
     fn claude_missing_settings_is_unset_default() {
         let dir = tempfile::tempdir().unwrap();
@@ -2090,7 +2090,7 @@ mod tests {
         assert!(check.verdict.is_dangerous());
     }
 
-    /// 坏 JSON：文件在但解析失败 → ParseFailed（fail-destructive 触发条件）。
+    /// Broken JSON: file exists but parse fails → ParseFailed (fail-destructive trigger condition).
     #[test]
     fn claude_broken_json_is_parse_failed() {
         let dir = tempfile::tempdir().unwrap();
@@ -2104,7 +2104,7 @@ mod tests {
         assert!(!check.layers.is_empty());
     }
 
-    /// 坏 JSON 优先于同一层里的好值：另一个 layer 合法也不能拯救 parse 失败。
+    /// Broken JSON takes precedence over valid values in same layer: another valid layer cannot rescue parse failure.
     #[test]
     fn broken_json_outranks_valid_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
@@ -2120,7 +2120,7 @@ mod tests {
         assert!(matches!(check.verdict, ClaudeRetention::ParseFailed { .. }));
     }
 
-    /// Gemini：空配置（只有 model）→ 默认 30 天 → dangerous。
+    /// Gemini: empty config (model only) → default 30 days → dangerous.
     #[test]
     fn gemini_unset_retention_is_default_dangerous() {
         let dir = tempfile::tempdir().unwrap();
@@ -2134,7 +2134,7 @@ mod tests {
         assert!(r.is_dangerous());
     }
 
-    /// Gemini：显式 enabled=false → safe。
+    /// Gemini: explicit enabled=false → safe.
     #[test]
     fn gemini_explicit_disable_is_safe() {
         let dir = tempfile::tempdir().unwrap();
@@ -2187,9 +2187,9 @@ mod b90_unknown_count_tests {
         }
     }
 
-    /// **B90 / A 的显示端反证。** 会话枚举成功（`session_count` 有值），
-    /// 但「有多少条读不出来」这一项本身没数出来。旧代码在这里一声不吭，
-    /// 和「数过了，是 0」的输出逐字相同 —— 读的人分不出来。
+    /// **B90 / A display-side counterproof.** Session enumeration succeeded (`session_count` has value),
+    /// but the "how many could not be read" tally itself could not be counted. Old code was silent here,
+    /// byte-identical to "counted, and it is 0" — readers could not tell the difference.
     #[test]
     fn an_uncounted_unreadable_tally_shows_up_as_unknown() {
         let detail = footprint_count_detail(&footprint(None));
@@ -2206,20 +2206,20 @@ mod b90_unknown_count_tests {
         assert_eq!(footprint_bytes_label(&footprint(None)), "unknown");
     }
 
-    /// 健康机器上「它不响」：数过了、就是 0 时，这一格逐字为空。
+    /// On a healthy machine "it stays silent": counted, and when it is 0, this cell is empty.
     #[test]
     fn a_counted_zero_stays_silent() {
         assert_eq!(footprint_count_detail(&footprint(Some(0))), "");
     }
 
-    /// 数过了、非 0 时，照旧印那个数字。
+    /// Counted and non-zero: prints the number as before.
     #[test]
     fn a_counted_number_still_prints_itself() {
         assert!(footprint_count_detail(&footprint(Some(411))).contains("411 unreadable"));
     }
 
-    /// 压根没枚举过的行（`session_count` 也是 `None`）不该被这条新规则
-    /// 拖出一句「未知」：它的状态字段已经说过了，这里多说一遍就是噪音。
+    /// A row never enumerated at all (`session_count` is also `None`) should not be dragged
+    /// into saying "unknown" by this rule: its status field already said so, repeating it is noise.
     #[test]
     fn a_row_that_was_never_enumerated_stays_quiet() {
         let mut f = footprint(None);

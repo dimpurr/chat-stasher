@@ -3,12 +3,12 @@
 //! Four reporting paths turned an unfinished look into a measured zero:
 //!
 //!   * A2 — a store root whose `metadata` call failed, or that exists as the
-//!     wrong kind of thing, became `ProbeState::Missing` / `不存在`, and every
-//!     non-`FileTarget` probe printed `会话=0` in the doctor table.
-//!   * A3 — `status` derived "本机没有扫描到任何会话" from `records.is_empty()`
+//!     wrong kind of thing, became `ProbeState::Missing` / `missing`, and every
+//!     non-`FileTarget` probe printed `sessions=0` in the doctor table.
+//!   * A3 — `status` derived "No sessions were found on this machine" from `records.is_empty()`
 //!     alone, ignoring the harnesses this run never got to look at.
 //!   * A4 — Cursor's legacy `workspaceStorage` walk counted its own ignorance
-//!     and then discarded it at the return, printing "未找到可读 composer 数据".
+//!     and then discarded it at the return, printing "no readable composer data found".
 //!   * A5 — an unreadable collector record arrived at `dest-init` as `false`
 //!     and was then used as *evidence* that a destination was never built.
 //!
@@ -174,8 +174,8 @@ fn plant_readable_store(db: &Path) -> PathBuf {
 
 /// Before B82: `fs::metadata` failing (here: EACCES on the parent directory)
 /// fell into the catch-all `_ =>` arm and produced
-/// `state=Missing, note="单文件不存在"`, the path went into `missing_roots`,
-/// and the doctor table printed `不存在 … 会话=0`. Rolling the fix back makes
+/// `state=Missing, note="single file does not exist"`, the path went into `missing_roots`,
+/// and the doctor table printed `missing ... sessions=0`. Rolling the fix back makes
 /// every assertion below fail on exactly that output.
 ///
 /// Unix-only: the "stat failed" injection is a chmod, and Windows has no
@@ -223,7 +223,7 @@ fn a2_unstattable_single_file_root_is_not_reported_as_absent() {
 
 /// The other half of A2's first clause: the path resolves, exists, and is the
 /// wrong kind of thing. `metadata` succeeds, `md.is_file()` is false, and the
-/// old catch-all reported "单文件不存在" about a path that is plainly there.
+/// old catch-all reported "single file does not exist" about a path that is plainly there.
 #[test]
 fn a2_wrong_path_type_is_reported_as_unknown_not_absent() {
     let sandbox = tempfile::tempdir().expect("create sandbox");
@@ -246,10 +246,10 @@ fn a2_wrong_path_type_is_reported_as_unknown_not_absent() {
 }
 
 // ---------------------------------------------------------------------------
-// A3 — "本机没有扫描到任何会话" is a claim about the machine, not about records
+// A3 — "No sessions were found on this machine" is a claim about the machine, not about records
 // ---------------------------------------------------------------------------
 
-/// Before B82 this printed the bare sentence "本机没有扫描到任何会话。" while
+/// Before B82 this printed the bare sentence "No sessions were found on this machine." while
 /// one of the two harnesses had never been looked at at all (its template does
 /// not reduce to a static root). Zero records plus places we did not look is
 /// not "there is nothing here".
@@ -325,8 +325,8 @@ fn a3_status_qualifies_its_zero_when_a_harness_was_never_looked_at() {
 
 /// `workspaceStorage` exists and cannot be enumerated (EACCES). Before B82 the
 /// walk's `fs::read_dir(...).ok()?` turned that into `None`, and the scanner
-/// printed "globalStorage/state.vscdb 不存在，legacy workspaceStorage 也未找到
-/// 可读 composer 数据" — an absence claim built out of a directory nobody was
+/// printed "globalStorage/state.vscdb does not exist, legacy workspaceStorage also found
+/// no readable composer data" — an absence claim built out of a directory nobody was
 /// allowed to open.
 ///
 /// Unix-only: the un-enumerable directory is made so with a chmod; Windows has
@@ -632,7 +632,7 @@ fn a_clean_scan_keeps_the_doctor_probe_row_identical() {
 /// The third label in the doctor's session column. A harness the registry
 /// does not list for this platform has nothing here to have missed, so it
 /// prints `N/A` — distinct from both the `0` of a measured absence and the
-/// `未知` of a look that did not happen.
+/// `unknown` of a look that did not happen.
 ///
 /// The cell is registered under the *other* platform family, so the assertion
 /// is symmetric: on a Unix host the Windows cell does not apply, on a Windows

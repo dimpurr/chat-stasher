@@ -4,7 +4,7 @@
 //! and the `cmd_search` / `cmd_collect` comments):
 //!
 //! ```text
-//! 3 = 没读完 / 根本没读      1 = 读完了失败      2 = 用法错
+//! 3 = did not finish / never read      1 = finished and failed      2 = usage error
 //! ```
 //!
 //! Three commands printed a failure and then returned 0 anyway. Scripts and
@@ -120,7 +120,7 @@ fn stdio(out: &std::process::Output) -> String {
 // ---------------------------------------------------------------------------
 
 /// Pre-B80 this printed `doctor: scan failed: …` plus
-/// `🔴 registry 缺失/无法解析 —— 会话覆盖未知` and returned **0**: a nightly
+/// `🔴 registry missing/unparseable — session coverage unknown` and returned **0**: a nightly
 /// `chat-stasher doctor` that could not look at a single harness reported the
 /// machine as fine. Reverting `cmd_doctor` to an unconditional `SUCCESS` fails
 /// this assertion.
@@ -152,7 +152,7 @@ fn doctor_that_could_not_scan_does_not_exit_zero() {
 
 /// Plant one bundle that cannot be sealed: a plain **file** sits where the
 /// session's shard directory has to be, so `existing_file_shas` fails on it.
-/// The candidate is opened and then fails — the "读完了失败" case — and the
+/// The candidate is opened and then fails — the "finished and failed" case — and the
 /// file is left in the inbox unretired.
 fn inbox_with_one_blocked_bundle(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let inbox = sandbox.join("inbox");
@@ -196,16 +196,16 @@ fn ingest_that_could_not_consume_a_bundle_does_not_exit_zero() {
 
     assert!(
         text.contains("[ingest] errors"),
-        "fixture must really produce an ingest error; 实际输出：\n{text}"
+        "fixture must really produce an ingest error; actual output:\n{text}"
     );
     assert_eq!(
         out.status.code(),
         Some(FINISHED_AND_FAILED),
-        "收件箱被完整枚举了、这个文件被打开了然后失败 = 1，不是 3（根本没读）；实际输出：\n{text}"
+        "inbox was fully enumerated, this file was opened and then failed = 1, not 3 (never read); actual output:\n{text}"
     );
     assert!(
         inbox.join(format!("deepseek-{SESSION_ID}.json")).exists(),
-        "失败的文件必须还留在 inbox 里 —— 退出码说的就是这件事；实际输出：\n{text}"
+        "the failed file must remain in inbox — that is what the exit code communicates; actual output:\n{text}"
     );
 }
 
@@ -224,14 +224,14 @@ fn a_read_all_report_with_warnings_is_not_a_complete_read() {
     let mut report = chat_stasher::readback::ReadAllReport::default();
     assert!(
         report.complete(),
-        "没有 warning 就是读全了 —— 正常路径必须留在 0"
+        "no warnings means a complete read — normal path must stay at 0"
     );
     report
         .warnings
         .push("host `h` snapshot deadbeef: cannot read tree root: fixture".to_string());
     assert!(
         !report.complete(),
-        "有 warning = 有一台机器的会话没读出来 = 没读完，退出码必须是 {DID_NOT_FINISH}"
+        "warning present = one machine's sessions unreadable = did not finish, exit code must be {DID_NOT_FINISH}"
     );
 }
 
@@ -257,7 +257,7 @@ fn status_that_could_not_scan_says_did_not_read_not_unhealthy_timer() {
     assert_eq!(
         out.status.code(),
         Some(DID_NOT_FINISH),
-        "根本没扫到 = 3；1 是这条命令留给「定时器不健康」的；实际输出：\n{text}"
+        "scan never completed = 3; 1 is reserved by this command for 'timer unhealthy'; actual output:\n{text}"
     );
 }
 
@@ -277,16 +277,16 @@ fn status_reserves_its_exit_code_for_the_timer_verdict() {
 
     assert!(
         !text.contains("scan failed"),
-        "fixture 必须是「扫描成功了」的那条路径；实际输出：\n{text}"
+        "fixture must take the 'scan succeeded' path; actual output:\n{text}"
     );
     assert!(
         text.contains("[run-once]"),
-        "退出码的依据那一行必须还在；实际输出：\n{text}"
+        "the line providing the exit code basis must still be present; actual output:\n{text}"
     );
     assert_eq!(
         out.status.code(),
         Some(FINISHED_AND_FAILED),
-        "扫描读完了、判定失败 = 1；把「扫描完整性」也塞进这个码会把这层含义冲掉；实际输出：\n{text}"
+        "scan completed, verdict failed = 1; stuffing 'scan completeness' into this code washes out that meaning; actual output:\n{text}"
     );
 }
 
@@ -308,12 +308,12 @@ fn a_scannable_machine_still_gets_doctor_exit_zero() {
 
     assert!(
         !text.contains("scan failed"),
-        "fixture 必须走扫描成功的那条路；实际输出：\n{text}"
+        "fixture must take the scan-succeeded path; actual output:\n{text}"
     );
     assert_eq!(
         out.status.code(),
         Some(CLEAN),
-        "扫得动的机器上 doctor 必须还是 0；实际输出：\n{text}"
+        "doctor on a scannable machine must still be 0; actual output:\n{text}"
     );
 }
 
@@ -341,7 +341,7 @@ fn a_clean_ingest_still_exits_zero() {
     assert_eq!(
         empty.status.code(),
         Some(CLEAN),
-        "空收件箱不是失败；实际输出：\n{}",
+        "empty inbox is not a failure; actual output:\n{}",
         stdio(&empty)
     );
 
@@ -350,15 +350,15 @@ fn a_clean_ingest_still_exits_zero() {
     let text = stdio(&good);
     assert!(
         text.contains("[ingest] consumed         : 1"),
-        "fixture 必须真的封出一个分片；实际输出：\n{text}"
+        "fixture must really seal a shard; actual output:\n{text}"
     );
     assert!(
         !text.contains("[ingest] errors"),
-        "正常路径不许出现 errors 行；实际输出：\n{text}"
+        "normal path must not have errors lines; actual output:\n{text}"
     );
     assert_eq!(
         good.status.code(),
         Some(CLEAN),
-        "一次干净的 ingest 必须还是 0；实际输出：\n{text}"
+        "a clean ingest must still be 0; actual output:\n{text}"
     );
 }

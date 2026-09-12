@@ -5109,7 +5109,7 @@ mod decision_surface_tests {
     }
 
     // -----------------------------------------------------------------------
-    // ADR-018: 机器名三级解析 —— 显式 > config.machine > 身份文件
+    // ADR-018: three-tier machine resolution — explicit > config.machine > identity file
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5181,7 +5181,7 @@ mod decision_surface_tests {
     }
 
     // -----------------------------------------------------------------------
-    // ADR-018: overview 显示名 —— 永不为空、永不把分区名冒充名字
+    // ADR-018: overview display name — never empty, never masquerade partition as name
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5242,7 +5242,7 @@ mod decision_surface_tests {
     }
 
     // -----------------------------------------------------------------------
-    // ADR-018: machine-declare / machine-label 写文件
+    // ADR-018: machine-declare / machine-label writing files
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5516,7 +5516,7 @@ fn cmd_status(sessions: bool, json: bool) -> ExitCode {
     // Deliberately *not* folded in here either: a scan that succeeded but could
     // not read every session a harness claims (`report.probes` with a non-zero
     // `unreadable_count`). It is real and it is reported — B78 put it on the
-    // `[scan]` line ("另有 N 条读不出来 …… 尚未归档") precisely because that is
+    // `[scan]` line ("another N unreadable ... not archived") precisely because that is
     // its channel. Two reasons it must not also move the exit code:
     //
     //   * This code already means one thing — "is the scheduled run healthy?"
@@ -5535,7 +5535,7 @@ fn cmd_status(sessions: bool, json: bool) -> ExitCode {
     // integer would be the regression.
     //
     // B84 — and the third case, the one that reads wrong in a terminal: on a
-    // machine that never ran `run-once`, `[run-once]` says "从未成功跑完一次"
+    // machine that never ran `run-once`, `[run-once]` says "never completed a successful run"
     // and this returns **1**. That is deliberate, and it stays.
     //
     // `status` is two things at once. The body is a dashboard for a human; the
@@ -5545,8 +5545,8 @@ fn cmd_status(sessions: bool, json: bool) -> ExitCode {
     // so a 0 would tell them nothing they don't know; a script has nothing but
     // the integer, and for a script "no evidence the timer ever fired" is the
     // strongest reason there is to go look at the timer. So the integer serves
-    // the script. `docs/install.md` promises exactly this ("`status` 在判定
-    // 「不健康」时会以非零码退出"), and says why in the same words as
+    // the script. `docs/install.md` promises exactly this ("`status` exits with
+    // non-zero when judged 'unhealthy'"), and says why in the same words as
     // `runstate.rs:186-192`: an absent record is the absence of evidence, not
     // evidence of health.
     //
@@ -5747,7 +5747,7 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
         // byte output it saw before.
         let unreadable = unreadable_notice(report);
         if report.records.is_empty() {
-            // B82: "本机没有扫描到任何会话" is a claim about the whole
+            // B82: "No sessions were found on this machine" is a claim about the whole
             // machine, and this branch used to make it from
             // `records.is_empty()` alone — with no regard for the harnesses
             // this run never got to look at. Zero records plus places we did
@@ -5860,7 +5860,7 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
 /// The clause appended to "No sessions were found on this machine" when that
 /// sentence would otherwise be a claim we cannot back.
 ///
-/// Counted here are the probes that never looked: `未查明` (scanning a guessed
+/// Counted here are the probes that never looked: `unascertained` (scanning a guessed
 /// path is forbidden), a template that does not reduce to a root, and B82's
 /// `Indeterminate` (the path could not be stat'd, is the wrong type, or its
 /// store refused to enumerate). Deliberately *not* counted: `Missing` (looked,

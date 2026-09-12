@@ -303,7 +303,7 @@ mod tests {
         assert!(missing_index_machines(&snaps, &idx).is_empty());
     }
 
-    // ------------------------------------------------- meta 元数据文件匹配
+    // ------------------------------------------------- meta metadata file matching
     #[test]
     fn declaration_machine_matches_meta_suffix() {
         assert_eq!(

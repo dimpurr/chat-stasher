@@ -19,9 +19,9 @@
 //!
 //! These tests pin the three answers the repository refuses to merge:
 //!
-//!   * **确实没有** — read the body, it really is empty (`filtered`);
-//!   * **有但被过滤掉了** — same bucket, by an explicit rule (archived);
-//!   * **有但我们读不出来** — the store says a session exists and we could not
+//!   * **genuinely none** — read the body, it really is empty (`filtered`);
+//!   * **exists but filtered out** — same bucket, by an explicit rule (archived);
+//!   * **exists but we cannot read it** — the store says a session exists and we could not
 //!     get at it (`unreadable`).
 //!
 //! Everything here runs against `tempfile` fixtures opened `mode=ro` by the
@@ -213,9 +213,9 @@ fn cursor_footprint(report: &doctor::DoctorReport) -> &doctor::HarnessFootprint 
 /// Legacy `workspaceStorage`: four composers, four different reasons, and the
 /// probe has to keep the failure separate from the two genuine filters.
 ///
-/// This is the exact shape behind the reporter's `过滤前 414 / 过滤后 3`: the
+/// This is the exact shape behind the reporter's `before filter 414 / after 3`: the
 /// composers that vanished are metadata-only index entries, so 411 of them
-/// belong in "读不出来", not in "确实没有".
+/// belong in "unreadable", not in "genuinely none".
 #[test]
 fn legacy_probe_separates_a_missing_body_from_an_empty_one() {
     let base = tempfile::tempdir().unwrap();
@@ -247,8 +247,8 @@ fn legacy_probe_separates_a_missing_body_from_an_empty_one() {
     );
     assert_eq!(
         probe.unreadable_count,
-        // B90: 这个字段现在是三态 —— `Some(1)` 是「数过了，是 1」，
-        // `None` 才是「这一项本身没数出来」。
+        // B90: this field is now three-state — `Some(1)` means "counted, and it is 1",
+        // `None` means "this item could not itself be counted".
         Some(1),
         "only the metadata-only one is 'unreadable'"
     );
@@ -311,7 +311,7 @@ fn global_probe_counts_an_undecodable_row_as_unreadable_not_as_empty() {
 /// The headline case. The global store hands the scanner two qualified rows and
 /// only one of them can become a `SessionRecord`; a third row could not be
 /// decoded at all. Before B68 the probe reported `record_count: Some(2)` beside
-/// one emitted record and said nothing — "数出来 2 条，交出来 1 条".
+/// one emitted record and said nothing — "counted 2, handed over 1".
 #[test]
 fn doctor_says_how_many_known_sessions_it_could_not_hand_over() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -380,7 +380,7 @@ fn legacy_fallback_reports_the_metadata_only_composers_it_cannot_read() {
     );
 }
 
-/// The false-positive guard, and the "一切正常时输出不变" guard in one: a store
+/// The false-positive guard, and the "output unchanged when all is normal" guard in one: a store
 /// whose every dropped row was genuinely read and found empty must report
 /// **zero** unreadable sessions and must not add a word to its line.
 #[test]

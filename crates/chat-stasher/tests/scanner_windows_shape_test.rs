@@ -42,7 +42,7 @@ fn short_name_shaped_dir(base: &Path) -> PathBuf {
     fs::create_dir_all(&dir).unwrap();
     assert!(
         dir.display().to_string().contains('~'),
-        "仪器前提失效：模拟的临时目录必须带一个非 home 含义的 `~`，实际是 {}",
+        "instrument premise failed: simulated temp dir must contain non-home '~', actual is {}",
         dir.display()
     );
     dir
@@ -108,13 +108,13 @@ fn short_name_tilde_in_template_still_anchors_the_root() {
     assert_ne!(
         probe.state,
         ProbeState::SkipUnresolvable,
-        "路径里的 `~` 只是文件名的一部分，不该让整条模板变成「无法锚定」；note={}",
+        "'~' in path is just part of filename, should not make entire template 'unanchorable'; note={}",
         probe.note
     );
     assert_eq!(
         report.records.len(),
         1,
-        "种下 1 个 session-* + 2 个配置文件，应当只数出 1 条"
+        "planted 1 session-* + 2 config files, should count only 1"
     );
     assert_eq!(probe.record_count, Some(1));
     assert!(report.records[0]
@@ -154,11 +154,11 @@ fn leading_tilde_is_still_home_and_unanchorable_is_still_refused() {
     assert_eq!(
         report.probes[0].state,
         ProbeState::SkipUnresolvable,
-        "`$CWD/...` 依然锚不住，必须照旧拒绝，而不是退化成某个存在的目录"
+        "'$CWD/...' is still unanchorable, must still be refused rather than degrading into some existing directory"
     );
     assert_eq!(
         report.probes[0].record_count, None,
-        "锚不住 = 未知，未知不能当成 0"
+        "unanchorable = unknown, unknown cannot be treated as 0"
     );
     drop(base);
 }

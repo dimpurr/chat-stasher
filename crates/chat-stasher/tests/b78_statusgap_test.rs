@@ -1,21 +1,21 @@
 //! B78 — `status` had to learn to say the word `doctor` already knew.
 //!
 //! B68 gave the Cursor probe a third answer to "where did my sessions go":
-//! not "确实没有" and not "被过滤掉了" but **"它说有，我读不出来"**
+//! not "genuinely none" and not "filtered out" but **"it claims to exist, but cannot be read"**
 //! (`HarnessProbe::unreadable_count`, per harness, `scanner.rs`).
 //! `doctor` prints it:
 //!
 //! ```text
-//! cursor  会话 3 （过滤前 414 / 过滤后 3，411 条读不出来）
+//! cursor  sessions 3 (before filter 414 / after filter 3, 411 unreadable)
 //! ```
 //!
 //! `status` — the command a non-terminal-dweller actually runs — did not:
 //!
 //! ```text
-//! [scan] 491 个会话（0 compressed）：claude-code 115 · codex 107 · cursor 3 · …
+//! [scan] 491 session(s) (0 compressed): claude-code 115 · codex 107 · cursor 3 · ...
 //! ```
 //!
-//! So "有 411 条没进来" was true, counted, and invisible unless you knew to run
+//! So "411 sessions did not make it in" was true, counted, and invisible unless you knew to run
 //! a second command.
 //!
 //! The other half of the constraint is that `status`'s default body was
@@ -59,7 +59,7 @@ const GENUINELY_EMPTY_ROW: &str =
     r#"{"composerId":"d","createdAt":1760000000000,"fullConversationHeadersOnly":[]}"#;
 
 /// A Cursor store with no rows at all: the scan finds nothing, `status` takes
-/// its "本机没有扫描到任何会话。" branch — the other line B78 touched.
+/// its "No sessions were found on this machine." branch — the other line B78 touched.
 fn plant_empty_cursor_store(user_dir: &Path) {
     plant_rows(user_dir, &[]);
 }
@@ -242,9 +242,9 @@ fn the_sentence_cannot_be_read_as_already_archived() {
 /// it printed before B78 — three, recorded from the pre-change binary:
 ///
 /// ```text
-/// [scan] 1 个会话（0 compressed）：cursor 1
-/// ⚠ 1 个 harness 有已识别但 collect 不会归档的会话。
-/// 明细（每个会话一行）：chat-stasher status --sessions
+/// [scan] 1 session(s) (0 compressed): cursor 1
+/// ⚠ 1 harness(es) have recognised sessions that collect will not archive.
+/// details (one line per session): chat-stasher status --sessions
 /// ```
 ///
 /// (The middle line is the pre-existing archive-gap notice, not B78's — which
@@ -263,7 +263,7 @@ fn saying_it_costs_zero_extra_lines() {
     assert_eq!(
         dirty.body.lines().count(),
         PRE_B78_LINES,
-        "不许多出一行 —— status 刚从 463 行瘦到 4 行，这句话必须搭在 [scan] 那行上：\n{}",
+        "not allowed to add an extra line — status was just slimmed down from 463 to 4 lines, this sentence must ride on the [scan] line:\n{}",
         dirty.body
     );
     assert!(
@@ -297,7 +297,7 @@ fn a_clean_machine_sees_a_byte_identical_status() {
     assert_eq!(
         sha256_hex(run.body.as_bytes()),
         CLEAN_STATUS_BODY_SHA256,
-        "status 在「没有读不出来的会话」时必须逐字节不变；实际输出：\n{}",
+        "status must remain byte-identical when there are no unreadable sessions; actual output:\n{}",
         run.body
     );
 }
@@ -319,7 +319,7 @@ fn an_empty_machine_sees_a_byte_identical_status() {
     assert_eq!(
         sha256_hex(run.body.as_bytes()),
         EMPTY_STATUS_BODY_SHA256,
-        "空机器的 status 必须逐字节不变；实际输出：\n{}",
+        "status on an empty machine must remain byte-identical; actual output:\n{}",
         run.body
     );
 }
