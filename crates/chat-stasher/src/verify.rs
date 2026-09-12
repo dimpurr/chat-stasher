@@ -115,6 +115,8 @@ pub struct SessionExpectation {
     pub sha256: String,
     /// Which authority this row's expected values came from.
     pub basis: ExpectationBasis,
+    /// If the expectation baseline could not be verified (e.g. summary missing or corrupt).
+    pub unverifiable_reason: Option<String>,
 }
 
 /// Verdict for one session after reconciling the archive against the expected
@@ -123,8 +125,7 @@ pub struct SessionExpectation {
 pub enum SessionOutcome {
     /// Archive observation equals the expected manifest row.
     Match,
-    /// Expected by the manifest but absent from (the newest snapshot of) the
-    /// archive.
+    /// Expected by the manifest but absent from the archive.
     MissingInArchive,
     /// Present, but the number of shards differs.
     ShardCountMismatch { expected: usize, observed: usize },
@@ -132,6 +133,9 @@ pub enum SessionOutcome {
     ByteLengthMismatch { expected: u64, observed: u64 },
     /// Present with the same shape, but the concatenated sha256 differs.
     ShaMismatch { expected: String, observed: String },
+    /// Baseline could not be verified (e.g. summary is missing or corrupt).
+    /// Does not count as passed (ok), does not count as lost (failed).
+    Unverifiable { reason: String },
 }
 
 /// One reconciled row — always a manifest row; archive-only sessions are
@@ -167,15 +171,41 @@ pub struct ReconcileReport {
 }
 
 impl ReconcileReport {
-    /// A failure is a manifest row that did not come back `Match`.
+    /// True if every expected row is a Match.
     pub fn ok(&self) -> bool {
         self.rows.iter().all(|r| r.outcome == SessionOutcome::Match)
     }
 
+    /// Hard failures: missing in archive or content mismatches.
+    /// Does NOT include Unverifiable rows (which are neither passed nor lost).
     pub fn failed(&self) -> usize {
         self.rows
             .iter()
-            .filter(|r| r.outcome != SessionOutcome::Match)
+            .filter(|r| {
+                matches!(
+                    r.outcome,
+                    SessionOutcome::MissingInArchive
+                        | SessionOutcome::ShardCountMismatch { .. }
+                        | SessionOutcome::ByteLengthMismatch { .. }
+                        | SessionOutcome::ShaMismatch { .. }
+                )
+            })
+            .count()
+    }
+
+    /// Number of unverifiable rows.
+    pub fn unverifiable(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| matches!(r.outcome, SessionOutcome::Unverifiable { .. }))
+            .count()
+    }
+
+    /// Number of matching rows.
+    pub fn matched(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| r.outcome == SessionOutcome::Match)
             .count()
     }
 
@@ -241,8 +271,15 @@ impl BackupStore {
     ) -> anyhow::Result<ReconcileReport> {
         let start = Instant::now();
         let expected = load_expected_manifest(stage)?;
+
+        let wanted: BTreeSet<(String, String)> = expected
+            .iter()
+            .filter(|e| e.unverifiable_reason.is_none())
+            .map(|e| (e.machine.clone(), e.session_id.clone()))
+            .collect();
+
         let observation = self
-            .read_all_machines(mk)
+            .read_cumulative_sessions(mk, Some(&wanted))
             .context("read archive back for reconcile")?;
 
         let obs_map: BTreeMap<(String, String), SessionBackedUp> = observation
@@ -255,25 +292,31 @@ impl BackupStore {
         let mut rows = Vec::with_capacity(expected.len());
         for exp in &expected {
             let key = (exp.machine.clone(), exp.session_id.clone());
-            let outcome = match obs_map.get(&key) {
-                None => SessionOutcome::MissingInArchive,
-                Some(obs) if obs.shard_count != exp.shard_count => {
-                    SessionOutcome::ShardCountMismatch {
-                        expected: exp.shard_count,
-                        observed: obs.shard_count,
-                    }
+            let outcome = if let Some(reason) = &exp.unverifiable_reason {
+                SessionOutcome::Unverifiable {
+                    reason: reason.clone(),
                 }
-                Some(obs) if obs.concat_bytes != exp.concat_bytes => {
-                    SessionOutcome::ByteLengthMismatch {
-                        expected: exp.concat_bytes,
-                        observed: obs.concat_bytes,
+            } else {
+                match obs_map.get(&key) {
+                    None => SessionOutcome::MissingInArchive,
+                    Some(obs) if obs.shard_count != exp.shard_count => {
+                        SessionOutcome::ShardCountMismatch {
+                            expected: exp.shard_count,
+                            observed: obs.shard_count,
+                        }
                     }
+                    Some(obs) if obs.concat_bytes != exp.concat_bytes => {
+                        SessionOutcome::ByteLengthMismatch {
+                            expected: exp.concat_bytes,
+                            observed: obs.concat_bytes,
+                        }
+                    }
+                    Some(obs) if obs.sha256 != exp.sha256 => SessionOutcome::ShaMismatch {
+                        expected: exp.sha256.clone(),
+                        observed: obs.sha256.clone(),
+                    },
+                    Some(_) => SessionOutcome::Match,
                 }
-                Some(obs) if obs.sha256 != exp.sha256 => SessionOutcome::ShaMismatch {
-                    expected: exp.sha256.clone(),
-                    observed: obs.sha256.clone(),
-                },
-                Some(_) => SessionOutcome::Match,
             };
             rows.push(ReconcileRow {
                 machine: exp.machine.clone(),
@@ -349,6 +392,7 @@ pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>
                 concat_bytes: concat.len() as u64,
                 sha256: hex_digest(&Sha256::digest(&concat)),
                 basis: ExpectationBasis::DerivedFromStageBody,
+                unverifiable_reason: None,
             });
         }
     }
@@ -357,47 +401,159 @@ pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>
 }
 
 /// Resolve the L3 expected manifest, preferring the strongest available
-/// basis: when the sealed shard body is still on the staging disk, derive the
-/// expectations fresh by hashing those bytes; when the body is gone, fall back
-/// to the persisted per-session summaries. No baseline at all is an error —
+/// basis: when sealed shard bodies are on the staging disk, derive the
+/// expectations fresh by hashing those bytes; when bodies are gone (reclaimed),
+/// resolve from the persisted per-session summaries. No baseline at all is an error —
 /// L3 must never pass vacuously against an empty expectation list.
 pub fn load_expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
-    if stage_body_present(stage)? {
-        expected_manifest(stage)
-    } else {
-        stored_manifest_expectations(stage)
-    }
-}
+    let sessions_root = stage.join(SESSIONS_DIR);
+    let meta_root = stage.join(crate::manifest::META_DIR);
 
-/// Whether the staging tree still holds any sealed shard (the "body"). Once
-/// the archived body is reclaimed this is false, and L3 must fall back to the
-/// persisted summary.
-fn stage_body_present(stage: &Path) -> anyhow::Result<bool> {
-    Ok(crate::store::sealed_shard_count(stage)? > 0)
-}
-
-/// Build expectations from the persisted summaries. Zero manifest files means
-/// no baseline exists — an error, never an empty expectation list.
-fn stored_manifest_expectations(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
-    let stored = crate::manifest::stored_manifest_rows(stage)?;
-    if stored.files == 0 {
+    if !sessions_root.exists() && !meta_root.exists() {
         anyhow::bail!(
             "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against",
-            stage.join(crate::manifest::META_DIR).display()
+            meta_root.display()
         );
     }
-    let mut out: Vec<SessionExpectation> = stored
-        .rows
-        .iter()
-        .map(|row| SessionExpectation {
-            machine: row.machine.clone(),
-            session_id: row.session_id.clone(),
-            shard_count: row.shard_count,
-            concat_bytes: row.concat_bytes,
-            sha256: row.concat_sha256.clone(),
-            basis: ExpectationBasis::StoredManifest,
-        })
-        .collect();
+
+    let mut map: BTreeMap<(String, String), SessionExpectation> = BTreeMap::new();
+    let mut manifest_machines = BTreeSet::new();
+
+    // 1. Process meta_root for stored manifests
+    if meta_root.is_dir() {
+        if let Ok(entries) = fs::read_dir(&meta_root) {
+            for entry in entries.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_dir() {
+                        let machine = entry.file_name().to_string_lossy().into_owned();
+                        manifest_machines.insert(machine.clone());
+                        match crate::manifest::read_manifest(stage, &machine) {
+                            Ok(crate::manifest::ManifestFileState::Loaded(rows)) => {
+                                for row in rows {
+                                    let unverifiable_reason = if row.concat_sha256.len() != 64
+                                        || row.concat_sha256.chars().any(|c| !c.is_ascii_hexdigit())
+                                    {
+                                        Some("stored manifest has invalid digest".to_string())
+                                    } else {
+                                        None
+                                    };
+                                    map.insert(
+                                        (machine.clone(), row.session_id.clone()),
+                                        SessionExpectation {
+                                            machine: machine.clone(),
+                                            session_id: row.session_id,
+                                            shard_count: row.shard_count,
+                                            concat_bytes: row.concat_bytes,
+                                            sha256: row.concat_sha256,
+                                            basis: ExpectationBasis::StoredManifest,
+                                            unverifiable_reason,
+                                        },
+                                    );
+                                }
+                            }
+                            Ok(crate::manifest::ManifestFileState::Empty) => {}
+                            Ok(crate::manifest::ManifestFileState::Missing) => {}
+                            Err(e) => {
+                                map.insert(
+                                    (machine.clone(), "<corrupt-manifest>".to_string()),
+                                    SessionExpectation {
+                                        machine: machine.clone(),
+                                        session_id: "<corrupt-manifest>".to_string(),
+                                        shard_count: 0,
+                                        concat_bytes: 0,
+                                        sha256: String::new(),
+                                        basis: ExpectationBasis::StoredManifest,
+                                        unverifiable_reason: Some(format!(
+                                            "stored manifest corrupt: {e:#}"
+                                        )),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Process sessions_root: disk bodies take precedence over stored manifests
+    if sessions_root.is_dir() {
+        for m_entry in fs::read_dir(&sessions_root).context("read sessions root")? {
+            let m_entry = m_entry?;
+            if !m_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let machine = m_entry.file_name().to_string_lossy().into_owned();
+            for s_entry in fs::read_dir(m_entry.path()).context("read machine dir")? {
+                let s_entry = s_entry?;
+                if !s_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let session_id = s_entry.file_name().to_string_lossy().into_owned();
+                let shard_count = count_shards(&s_entry.path())?;
+                if shard_count > 0 {
+                    let concat = crate::store::concat_shards(stage, &machine, &session_id)?;
+                    map.insert(
+                        (machine.clone(), session_id.clone()),
+                        SessionExpectation {
+                            machine: machine.clone(),
+                            session_id,
+                            shard_count,
+                            concat_bytes: concat.len() as u64,
+                            sha256: hex_digest(&Sha256::digest(&concat)),
+                            basis: ExpectationBasis::DerivedFromStageBody,
+                            unverifiable_reason: None,
+                        },
+                    );
+                } else {
+                    // Body reclaimed: check stored manifest
+                    if let Some(corrupt) =
+                        map.remove(&(machine.clone(), "<corrupt-manifest>".to_string()))
+                    {
+                        map.insert(
+                            (machine.clone(), session_id.clone()),
+                            SessionExpectation {
+                                machine: machine.clone(),
+                                session_id,
+                                shard_count: 0,
+                                concat_bytes: 0,
+                                sha256: String::new(),
+                                basis: ExpectationBasis::StoredManifest,
+                                unverifiable_reason: corrupt.unverifiable_reason,
+                            },
+                        );
+                    } else if !map.contains_key(&(machine.clone(), session_id.clone())) {
+                        let reason = if manifest_machines.contains(&machine) {
+                            "reclaimed session missing from stored manifest".to_string()
+                        } else {
+                            "stored manifest is missing".to_string()
+                        };
+                        map.insert(
+                            (machine.clone(), session_id.clone()),
+                            SessionExpectation {
+                                machine: machine.clone(),
+                                session_id,
+                                shard_count: 0,
+                                concat_bytes: 0,
+                                sha256: String::new(),
+                                basis: ExpectationBasis::StoredManifest,
+                                unverifiable_reason: Some(reason),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if map.is_empty() {
+        anyhow::bail!(
+            "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against",
+            meta_root.display()
+        );
+    }
+
+    let mut out: Vec<SessionExpectation> = map.into_values().collect();
     out.sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
     Ok(out)
 }

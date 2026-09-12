@@ -39,7 +39,7 @@ use anyhow::Context;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
 use rustic_core::{Credentials, Grouped, LsOptions, Repository, SnapshotGroupCriterion};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::store::{BackupStore, SESSIONS_DIR, SHARD_SUFFIX};
@@ -143,14 +143,10 @@ pub fn sort_shards<T>(entries: &mut Vec<(PathBuf, T)>) {
 }
 
 impl BackupStore {
-    /// Cross-machine read-back merge.
+    /// Read only the newest snapshot per machine.
     ///
-    /// Opens the repository fresh, groups all snapshots by hostname, takes the
-    /// newest snapshot per hostname, and buckets that snapshot's sealed shards
-    /// under its `sessions/<machine>/…` subtree. Session shards are
-    /// concatenated in sequence order and hashed. Only ids / counts /
-    /// lengths / digests are ever produced.
-    pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
+    /// Used by `stagereclaim` to prove candidates that are still currently on stage.
+    pub fn read_latest_per_machine(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
         let repo = Repository::new(&self.cfg.repository_options(), &backends)?
             .open(&Credentials::Masterkey(mk.clone()))
@@ -174,11 +170,6 @@ impl BackupStore {
             let snapshot_time = snap.time.to_string();
             let snapshot_time_unix = snap.time.timestamp().as_second();
 
-            // A rustic dir-backup's tree mirrors the full source path
-            // (`snapshot.paths` minus the leading `/`), so `sessions/` sits at
-            // `stage-relative` depth and *not* at the tree root. We therefore
-            // list the whole tree and bucket shard files by the `sessions/`
-            // marker instead of `node_from_snapshot_and_path(snap, "sessions")`.
             let root = match repo.node_from_snapshot_and_path(&snap, "") {
                 Ok(n) => n,
                 Err(e) => {
@@ -247,6 +238,168 @@ impl BackupStore {
         merges.sort_by(|a, b| a.hostname.cmp(&b.hostname));
         report.machines = merges;
         Ok(report)
+    }
+
+    /// Cumulative cross-machine read-back merge (`read --all-machines` and `verify` L3).
+    ///
+    /// Answers "what do all snapshots hold across machines, cumulatively" (ADR-021).
+    /// Groups snapshots by hostname, traverses snapshots from newest to oldest reading
+    /// tree metadata, and maps each session to the newest snapshot that contains it.
+    /// Only the resolved sessions (filtered by `wanted` if specified) have their data
+    /// blobs downloaded and concatenated into verification triples.
+    pub fn read_cumulative_sessions(
+        &self,
+        mk: &MasterKey,
+        wanted: Option<&BTreeSet<(String, String)>>,
+    ) -> anyhow::Result<ReadAllReport> {
+        let backends = self.backends()?;
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
+            .open(&Credentials::Masterkey(mk.clone()))
+            .context("open repository for read-all")?
+            .to_indexed()
+            .context("index repository for read-all")?;
+
+        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snapshots_in_repo = snaps.len();
+        let grouped = Grouped::from_items(snaps, SnapshotGroupCriterion::new().hostname(true));
+
+        let mut report = ReadAllReport::default();
+        report.snapshots_in_repo = snapshots_in_repo;
+
+        let mut merges = Vec::new();
+        for group in grouped.groups {
+            let mut snaps = group.items;
+            if snaps.is_empty() {
+                continue;
+            }
+            snaps.sort_by(|a, b| b.time.cmp(&a.time));
+
+            let newest_snap = &snaps[0];
+            let hostname = newest_snap.hostname.clone();
+            let snapshot_id = newest_snap.id.to_hex().as_str().to_string();
+            let snapshot_time = newest_snap.time.to_string();
+            let snapshot_time_unix = newest_snap.time.timestamp().as_second();
+
+            let mut sessions_map: BTreeMap<String, Vec<(String, rustic_core::repofile::Node)>> =
+                BTreeMap::new();
+
+            for snap in &snaps {
+                if let Some(wanted_set) = wanted {
+                    let wanted_for_this_machine: BTreeSet<&str> = wanted_set
+                        .iter()
+                        .filter(|(m, _)| m == &hostname)
+                        .map(|(_, s)| s.as_str())
+                        .collect();
+                    if !wanted_for_this_machine.is_empty()
+                        && wanted_for_this_machine
+                            .iter()
+                            .all(|s| sessions_map.contains_key(*s))
+                    {
+                        break;
+                    }
+                }
+
+                let root = match repo.node_from_snapshot_and_path(snap, "") {
+                    Ok(n) => n,
+                    Err(e) => {
+                        report.warnings.push(format!(
+                            "host `{hostname}` snapshot {}: cannot read tree root: {e}",
+                            snap.id.to_hex().as_str()
+                        ));
+                        continue;
+                    }
+                };
+
+                let entries = match repo.ls(&root, &LsOptions::default()) {
+                    Ok(it) => match it.collect::<rustic_core::RusticResult<Vec<_>>>() {
+                        Ok(e) => e,
+                        Err(e) => {
+                            report.warnings.push(format!(
+                                "host `{hostname}` snapshot {}: cannot collect entries: {e}",
+                                snap.id.to_hex().as_str()
+                            ));
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        report.warnings.push(format!(
+                            "host `{hostname}` snapshot {}: cannot ls tree: {e}",
+                            snap.id.to_hex().as_str()
+                        ));
+                        continue;
+                    }
+                };
+
+                let mut snap_sessions: BTreeMap<
+                    String,
+                    Vec<(String, rustic_core::repofile::Node)>,
+                > = BTreeMap::new();
+                for (path, node) in entries {
+                    if node.node_type != NodeType::File {
+                        continue;
+                    }
+                    if let Some((m, session, shard)) = bucket_shard_path(&path) {
+                        if m == hostname {
+                            if let Some(wanted_set) = wanted {
+                                if !wanted_set.contains(&(hostname.clone(), session.clone())) {
+                                    continue;
+                                }
+                            }
+                            if !sessions_map.contains_key(&session) {
+                                snap_sessions
+                                    .entry(session)
+                                    .or_default()
+                                    .push((shard, node));
+                            }
+                        }
+                    }
+                }
+
+                for (session, shards) in snap_sessions {
+                    sessions_map.entry(session).or_insert(shards);
+                }
+            }
+
+            let mut sessions = Vec::new();
+            for (session_id, mut shards) in sessions_map {
+                shards.sort_by_key(|(n, _)| store_seq_of(n));
+                let mut concat = Vec::new();
+                for (shard, node) in &shards {
+                    let mut buf = Vec::new();
+                    repo.dump(node, &mut buf)
+                        .with_context(|| format!("dump shard {shard}"))?;
+                    concat.extend_from_slice(&buf);
+                }
+                sessions.push(SessionBackedUp {
+                    machine: hostname.clone(),
+                    session_id,
+                    shard_count: shards.len(),
+                    concat_bytes: concat.len() as u64,
+                    sha256: hex_digest(&Sha256::digest(&concat)),
+                });
+            }
+
+            merges.push(MachineMerge {
+                hostname,
+                snapshot_id,
+                snapshot_time,
+                snapshot_time_unix,
+                sessions,
+            });
+        }
+
+        merges.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        report.machines = merges;
+        Ok(report)
+    }
+
+    /// Cross-machine read-back merge (`read --all-machines`).
+    ///
+    /// Answers "what do I have archived, across every machine, right now".
+    /// Traverses all snapshots cumulatively, grouping sessions by their newest
+    /// snapshot appearance (ADR-021).
+    pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
+        self.read_cumulative_sessions(mk, None)
     }
 
     /// Dump the individual sealed shards of selected sessions of one machine

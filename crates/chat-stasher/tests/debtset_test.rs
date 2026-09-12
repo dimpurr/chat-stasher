@@ -380,3 +380,153 @@ fn the_debt_set_records_which_destinations_we_have_dealt_with() {
         collect::destination_has_record(&fx.state, "dest-b"),
     );
 }
+
+/// (1) Main path: after reclaim (shards deleted from stage, manifest written),
+/// a subsequent collect against an unreachable destination MUST NOT recreate
+/// shards for the already-reclaimed session.
+#[test]
+fn reclaimed_session_with_manifest_is_not_restaged() {
+    let fx = fixture(b"one\ntwo\n");
+    let first = fx.collect(&unreachable("dest-a"));
+    assert_eq!(first.lines_written, 2);
+    assert_eq!(first.shards_written, 1);
+    let session = fx.session_id();
+
+    // Reclaim: manifest is written, sealed shards are removed from stage.
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    let removed =
+        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    assert_eq!(removed, 1);
+
+    // Destination archive is unreachable (offline). Manifest must discharge the debt locally.
+    let second = fx.collect(&unreachable("dest-a"));
+    assert_eq!(
+        second.unverified_cursors, 0,
+        "manifest must prove the reclaimed session"
+    );
+    assert_eq!(
+        second.reset_records, 0,
+        "reclaimed session must not be forced into reset"
+    );
+    assert_eq!(
+        second.lines_written, 0,
+        "reclaimed session must not produce any new lines"
+    );
+    assert_eq!(
+        second.shards_written, 0,
+        "reclaimed session must not write new shards to stage"
+    );
+    assert_eq!(
+        store::sealed_shard_entries(&store::session_shard_dir(&fx.stage, MACHINE, &session))
+            .unwrap()
+            .len(),
+        0,
+        "no new shards may be restaged"
+    );
+}
+
+/// (2) Growing session: after reclaim, if the source file grows, only the new
+/// content is staged. The previously reclaimed lines are NOT restaged.
+#[test]
+fn reclaimed_session_growth_stages_only_delta_not_old_content() {
+    let fx = fixture(b"one\ntwo\n");
+    let first = fx.collect(&unreachable("dest-a"));
+    assert_eq!(first.lines_written, 2);
+    assert_eq!(first.shards_written, 1);
+    let session = fx.session_id();
+
+    // Reclaim: manifest written, shard body removed.
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    let removed =
+        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    assert_eq!(removed, 1);
+
+    // Source file grows with 2 new lines.
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&fx.source)
+        .unwrap();
+    f.write_all(b"three\nfour\n").unwrap();
+    f.sync_all().unwrap();
+    drop(f);
+
+    let second = fx.collect(&unreachable("dest-a"));
+    assert_eq!(
+        second.unverified_cursors, 0,
+        "cursor must be accepted without reset"
+    );
+    assert_eq!(
+        second.reset_records, 0,
+        "growth must not reset the read position"
+    );
+    assert_eq!(
+        second.lines_written, 2,
+        "only the 2 newly appended lines should be written"
+    );
+    assert_eq!(
+        second.shards_written, 1,
+        "exactly 1 new shard should be created for delta"
+    );
+    // Crucial check: the new shard on stage MUST contain ONLY "three\nfour\n",
+    // NOT "one\ntwo\nthree\nfour\n".
+    let staged_bytes = store::concat_shards(&fx.stage, MACHINE, &session).unwrap();
+    assert_eq!(
+        staged_bytes, b"three\nfour\n",
+        "stage must hold only the new delta, old content must not be restaged"
+    );
+}
+
+/// (3) Degradation: if manifest is missing or corrupt, behavior falls back to
+/// standard remote verification (never silent pass, never crashing).
+#[test]
+fn manifest_missing_or_corrupt_falls_back_to_unverifiable() {
+    let fx = fixture(b"one\ntwo\n");
+    fx.collect(&unreachable("dest-a"));
+    let session = fx.session_id();
+
+    // Reclaim: write valid manifest and remove body.
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+
+    // Baseline: with intact manifest, unreachable destination does not cause reset.
+    let intact = fx.collect(&unreachable("dest-a"));
+    assert_eq!(
+        intact.unverified_cursors, 0,
+        "intact manifest must verify the cursor locally"
+    );
+
+    // Case A: manifest corrupted (e.g. invalid JSON garbage)
+    let manifest_file = chat_stasher::manifest::manifest_path(&fx.stage, MACHINE);
+    fs::write(&manifest_file, b"NOT_VALID_JSON_GARBAGE\n").unwrap();
+
+    let report_corrupt = fx.collect(&unreachable("dest-a"));
+    assert_eq!(
+        report_corrupt.unverified_cursors, 1,
+        "corrupted manifest must not be trusted; must fall back to unverifiable"
+    );
+    assert_eq!(
+        report_corrupt.reset_records, 1,
+        "corrupted manifest causes reset reread"
+    );
+    assert!(
+        report_corrupt.errors.is_empty(),
+        "corrupted manifest must not crash the run"
+    );
+
+    // Case B: manifest missing (e.g. deleted)
+    fs::remove_file(&manifest_file).unwrap();
+    // Clear out shards written by the reset above
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+
+    let report_missing = fx.collect(&unreachable("dest-a"));
+    assert_eq!(
+        report_missing.unverified_cursors, 1,
+        "missing manifest must fall back to remote probe (unverifiable when offline)"
+    );
+    assert_eq!(report_missing.reset_records, 1);
+    assert!(report_missing.errors.is_empty());
+}
