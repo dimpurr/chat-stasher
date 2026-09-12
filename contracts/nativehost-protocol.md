@@ -139,16 +139,24 @@ bytes were already sealed; `shard` names the existing one).
  "kind": "<see below>", "retryable": false, "detail": "<human-readable, ≤ 4 KiB>"}
 ```
 
-| `kind` | `retryable` | Meaning |
-|---|---|---|
-| `protocol-version` | false | `protocol` missing or not supported. The response adds `"supported": [1]`. |
-| `bad-request` | false | Not JSON, unknown `type`, missing or malformed field (`request_id`, `name`, `sha256`). |
-| `too-large` | false | Length prefix above 64 MiB. |
-| `integrity` | true | `sha256` does not match `payload`. |
-| `invalid-bundle` | false | `payload` is not a valid inbox bundle. |
-| `config` | false | No `[native_host] stage`, config unreadable, or machine id unresolvable. `detail` names the fix command. |
-| `stage-unavailable` | true | Stage missing, not a directory, not writable, or lock wait timed out. |
-| `io` | true | Sealing failed. Nothing was acknowledged; the retry is safe. |
+| `kind` | Scope | `retryable` | Meaning |
+|---|---|---|---|
+| `protocol-version` | host | false | `protocol` missing or not supported. The response adds `"supported": [1]`. |
+| `bad-request` | item | false | Not JSON, unknown `type`, missing or malformed field (`request_id`, `name`, `sha256`). |
+| `too-large` | item | false | Length prefix above 64 MiB. |
+| `integrity` | item | true | `sha256` does not match `payload`. |
+| `invalid-bundle` | item | false | `payload` is not a valid inbox bundle. |
+| `config` | host | false | No `[native_host] stage`, config unreadable, or machine id unresolvable. `detail` names the fix command. |
+| `stage-unavailable` | host | true | Stage missing, not a directory, not writable, or lock wait timed out. |
+| `io` | host | true | Sealing failed. Nothing was acknowledged; the retry is safe. |
+
+**Scope decides what happens to the item; `retryable` only says whether the
+same request can succeed without a human.** A *host*-scope `nack` says nothing
+about the item: the item stays pending and delivery pauses until a `hello`
+succeeds — even when `retryable` is false (a missing config needs a person,
+but once it is fixed, every waiting item must go through). Only an *item*-scope
+`nack` with `retryable: false` marks that one item rejected. The scope is fixed
+by `kind` and is not sent on the wire.
 
 ## 7. Idempotency
 
@@ -188,6 +196,10 @@ version is a new document section, never an edit to an existing one.
   pauses with a visible reason until a `hello` succeeds again.
 - The outbox never drops an item on its own. When it is full the extension
   refuses new live captures visibly instead.
-- A non-retryable `nack` moves the item to a visible "rejected" state; it is
-  kept and is included in an export.
+- Only an item-scope, non-retryable `nack` (§6.3) moves the item to a visible
+  "rejected" state; it is kept and is included in an export. A host-scope
+  `nack`, a timeout or a send failure keeps the item pending.
+- Retries must not depend on the backfill switch: while the outbox holds a
+  pending item, the extension keeps its own low-frequency retry timer, and
+  clears it once the outbox is empty.
 - There is no automatic file download anywhere.
