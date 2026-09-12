@@ -111,16 +111,18 @@ export const PLATFORMS: readonly ChatPlatform[] = [
   {
     id: 'perplexity',
     origins: ['https://www.perplexity.ai'],
-    // 🔴 C27 · 只登记会话列表这一条精确路径；正文路径没有出处，不能放宽成前缀。
+    // 🔴 C27 · Register exactly the one conversation-list path; the body path has no source and must not be loosened into a prefix.
     pathHints: ['/rest/thread/list_ask_threads'],
     methods: ['POST'],
     status: { min: 200, max: 299 },
-    // 回溯枚举器会对列表形状做更严格的顶层数组 + thread_id 检查。
-    // 这里的通用 capture gate 只负责不把非 JSON 当作这个平台的流量。
+    // The backfill enumerator applies a stricter top-level-array + thread_id check
+    // to the list shape; this generic capture gate only has to stop non-JSON being
+    // taken as traffic for this platform.
     responseShape: { encoding: 'json' },
-    // 列表响应不是正文捕获；本单也没有单条正文 URL 的出处，因此不猜 URL id。
+    // A list response is not a body capture, and this change has no source for a
+    // single-body URL either, so no URL id is guessed.
     sessionIdPatterns: [],
-    // R26 三源交叉（2026-08-17）；未做真实端到端验证。
+    // R26 cross-check of three sources (2026-08-17); no real end-to-end verification was done.
     credibility: 'from-source',
     webSocketCapture: false,
   },
@@ -334,18 +336,24 @@ export interface CapturedFetch {
   pageUrl?: string;
   capturedAt: number;
   /**
-   * 🔴 C21 · 会话身份的【权威值】，由「已经知道它是谁」的那一方一路带下来。
+   * 🔴 C21 · The **authoritative value** of the conversation's identity, carried
+   * down by whichever side already knows who it is.
    *
-   * 根因回顾：同一个会话的身份以前被表达了两次 —— 欠账键是列表接口的
-   * items[].id，文件名却是「从 URL 里再抠一次」。两次表达之间隔着有损函数，
-   * 于是两个不同的欠账键可以塌成同一个文件名（后写的覆盖先写的）。
-   * 这个字段就是那第二次表达的【消除口】：回溯腿把枚举给的 id 直接放进来，
-   * 落盘不再推导。
+   * The root cause, revisited: the identity of one conversation used to be
+   * expressed twice — the debt key was the list API's items[].id, while the file
+   * name was "scraped out of the URL once more". A lossy function sat between the
+   * two expressions, so two different debt keys could collapse onto one file name
+   * (the later write overwriting the earlier one).
+   * This field is the **elimination point** of that second expression: the backfill
+   * leg puts the id the enumerator gave it straight in, and the write-down path
+   * stops deriving.
    *
-   * 🔴 谁可以填：只有扩展自己（lib/backfill/engine.ts）。
-   *    页面来的载荷一律【不许】带这个字段 —— 见 isCapturedFetchShape：
-   *    能指定身份就等于能指定写到哪个文件名。
-   * 🔴 不填（undefined）⇒ 走 extractSessionId 的老路，实时腿行为逐字不变。
+   * 🔴 Who may fill it: only the extension itself (lib/backfill/engine.ts).
+   *    A payload from a page must **never** carry this field — see
+   *    isCapturedFetchShape: being able to specify the identity is the same as
+   *    being able to specify which file name it is written to.
+   * 🔴 Left undefined ⇒ the old extractSessionId route, byte-for-byte the same
+   *    live-leg behaviour.
    */
   sessionId?: string;
 }
@@ -411,9 +419,12 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   ) return false;
   if (typeof value.text !== 'string' || value.text.length === 0) return false;
   if (value.pageUrl !== undefined && typeof value.pageUrl !== 'string') return false;
-  // 🔴 C21：`sessionId` 是扩展内部的权威身份通道（回溯腿用），它直接决定文件名。
-  //    页面能填它 = 页面能指定写到哪个文件（覆盖别的会话）。所以这里不是「校验它」，
-  //    而是【存在即拒收】—— 一条页面来的载荷根本不该有这个字段。
+  // 🔴 C21: `sessionId` is the extension-internal authoritative identity channel
+  //    (used by the backfill leg) and it decides the file name directly. A page
+  //    being able to fill it = a page being able to choose which file is written
+  //    (overwriting another conversation). So this is not "validate it", it is
+  //    **reject on sight** — a payload from a page should never have this field at
+  //    all.
   if ('sessionId' in value) return false;
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
@@ -641,27 +652,33 @@ export function sanitizePathSegment(s: string): string {
 }
 
 /**
- * 🔴 C21 · 会话 id → 文件名片段，**必须是单射的**（两个不同的 id 绝不可能得到同一个片段）。
+ * 🔴 C21 · conversation id → file-name fragment, which **must be injective** (two
+ * different ids can never produce the same fragment).
  *
- * 为什么不是「把不安全字符换成 _ 就完事」：`sanitizePathSegment` 是**多对一**的
- * （'a b' 和 'a/b' 都变成 'a_b'），而 lib/download.ts 是 conflictAction:'overwrite' ——
- * 两个不同的会话塌成同一个名字，后写的会把先写的**从磁盘上抹掉**。
+ * Why not "replace the unsafe characters with _ and be done": `sanitizePathSegment`
+ * is **many-to-one** ('a b' and 'a/b' both become 'a_b'), and lib/download.ts used
+ * conflictAction:'overwrite' — two different conversations collapse onto one name
+ * and the later write **wipes the earlier one off disk**.
  *
- * 这里选的是【恒等 + 拒收】而不是【转义】：
- *  · 片段安全（sanitize 是空操作）⇒ 原样返回。在这个定义域上命名函数就是恒等映射，
- *    单射是**结构性**的，不依赖任何字符表的细节。
- *  · 片段不安全 ⇒ 返回 null，调用方必须当成一次【留痕的失败】，绝不硬塞一个名字。
+ * What is chosen here is [identity + refusal], not [escaping]:
+ *  · the fragment is safe (sanitize is a no-op) ⇒ returned unchanged. On this
+ *    domain the naming function is the identity map, so injectivity is
+ *    **structural** and depends on no detail of any character table.
+ *  · the fragment is unsafe ⇒ null, and the caller must treat it as a **traced
+ *    failure**; never force a name through.
  *
- * 🔴 为什么不用转义（例如 '_'→'_5f'、' '→'_20'）：那样会把**已有用户**所有
- *    含 '_' 的会话（gemini / kimi 的 id 字符集是 [A-Za-z0-9_-]）重命名一遍，
- *    等于把整个收件箱重下一遍。恒等方案对所有既有的、路径安全的 id
- *    **一个字节都不变** —— 实时腿的既有行为因此可以逐字保持。
+ * 🔴 Why not escaping (e.g. '_'→'_5f', ' '→'_20'): that would rename every one of
+ *    **existing users'** conversations containing '_' (gemini / kimi ids use the
+ *    character set [A-Za-z0-9_-]), which amounts to re-downloading the whole
+ *    inbox. The identity scheme leaves every existing, path-safe id
+ *    **byte-for-byte unchanged** — so the live leg's existing behaviour is
+ *    preserved character for character.
  */
 export function pathSafeSessionId(id: string): string | null {
   if (!id) return null;
-  // 恒等即单射：只接受「原样就能当文件名」的 id。
+  // Identity is injective: accept only ids that already work as a file name as-is.
   if (sanitizePathSegment(id) !== id) return null;
-  // '.'/'..' 会被当成路径而不是名字；'.' 开头也不该出现在收件箱里。
+  // '.'/'..' would be read as a path rather than a name, and a leading '.' should not appear in the inbox either.
   if (id.startsWith('.')) return null;
   return id;
 }

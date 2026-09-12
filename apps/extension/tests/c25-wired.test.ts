@@ -1,12 +1,14 @@
 /**
- * C25 · 生产 background 的回溯腿必须可达。
+ * C25 · The backfill leg in the production background must be reachable.
  *
- * 这些断言只从 defineBackground 的真实回调进入；runBackfill 是唯一的
- * 网络/引擎边界，在这里替换成 spy，避免测试发送真实请求。闹钟、storage
- * 事件、目标登记和标签页端口仍然走 background 的生产代码。
+ * These assertions enter only through defineBackground's real callbacks; runBackfill is the
+ * one network/engine boundary and is replaced with a spy here so the test sends no real
+ * request. Alarms, storage events, target registration and the tab port still go through
+ * background's production code.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 
 const runBackfillSpy = vi.fn(async (_opts: any) => ({
   stopped: 'queue-empty',
@@ -118,7 +120,7 @@ beforeEach(async () => {
   storageChangeListeners.length = 0;
   runBackfillSpy.mockClear();
   vi.resetModules();
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (callback: any) => callback);
   const { resetTickLockForTest } = await import('../lib/backfill/schedule');
@@ -126,7 +128,7 @@ beforeEach(async () => {
 });
 
 describe('C25 · background wiring', () => {
-  it('开关开时创建闹钟，切关时通过 storage change 立即清掉', async () => {
+  it('the alarm is created when the switch goes on and cleared at once via the storage change when it goes off', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
@@ -142,7 +144,7 @@ describe('C25 · background wiring', () => {
     expect(alarmClears).toContain(BACKFILL_ALARM_NAME);
   });
 
-  it('默认关闭时启动不创建闹钟，闹钟事件也不跑回溯', async () => {
+  it('starting with the default (off) creates no alarm, and an alarm event runs no backfill either', async () => {
     const mod = await boot();
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
 
@@ -155,7 +157,7 @@ describe('C25 · background wiring', () => {
     expect(mod.lastBackfillTick()?.reason).toBe('disabled');
   });
 
-  it('匹配的 onAlarm 从生产入口走到回溯一跳，但不发真实网络', async () => {
+  it('a matching onAlarm walks from the production entry point through one backfill tick, without any real network', async () => {
     stored[ENABLED_KEY] = true;
     seedTargetAndLiveTab();
     const mod = await boot();
@@ -169,7 +171,7 @@ describe('C25 · background wiring', () => {
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
   });
 
-  it('开关打开但拿不到端口时显式返回 no-http-port，不调用引擎且不抛错', async () => {
+  it('switch on but no port available returns no-http-port explicitly, without calling the engine or throwing', async () => {
     stored[ENABLED_KEY] = true;
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     const mod = await boot();

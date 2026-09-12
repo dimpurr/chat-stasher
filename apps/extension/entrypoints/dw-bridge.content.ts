@@ -147,24 +147,32 @@ export default defineContentScript({
     }
 
     // -----------------------------------------------------------------------
-    // 🔴 C19 · 回溯腿的取数通道就在这里落地。
+    // 🔴 C19 · This is where the backfill leg's fetch channel lands.
     //
-    // 这段代码跑在【用户已登录的那个页面】的上下文里，所以下面这个 fetch 是
-    // **同源**请求，带的就是用户自己那个页面的 cookie —— 与用户手动点开一条
-    // 历史对话时浏览器发出的请求同源同凭据。因此：
-    //   · 不需要任何 host 权限（同源请求本来就不受 host 权限约束）；
-    //   · matches 一个字都不用改（本来就注入在这些平台上）；
-    //   · 取数没有被挪出用户的登录上下文（架构前提保住了）。
-    // 允许代发哪些 URL 由 lib/backfill/tab-port.ts 的三道检查决定
-    //（同源 + 在平台表里 + 只有回溯腿那两条路径），这里不自己判断。
+    // This code runs in the context of **the page the user is already logged
+    // into**, so the fetch below is a **same-origin** request carrying that
+    // page's own cookies — same origin and same credentials as the request the
+    // browser sends when the user opens a past conversation by hand. Hence:
+    //   · no host permission is needed (same-origin requests are not governed by
+    //     host permissions in the first place);
+    //   · `matches` need not change a character (it was already injected on these
+    //     platforms);
+    //   · fetching has not been moved out of the user's logged-in context (the
+    //     architectural premise holds).
+    // Which URLs may be sent on the page's behalf is decided by the three checks
+    // in lib/backfill/tab-port.ts (same origin + in the platform table + only the
+    // backfill leg's two paths); nothing is decided here.
     // -----------------------------------------------------------------------
     browser.runtime.onMessage.addListener(
       (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
         const pending = handleBackfillMessage(message, pageOrigin, async (url, init) => {
-          // 🔴 C23：method / body / Content-Type 都已经被 checkBackfillRequest 过完闭集
-          //    才会走到这里（handleBackfillMessage → serveBackfillFetch）。
-          //    这里不再做任何判断，也【不许】做 —— 判断只有一处，就是那个白名单。
-          //    init 省略（GET 段）⇒ 下面这个 fetch 的实参与 C19/C22 逐字相同。
+          // 🔴 C23: by the time execution reaches here, method / body /
+          //    Content-Type have already passed checkBackfillRequest's closed-set
+          //    checks (handleBackfillMessage → serveBackfillFetch).
+          //    Nothing is decided here, and nothing **may** be — the decision lives
+          //    in exactly one place, that allowlist.
+          //    init omitted (a GET segment) ⇒ the fetch below takes byte-identical
+          //    arguments to C19/C22.
           const res = init && init.method === 'POST'
             ? await fetch(url, {
                 method: 'POST',
@@ -181,20 +189,21 @@ export default defineContentScript({
               });
           return { status: res.status, text: () => res.text() };
         });
-        if (!pending) return;   // 不是给我的消息，让给别的监听器
+        if (!pending) return;   // not a message for me; leave it to the other listeners
         pending
           .then(sendResponse)
           .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
-        return true;            // MV3：异步 sendResponse 必须返回 true
+        return true;            // MV3: an async sendResponse requires returning true
       },
     );
 
-    // 报到：把 tab id（由浏览器填在 sender 上）留给 background，
-    // 好让【闹钟醒来时】知道该找哪个标签页取数。失败无所谓 —— 实时腿那条路
-    // 用的是当场的 sender，不依赖这张登记表。
+    // Check in: leave the tab id (filled in on `sender` by the browser) with
+    // background, so that **when the alarm wakes** it knows which tab to fetch
+    // through. A failure is harmless — the live leg uses the sender it has at the
+    // time and does not depend on this registry.
     browser.runtime
       .sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin })
-      .catch(() => { /* background 没醒/没人接：不打扰页面 */ });
+      .catch(() => { /* background asleep / nobody listening: do not disturb the page */ });
 
     window.addEventListener('message', onMessage);
     // A tokenized probe makes the readiness handshake insensitive to which

@@ -1,34 +1,35 @@
 /**
- * C17 · 回溯腿【端到端】串一次。
+ * C17 · Walk the backfill leg **end to end** once.
  *
- * 与 c11/c12/c13 的分工：
- *  · c11 单独验引擎、c12 单独验守卫、c13 只验"接线到达"（runBackfill 被 vi.mock 掉了）。
- *  · 🔴 本文件【不 mock 任何一环】：真引擎 + 真欠账 + 真定速 + 真 download.ts +
- *    真 download-guard + 真 background.ts 入口，只把 browser.* 换成假实现、
- *    http 端口换成合成服务器。
- *  · 全程零真实网络、零登录态：http 端口是本文件里的一个纯函数，
- *    browser.downloads 也只是把 filename 记进数组。
+ * How the work is split with c11/c12/c13:
+ *  · c11 verifies the engine alone, c12 the guards alone, and c13 only that "the wiring arrives" (runBackfill is vi.mock'd out).
+ *  · 🔴 This file **mocks no link in the chain**: the real engine + real debts + real pacing + the real write-down exit +
+ *    the real background.ts entry point, swapping only browser.* for a fake and the http port for a synthetic server.
+
+ *  · Zero real network and zero logged-in state throughout: the http port is a pure function in this file,
+ *    and the write-down channel is a synthetic native host that merely records names into an array.
  *
- * 每个用例都从【真实入口】出发：runtime.onMessage('chat-captured')。
+ * Every case starts from the **real entry point**: runtime.onMessage('chat-captured').
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 // ---------------------------------------------------------------------------
-// 假浏览器。storage 是【跨 resetModules 存活的】—— 这正是"浏览器重启"的模型：
-// 内存态（模块变量）清零，storage.local 留着。
+// A fake browser. Storage **survives resetModules** — which is exactly the model of a "browser restart":
+// in-memory state (module variables) is cleared while storage.local stays.
 //
-// W2：落盘通道 = 合成 native host（tests/synthetic-native-host.ts）。
-// 「这一笔到底存下来了没有」不再看磁盘上有没有文件，而是看 host 有没有答 ack ——
-// 那本来就是规范里唯一算数的东西（§1）。
+// W2: the write-down channel = a synthetic native host (tests/synthetic-native-host.ts).
+// "Was this one actually stored" no longer looks at whether a file is on disk but at whether the host acked —
+// which was the only thing that ever counted under the spec (§1).
 // ---------------------------------------------------------------------------
 const store: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 let host: SyntheticHost;
-/** 让主机整个下线（模拟「本机没装 host / host 答不上话」）。 */
+/** Take the host entirely offline (simulating "the host is not installed / does not answer"). */
 let hostDown = false;
 
 const fakeBrowser: any = {
@@ -56,14 +57,14 @@ const fakeBrowser: any = {
 };
 
 // ---------------------------------------------------------------------------
-// 合成"服务器"。绝不碰网络：就是一个 (url) => {status,text} 的纯函数。
+// A synthetic "server". It never touches the network: just a pure (url) => {status,text} function.
 // ---------------------------------------------------------------------------
 interface ServerOpts {
   ids: string[];
-  /** null ⇒ 列表接口【不给】total，用来验"没有分母就不许出现 %"。 */
+  /** null ⇒ the list endpoint gives **no** total, used to verify "no denominator means no %". */
   total: number | null;
   pageSize: number;
-  /** 额外塞进某一页的重复 id（模拟"同一个会话被枚举两次"）。 */
+  /** A duplicate id stuffed into one page (simulating "the same conversation enumerated twice"). */
   dupeOnPage?: { page: number; id: string };
 }
 
@@ -84,7 +85,7 @@ function makeServer(opts: ServerOpts) {
       if (opts.total !== null) body.total = opts.total;
       return { status: 200, text: JSON.stringify(body) };
     }
-    // 取正文：必须命中 chatgpt 的 responseShape（mapping + current_node）。
+    // Body fetch: it must hit chatgpt's responseShape (mapping + current_node).
     const id = decodeURIComponent(u.pathname.replace('/backend-api/conversation/', ''));
     return {
       status: 200,
@@ -98,7 +99,7 @@ function makeServer(opts: ServerOpts) {
   return { port, calls };
 }
 
-/** 实时腿的载荷（合成夹具，不是任何真人的对话）。 */
+/** The live leg's payload (a synthetic fixture, not anybody's actual conversation). */
 function liveCapture(account = 'acct-fixture-1'): CapturedFetch {
   const sid = 'aaaaaaaa-1111-2222-3333-444444444444';
   return {
@@ -111,7 +112,7 @@ function liveCapture(account = 'acct-fixture-1'): CapturedFetch {
   };
 }
 
-/** 走真实入口：加载 background → 执行 defineBackground 回调 → 派发一条消息。 */
+/** Take the real entry point: load background → run defineBackground's callback → dispatch a message. */
 async function bootAndDispatch(payload: CapturedFetch): Promise<{ mod: any; responded: any }> {
   const mod: any = await import('../entrypoints/background');
   mod.configureBackfillPace({ clock: fakeClock });
@@ -134,7 +135,7 @@ function detailCalls(calls: string[]): string[] {
   return calls.filter((u) => u.includes('/backend-api/conversation/'));
 }
 
-/** 主机 ack 过的名字 —— 现在这就是「落盘」的唯一证据（§1）。 */
+/** The names the host acked — this is now the only evidence of "stored" (§1). */
 function finalWrites(): string[] {
   return host.names();
 }
@@ -147,10 +148,10 @@ const UUIDS = [
 ];
 
 /**
- * 🔴 C19：假时钟。sleep 不真的等，只把 now 往前推。
- * 为什么现在必须有它：C19 修好了 BUG-3（取正文的最小间隔跨 tick 生效），
- * 于是本文件里"连着踢好几脚"的用例会真的去睡 20 秒 —— 那是修好了的证据，
- * 但不该让测试也跟着睡。时钟由 background 的测试接缝注入（configureBackfillPace）。
+ * 🔴 C19: a fake clock. sleep does not really wait, it only advances now.
+ * Why it is now required: C19 fixed BUG-3 (the body-fetch minimum interval now takes effect across ticks),
+ * so the cases in this file that "kick it several times in a row" really would sleep 20 seconds each — which is the evidence
+ * that it is fixed, but the test should not have to sleep too. The clock is injected through background's test seam (configureBackfillPace).
  */
 let fakeNow = 1_700_000_000_000;
 const fakeClock = {
@@ -165,7 +166,7 @@ beforeEach(async () => {
   hostDown = false;
   (globalThis as any).indexedDB = new IDBFactory();
   fakeNow = 1_700_000_000_000;
-  vi.stubGlobal('browser', fakeBrowser);
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
   vi.stubGlobal('defineBackground', (cb: any) => cb);
   vi.resetModules();
@@ -180,23 +181,23 @@ async function enableBackfill(): Promise<void> {
 }
 
 // ===========================================================================
-// 任务 1 · 串一条完整的回溯（N = 4 > 1）
+// Task 1 · walk one complete backfill (N = 4 > 1)
 // ===========================================================================
-describe('C17 任务 1 · 枚举 → 欠账 → 定速逐个取 → 落盘 → 欠账减少 → 进度更新', () => {
-  it('N=4 全链路，每一步都有独立证据', async () => {
+describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write down → debts shrink → progress updates', () => {
+  it('N=4 down the whole chain, with independent evidence at every step', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 2 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
 
-    // ---- tick 1：枚举跑完 + 清第 1 笔账 ----
+    // ---- tick 1: enumeration finishes + the 1st debt is cleared ----
     await bootAndDispatch(liveCapture());
     const listUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
-    console.log('[C17-1] 证据A 枚举实际请求的列表页:', listUrls);
-    expect(listUrls.length).toBe(2);            // 2 页 × pageSize 2 = 4 条
+    console.log('[C17-1] evidence A — the list pages actually requested:', listUrls);
+    expect(listUrls.length).toBe(2);            // 2 pages × pageSize 2 = 4 rows
 
     const s1 = stateOf();
-    console.log('[C17-1] 证据B 欠账集合(storage 里读回来的):', {
+    console.log('[C17-1] evidence B — the debt set (read back out of storage):', {
       key: STATE_KEY, pending: s1.pending, archived: s1.archived,
       totalKnown: s1.totalKnown, totalSource: s1.totalSource, enumCursor: s1.enumCursor,
     });
@@ -204,14 +205,14 @@ describe('C17 任务 1 · 枚举 → 欠账 → 定速逐个取 → 落盘 → �
     expect(s1.archived.length).toBe(1);
     expect(s1.pending.length).toBe(3);
 
-    console.log('[C17-1] 证据C tick1 实际取正文的 URL:', detailCalls(server.calls));
-    expect(detailCalls(server.calls).length).toBe(1);   // 「逐个」：一次 tick 只取一条
+    console.log('[C17-1] evidence C — the body URLs tick1 actually fetched:', detailCalls(server.calls));
+    expect(detailCalls(server.calls).length).toBe(1);   // "one by one": a tick fetches exactly one
 
-    console.log('[C17-1] 证据D tick1 落盘的最终文件:', finalWrites());
-    console.log('[C17-1] 证据E tick1 进度文案:', mod.lastBackfillTick()?.report?.progress);
-    console.log('[C17-1] 证据F tick1 paceTrace:', mod.lastBackfillTick()?.report?.paceTrace);
+    console.log('[C17-1] evidence D — the final files tick1 wrote down:', finalWrites());
+    console.log('[C17-1] evidence E — tick1 progress text:', mod.lastBackfillTick()?.report?.progress);
+    console.log('[C17-1] evidence F — tick1 paceTrace:', mod.lastBackfillTick()?.report?.paceTrace);
 
-    // ---- tick 2..4：把剩下 3 笔清完，逐个观察欠账下降 ----
+    // ---- ticks 2..4: clear the remaining 3 and watch the debts fall one by one ----
     const trail: Array<{ tick: number; pending: number; archived: number; progress: string }> = [];
     for (let i = 2; i <= 4; i += 1) {
       await bootAndDispatch(liveCapture());
@@ -221,29 +222,29 @@ describe('C17 任务 1 · 枚举 → 欠账 → 定速逐个取 → 落盘 → �
         progress: mod.lastBackfillTick()!.report!.progress,
       });
     }
-    console.log('[C17-1] 证据G 欠账逐 tick 下降 + 进度文案:', trail);
+    console.log('[C17-1] evidence G — debts falling tick by tick, plus progress text:', trail);
     expect(trail.map((t) => t.pending)).toEqual([2, 1, 0]);
     expect(trail.map((t) => t.archived)).toEqual([2, 3, 4]);
 
-    // 逐个取：4 次 detail 请求，顺序 = FIFO
+    // Fetched one by one: 4 detail requests, in FIFO order
     expect(detailCalls(server.calls).length).toBe(4);
     expect(detailCalls(server.calls).map((u) => u.split('/').pop())).toEqual(UUIDS);
 
-    // 落盘：4 个会话各一个最终文件（外加实时腿自己的那条）
+    // Written down: one final file per conversation (plus the live leg's own)
     const backfillFiles = finalWrites().filter((f) => UUIDS.some((id) => f.includes(id)));
-    console.log('[C17-1] 证据H 回溯落盘的 4 个最终文件:', backfillFiles);
+    console.log('[C17-1] evidence H — the 4 final files the backfill leg wrote down:', backfillFiles);
     expect(backfillFiles.length).toBe(4);
 
-    console.log('[C17-1] 证据I 末态进度文案:', trail[trail.length - 1]!.progress);
+    console.log('[C17-1] evidence I — the final progress text:', trail[trail.length - 1]!.progress);
     expect(trail[trail.length - 1]!.progress).toContain('100%');
   });
 });
 
 // ===========================================================================
-// 任务 2 · 四个接缝反面
+// Task 2 · four seam counter-cases
 // ===========================================================================
-describe('C17 任务 2 · 反面 1：中途"浏览器重启"（清内存态、留 storage）', () => {
-  it('从欠账集合接着跑，不重头来', async () => {
+describe('C17 task 2 · counter-case 1: a "browser restart" mid-way (in-memory state cleared, storage kept)', () => {
+  it('it carries on from the debt set rather than starting over', async () => {
     await enableBackfill();
     const server1 = makeServer({ ids: UUIDS, total: 4, pageSize: 2 });
     let mod: any = await import('../entrypoints/background');
@@ -251,34 +252,34 @@ describe('C17 任务 2 · 反面 1：中途"浏览器重启"（清内存态、�
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
     const before = stateOf();
-    console.log('[C17-2.1] 重启前:', { archived: before.archived, pending: before.pending });
+    console.log('[C17-2.1] before the restart:', { archived: before.archived, pending: before.pending });
     expect(before.archived.length).toBe(2);
 
-    // ---- "浏览器重启"：所有模块内存态清零，storage 原样留着 ----
+    // ---- "a browser restart": all module in-memory state cleared, storage left as it is ----
     vi.resetModules();
     runtimeListeners.length = 0;
     const { resetTickLockForTest } = await import('../lib/backfill/schedule');
     resetTickLockForTest();
     const server2 = makeServer({ ids: UUIDS, total: 4, pageSize: 2 });
     mod = await import('../entrypoints/background');
-    // 重启后 transport 也是 null（生产事实），必须重新注入才会动。
-    expect(mod.lastBackfillTick()).toBeNull();       // 内存态确实清零了
+    // After the restart the transport is null too (a production fact); nothing moves until it is injected again.
+    expect(mod.lastBackfillTick()).toBeNull();       // the in-memory state really was cleared
     mod.configureBackfillTransport(server2.port);
 
     await bootAndDispatch(liveCapture());
     const after = stateOf();
-    console.log('[C17-2.1] 重启后第一次 tick 取的正文:', detailCalls(server2.calls));
-    console.log('[C17-2.1] 重启后:', { archived: after.archived, pending: after.pending });
+    console.log('[C17-2.1] the bodies the first tick after the restart fetched:', detailCalls(server2.calls));
+    console.log('[C17-2.1] after the restart:', { archived: after.archived, pending: after.pending });
 
-    // 关键断言：重启后没有重新枚举、没有重抓已归档的，直接接着第 3 条。
+    // The key assertion: after the restart it does not re-enumerate, does not re-fetch what was archived, and carries on at the 3rd.
     expect(server2.calls.filter((u) => u.includes('/conversations'))).toEqual([]);
     expect(detailCalls(server2.calls).map((u) => u.split('/').pop())).toEqual([UUIDS[2]]);
     expect(after.archived).toEqual([UUIDS[0], UUIDS[1], UUIDS[2]]);
   });
 });
 
-describe('C17 任务 2 · 反面 2：中途主机够不着（host-paused）', () => {
-  it('主机不在 ⇒ 立刻停、欠账不动；主机回来之后从断点继续', async () => {
+describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (host-paused)', () => {
+  it('the host is absent ⇒ it stops at once with the debts untouched; once the host is back it resumes from the breakpoint', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 2 });
     const mod: any = await import('../entrypoints/background');
@@ -287,112 +288,112 @@ describe('C17 任务 2 · 反面 2：中途主机够不着（host-paused）', ()
     const beforeTrip = stateOf();
     expect(beforeTrip.archived.length).toBe(1);
 
-    // 🔴 W2 · 真制造这一次暂停：主机整个下线，下一笔欠账送不出去。
-    //    这不是「下载停滞」，是 §1 意义上的一次【未送达】——
-    //    唯一正确的反应是保持欠账 + 具名暂停，绝不当成"处理完了"。
+    // 🔴 W2 · Really create this pause: the host goes entirely offline and the next debt cannot be delivered.
+    //    This is not a "download stall" but a **non-delivery** in §1's sense —
+    //    and the only correct reaction is to keep the debt and pause by name, never to treat it as "done".
     hostDown = true;
     await bootAndDispatch(liveCapture());
-    console.log('[C17-2.2] 主机不在时 tick reason =', mod.lastBackfillTick()?.reason);
+    console.log('[C17-2.2] tick reason while the host is absent =', mod.lastBackfillTick()?.reason);
     const paused = stateOf();
-    console.log('[C17-2.2] 暂停后欠账:', { archived: paused.archived.length, pending: paused.pending.length });
+    console.log('[C17-2.2] debts after the pause:', { archived: paused.archived.length, pending: paused.pending.length });
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
     expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
-    expect(paused.pending).toEqual(beforeTrip.pending);              // 欠账原封不动
-    expect(paused.archived).toEqual(beforeTrip.archived);            // 一条都没冒充成功
-    expect(paused.failures ?? []).toEqual([]);                       // 也没被判死
+    expect(paused.pending).toEqual(beforeTrip.pending);              // the debts are untouched
+    expect(paused.archived).toEqual(beforeTrip.archived);            // not one passed itself off as a success
+    expect(paused.failures ?? []).toEqual([]);                       // and none was judged dead
 
-    // 暂停态被写了下来（Popup 要显示的就是它）。
+    // The pause state was written down (it is what the popup displays).
     const { HOST_PAUSE_KEY } = await import('../lib/host-status');
     expect(store[HOST_PAUSE_KEY]).toMatchObject({ reason: 'host-unavailable' });
 
-    // 主机还是不在 ⇒ 暂停继续，一个请求都不多发。
+    // The host is still absent ⇒ the pause continues and not one extra request is sent.
     const detailsBefore = detailCalls(server.calls).length;
     await bootAndDispatch(liveCapture());
-    console.log('[C17-2.2] 主机仍不在时 tick reason =', mod.lastBackfillTick()?.reason);
+    console.log('[C17-2.2] tick reason while the host is still absent =', mod.lastBackfillTick()?.reason);
     expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
     expect(detailCalls(server.calls).length).toBe(detailsBefore);
 
-    // 主机回来 ⇒ 下一次心跳先 hello，成功了才恢复；恢复后从断点继续。
+    // The host comes back ⇒ the next heartbeat says hello first and only resumes on success; then it carries on from the breakpoint.
     hostDown = false;
     await bootAndDispatch(liveCapture());
     const resumed = stateOf();
-    console.log('[C17-2.2] 恢复后:', { reason: mod.lastBackfillTick()?.reason, archived: resumed.archived });
+    console.log('[C17-2.2] after resuming:', { reason: mod.lastBackfillTick()?.reason, archived: resumed.archived });
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
-    expect(store[HOST_PAUSE_KEY]).toBeNull();                        // 暂停被清掉了
-    expect(resumed.archived).toEqual([UUIDS[0], UUIDS[1]]);          // 接着第 2 条，不是重头
+    expect(store[HOST_PAUSE_KEY]).toBeNull();                        // the pause was cleared
+    expect(resumed.archived).toEqual([UUIDS[0], UUIDS[1]]);          // it carries on at the 2nd rather than starting over
   });
 });
 
-describe('C17 任务 2 · 反面 3：枚举给不出 total', () => {
-  it('进度文案里绝不出现 % —— 且先证明仪器能看出反面', async () => {
+describe('C17 task 2 · counter-case 3: enumeration gives no total', () => {
+  it('the progress text never contains % — and the instrument is first shown to be able to see the opposite', async () => {
     await enableBackfill();
-    // (a) 仪器自证：有 total 时，同一个检查【看得见】百分比
+    // (a) The instrument proves itself: with a total, the same check **does see** a percentage
     const withTotal = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(withTotal.port);
     await bootAndDispatch(liveCapture());
     const yes = mod.lastBackfillTick()!.report!.progress;
-    console.log('[C17-2.3] 仪器自证（有 total）:', yes);
+    console.log('[C17-2.3] instrument self-proof (with a total):', yes);
     expect(yes).toContain('%');
 
-    // (b) 真反面：另一个 scope，列表不给 total
+    // (b) The real counter-case: another scope, and the list gives no total
     const noTotal = makeServer({ ids: UUIDS, total: null, pageSize: 4 });
     mod.configureBackfillTransport(noTotal.port);
     await bootAndDispatch(liveCapture('acct-no-total'));
     const no = mod.lastBackfillTick()!.report!.progress;
-    console.log('[C17-2.3] 真反面（无 total）:', no);
+    console.log('[C17-2.3] the real counter-case (no total):', no);
     expect(no).not.toContain('%');
-    expect(no).toContain('总数未知');
+    expect(no).toContain('total unknown');
 
     const s = stateOf('cs_backfill_v1:chatgpt:acct-no-total');
-    console.log('[C17-2.3] 无 total 时的 state:', { totalKnown: s.totalKnown, totalSource: s.totalSource });
+    console.log('[C17-2.3] the state with no total:', { totalKnown: s.totalKnown, totalSource: s.totalSource });
     expect(s.totalSource).toBe('unknown');
   });
 });
 
-describe('C17 任务 2 · 反面 4：同一个会话被枚举两次', () => {
-  it('不重复落盘 —— 且先证明仪器能看出重复', async () => {
+describe('C17 task 2 · counter-case 4: the same conversation enumerated twice', () => {
+  it('it is not written down twice — and the instrument is first shown to be able to see a duplicate', async () => {
     await enableBackfill();
-    // (a) 仪器自证：真的送两次同一个会话（名字逐字相同）时，
-    //     finalWrites() 【看得见】两条同名记录。
-    //     🔴 W2：载荷按内容去重（sha256 就是主键），所以这里必须让【字节】不同
-    //     —— 改一个 capturedAt 即可，名字一个字都不变。
+    // (a) The instrument proves itself: when the same conversation is really sent twice (the name identical byte for byte),
+    //     finalWrites() **does see** two records with the same name.
+    //     🔴 W2: payloads are deduplicated by content (sha256 is the primary key), so the **bytes** have to differ here
+    //     — changing capturedAt is enough, and the name does not change a character.
     const mod: any = await import('../entrypoints/background');
     const dup = liveCapture();
     await bootAndDispatch(dup);
     await mod.handleCaptured({ ...dup, capturedAt: dup.capturedAt + 1_000 });
     const liveName = finalWrites().filter((f) => f.includes('aaaaaaaa-1111'));
-    console.log('[C17-2.4] 仪器自证（两次不同字节、同一个名字）:', liveName);
+    console.log('[C17-2.4] instrument self-proof (two different byte strings, one name):', liveName);
     expect(liveName.length).toBe(2);
 
-    // (b) 真反面：第 0 页把 UUIDS[0] 再塞一遍
+    // (b) The real counter-case: page 0 stuffs UUIDS[0] in a second time
     host = createSyntheticHost({ up: true });
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 2, dupeOnPage: { page: 0, id: UUIDS[0]! } });
     mod.configureBackfillTransport(server.port);
     for (let i = 0; i < 4; i += 1) await bootAndDispatch(liveCapture());
 
     const s = stateOf();
-    console.log('[C17-2.4] 枚举带重复时的 state:', { pending: s.pending, archived: s.archived });
+    console.log('[C17-2.4] the state when enumeration carries a duplicate:', { pending: s.pending, archived: s.archived });
     const dupFiles = finalWrites().filter((f) => f.includes(UUIDS[0]!));
-    console.log('[C17-2.4] UUIDS[0] 的最终文件:', dupFiles);
-    console.log('[C17-2.4] UUIDS[0] 的 detail 请求次数:',
+    console.log('[C17-2.4] the final files for UUIDS[0]:', dupFiles);
+    console.log('[C17-2.4] the number of detail requests for UUIDS[0]:',
       detailCalls(server.calls).filter((u) => u.endsWith(UUIDS[0]!)).length);
 
-    expect(new Set(s.archived).size).toBe(s.archived.length);   // archived 无重复
-    expect(dupFiles.length).toBe(1);                            // 只落盘一次
+    expect(new Set(s.archived).size).toBe(s.archived.length);   // archived has no duplicates
+    expect(dupFiles.length).toBe(1);                            // written down exactly once
     expect(detailCalls(server.calls).filter((u) => u.endsWith(UUIDS[0]!)).length).toBe(1);
   });
 });
 
 // ===========================================================================
-// 任务 3 · 接缝 bug（这些用例【钉住当前的真实行为】，包括错误的行为）
+// Task 3 · seam bugs (these cases **pin the current real behaviour**, wrong behaviour included)
 // ===========================================================================
-describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一个身份', () => {
-  it('🔴 BUG-1【C20 已修】：落盘被跳过（拿不到 sessionId）⇒ 欠账【不清】、进失败清单', async () => {
+describe('C17 task 3 · seam A: are the debt key and the on-disk file name the same identity', () => {
+  it('🔴 BUG-1, fixed in C20: the write-down is skipped (no sessionId) ⇒ the debt is **not cleared** and enters the failure list', async () => {
     await enableBackfill();
-    // 'shortid' 是合法的欠账键（enumerate 只要求非空 string），
-    // 但 chatgpt 的 sessionIdPatterns 是 /backend-api/conversation/([0-9a-fA-F-]{8,})，
-    // 'shortid' 不是 hex ⇒ extractSessionId 返回 null ⇒ handleCaptured 直接跳过不落盘。
+    // 'shortid' is a legal debt key (enumerate only requires a non-empty string),
+    // but chatgpt's sessionIdPatterns is /backend-api/conversation/([0-9a-fA-F-]{8,}),
+    // and 'shortid' is not hex ⇒ extractSessionId returns null ⇒ handleCaptured skips the write-down outright.
     const server = makeServer({ ids: ['shortid'], total: 1, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
@@ -400,35 +401,35 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
 
     const s = stateOf();
     const files = finalWrites().filter((f) => f.includes('shortid'));
-    console.log('[C17-3.A] detail 请求:', detailCalls(server.calls));
-    console.log('[C17-3.A] 落盘的文件里跟 shortid 有关的:', files);
-    console.log('[C17-3.A] 欠账状态:', { pending: s.pending, archived: s.archived });
-    console.log('[C17-3.A] 失败清单:', s.failures);
-    console.log('[C17-3.A] 进度文案:', mod.lastBackfillTick()!.report!.progress);
+    console.log('[C17-3.A] detail requests:', detailCalls(server.calls));
+    console.log('[C17-3.A] the files written down related to shortid:', files);
+    console.log('[C17-3.A] debt state:', { pending: s.pending, archived: s.archived });
+    console.log('[C17-3.A] failure list:', s.failures);
+    console.log('[C17-3.A] progress text:', mod.lastBackfillTick()!.report!.progress);
 
-    expect(detailCalls(server.calls).length).toBe(1);   // 确实取了正文
-    expect(files.length).toBe(0);                       // 一个字节都没落盘
+    expect(detailCalls(server.calls).length).toBe(1);   // the body really was fetched
+    expect(files.length).toBe(0);                       // not one byte was written down
 
-    // C20 之前：s.archived === ['shortid'] —— 没落盘却被划掉，进度还会说 100%。
-    // C20 之后：sink 说 saved:false ⇒ 不清账、不冒充已归档、进失败清单、不重试。
+    // Before C20: s.archived === ['shortid'] — never stored yet struck off, and progress even said 100%.
+    // After C20: the sink says saved:false ⇒ no clearing, no passing off as archived, into the failure list, no retry.
     expect(s.archived).toEqual([]);
-    expect(s.pending).toEqual([]);                      // 也不留在队首原地打转
+    expect(s.pending).toEqual([]);                      // and not left at the head of the queue spinning in place
     expect(s.failures).toEqual([
       { shortId: 'shortid', platform: 'chatgpt', reason: 'not-saved', at: expect.any(Number) },
     ]);
-    // 🔴 进度分子不再说谎：0 条已归档，不是 100%。
+    // 🔴 The progress numerator no longer lies: 0 archived, not 100%.
     expect(mod.lastBackfillTick()!.report!.progress).not.toContain('100%');
-    expect(mod.lastBackfillTick()!.report!.progress).toContain('已归档 0');
+    expect(mod.lastBackfillTick()!.report!.progress).toContain('Archived 0');
     expect(mod.lastBackfillTick()!.report!.failedThisRun).toHaveLength(1);
   });
 
-  it('🔴 BUG-2【C21 治根】：两个欠账键【不可能】再塌成同一个文件名', async () => {
+  it('🔴 BUG-2, root-caused in C21: two debt keys can **no longer** collapse onto one file name', async () => {
     await enableBackfill();
-    // 这两个 id 都以同一段 hex-dash 开头，sessionIdPatterns 的贪婪匹配到此为止：
-    //   'deadbeef01-zzz' 和 'deadbeef01-yyy' 曾经都 ⇒ sessionId 'deadbeef01-'
-    // 🔴 C21 之后落盘那一侧【根本不再从 URL 抠身份】（见 lib/backfill/engine.ts
-    //    的 `sessionId: id` 与 entrypoints/background.ts 的 resolveSessionId），
-    //    所以这条正则怎么贪婪都不再影响文件名。
+    // Both ids start with the same hex-dash run, and sessionIdPatterns' greedy match stops there:
+    //   'deadbeef01-zzz' and 'deadbeef01-yyy' both used to ⇒ sessionId 'deadbeef01-'
+    // 🔴 After C21 the write-down side **no longer scrapes an identity out of the URL at all** (see lib/backfill/engine.ts's
+    //    `sessionId: id` and entrypoints/background.ts's resolveSessionId),
+    //    so however greedy that regex is, it no longer affects the file name.
     const ids = ['deadbeef01-zzz', 'deadbeef01-yyy'];
     const server = makeServer({ ids, total: 2, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
@@ -438,51 +439,51 @@ describe('C17 任务 3 · 接缝 A：欠账键 vs 落盘文件名是不是同一
 
     const s = stateOf();
     const files = finalWrites().filter((f) => f.includes('deadbeef01'));
-    console.log('[C17-3.A2] 已归档:', s.archived);
-    console.log('[C17-3.A2] 失败清单:', s.failures);
-    console.log('[C17-3.A2] 交出去的名字:', files);
-    expect(files.length).toBe(2);                         // 送出两次
-    expect(new Set(files).size).toBe(2);                  // 🔴 C21：两个【不同】的名字
+    console.log('[C17-3.A2] archived:', s.archived);
+    console.log('[C17-3.A2] failure list:', s.failures);
+    console.log('[C17-3.A2] the names handed over:', files);
+    expect(files.length).toBe(2);                         // two sends
+    expect(new Set(files).size).toBe(2);                  // 🔴 C21: two **different** names
     expect(files.sort()).toEqual([
       'chatgpt-deadbeef01-yyy.json',
       'chatgpt-deadbeef01-zzz.json',
     ]);
 
-    // 历史：
-    //  · C20 之前：s.archived === ids —— 两条都被划掉，而磁盘上只剩 1 个文件，
-    //    先写的那条对话被后写的覆盖，且没有任何人知道。
-    //  · C20：sink 报回它【实际用来命名】的身份，engine 当场对账 ⇒ 对不上就不清账。
-    //    覆盖仍然发生，只是不再静默 —— 治的是症状。
-    //  · 🔴 C21：身份【只表达一次】⇒ 覆盖本身消失。两条都正常清账，
-    //    identity-mismatch 那条分支在这条路径上已经不可能被触发。
+    // History:
+    //  · Before C20: s.archived === ids — both struck off while only 1 file remained on disk,
+    //    the conversation written first overwritten by the later one, and nobody the wiser.
+    //  · C20: the sink reports back the identity it **actually named by**, the engine reconciles on the spot ⇒ a mismatch means no clearing.
+    //    The overwrite still happened, only no longer silently — a treatment of the symptom.
+    //  · 🔴 C21: the identity is **expressed once** ⇒ the overwrite itself disappears. Both debts clear normally,
+    //    and the identity-mismatch branch can no longer be triggered on this path.
     expect(s.archived.sort()).toEqual([...ids].sort());
     expect(s.failures ?? []).toEqual([]);
   });
 });
 
-describe('C17 任务 3 · 接缝 B：定速器与暂停谁优先 / 暂停时定速的计时', () => {
-  it('暂停优先于定速：暂停态下 gate() 一次都没被调用', async () => {
+describe('C17 task 3 · seam B: which wins, the pacer or the pause / pacing while paused', () => {
+  it('the pause outranks pacing: while paused, gate() is never called once', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
     await bootAndDispatch(liveCapture());
 
-    // 主机下线 ⇒ 造出一次真的 host-unavailable 暂停（而不是假造一个状态位）。
+    // The host goes offline ⇒ a real host-unavailable pause is created (not a hand-made status flag).
     hostDown = true;
     await bootAndDispatch(liveCapture());
     expect(store['cs_native_host_pause_v1']).toMatchObject({ reason: 'host-unavailable' });
 
     const detailsBefore = detailCalls(server.calls).length;
     await bootAndDispatch(liveCapture());
-    // schedule.ts 在 runBackfill 之前就挡住了 ⇒ 连 Pacer 都没被 new 出来。
-    console.log('[C17-3.B] 暂停态 tick:', mod.lastBackfillTick());
+    // schedule.ts stops it before runBackfill ⇒ a Pacer is not even constructed.
+    console.log('[C17-3.B] the tick while paused:', mod.lastBackfillTick());
     expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
     expect(mod.lastBackfillTick()?.report).toBeNull();
     expect(detailCalls(server.calls).length).toBe(detailsBefore);
   });
 
-  it('🔴 BUG-3【C19 已修】：取正文的 20s 最小间隔【跨 tick】生效', async () => {
+  it('🔴 BUG-3, fixed in C19: the 20s body-fetch minimum interval takes effect **across ticks**', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
@@ -493,70 +494,70 @@ describe('C17 任务 3 · 接缝 B：定速器与暂停谁优先 / 暂停时定�
       await bootAndDispatch(liveCapture());
       traces.push(mod.lastBackfillTick()!.report!.paceTrace);
     }
-    console.log('[C17-3.B2] 每次 tick 的 paceTrace:', traces);
-    console.log('[C17-3.B2] 4 次 tick 之后假时钟一共走了(ms):', fakeNow - 1_700_000_000_000);
+    console.log('[C17-3.B2] the paceTrace of each tick:', traces);
+    console.log('[C17-3.B2] total fake-clock advance after 4 ticks (ms):', fakeNow - 1_700_000_000_000);
 
-    // C19 之前：每个 trace 都是 [0]（每次 runBackfill 都 new 一个 Pacer，lastAt 从 null 起）
-    //           ⇒ 4 条正文零间隔连着取完。
-    // C19 之后：只有第一次是 0（真的没有"上一次"），之后每次都补足 20 秒 ——
-    //           上次取数的时刻存在 state.lastFetchAt 里，跨 tick 跨重启存活。
+    // Before C19: every trace was [0] (each runBackfill constructed a new Pacer with lastAt starting at null)
+    //           ⇒ 4 bodies fetched back to back at zero interval.
+    // After C19: only the first is 0 (there really is no "previous one"), and every later one makes up the full 20 seconds —
+    //           the moment of the last fetch lives in state.lastFetchAt, surviving ticks and restarts.
     expect(traces[0]!.detail).toEqual([0]);
     for (const t of traces.slice(1)) expect(t.detail).toEqual([20_000]);
-    // 4 条正文仍然都取到了，只是被摊开在 60 秒里（3 个间隔 × 20 秒）。
+    // All 4 bodies were still fetched; they are just spread over 60 seconds (3 intervals × 20 seconds).
     expect(detailCalls(server.calls).length).toBe(4);
     expect(fakeNow - 1_700_000_000_000).toBe(60_000);
   });
 });
 
-describe('C17 任务 3 · 接缝 C：进度分母来自枚举，分子来自另一处', () => {
-  it('🔴 W2：主机够不着时 tick 有【具名结局】，既不清账也不把这一笔判死', async () => {
+describe('C17 task 3 · seam C: the progress denominator comes from enumeration and the numerator from elsewhere', () => {
+  it('🔴 W2: when the host is unreachable the tick has a **named outcome** that neither clears the debt nor judges it dead', async () => {
     await enableBackfill();
     const server = makeServer({ ids: UUIDS, total: 4, pageSize: 4 });
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
 
-    // 先让枚举跑完并清 1 笔（正常）
+    // First let enumeration finish and clear 1 debt (normal)
     await bootAndDispatch(liveCapture());
     const ok = stateOf();
     expect(ok.archived.length).toBe(1);
 
-    // 现在主机下线 ⇒ 下一条送不出去。
-    // 🔴 这条用例的前身是 C17-3.C「BUG-4」：那时候 sink 抛错会被整个吞掉，
-    //    既不 halt 也不留痕（欠账还在，但账本上看不出发生过什么）。
-    //    W2 之后 sink 不抛错，它【回答】—— 而答案有具名的第三种结局：
-    //    retryLater ⇒ 欠账保持 + 这条腿以 'host-unavailable' 停下并留痕。
+    // Now the host goes offline ⇒ the next one cannot be delivered.
+    // 🔴 This case's ancestor is C17-3.C "BUG-4": back then a sink that threw was swallowed whole,
+    //    with neither a halt nor a trace (the debt was still there, but the ledger showed nothing had happened).
+    //    Since W2 the sink does not throw, it **answers** — and the answer has a named third outcome:
+    //    retryLater ⇒ the debt stays, and this leg stops with a trace as 'host-unavailable'.
     hostDown = true;
     await bootAndDispatch(liveCapture());
 
     const after = stateOf();
-    console.log('[C17-3.C] 主机够不着时:', {
+    console.log('[C17-3.C] when the host is unreachable:', {
       archived: after.archived.length, pending: after.pending.length,
       halted: after.halted, lastTickReason: mod.lastBackfillTick()?.reason,
       stopped: mod.lastBackfillTick()?.report?.stopped,
     });
-    // 欠账没被清（没丢数据）—— 与 BUG-4 时代相同的一面。
+    // The debt was not cleared (no data lost) — the side that matches the BUG-4 era.
     expect(after.archived.length).toBe(1);
     expect(after.pending[0]).toBe(UUIDS[1]);
-    // 与 BUG-4 时代【不同】的一面：这次 tick 的结局在运行时看得见，
-    // 而且它是具名的，不是一个"上一次成功"的残留。
+    // The side that **differs** from the BUG-4 era: this tick's outcome is visible at runtime,
+    // and it is named rather than a leftover from "the last success".
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
     expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
-    expect(after.halted).toBeNull();          // 不是这条腿自己坏了，不许留 halt
-    expect(after.failures ?? []).toEqual([]); // 也不许把这一笔判死
+    expect(after.halted).toBeNull();          // this leg did not break itself; no halt may be left
+    expect(after.failures ?? []).toEqual([]); // and this item may not be judged dead either
   });
 });
 
 // ===========================================================================
-// 任务 4 · 运行时真的会跑吗
+// Task 4 · does it really run at runtime
 // ===========================================================================
-describe('C17 任务 4 · 运行时', () => {
-  it('🔴 生产事实：没有任何生产代码注入 http 端口 ⇒ 这条链在浏览器里永远走不到 runBackfill', async () => {
-    await enableBackfill();                       // 用户甚至已经显式打开了开关
+describe('C17 task 4 · the runtime', () => {
+  it('🔴 the production fact: no production code injected an http port until C19 ⇒ this chain never reached runBackfill in a browser', async () => {
+    await enableBackfill();                       // the user has even turned the switch on explicitly
     const mod: any = await import('../entrypoints/background');
-    // 【不】调用 configureBackfillTransport —— 这就是真实的生产状态
+    // configureBackfillTransport is **not** called — this is the real production state
     await bootAndDispatch(liveCapture());
-    console.log('[C17-4] 未注入 transport 时的 tick:', mod.lastBackfillTick());
+    console.log('[C17-4] the tick with no transport injected:', mod.lastBackfillTick());
     expect(mod.lastBackfillTick()?.reason).toBe('no-http-port');
-    expect(stateOf()).toBeNull();                 // 欠账集合根本没被创建过
+    expect(stateOf()).toBeNull();                 // the debt set was never created at all
   });
 });

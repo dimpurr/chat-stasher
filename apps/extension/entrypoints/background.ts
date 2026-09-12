@@ -58,35 +58,40 @@ import {
   POPUP_STATUS_MESSAGE,
   type BackfillRuntimeStatus,
 } from '../lib/popup-view';
+import { initUiLocale } from '../lib/i18n';
 /**
- * 实时腿一次捕获的结局。
+ * The outcome of one live-leg capture.
  *
- * 🔴 W2 · **唯一算「存下来了」的取值是 `saved:true`，而它只在收到匹配 ack 时出现。**
- *    已入队但还没被确认是另一个可区分的结局（`status:'queued'`），
- *    它既不是成功也不是失败 —— 角标按「待送数」计它。
+ * 🔴 W2 · **The only value that counts as "it was stored" is `saved:true`, and
+ *    it only appears when a matching ack arrived.** Queued-but-not-yet-confirmed
+ *    is a separate, distinguishable outcome (`status:'queued'`) — neither a
+ *    success nor a failure — and the badge counts it as "waiting".
  */
 export interface HandledResult {
-  /** 🔴 true 当且仅当这一条 payload 收到了匹配的 `ack`（§1）。 */
+  /** 🔴 true if and only if this payload received a matching `ack` (§1). */
   saved: boolean;
-  /** 四种互斥的结局，每一种都必须说得出口。 */
+  /** Four mutually exclusive outcomes, every one of which has to be sayable. */
   status: 'delivered' | 'queued' | 'rejected' | 'refused';
   reason?: string;
-  /** 被拒时的 `nack` kind（§6.3）。 */
+  /** The `nack` kind when it was rejected (§6.3). */
   kind?: string;
   /**
-   * 🔴 C20：落盘时【实际用来命名】的那个身份。
-   * 根因是「同一个身份被表达了两次」—— 欠账键来自列表接口的 items[].id，
-   * 文件名来自「用正则从 URL 里再抠一次」，中间没有任何一致性校验。
-   * 把这一位如实报出来，回溯腿才有可能当场对一次账（见 engine.ts 的 sinkVerdict）。
-   * saved:false 时为 undefined（根本没有命名过）。
+   * 🔴 C20: the identity that was **actually used to name** this on the way to
+   * disk. The root cause was "the same identity expressed twice" — the debt key
+   * came from the list API's items[].id, the file name came from "scrape it out
+   * of the URL with a regex again", and nothing checked the two against each
+   * other in between. Reporting this field faithfully is what lets the backfill
+   * leg reconcile on the spot (see sinkVerdict in engine.ts).
+   * undefined when saved:false (nothing was ever named).
    */
   sessionId?: string;
-  /** 这条 payload 在本机 host 那边的名字（§6.2 的 `name`，即分片的 source_file）。 */
+  /** This payload's name on this machine's host (§6.2's `name`, i.e. the shard's source_file). */
   finalName?: string;
   bytes?: number;
   /**
-   * 🔴 只有一条通道了。这个字段留着是为了让「没有降级通道」这件事在类型上
-   * 显式可见：`downloads` 这个取值连同整条自动下载通道已经被删除。
+   * 🔴 There is only one channel now. The field is kept so that "there is no
+   * degraded channel" is explicitly visible in the type: the `downloads` value,
+   * and the whole automatic-download channel behind it, have been removed.
    */
   channel?: 'native-messaging';
 }
@@ -127,16 +132,18 @@ function buildBundle(captured: CapturedFetch): InboxBundle {
 }
 
 /**
- * 🔴 C21 · **这条链路上唯一一处决定「这条会话是谁」的地方。**
+ * 🔴 C21 · **The one place on this path that decides "whose conversation is this".**
  *
- * 顺序不是偏好，是根因治理本身：
- *  1. `captured.sessionId` —— 上游【已经知道】身份时一路带下来的权威值
- *     （回溯腿：欠账键 = 列表接口的 items[].id，见 lib/backfill/engine.ts）。
- *     有它就【绝不再推导】—— 第二次表达就是在这里消失的。
- *  2. 没有它才回落到 extractSessionId（实时腿：身份只存在于 URL 里，别无来源）。
+ * The order is not a preference, it is the root-cause fix itself:
+ *  1. `captured.sessionId` — the authoritative value carried down from upstream
+ *     when it **already knows** the identity (backfill leg: debt key = the list
+ *     API's items[].id, see lib/backfill/engine.ts). When it is present we
+ *     **never derive again** — the second expression dies right here.
+ *  2. Only without it do we fall back to extractSessionId (live leg: the identity
+ *     exists in the URL and nowhere else).
  *
- * 页面来的载荷永远走不到第 1 支：lib/contract.ts 的 isCapturedFetchShape
- * 对带 sessionId 的页面载荷【存在即拒收】。
+ * A payload from a page can never take branch 1: lib/contract.ts's
+ * isCapturedFetchShape **rejects on sight** any page payload carrying a sessionId.
  */
 function resolveSessionId(captured: CapturedFetch): string | null {
   if (captured.sessionId !== undefined) return captured.sessionId;
@@ -150,12 +157,15 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   }
   const { name, payload, bytes, sessionId } = prepared;
 
-  // 🔴 ADR-025 §10 · **write-ahead**：先落进发件箱，再做任何投递尝试。
-  //    在这两行之间 SW 被杀掉，会话仍然在盘上等着，下一次排空会把它送出去。
+  // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox first, and only
+  //    then attempt any delivery. If the SW is killed between these two lines,
+  //    the conversation is still waiting on disk and the next drain sends it.
   const queued: EnqueueResult = await enqueue(name, payload);
   if (!queued.accepted || !queued.sha256) {
-    // 存不进发件箱 ⇒ 不投递。投出去的东西发件箱不知道，那正好是 write-ahead
-    // 要防的那件事；宁可如实报一次拒收，也不悄悄少一层保障。
+    // Cannot get it into the outbox ⇒ do not deliver. Something delivered that
+    // the outbox does not know about is precisely what write-ahead exists to
+    // prevent; better to report an honest refusal than to quietly drop a layer
+    // of protection.
     return {
       saved: false,
       status: 'refused',
@@ -166,7 +176,8 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     };
   }
 
-  // 入队后立刻尝试一次排空（任务 5 的第二个时机；第一个是闹钟心跳）。
+  // Try one drain right after enqueueing (the second of task 5's two occasions;
+  // the first is the alarm heartbeat).
   const drained = await drainSafely();
   await syncOutboxAlarmSafely();
 
@@ -174,8 +185,9 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   await refreshBadgeSafely();
 
   if (!lookup.ok) {
-    // 🔴 「读不出来」不是「送达了」也不是「没送达」。这一条确实已经写进发件箱了，
-    //    但我们答不上它现在是什么状态 —— 那就照实说答不上来，绝不猜成 saved。
+    // 🔴 "Could not read it" is neither "delivered" nor "not delivered". This
+    //    item really is in the outbox, but we cannot say what state it is in —
+    //    so say we cannot, and never guess it into saved.
     return {
       saved: false,
       status: 'queued',
@@ -186,7 +198,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     };
   }
   if (lookup.entry === null) {
-    // 🔴 只有匹配的 ack 才会删条目（§1），所以「查不到」= 这一条真的落盘了。
+    // 🔴 Only a matching ack deletes an entry (§1), so "not found" = this one really was stored.
     return {
       saved: true,
       status: 'delivered',
@@ -220,7 +232,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   };
 }
 
-/** 名字与载荷的唯一构造点。实时腿和回溯腿【共用】它，落盘逻辑不分叉。 */
+/** The single construction point for names and payloads. The live leg and the backfill leg **share** it, so the on-disk logic does not fork. */
 export type PreparedPayload =
   | { ok: true; name: string; payload: string; bytes: number; sessionId: string }
   | { ok: false; reason: string };
@@ -234,16 +246,19 @@ function preparePayload(captured: CapturedFetch): PreparedPayload {
   }
 
   const bundle = buildBundle(captured);
-  // 🔴 C21 · 命名是【恒等映射】，不是「换掉不安全字符」：
-  //    sanitizePathSegment 是多对一的（'a b' 与 'a/b' 同名），以前下载是 overwrite ⇒
-  //    两条不同的会话能互相抹掉。起不出安全名字就当场收手、留痕，绝不硬塞。
+  // 🔴 C21 · Naming is an **identity mapping**, not "replace unsafe characters":
+  //    sanitizePathSegment is many-to-one ('a b' and 'a/b' collide), and the old
+  //    download path overwrote ⇒ two different conversations could erase each
+  //    other. If a safe name cannot be produced, stop on the spot and leave a
+  //    trace; never force one through.
   const named = pathSafeSessionId(bundle.sessionId);
   if (named === null) {
     return { ok: false, reason: 'session id is not usable as a file name (refused, not collapsed)' };
   }
   const name = `${bundle.platform}-${named}.json`;
-  // §6.2 的 name 规则。我们的构造器本来就只会产出合法的名字，这里是防御性的
-  // 最后一道：宁可当场拒收，也不把一个主机明确会 nack 的名字发出去。
+  // §6.2's name rule. Our builder only ever produces legal names anyway; this is
+  // the defensive final gate: refuse on the spot rather than send a name the
+  // host would certainly nack.
   if (!isValidDeliverName(name)) {
     return { ok: false, reason: `refused to build a deliver name outside §6.2: ${named.length} chars` };
   }
@@ -257,7 +272,7 @@ function preparePayload(captured: CapturedFetch): PreparedPayload {
   };
 }
 
-/** 排空：绝不允许它把「用户当前这条对话」这条路带下水。 */
+/** Drain: it must never be allowed to take the "user's current conversation" path down with it. */
 async function drainSafely(): Promise<Awaited<ReturnType<typeof drainOutbox>>> {
   try {
     return await drainOutbox();
@@ -288,9 +303,10 @@ async function syncOutboxAlarmSafely(): Promise<void> {
 }
 
 /**
- * 角标是装饰性的：它自己出错不许影响任何一条真实路径。
- * 🔴 但它**要被 await**：不等它，调用方拿到的就只是"角标即将被重画"，
- *    而角标说的正是「发件箱现在有几条待送」—— 那个数字必须与本次结果同拍。
+ * The badge is decorative: an error in it must not affect any real path.
+ * 🔴 But it **has to be awaited**: without that, the caller only gets "the badge
+ *    is about to be repainted", while the badge says exactly "how many items the
+ *    outbox is holding" — and that number must be in step with this result.
  */
 async function refreshBadgeSafely(): Promise<void> {
   try {
@@ -301,13 +317,14 @@ async function refreshBadgeSafely(): Promise<void> {
 }
 
 /**
- * 🔴 W2 · **回溯腿的出口。它不进发件箱。**（§10）
+ * 🔴 W2 · **The backfill leg's exit. It does not go through the outbox.** (§10)
  *
- * 理由：这条会话在平台上还在，欠账才是它该待的地方 —— 排队一份 payload 只会
- * 让同一个会话在「欠账」和「发件箱」两本账上各存在一次。
+ * Reason: this conversation still exists on the platform, and the debt set is
+ * where it belongs — queueing a payload would make the same conversation exist
+ * once in the "debt" ledger and once in the "outbox" ledger.
  *
- * 三种结局，一种都不许混：
- *  · 匹配 ack          ⇒ saved:true，engine 清账；
+ * Three outcomes, none of which may be confused with another:
+ *  · a matching ack ⇒ saved:true, and the engine clears the debt;
  *  · item-scope, non-retryable nack (§6.3, `isItemRejected`) ⇒ saved:false (judged dead):
  *    the engine records a failure and moves on to the next item;
  *  · everything else (timeout, host missing, host-scope nack such as `config`) ⇒ retryLater:
@@ -333,7 +350,7 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
       sessionId: prepared.sessionId,
     };
   }
-  // 🔴 出口够不着：欠账保持、暂停留痕（§10「visible reason」）。
+  // 🔴 The exit is unreachable: keep the debt, pause with a trace (§10, "visible reason").
   await setHostPause(browserLocalStore(), {
     reason: HOST_UNAVAILABLE,
     at: Date.now(),
@@ -343,10 +360,12 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
 }
 
 /**
- * Popup 打开时问一句「主机在不在、往哪儿写」。
- * 探测窗口短（HELLO_PROBE_TIMEOUT_MS）：Popup 是界面，不许被一个卡住的主机吊住；
- * 投递路径用的仍然是 §2 规定的 60 秒。结论会被写进 storage.local —— 写下来
- * 才是「下一次打开 Popup 还看得见」的唯一办法。
+ * The one question the popup asks when it opens: "is the host there, and where
+ * does it write?"
+ * The probe window is short (HELLO_PROBE_TIMEOUT_MS): the popup is UI and must
+ * not be hung up on a stuck host; the delivery path still uses the 60 seconds
+ * §2 specifies. The conclusion is written to storage.local — writing it down is
+ * the only way it is still visible the next time the popup opens.
  */
 export async function hostStatusForPopup(): Promise<HostStatusRecord | null> {
   try {
@@ -358,29 +377,34 @@ export async function hostStatusForPopup(): Promise<HostStatusRecord | null> {
 }
 
 // ---------------------------------------------------------------------------
-// C13 → C19 · 回溯腿的接线
+// C13 → C19 · Wiring the backfill leg
 //
-// C13 的触发点是【实时腿的 onMessage】，理由是 MV3 里 SW 平时是死的、而实时腿
-// 那条消息里现成带着 platform/origin/账号 scope。那些理由今天仍然成立，所以
-// 那一脚【保留】。但它有一个致命推论：
-// 🔴 一个装了之后再也不打开那个网站的用户，永远不会有第二条实时捕获来踢它，
-//    历史就永远补不完。
-// ⇒ C19 加了第二个心跳：chrome.alarms（见 lib/backfill/alarm.ts，周期与理由都在
-//   那里）。两个心跳走的是同一个 tickBackfill，闸门顺序完全一致。
-//   闹钟醒来时 SW 是全新的、什么都不知道 —— 所以实时腿踢那一脚时会顺手把目标
-//   记进 storage（rememberTarget），闹钟直接读它，一个字都不用猜。
+// C13 triggered it from the **live leg's onMessage**, because under MV3 the SW is
+// normally dead and that message already carries platform/origin/account scope.
+// Those reasons still hold, so the kick **stays**. But it has one fatal
+// corollary:
+// 🔴 a user who installs the extension and never opens that site again will never
+//    get a second live capture to kick it, so their history would never finish
+//    backfilling.
+// ⇒ C19 added a second heartbeat: chrome.alarms (see lib/backfill/alarm.ts; the
+//   period and its argument are there). Both heartbeats go through the same
+//   tickBackfill, with identical gate ordering.
+//   When the alarm wakes, the SW is brand new and knows nothing — so the live
+//   leg's kick also records the target into storage (rememberTarget), and the
+//   alarm just reads it, without guessing a single thing.
 // ---------------------------------------------------------------------------
 
 /**
- * 🔴 显式覆盖用的网络端口。默认 null。
- * C13~C18 期间这是【唯一】的注入口，而生产代码里没人调用它 ⇒ 回溯腿永远
- * 停在 'no-http-port'。C19 之后它退化成一个测试接缝：真正的生产端口由
- * resolveHttpPort() 现场从「一个活着的、已登录的平台标签页」上造出来。
+ * 🔴 The network port used for explicit overrides. null by default.
+ * Through C13–C18 this was the **only** injection point, and no production code
+ * called it ⇒ the backfill leg always stopped at 'no-http-port'. Since C19 it has
+ * degenerated into a test seam: the real production port is built on the spot by
+ * resolveHttpPort() from "a live, logged-in platform tab".
  */
 let backfillTransport: HttpPort | null = null;
 let lastTick: TickResult | null = null;
 let pendingTick: Promise<unknown> = Promise.resolve();
-/** 测试接缝：注入假时钟/自定义节奏，免得测试真的睡满 20 秒。生产恒为 null。 */
+/** Test seam: inject a fake clock / a custom pacing so tests do not really sleep 20 seconds. Always null in production. */
 let backfillPaceOverride: { pace?: BackfillOptions['pace']; clock?: BackfillOptions['clock'] } | null = null;
 
 export function configureBackfillTransport(http: HttpPort | null): void {
@@ -393,7 +417,7 @@ export function configureBackfillPace(
   backfillPaceOverride = override;
 }
 
-/** 最近一次 tick 的结果（给测试/排查用，也给 C18 的 Popup 用）。 */
+/** The most recent tick's result (for tests and diagnosis, and for C18's popup). */
 export function lastBackfillTick(): TickResult | null {
   return lastTick;
 }
@@ -404,27 +428,31 @@ function alarmsApi(): AlarmsApi | null {
 
 function tabsApi(): { sendMessage: TabSend } | null {
   const tabs = (browser as unknown as { tabs?: { sendMessage?: TabSend } }).tabs;
-  // 🔴 tabs.sendMessage 不需要 'tabs' 权限（'tabs' 只管 url/title 这些敏感字段），
-  //    而且我们只往【自己注入的内容脚本】发消息。matches 一个字都不用改。
+  // 🔴 tabs.sendMessage does not need the 'tabs' permission ('tabs' only governs
+  //    sensitive fields like url/title), and we only message **our own injected
+  //    content script**. The matches need not change a character.
   return tabs && typeof tabs.sendMessage === 'function'
     ? { sendMessage: (id, msg) => tabs.sendMessage!(id, msg) }
     : null;
 }
 
 /**
- * 🔴 **生产环境里 http 端口就是在这里被造出来的。**
+ * 🔴 **This is where the http port is built in production.**
  *
- * 顺序：显式覆盖（测试） → 指定的那个标签页 → 登记表里任意一个还活着的同源标签页。
- * 一个都没有 ⇒ 返回 undefined ⇒ tickBackfill 如实答 'no-http-port'。
- * 🔴 绝不退化成"由 SW 自己 fetch" —— 那需要 host 权限，也会把取数挪出用户的
- *    登录上下文。宁可这一次不跑。
+ * Order: explicit override (tests) → the specified tab → any live same-origin tab
+ * in the registry. None at all ⇒ undefined ⇒ tickBackfill answers 'no-http-port'
+ * faithfully.
+ * 🔴 It never degrades into "the SW fetches it itself" — that would need host
+ *    permissions and would move fetching out of the user's logged-in context.
+ *    Better not to run this time.
  */
 async function resolveHttpPort(origin: string, senderTabId?: number): Promise<HttpPort | undefined> {
   if (backfillTransport) return backfillTransport;
   const tabs = tabsApi();
   if (!tabs) return undefined;
-  // 实时腿那条路上，发消息的那个标签页【此刻就开着、且刚刚发生过一次真实抓取】
-  // ——它是最可靠的取数通道，不必再去查登记表。
+  // On the live leg's path, the tab that sent the message **is open right now and
+  // has just performed a real capture** — it is the most reliable fetch channel,
+  // and there is no need to consult the registry again.
   if (senderTabId !== undefined) return tabHttpPort(senderTabId, tabs.sendMessage);
   const live = await pickLiveTab(browserLocalStore(), origin, (id) =>
     tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
@@ -432,13 +460,16 @@ async function resolveHttpPort(origin: string, senderTabId?: number): Promise<Ht
 }
 
 /**
- * C18 · Popup 问 background 要的运行时事实。全部是「我这边真实是什么」，不含推测。
- * 🔴 transportWired 不是一个静态标志，而是【现场 ping 一次】的结果：
- *    有没有一个活着的平台标签页可以替我们取数。没有就是没有，Popup 照实说。
+ * C18 · The runtime facts the popup asks background for. All of them are "what is
+ * actually true on my side", with no inference.
+ * 🔴 transportWired is not a static flag but the result of **a ping taken right
+ *    now**: is there a live platform tab that can fetch on our behalf. If there
+ *    is not, there is not, and the popup says so plainly.
  */
 export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
-  // 🔴 C33：一次 ping 同时回答两个问题（通道通不通 / 是哪个平台）。
-  //    分两次问会出现「说有通道、却答不上是哪个平台」这种自相矛盾的回答。
+  // 🔴 C33: one ping answers both questions at once (is the channel up / which
+  //    platform is it). Asking twice would allow a self-contradictory answer:
+  //    "there is a channel, but I cannot say which platform".
   const live = await liveTransport();
   return {
     transportWired: live.wired,
@@ -448,11 +479,12 @@ export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
 }
 
 /**
- * 🔴 W2 · Popup 问的那一句「主机在不在」。
+ * 🔴 W2 · The "is the host there" question the popup asks.
  *
- * 由 background 去问（而不是 Popup 自己探测）有两个理由：写完就落在
- * storage.local 里，Popup 关掉再打开仍然看得见上一次的结论；而且只有这一处
- * 会去碰主机，Popup 那边一行网络/socket 代码都没有。
+ * Background asks it rather than the popup probing for itself, for two reasons:
+ * the answer lands in storage.local as soon as it is written, so closing and
+ * reopening the popup still shows the last conclusion; and this is the only place
+ * that touches the host at all — the popup has not one line of network/socket code.
  */
 export async function popupHostStatus(): Promise<BackfillRuntimeStatus> {
   const base = await backfillRuntimeStatus();
@@ -460,11 +492,12 @@ export async function popupHostStatus(): Promise<BackfillRuntimeStatus> {
 }
 
 /**
- * 此刻那条活着的取数通道。
- * `wired` 与 C19 的 hasLiveTransport 逐字同义；`target` 是它顺带带出来的事实：
- * 那个标签页的源，以及源在平台表里对应的平台。
- * 🔴 显式覆盖（测试接缝）下 target 恒为 null —— 那条路上没有任何标签页，
- *    编一个平台出来就是撒谎。
+ * The fetch channel that is live right now.
+ * `wired` is byte-for-byte synonymous with C19's hasLiveTransport; `target` is a
+ * fact it brings along: that tab's origin, and the platform that origin maps to
+ * in the platform table.
+ * 🔴 Under an explicit override (the test seam) target is always null — there is
+ *    no tab on that path, and naming a platform would be a lie.
  */
 async function liveTransport(): Promise<{
   wired: boolean;
@@ -477,31 +510,42 @@ async function liveTransport(): Promise<{
     tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
   if (!live) return { wired: false, target: null };
   const row = getPlatformByOrigin(live.origin);
-  // 源不在平台表里 ⇒ 我们答不上"这是哪个平台" ⇒ 照实说 null，绝不猜一个。
+  // The origin is not in the platform table ⇒ we cannot answer "which platform is
+  // this" ⇒ say null plainly, never guess one.
   return { wired: true, target: row ? { platform: row.id, origin: live.origin } : null };
 }
 
 /**
- * 🔴 C33 · 【显式知情同意】那条登记入口：用户在 Popup 上按了「开始回溯这个平台」。
+ * 🔴 C33 · The registration entry point for **explicit informed consent**: the
+ * user pressed "start backfilling this platform" in the popup.
  *
- * 与 kickBackfill 的关系：**这是多一条登记入口，不是放宽任何既有判定。**
- * kickBackfill / rememberTab / 闹钟里 `targets.length` 的判定一个字都没动 ——
- * 这里做的事和 kickBackfill 里那一行 rememberTarget 完全相同，只是目标的来源
- * 从「一次真实捕获」换成了「用户自己按下的这一次」。两个来源都不是我们编的。
+ * Its relationship to kickBackfill: **this is one more registration entry point,
+ * not a relaxation of any existing decision.** Nothing in kickBackfill /
+ * rememberTab / the alarm's `targets.length` test moved a character — what
+ * happens here is exactly the rememberTarget line inside kickBackfill, with the
+ * target's source changed from "a real capture" to "the user pressing this".
+ * Neither source is invented by us.
  *
- * 🔴 scope（账号标识）怎么办：**记 'default'**，理由写在这里，不许悄悄编一个。
- *  · 通道那一跳（内容脚本 ping）带回来的只有源，**没有任何账号信息** ——
- *    要拿到真实账号得去读页面里的响应体，那是"猜"，本单不做；
- *  · 'default' 不是新发明：它就是本仓「认不出账号」时既有的写法
- *    （entrypoints/background.ts:303 的 `identity.value || 'default'`、
- *      lib/popup-view.ts 的 emptyStateFor、lib/contract.ts 的 IdentityLevel 'default'），
- *    含义逐字是「身份不可靠」，而不是冒充成某个具体账号；
- *  · 取数用的仍然是用户自己那个页面的登录态，所以**补回来的确实是他自己的历史**；
- *    scope 只是欠账账本的分区键，写 'default' 不会把别人的东西补到这里来。
- *  · 代价（如实写下）：以后真的捕获到一次时会再记一份带真实账号的目标，
- *    于是同一个平台下会有两份欠账集合，同一批会话可能被各自清一遍。
- *    文件名是 platform-sessionId、下载是覆盖写 ⇒ 不会串档、不会互相抹掉，
- *    多出来的只是重复的取数与写入。相比「回溯永远不开始」，这个代价是划算的。
+ * 🔴 What about scope (the account identifier): **it records 'default'**, and the
+ * reason is written here rather than quietly inventing a value.
+ *  · The channel hop (the content script's ping) brings back the origin only,
+ *    **no account information at all** — getting a real account would mean
+ *    reading a response body out of the page, which is a guess, and this change
+ *    does not do it;
+ *  · 'default' is not a new invention: it is this repository's existing spelling
+ *    for "the account cannot be told" (entrypoints/background.ts:303's
+ *    `identity.value || 'default'`, lib/popup-view.ts's emptyStateFor,
+ *    lib/contract.ts's IdentityLevel 'default'), and it means, literally,
+ *    "the identity is unreliable", not an impersonation of some specific account;
+ *  · fetching still uses the login of the user's own page, so **what comes back
+ *    really is their own history**; scope is only the partition key of the debt
+ *    ledger, and writing 'default' does not pull anyone else's material in here.
+ *  · The cost (written down honestly): a later real capture registers a second
+ *    target carrying the real account, so there will be two debt sets under the
+ *    same platform and the same conversations may be cleared once each.
+ *    File names are platform-sessionId and writes overwrite ⇒ no cross-talk and
+ *    no erasing each other; the only extra cost is duplicate fetching and writing.
+ *    Against "backfill never starts at all", that is worth paying.
  */
 export async function registerBackfillTargetHere(): Promise<
   | { ok: true; target: { platform: string; origin: string; scope: string } }
@@ -512,18 +556,18 @@ export async function registerBackfillTargetHere(): Promise<
   const live = await liveTransport();
   if (!live.wired) return { ok: false, reason: 'no-live-transport' };
   if (!live.target) return { ok: false, reason: 'origin-not-a-platform' };
-  // 🔴 scope = 'default'：见上面那段。这是既有约定，不是新发明的值。
+  // 🔴 scope = 'default': see the block above. That is an existing convention, not a new value.
   const target = { platform: live.target.platform, origin: live.target.origin, scope: 'default' };
   await rememberTarget(store, { ...target, at: Date.now() });
   return { ok: true, target };
 }
 
-/** 等待 fire-and-forget 的那次 tick 结束。回溯腿绝不允许拖慢落盘，所以只能这样等。 */
+/** Wait for the fire-and-forget tick to finish. The backfill leg must never slow the write-down path, so this is the only way to wait. */
 export function backfillTickSettled(): Promise<unknown> {
   return pendingTick;
 }
 
-/** 从一次真实捕获里推出回溯目标。推不出来就返回 null（不猜）。 */
+/** Derive a backfill target from one real capture. Returns null when it cannot be derived (no guessing). */
 export function backfillTargetFor(
   captured: CapturedFetch,
 ): { platform: string; origin: string; scope: string } | null {
@@ -536,17 +580,19 @@ export function backfillTargetFor(
     try {
       const o = new URL(candidate).origin;
       if (row.origins.includes(o)) { origin = o; break; }
-    } catch { /* 不是合法 URL ⇒ 换下一个候选 */ }
+    } catch { /* not a valid URL ⇒ try the next candidate */ }
   }
   if (!origin) return null;
-  // 归档范围键走 ADR-002 的账号轴；认不出账号就用 'default'（与落盘那边一致）。
+  // The archive-scope key follows ADR-002's account axis; an untellable account
+  // is 'default' (consistent with the write-down path).
   const identity = extractIdentity(captured.text, extractSessionId(captured.url, captured.text, captured.pageUrl));
   return { platform: row.id, origin, scope: identity.value || 'default' };
 }
 
 /**
- * 实时腿存完一条之后顺带踢一脚回溯腿。全程 best-effort：
- * 任何异常只进日志，绝不影响用户当前这条对话的落盘。
+ * After the live leg stores one item it kicks the backfill leg. Best-effort
+ * throughout: any exception only reaches the log and never affects the write-down
+ * of the user's current conversation.
  */
 export async function kickBackfill(
   captured: CapturedFetch,
@@ -555,8 +601,9 @@ export async function kickBackfill(
   const target = backfillTargetFor(captured);
   if (!target) return null;
   const store = browserLocalStore();
-  // 闹钟醒来时用得上：把这个「用户真的用过的」目标记下来，省得以后去猜。
-  // 记不下来也照跑这一次 —— 登记表只影响闹钟那条路。
+  // Useful when the alarm wakes: record this target the user really did use, so
+  // there is nothing to guess later. A failed write still lets this tick run —
+  // the registry only affects the alarm's path.
   try {
     await rememberTarget(store, { ...target, at: Date.now() });
   } catch (err) {
@@ -566,9 +613,12 @@ export async function kickBackfill(
     ...target,
     store,
     http: await resolveHttpPort(target.origin, senderTabId),
-    // 归档出口 = 回溯腿自己的投递函数（**不进发件箱**，见 §10 与 deliverBackfillItem）。
-    // 🔴 C20：**必须 return**。以前这里是 `{ await handleCaptured(c); }` —— 花括号
-    //    把 HandledResult 吃掉了，于是 engine 拿不到任何异议，没落盘也照样清账。
+    // The archive exit = the backfill leg's own delivery function (**not through
+    // the outbox**; see §10 and deliverBackfillItem).
+    // 🔴 C20: **the return is mandatory**. This used to be
+    //    `{ await handleCaptured(c); }` — the braces swallowed the HandledResult,
+    //    so the engine heard no objection and cleared the debt even when nothing
+    //    had been stored.
     sink: (c) => deliverBackfillItem(c),
     ...(backfillPaceOverride ?? {}),
   });
@@ -577,16 +627,20 @@ export async function kickBackfill(
 }
 
 /**
- * 🔴 闹钟那一脚。与 kickBackfill 走【同一个 tickBackfill】，闸门顺序一致。
- * 与实时腿的唯一区别：目标从 storage 的登记表里读，而不是从一条消息里现取。
- * 一次闹钟最多清 1 笔账（DEFAULT_TICK_DETAILS），跑成了就收手。
+ * 🔴 The alarm's kick. It goes through the **same tickBackfill** as kickBackfill,
+ * with identical gate ordering.
+ * Its only difference from the live leg: the target is read from the registry in
+ * storage rather than taken from a message that just arrived.
+ * One alarm clears at most 1 debt (DEFAULT_TICK_DETAILS); once it runs, it stops.
  */
 export async function runAlarmTick(): Promise<TickResult> {
   const store = browserLocalStore();
 
-  // 🔴 W2 · 每一次闹钟醒来都先把发件箱送一遍（任务 5 的第一个时机）。
-  //    顺序放在回溯腿之前：spool 里躺着的是用户当时就看着的那条对话，
-  //    而回溯腿补的是历史 —— 手上这条先送出去。两条腿互不影响。
+  // 🔴 W2 · Every alarm wake sends the outbox first (the first of task 5's two
+  //    occasions). It is ordered before the backfill leg: what is sitting in the
+  //    spool is the conversation the user was looking at at the time, whereas the
+  //    backfill leg is filling in history — get the one in hand out first. The
+  //    two legs do not affect each other.
   const drain = await drainSafely();
   markOutboxDrain(drain);
   await syncOutboxAlarmSafely();
@@ -595,15 +649,18 @@ export async function runAlarmTick(): Promise<TickResult> {
   const targets = await loadTargets(store);
 
   if (targets.length === 0) {
-    // 还没有任何目标 ⇒ 用户从没在受支持平台上被抓到过一条。
-    // 仍然把闸门跑一遍，好让 Popup 的 lastTickReason 说得出真话。
+    // No targets at all ⇒ the user has never been captured on a supported
+    // platform. The gates are still run once, so that the popup's lastTickReason
+    // can tell the truth.
     const blocked = await tickBlockReason({
       hasStore: store !== null,
       isEnabled: () => isBackfillEnabled(store),
       isHostPaused: () => isBackfillHostPaused(store),
-      // 🔴 C30：这两个值都是【事实】。以前这里把 hasHttp 写死成 false 再兜底成
-      //    'no-http-port'，于是「通道好端端接着、只是没有目标」被报成了端口坏了 ——
-      //    排查的人顺着那句话去查端口，而端口根本没坏。
+      // 🔴 C30: both of these are **facts**. This used to hardcode hasHttp to
+      //    false and then fall back to 'no-http-port', so "the channel is
+      //    perfectly connected, there simply are no targets" was reported as a
+      //    broken port — and whoever diagnosed it went off chasing the port,
+      //    which was never broken.
       hasHttp: false,
       hasTargets: false,
     });
@@ -620,28 +677,32 @@ export async function runAlarmTick(): Promise<TickResult> {
       scope: target.scope,
       store,
       http: await resolveHttpPort(target.origin),
-      // 🔴 C20：闹钟那一脚同样必须 return（两条心跳走同一个出口，不许一条报一条不报）。
+      // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
+      //    and one of them reporting while the other does not is not acceptable).
       sink: (c) => deliverBackfillItem(c),
       ...(backfillPaceOverride ?? {}),
     });
     last = result;
     lastTick = result;
-    // 跑动了就收手；被开关/存储/主机暂停挡住也没必要再试别的目标（结论一样）。
+    // If it ran, stop. If it was blocked by the switch / storage / a host pause,
+    // there is no point trying another target — the conclusion would be the same.
     if (result.reason !== 'no-http-port') break;
   }
   await recordAlarmTick(store, last, targets.length);
   return last;
 }
 
-/** 闸门用的「现在是不是暂停态」——只读，不试恢复（恢复是 tickBackfill 的事）。 */
+/** The gate's "are we paused right now" — read-only, no recovery attempt (recovery is tickBackfill's job). */
 async function isBackfillHostPaused(store: ReturnType<typeof browserLocalStore>): Promise<boolean> {
   return (await loadHostPause(store)) !== null;
 }
 
 /**
- * 最近一次发件箱排空的结论（内存态，只给测试与排查用）。
- * 🔴 与回溯腿的 lastTick 一样：SW 被回收就没了 —— 发件箱里有什么从来只由
- *    发件箱自己说了算，这里不承载任何真相。
+ * The conclusion of the most recent outbox drain (in-memory; for tests and
+ * diagnosis only).
+ * 🔴 Like the backfill leg's lastTick: it is gone once the SW is reclaimed — what
+ *    is in the outbox is only ever decided by the outbox itself, and nothing here
+ *    carries any truth.
  */
 let lastDrain: Awaited<ReturnType<typeof drainOutbox>> | null = null;
 
@@ -667,12 +728,15 @@ export function lastOutboxDrain(): Awaited<ReturnType<typeof drainOutbox>> | nul
 }
 
 /**
- * 🔴 C30 · 把闹钟这一跳的结论写进存储。
+ * 🔴 C30 · Write the conclusion of this alarm tick to storage.
  *
- * 为什么必须落盘而不是只留在 lastTick 变量里：MV3 的 SW 干完这一跳就会被回收，
- * 用户过一会儿点开 Popup 时内存里什么都不剩 —— 真机上看到的正是这个：
- * 闹钟一直在醒、一直什么都没做，而任何地方都查不到它醒过。
- * 写失败只 warn，绝不让「留痕」反过来变成挡住这条腿的新理由。
+ * Why it must be persisted rather than left in the lastTick variable: an MV3 SW
+ * is reclaimed as soon as this tick finishes, and when the user opens the popup a
+ * while later nothing is left in memory — which is exactly what a real machine
+ * showed: the alarm kept waking and kept doing nothing, and nowhere could you find
+ * out that it had ever woken.
+ * A failed write only warns; leaving a trace must never become a new reason to
+ * block this leg.
  */
 async function recordAlarmTick(
   store: ReturnType<typeof browserLocalStore>,
@@ -692,7 +756,7 @@ function cancelledIdLike(id: string | null): boolean {
   return id.length < 8 || id === 'unknown';
 }
 
-/** 开关是什么状态，闹钟就该是什么状态。SW 每次醒来都对一次表。 */
+/** Whatever state the switch is in, the alarm should be in. Every SW wake re-syncs the two. */
 export async function syncAlarmWithSwitch(): Promise<string> {
   const enabled = await isBackfillEnabled(browserLocalStore());
   return syncBackfillAlarm(alarmsApi(), enabled);
@@ -721,22 +785,27 @@ function addBackfillSwitchListener(): void {
 export default defineBackground(async () => {
   browser.runtime.onMessage.addListener(
     (message: { type?: string; payload?: CapturedFetch }, sender, sendResponse) => {
-      // C18：Popup 打开时问一句「取数通道接上没有」。
-      // C19 起这个回答要现场 ping 一个标签页 ⇒ 变成异步，仍然 return true。
-      // 🔴 W2：同一个回答里带上「主机在不在」——由 background 去问主机并把结论
-      //    落盘，Popup 只负责把拿到的事实显示出来（它自己一行探测代码都没有）。
+      // C18: the popup asks, when it opens, "is the fetch channel connected".
+      // Since C19 that answer requires pinging a tab on the spot ⇒ it is async,
+      // and it still returns true.
+      // 🔴 W2: the same answer also carries "is the host there" — background asks
+      //    the host and writes the conclusion down, and the popup only displays
+      //    the facts it was handed (it has not one line of probing code of its own).
       if (message?.type === POPUP_STATUS_MESSAGE) {
         popupHostStatus()
           .then(sendResponse)
-          // 问不出来就按最保守的方向答，绝不让 Popup 显示成"在跑"。
+          // If it cannot be answered, answer in the most conservative direction;
+          // never let the popup show it as "running".
           .catch(() => sendResponse({ transportWired: false, lastTickReason: null, nativeHost: null }));
         return true;
       }
-      // C19：内容脚本报到。tab id 由浏览器填在 sender 上（不需要 'tabs' 权限），
-      // 记进 storage 之后，闹钟醒来才知道该找谁取数。
-      // 🔴 C33：Popup 上那个「开始回溯这个平台」按钮按下来的那一脚。
-      //    登记【写完】才回话 —— 回一个 ok 就该意味着"登记表里真的有这一条了"，
-      //    否则 Popup 紧接着的那次重画会读到一张还没落盘的表，看起来像没生效。
+      // C19: a content script checking in. The browser fills the tab id in on
+      // `sender` (no 'tabs' permission needed), and once it is in storage the
+      // alarm knows who to fetch through when it wakes.
+      // 🔴 C33: the kick from the popup's "start backfilling this platform" button.
+      //    It answers only **after** the write — an ok has to mean "that row really
+      //    is in the registry now", otherwise the popup's immediate repaint reads a
+      //    registry that has not landed yet and it looks like nothing happened.
       if (message?.type === POPUP_START_BACKFILL_MESSAGE) {
         registerBackfillTargetHere()
           .then(sendResponse)
@@ -752,8 +821,9 @@ export default defineBackground(async () => {
           sendResponse({ ok: false, error: 'no tab id on sender' });
           return true;
         }
-        // 🔴 登记【写完】才回话：回一个 ok 就该意味着"闹钟已经找得到你了"，
-        // 否则紧跟着的一次闹钟/状态查询会读到一张还没落盘的表。
+        // 🔴 Answer only **after** the write: an ok has to mean "the alarm can find
+        //    you now", otherwise the alarm or status query right behind it reads a
+        //    registry that has not landed yet.
         rememberTab(browserLocalStore(), { tabId, origin: message.origin, at: Date.now() })
           .then(() => sendResponse({ ok: true }))
           .catch((err: Error) => {
@@ -767,8 +837,9 @@ export default defineBackground(async () => {
       const senderTabId = (sender as { tab?: { id?: number } })?.tab?.id;
       handleCaptured(payload)
         .then((result) => {
-          // C13：实时腿这一脚顺带唤醒回溯腿。fire-and-forget —— 回溯是慢活，
-          // 绝不允许它挡住 sendResponse 或拖慢用户当前这条对话的落盘。
+          // C13: this live-leg kick also wakes the backfill leg. Fire-and-forget —
+          // backfilling is slow work and must never block sendResponse or slow the
+          // write-down of the user's current conversation.
           pendingTick = kickBackfill(payload, senderTabId).catch((err) => {
             console.warn('[chat-stasher] backfill tick failed', (err as Error).message);
             return null;
@@ -782,8 +853,9 @@ export default defineBackground(async () => {
               + ` — ${result.bytes ?? 0} bytes`,
             );
           }
-          // 🔴 `ok` 仍然是 `saved` 的别名，但 payload 里多了可区分的 `status`：
-          //    调用方（内容脚本）再也看不到「没 ack 也算成功」这种回答了。
+          // 🔴 `ok` is still an alias of `saved`, but the payload now carries a
+          //    distinguishable `status`: the caller (the content script) can no
+          //    longer be told "no ack but it counts as success".
           sendResponse({ ok: result.saved, ...result });
         })
         .catch((err) => {
@@ -795,8 +867,9 @@ export default defineBackground(async () => {
     },
   );
 
-  // 🔴 C19 · 闹钟的监听器必须在 SW 顶层【同步】注册：MV3 里 SW 被回收后是由
-  //    事件重新唤醒的，注册晚了就会错过那次唤醒。
+  // 🔴 C19 · The alarm listener must be registered **synchronously** at the SW's
+  //    top level: under MV3 a reclaimed SW is woken by the event itself, and
+  //    registering late misses that wake-up.
   const alarms = (browser as unknown as {
     alarms?: AlarmsApi & { onAlarm?: { addListener(fn: (a: { name?: string }) => void): void } };
   }).alarms;
@@ -823,11 +896,21 @@ export default defineBackground(async () => {
   // wake-up. The listener itself is synchronous, as required by MV3.
   addBackfillSwitchListener();
 
+  // 🔴 Load the language the user chose before anything paints text. The badge
+  //    tooltip is set from this worker, so the overlay has to be initialised here
+  //    too — otherwise the tooltip would stay in the browser's language while the
+  //    popup follows the setting. A failure is only logged: falling back to
+  //    browser.i18n is the pre-existing behaviour, not a reason to skip the badge.
+  await initUiLocale().catch((err) => {
+    console.warn('[chat-stasher] ui locale init failed', (err as Error).message);
+  });
+
   // Every SW wake (fresh start AND runtime.onStartup) re-asserts the badge's
   // truth, so a dead-worker leftover badge gets cleared once 5 min pass.
   void refreshBadge();
-  // 开关是持久的，闹钟也该是。每次 SW 醒来对一次表：开着就确保有闹钟，
-  // 关着就确保没有 —— 🔴 默认（关）下这里只会 clear，绝不会凭空创建。
+  // The switch is persistent, so the alarm should be too. Every SW wake re-syncs:
+  // on ⇒ make sure an alarm exists; off ⇒ make sure none does — 🔴 with the
+  // default (off) this only ever clears, and never creates one out of nowhere.
   await syncAlarmWithSwitch().catch((err) => {
     console.warn('[chat-stasher] backfill alarm sync failed', (err as Error).message);
   });
@@ -835,7 +918,7 @@ export default defineBackground(async () => {
   await syncOutboxAlarmSafely();
   browser.runtime.onStartup.addListener(() => {
     void refreshBadge();
-    void syncAlarmWithSwitch().catch(() => { /* 日志已在上面那条路径覆盖 */ });
+    void syncAlarmWithSwitch().catch(() => { /* already logged on the path above */ });
     void syncOutboxAlarmSafely();
   });
 

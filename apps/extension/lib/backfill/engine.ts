@@ -1,14 +1,19 @@
 /**
- * 回溯腿的编排：枚举 → 欠账集合 → 逐条取正文 → 交给实时腿同一个落盘出口。
+ * The backfill leg's orchestration: enumerate → debt set → fetch bodies one by one
+ * → hand off to the very same write-down exit the live leg uses.
  *
- * 三条不许破的规矩：
- *  1. 每清一笔账立刻落盘 ⇒ 任何时刻被杀掉，重启都能从断点继续；
- *  2. 枚举和取正文各用各的 Pacer ⇒ 两段分开定速；
- *  3. 任何非 2xx / 形状不认识 / 无法持久化 ⇒ halt 并写进 state.halted，
- *     绝不吞掉继续转圈。
+ * Three rules that must not be broken:
+ *  1. persist immediately after clearing each debt ⇒ whenever it is killed, a
+ *     restart carries on from the breakpoint;
+ *  2. enumeration and body-fetching each use their own Pacer ⇒ the two segments are
+ *     paced separately;
+ *  3. any non-2xx / unrecognised shape / inability to persist ⇒ halt and write it
+ *     into state.halted; never swallow it and keep spinning.
  *
- * 🔴 这里【没有】任何默认会真的发请求的路径：http 端口不注入就是 notWiredHttp，
- *    调用它直接抛错。本任务全部用合成夹具测，没有也不该有登录态。
+ * 🔴 There is **no** path here that would really send a request by default: without
+ *    an injected http port it is notWiredHttp, and calling that throws. Everything
+ *    is tested against synthetic fixtures, with no logged-in session and none
+ *    needed.
  */
 
 import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
@@ -44,79 +49,94 @@ export interface HttpResponse {
 }
 
 /**
- * 🔴 C23 · 通道现在能表达 POST。
+ * 🔴 C23 · The channel can now express POST.
  *
- * 改动只有一处：多了一个**可选**的第二参数。为什么这样改而不是换个新类型：
- *  · 既有的所有实现（测试夹具、tabHttpPort）都是 `(url) => ...`，
- *    在 TypeScript 里少写参数依然可赋值 ⇒ **一行都不用改就还能用**；
- *  · engine 在 GET 段【逐字仍然调用 `http(url)`】，一个参数都不多传
- *    （见 sendVia），所以 ChatGPT 那条路上连实参个数都没变。
+ * Exactly one thing changed: an **optional** second parameter was added. Why this
+ * rather than a new type:
+ *  · every existing implementation (test fixtures, tabHttpPort) is `(url) => ...`,
+ *    and in TypeScript writing fewer parameters is still assignable ⇒ **not one
+ *    line has to change for them to keep working**;
+ *  · on a GET segment the engine **still calls `http(url)` byte for byte**, not one
+ *    argument more (see sendVia), so on ChatGPT's path not even the argument count
+ *    changed.
  *
- * init 省略 ⇒ GET 且无 body。方法/Content-Type/body 顶层键三样都是闭集，
- * 声明在 lib/backfill/enumerate.ts，强制在 lib/backfill/tab-port.ts。
+ * An omitted init ⇒ GET with no body. The method, the Content-Type and the body's
+ * top-level keys are all closed sets, declared in lib/backfill/enumerate.ts and
+ * enforced in lib/backfill/tab-port.ts.
  */
 export type HttpPort = (url: string, init?: BackfillRequestInit) => Promise<HttpResponse>;
 
-/** 🔴 GET 且无 body ⇒ 逐字退回旧调用 `http(url)`。向后兼容的落点就是这一行。 */
+/** 🔴 GET with no body ⇒ fall back to the old call `http(url)`, byte for byte. This line is the back-compat landing point. */
 async function sendVia(http: HttpPort, url: string, init: BackfillRequestInit): Promise<HttpResponse> {
   if (init.method === 'GET' && init.body === undefined) return http(url);
   return http(url, init);
 }
 
-/** 默认端口：故意会炸。没接线就绝不会有网络行为。 */
+/** The default port: it blows up on purpose. Not wired ⇒ never any network activity. */
 export const notWiredHttp: HttpPort = async (url: string) => {
   throw new Error(`[chat-stasher] backfill http port is not wired (refused to fetch ${new URL(url).pathname})`);
 };
 
 /**
- * 🔴 C20 · sink 回答的那件事：**到底存下来了没有。**
- * 与 entrypoints/background.ts 的 HandledResult 结构相容（那边就是原样 return 回来）。
+ * 🔴 C20 · The one thing the sink answers: **was it actually stored?**
+ * Structurally compatible with entrypoints/background.ts's HandledResult (which is
+ * returned as-is from there).
  */
 export interface SinkOutcome {
   saved: boolean;
-  /** 没存下来时的技术理由。只进日志和失败清单，绝不含正文。 */
+  /** The technical reason when it was not stored. Log and failure list only; never a conversation body. */
   reason?: string;
   /**
-   * 🔴 落盘时【实际用来命名】的那个身份。根因治理的另一半：
-   * 欠账键来自列表接口的 items[].id，文件名来自「从 URL 再抠一次」——
-   * 以前中间没有任何一致性校验。把它带回来，engine 就能当场对一次账。
-   * 出口不报这个字段（undefined）⇒ 不做这项校验，行为与 C19 逐字一致。
+   * 🔴 The identity the write-down path **actually named it by**. The other half of
+   * the root-cause fix: the debt key came from the list API's items[].id, the file
+   * name came from "scrape the URL once more", and nothing checked the two against
+   * each other in between. Reporting it back lets the engine reconcile on the spot.
+   * An exit that does not report this field (undefined) ⇒ the check is skipped, and
+   * the behaviour is byte-identical to C19.
    */
   sessionId?: string;
   /**
-   * 🔴 W2 · **「这一次没送出去，但它不该被划掉。」**
+   * 🔴 W2 · **"This one was not delivered, but it must not be struck off."**
    *
-   * 与 saved:false 是两件不同的事，必须分开：
-   *  · saved:false（不带这个字段）= 这一笔【已经判死】：不重试、进失败清单、
-   *    从 pending 里拿掉。适用于「这一条会话本身有问题」（起不出安全文件名、
-   *    主机明确 nack 说它不合法）。
-   *  · retryLater:true = 出口【暂时】够不着（本机 host 不在）。会话本身没问题，
-   *    所以：欠账原样留在 pending 里、不进失败清单、这条腿立刻停下并留痕，
-   *    等下一次心跳 `hello` 成功之后从同一笔继续。
+   * This is a different thing from saved:false and has to be kept separate:
+   *  · saved:false (without this field) = this item is **judged dead**: no retry,
+   *    into the failure list, out of pending. It applies when "the conversation
+   *    itself is the problem" (no safe file name can be produced, or the host
+   *    explicitly nacks it as illegal).
+   *  · retryLater:true = the exit is **temporarily** unreachable (this machine's
+   *    host is not there). The conversation itself is fine, so: the debt stays in
+   *    pending untouched, it does not go into the failure list, and this leg stops
+   *    at once with a trace, resuming from the same item once the next heartbeat's
+   *    `hello` succeeds.
    *
-   * 少了这一位，「host 不在」就会被记成「这一笔处理完了」—— 正是本项目
-   * 最不能接受的那种静默丢失（欠账被划掉、再也不会重试、也没有人知道）。
+   * Without this field, "the host is not there" would be recorded as "this item is
+   * done" — exactly the silent loss this project finds least acceptable (the debt
+   * struck off, never retried, and nobody the wiser).
    */
   retryLater?: boolean;
 }
 
 /**
- * 把 sink 的返回值判成「存下来了 / 没存下来」。
+ * Turn the sink's return value into "stored / not stored".
  *
- * 🔴 **`undefined` 判成成功**，这是一个必须写清楚的妥协：
- *    老的 `sink: async (c) => { ... }`（返回 void）在类型上仍然合法，
- *    engine 拿不到任何异议 ⇒ 只能当它成功。
- *    换句话说：**一个不报告结果的出口，仍然可以静默清账。**
- *    生产接线（entrypoints/background.ts 两处）已经改成 return handleCaptured 的结果，
- *    所以生产路径上不存在这个洞；但如果以后有人新接一个不 return 的 sink，
- *    这个洞会重新出现。要彻底堵死就得让 sink 的返回类型变成必填 —— 那会一次性
- *    弄红全部既有测试夹具，超出本任务的范围，所以这里选择【写明】而不是【偷偷收紧】。
+ * 🔴 **`undefined` counts as success**, and that compromise has to be written down:
+ *    the old `sink: async (c) => { ... }` (returning void) is still legal by type,
+ *    the engine hears no objection ⇒ it can only treat it as success.
+ *    In other words: **an exit that reports no result can still clear a debt
+ *    silently.**
+ *    The production wiring (both call sites in entrypoints/background.ts) has been
+ *    changed to return handleCaptured's result, so this hole does not exist on the
+ *    production path; but if someone later wires up a sink that returns nothing,
+ *    the hole reappears. Closing it completely would mean making the sink's return
+ *    type mandatory — which would turn every existing test fixture red at once and
+ *    is outside this change's scope, so it is **written down** here rather than
+ *    quietly tightened.
  */
 type SinkVerdict =
   | { ok: true }
-  /** 这一笔判死（进失败清单、不重试、不再排队）。 */
+  /** This item is judged dead (into the failure list, no retry, no longer queued). */
   | { ok: false; fatal: true; reason: FailureReason; detail: string }
-  /** 出口暂时够不着：欠账原样留着，这条腿停下。（W2） */
+  /** The exit is temporarily unreachable: the debt stays untouched and this leg stops. (W2) */
   | { ok: false; fatal: false; reason: string; detail: string };
 
 function sinkVerdict(outcome: SinkOutcome | void | undefined, debtId: string): SinkVerdict {
@@ -140,7 +160,7 @@ function sinkVerdict(outcome: SinkOutcome | void | undefined, debtId: string): S
       ok: false,
       fatal: true,
       reason: 'identity-mismatch',
-      // 只放长度，不放两个 id 本身：完整会话 id 不进任何日志。
+      // Only the lengths, never the two ids themselves: a full conversation id goes into no log.
       detail: `debt key (len ${debtId.length}) != file identity (len ${outcome.sessionId.length})`,
     };
   }
@@ -149,33 +169,38 @@ function sinkVerdict(outcome: SinkOutcome | void | undefined, debtId: string): S
 
 export interface BackfillOptions {
   platform: string;
-  /** 平台源，例如 https://chatgpt.com。必须命中 lib/contract.ts 的平台表。 */
+  /** The platform origin, e.g. https://chatgpt.com. Must hit the platform table in lib/contract.ts. */
   origin: string;
-  /** 归档范围键（账号轴）。 */
+  /** The archive-scope key (the account axis). */
   scope: string;
   store: BackfillStore | null;
   http?: HttpPort;
   /**
-   * 🔴 测试接缝，与 http/clock/pace 同类：换一张 plan 表。
-   * **生产代码从不设置它** —— background.ts 的两处调用（kickBackfill / runAlarmTick）
-   * 都没有这个字段，所以线上恒为 backfillPlanFor，允许集一点没变大。
-   * 存在的唯一理由：C23 要证明「通道能发 POST」，而生产表里【故意】还没有任何
-   * POST 平台（kimi/gemini 的参数仍然没有出处，填了就是编）。
+   * 🔴 A test seam, in the same family as http/clock/pace: swap the plan table.
+   * **Production code never sets it** — neither of background.ts's two call sites
+   * (kickBackfill / runAlarmTick) has this field, so on the wire it is always
+   * backfillPlanFor and the permitted set has not grown at all.
+   * It exists for exactly one reason: C23 has to prove "the channel can send a
+   * POST", and the production table **deliberately** still has no POST platform
+   * (kimi/gemini's parameters still have no source, and filling them in would be
+   * inventing them).
    */
   plans?: (platform: string) => import('./enumerate').BackfillEnumPlan | null;
   clock?: Clock;
   pace?: BackfillPace;
   listLimit?: number;
-  /** 本次 run 最多取几条正文；用来切片跑，也用来模拟「跑一半被打断」。 */
+  /** How many bodies this run fetches at most; used to run in slices and to simulate "interrupted half way". */
   maxDetails?: number;
-  /** 每步之前问一次要不要中断（模拟浏览器关掉 / SW 被回收）。 */
+  /** Asked before every step whether to abort (simulates the browser closing / the SW being reclaimed). */
   shouldAbort?: () => boolean;
   /**
-   * 归档出口：产出与实时腿完全同形的 CapturedFetch，落盘逻辑不分叉。
+   * The archive exit: produces a CapturedFetch of exactly the same shape as the
+   * live leg's, so the on-disk logic does not fork.
    *
-   * 🔴 C20：返回值现在【说了算】—— 见 SinkOutcome 和 sinkVerdict()。
-   *    以前这里是 `=> Promise<void> | void`，接线处 `await handleCaptured(c)` 之后
-   *    把 HandledResult 丢在地上，于是「没落盘」和「落盘了」在欠账账本上是同一个结果。
+   * 🔴 C20: the return value now **decides** — see SinkOutcome and sinkVerdict().
+   *    This used to be `=> Promise<void> | void`, and the wiring did
+   *    `await handleCaptured(c)` and then dropped the HandledResult on the floor,
+   *    so "not stored" and "stored" were the same outcome in the debt ledger.
    */
   sink?: (captured: CapturedFetch) => Promise<SinkOutcome | void> | SinkOutcome | void;
 }
@@ -185,26 +210,28 @@ export interface RunReport {
   enumeratedPages: number;
   newDebts: number;
   archivedThisRun: string[];
-  /** 🔴 C20：本次 run 里「取到了正文但没能落盘」的那几条，已进失败清单、不会重试。 */
+  /** 🔴 C20: the items in this run whose body was fetched but could not be stored; already in the failure list and never retried. */
   failedThisRun: FailureEntry[];
-  /** 枚举时被「已归档 ⇒ 不再入队」挡掉的条数。 */
+  /** How many were blocked by "already archived ⇒ never enqueued again" during enumeration. */
   skippedAlreadyArchived: number;
-  /** 枚举时已经在欠账里、无需重复入队的条数。 */
+  /** How many were already in the debt set and needed no second enqueue. */
   skippedAlreadyPending: number;
   /**
-   * 🔴 C28：正文返回空时的具名收据。未证实为空与已证实合法为空不能共用
-   * queue-empty；每一条还带正文这一笔自己的 complete，前者必须为 false。
+   * 🔴 C28: the named receipts for an empty body. Unverified-empty and
+   * confirmed-legitimately-empty cannot share queue-empty; each one also carries
+   * its own `complete` for the body item, and the former's must be false.
    */
   detailOutcomes: DetailOutcomeRecord[];
   progress: string;
   halted: HaltRecord | null;
   /**
-   * 🔴 C26 · 枚举**没能走完**的具名理由；null = 没有这回事。
-   * 非 null 时 state.enumCursor.complete 虽然是 true，但它的意思是「停在这里了」，
-   * 不是「已经全部列完」。见 lib/backfill/types.ts 的 EnumTruncation。
+   * 🔴 C26 · The named reason enumeration **could not finish**; null = no such thing.
+   * When it is non-null, state.enumCursor.complete may still be true, but that means
+   * "stopped here", not "everything has been listed". See EnumTruncation in
+   * lib/backfill/types.ts.
    */
   enumTruncated: EnumTruncation | null;
-  /** 每次 gate() 实际等待的毫秒数，两段分开记。 */
+  /** The milliseconds each gate() actually waited, kept separately for the two segments. */
   paceTrace: { enumerate: number[]; detail: number[] };
   state: BackfillState;
 }
@@ -226,10 +253,11 @@ export async function loadState(
   scope: string,
 ): Promise<BackfillState> {
   const raw = await store.load(stateKey(platform, scope));
-  // 版本对不上就重开一个空集合，而不是拿旧结构硬凑。
+  // A version mismatch starts a fresh empty set rather than forcing the old structure to fit.
   if (!isBackfillState(raw)) return initialState(platform, scope);
-  // C28：v1 旧状态没有这栏；读回来即补空数组，之后每次写回都能把正文空结局
-  // 与 pending 一起留住。optional 只为兼容旧状态的 TypeScript 形状。
+  // C28: v1 states have no such column; reading one back fills in an empty array, so
+  // every later write-back keeps the empty-body outcomes together with pending.
+  // The `optional` is only to accommodate old states' TypeScript shape.
   raw.detailOutcomes ??= [];
   return raw;
 }
@@ -238,7 +266,7 @@ async function persist(store: BackfillStore, state: BackfillState): Promise<void
   await store.save(stateKey(state.platform, state.scope), state);
 }
 
-/** 非 2xx 的分类：限流类 vs 其它。两者都停，但留痕的理由不同。 */
+/** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
 function haltReasonForStatus(status: number): HaltReason {
   if (status === 429 || status === 403 || status >= 500) return 'rate-limited';
   return 'shape-changed';
@@ -250,12 +278,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const http = opts.http ?? notWiredHttp;
   const listLimit = opts.listLimit ?? DEFAULT_LIST_LIMIT;
 
-  // 🔴 C19：Pacer 的构造挪到 loadState 之后 —— 它现在需要 state.lastFetchAt 当种子。
-  // 没有 store 的那一支根本没跑过任何请求，等待序列必然是空的。
+  // 🔴 C19: the Pacer construction moved after loadState — it now needs
+  // state.lastFetchAt as its seed. The branch with no store never ran a single
+  // request, so its wait sequence is necessarily empty.
   const emptyTrace = { enumerate: [] as number[], detail: [] as number[] };
 
   if (!opts.store) {
-    // 没有持久化 ⇒ 没有可断可续 ⇒ 不许开跑。留痕只能进日志（存不下来）。
+    // No persistence ⇒ no stop-and-resume ⇒ not allowed to run. The trace can only go to the log (there is nowhere to store it).
     const state = initialState(opts.platform, opts.scope);
     state.halted = {
       reason: 'storage-unavailable',
@@ -283,12 +312,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const store = opts.store;
   const state = await loadState(store, opts.platform, opts.scope);
 
-  // 🔴 C19 · BUG-3：用落盘的「上一次取数时刻」给两段定速器播种，间隔于是跨 tick 生效。
-  // 旧集合没有这个字段 ⇒ null ⇒ 与 C11 行为逐字一致。
+  // 🔴 C19 · BUG-3: seed both pacers with the persisted "moment of the last fetch",
+  // so the interval takes effect across ticks.
+  // Old sets have no such field ⇒ null ⇒ byte-identical to C11.
   const anchors = state.lastFetchAt ?? { enumerate: null, detail: null };
   const enumPacer = new Pacer(pace.enumerate, clock, 'enumerate', anchors.enumerate);
   const detailPacer = new Pacer(pace.detail, clock, 'detail', anchors.detail);
-  /** 把某一段刚刚放行的时刻写回 state（落盘由各自的 persist 负责）。 */
+  /** Write the moment a segment was just let through back into state (persisting is each caller's own job). */
   const anchor = (segment: 'enumerate' | 'detail', at: number | null): void => {
     state.lastFetchAt = { ...(state.lastFetchAt ?? { enumerate: null, detail: null }), [segment]: at };
   };
@@ -302,7 +332,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   let enumTruncated: EnumTruncation | null = state.enumCursor.truncated ?? null;
   const detailOutcomes = state.detailOutcomes ?? (state.detailOutcomes = []);
 
-  /** C28：正文空结局先写同一本账，再决定是否停下或按确认结果清账。 */
+  /** C28: an empty body outcome is written into the same ledger first, before deciding whether to stop or to settle on a confirmed result. */
   const recordDetailOutcome = (
     id: string,
     outcome: DetailOutcomeRecord['outcome'],
@@ -316,19 +346,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   };
 
   /**
-   * 🔴 C26 · 「枚举读不下去了」的唯一出口。
+   * 🔴 C26 · The single exit for "enumeration cannot read any further".
    *
-   * 它做三件事，一件都不能少：把游标停下（complete=true，别再空转打平台）、
-   * 在**落盘的账本上**留一个具名标记（enumCursor.truncated）、并在本次 RunReport 里报出来。
-   * complete=true 在这里【不是】「全部列完了」的意思 —— truncated 就是用来区分这两者的。
-   * 少了它，「只回溯到第一页」和「一共就这一页」在账本上会长得一模一样。
+   * It does three things, none optional: stop the cursor (complete=true, so it stops
+   * hammering the platform in a spin), leave a named mark **on the persisted ledger**
+   * (enumCursor.truncated), and report it in this run's RunReport.
+   * complete=true here does **not** mean "everything has been listed" — truncated is
+   * exactly what distinguishes the two. Without it, "backfilled only as far as the
+   * first page" and "there was only ever this one page" would look identical in the
+   * ledger.
    */
   const stopEnumerating = (why: EnumTruncation, opts: { complete?: boolean } = {}): void => {
-    // C26 的 cursor/has_more 缺失仍然把循环停在这里并置 complete=true，
-    // 因为那是旧状态契约里的「不要空转」标记；truncated 才说明它不是完整枚举。
-    // C27 的 Perplexity 空页/短页更严格：它连接口终止字段都没有，只有客户端
-    // 推断，所以 complete 必须保持 false。循环同时看 truncated，避免把这个
-    // “未确认完成”的状态误当成可以继续发请求或已经补完。
+    // C26's missing cursor/has_more still stops the loop here and sets complete=true,
+    // because that is the old state contract's "do not spin" marker; `truncated` is
+    // what says it is not a complete enumeration.
+    // C27's Perplexity empty/short page is stricter: it does not even have an API
+    // termination field, only a client inference, so complete must stay false. The
+    // loop looks at truncated as well, so this "not confirmed complete" state is not
+    // mistaken for one that may keep sending requests or has already finished.
     if (opts.complete !== false) state.enumCursor.complete = true;
     state.enumCursor.truncated = why;
     enumTruncated = why;
@@ -341,7 +376,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const halt = async (reason: HaltReason, detail: string): Promise<RunReport> => {
     state.halted = { reason, at: clock.now(), detail };
     await persist(store, state);
-    // 只打技术细节，绝不打对话正文。
+    // Only the technical detail is logged, never a conversation body.
     console.warn(`[chat-stasher] backfill halted: ${reason} — ${detail}`);
     return report('halted');
   };
@@ -362,7 +397,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     state,
   });
 
-  // 上一次已经停下留痕了：要人来看过、清掉 halted 才继续，绝不自己重试打平台。
+  // The last run already stopped and left a trace: it takes a human looking and clearing `halted` to continue; it never retries against the platform on its own.
   if (state.halted) return report('halted');
 
   const platformRow = getPlatformByOrigin(opts.origin);
@@ -370,16 +405,19 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt('shape-changed', `origin ${opts.origin} is not in the platform table`);
   }
 
-  // 🔴 C22 · 在【发出任何请求之前】问一句：这个平台的枚举我们到底写没写过。
+  // 🔴 C22 · **Before issuing any request**, ask: have we actually written this
+  // platform's enumeration at all?
   //
-  // 以前这里没有这一问，engine 直接用 ChatGPT 的 listPageUrl(origin) 拼 URL ——
-  // 于是 DeepSeek 用户会被拿 `https://chat.deepseek.com/backend-api/conversations`
-  // 去打自己的账号，拿回 404，然后账本上留下一条 'shape-changed'。
-  // 那条留痕是**准确的谎话**：接口没变，是我们从来没写过它。
+  // This question did not exist before, and the engine built the URL straight from
+  // ChatGPT's listPageUrl(origin) — so a DeepSeek user would have
+  // `https://chat.deepseek.com/backend-api/conversations` fired at their own
+  // account, get a 404 back, and leave a 'shape-changed' row in the ledger.
+  // That trace was an **accurately worded lie**: the API had not changed, we had
+  // simply never written it.
   const plan = (opts.plans ?? backfillPlanFor)(platformRow.id);
   if (!plan) {
     const gap = unsupportedBackfillFor(platformRow.id);
-    // 平台表里有、但两张表都没登记 ⇒ 这是接线漏了，同样必须说得出口。
+    // In the platform table but registered in neither ⇒ the wiring missed it, and that has to be sayable too.
     const detail = gap
       ? `platform ${platformRow.id} has no backfill enumeration yet; missing: ${gap.missing.join(' | ')}`
       : `platform ${platformRow.id} is in the platform table but is registered in neither`
@@ -387,14 +425,17 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt('unsupported-platform', detail);
   }
 
-  // ---- 第一段：枚举（便宜，一次跑完）----
+  // ---- Segment one: enumeration (cheap, runs to completion) ----
   //
-  // 🔴 C26：这里有两种翻页方式，**由 plan 说了算**，不是由响应内容临时决定的：
-  //   · 声明了 listCursorUrl ⇒ 游标翻页（DeepSeek：count + before_seq_id）；
-  //   · 没声明             ⇒ offset 翻页（ChatGPT，行为与 C22 逐字一致）。
+  // 🔴 C26: two paging schemes exist here, and **the plan decides**, not the
+  // response content on the fly:
+  //   · listCursorUrl declared     ⇒ cursor paging (DeepSeek: count + before_seq_id);
+  //   · listCursorUrl not declared ⇒ offset paging (ChatGPT, byte-identical to C22).
   const cursorMode = plan.listCursorUrl !== undefined;
-  // 留痕里说清「停在哪一页」。游标模式下 offset 是【已枚举条数】而不是请求参数，
-  // 所以两种模式的说法必须不一样 —— 一句读起来对、其实指错东西的留痕，比没有更糟。
+  // The trace has to say which page it stopped on. Under cursor mode `offset` is the
+  // **number enumerated so far**, not a request parameter, so the two modes must be
+  // worded differently — a trace that reads correctly but points at the wrong thing
+  // is worse than none.
   const listWhere = (): string =>
     cursorMode
       ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
@@ -406,8 +447,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     const url = cursorMode
       ? plan.listCursorUrl!(opts.origin, state.enumCursor.cursor ?? null, listLimit)
       : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
-    // 🔴 C23：body 只可能出自 plan 自己的构造器（listRequestInit → spec.body）。
-    //    没有任何一条路径能让页面侧或消息侧决定这里发什么。
+    // 🔴 C23: the body can only come from the plan's own builder
+    //    (listRequestInit → spec.body). No path lets the page side or the message
+    //    side decide what is sent here.
     const init = listRequestInit(plan, opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
     try {
@@ -427,13 +469,14 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     enumeratedPages += 1;
 
-    // 分母只认接口自己给的 total。拿不到就保持 'unknown'，进度那边会拒绝显示百分比。
+    // Only the total the API gave is accepted as the denominator. When it is
+    // unavailable, 'unknown' stays, and progress refuses to show a percentage.
     if (parsed.page.total !== null) {
       state.totalKnown = parsed.page.total;
       state.totalSource = 'response-total';
     }
 
-    // 先量一下这一页里有多少是「已经清过账的」—— 这是「不重复抓」的直接证据。
+    // First measure how much of this page is "already settled" — the direct evidence for "fetch nothing twice".
     const archivedSet = new Set(state.archived);
     const pendingSet = new Set(state.pending);
     for (const id of parsed.page.ids) {
@@ -442,41 +485,51 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     newDebts += enqueueDebts(state, parsed.page.ids).length;
 
-    // offset 模式通常按读到的条数往前走；Perplexity 的三个来源明确写的是
-    // 客户端自己 `offset += limit`，所以即便本页是短页/空页，落盘也保留
-    // 那个请求步长。游标模式的 offset 仍只是「已经枚举过多少条」的计数。
+    // Offset mode normally advances by the number of rows read; Perplexity's three
+    // sources state explicitly that the client does `offset += limit` itself, so
+    // even when this page is short or empty, the persisted value keeps that request
+    // stride. Under cursor mode `offset` remains only a count of how many have been
+    // enumerated.
     state.enumCursor.offset += plan.platform === 'perplexity'
       ? listLimit
       : parsed.page.ids.length;
     if (parsed.page.ids.length === 0) {
       if (plan.platform === 'perplexity') {
-        // 🔴 Perplexity 没有 has_more / total / count 等已知终止字段。
-        // 空页只是“这次没读到更多”，不是接口明说“到底了”；与短页分开留痕。
-        // DeepSeek 则走下面的 has_more 分支，不能把两种平台的规矩混为一谈。
+        // 🔴 Perplexity has no known termination field such as has_more / total /
+        // count. An empty page only means "nothing more was read this time", not the
+        // API saying "that is the end"; it is traced separately from a short page.
+        // DeepSeek takes the has_more branch below; the two platforms' rules must not
+        // be conflated.
         stopEnumerating('empty-page-inferred', { complete: false });
       } else {
         state.enumCursor.complete = true;
       }
     } else if (cursorMode) {
-      // 🔴 游标翻页的终止判断【只认 has_more】。
-      //    绝不用「这一页比 count 少 ⇒ 到底了」去推断 —— 那是拿未知当已知。
+      // 🔴 Cursor paging's termination test **recognises has_more only**.
+      //    Never infer it from "this page has fewer than count ⇒ that is the end" —
+      //    that would be treating an unknown as known.
       if (parsed.page.hasMore === undefined) {
-        // 响应里没有这个布尔信号 ⇒ 我们【不知道】后面还有没有。停，并具名留痕。
+        // The response carries no such boolean ⇒ we **do not know** whether more
+        // follow. Stop, and leave a named trace.
         stopEnumerating('has-more-missing');
       } else if (parsed.page.hasMore === false) {
         state.enumCursor.complete = true;
       } else if (parsed.page.nextCursor === null || parsed.page.nextCursor === undefined) {
-        // 接口说还有下一页，但这一页没能给出游标 ⇒ 翻不过去。
-        // 🔴 只回溯到了这一页，必须说出来，不许假装抓全了。
+        // The API says there is another page, but this page could not supply a
+        // cursor ⇒ it cannot page on.
+        // 🔴 Only this page was backfilled, and that has to be said; never pretend
+        // the whole thing was captured.
         stopEnumerating('cursor-missing');
       } else {
         state.enumCursor.cursor = parsed.page.nextCursor;
       }
     } else if (plan.platform === 'perplexity' && parsed.page.ids.length < listLimit) {
-      // 🔴 C27 · 这里是唯一的“短页即止”分支。它是三源实现共同采用的
-      // 客户端推断，不是接口提供的终止信号，所以不能置 complete=true。
-      // 如果未来确认 Perplexity 返回了终止字段，就改这一行分支：读取那个
-      // 字段，并仅在它明确为 false 时置 complete=true。
+      // 🔴 C27 · This is the only "a short page means stop" branch. It is a client
+      // inference all three sources share, not a termination signal supplied by the
+      // API, so complete must not be set to true.
+      // If it is ever confirmed that Perplexity returns a termination field, change
+      // this branch: read that field, and set complete=true only when it is
+      // explicitly false.
       stopEnumerating('short-page-inferred', { complete: false });
     } else if (state.totalKnown !== null && state.enumCursor.offset >= state.totalKnown) {
       state.enumCursor.complete = true;
@@ -484,18 +537,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     await persist(store, state);
   }
 
-  // 🔴 C26 · 在发出【任何一条正文请求之前】问一句：这个平台的正文段我们写没写过。
+  // 🔴 C26 · **Before issuing any body request**, ask: have we actually written this
+  // platform's body segment at all?
   //
-  // DeepSeek 就是这个中间态：列表段有四源交叉的出处（会话已经列出来、欠账已经落盘），
-  // 正文段没有出处。这时候：
-  //  · 绝不能继续往下跑 —— plan.detailUrl 是 null，硬跑就得现编一个正文路由；
-  //  · 也绝不能悄悄 return 'queue-empty' —— 那等于说「补完了」，而一条正文都没取。
-  // 所以它是一条**独立的、会落盘的** halt：欠账原封不动地留着，
-  // 等正文段有了出处，接着这批欠账往下清就行。
+  // DeepSeek is in exactly this intermediate state: the list segment has a
+  // four-source provenance (conversations have been listed, debts are on disk), and
+  // the body segment has none. At that point:
+  //  · it must not keep going — plan.detailUrl is null, and forcing it would mean
+  //    inventing a body route on the spot;
+  //  · and it must not quietly return 'queue-empty' either — that would amount to
+  //    saying "it is all backfilled" when not one body was fetched.
+  // So it is a **separate, persisted** halt: the debts stay untouched, and once the
+  // body segment has a source, this batch of debts is simply worked through.
   //
-  // 🔴 只在【真的有欠账等着】时才 halt。一条欠账都没有（用户真的没有历史）时
-  //    没有任何东西被这半条腿挡住，那就该走正常的 'queue-empty' ——
-  //    否则「你没有历史」又会被写成一条停机记录，正是本仓库最想避免的那种混淆。
+  // 🔴 It halts only when there really are debts waiting. With none at all (the user
+  //    genuinely has no history) nothing is being blocked by this half leg, and the
+  //    normal 'queue-empty' is the right answer — otherwise "you have no history"
+  //    would be written down as a stop record, exactly the confusion this repository
+  //    most wants to avoid.
   if (!plan.detailUrl || !plan.detailPath) {
     if (state.pending.length === 0) return report('queue-empty');
     const gap = plan.partial?.missing.join(' | ') ?? 'detailPath / detailUrl';
@@ -508,7 +567,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   }
   const detailUrlOf = plan.detailUrl;
 
-  // ---- 第二段：逐条取正文（贵，必须温和）----
+  // ---- Segment two: fetching bodies one by one (expensive, must be gentle) ----
   const today = dayKeyOf(clock.now());
   if (state.detailToday.day !== today) {
     state.detailToday = { day: today, count: 0 };
@@ -525,10 +584,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (id === null) break;
 
     await detailPacer.gate();
-    // 🔴 在【发请求之前】就把时刻落盘。取正文这一段是真正要温和的那一段：
-    // 万一 SW 在 fetch 中途被回收、或用户关掉浏览器，下一次 tick 也必须知道
-    // 「刚刚已经取过一次了」，否则重启就成了绕过间隔的后门。
-    // 代价是每笔账多一次 storage.local 写（约每 20 秒一次），可以忽略。
+    // 🔴 The moment is persisted **before the request goes out**. Body-fetching is
+    // the segment that really has to be gentle: if the SW is reclaimed mid-fetch, or
+    // the user closes the browser, the next tick still has to know "one was just
+    // fetched", otherwise a restart becomes a back door around the interval.
+    // The cost is one extra storage.local write per debt (about every 20 seconds),
+    // which is negligible.
     anchor('detail', detailPacer.lastAt);
     await persist(store, state);
     const url = detailUrlOf(opts.origin, id);
@@ -537,26 +598,31 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     try {
       res = await sendVia(http, url, init);
     } catch (err) {
-      // 🔴 POST 的失败与 GET 的失败走【同一行】：halt('transport-error') + 落盘留痕。
-      //    没有为 POST 新开任何一条静默路径。
+      // 🔴 A POST failure and a GET failure take **the same line**:
+      //    halt('transport-error') + a persisted trace. No silent path was opened
+      //    for POST.
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
       return halt(haltReasonForStatus(res.status), `detail returned HTTP ${res.status}`);
     }
-    // 用实时腿同一个形状校验器：接口改了这里第一个知道。
+    // The same shape checker the live leg uses: if the API changes, this is the first to know.
     if (!matchesResponseShape(platformRow, res.text)) {
       return halt('shape-changed', `detail body does not match the ${platformRow.id} response shape`);
     }
 
     /**
-     * 🔴 C28 · 这是未来正文解析器的唯一护栏落点：形状是好的之后、sink 之前。
+     * 🔴 C28 · This is the single guardrail landing point for a future body parser:
+     * after the shape is good and before the sink.
      *
-     * 当前生产 plan 没有 parseDetailPage，所以本分支不会改变任何现有平台行为，
-     * 更不会替 DeepSeek 猜正文字段。等拿到原始 payload 后，应在 plan 的 parser
-     * 实现里把「成功但空」返回为 detail-empty-unverified；本分支会立刻落账并
-     * halt，绝不让下面的 sinkVerdict/settleDebt 把它冒充成成功。只有 parser
-     * 明确返回 detail-empty-confirmed，才允许把合法空会话作为正文这一笔完成。
+     * No production plan has a parseDetailPage today, so this branch changes no
+     * existing platform's behaviour and certainly does not guess body fields for
+     * DeepSeek. Once the raw payload is available, the plan's parser implementation
+     * should return "succeeded but empty" as detail-empty-unverified; this branch
+     * then writes the receipt at once and halts, never letting the
+     * sinkVerdict/settleDebt below pass it off as success. Only when a parser
+     * explicitly returns detail-empty-confirmed may a legitimately empty
+     * conversation be completed as this body item.
      */
     const detailParsed = plan.parseDetailPage?.(res.text);
     if (detailParsed?.ok === false) {
@@ -572,7 +638,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     if (detailParsed?.ok === true && detailParsed.outcome === 'detail-empty-confirmed') {
       recordDetailOutcome(id, detailParsed.outcome, clock.now());
-      // 合法空会话不是丢失：它可以清账，但必须与上面的未证实空值分开留痕。
+      // A legitimately empty conversation is not a loss: it may be settled, but its
+      // trace must be separate from the unverified empty above.
       settleDebt(state, id);
       archivedThisRun.push(id);
       state.detailToday.count += 1;
@@ -582,36 +649,45 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
     const captured: CapturedFetch = {
       url,
-      // 🔴 C23：如实写实际发出的方法。GET 段仍然逐字是 'GET'（init.method 默认就是它）。
+      // 🔴 C23: write the method actually sent, faithfully. A GET segment is still
+      // byte-for-byte 'GET' (init.method defaults to it).
       method: init.method,
       status: res.status,
       text: res.text,
       pageUrl: `${opts.origin}/c/${id}`,
       capturedAt: clock.now(),
-      // 🔴 C21 · 根因治理的落点：**身份只表达一次。**
-      //    这条欠账的 id 就是列表接口给的 items[].id（enumerate.ts:64-68），
-      //    这里原样带下去，落盘那边不再从 URL 里抠第二遍。
-      //    ⇒「两个不同的欠账键塌成同一个文件名」在结构上不再可能：
-      //      文件名片段 = 欠账键本身（恒等映射，见 contract.ts 的 pathSafeSessionId）。
+      // 🔴 C21 · The root-cause fix's landing point: **the identity is expressed
+      //    once.**
+      //    This debt's id is the items[].id the list API gave (enumerate.ts:64-68),
+      //    carried down here as-is, and the write-down path no longer scrapes it out
+      //    of the URL a second time.
+      //    ⇒ "two different debt keys collapsing onto one file name" is structurally
+      //      impossible now: the file-name fragment = the debt key itself (the
+      //      identity map; see pathSafeSessionId in contract.ts).
       sessionId: id,
     };
-    // 🔴 C20 · 本次修法的落点：**sink 的结果说了算。**
+    // 🔴 C20 · This fix's landing point: **the sink's result decides.**
     //
-    // 产品主人的原话：「丢了」和「丢了但你知道」是完全不同的两件事，
-    // 而这个项目的立身之本就是后者。
+    // The product owner's words: "losing something" and "losing something but
+    // knowing about it" are two entirely different things, and this project exists
+    // for the second one.
     //
-    // 以前这里是 `await opts.sink?.(captured); settleDebt(state, id);` ——
-    // 不看出口有没有真的把文件存下来，欠账照样被划掉，那条对话从此永不再试、
-    // 也永远不会有人知道它丢了。现在分两条路：
-    //   存下来了 ⇒ settleDebt（清账，进 archived）
-    //   没存下来 ⇒ recordFailure（进失败清单，🔴 不清账、不进 archived、不重试）
+    // This used to be `await opts.sink?.(captured); settleDebt(state, id);` —
+    // without looking at whether the exit really stored the file, the debt was
+    // struck off anyway, and that conversation was never tried again and nobody ever
+    // knew it was lost. There are now two paths:
+    //   stored ⇒ settleDebt (clear the debt, into archived)
+    //   not stored ⇒ recordFailure (into the failure list; 🔴 no clearing, no
+    //   archived, no retry)
     const verdict = sinkVerdict(await opts.sink?.(captured), id);
 
     if (!verdict.ok && !verdict.fatal) {
-      // 🔴 W2 · 出口暂时够不着（本机 host 不在）。这一笔【不许】被划掉：
-      //    不进 archived、不进失败清单、不从 pending 里拿掉。
-      //    已经真的发出去的那次请求仍然计入今天的配额（下面的 count += 1），
-      //    然后这条腿立刻停下 —— 下一次心跳会先用 hello 问一次主机在不在。
+      // 🔴 W2 · The exit is temporarily unreachable (this machine's host is not
+      //    there). This item **must not** be struck off: not into archived, not into
+      //    the failure list, not out of pending.
+      //    The request that really did go out still counts against today's quota
+      //    (the count += 1 below), and then this leg stops at once — the next
+      //    heartbeat asks the host whether it is there first.
       state.detailToday.count += 1;
       await persist(store, state);
       console.warn(`[chat-stasher] backfill paused: ${verdict.reason} — ${verdict.detail}`);
@@ -622,18 +698,20 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       settleDebt(state, id);
       archivedThisRun.push(id);
     } else {
-      // 🔴 从 pending 里拿掉但【不】进 archived：不重试是产品决定，
-      //    冒充已归档则会让进度分子说谎 —— 两件事都不许发生。
+      // 🔴 Taken out of pending but **not** put into archived: no retry is a product
+      //    decision, and pretending it was archived would make the progress numerator
+      //    lie — neither may happen.
       dropDebt(state, id);
       failedThisRun.push(recordFailure(state, { id, reason: verdict.reason, at: clock.now() }));
-      // 只打技术细节，绝不打对话正文，也绝不打完整 URL / 完整会话 id。
+      // Only the technical detail is logged: never a conversation body, never a full URL, never a full conversation id.
       console.warn(`[chat-stasher] backfill sink did not save: ${verdict.reason} — ${verdict.detail}`);
     }
 
-    // 无论成败都算一次「今天取过的正文」：请求已经真的发出去了，
-    // 不计数就等于给失败开了一条绕过每日配额的后门。
+    // Success or failure, it counts as one "body fetched today": the request really
+    // did go out, and not counting it would open a back door around the daily quota
+    // for failures.
     state.detailToday.count += 1;
-    // 每清一笔账（或记一条失败）立刻落盘 —— 可断可续的全部秘密就在这一行。
+    // Persist immediately after clearing a debt (or recording a failure) — the whole secret of stop-and-resume is this one line.
     await persist(store, state);
   }
 

@@ -1,82 +1,97 @@
 /**
- * C11 · 回溯腿（backfill leg）的共享类型。
+ * C11 · Shared types for the backfill leg.
  *
- * 产品要求（12:52 原话）：「非常温和地慢慢地去爬我历史上所有的对话 …… 有一个进度条
- * …… 非常温和的一点一点的在好几天之后」。所以这条腿的三个硬约束是：
- *   1. 可断可续 —— 状态必须落盘，重启从断点继续；
- *   2. 枚举 / 取正文分开定速 —— 枚举很便宜（ChatGPT 约 10 页拿完 1000 条），
- *      真正要温和的是随后逐条取正文的那 1000 次；
- *   3. 进度必须诚实 —— 分母拿不到就绝不显示百分比，被限流/形状变了必须停下留痕。
+ * The product requirement, in the owner's words (12:52): "crawl all my past
+ * conversations very gently and slowly ... with a progress bar ... very gently,
+ * bit by bit, over several days". So the leg has three hard constraints:
+ *   1. stop-and-resume — the state must be on disk, and a restart carries on from
+ *      the breakpoint;
+ *   2. enumeration and body-fetching are paced separately — enumeration is cheap
+ *      (ChatGPT hands over 1000 rows in about 10 pages), and what really has to be
+ *      gentle is the 1000 body fetches that follow;
+ *   3. progress must be honest — no percentage when the denominator is
+ *      unavailable, and a rate limit or a shape change must stop with a trace.
  *
- * 这里只放类型与常量，没有任何 I/O，方便 MAIN world / 测试双向复用。
+ * Only types and constants live here, with no I/O at all, so the MAIN world and
+ * the tests can both reuse it.
  */
 
 export const BACKFILL_STATE_VERSION = 1;
 
 /**
- * 停下来并留痕的原因。出现任何一个都表示「这条腿不再自己往前爬」，
- * 需要人来看一眼 —— 绝不允许静默地爬不动。
+ * Why it stopped and left a trace. Any one of these means "this leg is no longer
+ * crawling forward on its own" and a human should look — silently failing to make
+ * progress is never allowed.
  */
 export type HaltReason =
-  /** HTTP 429 / 403 / 5xx：被平台限流或拒绝 */
+  /** HTTP 429 / 403 / 5xx: rate-limited or refused by the platform */
   | 'rate-limited'
-  /** 响应能拿到，但结构不是我们认识的形状（接口改了） */
+  /** The response arrives, but its structure is not a shape we recognise (the API changed) */
   | 'shape-changed'
-  /** 网络/传输层直接抛错 */
+  /** The network / transport layer threw outright */
   | 'transport-error'
-  /** 没有可用的持久化存储 ⇒ 无法可断可续 ⇒ 宁可不爬 */
+  /** No usable persistent storage ⇒ no stop-and-resume ⇒ better not to crawl at all */
   | 'storage-unavailable'
   /**
-   * 🔴 C22 · 这个平台的**回溯枚举还没有实现**（lib/backfill/enumerate.ts 的
-   * BACKFILL_UNSUPPORTED 里有它，并写明缺哪几项）。
+   * 🔴 C22 · This platform's **backfill enumeration is not implemented yet** (it is
+   * in lib/backfill/enumerate.ts's BACKFILL_UNSUPPORTED, which names what is missing).
    *
-   * 为什么必须是**独立**的一种理由，而不是复用 'shape-changed'：
-   * 'shape-changed' 的含义是「我们认识这个接口，但它变了」——
-   * 对用户就是「平台改版了，等修」。而这里的真相是「我们从来就没读过你这个平台的历史」。
-   * 以前没有这一条，非 ChatGPT 平台会被拿 ChatGPT 的路径去打，拿回 404 之后
-   * 记成 'shape-changed'：一句**准确的谎话**。
+   * Why it has to be a **separate** reason rather than reusing 'shape-changed':
+   * 'shape-changed' means "we know this endpoint, but it changed" — which reads to
+   * the user as "the platform changed, wait for a fix". The truth here is "we never
+   * read your platform's history in the first place".
+   * Before this value existed, non-ChatGPT platforms were hit with ChatGPT's path,
+   * got a 404, and were recorded as 'shape-changed': an **accurate-sounding lie**.
    *
-   * 🔴 它在【发出任何请求之前】就成立 —— 见 engine.ts 的 plan 查表。
+   * 🔴 It holds **before any request is issued** — see the plan lookup in engine.ts.
    */
   | 'unsupported-platform'
   /**
-   * 🔴 C26 · 这个平台的**列表段写得出来、正文段还没有出处**（plan.detailUrl === null）。
+   * 🔴 C26 · This platform's **list segment can be written, its body segment has no
+   * source yet** (plan.detailUrl === null).
    *
-   * 为什么必须与 'unsupported-platform' 分开：后者的含义是「一个请求都没发过，
-   * 我们连你的会话列表都不会列」；而这一条的真相是「已经把你的历史会话【列出来了】、
-   * 也已经真的发过列表请求，只是还不会去取每条对话的正文」。
-   * 如果复用 'unsupported-platform'，Popup 那句「在发出任何请求之前就停住了」
-   * 就会变成一句**准确措辞的谎话** —— 请求确实发了。
+   * Why it must be separate from 'unsupported-platform': that one means "not a
+   * single request was sent, we cannot even list your conversations"; the truth
+   * here is "your past conversations have already been **listed** and the list
+   * request really was sent — we just cannot fetch each conversation's body yet".
+   * Reusing 'unsupported-platform' would turn the popup's sentence "stopped before
+   * issuing any request" into an **accurately worded lie** — the request did go out.
    *
-   * 它在【发出任何一条正文请求之前】成立：欠账集合已经落盘，
-   * 等正文段有了出处，接着这批欠账往下清即可。
+   * It holds **before any body request is issued**: the debt set is already on
+   * disk, and once the body segment has a source, this batch of debts is simply
+   * worked through.
   */
   | 'detail-unsupported'
   /**
-   * 🔴 C28 · 正文接口成功，但返回的内容为空；这不是「会话确实没有内容」。
+   * 🔴 C28 · The body endpoint succeeded, but returned empty content; that is not
+   * "the conversation really has no content".
    *
-   * 这条必须独立于 'shape-changed'：响应形状可以完全正确，错的是把一个
-   * 暂时读到的空当成了确定事实。也必须独立于 'detail-empty-confirmed'：
-   * 后者只有未来拿到明确证据时才能使用。
+   * This has to be independent of 'shape-changed': the response shape can be
+   * entirely correct, and the mistake is taking a momentary empty reading as a
+   * settled fact. It also has to be independent of 'detail-empty-confirmed': that
+   * one may only be used once explicit evidence exists.
    *
-   * 它在正文循环里、sink 之前成立；这条路不清 pending、不进 archived，
-   * 并以 complete=false 的 DetailOutcomeRecord 落盘。
+   * It holds inside the body loop, before the sink; this path neither clears
+   * pending nor enters archived, and persists a DetailOutcomeRecord with
+   * complete=false.
    */
   | 'detail-empty-unverified';
 
 /**
- * 🔴 C28 · 正文「空」的两种可观察结局。
+ * 🔴 C28 · The two observable outcomes of an "empty" body.
  *
- * 'detail-empty-unverified' = HTTP 成功且形状认识，但本次内容为空；不能据此
- * 断言会话本来就是空的。'detail-empty-confirmed' = 将来只有在原始 payload 或
- * 其它可靠契约明确证明「合法空会话」时才可使用。
+ * 'detail-empty-unverified' = HTTP succeeded and the shape is recognised, but this
+ * particular content is empty; that is not grounds for asserting the conversation
+ * was always empty. 'detail-empty-confirmed' = usable in future only when the raw
+ * payload or some other reliable contract explicitly proves "a legitimate empty
+ * conversation".
  *
- * 两个值都会进入 RunReport.detailOutcomes 与 BackfillState.detailOutcomes，
- * 不许把它们折叠成 queue-empty 或 shape-changed。
+ * Both values reach RunReport.detailOutcomes and BackfillState.detailOutcomes, and
+ * folding them into queue-empty or shape-changed is not allowed.
  */
 export type DetailOutcome = 'detail-empty-unverified' | 'detail-empty-confirmed';
 
-/** 正文空结局的账本收据；complete 是正文这一笔的完成标记，不是枚举游标。 */
+/** The ledger receipt for an empty body outcome; `complete` marks this body item as done, and is not the enumeration cursor. */
 export type DetailOutcomeRecord =
   | {
       sessionId: string;
@@ -92,50 +107,56 @@ export type DetailOutcomeRecord =
     };
 
 /**
- * 🔴 C26 · 枚举「没能走完」的具名理由。
+ * 🔴 C26 · The named reasons enumeration "could not finish".
  *
- * 存在的唯一目的：**不许把「我们读不下去了」记成「已经全部列完了」。**
- * 游标式翻页（DeepSeek）的每一页都要从上一页里读出下一页的游标；
- * 读不到就只能停在这一页。停是可以的，装作列完了不可以。
+ * Its one purpose: **"we could not read any further" must not be recorded as "we
+ * have listed everything".**
+ * Every page of cursor paging (DeepSeek) has to yield the next page's cursor from
+ * the previous page; if it cannot be read, the only option is to stop on this page.
+ * Stopping is fine; pretending the listing is complete is not.
  */
 export type EnumTruncation =
-  /** 记录里没有游标字段（DeepSeek 的 seq_id）⇒ 只枚举到了当前这一页。 */
+  /** The record has no cursor field (DeepSeek's seq_id) ⇒ only the current page was enumerated. */
   | 'cursor-missing'
-  /** 响应里没有「还有没有下一页」这个布尔信号 ⇒ 不知道后面还有没有，停。 */
+  /** The response carries no "is there another page" boolean ⇒ we do not know, so stop. */
   | 'has-more-missing'
-  /** Perplexity 返回空页；接口没有明确终止字段，这是客户端推断的停点。 */
+  /** Perplexity returned an empty page; the API has no explicit termination field, so this is a client-inferred stopping point. */
   | 'empty-page-inferred'
-  /** Perplexity 返回短页；接口没有明确终止字段，这是客户端推断的停点。 */
+  /** Perplexity returned a short page; the API has no explicit termination field, so this is a client-inferred stopping point. */
   | 'short-page-inferred';
 
 export interface HaltRecord {
   reason: HaltReason;
-  /** 发生时间（clock.now()，毫秒） */
+  /** When it happened (clock.now(), milliseconds) */
   at: number;
-  /** 只放技术细节：URL 路径、状态码、缺哪个字段。绝不放对话正文。 */
+  /** Technical detail only: URL path, status code, which field is missing. Never a conversation body. */
   detail: string;
 }
 
-/** 一次 run 为什么结束。halted 之外都属于正常的「温和地停一下」。 */
+/** Why one run ended. Everything other than `halted` is a normal "gentle pause". */
 export type StopReason =
   | 'queue-empty'
   | 'budget-exhausted'
   | 'daily-cap'
   | 'aborted'
   /**
-   * W2：落盘出口（本机 native host）够不着 ⇒ 这条腿暂停。
-   * 与 'halted' 的区别：halted 是这条腿【自己】出了问题需要人看一眼；
-   * host-unavailable 是落盘出口暂时不在，腿本身是健康的，欠账原封不动，
-   * 下一次心跳 `hello` 成功之后就从这个断点继续 —— 不会重头再来。
-   * 🔴 它绝不允许被记成「这一笔已经处理完了」：见 engine.ts 的 retryLater 分支。
+   * W2: the delivery exit (this machine's native host) is unreachable ⇒ this leg
+   * pauses.
+   * Its difference from 'halted': `halted` is this leg **itself** going wrong and
+   * needing a human look; `host-unavailable` is the delivery exit being temporarily
+   * absent — the leg is healthy, not one debt was moved, and after the next
+   * heartbeat's `hello` succeeds it carries on from this breakpoint rather than
+   * starting over.
+   * 🔴 It must never be recorded as "this item is done": see the retryLater branch
+   * in engine.ts.
    */
   | 'host-unavailable'
   | 'halted';
 
-/** total 的来源。只有 'response-total' 才配当进度条的分母。 */
+/** Where `total` came from. Only 'response-total' is fit to be the progress bar's denominator. */
 export type TotalSource = 'response-total' | 'unknown';
 
-/** 每天配额的计数窗口，按 UTC 日期切分。 */
+/** The counting window for the daily quota, split by UTC date. */
 export interface DailyCounter {
   /** YYYY-MM-DD（UTC） */
   day: string;
@@ -143,69 +164,84 @@ export interface DailyCounter {
 }
 
 /**
- * 「欠账集合」——- 与 CLI 侧 state/debts-v2.json 的 per-destination 欠账集合同构：
- * 已清的不再入队、可断可续、进度 = 已清 / 总数。
+ * The "debt set" — isomorphic to the CLI side's per-destination debt set in
+ * state/debts-v2.json: a settled id is never enqueued again, it is
+ * stop-and-resume, and progress = settled / total.
  */
 export interface BackfillState {
   v: typeof BACKFILL_STATE_VERSION;
   platform: string;
-  /** 归档范围键：同一账号一个集合（ADR-002 的账号轴）。 */
+  /** The archive-scope key: one set per account (ADR-002's account axis). */
   scope: string;
-  /** 接口直给的会话总数；拿不到就是 null。 */
+  /** The conversation total the API gave directly; null when it did not. */
   totalKnown: number | null;
   totalSource: TotalSource;
   /**
-   * 枚举游标：offset + 是否枚举完。
+   * The enumeration cursor: offset + whether enumeration is done.
    *
-   * 🔴 C26 新增两个**可选**字段（旧集合读回来都是 undefined ⇒ 行为与 C22 逐字一致）：
-   *  · cursor    游标式翻页的下一页游标（DeepSeek 的 before_seq_id）。
-   *              null / undefined = 还没有游标 = 请求第一页。
-   *              offset 式翻页（ChatGPT）永远不写它。
-   *  · truncated 🔴 **枚举是「读完了」还是「读不下去了」**。非空表示后者，
-   *              complete 虽然是 true，但它【不是】「全部列完」的意思。
-   *              例外是 Perplexity 的空页/短页推断：它们没有接口终止信号，
-   *              因此 truncated 非空但 complete 保持 false，避免把推断冒充确定完成。
-   *              没有这个字段，两种结局在账本上会长得一模一样。
+   * 🔴 C26 added two **optional** fields (old sets read back as undefined ⇒
+   * behaviour byte-identical to C22):
+   *  · cursor    the next page's cursor for cursor paging (DeepSeek's before_seq_id).
+   *              null / undefined = no cursor yet = request the first page.
+   *              Offset paging (ChatGPT) never writes it.
+   *  · truncated 🔴 **whether enumeration "finished reading" or "could not read any
+   *              further"**. Non-empty means the latter: `complete` may be true, but
+   *              it does **not** mean "everything was listed".
+   *              The exception is Perplexity's empty/short-page inference: there is
+   *              no API termination signal, so `truncated` is non-empty while
+   *              `complete` stays false, so that an inference is never passed off as
+   *              a definite completion.
+   *              Without this field the two outcomes would look identical in the ledger.
    */
   enumCursor: { offset: number; complete: boolean; cursor?: number | null; truncated?: EnumTruncation };
-  /** 欠账：已枚举出来、但还没取到正文的会话 id。 */
+  /** Debts: conversation ids that were enumerated but whose body has not been fetched. */
   pending: string[];
-  /** 已清：已经归档过的会话 id，永不再入队。 */
+  /** Settled: conversation ids already archived, never enqueued again. */
   archived: string[];
   /**
-   * 🔴 C28 · 正文空结局的逐会话收据。optional 以兼容 C27 以前的 v1 旧状态；
-   * 新建/写回的状态都会初始化为 []。未证实为空的那一笔必须带 complete:false，
-   * 并且仍同时出现在 pending 里，不能只靠 UI 的一瞬间报告记住它。
+   * 🔴 C28 · The per-conversation receipt for empty body outcomes. Optional for
+   * compatibility with v1 states from before C27; newly created / written-back
+   * states are initialised to []. An unverified-empty item must carry
+   * complete:false and must still appear in pending at the same time — it cannot
+   * be remembered only through a momentary line in the UI.
    */
   detailOutcomes?: DetailOutcomeRecord[];
-  /** 今天已经取了多少条正文（跨重启有效）。 */
+  /** How many bodies have been fetched today (valid across restarts). */
   detailToday: DailyCounter;
   /**
-   * 🔴 C19 · 跨 tick 的定速锚点：每一段【上一次真实取数】的时刻（clock.now()，毫秒）。
+   * 🔴 C19 · The cross-tick pacing anchor: the moment of **the last real fetch** for
+   * each segment (clock.now(), milliseconds).
    *
-   * 为什么必须落盘：Pacer 是 per-run 的，而运行时一次 tick 只清 1 笔账 ⇒
-   * 每个 run 的第一次 gate() 恒等待 0 ⇒ 「每条 20 秒」在浏览器里一次都没生效过
-   * （C17-3.B2 实测四条正文零间隔）。把时刻存进欠账集合，间隔就能跨 tick、跨 SW
-   * 回收、跨浏览器重启地续上 —— 与 detailToday 的日上限是同一种做法。
+   * Why it must be on disk: a Pacer is per-run, and at runtime a tick clears only 1
+   * debt ⇒ every run's first gate() waits 0 ⇒ "20 seconds per item" never once took
+   * effect in the browser (measured in C17-3.B2: four bodies at zero interval).
+   * Storing the moment in the debt set lets the interval survive across ticks,
+   * across SW reclaim and across browser restarts — the same approach as
+   * detailToday's daily cap.
    *
-   * optional：v1 的旧集合里没有这个字段，读回来是 undefined ⇒ 当作「没有上一次」，
-   * 行为与 C11 逐字一致，不需要提版本号，也不会把用户已有的进度作废。
+   * optional: v1's older sets have no such field and read back as undefined ⇒ treated
+   * as "there is no previous one", byte-identical to C11, with no version bump needed
+   * and no user progress invalidated.
    */
   lastFetchAt?: { enumerate: number | null; detail: number | null };
   /**
-   * 🔴 C20 · 落盘失败清单。**同一本账上的第三栏**（另外两栏是 pending / archived）。
+   * 🔴 C20 · The write-down failure list. **The third column of the same ledger**
+   * (the other two are pending / archived).
    *
-   * 为什么在这里而不是另开一个存储键：本次缺陷的根因是「同一个身份被表达了两次」，
-   * 再造第二份「这条会话怎么样了」的账本就是同一个错误再犯一遍。
-   * 结构、上限、为什么不重试，全在 lib/backfill/failures.ts。
+   * Why here rather than a storage key of its own: the root cause of this defect was
+   * "the same identity expressed twice", and building a second ledger of "what
+   * happened to this conversation" would be the same mistake all over again.
+   * The structure, the cap, and why there is no retry are all in
+   * lib/backfill/failures.ts.
    *
-   * optional：C19 及更早的旧集合里没有这两个字段，读回来 undefined ⇒ 当作空清单，
-   * 行为与 C19 逐字一致，不需要提版本号，也不会把用户已有的进度作废。
+   * optional: C19 and older sets have neither field and read back as undefined ⇒
+   * treated as an empty list, byte-identical to C19, with no version bump needed and
+   * no user progress invalidated.
    */
   failures?: import('./failures').FailureEntry[];
-  /** 因为超过上限而被丢掉的历史失败条数。🔴 绝不静默截断。 */
+  /** How many older failures were dropped for exceeding the cap. 🔴 Never a silent truncation. */
   failuresDropped?: number;
-  /** 非 null 表示这条腿已经停下并留痕。 */
+  /** Non-null means this leg has stopped and left a trace. */
   halted: HaltRecord | null;
 }
 
@@ -228,7 +264,7 @@ export function initialState(platform: string, scope: string): BackfillState {
   };
 }
 
-/** 存储键。与 badge 的 cs_* 前缀同族，不新增任何权限。 */
+/** The storage key. Same cs_* prefix family as the badge; no new permission. */
 export function stateKey(platform: string, scope: string): string {
   return `cs_backfill_v${BACKFILL_STATE_VERSION}:${platform}:${scope}`;
 }

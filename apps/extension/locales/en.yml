@@ -1,0 +1,308 @@
+# English catalog — the default locale.
+#
+# Two kinds of entry live here:
+#   1. the `__MSG_*__` keys the manifest references (Chrome resolves those before
+#      the extension starts, from `_locales/<resolved locale>/messages.json`);
+#   2. every string the popup and the toolbar badge can show.
+#
+# Placeholder syntax is `@wxt-dev/i18n`'s, read off the package source rather
+# than from memory: named substitutions use `{name}` and are replaced in JS by
+# `applyNamedSubstitutions` (node_modules/@wxt-dev/i18n/dist/utils-C75KGsJ7.mjs:2,9-13),
+# while `$1`-`$9` are replaced by the browser inside `browser.i18n.getMessage`
+# (node_modules/@wxt-dev/i18n/dist/index.mjs:17-20). This catalog uses `{name}`
+# only, because that is the single form both code paths can reproduce
+# identically (lib/i18n.ts explains why). Nothing here contains the exact
+# sequence ` | `, which `@wxt-dev/i18n` reserves for plural forms (index.mjs:23).
+extName: Chat Stasher
+extDescription: Capture selected web chat sessions to files on your own machine.
+
+common:
+  unknownTime: unknown time
+  unknownTimeShort: time unknown
+  unknownSize: unknown size
+
+# ---------------------------------------------------------------------------
+# Delivery channel (the native host)
+# ---------------------------------------------------------------------------
+channel:
+  noCheck: >-
+    Delivery channel: no host check has run yet — the extension has not asked
+    the chat-stasher host anything, so it has nothing to report.
+  connected: >-
+    Delivery channel: connected to the chat-stasher host — stage {stage} ·
+    machine {machine} · host version {hostVersion} (checked {at}).
+  disconnected:
+    head: >-
+      Delivery channel: NOT connected to the chat-stasher host — reason: {why}
+      (checked {at}).
+    detail: " Detail: {detail}."
+    stageKnown: " Last known stage: {stage}."
+    stageNever: " No stage path has ever been learned on this machine."
+    fix: " Fix: {command}"
+  reason:
+    unknown: unknown reason
+
+# ---------------------------------------------------------------------------
+# Outbox
+# ---------------------------------------------------------------------------
+outbox:
+  empty: "Outbox: empty — every capture so far has been acknowledged by the host."
+  head: "Outbox: {pending} waiting, {rejected} rejected — using {bytes} of {capacity}."
+  full: >-
+    The outbox is FULL: new captures are refused until the host takes what is
+    already queued. Nothing queued was deleted.
+  rejected: "Rejected by the host and kept (never retried): {kinds}."
+  sample: "  · {kind}: {detail}"
+  noDetail: no detail recorded
+  unknownKind: unknown
+  unreadable: >-
+    Outbox: unreadable — this browser context has no IndexedDB, so the extension
+    cannot say what is queued. Nothing has been deleted.
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+export:
+  buttonLabel: Export undelivered captures
+  emptyNote: "Nothing to export: the outbox is empty, so there is no undelivered capture."
+  note: >-
+    Export: last written {at} — {entries} capture(s), {bytes}, file name
+    {filename}. Exported captures stay in the outbox: the host will confirm them
+    as duplicates once it is reachable again.
+  noHistory: "Export: no export file has been written yet."
+  nothingQueued: Nothing to export.
+  unreadable: >-
+    Outbox: unreadable — this browser context has no IndexedDB. No export file
+    was written.
+
+# ---------------------------------------------------------------------------
+# Backfill pause (the host is unreachable)
+# ---------------------------------------------------------------------------
+backfill:
+  paused:
+    head: "Backfill: PAUSED — the host is unavailable ({reason}), first noticed {at}."
+    detail: " Detail: {detail}."
+    tail: >-
+      The conversations still owed are untouched and will be picked up from
+      where they stopped when the host answers again.
+
+# ---------------------------------------------------------------------------
+# Toolbar badge
+# ---------------------------------------------------------------------------
+badge:
+  waiting: "{pending} capture(s) waiting for the chat-stasher host"
+  rejected: "{rejected} rejected by the host"
+  full: the outbox is full and refusing new captures
+  title: "chat-stasher: {parts}"
+  unreadable: >-
+    chat-stasher: the outbox cannot be read in this browser context — the
+    extension cannot say what is queued. Nothing has been deleted.
+
+# ---------------------------------------------------------------------------
+# Popup
+# ---------------------------------------------------------------------------
+popup:
+  # How `popupText` renders a button in the flattened text, so a test can see
+  # whether the button appeared at all.
+  buttonTag: "[Button] {label}"
+  toggle:
+    label: Backfill past conversations automatically
+  clearFailures:
+    label: Got it — clear this list
+  startBackfill:
+    label: Start backfilling this platform
+  locale:
+    label: Language
+    auto: Auto
+    english: English
+    chinese: 中文
+  status:
+    hostPaused: >-
+      Status: the switch is ON, but this machine's host is unreachable, so
+      backfill paused itself (not one debt was touched)
+    on: "Status: the switch is ON"
+    off: "Status: the switch is OFF (that is the default; you have to turn it on yourself)"
+  running:
+    noStore: "Running: NOT running — browser storage is unavailable."
+    disabled: "Running: NOT running — the switch is off."
+    hostPaused: >-
+      Running: NOT running — this machine's host is unreachable, so it is
+      paused; the debts are untouched, and the next heartbeat asks whether the
+      host is there first and carries on from the same item once it answers.
+    noTargets: >-
+      Running: NOT running — the switch is on, but there are no backfill targets
+      at all, so the alarm wakes up with nothing to do and not one conversation
+      is being fetched. The line below says the one thing you have to do.
+    noHttpPort: >-
+      Running: NOT running — the switch is on, but there is no usable fetch
+      channel right now, so not one conversation is being fetched.
+    active: >-
+      Running: archiving — one debt is cleared automatically every {minutes}
+      minutes (at most {maxPerDay} a day, and at least {minIntervalSeconds}
+      seconds apart).
+  missing:
+    noStore: >-
+      Missing: browser.storage.local. Without persistence there is no
+      stop-and-resume, and rather than crawl from scratch on every restart it
+      does not run at all.
+    noHttpPort: >-
+      Missing: an open, logged-in page of a supported platform — the fetch
+      channel borrows it to exist. Past conversations are only ever fetched
+      inside your own browser page (a same-origin request, using the login you
+      already have), so as long as no tab of a supported platform is open this
+      leg cannot fetch anything. Open any one of those platform pages and leave
+      it open, and it will carry on by itself.
+    noTargets:
+      buttonHint: |-
+        You can also just press the “{button}” button below this paragraph —
+        that counts as you saying outright “backfill this platform”, and only
+        then do we record it as a backfill target. (We still do not guess your
+        account: that archive scope is recorded as default, and once you really
+        have been archived once, the real account gets a record of its own.)
+      body: |-
+        Missing: one conversation that really has been archived once — backfill needs it to learn which platform and which account's history to fetch.
+        The one thing for you to do now: send a message on this platform, or open a conversation you already have, and let it be archived LIVE once (it is stored into your own download directory as usual). Only after that capture do we note this platform and this account, and backfill starts walking backwards from that account.
+        🔴 Why that one capture is unavoidable: we do not guess your account, we only use the one you actually used. This extension has no host permissions at all, and history is only fetched inside pages you have already opened and already logged into; until you have really used it once, we will neither guess an account nor walk the whole platform's conversations.
+        (How long it takes depends on how much history you have and how long the page stays open — no time promise is given here, and progress is shown one item at a time below.)
+    hostPaused: >-
+      Missing: the chat-stasher host on this machine does not answer. It is
+      installed by `chat-stasher install-native-host --stage <your stage path>`
+      pointing at a directory that exists; once that is done this leg recovers
+      by itself (the heartbeat asks the host first), with nothing for you to
+      click.
+  failures:
+    head: "🔴 Failures: {count} past conversation(s) had their body fetched but were NOT stored, and they will NOT be retried automatically."
+    headDropped: >-
+      🔴 Failures: {count} past conversation(s) had their body fetched but were
+      NOT stored, and they will NOT be retried automatically. (The list keeps at
+      most {max}; {dropped} older one(s) are no longer on it.)
+  failureNote:
+    title: "These were not stored (newest first):"
+    row: "· {platform} · conversation {shortId}… · {reason} · {at}"
+    retry: >-
+      🔴 They will not be retried automatically — deliberately: the same exit has
+      just failed once, and hammering it again would only repeat the same
+      failure and make you think it is fine now.
+    ledger: >-
+      On the debt ledger they count neither as archived nor as queued, so the
+      numbers in the progress line do not pass them off as successes.
+    clear: >-
+      Clearing this list only means “I have seen it”; it does not trigger any
+      re-fetch.
+  lastTick:
+    none: >-
+      Alarm: storage holds no record of the alarm ever firing — it may not have
+      woken up for the first time yet. (This line is saying “I do not know”, not
+      “it is not running”.)
+    ran: >-
+      Alarm: the last wake-up was {when}, and that tick really ran ({targets}
+      backfill target(s) in the registry).
+    skipped: >-
+      Alarm: the last wake-up was {when}, and that tick did nothing at all —
+      {reason} ({targets} backfill target(s) in the registry at the time).
+  progress:
+    notStarted: >-
+      Progress: not started yet — storage holds no debt set for this platform,
+      which means nothing has been enumerated at all.
+    line: "Progress: {progress}"
+  coverage:
+    all: "Backfill coverage: every platform supported today ({yes}) can backfill past conversations."
+    partial: >-
+      Backfill coverage: right now only {yes} can backfill past conversations;
+      {no} cannot yet. Their live archiving works as usual (the conversation you
+      are looking at is still stored) — it is only the past that cannot be
+      fetched back yet, which is not a breakdown and not an absence of history:
+      we simply have not learned to read their history lists yet.
+    noteTitle: "These platforms cannot backfill history yet; here is where each one is stuck:"
+    noteWhy: >-
+      🔴 We will not guess a request URL just to make it look like something is
+      moving: getting it wrong produces no error, only the impression that
+      history is being backfilled while not one conversation is. Saying plainly
+      that it is not supported yet is the better answer.
+  notes:
+    target: "This progress is for: platform {platform} · archive scope {scope}"
+    noTarget: >-
+      There is no backfill record for any platform yet, so there is no archive
+      scope to show here.
+    whatOpening: >-
+      What turning it on does: as long as one page of a supported platform is
+      open, every {minutes} minutes it quietly backfills one past conversation
+      in the background, using the login of that page of yours; at most
+      {maxPerDay} a day, so a long history fills in over several days. Turning it
+      off stops it (and clears the timer with it).
+    halted:
+      unsupportedPlatform: >-
+        This platform ({platform}) has no history backfill implemented, so this
+        leg stopped before issuing any request. This is not a platform change
+        and not rate-limiting. Technical detail: {detail}
+      detailUnsupported: >-
+        This platform ({platform}) has already had its past conversations LISTED
+        ({pending} waiting), but the step that fetches each conversation's body
+        is not implemented yet, so this leg stopped before fetching the first
+        body and nothing has been stored so far. This is not a platform change
+        and not rate-limiting; the listed ones stay put and are worked through
+        once that step lands. Technical detail: {detail}
+      other: "This leg has stopped and left a record: {reason} — {detail}"
+
+# ---------------------------------------------------------------------------
+# The alarm's last tick — why it did nothing
+# ---------------------------------------------------------------------------
+tick:
+  reason:
+    noTargets: there are no backfill targets yet, so it does not know which platform or which account's history to fetch
+    noHttpPort: no usable fetch channel (no open supported-platform page at the time)
+    disabled: the switch was off at the time
+    noStore: browser storage was unavailable at the time
+    hostPaused: this machine's host is unreachable, so this leg paused until it answers
+    alreadyRunning: the previous tick had not finished, so this one stepped aside
+    ran: it ran
+    unknown: "outcome code: {reason}"
+
+# ---------------------------------------------------------------------------
+# Progress (the only place a percentage may ever be produced)
+# ---------------------------------------------------------------------------
+progress:
+  haltedPrefix: "[stopped: {reason}] "
+  unknownTotal: "Archived {archived}, still owed {pending}, total unknown ({reason})"
+  withTotal: "Archived {archived} of {total} ({percent}%), still owed {pending}"
+  reason:
+    noTotalFromApi: the API did not provide a total
+    totalNotPositiveInt: total is not a usable positive integer
+    totalExpired: the archived count exceeds total, so the denominator is stale
+
+# ---------------------------------------------------------------------------
+# Why one conversation was not stored
+# ---------------------------------------------------------------------------
+failure:
+  notSaved: the body was fetched, but no file was written
+  identityMismatch: it was written, but the identity used for the file name does not match this debt
+  unknownReason: "reason code {reason}"
+  shortIdEmpty: (empty)
+
+# ---------------------------------------------------------------------------
+# Per-platform coverage notes. These are written for the user: no jargon, and
+# none of them may hint that the platform is being backfilled right now.
+# ---------------------------------------------------------------------------
+platformNote:
+  deepseek:
+    partial: >-
+      DeepSeek: past conversation bodies cannot be backfilled yet. Your past
+      conversations can already be listed, but we do not fetch the content of
+      each one yet, so for now not a single one will be stored.
+  perplexity:
+    partial: >-
+      Perplexity: past conversation bodies cannot be backfilled yet. Your past
+      conversations can already be listed, but we do not fetch the content of
+      each one yet, so for now not a single one will be stored.
+  claude:
+    unsupported: >-
+      Claude: history cannot be backfilled yet. The list endpoint's address
+      contains an organization number, and we have no reliable way to obtain it.
+  kimi:
+    unsupported: >-
+      Kimi: history cannot be backfilled yet. We do not know what parameters its
+      list endpoint needs, and we will not guess one.
+  gemini:
+    unsupported: >-
+      Gemini: history cannot be backfilled yet. We did not find a reliable
+      source for a “list past conversations” endpoint, and we will not guess one.

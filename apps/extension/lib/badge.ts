@@ -22,7 +22,7 @@
  */
 
 import { summary, type OutboxSummary, type OutboxOptions } from './outbox';
-import { badgeTitle } from './ui-strings';
+import { badgeTitle, badgeUnreadable } from './ui-strings';
 
 /** Number-of-waiting background. */
 export const BADGE_COLOR_WAITING = '#c1353c';
@@ -45,13 +45,13 @@ export interface BadgePlan {
  */
 export function badgeFor(state: OutboxSummary | null): BadgePlan | null {
   if (state === null) {
-    // 🔴 「读不出发件箱」不是「没有待送」。两者在角标上也不能长得一样：
-    //    数字/空角标都在说「我知道现状」，而这里我们确实不知道。
+    // 🔴 "the outbox cannot be read" is not "nothing is waiting". The two must
+    //    not look alike on the badge either: a number or an empty badge both say
+    //    "I know the state", and here we genuinely do not.
     return {
       text: BADGE_ALERT_TEXT,
       color: BADGE_COLOR_ALERT,
-      title: 'chat-stasher: the outbox cannot be read in this browser context — '
-        + 'the extension cannot say what is queued. Nothing has been deleted.',
+      title: badgeUnreadable(),
     };
   }
   const alert = state.rejected > 0 || state.full;

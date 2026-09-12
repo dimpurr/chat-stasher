@@ -1,20 +1,27 @@
 /**
- * Every NEW piece of user-visible text lives here, in English, so the popup can
- * be localised later by swapping one module instead of hunting strings across
- * the render layer.
+ * The wordings for everything outside the popup's own state machine: the
+ * delivery channel, the outbox, the export button, the backfill pause and the
+ * toolbar badge title.
  *
- * 🔴 Scope rule: this file holds the strings introduced with the "one question,
- *    one answer, ack-only" transport — the channel status, the outbox, the
- *    export button and the host-availability pause. The older Chinese strings
- *    (status / running / missing / progress / coverage / failures) are NOT
- *    moved here; they belong to a separate i18n task. Do not "tidy" them into
- *    this file: that would change what the existing tests assert.
+ * 🔴 Every one of these is now a *builder*, not a constant, and every builder
+ *    goes through `t` (lib/i18n.ts). Two reasons, in order of importance:
+ *
+ *    1. The popup can switch language while it is open, so the text has to be
+ *       resolved at paint time. A module-level string constant would be frozen
+ *       at import time, in whatever language happened to be active then.
+ *    2. The wording lives in locales/en.yml + locales/zh_CN.yml, next to every
+ *       other user-visible string, so a translator has one file to read instead
+ *       of one file plus this one.
  *
  * Nothing here computes state. Each builder takes the facts it was handed and
  * states them; a missing fact becomes a missing fact in the sentence, never a
- * plausible default.
+ * plausible default. That rule survived the move to keys intact — the
+ * placeholders are the same facts, and a missing one still has to be spelled
+ * out (e.g. `channelDisconnected` says "no stage path has ever been learned"
+ * rather than quietly interpolating an empty string).
  */
 
+import { t } from './i18n';
 import type { NackKind } from './native-host';
 
 /** Placeholder used when we have never learned a stage path. */
@@ -30,13 +37,18 @@ export function fixCommand(stage: string | null | undefined): string {
 
 /** Milliseconds since epoch → `YYYY-MM-DD HH:MM:SS UTC`, or an honest gap. */
 export function stamp(at: number | null | undefined): string {
-  if (typeof at !== 'number' || !Number.isFinite(at)) return 'unknown time';
+  if (typeof at !== 'number' || !Number.isFinite(at)) return t('common.unknownTime');
   return `${new Date(at).toISOString().replace('T', ' ').slice(0, 19)} UTC`;
 }
 
-/** Bytes → a short human quantity. Used for outbox capacity, never for rates. */
+/**
+ * Bytes → a short human quantity. Used for outbox capacity, never for rates.
+ * The unit symbols are not translated: KiB/MiB/GiB are the same string in every
+ * language this catalog offers, and inventing localised unit names would make
+ * the number harder, not easier, to compare against the capacity we chose.
+ */
 export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size';
+  if (!Number.isFinite(bytes) || bytes < 0) return t('common.unknownSize');
   if (bytes < 1024) return `${bytes} B`;
   const kib = bytes / 1024;
   if (kib < 1024) return `${kib.toFixed(1)} KiB`;
@@ -61,36 +73,39 @@ export interface ChannelFacts {
   lastKnownStage?: string;
 }
 
-export const CHANNEL_NO_CHECK =
-  'Delivery channel: no host check has run yet — the extension has not asked the '
-  + 'chat-stasher host anything, so it has nothing to report.';
+export function channelNoCheck(): string {
+  return t('channel.noCheck');
+}
 
 export function channelConnected(f: ChannelFacts): string {
-  return 'Delivery channel: connected to the chat-stasher host'
-    + ` — stage ${f.stage} · machine ${f.machine} · host version ${f.hostVersion}`
-    + ` (checked ${stamp(f.at)}).`;
+  return t('channel.connected', {
+    stage: f.stage,
+    machine: f.machine,
+    hostVersion: f.hostVersion,
+    at: stamp(f.at),
+  });
 }
 
 export function channelDisconnected(f: ChannelFacts): string {
-  const why = f.kind ? `${f.reason} (${f.kind})` : (f.reason ?? 'unknown reason');
-  const detail = f.detail && f.detail.length > 0 ? ` Detail: ${f.detail}.` : '';
+  const why = f.kind
+    ? `${f.reason} (${f.kind})`
+    : (f.reason ?? t('channel.reason.unknown'));
   const stage = f.lastKnownStage ?? null;
-  const stageLine = stage
-    ? ` Last known stage: ${stage}.`
-    : ' No stage path has ever been learned on this machine.';
-  return 'Delivery channel: NOT connected to the chat-stasher host'
-    + ` — reason: ${why} (checked ${stamp(f.at)}).`
-    + detail
-    + stageLine
-    + ` Fix: ${fixCommand(stage)}`;
+  return t('channel.disconnected.head', { why, at: stamp(f.at) })
+    + (f.detail && f.detail.length > 0 ? t('channel.disconnected.detail', { detail: f.detail }) : '')
+    + (stage
+      ? t('channel.disconnected.stageKnown', { stage })
+      : t('channel.disconnected.stageNever'))
+    + t('channel.disconnected.fix', { command: fixCommand(stage) });
 }
 
 // ---------------------------------------------------------------------------
 // Outbox
 // ---------------------------------------------------------------------------
 
-export const OUTBOX_EMPTY =
-  'Outbox: empty — every capture so far has been acknowledged by the host.';
+export function outboxEmpty(): string {
+  return t('outbox.empty');
+}
 
 export interface OutboxFacts {
   pending: number;
@@ -102,46 +117,78 @@ export interface OutboxFacts {
   rejectedSamples: ReadonlyArray<{ kind: string; detail: string }>;
 }
 
+/**
+ * Data-layer markers `summarizeOutbox` puts in place of a value it never
+ * learned. They are plain strings in the (pure, tested) summarising function,
+ * and are mapped to their translated wording here, at paint time — so the
+ * "we never recorded a detail" case reads as that sentence in either language
+ * instead of leaking an English sentinel into a Chinese screen.
+ */
+export const OUTBOX_KIND_UNKNOWN = 'unknown';
+export const OUTBOX_DETAIL_MISSING = 'no detail recorded';
+
 export function outboxLine(f: OutboxFacts): string {
-  const head = `Outbox: ${f.pending} waiting`
-    + `, ${f.rejected} rejected`
-    + ` — using ${formatBytes(f.bytes)} of ${formatBytes(f.capacityBytes)}.`;
+  const head = t('outbox.head', {
+    pending: f.pending,
+    rejected: f.rejected,
+    bytes: formatBytes(f.bytes),
+    capacity: formatBytes(f.capacityBytes),
+  });
   if (!f.full && f.rejected === 0) return head;
   const parts: string[] = [];
-  if (f.full) {
-    parts.push('The outbox is FULL: new captures are refused until the host takes what is '
-      + 'already queued. Nothing queued was deleted.');
-  }
+  if (f.full) parts.push(t('outbox.full'));
   if (f.rejected > 0) {
-    const kinds = f.rejectedKinds.map((k) => `${k.kind} × ${k.count}`).join(', ');
-    parts.push(`Rejected by the host and kept (never retried): ${kinds}.`);
+    const kinds = f.rejectedKinds
+      .map((k) => `${k.kind === OUTBOX_KIND_UNKNOWN ? t('outbox.unknownKind') : k.kind} × ${k.count}`)
+      .join(', ');
+    parts.push(t('outbox.rejected', { kinds }));
     for (const sample of f.rejectedSamples) {
-      parts.push(`  · ${sample.kind}: ${sample.detail}`);
+      parts.push(t('outbox.sample', {
+        kind: sample.kind === OUTBOX_KIND_UNKNOWN ? t('outbox.unknownKind') : sample.kind,
+        detail: sample.detail === OUTBOX_DETAIL_MISSING ? t('outbox.noDetail') : sample.detail,
+      }));
     }
   }
   return [head, ...parts].join('\n');
+}
+
+export function outboxUnreadable(): string {
+  return t('outbox.unreadable');
 }
 
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
-export const EXPORT_BUTTON_LABEL = 'Export undelivered captures';
-
-export const EXPORT_EMPTY_NOTE =
-  'Nothing to export: the outbox is empty, so there is no undelivered capture.';
-
-export function exportNote(rec: { at: number; entries: number; bytes: number; filename: string }): string {
-  return `Export: last written ${stamp(rec.at)} — ${rec.entries} capture(s),`
-    + ` ${formatBytes(rec.bytes)}, file name ${rec.filename}.`
-    + ' Exported captures stay in the outbox: the host will confirm them as duplicates'
-    + ' once it is reachable again.';
+export function exportButtonLabel(): string {
+  return t('export.buttonLabel');
 }
 
-export const EXPORT_NO_HISTORY = 'Export: no export file has been written yet.';
+export function exportEmptyNote(): string {
+  return t('export.emptyNote');
+}
+
+export function exportNote(rec: { at: number; entries: number; bytes: number; filename: string }): string {
+  return t('export.note', {
+    at: stamp(rec.at),
+    entries: rec.entries,
+    bytes: formatBytes(rec.bytes),
+    filename: rec.filename,
+  });
+}
+
+export function exportNoHistory(): string {
+  return t('export.noHistory');
+}
 
 /** The popup shows this when the user presses the button and nothing was queued. */
-export const EXPORT_NOTHING_QUEUED = 'Nothing to export.';
+export function exportNothingQueued(): string {
+  return t('export.nothingQueued');
+}
+
+export function exportUnreadable(): string {
+  return t('export.unreadable');
+}
 
 // ---------------------------------------------------------------------------
 // Backfill pause
@@ -152,10 +199,9 @@ export const EXPORT_NOTHING_QUEUED = 'Nothing to export.';
  * open and backfill pauses with a visible reason until a `hello` succeeds.
  */
 export function backfillPaused(at: number, reason: string, detail?: string): string {
-  return `Backfill: PAUSED — the host is unavailable (${reason}), first noticed ${stamp(at)}.`
-    + (detail ? ` Detail: ${detail}.` : '')
-    + ' The conversations still owed are untouched and will be picked up from where they'
-    + ' stopped when the host answers again.';
+  return t('backfill.paused.head', { reason, at: stamp(at) })
+    + (detail ? t('backfill.paused.detail', { detail }) : '')
+    + t('backfill.paused.tail');
 }
 
 // ---------------------------------------------------------------------------
@@ -163,8 +209,12 @@ export function backfillPaused(at: number, reason: string, detail?: string): str
 // ---------------------------------------------------------------------------
 
 export function badgeTitle(pending: number, rejected: number, full: boolean): string {
-  const parts = [`${pending} capture(s) waiting for the chat-stasher host`];
-  if (rejected > 0) parts.push(`${rejected} rejected by the host`);
-  if (full) parts.push('the outbox is full and refusing new captures');
-  return `chat-stasher: ${parts.join(' · ')}`;
+  const parts = [t('badge.waiting', { pending })];
+  if (rejected > 0) parts.push(t('badge.rejected', { rejected }));
+  if (full) parts.push(t('badge.full'));
+  return t('badge.title', { parts: parts.join(' · ') });
+}
+
+export function badgeUnreadable(): string {
+  return t('badge.unreadable');
 }

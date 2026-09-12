@@ -1,15 +1,18 @@
 /**
- * 欠账集合的持久化端口。
+ * The debt set's persistence port.
  *
- * 不新增任何权限：复用 lib/badge.ts 已经在用的 browser.storage.local（cs_* 前缀同族）。
+ * No new permissions: it reuses the browser.storage.local lib/badge.ts already
+ * uses (the same cs_* key family).
  *
- * ⚠️ 已知的既有缺口（不是本任务引入的，但会直接打到这条腿）：
- *   wxt.config.ts:9 的 permissions 只有 ['downloads']，**没有 'storage'**，
- *   而 lib/badge.ts:43 已经在用 browser.storage.local。badge 是装饰性的，拿不到
- *   存储就静默 no-op 没关系；**回溯腿不行** —— 没有持久化就没有可断可续，
- *   一路 no-op 会变成「每次重启都从头爬」，正好是我们最怕的那种静默失败。
- *   所以这里拿不到存储时返回 null，engine 会 halt('storage-unavailable') 并留痕，
- *   而不是假装在跑。是否补 'storage' 权限要产品主人拍板（会改 manifest ⇒ 本任务不动）。
+ * ⚠️ A known pre-existing gap (not introduced by this task, but it hits this leg
+ *   directly): wxt.config.ts used to list only ['downloads'] in permissions with
+ *   **no 'storage'**, while lib/badge.ts was already using browser.storage.local.
+ *   The badge is decorative and silently no-oping without storage is fine;
+ *   **the backfill leg is not** — without persistence there is no
+ *   stop-and-resume, and a no-op all the way down becomes "crawl from scratch on
+ *   every restart", exactly the silent failure we fear most.
+ *   So an unavailable store returns null here, and the engine halts with
+ *   'storage-unavailable' and leaves a trace rather than pretending to run.
  */
 
 export interface BackfillStore {
@@ -25,25 +28,29 @@ type LocalArea = {
 type ExtApi = { runtime?: { id?: string }; storage?: { local?: unknown } };
 
 /**
- * 🔴 C18 实测发现的【第三道生产阻断】（不是本任务引入的，是本任务撞上的）：
+ * 🔴 The **third production blocker** found by running C18 for real (not
+ * introduced by this task, but run into by it):
  *
- * 这里原来只读 `globalThis.browser`。**Chrome MV3 里根本没有 `browser` 这个全局**
- * —— 只有 `chrome`。所以在 Chrome 构建里 browserLocalStore() 恒为 null，
- * tickBackfill 第一道闸就是 'no-store'，而 Popup 的开关也【存不下去】。
+ * This used to read `globalThis.browser` only. **Chrome MV3 has no `browser`
+ * global at all** — only `chrome`. So in a Chrome build browserLocalStore() was
+ * always null, tickBackfill's first gate was 'no-store', and the popup's switch
+ * could not be **saved** either.
  *
- * 证据：.output/chrome-mv3/background.js 里 WXT 自己的 browser 垫片写的是
+ * Evidence: in .output/chrome-mv3/background.js, WXT's own browser shim reads
  *   `globalThis.browser?.runtime?.id ? globalThis.browser : globalThis.chrome`
- * —— lib/badge.ts 用的是 WXT 注入的那个 `browser`（所以 badge 在 Chrome 上是好的），
- * 唯独本文件绕过了垫片直接读 globalThis，于是只有 Firefox 能用。
+ * — lib/badge.ts uses the `browser` WXT injects (which is why the badge is fine
+ * on Chrome), and only this file bypassed the shim to read globalThis, so it
+ * worked on Firefox alone.
  *
- * 这里逐字照抄 WXT 的判定，不引入任何 import（本文件要在 node 测试环境里裸跑，
- * 那里两个全局都不存在 ⇒ 仍然返回 null ⇒ 既有行为不变）。
+ * The shim's test is copied here verbatim, with no import added (this file has to
+ * run bare in the node test environment, where neither global exists ⇒ still
+ * null ⇒ existing behaviour unchanged).
  */
 function extensionApi(): ExtApi | null {
   const g = globalThis as { browser?: ExtApi; chrome?: ExtApi };
   if (g.browser?.runtime?.id) return g.browser;
   if (g.chrome?.runtime?.id) return g.chrome;
-  // runtime.id 都拿不到时退回「谁存在用谁」，免得比原来更严。
+  // When not even runtime.id is available, fall back to whichever exists, so this is never stricter than before.
   return g.browser ?? g.chrome ?? null;
 }
 
@@ -53,7 +60,7 @@ function localArea(): LocalArea | null {
   return area;
 }
 
-/** 拿不到 storage.local 就返回 null —— 让调用方必须显式处理「不能持久化」。 */
+/** Returns null when storage.local is unavailable — so the caller must handle "cannot persist" explicitly. */
 export function browserLocalStore(): BackfillStore | null {
   const area = localArea();
   if (!area) return null;
@@ -69,19 +76,22 @@ export function browserLocalStore(): BackfillStore | null {
 }
 
 /**
- * 读一份 storage.local 的全量快照。
- * 只有 Popup 用得到：它不知道用户当前是哪个平台/哪个账号（那些信息只在实时腿
- * 的那条消息里现成带着），只能把已经存在的欠账集合列出来挑一个显示。
- * 拿不到存储就返回 null —— 和 browserLocalStore() 一样，让调用方显式处理。
+ * Read a full snapshot of storage.local.
+ * Only the popup needs it: it does not know which platform / which account the
+ * user is currently on (that information is carried by live-leg messages and
+ * nowhere else), so it can only list the debt sets that already exist and pick
+ * one to display.
+ * An unavailable store returns null — same as browserLocalStore(), so the caller
+ * handles it explicitly.
  */
 export async function browserLocalSnapshot(): Promise<Record<string, unknown> | null> {
   const area = localArea();
   if (!area) return null;
-  // 真实 API 里 get(null) = 全量；假实现如果不支持就会抛，交给调用方兜。
+  // In the real API get(null) means "everything"; a fake that does not support it will throw, which the caller catches.
   return await (area.get as unknown as (q: null) => Promise<Record<string, unknown>>)(null);
 }
 
-/** 纯内存实现，只给测试用。 */
+/** A pure in-memory implementation, for tests only. */
 export function memoryStore(seed: Record<string, unknown> = {}): BackfillStore & {
   readonly data: Record<string, unknown>;
   writes: number;
@@ -91,7 +101,7 @@ export function memoryStore(seed: Record<string, unknown> = {}): BackfillStore &
     data,
     writes: 0,
     async load(key: string): Promise<unknown> {
-      // 深拷贝：模拟真实存储的「读回来的是另一个对象」，避免测试里意外共享引用。
+      // Deep copy: mimics the real store's "you get back a different object" and keeps tests from sharing references by accident.
       const v = data[key];
       return v === undefined ? null : JSON.parse(JSON.stringify(v));
     },

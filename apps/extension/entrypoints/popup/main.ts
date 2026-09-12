@@ -1,15 +1,26 @@
 /**
- * C18 · Popup 的接线。
+ * C18 · The popup's wiring.
  *
- * W2 之后它多了三件事，每一件都只显示**已经存在的事实**，不猜：
- *  1. 落盘通道：显示 background 最近一次问 `hello` 拿到的答案（含 stage/machine/版本），
- *     或者具名的失败原因 + 修复命令。Popup 自己一行探测代码都没有。
- *  2. 发件箱：直接读同一个扩展源下的 IndexedDB —— 与 background 排空时读的是同一份数据。
- *  3. 「导出未送达的会话」：Blob + `<a download>`，**不用 downloads 权限**。
- *     用户点击那一下就是用户手势，所以浏览器允许这个下载。
+ * Since W2 it grew three things, and each one displays **a fact that already
+ * exists**, never a guess:
+ *  1. the delivery channel: the answer background got the last time it asked
+ *     `hello` (including stage/machine/version), or a named failure reason plus
+ *     the fix command. The popup has not one line of probing code of its own.
+ *  2. the outbox: read straight from the IndexedDB under this same extension
+ *     origin — the same data the drain in background reads.
+ *  3. "Export undelivered captures": Blob + `<a download>`, **with no downloads
+ *     permission**. The user's click is the user gesture, so the browser allows
+ *     the download.
  *
- * 🔴 本文件【绝不】发起任何网络请求，也【绝不】触发一次回溯。
- *    打开开关只是写一个布尔值；真正的 tick 仍然只由两条心跳唤醒。
+ * Plus the language selector: the switch that makes the popup render in English
+ * or Chinese regardless of the browser's own language (lib/i18n.ts explains why
+ * a layer is needed for that at all). The choice is persisted in
+ * `storage.local`, and a change repaints immediately — including the selector's
+ * own labels, because those are shown in each language's own script.
+ *
+ * 🔴 This file **never** issues a network request and **never** triggers a
+ *    backfill. Flipping the switch writes one boolean; the real tick is still
+ *    only woken by the two heartbeats.
  */
 
 import {
@@ -48,11 +59,14 @@ import {
   undeliveredEntries,
 } from '../../lib/outbox';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
-import { EXPORT_NOTHING_QUEUED, EXPORT_NO_HISTORY } from '../../lib/ui-strings';
+import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
+import { initUiLocale, normalizeUiLocale, setUiLocale, type UiLocale } from '../../lib/i18n';
 
 /**
- * 问 background 要运行时事实。问不到（SW 起不来 / 消息没人接）时
- * 【按最保守的方向回答：没接上】—— 宁可显示「未在运行」，也不许显示成在跑。
+ * Ask background for the runtime facts. When the answer does not come (the SW
+ * will not start, nobody is listening) we answer **in the most conservative
+ * direction: not connected** — better to show "not running" than to show it as
+ * running.
  */
 async function askBackground(): Promise<BackfillRuntimeStatus> {
   try {
@@ -80,12 +94,13 @@ async function collect(): Promise<PopupModel> {
   }
   const state = pickBackfillState(snapshot);
 
-  // 🔴 C30 · 回溯目标登记表。这是闹钟那条路【唯一】的目标来源。
+  // 🔴 C30 · The backfill-target registry. This is the **only** source of
+  //    targets for the alarm's path.
   const targets = await loadTargets(store);
   const lastTick = await loadLastTick(store);
 
-  // 🔴 W2 · 发件箱。listEntries() 返回 null = 读不出来 ⇒ 照实说读不出来，
-  //    绝不显示成「空的」（那是把未知记成空）。
+  // 🔴 W2 · The outbox. listEntries() returning null = unreadable ⇒ say it is
+  //    unreadable, never show it as "empty" (that would record an unknown as empty).
   let outbox: PopupModel['outbox'];
   try {
     const entries = await listEntries();
@@ -96,10 +111,11 @@ async function collect(): Promise<PopupModel> {
   }
   const lastExport = await loadLastExport(store);
   const hostPause = await loadHostPause(store);
-  // 通道状态优先用 background 刚问回来的那一次；问不到就退回 storage 里上一次的结论。
+  // Prefer the channel status background just fetched; fall back to the last
+  // conclusion in storage when it did not come back.
   const nativeHost = runtime.nativeHost ?? await loadHostStatus(store);
 
-  // 🔴 与 tickBackfill 共用的那一个判断，顺序天然一致。
+  // 🔴 The one predicate shared with tickBackfill, so the ordering is identical by construction.
   const block = await tickBlockReason({
     hasStore: store !== null,
     isEnabled: () => enabled,
@@ -113,10 +129,12 @@ async function collect(): Promise<PopupModel> {
     block,
     state,
     target: state ? { platform: state.platform, scope: state.scope } : null,
-    // 🔴 C20：跨所有平台/账号汇总。读不到快照 ⇒ 空清单（那时候我们确实什么都不知道）。
+    // 🔴 C20: aggregated across every platform/account. An unreadable snapshot ⇒
+    //    empty list (at that point we genuinely know nothing).
     failures: collectFailures(snapshot),
     lastTick,
-    // 🔴 C33 · 「开始回溯这个平台」那个按钮的两个前提，都是【事实】，不是推断。
+    // 🔴 C33 · The two preconditions of the "start backfilling this platform"
+    //    button, both of them **facts**, not inferences.
     liveTarget: runtime.liveTarget ?? null,
     targetCount: targets.length,
     nativeHost,
@@ -127,9 +145,10 @@ async function collect(): Promise<PopupModel> {
 }
 
 /**
- * 🔴 C20 · 「我知道了，清空这份清单」。
- * 遍历快照里每一份欠账集合，把 failures / failuresDropped 清零后写回去。
- * **不触发任何重新抓取** —— 这是产品拍板的「不重试」，按钮只表示「我看到了」。
+ * 🔴 C20 · "Got it — clear this list".
+ * Walks every debt set in the snapshot, zeroes failures / failuresDropped and
+ * writes them back. **It triggers no re-fetch whatsoever** — that is the product
+ * decision of "no retry"; the button only means "I have seen it".
  */
 async function onClearFailures(): Promise<void> {
   const store = browserLocalStore();
@@ -150,11 +169,13 @@ async function onClearFailures(): Promise<void> {
 }
 
 /**
- * 🔴 C33 · 用户按下「开始回溯这个平台」。
+ * 🔴 C33 · The user pressed "start backfilling this platform".
  *
- * 登记这件事交给 background 做，不在这里直接写 storage：只有它能现场 ping 出
- * 「此刻活着的那个通道是谁」。Popup 手里那份 liveTarget 是打开时的快照，
- * 用它去登记就等于拿一份可能已经过期的事实当真 —— 那正是「猜」。
+ * Registration is left to background rather than writing storage here directly:
+ * only background can ping, live, for "which channel is alive right now". The
+ * liveTarget the popup holds is a snapshot taken when it opened, and registering
+ * from it would be treating a possibly stale fact as current — which is exactly
+ * "guessing".
  */
 async function onStartBackfill(): Promise<void> {
   let reply: unknown = null;
@@ -172,16 +193,18 @@ async function onStartBackfill(): Promise<void> {
 }
 
 /**
- * 🔴 W2 · 「导出未送达的会话」。
+ * 🔴 W2 · "Export undelivered captures".
  *
- * 规范 §8：文件名 `chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl`，
- * 每行一个 payload（原样）加一个 `\n`。
+ * Spec §8: the file name is `chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl`,
+ * one payload per line (verbatim) followed by a `\n`.
  *
- * 🔴 用户点击 = 用户手势，所以 `<a download>` 是被允许的 —— 这里【不使用】
- *    `downloads` 权限（它已经从 manifest 里删掉了，见 wxt.config.ts）。
+ * 🔴 The user's click is the user gesture, so `<a download>` is permitted — and
+ *    **no** `downloads` permission is used here (it has been removed from the
+ *    manifest; see wxt.config.ts).
  *
- * 🔴 导出【不删除】任何条目：它们仍然排在发件箱里，主机恢复之后会以 duplicate
- *    被确认并清掉（§7 —— 内容寻址，重发是安全的）。
+ * 🔴 Exporting **does not delete** any entry: they are still queued in the
+ *    outbox, and once the host is reachable again they are confirmed as
+ *    duplicates and cleared (§7 — content addressing makes re-sending safe).
  */
 async function onExportUndelivered(): Promise<void> {
   let entries;
@@ -192,14 +215,14 @@ async function onExportUndelivered(): Promise<void> {
     entries = null;
   }
   if (entries === null) {
-    // 读不出来就【不生成文件】：凭空生成一个空文件，等于告诉用户「没有未送达的」。
-    setExportNote('Outbox: unreadable — this browser context has no IndexedDB. '
-      + 'No export file was written.');
+    // Unreadable ⇒ do **not** produce a file: conjuring an empty one would tell
+    // the user "there is nothing undelivered".
+    setExportNote(exportUnreadable());
     return;
   }
   if (entries.length === 0) {
-    // 空发件箱：一个文件都不生成，照实说一句。
-    setExportNote(EXPORT_NOTHING_QUEUED);
+    // Empty outbox: produce no file at all, just say so.
+    setExportNote(exportNothingQueued());
     return;
   }
 
@@ -214,7 +237,7 @@ async function onExportUndelivered(): Promise<void> {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  // 撤销得晚一点：撤销太早会让下载拿不到数据（Firefox 尤其）。
+  // Revoke late: revoking too early makes the download come up empty (Firefox especially).
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 
   await recordExport(browserLocalStore(), {
@@ -236,11 +259,44 @@ function text(id: string, value: string): void {
   if (el) el.textContent = value;
 }
 
+/**
+ * Paint the language selector. The options are rebuilt on every paint because
+ * their labels are written in their own languages and the label of "Language"
+ * follows the active one — so switching has to be able to relabel itself.
+ */
+function paintLocale(view: PopupView): void {
+  text('locale-label', view.locale.label);
+  const select = document.getElementById('locale') as HTMLSelectElement | null;
+  if (!select) return;
+  const wanted = view.locale.options.map((o) => o.value).join(',');
+  const current = Array.from(select.options).map((o) => o.value).join(',');
+  if (wanted !== current) {
+    select.textContent = '';
+    for (const option of view.locale.options) {
+      const el = document.createElement('option');
+      el.value = option.value;
+      el.textContent = option.label;
+      select.appendChild(el);
+    }
+  } else {
+    for (const option of view.locale.options) {
+      const el = Array.from(select.options).find((o) => o.value === option.value);
+      if (el && el.textContent !== option.label) el.textContent = option.label;
+    }
+  }
+  select.value = view.locale.value;
+  // The document's language attribute follows the UI so that hyphenation and
+  // screen readers are not told the wrong script.
+  document.documentElement.lang = view.locale.value === 'zh_CN' ? 'zh-CN' : 'en';
+}
+
 function paint(view: PopupView): void {
+  paintLocale(view);
   text('status', view.status);
   text('channel', view.channel);
-  // 🔴 W2：暂停行、发件箱行与「导出」那一行都只在有内容时出现，
-  //    绝不留一个空壳让用户以为「这里本来就该是空的」。
+  // 🔴 W2: the pause row, the outbox row and the export row only appear when
+  //    they have content — never an empty shell that reads as "this was
+  //    supposed to be empty".
   text('pause', view.pause ?? '');
   const pauseBox = document.getElementById('pause');
   if (pauseBox) pauseBox.hidden = view.pause === null;
@@ -249,14 +305,15 @@ function paint(view: PopupView): void {
   const outboxBox = document.getElementById('outbox');
   if (outboxBox) outboxBox.hidden = view.outbox === null;
 
-  text('last-export', view.lastExport || EXPORT_NO_HISTORY);
+  text('last-export', view.lastExport || exportNoHistory());
   const exportBtn = document.getElementById('export-file') as HTMLButtonElement | null;
   if (exportBtn) {
     exportBtn.textContent = view.exportFile.label;
     exportBtn.hidden = !view.exportFile.visible;
   }
 
-  // 🔴 C20：有失败项时这一行必须出现在最显眼的位置；没有时整块隐藏。
+  // 🔴 C20: when there are failures this row must be in the most prominent
+  //    place; when there are none the whole block is hidden.
   text('failures', view.failures ?? '');
   const failBox = document.getElementById('failures');
   if (failBox) failBox.hidden = view.failures === null;
@@ -276,7 +333,7 @@ function paint(view: PopupView): void {
   text('running', view.running);
   text('missing', view.missing ?? '');
   text('progress', view.progress);
-  // 🔴 C22：哪些平台补得回历史、哪些暂时补不回。永远显示。
+  // 🔴 C22: which platforms can have their history backfilled and which cannot. Always shown.
   text('coverage', view.coverage);
   text('toggle-label', view.toggle.label);
 
@@ -291,7 +348,8 @@ function paint(view: PopupView): void {
     notes.textContent = '';
     for (const note of view.notes) {
       const p = document.createElement('p');
-      // textContent（不是 innerHTML）：文案里可能带用户账号 scope，绝不当 HTML 解析。
+      // textContent (not innerHTML): the wording can carry a user's account
+      // scope, which must never be parsed as HTML.
       p.textContent = note;
       notes.appendChild(p);
     }
@@ -304,10 +362,13 @@ async function refresh(): Promise<void> {
 
 async function onToggle(on: boolean): Promise<void> {
   const store = browserLocalStore();
-  // 存不住就别假装切成功了：立刻重画，UI 会退回真实取值。
+  // If it cannot be saved, do not pretend the flip worked: repaint at once and
+  // the UI falls back to the real value.
   await setBackfillEnabled(store, on);
-  // 🔴 C19：开关和闹钟必须同时改。以【存下来的真实取值】为准，不是以 `on` 为准 ——
-  // 存储写失败时开关会退回原值，闹钟也必须跟着退回，不许出现"开关是关的但闹钟还在响"。
+  // 🔴 C19: the switch and the alarm must change together. The **stored value**
+  //    is authoritative, not `on` — if the storage write failed the switch falls
+  //    back, and the alarm has to fall back with it, so that "switch is off but
+  //    the alarm is still firing" cannot happen.
   const persisted = await isBackfillEnabled(store);
   const result = await syncBackfillAlarm(
     (browser as unknown as { alarms?: AlarmsApi }).alarms ?? null,
@@ -317,10 +378,25 @@ async function onToggle(on: boolean): Promise<void> {
   await refresh();
 }
 
+/** 🔴 The language switch: persist the choice, then repaint in the new language immediately. */
+async function onLocaleChange(value: string): Promise<void> {
+  const applied: UiLocale = await setUiLocale(normalizeUiLocale(value));
+  console.log('[chat-stasher] ui locale ->', applied);
+  await refresh();
+}
+
 document.getElementById('toggle')?.addEventListener('change', (ev) => {
   const on = (ev.target as HTMLInputElement).checked;
   void onToggle(on).catch((err) => {
     console.warn('[chat-stasher] popup toggle failed', (err as Error).message);
+    void refresh();
+  });
+});
+
+document.getElementById('locale')?.addEventListener('change', (ev) => {
+  const value = (ev.target as HTMLSelectElement).value;
+  void onLocaleChange(value).catch((err) => {
+    console.warn('[chat-stasher] popup language switch failed', (err as Error).message);
     void refresh();
   });
 });
@@ -346,6 +422,13 @@ document.getElementById('clear-failures')?.addEventListener('click', () => {
   });
 });
 
-void refresh().catch((err) => {
-  console.error('[chat-stasher] popup render failed', (err as Error).message);
-});
+// Load the stored language before the first paint, so the popup does not flash
+// the browser's language and then swap to the chosen one.
+void initUiLocale()
+  .catch((err) => {
+    console.warn('[chat-stasher] popup locale init failed', (err as Error).message);
+  })
+  .then(() => refresh())
+  .catch((err) => {
+    console.error('[chat-stasher] popup render failed', (err as Error).message);
+  });

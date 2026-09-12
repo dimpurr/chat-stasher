@@ -1,14 +1,18 @@
 /**
- * W2 · 弹窗新说的那四件事：通道状态、发件箱、回溯暂停、导出。
+ * W2 · The four new things the popup says: channel status, outbox, backfill pause, export.
  *
- * 🔴 每一条都只陈述**已经发生过的事实**（含时间戳），没有一条是"大概是好的"：
- *    · 通道：上一次 `hello` 问到了什么（stage / machine / 版本），或者具名原因 + 修复命令；
- *    · 发件箱：待送几条、被拒几条（列出 kind 与 detail 摘要）、容量用了多少；
- *    · 暂停：回溯因为主机够不着停在哪里、欠账没丢；
- *    · 导出：按钮的措辞与可见性，以及最近一次导出的时间。
+ * 🔴 Every one of them states only **facts that already happened** (timestamp included); not one is
+ * "probably fine":
+ *    · channel: what the last `hello` was told (stage / machine / version), or a named reason plus
+ *      the fix command;
+ *    · outbox: how many are waiting, how many were rejected (with the kinds and a detail summary),
+ *      how much capacity is used;
+ *    · pause: where backfill stopped because the host is unreachable, and that no debt was lost;
+ *    · export: the button word and its visibility, and when the last export was written.
  *
- * 这些行全部是**英文**（lib/ui-strings.ts），且与旧的中文文案共存 —— 旧文案
- * 属于另一个 i18n 任务，这个文件不许去动它们。
+ * Every one of these lines lives in the catalog (lib/ui-strings.ts resolves it through
+ * lib/i18n.ts), and the popup's older lines live there too now — this file owns the W2 additions
+ * and asserts them, it does not own the wording.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -56,24 +60,24 @@ function entry(overrides: Partial<OutboxEntry> = {}): OutboxEntry {
 }
 
 // ===========================================================================
-// 通道状态
+// Delivery channel
 // ===========================================================================
-describe('W2-POPUP · 落盘通道', () => {
-  it('连上了 ⇒ 说清 stage / machine / 主机版本 + 什么时候问的', () => {
+describe('W2-POPUP · the delivery channel', () => {
+  it('connected ⇒ it states stage / machine / host version plus when it asked', () => {
     const line = channelLine(model({
       nativeHost: { at: AT, ok: true, stage: '/Users/me/stage', machine: 'mac-1', hostVersion: '0.3.0' },
     }));
-    console.log('[W2-POPUP] 已连接:', line);
+    console.log('[W2-POPUP] connected:', line);
     expect(line).toContain('connected');
     expect(line).toContain('/Users/me/stage');
     expect(line).toContain('mac-1');
     expect(line).toContain('0.3.0');
     expect(line).toContain(ui.stamp(AT));
-    // 健康路径守卫：连上了就不该出现修复命令。
+    // A healthy-path guard: once connected, the fix command must not appear.
     expect(line).not.toContain('install-native-host');
   });
 
-  it('🔴 没连上 ⇒ 具名原因 + 修复命令（用上一次知道的 stage）', () => {
+  it('🔴 not connected ⇒ a named reason plus the fix command (using the last known stage)', () => {
     const line = channelLine(model({
       nativeHost: {
         at: AT, ok: false, reason: 'send-failed',
@@ -81,52 +85,52 @@ describe('W2-POPUP · 落盘通道', () => {
         lastKnownStage: '/Users/me/stage',
       },
     }));
-    console.log('[W2-POPUP] 未连接:', line);
+    console.log('[W2-POPUP] not connected:', line);
     expect(line).toContain('NOT connected');
     expect(line).toContain('send-failed');
     expect(line).toContain('chat-stasher install-native-host --stage /Users/me/stage');
     expect(line).toContain('Last known stage');
   });
 
-  it('从来没问过 ⇒ 照实说没问过（不猜一个"大概是好的"）', () => {
+  it('never asked ⇒ it says it was never asked (no guessing "probably fine")', () => {
     const line = channelLine(model({ nativeHost: null }));
-    console.log('[W2-POPUP] 没问过:', line);
-    expect(line).toBe(ui.CHANNEL_NO_CHECK);
+    console.log('[W2-POPUP] never asked:', line);
+    expect(line).toBe(ui.channelNoCheck());
     expect(line).toContain('no host check has run yet');
-    // 连"未连接"都不许说 —— 我们并不知道它连没连上。
+    // It may not even say "not connected" — we do not know whether it is.
     expect(line).not.toContain('NOT connected');
   });
 
-  it('没连过、也没有 stage 记录 ⇒ 修复命令里放占位符，不编一个路径', () => {
+  it('never connected and no stage on record ⇒ the fix command carries the placeholder rather than an invented path', () => {
     const line = channelLine(model({ nativeHost: { at: AT, ok: false, reason: 'timeout' } }));
     expect(line).toContain('chat-stasher install-native-host --stage <path-to-your-stage-dir>');
   });
 });
 
 // ===========================================================================
-// 发件箱
+// Outbox
 // ===========================================================================
-describe('W2-POPUP · 发件箱', () => {
-  it('空且未满 ⇒ 不出这一行（那时候"没有待送"本身就是全部事实）', () => {
+describe('W2-POPUP · the outbox', () => {
+  it('empty and not full ⇒ the line does not appear (then "nothing is waiting" is the whole truth)', () => {
     expect(outboxLine(model({ outbox: { pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] } }))).toBeNull();
     expect(outboxLine(model())).toBeNull();
   });
 
-  it('待送 N ⇒ 说清待送数、被拒数与容量占用', () => {
+  it('N waiting ⇒ it states the waiting count, the rejected count and the capacity used', () => {
     const line = outboxLine(model({
       outbox: {
         pending: 3, rejected: 0, bytes: 1024 * 1024, capacityBytes: OUTBOX_CAPACITY_BYTES,
         full: false, rejectedKinds: [], rejectedSamples: [],
       },
     }))!;
-    console.log('[W2-POPUP] 待送 3:', line);
+    console.log('[W2-POPUP] 3 waiting:', line);
     expect(line).toContain('3 waiting');
     expect(line).toContain('0 rejected');
     expect(line).toContain('1.0 MiB');
     expect(line).toContain('256.0 MiB');
   });
 
-  it('🔴 有被拒 ⇒ 逐 kind 计数 + 逐条 detail 摘要', () => {
+  it('🔴 something rejected ⇒ a per-kind count plus a per-entry detail summary', () => {
     const line = outboxLine(model({
       outbox: {
         pending: 1, rejected: 2, bytes: 10, capacityBytes: 100, full: false,
@@ -137,14 +141,14 @@ describe('W2-POPUP · 发件箱', () => {
         ],
       },
     }))!;
-    console.log('[W2-POPUP] 有被拒:', line);
+    console.log('[W2-POPUP] with rejections:', line);
     expect(line).toContain('2 rejected');
     expect(line).toContain('invalid-bundle × 2');
     expect(line).toContain('never retried');
     expect(line).toContain('nack:invalid-bundle');
   });
 
-  it('🔴 满了 ⇒ 明说在拒收新的，并明说已排队的没被删', () => {
+  it('🔴 full ⇒ it says outright that new ones are refused, and that nothing already queued was deleted', () => {
     const line = outboxLine(model({
       outbox: {
         pending: 5, rejected: 0, bytes: 100, capacityBytes: 100, full: true,
@@ -155,14 +159,14 @@ describe('W2-POPUP · 发件箱', () => {
     expect(line).toContain('Nothing queued was deleted');
   });
 
-  it('🔴 读不出来 ⇒ 说读不出来，绝不当成空', () => {
+  it('🔴 unreadable ⇒ it says it is unreadable, never treating it as empty', () => {
     const line = outboxLine(model({ outbox: null }))!;
-    console.log('[W2-POPUP] 读不出来:', line);
+    console.log('[W2-POPUP] unreadable:', line);
     expect(line).toContain('unreadable');
     expect(line).toContain('cannot say what is queued');
   });
 
-  it('summarizeOutbox 数得对，并且样本有条数上限', () => {
+  it('summarizeOutbox counts correctly, and the samples are capped', () => {
     const entries = [
       entry({ sha256: '1'.repeat(64), state: 'pending', bytes: 10 }),
       entry({ sha256: '2'.repeat(64), state: 'rejected', bytes: 20, rejectKind: 'config', lastError: 'nack:config' }),
@@ -173,7 +177,7 @@ describe('W2-POPUP · 发件箱', () => {
       })),
     ];
     const out = summarizeOutbox(entries, 1000);
-    console.log('[W2-POPUP] 汇总:', { ...out, rejectedSamples: out.rejectedSamples.length });
+    console.log('[W2-POPUP] summary:', { ...out, rejectedSamples: out.rejectedSamples.length });
     expect(out.pending).toBe(1);
     expect(out.rejected).toBe(12);
     expect(out.bytes).toBe(10 + 20 + 30 + 50);
@@ -185,7 +189,7 @@ describe('W2-POPUP · 发件箱', () => {
     expect(out.full).toBe(false);
   });
 
-  it('🔴 摘要里不放 payload / URL / 正文', () => {
+  it('🔴 the summary carries no payload / URL / conversation body', () => {
     const out = summarizeOutbox([
       entry({
         state: 'rejected', rejectKind: 'invalid-bundle', lastError: 'nack:invalid-bundle',
@@ -199,37 +203,37 @@ describe('W2-POPUP · 发件箱', () => {
 });
 
 // ===========================================================================
-// 回溯暂停
+// Backfill pause
 // ===========================================================================
-describe('W2-POPUP · 回溯暂停', () => {
-  it('暂停中 ⇒ 说清原因、什么时候发现的、欠账没动', () => {
+describe('W2-POPUP · the backfill pause', () => {
+  it('paused ⇒ it states the reason, when it was first noticed, and that no debt was moved', () => {
     const line = pauseLine(model({
       block: 'host-paused',
       hostPause: { reason: 'host-unavailable', at: AT, detail: 'timeout' },
     }))!;
-    console.log('[W2-POPUP] 暂停:', line);
+    console.log('[W2-POPUP] paused:', line);
     expect(line).toContain('PAUSED');
     expect(line).toContain('host-unavailable');
     expect(line).toContain(ui.stamp(AT));
     expect(line).toContain('untouched');
   });
 
-  it('没暂停 ⇒ 这一行不出现', () => {
+  it('not paused ⇒ the line does not appear', () => {
     expect(pauseLine(model({ hostPause: null }))).toBeNull();
     expect(pauseLine(model())).toBeNull();
   });
 });
 
 // ===========================================================================
-// 导出
+// Export
 // ===========================================================================
-describe('W2-POPUP · 导出', () => {
-  it('有未送达的 ⇒ 按钮出现；全都送出去了 ⇒ 按钮不出现', () => {
+describe('W2-POPUP · export', () => {
+  it('something undelivered ⇒ the button appears; everything delivered ⇒ it does not', () => {
     const withPending = renderPopup(model({
       outbox: { pending: 1, rejected: 0, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
     }));
     expect(withPending.exportFile.visible).toBe(true);
-    expect(withPending.exportFile.label).toBe(ui.EXPORT_BUTTON_LABEL);
+    expect(withPending.exportFile.label).toBe(ui.exportButtonLabel());
 
     const withRejected = renderPopup(model({
       outbox: { pending: 0, rejected: 1, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [{ kind: 'config', count: 1 }], rejectedSamples: [] },
@@ -242,33 +246,33 @@ describe('W2-POPUP · 导出', () => {
     expect(empty.exportFile.visible).toBe(false);
   });
 
-  it('🔴 最近一次导出的时间与文件名要看得见；没导出过就照实说没有', () => {
-    expect(exportLine(model())).toBe(ui.EXPORT_NO_HISTORY);
+  it('🔴 the last export\'s time and file name must be visible; never exported, and it says so', () => {
+    expect(exportLine(model())).toBe(ui.exportNoHistory());
     const line = exportLine(model({
       lastExport: { at: AT, entries: 4, bytes: 2048, filename: 'chat-stasher-export-20260912T214703Z.jsonl' },
     }));
-    console.log('[W2-POPUP] 最近一次导出:', line);
+    console.log('[W2-POPUP] the last export:', line);
     expect(line).toContain(ui.stamp(AT));
     expect(line).toContain('4 capture(s)');
     expect(line).toContain('chat-stasher-export-20260912T214703Z.jsonl');
-    // 导出【不】删除条目 —— 这句话必须写在用户看得到的地方。
+    // Exporting does **not** delete entries — that sentence has to be somewhere the user can see it.
     expect(line).toContain('stay in the outbox');
   });
 
-  it('按钮在拍平的文本里看得见（否则"它出没出现"断言不了）', () => {
+  it('the button is visible in the flattened text (otherwise "did it appear" cannot be asserted)', () => {
     const out = popupText(renderPopup(model({
       outbox: { pending: 2, rejected: 0, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
     })));
-    expect(out).toContain(`[按钮] ${ui.EXPORT_BUTTON_LABEL}`);
+    expect(out).toContain(`[Button] ${ui.exportButtonLabel()}`);
     expect(out).toContain('2 waiting');
   });
 });
 
 // ===========================================================================
-// 与 C18 的旧红线共存
+// Coexisting with C18's older red lines
 // ===========================================================================
-describe('W2-POPUP · 新文案不许踩 C18 的旧红线', () => {
-  it('🔴 W2 新增的每一行都不含百分号（进度那行的规矩是全页的）', () => {
+describe('W2-POPUP · the new wording must not step on C18\'s older red lines', () => {
+  it('🔴 not one of W2\'s new lines contains a percent sign (the progress rule applies to the whole page)', () => {
     const m = model({
       block: 'host-paused',
       hostPause: { reason: 'host-unavailable', at: AT },
@@ -283,11 +287,11 @@ describe('W2-POPUP · 新文案不许踩 C18 的旧红线', () => {
     const lines = [channelLine(m), outboxLine(m), pauseLine(m), exportLine(m)].filter(Boolean) as string[];
     expect(lines).toHaveLength(4);
     for (const line of lines) expect([line, line.includes('%')]).toEqual([line, false]);
-    // 顺带：整套 popupText 在"什么都有"的状态下也不含百分号。
+    // Along the way: the whole popupText contains no percent sign with everything present either.
     expect(popupText(renderPopup(m))).not.toContain('%');
   });
 
-  it('🔴 新文案里不出现任何时间承诺（我们没有速率模型）', () => {
+  it('🔴 no time promise appears in the new wording (we have no rate model)', () => {
     const m = model({
       nativeHost: { at: AT, ok: false, reason: 'timeout' },
       outbox: { pending: 1, rejected: 0, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
@@ -295,7 +299,7 @@ describe('W2-POPUP · 新文案不许踩 C18 的旧红线', () => {
     const lines = [channelLine(m), outboxLine(m), exportLine(m)].filter((l): l is string => l !== null);
     expect(lines).toHaveLength(3);
     for (const line of lines) {
-      for (const promise of ['预计', '几分钟', '很快', 'in a few minutes', 'soon', 'ETA']) {
+      for (const promise of ['in a few minutes', 'shortly', 'soon', 'ETA', 'estimated', 'time remaining']) {
         expect([line, line.includes(promise)]).toEqual([line, false]);
       }
     }

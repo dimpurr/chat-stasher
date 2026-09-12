@@ -1,18 +1,21 @@
 /**
- * C22 · 回溯腿的平台枚举表。
+ * C22 · The backfill leg's platform enumeration table.
  *
- * 🔴 全部合成夹具：没有任何一行会碰真实平台接口，没有登录态，没有真实对话正文。
- *    http 端口一律注入；不注入就是 notWiredHttp（调用即抛错）。
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint, there is no
+ * logged-in state and no real conversation body. The http port is always injected; without one
+ * it is notWiredHttp (calling it throws).
  *
- * 三条判据，对应三种【对用户含义完全不同】的结局：
- *   1. 能回溯的平台 ⇒ 合成响应 ⇒ 枚举出 N(≥2) 条 ⇒ 进欠账集合；
- *   2. 形状不合   ⇒ halt('shape-changed') 留痕，绝不静默；
- *   3. 还没支持的平台 ⇒ halt('unsupported-platform')，**且一个请求都不许发出去** ——
- *      它必须与「枚举出 0 条」（= 你真的没有历史）是两个可区分的结果。
+ * Three criteria, corresponding to three outcomes that **mean completely different things to a user**:
+ *   1. a backfillable platform ⇒ a synthetic response ⇒ N (≥2) rows enumerated ⇒ into the debt set;
+ *   2. a shape mismatch ⇒ halt('shape-changed') with a trace, never in silence;
+ *   3. a platform not supported yet ⇒ halt('unsupported-platform'), **and not one request may go
+ *      out** — it has to be a distinguishable outcome from "0 rows enumerated" (= you really have
+ *      no history).
  */
 
 import { describe, it, expect } from 'vitest';
 import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { t } from '../lib/i18n';
 import { memoryStore } from '../lib/backfill/store';
 import { PLATFORMS } from '../lib/contract';
 import {
@@ -48,7 +51,7 @@ function listBody(all: string[]): string {
   });
 }
 
-/** 合成后端。记录每一次被请求的 URL —— 「一个请求都没发」要靠它来证明。 */
+/** A synthetic backend. It records every requested URL — "not one request was sent" has to be proven with it. */
 function backend(all: string[], listText?: string) {
   const calls: string[] = [];
   const http = async (url: string): Promise<HttpResponse> => {
@@ -68,10 +71,10 @@ function backend(all: string[], listText?: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 判据 1 · 能填的平台：合成响应 ⇒ 枚举出 N 条 ⇒ 进欠账集合（N ≥ 2）
+// Criterion 1 · a platform that can be filled in: a synthetic response ⇒ N rows enumerated ⇒ into the debt set (N ≥ 2)
 // ---------------------------------------------------------------------------
-describe('C22-1 · 能回溯的平台真的枚举得出来', () => {
-  it('合成列表响应 ⇒ 欠账集合里有 N≥2 条，且没有 halt', async () => {
+describe('C22-1 · a backfillable platform really does enumerate', () => {
+  it('a synthetic list response ⇒ N≥2 rows in the debt set, and no halt', async () => {
     const store = memoryStore();
     const all = ids(5);
     const be = backend(all);
@@ -83,7 +86,7 @@ describe('C22-1 · 能回溯的平台真的枚举得出来', () => {
       store,
       http: be.http,
       clock: fakeClock(),
-      // 只跑枚举段：正文一条都不取（budget=0），这条用例只证明「列表进得了欠账集合」。
+      // Only the enumeration segment runs: not one body is fetched (budget=0); this case only proves "the list reaches the debt set".
       maxDetails: 0,
     });
 
@@ -93,34 +96,34 @@ describe('C22-1 · 能回溯的平台真的枚举得出来', () => {
     expect(report.newDebts).toBeGreaterThanOrEqual(2);
     expect(report.state.pending).toEqual(all);
     expect(report.state.totalKnown).toBe(5);
-    // 🔴 枚举段用的必须是 chatgpt plan 自己的路径。
+    // 🔴 The enumeration segment must use the chatgpt plan's own path.
     expect(be.calls[0]).toBe(`${CHATGPT_ORIGIN}/backend-api/conversations?offset=0&limit=100`);
   });
 
-  it('plan 的七项声明齐了才算「能回溯」', () => {
+  it('a plan counts as "backfillable" only with all seven declarations present', () => {
     const plan = backfillPlanFor('chatgpt');
     expect(plan).not.toBeNull();
     expect(plan!.listPath).toBe('/backend-api/conversations');
     expect(plan!.detailPath).toBe('/backend-api/conversation/');
     expect(plan!.listUrl(CHATGPT_ORIGIN, 20, 50))
       .toBe(`${CHATGPT_ORIGIN}/backend-api/conversations?offset=20&limit=50`);
-    // detailUrl 的类型在 C26 之后是 `(...) => string | null`（null = 正文段还没有出处），
-    // ChatGPT 这条 plan 两段都齐，所以这里断言它不是 null 再调用。
+    // Since C26 detailUrl's type is `(...) => string | null` (null = the body segment has no source yet),
+    // and ChatGPT's plan has both segments, so this asserts it is not null before calling it.
     expect(plan!.detailUrl).not.toBeNull();
     expect(plan!.detailUrl!(CHATGPT_ORIGIN, 'a b')).toBe(`${CHATGPT_ORIGIN}/backend-api/conversation/a%20b`);
     expect(typeof plan!.parseListPage).toBe('function');
-    // 出处这一项也是【必填】——「没有外部出处」也必须写出来，不许留空。
+    // The provenance item is **mandatory** too — "there is no external source" has to be written out, not left blank.
     expect(plan!.provenance.length).toBeGreaterThan(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 判据 2 · 🔴 形状不合 ⇒ halt('shape-changed') 留痕，不静默
+// Criterion 2 · 🔴 a shape mismatch ⇒ halt('shape-changed') with a trace, not in silence
 // ---------------------------------------------------------------------------
-describe('C22-2 · 形状不合必须留痕', () => {
-  it('列表响应没有 items ⇒ halt(shape-changed)，欠账集合里落了盘', async () => {
+describe('C22-2 · a shape mismatch must leave a trace', () => {
+  it('a list response with no items ⇒ halt(shape-changed), persisted into the debt set', async () => {
     const store = memoryStore();
-    // 平台把 items 改名成了 conversations（合成的「接口改版」）。
+    // The platform renamed items to conversations (a synthetic "API change").
     const drifted = JSON.stringify({ conversations: [{ id: 'x-0000-aaaaaaaa' }], total: 1 });
     const be = backend([], drifted);
 
@@ -133,30 +136,30 @@ describe('C22-2 · 形状不合必须留痕', () => {
       clock: fakeClock(),
     });
 
-    // 🔴 三件事一件都不许少：停了、理由对、留了痕。
+    // 🔴 None of the three may be missing: it stopped, the reason is right, and a trace was left.
     expect(report.stopped).toBe('halted');
     expect(report.halted?.reason).toBe('shape-changed');
     expect(report.halted?.detail).toContain('items');
-    // 🔴 静默的反面：留痕必须【落盘】，重启之后还在。
+    // 🔴 The opposite of silence: the trace must be **persisted** and still be there after a restart.
     const persisted = await store.load('cs_backfill_v1:chatgpt:acct-drift');
     expect((persisted as { halted?: { reason: string } }).halted?.reason).toBe('shape-changed');
-    // 🔴 绝不许被当成「枚举出 0 条」：一条欠账都没入队，但账本上写着为什么。
+    // 🔴 It must never be taken as "0 rows enumerated": not one debt was enqueued, but the ledger says why.
     expect(report.newDebts).toBe(0);
     expect(report.state.enumCursor.complete).toBe(false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 判据 3 · 🔴 不支持的平台 = 明确的「不支持」，而不是「枚举出 0 条」
+// Criterion 3 · 🔴 an unsupported platform = an explicit "not supported", not "0 rows enumerated"
 // ---------------------------------------------------------------------------
-describe('C22-3 · 「还不会读你的历史」与「你没有历史」必须分开', () => {
-  // 🔴 C26 改了这条用例的**主角**（deepseek → claude），判据一个字没改。
-  //    原因：C26 给 DeepSeek 填上了会话列表那一格（多源交叉出处，见 DEEPSEEK_PLAN），
-  //    它不再是「还没支持的平台」，拿它当主角就测不到这条判据了。
-  //    claude 仍然停在「列表接口地址里那段组织编号拿不到」上，是现在的合适主角。
-  //    DeepSeek 自己的新结局（列表列得出、正文段没有出处 ⇒ halt('detail-unsupported')）
-  //    在 tests/c26-dslist.test.ts 里单独盯着。
-  it('还没支持的平台 ⇒ halt(unsupported-platform)，且一个请求都没发', async () => {
+describe('C22-3 · "we cannot read your history yet" and "you have no history" must stay separate', () => {
+  // 🔴 C26 changed this case's **protagonist** (deepseek → claude); the criterion did not change a character.
+  //    Reason: C26 filled in DeepSeek's conversation-list cell (a multi-source provenance, see DEEPSEEK_PLAN),
+  //    so it is no longer "a platform not supported yet" and using it as the protagonist would no longer exercise this criterion.
+  //    claude still stands at "the organization number in the list endpoint's address cannot be obtained", which makes it the right protagonist now.
+  //    DeepSeek's own new outcome (the list can be listed, the body segment has no source ⇒ halt('detail-unsupported'))
+  //    is watched separately in tests/c26-dslist.test.ts.
+  it('a platform not supported yet ⇒ halt(unsupported-platform), and not one request was sent', async () => {
     const store = memoryStore();
     const be = backend([]);
 
@@ -171,14 +174,14 @@ describe('C22-3 · 「还不会读你的历史」与「你没有历史」必须�
 
     expect(report.stopped).toBe('halted');
     expect(report.halted?.reason).toBe('unsupported-platform');
-    // 🔴 在发出任何请求【之前】就停住 —— 以前这里会拿 ChatGPT 的路径去打 DeepSeek。
+    // 🔴 It stops **before** issuing any request — this used to fire ChatGPT's path at DeepSeek.
     expect(be.calls).toEqual([]);
-    // 留痕里必须写清缺哪几项，不许只说一句「不支持」。
+    // The trace must name what is missing, not just say "not supported".
     expect(report.halted?.detail).toContain('missing:');
     expect(report.halted?.detail).toContain('parseListPage');
   });
 
-  it('对照组：支持的平台但列表真的是空的 ⇒ 不是 halt，是「跑完了，没有历史」', async () => {
+  it('the control: a supported platform whose list really is empty ⇒ not a halt, but "finished, no history"', async () => {
     const store = memoryStore();
     const be = backend([]);
 
@@ -191,7 +194,7 @@ describe('C22-3 · 「还不会读你的历史」与「你没有历史」必须�
       clock: fakeClock(),
     });
 
-    // 🔴 与上一条对照：两种结局在账本上长得完全不一样。
+    // 🔴 Contrasting with the case above: the two outcomes look completely different in the ledger.
     expect(report.stopped).toBe('queue-empty');
     expect(report.halted).toBeNull();
     expect(report.newDebts).toBe(0);
@@ -199,89 +202,90 @@ describe('C22-3 · 「还不会读你的历史」与「你没有历史」必须�
     expect(be.calls.length).toBe(1);
   });
 
-  it('内容脚本不替「还不会回溯」的平台代发任何请求', () => {
-    // 支持的平台：自己的两条路径放行。
+  it('the content script sends no request on behalf of a platform that "cannot be backfilled yet"', () => {
+    // A supported platform: its own two paths are allowed.
     expect(isAllowedBackfillUrl(`${CHATGPT_ORIGIN}/backend-api/conversations?offset=0&limit=100`, CHATGPT_ORIGIN)).toBe(true);
     expect(isAllowedBackfillUrl(`${CHATGPT_ORIGIN}/backend-api/conversation/abc`, CHATGPT_ORIGIN)).toBe(true);
-    // 🔴 还没支持的平台：即使路径长得像，也一律拒发。
+    // 🔴 A platform not supported yet: even a lookalike path is refused outright.
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/backend-api/conversations`, DEEPSEEK_ORIGIN)).toBe(false);
-    // 🔴 C26 · 这一条从 false 变成了 true，变的是【事实】，不是判据。
-    //    C22 时 DeepSeek 在 BACKFILL_UNSUPPORTED 里（没有 plan），所以第 3 条检查
-    //    「这个平台真的能回溯」直接拒掉了它的所有 URL。
-    //    C26 给它填上了会话列表那一格（R25 多源交叉出处 ⇒ DEEPSEEK_PLAN），
-    //    于是它的 listPath 成了 plan 自己【逐字写下来】的那条路径，白名单照原样放行。
-    //    🔴 放行的机制一个字都没改：仍然是 checkBackfillRequest 的同源 + 平台表 +
-    //    有 plan + 路径逐字相等这四条，没有绕过、也没有放宽成前缀通配 ——
-    //    下面两条反例就是这句话的证据。
+    // 🔴 C26 · this one went from false to true; what changed is the **fact**, not the criterion.
+    //    Under C22 DeepSeek was in BACKFILL_UNSUPPORTED (no plan), so check 3, "this platform can
+    //    really be backfilled", rejected every one of its URLs.
+    //    C26 filled in its conversation-list cell (R25's multi-source provenance ⇒ DEEPSEEK_PLAN),
+    //    so its listPath is now the path the plan **wrote down itself**, and the allowlist lets it through as-is.
+    //    🔴 The mechanism that lets it through is unchanged: it is still checkBackfillRequest's four
+    //    checks (same origin + platform table + has a plan + path equality), with no bypass and no
+    //    loosening into a prefix wildcard —
+    //    the two counter-examples below are the evidence for that sentence.
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page`, DEEPSEEK_ORIGIN)).toBe(true);
-    // 🔴 但 DeepSeek 的【正文】段仍然没有出处（DEEPSEEK_PLAN.detailPath === null），
-    //    所以它一条正文 URL 都没有被放行 —— 半条腿就是半条腿，不许顺手放宽。
+    // 🔴 But DeepSeek's **body** segment still has no source (DEEPSEEK_PLAN.detailPath === null),
+    //    so not one body URL is allowed through — half a leg is half a leg, and it is not loosened on the way past.
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages?chat_session_id=x`, DEEPSEEK_ORIGIN)).toBe(false);
-    // 前缀像、但不逐字相等的路径照样拒（证明没有变成前缀通配）。
+    // A path that looks like a prefix but is not equal byte for byte is still refused (proving it did not become a prefix wildcard).
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page/extra`, DEEPSEEK_ORIGIN)).toBe(false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 4 · 两张表必须把平台表【盖满】—— 新加一个平台却忘了表态，就在这里红
+// 4 · The two tables must **cover** the platform table completely — a new platform that forgot to declare a side goes red here
 // ---------------------------------------------------------------------------
-describe('C22-4 · 每个平台都必须有一个明确结论', () => {
-  it('平台表里每一行，恰好落在「能回溯」或「登记为暂时不能」其中一侧', () => {
+describe('C22-4 · every platform must have a definite conclusion', () => {
+  it('every row of the platform table lands on exactly one side — backfillable, or registered as temporarily impossible', () => {
     for (const row of PLATFORMS) {
       const plan = backfillPlanFor(row.id);
       const gap = unsupportedBackfillFor(row.id);
       expect(
         (plan === null) !== (gap === null),
-        `平台 ${row.id} 必须恰好出现在两张表之一`,
+        `platform ${row.id} must appear in exactly one of the two tables`,
       ).toBe(true);
     }
     expect(BACKFILL_SUPPORTED_PLATFORMS.length + BACKFILL_UNSUPPORTED_PLATFORMS.length)
       .toBe(PLATFORMS.length);
-    // 今天的真实状况，写死在测试里：6 个平台，只有 1 个补得回历史。
+    // Today's real state, written into the test: 6 platforms, and only 1 can backfill history.
     expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
     expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([
       'deepseek', 'perplexity', 'gemini', 'claude', 'kimi',
     ]);
   });
 
-  it('每条「暂时不能」都必须写明缺哪几项 + 给用户一句人话', () => {
+  it('every "temporarily impossible" must name what is missing plus give the user one plain sentence', () => {
     for (const gap of BACKFILL_UNSUPPORTED) {
-      expect(gap.missing.length, `${gap.platform} 必须写明缺什么`).toBeGreaterThan(0);
-      expect(gap.userNote.length).toBeGreaterThan(0);
-      // 🔴 不许暗示它在补。
-      expect(gap.userNote).not.toContain('正在');
+      expect(gap.missing.length, `${gap.platform} must say what is missing`).toBeGreaterThan(0);
+      expect(t(gap.userNoteKey).length).toBeGreaterThan(0);
+      // 🔴 It must not hint that the platform is being backfilled right now.
+      expect(t(gap.userNoteKey)).not.toMatch(/backfilling now|is backfilling|in progress/);
     }
   });
 });
 
 // ---------------------------------------------------------------------------
-// 5 · Popup 必须把这件事说出来
+// 5 · The popup has to say this out loud
 // ---------------------------------------------------------------------------
-describe('C22-5 · Popup 的诚实说明', () => {
-  it('那一行同时说清「谁能补」「谁不能」「不能≠坏了」', () => {
+describe('C22-5 · the popup\'s honest explanation', () => {
+  it('that line says all three at once: who can backfill, who cannot, and that cannot ≠ broken', () => {
     const line = coverageLine();
     expect(line).toContain('chatgpt');
     for (const id of BACKFILL_UNSUPPORTED_PLATFORMS) expect(line).toContain(id);
-    expect(line).toContain('还不能');
-    expect(line).toContain('不是坏了');
-    // 沿用 C18 的红线：进度类文案里不许出现百分号和时间预估。
+    expect(line).toContain('cannot yet');
+    expect(line).toContain('not a breakdown');
+    // Carrying C18's red line forward: no percent sign and no time estimate in progress-type wording.
     expect(line).not.toContain('%');
-    expect(line).not.toContain('预计');
+    expect(line).not.toContain('estimated');
   });
 
-  it('这一行出现在 popupText 里，且名单不是手写的', () => {
+  it('the line appears in popupText, and the list is not hand-written', () => {
     const out = popupText(renderPopup({
       enabled: true, block: 'no-http-port', state: null, target: null,
       failures: NO_FAILURES,
     }));
     expect(out).toContain(coverageLine());
     expect(out).not.toContain('%');
-    // 逐平台的卡点也要能看到（notes 里）。
-    expect(out).toContain('DeepSeek：还不能回溯历史');
-    expect(out).toContain('Gemini：还不能回溯历史');
+    // The per-platform sticking point has to be visible too (in the notes).
+    expect(out).toContain('DeepSeek: past conversation bodies cannot be backfilled yet');
+    expect(out).toContain('Gemini: history cannot be backfilled yet');
   });
 
-  it('halted=unsupported-platform 时说的是「还没实现」，不是「平台改版了」', () => {
+  it('with halted=unsupported-platform it says "not implemented yet", not "the platform changed"', () => {
     const view = renderPopup({
       enabled: true,
       block: null,
@@ -295,7 +299,7 @@ describe('C22-5 · Popup 的诚实说明', () => {
       failures: NO_FAILURES,
     });
     const out = popupText(view);
-    expect(out).toContain('还没有实现');
-    expect(out).toContain('不是平台改版');
+    expect(out).toContain('has no history backfill implemented');
+    expect(out).toContain('This is not a platform change');
   });
 });

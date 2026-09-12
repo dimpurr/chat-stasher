@@ -1,19 +1,27 @@
 /**
- * C18 · Popup 的【纯渲染层】。
+ * C18 · The popup's **pure render layer**.
  *
- * 为什么单独一个文件、且一行 DOM 都不碰：
- *  entrypoints/popup/main.ts 里没法在 node 里跑测试，而本任务最要命的一条判据
- *  ——「开着但没端口时【绝不许】显示成正在归档」—— 必须能被断言。
- *  所以把「显示什么」全部收进这里，main.ts 只负责取数据和塞进 DOM。
+ * Why it is a file of its own, and why it does not touch the DOM once:
+ *  entrypoints/popup/main.ts cannot be run under node, and this task's single
+ *  most important criterion — "open but with no port must NEVER be shown as
+ *  archiving" — has to be assertable. So *what is displayed* all lives here, and
+ *  main.ts only fetches the data and puts it into the DOM.
  *
- * 🔴 三条硬规矩：
- *  1. 进度文案【一律复用 lib/backfill/progress.ts 的 formatProgress】。
- *     本文件不许自己算百分比、不许自己拼 '%' —— 另写一份就等于把 C11 的
- *     「分母不可信就不许出现百分比」绕过去了。
- *  2. 「开」和「在跑」是两件事，必须分两行说。开关开着不等于它在动。
- *  3. 不出现任何「预计剩余 X 天 / X 小时」。我们没有速率模型，编一个就是骗人。
+ * 🔴 Three hard rules:
+ *  1. Progress wording **always reuses `formatProgress` from
+ *     lib/backfill/progress.ts**. This file must not compute a percentage or
+ *     assemble a '%' itself — a second copy would be a way around C11's "no
+ *     percentage when the denominator is untrustworthy" rule.
+ *  2. "On" and "running" are two different things and must be said on two
+ *     separate lines. The switch being on does not mean it is doing anything.
+ *  3. No "about N days / N hours left" anywhere. We have no rate model;
+ *     inventing one would be a lie.
+ *
+ * Every user-visible sentence is resolved through `t` (lib/i18n.ts) at render
+ * time, so the same model renders in whichever language the popup is set to.
  */
 
+import { currentUiLocale, t, type UiLocale } from './i18n';
 import { formatProgress } from './backfill/progress';
 import {
   describeFailureReason,
@@ -41,105 +49,121 @@ import { OUTBOX_CAPACITY_BYTES } from './outbox';
 import * as ui from './ui-strings';
 
 /**
- * Popup ↔ background 的消息类型。
- * 常量放在这里而不是 background.ts：popup 只要 import 一个字符串，
- * 不该把整个 background 模块（连带 download / badge / engine）拖进 popup 的包。
+ * Popup ↔ background message types.
+ * The constants live here rather than in background.ts: the popup only needs to
+ * import one string, and it should not drag the whole background module (with
+ * download / badge / engine behind it) into the popup's bundle.
  */
 export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
 
 /**
- * 🔴 C33 · Popup → background：「就补这个平台，我说的」。
+ * 🔴 C33 · Popup → background: "backfill THIS platform, I am saying so".
  *
- * 为什么需要第二条登记入口：登记回溯目标此前【只】发生在 kickBackfill 那一脚上
- * （必须先有一次实时对话被捕获）。那个限制是有意的设计，本单一个字都没动它
- * （lib/backfill/alarm.ts:80-87 —— 闹钟醒来时 SW 是全新的，不去猜、只用现成的）。
- * 但它的推论是：一个刚装好、开着平台页面却还没聊过天的用户，回溯【永远不会开始】。
- * ⇒ 解法不是去猜，而是让用户**自己明确说一次**。「不去猜」这条原则因此没有松动：
- *   目标要么来自一次真实捕获，要么来自用户按下的这一次。两个来源都不是我们编的。
+ * Why a second registration entry point is needed: backfill targets used to be
+ * registered on exactly one occasion, the kickBackfill call that follows a live
+ * capture. That limitation was deliberate and this change does not touch it
+ * (lib/backfill/alarm.ts:80-87 — when the alarm wakes, the SW is brand new, and
+ * it does not guess: it only uses what is already there).
+ * But the corollary is: a user who has just installed the extension, has a
+ * platform page open and has not yet had a conversation, will **never** start
+ * backfilling. ⇒ The fix is not to start guessing, it is to let the user say it
+ * **once, explicitly**. The "we do not guess" principle is therefore intact:
+ * a target either comes from a real capture or from the user pressing this.
+ * Neither is invented by us.
  */
 export const POPUP_START_BACKFILL_MESSAGE = 'cs-backfill-start-here';
 
-/** background 回给 Popup 的运行时事实。 */
+/** The runtime facts background hands back to the popup. */
 export interface BackfillRuntimeStatus {
   /**
-   * 🔴 取数通道到底接上没有。
-   * C18 时这里恒为 false（没有任何生产代码注入端口）。C19 之后它是
-   * background 【现场 ping 一次】的结果：此刻有没有一个活着的、已登录的
-   * 平台标签页可以替我们取数。仍然是事实，不是推测。
+   * 🔴 Whether the fetch channel is actually connected.
+   * Under C18 this was always false (no production code injected a port). Since
+   * C19 it is the result of background **pinging right now**: is there a live,
+   * logged-in platform tab that can fetch on our behalf at this moment. Still a
+   * fact, not an inference.
    */
   transportWired: boolean;
-  /** 最近一次 tick 的结论；SW 被回收后会变回 null —— 那本身也是实话。 */
+  /** The conclusion of the most recent tick; null again once the SW is reclaimed — which is itself the truth. */
   lastTickReason: string | null;
   /**
-   * 🔴 C33 · **此刻那个活着的通道是哪个平台/哪个源。**
-   * 它与 transportWired 来自同一次现场 ping（同一个 pickLiveTab），所以不会出现
-   * 「说有通道、却答不上是哪个平台」这种自相矛盾。
-   * null = 没有活着的通道，或者拿到的源不在平台表里 —— 两种情况下都不许显示按钮。
+   * 🔴 C33 · **Which platform / which origin the live channel belongs to right now.**
+   * It comes from the same live ping as transportWired (the same pickLiveTab), so
+   * "there is a channel but I cannot say which platform" cannot happen.
+   * null = no live channel, or the origin is not in the platform table — either
+   * way the button must not be shown.
    */
   liveTarget?: { platform: string; origin: string } | null;
   /**
-   * 🔴 W2 · 最近一次 `hello` 的结论（§6.1），由 background 问完写进 storage。
-   * 它是**一次问答的记录**，带时间戳 —— Popup 显示的是「上一次问到的答案」，
-   * 不是「此刻的猜测」。null / 省略 = 从来没有问过。
+   * 🔴 W2 · The conclusion of the most recent `hello` (§6.1), written to storage
+   * by background after it asks. It is **a record of one question and answer**,
+   * with a timestamp — what the popup shows is "the answer we got last time",
+   * not "our guess right now". null / omitted = never asked.
    */
   nativeHost?: HostStatusRecord | null;
 }
 
 export interface PopupModel {
-  /** 开关的持久化取值。 */
+  /** The persisted value of the switch. */
   enabled: boolean;
   /**
-   * 🔴 四道闸门里最先卡住的那一道，来自 lib/backfill/schedule.ts 的
-   * tickBlockReason —— 与运行时 tickBackfill 用的是**同一个函数**。
-   * null 表示四道全过。
+   * 🔴 The first of the four gates to block, from lib/backfill/schedule.ts's
+   * tickBlockReason — the **same function** the runtime tickBackfill uses.
+   * null means all four passed.
    */
   block: TickBlockReason | null;
-  /** 欠账集合。null 表示 storage 里还没有这个集合（一次都没跑过）。 */
+  /** The debt set. null means storage has no such set yet (it has never run). */
   state: BackfillState | null;
-  /** 这份进度是哪个平台/哪个账号的。认不出来就是 null。 */
+  /** Which platform / which account this progress belongs to. null when it cannot be told. */
   target: { platform: string; scope: string } | null;
   /**
-   * 🔴 C20 · 落盘失败清单（**跨所有平台/账号汇总**）。
-   * 为什么要汇总而不是只看 model.state：进度那一栏只挑一份集合显示（挑已归档最多的），
-   * 失败要是也只看那一份，另一个账号下丢掉的东西就会在 UI 上凭空消失 ——
-   * 那正是「显示成一切正常」。
+   * 🔴 C20 · The on-disk failure list (**aggregated across every platform/account**).
+   * Why aggregate instead of just looking at model.state: the progress row picks
+   * a single set to display (the one with the most archived). If failures only
+   * looked at that same set, what was lost under another account would vanish
+   * from the UI — which is precisely "showing everything as fine".
    */
   failures: FailureSummary;
   /**
-   * 🔴 C30 · 闹钟最近一跳的留痕（存储里读的，不是内存）。
-   * null = 存储里还没有这条记录 —— 那本身也是实话（闹钟还没醒过一次，
-   * 或者刚装上还没到点），照实说，绝不编一条。
+   * 🔴 C30 · The trace of the alarm's most recent tick (read from storage, not
+   * from memory). null = storage has no such record yet — which is itself the
+   * truth (the alarm has not woken once, or the extension was just installed and
+   * it is not due), and it is said as-is, never invented.
    */
   lastTick?: BackfillTickRecord | null;
   /**
-   * 🔴 C33 · 此刻那个活着的通道对应的平台/源（来自 BackfillRuntimeStatus）。
-   * 省略/null ⇒ 没有可用通道 ⇒ 「开始回溯这个平台」按钮不出现（点了也没用）。
+   * 🔴 C33 · The platform/origin the live channel belongs to right now (from
+   * BackfillRuntimeStatus). Omitted/null ⇒ no usable channel ⇒ the "start
+   * backfilling this platform" button does not appear (pressing it would do
+   * nothing).
    */
   liveTarget?: { platform: string; origin: string } | null;
   /**
-   * 🔴 C33 · 登记表里已经有几个回溯目标。
-   * 省略 ⇒ 按 0 处理？**不**：省略视为「不知道」，按【有】处理，
-   * 于是按钮不出现 —— 老调用点（含既有测试）一个字都不用改，也不会凭空多一个按钮。
+   * 🔴 C33 · How many backfill targets are already in the registry.
+   * Omitted ⇒ treat as 0? **No**: omitted is treated as "unknown", which is
+   * treated as "there are some", so the button does not appear — existing call
+   * sites (including existing tests) need not change a single character, and no
+   * extra button appears out of nowhere.
    */
   targetCount?: number;
   /**
-   * 🔴 W2 · 最近一次 `hello` 的事实（§6.1）。
-   * null / 省略 ⇒ 从来没有问过 ⇒ 文案照实说「还没问过」，绝不猜一个。
+   * 🔴 W2 · The facts from the most recent `hello` (§6.1).
+   * null / omitted ⇒ never asked ⇒ the wording says "never asked" as-is, never a guess.
    */
   nativeHost?: HostStatusRecord | null;
   /**
-   * 🔴 W2 · 发件箱现状。null = 读不出来（IndexedDB 不可用）⇒ 照实说读不出来。
-   * 省略 ⇒ 按「空」处理：老调用点（含既有测试）一个字都不用改，
-   * 而空发件箱本来就是「一条待送都没有」。
+   * 🔴 W2 · The outbox as it stands. null = could not be read (IndexedDB
+   * unavailable) ⇒ say so as-is. Omitted ⇒ treat as empty: existing call sites
+   * (including existing tests) need not change a single character, and an empty
+   * outbox genuinely means "not one item is waiting".
    */
   outbox?: PopupOutbox | null;
-  /** 🔴 W2 · 回溯因为主机够不着而暂停的那条记录；null = 没暂停。 */
+  /** 🔴 W2 · The record of backfill pausing because the host is unreachable; null = not paused. */
   hostPause?: HostPauseRecord | null;
-  /** 🔴 W2 · 最近一次导出（storage.local 里读的）；null = 没导出过。 */
+  /** 🔴 W2 · The most recent export (read from storage.local); null = never exported. */
   lastExport?: LastExport | null;
 }
 
-/** 发件箱的展现形态：只放 UI 需要的那几个数，不把 payload 带进渲染层。 */
+/** How the outbox is presented: only the numbers the UI needs, never the payload. */
 export interface PopupOutbox {
   pending: number;
   rejected: number;
@@ -150,12 +174,13 @@ export interface PopupOutbox {
   rejectedSamples: Array<{ kind: string; detail: string }>;
 }
 
-/** 被拒条目在人话里最多列几条 —— 再多就该去看导出文件了，不是在弹窗里数。 */
+/** How many rejected entries to list in plain language — beyond that, go read the export file, not the popup. */
 export const MAX_REJECTED_SAMPLES = 5;
 
 /**
- * 🔴 纯函数：发件箱条目 → 弹窗要显示的那几个数。
- * 不在渲染层里遍历条目，也不把 payload 带过去：文案只需要计数和 kind。
+ * 🔴 Pure: outbox entries → the few numbers the popup displays.
+ * The render layer never walks the entries, and the payload never comes along:
+ * the wording needs counts and kinds only.
  */
 export function summarizeOutbox(
   entries: readonly OutboxEntry[],
@@ -164,7 +189,7 @@ export function summarizeOutbox(
   const rejected = entries.filter((e) => e.state === 'rejected');
   const counts = new Map<string, number>();
   for (const entry of rejected) {
-    const kind = entry.rejectKind ?? entry.lastError ?? 'unknown';
+    const kind = entry.rejectKind ?? entry.lastError ?? ui.OUTBOX_KIND_UNKNOWN;
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
   }
   const bytes = entries.reduce((sum, e) => sum + (Number.isFinite(e.bytes) ? e.bytes : 0), 0);
@@ -178,125 +203,160 @@ export function summarizeOutbox(
       .map(([kind, count]) => ({ kind, count }))
       .sort((a, b) => (b.count - a.count) || a.kind.localeCompare(b.kind)),
     rejectedSamples: rejected.slice(0, MAX_REJECTED_SAMPLES).map((entry) => ({
-      kind: entry.rejectKind ?? 'unknown',
-      // 摘要：只留理由码本身。🔴 绝不放 payload / URL / 会话正文。
-      detail: (entry.lastError ?? 'no detail recorded').slice(0, 200),
+      kind: entry.rejectKind ?? ui.OUTBOX_KIND_UNKNOWN,
+      // Summary: keep the reason code itself. 🔴 Never the payload / URL / conversation body.
+      detail: (entry.lastError ?? ui.OUTBOX_DETAIL_MISSING).slice(0, 200),
     })),
   };
 }
 
-/** 汇总后的失败清单。entries 已按时间从新到旧排好。 */
+/** The aggregated failure list. `entries` is already sorted newest first. */
 export interface FailureSummary {
   entries: FailureEntry[];
-  /** 因超过上限被丢掉的更早的失败条数。🔴 绝不静默截断。 */
+  /** How many earlier failures were dropped for exceeding the cap. 🔴 Never a silent truncation. */
   dropped: number;
 }
 
-export interface PopupView {
-  /** 第一行：开关本身处在什么状态。 */
-  status: string;
-  /**
-   * W2：落盘通道状态。**英文**（见 lib/ui-strings.ts）。
-   * 已连接 ⇒ stage / machine / host 版本；未连接 ⇒ 具名原因 + 修复命令。
-   */
-  channel: string;
-  /** W2：发件箱那一行（待送 / 被拒 / 容量）。**英文**。空发件箱且未满时是 null。 */
-  outbox: string | null;
-  /** W2：回溯暂停那一行（主机够不着）。**英文**。没暂停时是 null。 */
-  pause: string | null;
-  /** W2：导出按钮的措辞与可见性。 */
-  exportFile: { label: string; visible: boolean };
-  /** W2：最近一次导出的说明；从没导出过时是一句「还没有」。**英文**。 */
-  lastExport: string;
-  /**
-   * 🔴 C20 · 第二行：**有东西没存下来的时候，这一行必须出现。**
-   * 没有失败项时是 null（那时候「一切正常」才是实话）。
-   * 位置刻意排在「在不在跑」之前：一条腿跑得再顺，也不该盖过「有东西丢了」。
-   */
-  failures: string | null;
-  /** 第三行：🔴 到底在不在跑。 */
-  running: string;
-  /** 第三行：卡在哪一道、缺什么。不缺就是 null。 */
-  missing: string | null;
-  /** 第四行：进度（复用 C11）。 */
-  progress: string;
-  /**
-   * 🔴 C22 · 第五行：**哪些平台补得回历史、哪些暂时补不回。**
-   *
-   * 为什么这一行必须存在：用户装了扩展、把开关打开了，结果他常用的那个平台
-   * 一条历史都没动 —— 在他眼里这和「坏了」没有任何区别。
-   * 实时腿支持 5 个平台，回溯腿只写了 1 个；不说这件事，就是让用户
-   * 对着一个永远不动的进度条自己猜。
-   *
-   * 🔴 它与 lib/backfill/enumerate.ts 的两张表【同源】：不是在这里手写一份平台名单，
-   *    所以将来谁填上了一个平台，这行文案自己就变了，不会漂。
-   */
-  coverage: string;
-  /** 补充说明，可为空。 */
-  notes: string[];
-  toggle: { label: string; checked: boolean; disabled: boolean };
-  /** 🔴 C20 · 「我知道了 / 清空失败清单」按钮。没有失败项时不显示。 */
-  clearFailures: { label: string; visible: boolean };
-  /**
-   * 🔴 C33 · 「开始回溯这个平台」按钮。**只在【有可用通道、但一个目标都没有】时出现。**
-   *  · 有目标 ⇒ 不出现：它的活已经有人干了，挂着就只是噪声；
-   *  · 没通道 ⇒ 不出现：点了也登记不出一个「此刻活着的平台」，那就是在骗人。
-   */
-  startBackfill: { label: string; visible: boolean };
+/** One language choice in the popup's selector. */
+export interface LocaleOption {
+  value: UiLocale;
+  /** Written in its own language, so a user who cannot read the current one can still find theirs. */
+  label: string;
 }
 
-/** 开关那一行的固定措辞。开关只表示「用户同意了」，不表示「它在跑」。 */
-export const TOGGLE_LABEL = '自动回溯历史对话';
+export interface PopupView {
+  /** Line 1: what state the switch itself is in. */
+  status: string;
+  /** W2: the delivery-channel line. Connected ⇒ stage / machine / host version; not ⇒ a named reason + the fix command. */
+  channel: string;
+  /** W2: the outbox line (waiting / rejected / capacity). null when the outbox is empty and not full. */
+  outbox: string | null;
+  /** W2: the backfill-paused line (host unreachable). null when not paused. */
+  pause: string | null;
+  /** W2: the export button's wording and visibility. */
+  exportFile: { label: string; visible: boolean };
+  /** W2: the note about the most recent export; "never" when there has not been one. */
+  lastExport: string;
+  /**
+   * 🔴 C20 · Line 2: **when something was not stored, this line must appear.**
+   * It is null when there are no failures (that is when "everything is fine" is
+   * the truth). Its position before "is it running" is deliberate: a leg running
+   * smoothly must not paper over "something was lost".
+   */
+  failures: string | null;
+  /** Line 3: 🔴 whether it is actually running. */
+  running: string;
+  /** Line 3: which gate it is stuck on and what is missing. null when nothing is. */
+  missing: string | null;
+  /** Line 4: progress (reuses C11). */
+  progress: string;
+  /**
+   * 🔴 C22 · Line 5: **which platforms can have their history backfilled and
+   * which cannot, for now.**
+   *
+   * Why this line has to exist: a user installs the extension and turns the
+   * switch on, and then the platform they actually use does not move a single
+   * conversation — to them that is indistinguishable from "it is broken".
+   * The live leg supports 5 platforms and the backfill leg only 1; not saying so
+   * leaves the user staring at a progress bar that never moves, guessing.
+   *
+   * 🔴 It is **derived from the same two tables** in lib/backfill/enumerate.ts:
+   *    the platform list is not retyped here, so whoever fills in a platform
+   *    changes this wording automatically instead of letting it drift.
+   */
+  coverage: string;
+  /** Supplementary notes, possibly empty. */
+  notes: string[];
+  toggle: { label: string; checked: boolean; disabled: boolean };
+  /** 🔴 C20 · The "got it / clear the failure list" button. Hidden when there are no failures. */
+  clearFailures: { label: string; visible: boolean };
+  /**
+   * 🔴 C33 · The "start backfilling this platform" button. **Only appears when
+   * there IS a usable channel and there are NO targets yet.**
+   *  · targets exist ⇒ not shown: its job is already being done, and a permanent
+   *    button is just noise;
+   *  · no channel ⇒ not shown: pressing it cannot register "a platform that is
+   *    live right now", so it would be a lie.
+   */
+  startBackfill: { label: string; visible: boolean };
+  /** The popup's language selector: its label, its choices and the current value. */
+  locale: { label: string; options: LocaleOption[]; value: UiLocale };
+}
 
-/** 清空按钮的固定措辞。「我知道了」而不是「重试」—— 按下去什么都不会被重抓。 */
-export const CLEAR_FAILURES_LABEL = '我知道了，清空这份清单';
+/** The switch row's fixed wording. The switch only means "the user agreed", never "it is running". */
+export function toggleLabel(): string {
+  return t('popup.toggle.label');
+}
 
-/** 空清单。给 model 用的常量，省得各处手拼。 */
+/** The clear button's fixed wording. "Got it" rather than "retry" — pressing it re-fetches nothing. */
+export function clearFailuresLabel(): string {
+  return t('popup.clearFailures.label');
+}
+
+/** An empty list. A constant for models, so nobody hand-assembles one. */
 export const NO_FAILURES: FailureSummary = { entries: [], dropped: 0 };
 
 /**
- * 🔴 C33 · 那个按钮的固定措辞。
- * 「开始回溯这个平台」——**这个**，指的就是此刻那个活着的通道所在的平台，
- * 不是「所有平台」，也不是「你所有的账号」。按下去只做一件事：把它记成回溯目标。
+ * 🔴 C33 · The fixed wording for that button.
+ * "Start backfilling **this** platform" — *this* means the platform the live
+ * channel currently belongs to, not "all platforms" and not "all your accounts".
+ * Pressing it does exactly one thing: record it as a backfill target.
  */
-export const START_BACKFILL_LABEL = '开始回溯这个平台';
+export function startBackfillLabel(): string {
+  return t('popup.startBackfill.label');
+}
 
 /**
- * 🔴 按钮出现的判据，**只有一处**（Popup 与测试共用它，不许各写各的）。
- * 有可用通道 且 一个回溯目标都没有。两条缺一不可。
+ * 🔴 The selector's choices, each labelled in its own language. `Auto` follows
+ * the browser; the other two are the two shipped catalogs. The labels come
+ * from the catalog rather than from literals here so that they read the same no
+ * matter which language is active — a user who switched to English by mistake
+ * must still be able to find their own language in the list.
+ */
+export function localeOptions(): LocaleOption[] {
+  return [
+    { value: 'auto', label: t('popup.locale.auto') },
+    { value: 'en', label: t('popup.locale.english') },
+    { value: 'zh_CN', label: t('popup.locale.chinese') },
+  ];
+}
+
+/**
+ * 🔴 The criterion for the button appearing, in **exactly one place** (the popup
+ * and the tests share it; nobody writes their own). A usable channel AND no
+ * backfill targets. Both are required.
  */
 export function canStartBackfillHere(model: PopupModel): boolean {
   if (!model.liveTarget) return false;
-  // 省略 targetCount ⇒ 「不知道有没有」⇒ 按有处理 ⇒ 不显示。宁可少一个按钮。
+  // An omitted targetCount ⇒ "we do not know whether there are any" ⇒ treat as
+  // there being some ⇒ do not show. Better one button too few.
   return model.targetCount === 0;
 }
 
 /**
- * 落盘通道那一行。
- * 🔴 三种取值，一种都不许混：
- *  · 上一次问过、host 答了话 ⇒ 如实报 stage / machine / 版本；
- *  · 上一次问过、host 没答话 ⇒ 具名原因 + 修复命令（stage 用「上一次知道的」）；
- *  · 从来没问过 ⇒ 照实说「还没问过」，绝不猜一个"大概是好的"。
+ * The delivery-channel line.
+ * 🔴 Three values, none of which may be confused with another:
+ *  · asked last time, host answered ⇒ report stage / machine / version faithfully;
+ *  · asked last time, host did not answer ⇒ a named reason + the fix command
+ *    (using the stage we knew last);
+ *  · never asked ⇒ say "never asked" as-is, never guess a "probably fine".
  */
 export function channelLine(model: PopupModel): string {
   const status = model.nativeHost;
-  if (!status) return ui.CHANNEL_NO_CHECK;
+  if (!status) return ui.channelNoCheck();
   return status.ok ? ui.channelConnected(status) : ui.channelDisconnected(status);
 }
 
-/** 发件箱那一行。空且未满 ⇒ null（那时候「没什么要送的」才是实话，不必占一行）。 */
+/** The outbox line. Empty and not full ⇒ null (then "nothing to send" is the whole truth and need not take a line). */
 export function outboxLine(model: PopupModel): string | null {
   const box = model.outbox;
   if (box === undefined) return null;
-  if (box === null) {
-    return 'Outbox: unreadable — this browser context has no IndexedDB, so the extension '
-      + 'cannot say what is queued. Nothing has been deleted.';
-  }
+  if (box === null) return ui.outboxUnreadable();
   if (box.pending === 0 && box.rejected === 0 && !box.full) return null;
   return ui.outboxLine(box);
 }
 
-/** 回溯暂停那一行。没暂停 ⇒ null。 */
+/** The backfill-paused line. Not paused ⇒ null. */
 export function pauseLine(model: PopupModel): string | null {
   const pause = model.hostPause;
   if (!pause) return null;
@@ -305,7 +365,7 @@ export function pauseLine(model: PopupModel): string | null {
 
 export function exportLine(model: PopupModel): string {
   const rec = model.lastExport;
-  return rec ? ui.exportNote(rec) : ui.EXPORT_NO_HISTORY;
+  return rec ? ui.exportNote(rec) : ui.exportNoHistory();
 }
 
 export function renderPopup(model: PopupModel): PopupView {
@@ -323,8 +383,9 @@ export function renderPopup(model: PopupModel): PopupView {
     channel,
     outbox: outboxLine(model),
     pause: pauseLine(model),
-    // 「导出未送达的会话」：有东西没送到才出现 —— 空的按钮只会变成噪声。
-    exportFile: { label: ui.EXPORT_BUTTON_LABEL, visible: hasUndelivered },
+    // "Export undelivered captures": appears only when something has not been
+    // delivered — an empty button is pure noise.
+    exportFile: { label: ui.exportButtonLabel(), visible: hasUndelivered },
     lastExport: exportLine(model),
     failures: hasFailures ? failuresLine(model.failures) : null,
     running,
@@ -332,114 +393,117 @@ export function renderPopup(model: PopupModel): PopupView {
     progress,
     coverage: coverageLine(),
     notes: notesFor(model),
-    clearFailures: { label: CLEAR_FAILURES_LABEL, visible: hasFailures },
-    startBackfill: { label: START_BACKFILL_LABEL, visible: canStartBackfillHere(model) },
+    clearFailures: { label: clearFailuresLabel(), visible: hasFailures },
+    startBackfill: { label: startBackfillLabel(), visible: canStartBackfillHere(model) },
     toggle: {
-      label: TOGGLE_LABEL,
+      label: toggleLabel(),
       checked: model.enabled,
-      // 🔴 暂停态下开关【仍然可切】：暂停是落盘出口的问题，不是"用户不许反悔"。
-      // 只有存储不可用时切了也存不住，那才禁用 —— 并且 missing 行会说清原因。
+      // 🔴 The switch stays operable while paused: the pause is a problem with
+      //    the delivery exit, not "the user may not change their mind". It is
+      //    disabled only when storage is unavailable, because then a flip cannot
+      //    be saved — and the missing line says why.
       disabled: model.block === 'no-store',
+    },
+    locale: {
+      label: t('popup.locale.label'),
+      options: localeOptions(),
+      value: currentUiLocale(),
     },
   };
 }
 
 function statusLine(model: PopupModel): string {
-  if (model.block === 'host-paused') {
-    return '状态：开关是开的，但本机 host 够不着，回溯已自动暂停（欠账一条没动）';
-  }
-  if (model.enabled) return '状态：开关是开的';
-  return '状态：开关是关的（这是默认值，需要你手动打开）';
+  if (model.block === 'host-paused') return t('popup.status.hostPaused');
+  if (model.enabled) return t('popup.status.on');
+  return t('popup.status.off');
 }
 
 /**
- * 🔴 本文件最重要的一个函数。
- * 每一个分支都必须让用户看出「在跑 / 没在跑」，**不许有含糊的第三种说法**。
+ * 🔴 The most important function in this file.
+ * Every branch must let the user see "running / not running", and there must be
+ * **no vague third answer**.
  */
 function runningLine(model: PopupModel): string {
   switch (model.block) {
     case 'no-store':
-      return '运行：未在运行 —— 浏览器存储不可用。';
+      return t('popup.running.noStore');
     case 'disabled':
-      return '运行：未在运行 —— 开关没有打开。';
+      return t('popup.running.disabled');
     case 'host-paused':
-      // 🔴 W2 · 这一条取代了 C12 的 download-paused：暂停的原因现在只有一个 ——
-      //    本机 host 够不着。欠账一条都没动，主机一答话就从同一笔继续。
-      return '运行：未在运行 —— 本机 host 够不着，已经暂停；欠账原封不动地留着，'
-        + '下一次心跳会先问一次主机在不在，答话了就从同一笔接着做。';
+      // 🔴 W2 · This replaced C12's download-paused: there is now exactly one
+      //    reason to pause — this machine's host is unreachable. Not one debt
+      //    was moved, and it carries on from the same item once the host answers.
+      return t('popup.running.hostPaused');
     case 'no-targets':
-      // 🔴 C30 · 这一条与 'no-http-port' 是【两件事】，必须说成两句话：
-      //    通道可能好端端地接着（平台页面就开着），但我们连"从哪个账号、
-      //    哪个平台开始补"都还不知道 —— 登记表是空的。
-      // 🔴 C32 · 末尾这半句是刻意的：这一行本身只说「没在跑」，
-      //    读完它的人下一秒就会问「那我该干什么」—— 答案就在紧接着的下一行，
-      //    所以这里明确把他指过去，不让他以为这就是全部。
-      return '运行：未在运行 —— 开关已经打开了，但还没有任何回溯目标，'
-        + '所以闹钟每次醒来都无事可做，一条也没有在取。'
-        + '下面那一行写了你要做的那一件事。';
+      // 🔴 C30 · This and 'no-http-port' are **two different things** and must
+      //    be two different sentences: the channel may be perfectly connected
+      //    (a platform page is open), but we do not even know "which account,
+      //    which platform to start from" — the registry is empty.
+      // 🔴 C32 · The last half-sentence is deliberate: this line only says "not
+      //    running", and whoever finishes reading it asks "so what do I do" —
+      //    the answer is on the very next line, so it points them there rather
+      //    than letting them think this is all there is.
+      return t('popup.running.noTargets');
     case 'no-http-port':
-      // 🔴 这一条是 C18 的核心，C19 也没有把它拿掉：开关开着但一条都没在取，
-      //    必须照实说。变的只是原因 —— 现在是「没有开着的平台页面」。
-      return '运行：未在运行 —— 开关已经打开了，但此刻没有可用的取数通道，一条也没有在取。';
+      // 🔴 This branch is the heart of C18, and C19 did not remove it: switch on
+      //    but not one conversation being fetched has to be said as-is. Only the
+      //    reason changed — it is now "no platform page is open".
+      return t('popup.running.noHttpPort');
     case null:
-      // 🔴 四道闸门全过 = 开关开着 + 存储在 + 没熔断 + 【此刻真的有一个活着的、
-      // 已登录的平台标签页可以取数】。闹钟也已经在跑（开关打开时创建）。
-      // 只有到这一步才允许说"在归档"。
-      return `运行：正在归档 —— 每 ${BACKFILL_ALARM_PERIOD_MINUTES} 分钟自动清 1 笔账`
-        + `（每天最多 ${DEFAULT_DETAIL_PACE.maxPerDay} 笔，每笔之间至少隔 `
-        + `${Math.round(DEFAULT_DETAIL_PACE.minIntervalMs / 1000)} 秒）。`;
+      // 🔴 All four gates passed = switch on + storage present + not paused +
+      //    **there really is a live, logged-in platform tab to fetch through
+      //    right now**. The alarm is already running too (created when the
+      //    switch was turned on). Only at this point may "archiving" be said.
+      return t('popup.running.active', {
+        minutes: BACKFILL_ALARM_PERIOD_MINUTES,
+        maxPerDay: DEFAULT_DETAIL_PACE.maxPerDay,
+        minIntervalSeconds: Math.round(DEFAULT_DETAIL_PACE.minIntervalMs / 1000),
+      });
   }
 }
 
 function missingLine(model: PopupModel): string {
   switch (model.block) {
     case 'no-store':
-      return '缺：browser.storage.local。没有持久化就没有可断可续，'
-        + '与其每次重启都从头爬一遍，不如不跑。';
+      return t('popup.missing.noStore');
     case 'no-http-port':
-      // 🔴 C19 改了这条文案的【原因】，因为原因真的变了：端口现在有生产注入了，
-      // 但它必须借用一个开着的、已登录的平台页面。没有页面开着就是没有通道。
-      return '缺：一个开着的、已登录的受支持平台页面 —— 取数通道要借它才能建立。'
-        + '历史对话只在你自己的浏览器页面里取（同源请求，用的是你本来就有的登录态），'
-        + '所以只要没有任何受支持平台的标签页开着，这条腿就取不到数。'
-        + '打开其中任意一个平台的页面并保持开着，它就会自己继续。';
+      // 🔴 C19 changed the **reason** this wording gives, because the reason
+      //    really changed: there is production injection for the port now, but
+      //    it has to borrow an open, logged-in platform page. No page open means
+      //    no channel.
+      return t('popup.missing.noHttpPort');
     case 'no-targets':
-      // 🔴 C32 · 这一条必须把话说【全】。C30 已经把「未在运行」说对了，
-      //    但用户读完之后的下一个问题是「那我要做什么才会开始？」——
-      //    不回答它，这句诚实的话在用户眼里和「坏了」没有区别。
+      // 🔴 C32 · This one has to say the whole thing. C30 already got "not
+      //    running" right, but the user's next question is "then what do I do to
+      //    make it start?" — not answering it makes an honest sentence
+      //    indistinguishable from "it is broken".
       //
-      //    三件事一件都不许少，测试 tests/c32-coldstart.test.ts 逐条钉着：
-      //      1. 【具体动作】——「请稍候」这种废话不算数；
-      //      2. 【为什么】—— 这不是系统限制，是一句隐私承诺：我们不猜你的账号；
-      //      3. 【不承诺做不到的事】—— 我们没有速率模型，绝不说「几分钟内就会开始」。
+      //    None of the three may be missing, and tests/c32-coldstart.test.ts
+      //    pins each one:
+      //      1. THE ACTION — "please wait" does not count;
+      //      2. WHY — this is not a system limitation, it is a privacy promise:
+      //         we do not guess your account;
+      //      3. NO PROMISE WE CANNOT KEEP — we have no rate model, so never
+      //         "it will start within a few minutes".
       //
-      //    🔴 这里【只补文案】。登记目标必须先有一次真实捕获，这是 alarm.ts:80-87
-      //    有意的设计（闹钟醒来时 SW 全新、没有 tab 也没有账号，唯一不用编的
-      //    信息就是实时腿现成攥着的那一个），本单一个字都没有去改它。
+      //    🔴 This is **only wording**. A registration still requires a real
+      //    capture first; that is deliberate in alarm.ts:80-87 (when the alarm
+      //    wakes the SW is brand new, with no tab and no account, and the only
+      //    information that does not have to be invented is the one the live leg
+      //    is holding), and nothing here changes it.
       //
-      //    🔴 C33 · 现在这里【多了一条路】：用户可以直接按那个按钮明确说
-      //    「就补这个平台」。所以有按钮时必须把它一并说出来 —— 屏幕上摆着一个
-      //    按钮、文案却只写「你得先去发一条消息」，那是自己跟自己打架。
-      //    没有按钮（没通道）时这句一个字都不出现，免得指向一个不存在的东西。
+      //    🔴 C33 · There is **one more route** now: the user can press the button
+      //    and say outright "backfill this platform". So when the button is
+      //    present it has to be mentioned — a button sitting on screen while the
+      //    text only says "you have to send a message first" would be the UI
+      //    arguing with itself. With no button (no channel) that sentence does
+      //    not appear at all, so it never points at something that is not there.
       return (canStartBackfillHere(model)
-        ? `你现在也可以直接按这段话下面那个「${START_BACKFILL_LABEL}」按钮 —— `
-          + '那等于你明确说了「就补这个平台」，我们才会把它记成回溯目标。'
-          + '（我们仍然不猜你的账号：那份归档范围会记成 default，'
-          + '等你真的被归档过一次之后，那个真实账号会另记一份。）\n'
+        ? t('popup.missing.noTargets.buttonHint', { button: startBackfillLabel() }) + '\n'
         : '')
-        + '缺：一次真的被归档过的对话 —— 回溯要从它身上才知道该补哪个平台、哪个账号的历史。\n'
-        + '你现在要做的一件事：在这个平台上发一条消息，或者打开一条你已有的对话，'
-        + '让它被【实时归档】一次（照常存进你的下载目录）。'
-        + '捕获到那一次之后，我们才会记下这个平台和这个账号，回溯就从那个账号开始往回补。\n'
-        + '🔴 为什么非得先有这一次：我们不猜你的账号，只用你真的用过的那一个。'
-        + '这个扩展没有任何 host 权限，历史只在你自己已经打开、已经登录的页面里取；'
-        + '在你真的用过一次之前，我们既不会去猜一个账号，也不会把整个平台的会话都翻一遍。\n'
-        + '（补完要多久取决于你自己有多少历史、页面开着多久 —— 这里不给时间承诺，'
-        + '进度会一笔一笔显示在下面。）';
+        + t('popup.missing.noTargets.body');
     case 'host-paused':
-      return '缺：本机那个 chat-stasher host 答不上话。'
-        + '它由 `chat-stasher install-native-host --stage <你的 stage 路径>` 装好并指向一个存在的目录；'
-        + '装好之后这条腿会自己恢复（心跳会先问一次主机在不在），不需要你手动点任何东西。';
+      return t('popup.missing.hostPaused');
     case 'disabled':
     case null:
       return '';
@@ -447,208 +511,204 @@ function missingLine(model: PopupModel): string {
 }
 
 /**
- * 🔴 C20 · 失败清单那一行。三件事必须说全，一件都不许少：
- *   1. **几条没存下来**（数字来自真实条目，不估）；
- *   2. **不会自动再试**（这是产品拍板的行为，用户必须知道，否则他会以为等一等就好了）；
- *   3. 被上限丢掉的更早的条数（有就说，🔴 绝不静默截断）。
- * 🔴 这一行【不猜原因】（C12 那条规矩）—— 具体理由码在下面的 notes 里逐条列，
- *    每一条也只陈述我们自己观测到的事实。
+ * 🔴 C20 · The failure-list line. Three things must all be said:
+ *   1. **how many were not stored** (the number comes from real entries, never an estimate);
+ *   2. **no automatic retry** (that is a product decision the user has to know,
+ *      or they will assume waiting fixes it);
+ *   3. how many earlier entries the cap dropped (say it when it is non-zero —
+ *      🔴 never a silent truncation).
+ * 🔴 This line **does not guess a cause** (the C12 rule) — the specific reason
+ *    codes are listed one by one in the notes below, and each states only the
+ *    fact we observed.
  */
 function failuresLine(summary: FailureSummary): string {
   const n = summary.entries.length;
-  const head = `🔴 失败：有 ${n} 条历史对话取到了正文、但【没有存下来】，而且【不会自动再试】。`;
   if (summary.dropped > 0) {
-    return head
-      + `（清单最多留 ${MAX_FAILURES} 条，另有更早的 ${summary.dropped} 条已经不在清单里。）`;
+    return t('popup.failures.headDropped', { count: n, max: MAX_FAILURES, dropped: summary.dropped });
   }
-  return head;
+  return t('popup.failures.head', { count: n });
 }
 
-/** 时间戳 → 本地时间字符串。拿到的不是有限数就照实说「时间不详」，绝不编一个。 */
+/** Timestamp → a local-time string. A non-finite input is reported as unknown, never invented. */
 function stampOf(at: number): string {
-  if (!Number.isFinite(at)) return '时间不详';
+  if (!Number.isFinite(at)) return t('common.unknownTimeShort');
   try {
     return new Date(at).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
   } catch {
-    return '时间不详';
+    return t('common.unknownTimeShort');
   }
 }
 
 function failureNote(summary: FailureSummary): string {
   const lines = [
-    '这几条没有存下来（按时间从新到旧）：',
+    t('popup.failureNote.title'),
     ...summary.entries.map(
-      (e) => `· ${e.platform} · 会话 ${e.shortId}… · ${describeFailureReason(e.reason)} · ${stampOf(e.at)}`,
+      (e) => t('popup.failureNote.row', {
+        platform: e.platform,
+        shortId: e.shortId,
+        reason: describeFailureReason(e.reason),
+        at: stampOf(e.at),
+      }),
     ),
     '',
-    '🔴 它们不会被自动重试 —— 这是刻意的：同一个出口刚刚已经失败过一次，'
-    + '闷头再试一遍只会把同一个失败重复一遍，还会让你以为它已经好了。',
-    '欠账账本上它们既不算「已归档」也不再排队，所以进度里的数字没有把它们冒充成成功。',
-    '清空这份清单只是「我知道了」，不会触发任何重新抓取。',
+    t('popup.failureNote.retry'),
+    t('popup.failureNote.ledger'),
+    t('popup.failureNote.clear'),
   ];
   return lines.join('\n');
 }
 
 /**
- * 🔴 C30 · 「闹钟到底醒过没有、那一跳做了什么」。
+ * 🔴 C30 · "Did the alarm ever wake up, and what did that tick do?"
  *
- * 为什么这一段必须存在：状态行说的是【此刻】的闸门，而用户真正的疑问是
- * 「这几个小时里它一直在做什么」。C30 之前那个答案不存在于任何地方 ——
- * 闹钟每 5 分钟醒一次、每次静默跳过，既不报错也不留痕。
- * 🔴 这里只复述存储里那条记录，一个字都不推断。
+ * Why this section has to exist: the status line describes the gates **right
+ * now**, while the user's real question is "what has it been doing for the last
+ * few hours". Before C30 that answer existed nowhere — the alarm woke every 5
+ * minutes and silently skipped, reporting no error and leaving no trace.
+ * 🔴 This only restates the record in storage; it infers nothing.
  */
 function lastTickNote(rec: BackfillTickRecord | null): string | null {
-  if (!rec) {
-    return '闹钟：存储里还没有任何一次闹钟跳动的记录 —— 可能它还没醒过第一次。'
-      + '（这一条是照实说"我不知道"，不是"它没在跑"。）';
-  }
+  if (!rec) return t('popup.lastTick.none');
   const when = stampOf(rec.at);
-  if (rec.ran) {
-    return `闹钟：最近一次醒来是 ${when}，那一跳真的跑了（登记表里有 ${rec.targets} 个回溯目标）。`;
-  }
-  return `闹钟：最近一次醒来是 ${when}，那一跳【什么都没做】——`
-    + `${describeTickReason(rec.reason)}（当时登记表里有 ${rec.targets} 个回溯目标）。`;
+  if (rec.ran) return t('popup.lastTick.ran', { when, targets: rec.targets });
+  return t('popup.lastTick.skipped', {
+    when,
+    reason: describeTickReason(rec.reason),
+    targets: rec.targets,
+  });
 }
 
-/** 具名结局 → 一句人话。🔴 每一种都必须说得不一样，否则具名就白具了。 */
+/** Named outcome → one plain sentence. 🔴 Each one must read differently, or the naming is pointless. */
 export function describeTickReason(reason: string): string {
   switch (reason) {
     case 'no-targets':
-      return '还没有任何回溯目标，不知道该补哪个平台、哪个账号的历史';
+      return t('tick.reason.noTargets');
     case 'no-http-port':
-      return '没有可用的取数通道（当时没有一个开着的受支持平台页面）';
+      return t('tick.reason.noHttpPort');
     case 'disabled':
-      return '开关当时是关的';
+      return t('tick.reason.disabled');
     case 'no-store':
-      return '浏览器存储当时不可用';
+      return t('tick.reason.noStore');
     case 'host-paused':
-      return '本机 host 够不着，这条腿在等到它答话之前暂停了';
+      return t('tick.reason.hostPaused');
     case 'already-running':
-      return '上一跳还没结束，这一跳直接让路了';
+      return t('tick.reason.alreadyRunning');
     case 'ran':
-      return '它跑了';
+      return t('tick.reason.ran');
     default:
-      // 🔴 认不出来就照原样报出去，绝不吞掉一个我们没见过的结局。
-      return `结局码：${reason}`;
+      // 🔴 An unrecognised outcome is reported verbatim; never swallow one we have not seen.
+      return t('tick.reason.unknown', { reason });
   }
 }
 
 function progressLine(model: PopupModel): string {
-  // 🔴 唯一的进度文案来源。本文件不参与任何百分比计算。
-  if (!model.state) {
-    return '进度：还没有开始 —— 存储里还没有这个平台的欠账集合，'
-      + '也就是说一条都还没有枚举过。';
-  }
-  return `进度：${formatProgress(model.state)}`;
+  // 🔴 The single source of progress wording. This file does no percentage arithmetic.
+  if (!model.state) return t('popup.progress.notStarted');
+  return t('popup.progress.line', { progress: formatProgress(model.state) });
 }
 
 /**
- * 🔴 C22 · 回溯覆盖那一行。三件事必须说全：
- *   1. **哪些平台补得回历史**（名单来自 BACKFILL_PLANS，不是手写的）；
- *   2. **哪些暂时补不回**（名单来自 BACKFILL_UNSUPPORTED）；
- *   3. **补不回 ≠ 坏了 ≠ 没有历史** —— 这句必须写死在文案里，
- *      因为「一动不动」在用户眼里默认就是「坏了」。
- * 🔴 这一行不提任何进度、不提任何时间预估，也不出现百分号。
+ * 🔴 C22 · The backfill-coverage line. Three things must all be said:
+ *   1. **which platforms can have their history backfilled** (the list comes from BACKFILL_PLANS, not retyped);
+ *   2. **which cannot, for now** (the list comes from BACKFILL_UNSUPPORTED);
+ *   3. **cannot ≠ broken ≠ no history** — this must be written into the wording,
+ *      because "not moving" reads as "broken" by default.
+ * 🔴 This line mentions no progress, no time estimate, and contains no percent sign.
  */
 export function coverageLine(): string {
-  const yes = BACKFILL_SUPPORTED_PLATFORMS.join('、');
-  const no = BACKFILL_UNSUPPORTED_PLATFORMS.join('、');
-  if (no.length === 0) {
-    return `回溯覆盖：目前支持的平台（${yes}）都能补历史对话。`;
-  }
-  return `回溯覆盖：现在只有 ${yes} 能补回历史对话；${no} 【还不能】。`
-    + '它们的实时归档照常工作（你正在看的那条对话仍然会被存下来），'
-    + '只是过去的历史暂时补不回来 —— 这不是坏了，也不是你没有历史，是我们还没学会读它们的历史列表。';
+  const yes = BACKFILL_SUPPORTED_PLATFORMS.join(', ');
+  const no = BACKFILL_UNSUPPORTED_PLATFORMS.join(', ');
+  if (no.length === 0) return t('popup.coverage.all', { yes });
+  return t('popup.coverage.partial', { yes, no });
 }
 
-/** 逐平台缺什么。放进 notes，给愿意多看一眼的用户 —— 主行只说结论。 */
+/** What each platform is missing. Goes into the notes for a user who wants a closer look — the main line gives only the conclusion. */
 function coverageNote(): string {
-  const lines = ['这些平台暂时补不回历史，各自卡在哪一步：'];
-  // 🔴 C26 · 「只列得出会话、还取不到正文」的平台也要出现在这里。
-  //    它离「能补历史」更近，但对用户的结果仍然是【一条都没补回来】——
-  //    所以它属于这一段，不许被写成一句听起来像已经支持了的话。
+  const lines = [t('popup.coverage.noteTitle')];
+  // 🔴 C26 · Platforms that "can list conversations but not fetch bodies yet"
+  //    belong here too. They are closer to working, but the user-visible outcome
+  //    is still **not one conversation backfilled** — so they belong in this
+  //    section and must not be written as if the platform were already supported.
   for (const half of BACKFILL_PARTIAL) {
-    lines.push(`· ${half.userNote}`);
+    lines.push(`· ${t(half.userNoteKey)}`);
   }
   for (const gap of BACKFILL_UNSUPPORTED) {
-    lines.push(`· ${gap.userNote}`);
+    lines.push(`· ${t(gap.userNoteKey)}`);
   }
   lines.push('');
-  lines.push(
-    '🔴 我们不会为了让它「看起来在动」而去猜一个接口地址：猜错的结果不是报错，'
-    + '而是你以为历史在补、实际上一条都没补。宁可在这里明说还不支持。',
-  );
+  lines.push(t('popup.coverage.noteWhy'));
   return lines.join('\n');
 }
 
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
-  // 🔴 失败详情排在所有 note 的最前面。有东西丢了就先说这件事。
+  // 🔴 Failure details come before every other note. If something was lost, say that first.
   if (model.failures.entries.length > 0) notes.push(failureNote(model.failures));
 
   const tickNote = lastTickNote(model.lastTick ?? null);
   if (tickNote) notes.push(tickNote);
 
   if (model.target) {
-    notes.push(`这份进度对应：平台 ${model.target.platform} · 归档范围 ${model.target.scope}`);
+    notes.push(t('popup.notes.target', { platform: model.target.platform, scope: model.target.scope }));
   } else if (model.state === null) {
-    notes.push('还没有任何平台的回溯记录，所以这里没有可显示的归档范围。');
+    notes.push(t('popup.notes.noTarget'));
   }
 
   if (!model.enabled) {
-    notes.push(
-      `打开之后会做什么：只要有一个受支持平台的页面开着，就每 ${BACKFILL_ALARM_PERIOD_MINUTES} 分钟`
-      + '在后台悄悄补一笔历史对话，用的是你自己那个页面的登录态；'
-      + `每天最多 ${DEFAULT_DETAIL_PACE.maxPerDay} 笔，好几天里慢慢补完。关掉即停（定时器也会一并清掉）。`,
-    );
+    notes.push(t('popup.notes.whatOpening', {
+      minutes: BACKFILL_ALARM_PERIOD_MINUTES,
+      maxPerDay: DEFAULT_DETAIL_PACE.maxPerDay,
+    }));
   }
 
   if (model.state?.halted) {
-    // 🔴 C22 · 'unsupported-platform' 不是「出故障停下了」，是「这个平台我们还没写」。
-    //    两者都要留痕，但绝不能说成同一句话。
+    // 🔴 C22 · 'unsupported-platform' is not "it broke and stopped", it is "we
+    //    have not written this platform yet". Both must leave a trace, and they
+    //    must never be the same sentence.
     if (model.state.halted.reason === 'unsupported-platform') {
-      notes.push(
-        `这个平台（${model.state.platform}）的历史回溯还没有实现，所以这条腿在发出任何请求之前就停住了。`
-        + '这不是平台改版，也不是被限流。技术细节：'
-        + model.state.halted.detail,
-      );
+      notes.push(t('popup.notes.halted.unsupportedPlatform', {
+        platform: model.state.platform,
+        detail: model.state.halted.detail,
+      }));
     } else if (model.state.halted.reason === 'detail-unsupported') {
-      // 🔴 C26 · 这一条【不能】说成「在发出任何请求之前就停住了」—— 列表请求真的发过，
-      //    会话也真的列出来了。半路停下和一步没走，对用户是两件事。
-      notes.push(
-        `这个平台（${model.state.platform}）的历史会话【已经列出来了】（${model.state.pending.length} 条在等着），`
-        + '但取每条对话正文的那一步还没有实现，所以这条腿在取第一条正文之前就停住了，'
-        + '目前一条也没有存下来。这不是平台改版，也不是被限流；列出来的这些会一直留着，'
-        + '等那一步补上就接着往下清。技术细节：'
-        + model.state.halted.detail,
-      );
+      // 🔴 C26 · This one must **not** say "stopped before issuing any request" —
+      //    the list request really went out and conversations really were listed.
+      //    Stopping half way and never starting are two different things to a user.
+      notes.push(t('popup.notes.halted.detailUnsupported', {
+        platform: model.state.platform,
+        pending: model.state.pending.length,
+        detail: model.state.halted.detail,
+      }));
     } else {
-      notes.push(
-        `这条腿已经停下并留痕：${model.state.halted.reason} —— ${model.state.halted.detail}`,
-      );
+      notes.push(t('popup.notes.halted.other', {
+        reason: model.state.halted.reason,
+        detail: model.state.halted.detail,
+      }));
     }
   }
 
-  // 🔴 覆盖说明排在最后：它是长期事实，不是此刻的状态。
+  // 🔴 The coverage note comes last: it is a long-term fact, not the current state.
   if (BACKFILL_UNSUPPORTED.length > 0 || BACKFILL_PARTIAL.length > 0) notes.push(coverageNote());
   return notes;
 }
 
-/** 把一份 view 拍平成纯文本 —— 测试断言和「贴出完整文案」都用它。 */
+/** Flatten a view into plain text — used both by test assertions and by "paste the whole wording" reports. */
 export function popupText(view: PopupView): string {
   const lines = [view.status];
   if (view.channel) lines.push(view.channel);
-  // 🔴 W2：暂停行紧跟在通道行之后 —— 它是通道坏掉的下一个后果，两句话要挨着读。
+  // 🔴 W2: the pause line follows the channel line — it is the next consequence
+  //    of the channel being broken, and the two sentences must be read together.
   if (view.pause) lines.push(view.pause);
   if (view.outbox) lines.push(view.outbox);
   lines.push(view.lastExport);
   if (view.failures) lines.push(view.failures);
   lines.push(view.running);
   if (view.missing) lines.push(view.missing);
-  // 🔴 C33：按钮在屏幕上是一个真的可点的东西，拍平的文本里也必须看得见它 ——
-  //    否则「它到底出没出现」在测试里就断言不了。
-  if (view.startBackfill.visible) lines.push(`[按钮] ${view.startBackfill.label}`);
-  if (view.exportFile.visible) lines.push(`[按钮] ${view.exportFile.label}`);
+  // 🔴 C33: a button is a real, pressable thing on screen, so it has to be
+  //    visible in the flattened text too — otherwise "did it appear" cannot be
+  //    asserted at all.
+  if (view.startBackfill.visible) lines.push(t('popup.buttonTag', { label: view.startBackfill.label }));
+  if (view.exportFile.visible) lines.push(t('popup.buttonTag', { label: view.exportFile.label }));
   lines.push(view.progress);
   lines.push(view.coverage);
   for (const n of view.notes) lines.push('', n);
@@ -656,10 +716,11 @@ export function popupText(view: PopupView): string {
 }
 
 // ---------------------------------------------------------------------------
-// 从 storage.local 的全量快照里挑一份欠账集合。
-// Popup 不知道用户当前是哪个账号（那信息只在实时腿的消息里现成带着），
-// 所以只能把已经存在的集合列出来。挑「已归档最多」的那一份显示 —— 稳定、可解释，
-// 不依赖任何插入顺序。
+// Pick one debt set out of the full storage.local snapshot.
+// The popup does not know which account the user is currently on (that
+// information is carried by live-leg messages and nowhere else), so it can only
+// list the sets that exist. It shows the one with the most archived — stable,
+// explainable, and independent of any insertion order.
 // ---------------------------------------------------------------------------
 
 const STATE_KEY_PREFIX = `cs_backfill_v${BACKFILL_STATE_VERSION}:`;
@@ -680,14 +741,15 @@ export function pickBackfillState(snapshot: Record<string, unknown> | null): Bac
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
     if (!looksLikeState(value)) continue;
-    // 键里带着 platform/scope，值里也带着；只认两边对得上的，避免显示一份错位的进度。
+    // The key carries platform/scope and so does the value; only accept the two
+    // agreeing, so a mismatched progress set can never be displayed.
     if (stateKey(value.platform, value.scope) !== key) continue;
     if (!best || value.archived.length > best.archived.length) best = value;
   }
   return best;
 }
 
-/** 快照里所有合法的欠账集合（键值一致的那些）。失败汇总和清空都要遍历它。 */
+/** Every valid debt set in the snapshot (those whose key and value agree). Failure aggregation and clearing walk it. */
 export function backfillStateEntries(
   snapshot: Record<string, unknown> | null,
 ): Array<{ key: string; state: BackfillState }> {
@@ -703,10 +765,11 @@ export function backfillStateEntries(
 }
 
 /**
- * 🔴 C20 · 把【所有】平台/账号的失败清单汇总成一份。
- * 进度那一栏只挑一份集合显示；失败要是也只看那一份，另一个账号下丢掉的东西
- * 就会在 UI 上凭空消失 —— 那正是「把有失败项显示成一切正常」。
- * 排序：时间从新到旧（最近发生的最有诊断价值）。
+ * 🔴 C20 · Aggregate the failure lists of **every** platform/account into one.
+ * The progress row shows only one set; if failures only looked at that one, what
+ * was lost under another account would vanish from the UI — which is exactly
+ * "showing a state with failures as if everything were fine".
+ * Sort: newest first (the most recent is the most useful for diagnosis).
  */
 export function collectFailures(snapshot: Record<string, unknown> | null): FailureSummary {
   const entries: FailureEntry[] = [];

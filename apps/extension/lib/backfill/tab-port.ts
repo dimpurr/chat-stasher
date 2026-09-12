@@ -1,51 +1,64 @@
 /**
- * C19 · 回溯腿的【取数通道】—— 第二道闸的答案。
+ * C19 · The backfill leg's **fetch channel** — the answer to the second gate.
  *
- * ## 问题
- * C13 把 http 端口写成"必须有人显式注入"，然后【没有任何生产代码注入它】。
- * 于是回溯腿在浏览器里永远停在 'no-http-port'（C17-4 实测）。
- * 要接上它，就得回答一个真问题：**谁来发这个请求？**
+ * ## The problem
+ * C13 wrote the http port as "somebody has to inject it explicitly", and then
+ * **no production code injected it**. So the backfill leg always stopped at
+ * 'no-http-port' in a browser (measured in C17-4).
+ * To wire it up, one real question has to be answered: **who sends this request?**
  *
- * ## 为什么不能在 background 里直接 fetch
- * MV3 的 service worker 里 `fetch('https://chatgpt.com/backend-api/...')` 是一个
- * **跨源**请求：SW 自己的源是 chrome-extension://<id>。要让它带上用户在 chatgpt.com
- * 的 cookie，必须声明 `host_permissions: ["https://chatgpt.com/*", ...]` ——
- * 那是【新增权限】，而且是安装时会弹「读取和更改你在 xxx 上的数据」的那一类。
- * 🔴 本任务硬约束：不许新增 host 权限。所以这条路直接封死。
+ * ## Why we cannot just fetch from background
+ * In an MV3 service worker, `fetch('https://chatgpt.com/backend-api/...')` is a
+ * **cross-origin** request: the SW's own origin is chrome-extension://<id>. For it
+ * to carry the user's chatgpt.com cookies, the manifest would have to declare
+ * `host_permissions: ["https://chatgpt.com/*", ...]` — a **new permission**, and
+ * one of the kind that shows "Read and change your data on xxx" at install time.
+ * 🔴 This task's hard constraint: no new host permissions. So that road is closed.
  *
- * ## 走通的那条路：让【已经存在的内容脚本】去取
- * 内容脚本已经按 CONTENT_MATCHES 注入在这些平台的页面里（lib/contract.ts:292）。
- * 在那个上下文里发起的**同源** fetch，走的就是用户自己那个页面的凭据 ——
- * 与用户手动点开一条历史对话时浏览器发出的请求同源、同 cookie、同 UA。
- * 这正好满足「取数必须发生在用户已登录的浏览器上下文里」这个架构前提，
- * 而且【不需要任何新权限】：内容脚本对自己所在页面的同源请求本来就不受 host
- * 权限约束，matches 一个字都不用改。
+ * ## The road that works: let the content script that is already there fetch it
+ * The content script is already injected into these platforms' pages per
+ * CONTENT_MATCHES (lib/contract.ts:292). A **same-origin** fetch made in that
+ * context uses the credentials of the user's own page — same origin, same cookies,
+ * same UA as the request the browser sends when the user opens a past conversation
+ * by hand.
+ * That satisfies the architectural premise "fetching must happen inside the user's
+ * logged-in browser context", and it **needs no new permission**: a content
+ * script's same-origin requests to its own page are not governed by host
+ * permissions in the first place, and `matches` need not change a character.
  *
- * ## 因此这条腿的边界（诚实写在这里，Popup 也照这个说）
- * 🔴 **必须有一个该平台的标签页开着**，回溯才取得到数。没有开着的页面 ⇒
- *    没有可用端口 ⇒ tickBackfill 仍然如实返回 'no-http-port'。
- *    「装了之后再也不打开那个网站」的用户，历史确实补不完 —— 这是架构前提的
- *    直接推论，不是 bug，也不许拿假状态盖过去。
+ * ## Hence this leg's boundary (written honestly here, and the popup says the same)
+ * 🔴 **A tab of that platform has to be open** for backfill to fetch anything.
+ *    With no open page there is no usable port ⇒ tickBackfill still returns
+ *    'no-http-port' faithfully.
+ *    A user who "installs it and never opens that site again" really will not
+ *    finish backfilling — that is a direct corollary of the architectural premise,
+ *    not a bug, and it must not be papered over with a fake status.
  *
- * ## 自我约束（内容脚本侧，见 checkBackfillRequest / serveBackfillFetch）
- *  1. 只允许**同源**：请求 URL 的 origin 必须逐字等于页面自己的 origin；
- *  2. 只允许**平台表里的源**；
- *  3. 只允许**这个平台自己写过 plan** 的回溯（C22）；
- *  4. 只允许**回溯腿自己那两条路径**（会话列表 / 会话正文）。
- *  --- 🔴 C23 新增的三条：通道能发 POST 了，白名单必须跟着长出 method/body 这两维 ---
- *  5. method 必须落在**闭集** ALLOWED_BACKFILL_METHODS，**且**必须逐字等于
- *     plan 为这一段声明的那一个方法（expectedMethodFor）。plan 说 GET 的段
- *     发 POST ⇒ 拒；反之亦然。**请求自己说了不算。**
- *  6. GET 段**一律不许带 body / Content-Type**；
- *  7. POST 段的 body 必须：是字符串、≤ MAX_REQUEST_BODY_BYTES、
- *     JSON.parse 出来是**普通对象**、顶层键是 plan 声明的 bodyKeys 的**子集**、
- *     每个值只能是 string/number/boolean/null（不许嵌套对象或数组），
- *     Content-Type 必须逐字等于 plan 声明的那一个。
- * 任何一条不满足就拒绝并回错，绝不代发。
+ * ## Self-imposed limits (content-script side; see checkBackfillRequest /
+ * ## serveBackfillFetch)
+ *  1. **Same origin only**: the request URL's origin must equal the page's own
+ *     origin, character for character.
+ *  2. **Only origins in the platform table.**
+ *  3. **Only platforms that have written a plan of their own** (C22).
+ *  4. **Only the backfill leg's own two paths** (conversation list / conversation body).
+ *  --- 🔴 C23 added three more: the channel can send POST now, so the allowlist
+ *  --- has to grow the method/body dimensions with it
+ *  5. the method must be in the **closed set** ALLOWED_BACKFILL_METHODS **and** must
+ *     equal, character for character, the one the plan declared for this segment
+ *     (expectedMethodFor). A POST on a segment the plan says is GET ⇒ refused, and
+ *     vice versa. **The request does not get a say.**
+ *  6. a GET segment **may not carry a body or a Content-Type at all**;
+ *  7. a POST segment's body must be: a string, ≤ MAX_REQUEST_BODY_BYTES, parse as a
+ *     **plain object** under JSON.parse, have top-level keys that are a **subset**
+ *     of the plan's declared bodyKeys, hold only string/number/boolean/null values
+ *     (no nested objects or arrays), and its Content-Type must equal the plan's
+ *     exactly.
+ * Failing any one of these refuses the request with an error; never send it anyway.
  *
- * ## 🔴 为什么这还不是「通用代理」
- * 见 checkBackfillRequest 头上的那段说明：可变的只剩下【一个闭集里的键】
- * 对应的【原始标量值】，而 URL、源、路径、方法、结构、体量全部被钉死。
+ * ## 🔴 Why this is still not a "general-purpose proxy"
+ * See the note above checkBackfillRequest: the only thing left variable is the
+ * **raw scalar value** of a key **inside one closed set**, while the URL, the
+ * origin, the path, the method, the structure and the size are all pinned.
  */
 
 import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
@@ -64,16 +77,16 @@ import {
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
 
-/** background → 内容脚本：帮我取这个 URL。 */
+/** background → content script: fetch this URL for me. */
 export const BACKFILL_FETCH_MESSAGE = 'cs-backfill-fetch';
-/** background → 内容脚本：你还活着吗（用来如实回答 Popup 的 transportWired）。 */
+/** background → content script: are you still alive (used to answer the popup's transportWired faithfully). */
 export const BACKFILL_PING_MESSAGE = 'cs-backfill-ping';
-/** 内容脚本 → background：我在某个平台页面上活着，tab id 由 sender 带来。 */
+/** content script → background: I am alive on a platform page; the tab id comes with the sender. */
 export const BACKFILL_TAB_HELLO_MESSAGE = 'cs-backfill-tab-hello';
 
-/** 活着的平台标签页登记表。cs_* 前缀同族，不新增权限。 */
+/** The registry of live platform tabs. Same cs_* prefix family; no new permission. */
 export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
-/** 登记表最多留几条。够覆盖"同时开着几个平台"，又不会无限长。 */
+/** How many rows the registry keeps. Enough to cover "a few platforms open at once", without growing without bound. */
 export const MAX_TAB_ENTRIES = 12;
 
 export interface TabEntry {
@@ -91,9 +104,11 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * 🔴 C23：消息现在可以带 method/body/contentType 三个**可选**字段。
- *    这里只做「形状认不认」的最浅判断，**真正的准入在 checkBackfillRequest**。
- *    三个字段都不带 ⇒ 与 C22 的消息逐字相同 ⇒ 走 GET 那条老路。
+ * 🔴 C23: a message can now carry three **optional** fields, method/body/contentType.
+ *    This does only the shallowest "is the shape recognisable" test; **the real
+ *    admission check is in checkBackfillRequest**.
+ *    With none of the three present the message is byte-identical to C22's ⇒ the old
+ *    GET route.
  */
 export function isBackfillFetchRequest(
   v: unknown,
@@ -101,7 +116,7 @@ export function isBackfillFetchRequest(
   return isRecord(v) && v.type === BACKFILL_FETCH_MESSAGE && typeof v.url === 'string';
 }
 
-/** 把一条消息读成请求描述。非字符串的字段一律当成"没给"，交给白名单去拒。 */
+/** Read a message as a request description. Any non-string field counts as "not given" and is left to the allowlist to refuse. */
 function specFromMessage(m: { url: string; method?: unknown; body?: unknown; contentType?: unknown }): BackfillRequestSpec {
   return {
     url: m.url,
@@ -119,7 +134,7 @@ export function isTabHello(v: unknown): v is { type: string; origin: string } {
   return isRecord(v) && v.type === BACKFILL_TAB_HELLO_MESSAGE && typeof v.origin === 'string';
 }
 
-/** 一次代发请求的完整描述。method 省略 ⇒ 'GET'（与 C22 的消息形状逐字兼容）。 */
+/** The complete description of one sent-on-behalf request. Omitted method ⇒ 'GET' (byte-compatible with C22's message shape). */
 export interface BackfillRequestSpec {
   url: string;
   method?: string;
@@ -128,61 +143,71 @@ export interface BackfillRequestSpec {
 }
 
 /**
- * 🔴 C22 就存在的那句拒绝理由，**逐字保留**。
- * 它是回给 background 的 wire 值（tests/c19-runit.test.ts:433 在断言它），
- * 所以 URL 这一维的四条检查全部沿用它 —— 向后兼容不打折。
- * 更细的分类只进日志（verdict.detail），不改 wire。
+ * 🔴 The refusal reason that existed as of C22, **kept character for character**.
+ * It is the wire value returned to background (tests/c19-runit.test.ts:433 asserts
+ * it), so all four of the URL dimension's checks reuse it — back-compat is not
+ * discounted.
+ * Finer classification only reaches the log (verdict.detail) and does not change
+ * the wire.
  */
 export const REFUSED_URL_REASON = 'refused: url is not a same-origin backfill endpoint';
 
 export type RequestVerdict =
   | { ok: true; url: string; method: BackfillMethod; body?: string; contentType?: string }
-  /** reason = 回给对端的（wire）；detail = 只进日志的细分。 */
+  /** reason = what goes back to the other side (the wire); detail = the finer classification, log only. */
   | { ok: false; reason: string; detail: string };
 
-/** URL 这一维的拒绝：wire 值恒为 C22 那句，细分只进日志。 */
+/** A refusal on the URL dimension: the wire value is always C22's sentence; the finer classification is log only. */
 function refuseUrl(detail: string): { ok: false; reason: string; detail: string } {
   return { ok: false, reason: REFUSED_URL_REASON, detail };
 }
 
-/** 🔴 C23 新增的两维（method / body）：这些是新行为，可以有自己的 wire 理由。 */
+/** 🔴 C23's two new dimensions (method / body): these are new behaviour and may have their own wire reasons. */
 function refuseRequest(reason: string): { ok: false; reason: string; detail: string } {
   return { ok: false, reason, detail: reason };
 }
 
-/** plan 查表函数。生产恒为 backfillPlanFor；参数化只是为了能拿合成 plan 做断言。 */
+/** The plan lookup. Always backfillPlanFor in production; parameterised only so tests can assert against a synthetic plan. */
 export type PlanLookup = (platform: string) => BackfillEnumPlan | null;
 
-/** 请求 body 里允许出现的值类型：只有标量。不许嵌套对象/数组。 */
+/** The value types allowed in a request body: scalars only. No nested objects or arrays. */
 function isScalar(v: unknown): boolean {
   return v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
 }
 
 /**
- * 🔴 **C23 的安全落点。内容脚本敢不敢代发这一条请求。**
+ * 🔴 **C23's security landing point. Whether the content script dares send this one request.**
  *
- * ## 「GET 和 POST 在安全上不是一回事」这句话具体指什么
- * GET 只有 URL 一个自由度，而 URL 已经被同源 + 平台表 + 路径三重钉死。
- * POST 多了 body —— 一个**任意长度、任意结构、会被送到目标服务器**的字段。
- * 如果它不受约束，这个内容脚本就变成了「替我向 chatgpt.com 发任意 POST」的
- * 代理：拿着用户的登录 cookie，做用户没要求过的写操作。**那是不可接受的。**
+ * ## What "GET and POST are not the same thing, security-wise" actually means
+ * A GET has one degree of freedom, the URL, and the URL is already pinned three
+ * ways (same origin + platform table + path).
+ * A POST adds a body — a field of **arbitrary length and arbitrary structure that
+ * will be delivered to the target server**. If it were unconstrained, this content
+ * script would become a proxy for "send any POST to chatgpt.com on my behalf":
+ * holding the user's login cookies, performing writes the user never asked for.
+ * **That is unacceptable.**
  *
- * ## 因此 body 的自由度被压到这个程度
- *  · 谁能构造它：只有 plan 自己的 `spec.body()`（lib/backfill/enumerate.ts），
- *    engine 从来不接受外部传进来的 body（engine.ts 的 listRequestInit/detailRequestInit）；
- *  · 收到之后还要再验一遍：顶层键 ⊆ plan 声明的 bodyKeys（闭集），
- *    值只能是标量，整体 ≤ MAX_REQUEST_BODY_BYTES，Content-Type 必须逐字命中。
- *  · ⇒ 即使有人能往这个消息通道里塞东西，他能改的**只剩下闭集里那几个键的标量值**
- *    （对 Kimi 那种 plan 而言就是「翻页游标写成别的数」）。他不能换 URL、
- *    不能换源、不能换路径、不能换方法、不能加键、不能塞嵌套结构、不能塞大 payload。
+ * ## So the body's freedom is squeezed down to this
+ *  · Who can build it: only the plan's own `spec.body()` (lib/backfill/enumerate.ts).
+ *    The engine never accepts a body passed in from outside (engine.ts's
+ *    listRequestInit/detailRequestInit).
+ *  · Once received it is checked again: top-level keys ⊆ the plan's declared
+ *    bodyKeys (a closed set), values scalars only, the whole thing ≤
+ *    MAX_REQUEST_BODY_BYTES, and the Content-Type must match exactly.
+ *  · ⇒ Even if someone could stuff something into this message channel, the only
+ *    thing they could change is **the scalar value of one key inside the closed
+ *    set** (for a plan like Kimi's, "spell the page cursor as a different number").
+ *    They cannot change the URL, the origin, the path or the method, cannot add a
+ *    key, and cannot smuggle in a nested structure or a large payload.
  *
- * ## 谁能塞进来（判据 4 的正面回答）
- * 这个函数只被 `browser.runtime.onMessage` 那条路径调用
- *（entrypoints/dw-bridge.content.ts:161-176）。**页面 JS 够不着它**：
- * `browser.runtime` 只存在于 ISOLATED world，页面拿不到；manifest 里也没有
- * `externally_connectable`，所以任何网站都不能 sendMessage 进来。
- * 页面唯一能碰到的入口是同文件里的 `window.addEventListener('message')`，
- * 那条路径只产出 `chat-captured`，**与代发请求完全不相通**。
+ * ## Who can stuff something in (the direct answer to criterion 4)
+ * This function is called only from the `browser.runtime.onMessage` path
+ * (entrypoints/dw-bridge.content.ts:161-176). **Page JS cannot reach it**:
+ * `browser.runtime` exists only in the ISOLATED world and the page cannot obtain
+ * it, and the manifest has no `externally_connectable`, so no website can
+ * sendMessage in. The only entry point a page can touch is
+ * `window.addEventListener('message')` in the same file, and that path only
+ * produces `chat-captured`, which is **entirely separate from sending requests**.
  */
 export function checkBackfillRequest(
   spec: BackfillRequestSpec,
@@ -195,24 +220,25 @@ export function checkBackfillRequest(
   } catch {
     return refuseUrl('url is not parseable');
   }
-  if (u.origin !== pageOrigin) {                        // 1 · 同源
+  if (u.origin !== pageOrigin) {                        // 1 · same origin
     return refuseUrl('url is not same-origin with the page');
   }
-  const row = getPlatformByOrigin(u.origin);            // 2 · 在平台表里
+  const row = getPlatformByOrigin(u.origin);            // 2 · in the platform table
   if (!row) return refuseUrl('origin is not in the platform table');
-  const plan = lookup(row.id);                          // 3 · 这个平台真的能回溯
+  const plan = lookup(row.id);                          // 3 · this platform really can be backfilled
   if (!plan) return refuseUrl(`platform ${row.id} has no backfill plan`);
 
-  // 4 · 只有它自己的那两条路径 —— 顺便定下这是哪一段（决定了允许的方法/body）。
+  // 4 · Only its own two paths — which also settles which segment this is (deciding the permitted method/body).
   let segment: BackfillSegment;
   if (u.pathname === plan.listPath) segment = 'list';
-  // 🔴 C26：detailPath 可以是 null（列表段有出处、正文段还没有，DeepSeek 就是）。
-  //    null ⇒ 这个平台【没有】被放行的正文 URL。白名单不放宽，也不做前缀通配：
-  //    放行的仍然只有 plan 自己逐字写下来的那条路径。
+  // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
+  //    is not — DeepSeek). null ⇒ this platform has **no** permitted body URL. The
+  //    allowlist is not loosened and does no prefix wildcarding: what is permitted
+  //    is still only the path the plan itself wrote down, character for character.
   else if (plan.detailPath !== null && u.pathname.startsWith(plan.detailPath)) segment = 'detail';
   else return refuseUrl('path is not a backfill endpoint');
 
-  // 5 · method：先过闭集，再必须逐字等于 plan 为这一段声明的那一个。
+  // 5 · method: the closed set first, then it must equal the plan's declared one for this segment exactly.
   const method = spec.method ?? 'GET';
   if (!(ALLOWED_BACKFILL_METHODS as readonly string[]).includes(method)) {
     return refuseRequest(`refused: method ${sanitiseMethod(method)} is not in the allowed set`);
@@ -224,7 +250,7 @@ export function checkBackfillRequest(
 
   const post = postSpecFor(plan, segment);
   if (!post) {
-    // 6 · GET 段：一律不许带 body / Content-Type。
+    // 6 · A GET segment: no body or Content-Type at all.
     if (spec.body !== undefined) return refuseRequest('refused: GET request must not carry a body');
     if (spec.contentType !== undefined) {
       return refuseRequest('refused: GET request must not carry a content-type');
@@ -232,7 +258,7 @@ export function checkBackfillRequest(
     return { ok: true, url: spec.url, method: 'GET' };
   }
 
-  // 7 · POST 段的 body 闭集校验。
+  // 7 · The closed-set validation of a POST segment's body.
   if (typeof spec.body !== 'string') return refuseRequest('refused: POST request has no string body');
   if (new TextEncoder().encode(spec.body).byteLength > MAX_REQUEST_BODY_BYTES) {
     return refuseRequest('refused: request body exceeds MAX_REQUEST_BODY_BYTES');
@@ -241,7 +267,7 @@ export function checkBackfillRequest(
     return refuseRequest('refused: content-type is not the one declared by the plan');
   }
   if (!(ALLOWED_BACKFILL_CONTENT_TYPES as readonly string[]).includes(spec.contentType)) {
-    // plan 自己也不许声明闭集之外的 Content-Type。双保险：表写错了也发不出去。
+    // A plan is not allowed to declare a Content-Type outside the closed set either. Belt and braces: a mistyped table still cannot send.
     return refuseRequest('refused: content-type is not in the allowed set');
   }
   let parsed: unknown;
@@ -256,7 +282,7 @@ export function checkBackfillRequest(
   const allowedKeys = new Set(post.bodyKeys);
   for (const [key, value] of Object.entries(parsed)) {
     if (!allowedKeys.has(key)) {
-      // 🔴 只回「有个键不在闭集里」，不回键名本身：键名可能被塞进来当外泄载体。
+      // 🔴 Return only "a key is outside the closed set", never the key name itself: a key name could be stuffed in as a smuggling vector.
       return refuseRequest('refused: request body has a key outside the declared allow-list');
     }
     if (!isScalar(value)) {
@@ -266,15 +292,17 @@ export function checkBackfillRequest(
   return { ok: true, url: spec.url, method: 'POST', body: spec.body, contentType: spec.contentType };
 }
 
-/** 拒绝理由里回显 method 时先截短 —— 免得一个超长字符串被原样带进日志。 */
+/** Truncate the method before echoing it in a refusal reason, so an over-long string is not carried into the log verbatim. */
 function sanitiseMethod(method: string): string {
   return method.length > 16 ? `${method.slice(0, 16)}…` : method;
 }
 
 /**
- * 🔴 C22 留下的 URL 白名单，语义不变：**这个 URL 能不能用它那一段的默认方式发出去。**
- * 现在实现为 checkBackfillRequest 的一个特例（不传 method ⇒ 'GET'），
- * 于是「URL 白名单」和「method/body 白名单」不可能各说各话 —— 只有一份判断。
+ * 🔴 The URL allowlist C22 left behind, with unchanged semantics: **can this URL be
+ * sent with its segment's default method?**
+ * It is now a special case of checkBackfillRequest (no method ⇒ 'GET'), so the "URL
+ * allowlist" and the "method/body allowlist" cannot tell different stories — there
+ * is only one decision.
  */
 export function isAllowedBackfillUrl(url: string, pageOrigin: string): boolean {
   return checkBackfillRequest({ url }, pageOrigin).ok;
@@ -286,9 +314,11 @@ export type FetchLike = (
 ) => Promise<{ status: number; text: () => Promise<string> }>;
 
 /**
- * 内容脚本侧的取数实现。**这段代码跑在用户已登录的那个页面的上下文里。**
- * 任何失败都变成 `{ok:false}`，绝不把异常抛回消息通道（抛出去会变成一句
- * 看不懂的 "Could not establish connection"）。
+ * The content-script-side fetch. **This code runs in the context of the page the
+ * user is logged into.**
+ * Every failure becomes `{ok:false}`; an exception is never thrown back into the
+ * message channel (throwing would surface as an incomprehensible "Could not
+ * establish connection").
  */
 export async function serveBackfillFetch(
   request: string | BackfillRequestSpec,
@@ -296,13 +326,14 @@ export async function serveBackfillFetch(
   fetchImpl: FetchLike,
   lookup: PlanLookup = backfillPlanFor,
 ): Promise<BackfillFetchReply> {
-  // 字符串形态是 C22 的调用方式，保留：等价于「这个 URL，用它那一段的默认方法」。
+  // The string form is C22's calling convention, kept: equivalent to "this URL, with its segment's default method".
   const spec: BackfillRequestSpec = typeof request === 'string' ? { url: request } : request;
   const verdict = checkBackfillRequest(spec, pageOrigin, lookup);
   if (!verdict.ok) {
-    // 🔴 留痕：拒发也要说得出口，而且与「取数失败」走同一个回错通道
-    //    （{ok:false} → tabHttpPort throw → engine halt('transport-error') 落盘）。
-    //    只打技术理由，绝不打 URL / body / 正文。
+    // 🔴 A trace: a refusal has to be sayable too, and it goes through the same
+    //    error channel as a failed fetch ({ok:false} → tabHttpPort throw → the
+    //    engine persists halt('transport-error')). Only the technical reason is
+    //    logged — never the URL, body or conversation body.
     console.warn(`[chat-stasher] backfill fetch refused: ${verdict.detail}`);
     return { ok: false, error: verdict.reason };
   }
@@ -310,23 +341,24 @@ export async function serveBackfillFetch(
     const init: BackfillRequestInit = verdict.method === 'POST'
       ? { method: 'POST', body: verdict.body, contentType: verdict.contentType as BackfillRequestInit['contentType'] }
       : { method: 'GET' };
-    // 🔴 GET 段逐字维持 C22 的调用：只传 url，一个参数都不多传。
+    // 🔴 A GET segment keeps C22's call byte for byte: pass the url only, not one argument more.
     const res = verdict.method === 'GET' ? await fetchImpl(verdict.url) : await fetchImpl(verdict.url, init);
     const text = await res.text();
     if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
-      // 与实时腿同一条尺寸红线：过大的响应不是会话 JSON。
+      // The same size red line as the live leg: an over-large response is not conversation JSON.
       return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
     }
     return { ok: true, status: res.status, text };
   } catch (err) {
-    // 只回技术细节，绝不回正文。
+    // Only the technical detail goes back, never the body.
     return { ok: false, error: (err as Error).message };
   }
 }
 
 /**
- * 内容脚本的消息入口。返回 null 表示「这条消息不是给我的」，
- * 调用方就该让给别的监听器。把它抽成纯函数是为了能在 node 里测。
+ * The content script's message entry point. Returning null means "this message is
+ * not for me" and the caller should pass it to the other listeners. It is a pure
+ * function so that it can be tested under node.
  */
 export function handleBackfillMessage(
   message: unknown,
@@ -344,14 +376,15 @@ export function handleBackfillMessage(
 export type TabSend = (tabId: number, message: unknown) => Promise<unknown>;
 
 /**
- * 把「某个活着的平台标签页」包成 engine 认得的 HttpPort。
- * 🔴 失败一律 throw：engine 会 halt('transport-error') 并留痕，
- *    绝不会静默地当成"取到了空数据"。
+ * Wrap "one live platform tab" into the HttpPort the engine understands.
+ * 🔴 Every failure throws: the engine halts with 'transport-error' and leaves a
+ *    trace, and never silently treats it as "fetched empty data".
  */
 export function tabHttpPort(tabId: number, send: TabSend): HttpPort {
   return async (url: string, init?: BackfillRequestInit): Promise<HttpResponse> => {
-    // 🔴 向后兼容的落点：GET 且无 body ⇒ 发出去的消息**逐字**还是 `{type, url}`，
-    //    一个字段都不多。C22 那条 ChatGPT 路径在线上看到的东西完全没变。
+    // 🔴 The back-compat landing point: GET with no body ⇒ the message sent is
+    //    **byte for byte** still `{type, url}`, not one field more. What C22's
+    //    ChatGPT path sees on the wire is completely unchanged.
     const message = !init || (init.method === 'GET' && init.body === undefined)
       ? { type: BACKFILL_FETCH_MESSAGE, url }
       : { type: BACKFILL_FETCH_MESSAGE, url, method: init.method, body: init.body, contentType: init.contentType };
@@ -370,12 +403,14 @@ export function tabHttpPort(tabId: number, send: TabSend): HttpPort {
 }
 
 // ---------------------------------------------------------------------------
-// 活着的标签页登记表
+// The registry of live tabs
 //
-// 为什么需要它：闹钟醒来时 SW 是【全新的】，没有任何内存态，也不知道用户
-// 现在开着哪些页面。内容脚本每次加载都会报一次到（sender.tab.id 由浏览器填，
-// 不需要 'tabs' 权限），background 把它记进 storage.local。闹钟醒来时按这张表
-// 去 ping；ping 不通（标签页已经关了）就当作没有端口 —— 表会自己收敛。
+// Why it is needed: when the alarm wakes, the SW is **brand new** with no in-memory
+// state and no idea which pages the user has open. The content script checks in once
+// on every load (sender.tab.id is filled in by the browser; no 'tabs' permission
+// needed), and background records it in storage.local. When the alarm wakes it pings
+// down this list; a ping that fails (the tab is closed) counts as no port — the
+// list converges on its own.
 // ---------------------------------------------------------------------------
 
 function isTabEntry(v: unknown): v is TabEntry {
@@ -392,7 +427,7 @@ export async function loadTabs(store: BackfillStore | null): Promise<TabEntry[]>
   return Array.isArray(raw) ? raw.filter(isTabEntry) : [];
 }
 
-/** 记一个（tabId 去重，最近的排最前）。 */
+/** Record one (deduplicated by tabId, most recent first). */
 export async function rememberTab(store: BackfillStore | null, entry: TabEntry): Promise<TabEntry[]> {
   if (!store) return [];
   const rest = (await loadTabs(store)).filter((t) => t.tabId !== entry.tabId);
@@ -408,8 +443,10 @@ export async function forgetTab(store: BackfillStore | null, tabId: number): Pro
 }
 
 /**
- * 挑一个真的还活着的标签页。`ping` 通不过就顺手把它从表里划掉。
- * origin = null 表示"任意平台都行"（Popup 问 transportWired 时用）。
+ * Pick one tab that is really still alive. A `ping` that does not go through gets
+ * it struck off the list along the way.
+ * origin = null means "any platform will do" (used when the popup asks for
+ * transportWired).
  */
 export async function pickLiveTab(
   store: BackfillStore | null,
@@ -422,7 +459,7 @@ export async function pickLiveTab(
       const reply = await ping(entry.tabId);
       if (isRecord(reply) && reply.ok === true) return entry;
     } catch {
-      // 标签页已经关了 / 内容脚本没在：不是错误，是常态。
+      // The tab is closed / the content script is not there: not an error, the normal case.
     }
     await forgetTab(store, entry.tabId);
   }
