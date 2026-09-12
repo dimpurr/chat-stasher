@@ -3,7 +3,7 @@
 # This is a BINARY formula: Homebrew downloads a prebuilt binary from the
 # dimpurr/chat-stasher GitHub Release and installs it as-is. It does NOT build
 # from source. That is deliberate — see scripts/install.sh for the platform
-# story (darwin-arm64 is the only shipped target today).
+# story (darwin-arm64 and darwin-x86_64 are the shipped targets today).
 #
 # 🔴 URL + artifact names in this file MUST stay in sync with:
 #    - scripts/install.sh          (BASE_URL + ARTIFACT + VERSION)
@@ -30,9 +30,7 @@ class ChatStasher < Formula
       url "https://github.com/dimpurr/chat-stasher/releases/download/v0.2.0/chat-stasher-darwin-arm64"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # TODO(RELEASE): replace with real darwin-arm64 sha256
     else
-      # darwin-x86_64 is NOT shipped yet (scripts/install.sh only allows
-      # darwin-arm64). This branch exists so the formula is already correct the
-      # day the first Intel release lands; until then, filling this sha256 is
+      # darwin-x86_64 is shipped alongside darwin-arm64. Filling this sha256 is
       # part of that release.
       url "https://github.com/dimpurr/chat-stasher/releases/download/v0.2.0/chat-stasher-darwin-x86_64"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # TODO(RELEASE): replace with real darwin-x86_64 sha256 (when released)
