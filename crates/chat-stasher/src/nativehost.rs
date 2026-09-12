@@ -24,14 +24,35 @@
 //!   holds nine other manifests — so removal is by exact file name, and the
 //!   directory itself is never removed.
 //!
-//! Scope note: the stdio message loop itself is deliberately NOT implemented
-//! here. `native-host --self-test` is the verifiable stub that proves the host
-//! process starts and speaks one line of JSON; the framed loop is a later
-//! ticket.
+//! Scope note: the file also carries the **protocol v1 host itself** — frame
+//! codec, browser-launch detection and the one-request-one-response loop of
+//! `contracts/nativehost-protocol.md`. That document names this file
+//! explicitly ("Changing this file requires changing that document,
+//! `apps/extension/lib/native-host.ts` and
+//! `crates/chat-stasher/src/nativehost.rs` together"), so the host lives here
+//! rather than in a module of its own.
+//!
+//! The framing rules that decide the shape of everything below:
+//!
+//! * **stdout carries the response frame and nothing else.** Every diagnostic
+//!   goes to stderr; one stray byte on stdout is read by the browser as part
+//!   of a `u32` length prefix and kills the pipe.
+//! * **The length prefix is checked before anything is allocated.** A prefix
+//!   over 64 MiB is answered `nack too-large` without reading the body — the
+//!   point of the cap is not to politely refuse a large message, it is to
+//!   refuse to *allocate* what a hostile or broken peer claims to be sending.
+//! * **EOF inside a frame is not a message.** If the header or the body ends
+//!   early there is nothing to answer and nothing is written; the process
+//!   exits non-zero so a caller cannot read silence as a successful delivery.
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+use crate::config::Config;
+use crate::inbox;
 
 /// The host name browsers look up, and the manifest file stem.
 ///
@@ -552,9 +573,9 @@ pub fn apply_registry(command: &RegistryCommand) -> Result<()> {
 
 /// The single line `native-host --self-test` prints.
 ///
-/// One line, on stdout, then exit. It exists so that "the host process starts
-/// and can speak" is verifiable *before* the framed stdio loop is written —
-/// and so the next ticket has a fixed thing to regress against. Diagnostics
+/// One line, on stdout, then exit. It proves "the host process starts and can
+/// speak" without sending a request frame; `message_loop` states how the real
+/// loop runs (one request per process, `nativehost-protocol.md` §2). Diagnostics
 /// must never go to stdout: Chromium reads stdout as a `u32` length prefix, so
 /// a stray log line is parsed as a multi-gigabyte frame and the pipe dies.
 pub fn self_test_line(host_name: &str, version: &str) -> String {
@@ -563,10 +584,668 @@ pub fn self_test_line(host_name: &str, version: &str) -> String {
         "version": version,
         "protocol": HOST_TYPE,
         "mode": "self-test",
-        "message_loop": "not-implemented",
+        "message_loop": "one-request-per-process",
         "ok": true,
     });
     value.to_string()
+}
+
+// ===========================================================================
+// Protocol v1 — frames
+// ===========================================================================
+
+/// The protocol version this build implements. `nativehost-protocol.md` §9:
+/// a new version is a new document section, never an edit to this one.
+pub const PROTOCOL: u32 = 1;
+
+/// The versions a `nack protocol-version` advertises (§9).
+pub const SUPPORTED_PROTOCOL: [u32; 1] = [PROTOCOL];
+
+/// Largest request frame the host will accept (§2).
+///
+/// This is *our* cap, not the browser's: Chrome refuses to send more than
+/// 64 MiB, Firefox allows 4 GB. A host that trusted the browser here would
+/// allocate whatever a broken or hostile peer claimed.
+pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Largest response frame the browser will accept (§2). The length prefix
+/// counts against it too, so the JSON body gets four bytes less.
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// `detail` is truncated to this many bytes (§2).
+pub const DETAIL_CAP: usize = 4096;
+
+/// What the host reports for `hello.host_version`.
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Marker appended to a `detail` that hit [`DETAIL_CAP`], so a reader can tell
+/// a short message from the head of a long one.
+const TRUNCATION_MARK: &str = " [truncated]";
+
+/// What one read of a request frame produced.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestFrame {
+    /// A complete frame's body.
+    Frame(Vec<u8>),
+    /// The length prefix claimed more than [`MAX_REQUEST_BYTES`]. Nothing was
+    /// allocated for the body and none of it was read.
+    TooLarge { declared: u64 },
+    /// EOF before a whole frame arrived — inside the header or inside the body.
+    /// There is no message here to answer, and answering anyway would tell the
+    /// caller something it cannot know.
+    Truncated,
+}
+
+/// Read exactly one length-prefixed frame (§2).
+///
+/// `read` is allowed to return short reads — a pipe very often does — so both
+/// the header and the body are filled in a loop. `read_exact` would do the
+/// filling but reports a short read as `UnexpectedEof` with the partial bytes
+/// lost, and the three outcomes here have to stay three outcomes.
+pub fn read_request_frame<R: Read>(reader: &mut R) -> std::io::Result<RequestFrame> {
+    let mut header = [0u8; 4];
+    let mut filled = 0usize;
+    while filled < header.len() {
+        let read = reader.read(&mut header[filled..])?;
+        if read == 0 {
+            return Ok(RequestFrame::Truncated);
+        }
+        filled += read;
+    }
+    let declared = u64::from(u32::from_ne_bytes(header));
+    if declared > MAX_REQUEST_BYTES {
+        // Deliberately before the allocation below, and before any read of the
+        // body: the whole point of the cap is to refuse to allocate what the
+        // peer claims to be sending.
+        return Ok(RequestFrame::TooLarge { declared });
+    }
+    let mut body = vec![0u8; declared as usize];
+    let mut filled = 0usize;
+    while filled < body.len() {
+        let read = reader.read(&mut body[filled..])?;
+        if read == 0 {
+            return Ok(RequestFrame::Truncated);
+        }
+        filled += read;
+    }
+    Ok(RequestFrame::Frame(body))
+}
+
+/// Encode one response as a length-prefixed frame.
+///
+/// A response that would not fit in [`MAX_RESPONSE_BYTES`] is replaced by a
+/// minimal `nack io` rather than being written truncated: a truncated frame is
+/// not a shorter answer, it is an unparseable one, and the browser would report
+/// it as a protocol failure with no way to tell it from a crash. The fields
+/// that could grow are already bounded (`detail` by [`DETAIL_CAP`], so this is
+/// a backstop, not a normal path).
+pub fn encode_response_frame(response: &serde_json::Value) -> std::io::Result<Vec<u8>> {
+    let mut json = to_frame_json(response)?;
+    if 4 + json.len() > MAX_RESPONSE_BYTES {
+        eprintln!(
+            "native-host: response of {} bytes exceeds the {} byte frame cap; sending a nack instead",
+            json.len(),
+            MAX_RESPONSE_BYTES
+        );
+        json = to_frame_json(&oversize_nack())?;
+    }
+    let mut out = Vec::with_capacity(4 + json.len());
+    out.extend_from_slice(&(json.len() as u32).to_ne_bytes());
+    out.extend_from_slice(&json);
+    Ok(out)
+}
+
+/// Serialise one response object.
+///
+/// There is no fallback value here on purpose. A response is always built by
+/// this module from `json!` literals — no non-string map keys, no non-finite
+/// floats — so serialisation cannot fail; and if it somehow did, an empty body
+/// would be a *zero-length frame*, which the browser reads as a protocol error
+/// with no way to tell it from a crashed host. Reporting the failure and
+/// writing nothing is the only answer that stays true.
+fn to_frame_json(value: &serde_json::Value) -> std::io::Result<Vec<u8>> {
+    serde_json::to_vec(value).map_err(|e| std::io::Error::other(format!("serialise response: {e}")))
+}
+
+/// The response used when the real one does not fit. Short by construction.
+fn oversize_nack() -> serde_json::Value {
+    nack(
+        None,
+        NackKind::Io,
+        "the response did not fit in one 1 MiB frame",
+    )
+}
+
+// ===========================================================================
+// Protocol v1 — messages
+// ===========================================================================
+
+/// Every way a request can be refused (§6.3). One variant per row of that
+/// table; the `nack` spelling is [`NackKind::slug`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NackKind {
+    ProtocolVersion,
+    BadRequest,
+    TooLarge,
+    Integrity,
+    InvalidBundle,
+    Config,
+    StageUnavailable,
+    Io,
+}
+
+impl NackKind {
+    /// The `kind` string, exactly as the schema enumerates it.
+    pub fn slug(self) -> &'static str {
+        match self {
+            NackKind::ProtocolVersion => "protocol-version",
+            NackKind::BadRequest => "bad-request",
+            NackKind::TooLarge => "too-large",
+            NackKind::Integrity => "integrity",
+            NackKind::InvalidBundle => "invalid-bundle",
+            NackKind::Config => "config",
+            NackKind::StageUnavailable => "stage-unavailable",
+            NackKind::Io => "io",
+        }
+    }
+
+    /// The other half of the same table. Retryable means "the same bytes sent
+    /// again may succeed"; it is a statement about the *cause*, not about how
+    /// sad the message sounds.
+    pub fn retryable(self) -> bool {
+        match self {
+            NackKind::Integrity | NackKind::StageUnavailable | NackKind::Io => true,
+            NackKind::ProtocolVersion
+            | NackKind::BadRequest
+            | NackKind::TooLarge
+            | NackKind::InvalidBundle
+            | NackKind::Config => false,
+        }
+    }
+}
+
+/// Truncate a `detail` to [`DETAIL_CAP`] bytes without splitting a character.
+fn cap_detail(detail: String) -> String {
+    if detail.len() <= DETAIL_CAP {
+        return detail;
+    }
+    let mut end = DETAIL_CAP - TRUNCATION_MARK.len();
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = detail[..end].to_string();
+    out.push_str(TRUNCATION_MARK);
+    out
+}
+
+/// Build one `nack` message.
+fn nack(
+    request_id: Option<String>,
+    kind: NackKind,
+    detail: impl Into<String>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "protocol": PROTOCOL,
+        "type": "nack",
+        "request_id": request_id,
+        "kind": kind.slug(),
+        "retryable": kind.retryable(),
+        "detail": cap_detail(detail.into()),
+    });
+    if kind == NackKind::ProtocolVersion {
+        value["supported"] = serde_json::json!(SUPPORTED_PROTOCOL);
+    }
+    value
+}
+
+/// `hello` request body. Only the fields the protocol names; unknown extras are
+/// ignored rather than rejected, because §6.3's `bad-request` covers "missing
+/// or malformed field" and says nothing about fields the contract never
+/// mentions.
+#[derive(Debug, Deserialize)]
+struct DeliverRequest {
+    request_id: String,
+    name: String,
+    payload: String,
+    sha256: String,
+}
+
+/// `[A-Za-z0-9_-]{1,128}` (§6.2).
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// `[0-9a-f]{64}` (§6.2).
+fn valid_sha256(sha: &str) -> bool {
+    sha.len() == 64
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `^[a-z0-9]+-[^/\\]+\.json$` (§6.2).
+///
+/// Written by hand rather than with a regex crate: the grammar is four lines,
+/// and a hand-written predicate can be read against the contract in one
+/// sitting.
+fn valid_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".json") else {
+        return false;
+    };
+    let Some(dash) = stem.find('-') else {
+        return false;
+    };
+    let (head, tail) = stem.split_at(dash);
+    let tail = &tail[1..];
+    !head.is_empty()
+        && head
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && !tail.is_empty()
+        && !tail.contains('/')
+        && !tail.contains('\\')
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Where the host would write, and as which machine — or why it cannot.
+enum HostTarget {
+    Ready { machine: String, stage: PathBuf },
+    Refused { kind: NackKind, detail: String },
+}
+
+/// Resolve the config and the stage exactly as `ingest` resolves the machine
+/// (§4), then check the stage without ever creating it.
+///
+/// The three ways this can fail are three different user actions, so they are
+/// three different answers: no key at all (`config`, fix with the install
+/// command), a config that could not be read or parsed (`config`, fix the
+/// file), and a configured path that is not a directory
+/// (`stage-unavailable`, recreate it or re-point the key).
+fn resolve_target() -> HostTarget {
+    let refused = |kind: NackKind, detail: String| HostTarget::Refused { kind, detail };
+
+    let config = Config::load();
+    if config.source.is_error_fallback() {
+        return refused(
+            NackKind::Config,
+            format!(
+                "the config file {} could not be read or parsed, so no stage is configured; \
+                 fix it, then re-run `chat-stasher install-native-host --stage <path>`",
+                crate::config::config_path().display()
+            ),
+        );
+    }
+    let declared = config
+        .native_host
+        .as_ref()
+        .and_then(|section| section.stage.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(declared) = declared else {
+        return refused(
+            NackKind::Config,
+            format!(
+                "no `[native_host] stage` in {}; fix with: \
+                 chat-stasher install-native-host --stage <path>",
+                crate::config::config_path().display()
+            ),
+        );
+    };
+    let stage = PathBuf::from(declared);
+    if !stage.is_absolute() {
+        // The browser chooses the host's working directory, so a relative
+        // value means a different stage depending on who started us.
+        return refused(
+            NackKind::Config,
+            format!(
+                "`[native_host] stage` is not an absolute path ({declared}); fix with: \
+                 chat-stasher install-native-host --stage <absolute path>"
+            ),
+        );
+    }
+
+    let machine = match resolve_machine(&config) {
+        Ok(machine) => machine,
+        Err(detail) => return refused(NackKind::Config, detail),
+    };
+
+    // Read-only: existence and kind are both checked, and neither is created.
+    match fs::metadata(&stage) {
+        Ok(meta) if meta.is_dir() => HostTarget::Ready { machine, stage },
+        Ok(_) => refused(
+            NackKind::StageUnavailable,
+            format!("stage {} exists but is not a directory", stage.display()),
+        ),
+        Err(e) => refused(
+            NackKind::StageUnavailable,
+            format!("stage {} is not usable: {e}", stage.display()),
+        ),
+    }
+}
+
+/// The machine id: an explicit config value wins, otherwise the persisted
+/// 128-bit identity.
+///
+/// Unlike every CLI command, the host never *creates* the identity. The host
+/// is started by the browser, not by the user's shell, so it does not see
+/// environment variables a shell profile sets (such as `XDG_DATA_HOME`). If the
+/// CLI's identity lives under such a variable, the host would find nothing at
+/// the default path and mint a second identity, and every delivered shard
+/// would land in a different machine's archive partition without a word. A
+/// missing identity is therefore a `config` refusal that names the fix,
+/// exactly like a missing stage.
+fn resolve_machine(config: &Config) -> std::result::Result<String, String> {
+    if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
+        return Ok(machine.to_string());
+    }
+    let path = crate::config::default_data_root().join("machine-identity");
+    match crate::identity::load_identity_state(&path) {
+        crate::identity::IdentityFileState::Loaded(id) => Ok(id.as_hex()),
+        crate::identity::IdentityFileState::Missing => Err(format!(
+            "no machine identity at {}; the host never creates one. Run any archiving command \
+             once from your shell (for example `chat-stasher run-once ...`), or set `machine` \
+             in {}. If your shell sets XDG_DATA_HOME, the browser does not see it: set \
+             `machine` in the config instead",
+            path.display(),
+            crate::config::config_path().display()
+        )),
+        crate::identity::IdentityFileState::Unusable(error) => Err(format!(
+            "machine identity file {} is present but unusable ({error:?}); do not delete it — \
+             it is the key to this machine's archive partition",
+            path.display()
+        )),
+    }
+}
+
+/// Answer one request frame. Never touches stdout; the caller frames the result.
+pub fn respond(frame: &[u8]) -> serde_json::Value {
+    let request: serde_json::Value = match serde_json::from_slice(frame) {
+        Ok(value) => value,
+        Err(e) => {
+            return nack(
+                None,
+                NackKind::BadRequest,
+                format!("request is not JSON: {e}"),
+            )
+        }
+    };
+    if !request.is_object() {
+        return nack(
+            None,
+            NackKind::BadRequest,
+            "request is not a JSON object".to_string(),
+        );
+    }
+
+    // Only echoed when it already satisfies the schema, so a malformed value
+    // cannot make the `nack` itself fail schema validation.
+    let echoed_id = request
+        .get("request_id")
+        .and_then(|value| value.as_str())
+        .filter(|id| valid_request_id(id))
+        .map(str::to_string);
+
+    match request.get("protocol").and_then(|value| value.as_u64()) {
+        Some(version) if version == u64::from(PROTOCOL) => {}
+        _ => {
+            return nack(
+                echoed_id,
+                NackKind::ProtocolVersion,
+                format!("this host implements protocol {PROTOCOL} only"),
+            );
+        }
+    }
+
+    match request.get("type").and_then(|value| value.as_str()) {
+        Some("hello") => hello(echoed_id),
+        Some("deliver") => deliver(request, echoed_id),
+        Some(other) => nack(
+            echoed_id,
+            NackKind::BadRequest,
+            format!("unknown message type {other:?}"),
+        ),
+        None => nack(
+            echoed_id,
+            NackKind::BadRequest,
+            "request has no `type`".to_string(),
+        ),
+    }
+}
+
+/// `hello` — is the host there, and where does it write?
+///
+/// It resolves the config, the machine and the stage exactly as `deliver` does,
+/// so an `ok` here is a statement about the next `deliver`, not a heartbeat.
+fn hello(request_id: Option<String>) -> serde_json::Value {
+    match resolve_target() {
+        // A `hello` request carries no `request_id` in the schema, so the
+        // refusal carries `null` — the same answer as an unreadable one.
+        HostTarget::Refused { kind, detail } => nack(request_id, kind, detail),
+        HostTarget::Ready { machine, stage } => serde_json::json!({
+            "protocol": PROTOCOL,
+            "type": "hello",
+            "ok": true,
+            "host_version": HOST_VERSION,
+            "machine": machine,
+            // Verbatim from the config: canonicalising would resolve symlinks
+            // and report a path the user never wrote.
+            "stage": stage.to_string_lossy(),
+        }),
+    }
+}
+
+/// `deliver` — archive one bundle.
+fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let parsed: DeliverRequest = match serde_json::from_value(request) {
+        Ok(parsed) => parsed,
+        Err(e) => return nack(request_id, NackKind::BadRequest, e.to_string()),
+    };
+
+    if !valid_request_id(&parsed.request_id) {
+        return nack(request_id, NackKind::BadRequest, "malformed `request_id`");
+    }
+    if !valid_name(&parsed.name) {
+        return nack(request_id, NackKind::BadRequest, "malformed `name`");
+    }
+    if !valid_sha256(&parsed.sha256) {
+        return nack(request_id, NackKind::BadRequest, "malformed `sha256`");
+    }
+    let request_id = Some(parsed.request_id.clone());
+
+    // Recomputed over the UTF-8 bytes of the *decoded* payload, which is what
+    // makes the content hash identical across every channel.
+    let payload_sha = sha256_hex(parsed.payload.as_bytes());
+    if payload_sha != parsed.sha256 {
+        return nack(
+            request_id,
+            NackKind::Integrity,
+            "sha256 does not match the payload bytes",
+        );
+    }
+
+    let (machine, stage) = match resolve_target() {
+        HostTarget::Ready { machine, stage } => (machine, stage),
+        HostTarget::Refused { kind, detail } => return nack(request_id, kind, detail),
+    };
+
+    // `invalid-bundle` is the answer for a payload this channel cannot archive.
+    // `ingest` would keep such bytes as a raw-only record, because an inbox
+    // file is the user's own drop box; a delivery is machine-fed, and the
+    // protocol has a word for refusing it.
+    if let Err(detail) = inbox::check_bundle(parsed.payload.as_bytes()) {
+        return nack(request_id, NackKind::InvalidBundle, detail);
+    }
+
+    match inbox::seal_payload(
+        &parsed.name,
+        parsed.payload.as_bytes(),
+        &stage,
+        &machine,
+        crate::store::DEFAULT_SHARD_BUCKET_CAP,
+    ) {
+        Ok(inbox::SealOutcome::Stored(consumed)) => serde_json::json!({
+            "protocol": PROTOCOL,
+            "type": "ack",
+            "request_id": parsed.request_id,
+            "status": "stored",
+            "sha256": parsed.sha256,
+            "shard": consumed.shard,
+        }),
+        Ok(inbox::SealOutcome::Duplicate(existing)) => serde_json::json!({
+            "protocol": PROTOCOL,
+            "type": "ack",
+            "request_id": parsed.request_id,
+            "status": "duplicate",
+            "sha256": parsed.sha256,
+            "shard": existing.matched_shard,
+        }),
+        Err(inbox::SealError::Lock(e)) => {
+            nack(request_id, NackKind::StageUnavailable, format!("{e:#}"))
+        }
+        Err(inbox::SealError::Other(e)) => nack(request_id, NackKind::Io, format!("{e:#}")),
+    }
+}
+
+// ===========================================================================
+// Protocol v1 — how the host is started
+// ===========================================================================
+
+/// What this process was started as (§3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    /// An ordinary command line: parse it with clap as usual.
+    CommandLine,
+    /// A browser started us as its Native Messaging host.
+    Host,
+    /// A browser started us for an extension this build does not serve. The
+    /// origin is carried so the refusal can name it.
+    Foreign { origin: String },
+}
+
+/// Recognise a browser launch from the raw process arguments (§3).
+///
+/// `argv[0]` is the program name and is skipped. The two shapes are the two
+/// browser families and nothing else:
+///
+/// * Chromium passes the extension origin as the first argument, and on Windows
+///   appends `--parent-window=<n>`; the argument after the origin is ignored
+///   for exactly that reason.
+/// * Firefox passes the path of the host manifest we registered (always
+///   `*.json`) followed by the add-on id.
+///
+/// A `chrome-extension://` origin with any other id, and a Firefox-shaped
+/// launch for any other add-on, are both [`Launch::Foreign`]: the process was
+/// started to serve somebody, just not us.
+pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch {
+    let args: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let Some(first) = args.first() else {
+        return Launch::CommandLine;
+    };
+
+    if let Some(rest) = first.strip_prefix("chrome-extension://") {
+        let id = rest.split('/').next().unwrap_or("");
+        return if id == CHROME_EXTENSION_ID {
+            Launch::Host
+        } else {
+            Launch::Foreign {
+                origin: first.clone(),
+            }
+        };
+    }
+
+    if first.ends_with(".json") {
+        if let Some(addon) = args.get(1) {
+            return if addon == FIREFOX_EXTENSION_ID {
+                Launch::Host
+            } else {
+                Launch::Foreign {
+                    origin: addon.clone(),
+                }
+            };
+        }
+    }
+
+    Launch::CommandLine
+}
+
+// ===========================================================================
+// Protocol v1 — the one-request loop
+// ===========================================================================
+
+/// What one turn of the host produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOutcome {
+    /// One response frame was written. Success — including when that response
+    /// is a `nack`: the protocol was honoured, and `nack` is what it says.
+    Answered,
+    /// Nothing could be read at all. Nothing was written; the caller exits
+    /// non-zero (§2).
+    Unreadable,
+}
+
+/// Read one request, write one response (§2).
+pub fn serve_one<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> std::io::Result<HostOutcome> {
+    let response = match read_request_frame(reader)? {
+        RequestFrame::Frame(body) => respond(&body),
+        RequestFrame::TooLarge { declared } => nack(
+            None,
+            NackKind::TooLarge,
+            format!(
+                "length prefix {declared} exceeds the {MAX_REQUEST_BYTES} byte request cap; the body was not read"
+            ),
+        ),
+        RequestFrame::Truncated => return Ok(HostOutcome::Unreadable),
+    };
+    let frame = encode_response_frame(&response)?;
+    writer.write_all(&frame)?;
+    writer.flush()?;
+    Ok(HostOutcome::Answered)
+}
+
+/// Serve one request on the real stdin/stdout and report the process exit code.
+///
+/// This is the whole of host mode, shared by the browser launch and by the
+/// `native-host` subcommand, so manual testing exercises the same code the
+/// browser does.
+pub fn serve_stdin() -> std::process::ExitCode {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match serve_one(&mut stdin.lock(), &mut stdout.lock()) {
+        Ok(HostOutcome::Answered) => std::process::ExitCode::SUCCESS,
+        Ok(HostOutcome::Unreadable) => {
+            eprintln!(
+                "native-host: EOF before a whole request frame arrived (header or body was \
+                 truncated); nothing was written to stdout"
+            );
+            // 3 is this repository's "did not finish reading" code. The
+            // contract only asks for non-zero; using the code that already
+            // means "no conclusion can be drawn from the absence" keeps the
+            // host inside the CLI's existing vocabulary.
+            std::process::ExitCode::from(3)
+        }
+        Err(e) => {
+            eprintln!("native-host: cannot write the response frame: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]

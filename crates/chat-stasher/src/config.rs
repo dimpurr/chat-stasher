@@ -6,6 +6,7 @@
 //! reason other than "not there") is worth warning about, and even then we
 //! degrade to defaults rather than aborting a scan.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -156,6 +157,30 @@ pub struct Config {
     /// reaches a repository has to say **which** one, because picking one
     /// silently is exactly the failure this table exists to prevent.
     pub destinations: BTreeMap<String, DestinationConfig>,
+
+    /// Native Messaging host settings (ADR-025, protocol v1).
+    ///
+    /// The whole section is optional, and the one key inside it is optional
+    /// too: "no `[native_host] stage`" is a *fourth* state, distinct from
+    /// "declared but the path is gone". The host answers the first with `nack`
+    /// `config` and the second with `nack` `stage-unavailable`, because the fix
+    /// a user has to apply is different in each case.
+    pub native_host: Option<NativeHostConfig>,
+}
+
+/// The `[native_host]` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativeHostConfig {
+    /// Absolute path of the stage the browser-spawned host writes to.
+    ///
+    /// Written by `chat-stasher install-native-host --stage <path>`. It is an
+    /// absolute path on purpose: the browser starts the host with a working
+    /// directory it chooses, so a relative value would resolve against a
+    /// directory the user never named. The host never creates this directory —
+    /// a stage that appears because a host was pointed at it is a stage
+    /// nothing pushes.
+    pub stage: Option<String>,
 }
 
 /// One named destination. Fields left unset fall back to the same defaults the
@@ -178,6 +203,51 @@ pub struct DestinationConfig {
     pub cache_dir: Option<String>,
     /// Per-destination `rustic_no_cache` (overrides the singular field).
     pub no_cache: Option<bool>,
+}
+
+/// What [`Config::set_native_host_stage`] did to the file.
+///
+/// `Unchanged` is deliberately a distinct outcome from `Updated`: it is the
+/// only one that wrote no bytes, and a caller that prints "updated" for a
+/// no-op teaches the user not to believe the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageKeyWrite {
+    /// `[native_host] stage` was not in the file and is now.
+    Added,
+    /// It was there with a different value; `previous` is what it held.
+    Updated { previous: String },
+    /// It already held exactly this value. Nothing was written.
+    Unchanged,
+}
+
+/// Replace `path` with `bytes` through a temp file in the same directory plus a
+/// rename, so a reader — or a crash — sees either the old file or the new one,
+/// never a half-written one. The temp name is dot-prefixed and pid-suffixed:
+/// dot-prefixed because the config directory is not ours alone, pid-suffixed
+/// because two concurrent installs must not share a temp file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_string());
+    let tmp = dir.join(format!(".{stem}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Best effort, and said out loud when it fails: a stray dot-file
+            // left next to the user's config is debris this command is not
+            // supposed to leave behind.
+            if let Err(cleanup) = std::fs::remove_file(&tmp) {
+                eprintln!(
+                    "warning: could not remove temporary {}: {cleanup}",
+                    tmp.display()
+                );
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Decided default archive cadence: hourly.
@@ -274,6 +344,127 @@ impl Config {
         Ok(())
     }
 
+    /// Write `[native_host] stage = "<stage>"` into the config file, keeping
+    /// everything else in that file byte-identical.
+    ///
+    /// The config is a *hand-written* file — the shipped template is nothing
+    /// but comments — so a serde round-trip (`toml::to_string`) is not an
+    /// option: it would re-emit the file and delete every comment the user
+    /// wrote. `toml_edit` edits the parsed document in place and preserves
+    /// decor, ordering and comments.
+    ///
+    /// Three outcomes, three states, and the caller prints which one happened:
+    /// the key was absent and is now there, the key was there with a different
+    /// value and has been replaced (the old value is returned so it can be
+    /// shown), or the key already held exactly this value and **nothing was
+    /// written at all** — not even a rewrite of identical bytes, so a file the
+    /// user is editing is never touched by a no-op.
+    ///
+    /// A config file that exists but is not valid TOML is an error, never a
+    /// silent overwrite: the parse failure is the user's text, and replacing it
+    /// would delete whatever they were in the middle of writing.
+    pub fn set_native_host_stage(stage: &str) -> anyhow::Result<StageKeyWrite> {
+        let path = config_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Same first-run path `init` takes, reused rather than
+                // re-implemented, so the key lands in the documented template
+                // instead of in a one-line file of our own invention.
+                Config::init_default(DEFAULT_CONFIG_TEMPLATE)
+                    .with_context(|| format!("write default config {}", path.display()))?;
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", path.display()));
+            }
+        };
+        let mut doc: toml_edit::DocumentMut = raw
+            .parse()
+            .with_context(|| format!("parse {} as TOML", path.display()))?;
+
+        let previous = doc
+            .get("native_host")
+            .and_then(|section| section.get("stage"))
+            .and_then(|item| item.as_str())
+            .map(str::to_string);
+
+        let outcome = match &previous {
+            Some(old) if old == stage => return Ok(StageKeyWrite::Unchanged),
+            Some(old) => StageKeyWrite::Updated {
+                previous: old.clone(),
+            },
+            None => StageKeyWrite::Added,
+        };
+
+        // Appended as text rather than inserted through `toml_edit`.
+        //
+        // `DocumentMut::insert` places a new root-level table correctly only
+        // when the root already has a key-value pair. The shipped template has
+        // none — every line of it is a comment — so an insert there lands the
+        // table *above* the file's own header comment: the bytes are preserved,
+        // but the result is a file nobody would have written. Appending is
+        // deterministic in both shapes, and the result is re-parsed below
+        // before anything is written, so the format is still checked.
+        let appended: Option<String> = match doc.get_mut("native_host") {
+            Some(section) => match section.as_table_mut() {
+                Some(table) => {
+                    table.insert("stage", toml_edit::value(stage));
+                    None
+                }
+                // `native_host = 5`: saying so beats either silently replacing
+                // the user's value or panicking on an index.
+                None => anyhow::bail!(
+                    "{}: `native_host` is not a table, so `stage` cannot be set in it",
+                    path.display()
+                ),
+            },
+            None => {
+                let literal = toml_edit::Value::from(stage).to_string();
+                let mut next = raw.clone();
+                if !next.ends_with('\n') {
+                    next.push('\n');
+                }
+                next.push_str(&format!(
+                    "\n# ---------------------------------------------------------------- native_host\n\
+                     # Stage the browser-spawned Native Messaging host writes to.\n\
+                     # Written by `chat-stasher install-native-host --stage <path>`. The\n\
+                     # host never creates this directory; it refuses to run if it is gone.\n\
+                     [native_host]\nstage = {literal}\n"
+                ));
+                Some(next)
+            }
+        };
+        let updated = appended.unwrap_or_else(|| doc.to_string());
+
+        // The post-condition, checked rather than assumed: the text about to be
+        // written must parse, and must parse back to exactly the value asked
+        // for. Writing a config the tool cannot read would be worse than
+        // failing here, where the user's original file is still untouched.
+        let reparsed: toml_edit::DocumentMut = updated.parse().with_context(|| {
+            format!(
+                "the updated config for {} would not be valid TOML; nothing was written",
+                path.display()
+            )
+        })?;
+        if reparsed
+            .get("native_host")
+            .and_then(|section| section.get("stage"))
+            .and_then(|item| item.as_str())
+            != Some(stage)
+        {
+            anyhow::bail!(
+                "the updated config for {} would not read back the recorded stage; nothing was written",
+                path.display()
+            );
+        }
+
+        write_atomic(&path, updated.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(outcome)
+    }
+
     /// Expand every path-typed field in place. Fields whose `~` cannot be
     /// expanded (missing home, `~otheruser`) — or that still contain a literal
     /// `~` component after expansion — are *dropped to their default* (`None`,
@@ -294,6 +485,10 @@ impl Config {
         expand_opt_field("rustic_repo", &mut self.rustic_repo, problems);
         expand_opt_field("rustic_key_file", &mut self.rustic_key_file, problems);
         expand_opt_field("rustic_cache_dir", &mut self.rustic_cache_dir, problems);
+
+        if let Some(native_host) = self.native_host.as_mut() {
+            expand_opt_field("native_host.stage", &mut native_host.stage, problems);
+        }
 
         let mut bad_harness_roots: Vec<String> = Vec::new();
         for (id, root) in &mut self.harness_roots {
@@ -539,6 +734,20 @@ pub fn home_dir() -> PathBuf {
             ))
         }
     }
+}
+
+/// `$XDG_DATA_HOME/chat-stasher`, or `~/.local/share/chat-stasher`.
+///
+/// One definition for what had been three copies (the CLI's, `doctor`'s and the
+/// host's). They must agree exactly: this directory holds the machine identity
+/// file whose 128-bit value *is* this machine's archive partition, so a second
+/// spelling of the path would silently create a second identity and split the
+/// archive in two.
+pub fn default_data_root() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("chat-stasher");
+    }
+    home_dir().join(".local").join("share").join("chat-stasher")
 }
 
 /// The current user's home directory from the environment, when one is

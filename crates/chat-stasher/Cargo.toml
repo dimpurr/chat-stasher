@@ -25,9 +25,25 @@ sha2 = "0.11"
 zstd = "0.13"
 rayon = "1"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
+# Appended rather than inserted: `docs/threat-model.md` cites this table by
+# line (`Cargo.toml:20-21,27`) to name the pinned crates, and inserting in the
+# middle would move those lines onto whatever was written here — turning a
+# still-correct sentence into a wrong one without anybody editing it.
+#
+# `install-native-host --stage` has to add one key to a hand-written, heavily
+# commented config file. `toml` (a serde round-trip) would re-emit the file and
+# delete every comment the user wrote; `toml_edit` is the format-preserving
+# editor that keeps them. It is already in the lock file as `toml`'s own
+# parser, so this adds no new crate to the build graph — only a direct edge.
+toml_edit = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
+# The protocol tests have to compute the SHA-256 the extension would send, from
+# outside the crate: a test that reused an internal helper would be asserting
+# the implementation against itself. Same version as the normal dependency, so
+# this adds no package to the build graph.
+sha2 = "0.11"
 
 [profile.release]
 lto = true
