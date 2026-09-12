@@ -184,7 +184,7 @@ Two things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:96`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:261-296,977-1062`).
+kept on your machine (`crates/chat-stasher/src/store.rs:261-296,981-1066`).
 
 ## 4. Who your data is shared with
 
@@ -364,10 +364,10 @@ this is the normal situation; on a shared machine it is the dominant risk.
 **3. The master key is the only key, and losing it is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1102-1109,1064-1068`). The key file
+archive (`crates/chat-stasher/src/store.rs:1106-1113,1068-1072`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1144-1229`).
+(`crates/chat-stasher/src/store.rs:1148-1233`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension can read our downloaded files, observe the

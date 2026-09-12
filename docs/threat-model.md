@@ -66,7 +66,7 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:261-296,977-1062`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:146-162`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:261-296,981-1066`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:146-162`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
@@ -108,7 +108,7 @@ Concretely, four separate plaintext exposures:
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
    inside a parent directory tightened to `0700`
-   (`crates/chat-stasher/src/store.rs:1144-1229`); on platforms without Unix
+   (`crates/chat-stasher/src/store.rs:1148-1233`); on platforms without Unix
    modes it inherits whatever the filesystem gives it. That keeps it away from
    *other* users, not from you: any process running as you can read it and,
    combined with access to your destination, decrypt the entire archive.
@@ -265,14 +265,16 @@ there" when the truth is "we could not tell".**
 
 Two enforcement points exist in the code:
 
-- **`push` refuses an unprovable empty snapshot.** If the stage holds no sealed
-  shards, `push` audits consumed inbox files against the stage and the
+- **`push` refuses an unprovable empty snapshot.** If the stage holds neither
+  sealed shards nor machine metadata (a stage whose shards were all reclaimed
+  still carries its declaration and retained summaries, and pushing those is
+  not an empty snapshot), `push` audits consumed inbox files against the stage and the
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:4118-4210`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:4146-4239`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:4101-4108`).
+  (`crates/chat-stasher/src/main.rs:4118-4125`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -305,15 +307,15 @@ a real limitation of the current code.
 
 2. **The master key file is plaintext on disk.** It is not passphrase-wrapped
    and not kept in an OS keychain. On Unix it is created `0600` in a `0700`
-   parent (`crates/chat-stasher/src/store.rs:1144-1229`), which keeps it from
+   parent (`crates/chat-stasher/src/store.rs:1148-1233`), which keeps it from
    other users but not from anything running as you; on platforms without Unix
    modes it inherits the filesystem's defaults.
 
 3. **Lose the key file and the data is gone. We have no recovery mechanism of
    any kind.** The master key is the repository's only key
-   (`crates/chat-stasher/src/store.rs:1102-1104`); losing it makes the repository
+   (`crates/chat-stasher/src/store.rs:1106-1108`); losing it makes the repository
    unreadable, and `load_key_file` can only report the loss
-   (`crates/chat-stasher/src/store.rs:1231-1235`). There is no escrow, no
+   (`crates/chat-stasher/src/store.rs:1235-1239`). There is no escrow, no
    recovery code, no maintainer-held copy, and no password-reset path — by
    design, because any of those would mean someone other than you could open
    your archive. **Back up the key file separately from the repository, or your
@@ -325,7 +327,7 @@ a real limitation of the current code.
    (`crates/chat-stasher/src/main.rs:44-821`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:223-225,4188-4219`), and note that `read` therefore
+   (`crates/chat-stasher/src/main.rs:223-225,4216-4247`), and note that `read` therefore
    *is* a payload-output command — it prints conversation content. Restoring a
    whole archive is not something you can currently do with one command. If
    getting everything back in bulk matters to you, this is not ready for you

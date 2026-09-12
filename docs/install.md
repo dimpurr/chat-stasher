@@ -220,9 +220,9 @@ read the repository and key file you select in config or arguments
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1102-1104`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1106-1108`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1202-1210`).
+(`crates/chat-stasher/src/store.rs:1206-1214`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -249,12 +249,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:5679-5680`). This is the
+does not (`crates/chat-stasher/src/main.rs:5723-5724`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:5460-5461`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:5504-5505`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -270,7 +270,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:5670-5680`):
+(`crates/chat-stasher/src/main.rs:5714-5724`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -283,7 +283,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:5528-5535`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:5572-5579`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -316,7 +316,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1102-1109`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1106-1113`).
 
 - **History backfill takes days, not minutes.** The backfill leg's rate limit
   for fetching content is **at most 200 per day**, with at least 20 seconds

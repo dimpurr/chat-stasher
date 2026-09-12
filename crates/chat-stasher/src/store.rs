@@ -335,7 +335,11 @@ impl BackupStore {
         // assembled for machine A must never be snapshotted as machine B.
         validate_stage_machines(stage_root, &self.machine)?;
         let stage_shards = sealed_shard_count(stage_root)?;
-        if stage_shards == 0 {
+        // This guard used to refuse any shard-less stage: while readers looked only at the
+        // newest snapshot per machine, an empty snapshot made the machine look as if it
+        // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
+        // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
+        if stage_shards == 0 && !crate::metahash::has_meta_files(stage_root, &self.machine)? {
             anyhow::bail!(
                 "refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
             );

@@ -3348,9 +3348,26 @@ fn run_once_pass(
         }
     };
     state.stage_shards = stage_shards;
-    let changed = report.changed_records > 0 || report.shards_written > 0;
+    // This guard used to refuse any shard-less stage: while readers looked only at the
+    // newest snapshot per machine, an empty snapshot made the machine look as if it
+    // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
+    // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
+    let (has_content, changed) = match chat_stasher::metahash::evaluate_run_once_change(
+        stage,
+        &machine_name,
+        &state_dir,
+        stage_shards,
+        report.changed_records > 0 || report.shards_written > 0,
+    ) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("[run-once] result: ERROR exit_code=1 stage_audit={e:#}");
+            state.failed_step = Some("stage-audit".to_string());
+            return (ExitCode::FAILURE, state);
+        }
+    };
     let only_if_changed = config.push_only_if_changed.unwrap_or(true);
-    let should_push = stage_shards > 0 && (!only_if_changed || changed);
+    let should_push = has_content && (!only_if_changed || changed);
     if !should_push {
         println!(
             "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}",
@@ -4115,7 +4132,18 @@ fn cmd_push(
         stage_check.scanner_unknown,
         stage_check.committed_reads,
     );
-    if stage_check.stage_shards == 0 {
+    let has_meta = match chat_stasher::metahash::has_meta_files(stage, &machine) {
+        Ok(has) => has,
+        Err(e) => {
+            eprintln!("push: cannot check stage metadata: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // This guard used to refuse any shard-less stage: while readers looked only at the
+    // newest snapshot per machine, an empty snapshot made the machine look as if it
+    // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
+    // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
+    if stage_check.stage_shards == 0 && !has_meta {
         let inboxes = match inbox {
             Some(inbox) => vec![inbox],
             None => match chat_stasher::inbox::remembered_inboxes(&state_dir) {
@@ -4256,6 +4284,15 @@ fn cmd_push(
             "ON"
         }
     );
+    // Taken before the backup so that what gets recorded is exactly what this
+    // push carried (see `metahash::record_pushed_meta_hash`).
+    let meta_hash_before = match chat_stasher::metahash::compute_meta_hash(stage, &machine) {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("push: cannot read stage metadata: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     let summary = match store.push(stage, &mk) {
         Ok(s) => s,
         Err(e) => {
@@ -4293,6 +4330,13 @@ fn cmd_push(
         store::machine_fingerprint(&summary.snapshot_host)
     );
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
+    if let Err(e) = chat_stasher::metahash::record_pushed_meta_hash(
+        &state_dir,
+        &machine,
+        meta_hash_before.as_deref(),
+    ) {
+        eprintln!("[push] warning: could not save pushed meta hash: {e:#}");
+    }
     reap_remote(&cfg, keep_ssh_masters);
     ExitCode::SUCCESS
 }
