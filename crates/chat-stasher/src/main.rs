@@ -360,6 +360,12 @@ enum Command {
         /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
         keep_ssh_masters: bool,
+        /// Record this destination's ssh host key in `~/.ssh/known_hosts` after
+        /// printing its fingerprint. Off by default and never implied: without
+        /// this flag nothing is ever written to `known_hosts`, so the first
+        /// connection of an unattended run cannot silently trust a host.
+        #[arg(long)]
+        trust_host: bool,
     },
     /// Search one destination's archive by session metadata.
     ///
@@ -1041,6 +1047,7 @@ fn run() -> ExitCode {
             connections,
             options,
             keep_ssh_masters,
+            trust_host,
         } => cmd_dest_init(
             destination,
             &stage,
@@ -1052,6 +1059,7 @@ fn run() -> ExitCode {
             connections,
             &options,
             keep_ssh_masters,
+            trust_host,
         ),
         Command::Search {
             destination,
@@ -2028,8 +2036,8 @@ fn cmd_overview(
     let read = match read_overview_indexes(&cfg, &mk) {
         Ok(read) => read,
         Err(e) => {
-            let msg = format!("{e:#}");
-            eprintln!("overview: {msg}");
+            let msg = chat_stasher::remote_err::format_remote_error("overview", &e, &cfg);
+            eprintln!("{msg}");
             eprintln!(
                 "overview: the archive was not read to completion — this is not an empty result"
             );
@@ -2559,7 +2567,12 @@ fn cmd_view(
 }
 
 fn cmd_doctor(json: bool) -> ExitCode {
-    let report = chat_stasher::doctor::run();
+    let mut report = chat_stasher::doctor::run();
+    // ADR-023 — the one place `doctor` opens a real connection. Kept out of
+    // `doctor::run()` because a dozen integration tests call that entry point
+    // directly and a test may not reach the network; the CLI is where a real
+    // probe belongs.
+    report.destinations = chat_stasher::doctor::probe_destinations(&Config::load());
     if json {
         let value = chat_stasher::doctor::report_to_json(&report);
         println!("{}", json_string(&value));
@@ -2697,6 +2710,7 @@ fn cmd_dest_init(
     connections: Option<usize>,
     options: &[String],
     keep_ssh_masters: bool,
+    trust_host: bool,
 ) -> ExitCode {
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
@@ -2717,6 +2731,70 @@ fn cmd_dest_init(
         connections,
         options,
     );
+
+    // ADR-023 — resolve the destination's trust *before* the expensive local
+    // work, because the first deployment of a machine fails here and nowhere
+    // else. Both branches are explicit: `--trust-host` is the only thing in
+    // this program that writes to `known_hosts`, and without it an untrusted
+    // host stops the command instead of being accepted.
+    if trust_host {
+        if !chat_stasher::remote_err::is_remote_endpoint(&target) {
+            eprintln!(
+                "dest-init: --trust-host applies to a remote destination; `{}` is a local path \
+                 with no host key to record.",
+                target.repo_root
+            );
+            return ExitCode::from(2);
+        }
+        let known_hosts = chat_stasher::remote_err::default_known_hosts_path();
+        match chat_stasher::remote_err::trust_host(&target, &known_hosts) {
+            Ok(outcome) => {
+                println!(
+                    "[dest-init] trust-host    : {} record(s) scanned, {} newly written to {}",
+                    outcome.scanned,
+                    outcome.added,
+                    outcome.known_hosts.display()
+                );
+                println!(
+                    "[dest-init] trust-host    : `{}:{}` will now pass strict host key checking",
+                    outcome.host, outcome.port
+                );
+            }
+            Err(e) => {
+                eprintln!("dest-init: --trust-host could not record the host key: {e}");
+                // Nothing was written, so this is "the trust step did not
+                // happen" rather than "the destination refused us" — the
+                // command never got as far as reading the archive.
+                return ExitCode::from(3);
+            }
+        }
+    }
+
+    // ADR-023 pre-flight: connect once, read-only, so an untrusted host or a
+    // dead endpoint is diagnosed here with its own advice instead of surfacing
+    // much later out of a push. 3, not 1: the destination was not read, so
+    // nothing downstream may be reported as "not there".
+    match chat_stasher::remote_err::preflight(&target, "dest-init") {
+        chat_stasher::remote_err::Preflight::Reached { repository_exists } => {
+            println!(
+                "[dest-init] preflight      : reached `{}` (repository {})",
+                target.repo_root,
+                if repository_exists {
+                    "present"
+                } else {
+                    "not there yet — this run creates it"
+                }
+            );
+        }
+        chat_stasher::remote_err::Preflight::Unreachable => {
+            eprintln!(
+                "dest-init: INCOMPLETE exit_code=3 — the destination could not be reached, so \
+                 whether a repository is already there is UNKNOWN, not empty. Nothing was \
+                 collected, and no destination was created or modified."
+            );
+            return ExitCode::from(3);
+        }
+    }
 
     // Which existing destinations the difference set is computed against.
     // Default = every *other* declared destination; naming them explicitly is
@@ -2954,7 +3032,7 @@ fn cmd_dest_init(
                         summary.snapshots_in_repo,
                     ),
                     Err(e) => {
-                        eprintln!("dest-init: push failed: {e:#}");
+                        chat_stasher::remote_err::eprint_remote_error("dest-init: push", &e, &target);
                         push_failed = true;
                     }
                 }
@@ -4296,7 +4374,7 @@ fn cmd_push(
     let summary = match store.push(stage, &mk) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("push: {e:#}");
+            chat_stasher::remote_err::eprint_remote_error("push", &e, &cfg);
             reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::FAILURE;
         }
@@ -4432,7 +4510,7 @@ fn cmd_read(
         let (bytez, hashes) = match store.read_session_readback(stage, session, &mk) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("read: {e}");
+                chat_stasher::remote_err::eprint_remote_error("read", &e, &cfg);
                 reap_remote(&cfg, keep_ssh_masters);
                 // Deliberately 3, not 1. A session readback that does not
                 // finish cannot claim a complete result; this is the same
@@ -4471,7 +4549,7 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) ->
     let report = match store.read_all_machines(mk) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("read: {e}");
+            chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
             // Deliberately 3, not 1. `read_all_machines` failed before it
             // produced a complete archive report, so the archive was not read
             // to completion; 1 is for a completed read whose result failed.
@@ -4620,7 +4698,11 @@ fn run_check(store: &BackupStore, mk: &MasterKey, data: bool, name: &str, failed
             }
         }
         Err(e) => {
-            eprintln!("verify: {name} failed to run: {e:#}");
+            chat_stasher::remote_err::eprint_remote_error(
+                &format!("verify: {name}"),
+                &e,
+                &store.cfg,
+            );
             *failed += 1;
         }
     }
@@ -4660,7 +4742,7 @@ fn run_reconcile(
             }
         }
         Err(e) => {
-            eprintln!("verify: L3 reconcile failed to run: {e:#}");
+            chat_stasher::remote_err::eprint_remote_error("verify: L3 reconcile", &e, &store.cfg);
             *failed += 1;
         }
     }
@@ -4798,7 +4880,15 @@ fn cmd_reclaim_stage(
     let report = match stagereclaim::reclaim_stage(stage, &destinations, apply) {
         Ok(report) => report,
         Err(e) => {
-            eprintln!("reclaim-stage: {e:#}");
+            let primary_cfg = destinations
+                .iter()
+                .find(|d| {
+                    d.cfg.repo_root.starts_with("opendal:")
+                        || d.cfg.options.contains_key("endpoint")
+                })
+                .map(|d| &d.cfg)
+                .unwrap_or(&destinations[0].cfg);
+            chat_stasher::remote_err::eprint_remote_error("reclaim-stage", &e, primary_cfg);
             for dest in &destinations {
                 reap_remote(&dest.cfg, keep_ssh_masters);
             }

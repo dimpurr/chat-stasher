@@ -797,6 +797,143 @@ pub struct DoctorReport {
     /// True when the registry-driven scan failed (registry missing/unparseable)
     /// — the coverage numbers are then *unknown*, never faked zeros.
     pub scan_failed: bool,
+    /// ADR-023 — one real connection per declared destination. Empty unless
+    /// somebody probed (see [`probe_destinations`]), which is why it is filled
+    /// in by the CLI rather than by [`run()`].
+    pub destinations: Vec<DestinationProbe>,
+}
+
+/// What one read-only connection to a declared destination answered.
+#[derive(Debug, Clone)]
+pub struct DestinationProbe {
+    pub name: String,
+    pub repo_root: String,
+    pub outcome: DestinationOutcome,
+}
+
+/// The answers a destination can give, kept apart for the same reason the rest
+/// of this file keeps its tri-states apart: "the host said there is no
+/// repository", "the host did not answer" and "this destination is not filled
+/// in" are three different findings, and only the first one is about the
+/// archive.
+#[derive(Debug, Clone)]
+pub enum DestinationOutcome {
+    /// The host answered. `repository_exists` is what it answered.
+    Reached { repository_exists: bool },
+    /// The host did not answer. `kind` is the classifier's verdict, `None`
+    /// when the failure matched none of the known signatures — the raw chain
+    /// is in `detail` either way, so an unclassified failure is reported
+    /// verbatim rather than dropped.
+    Unreachable {
+        kind: Option<crate::remote_err::RemoteErrorKind>,
+        detail: String,
+    },
+    /// No connection was even attempted: the destination has no `repo`, so
+    /// there is no address to dial. Reporting this as "unreachable" would put
+    /// a config mistake and a dead network in the same bucket.
+    NotConfigured { detail: String },
+}
+
+/// Build the [`StoreConfig`] a declared destination connects with, or `None`
+/// when it names no repository.
+///
+/// A local copy of what `resolve_store_config` does in the CLI, minus its
+/// `exit(2)` calls: `doctor` must be able to report a half-configured
+/// destination instead of dying on it.
+fn destination_store_config(
+    config: &Config,
+    name: &str,
+    entry: &crate::config::DestinationConfig,
+) -> Option<StoreConfig> {
+    let repo_root = entry.repo.clone()?;
+    let key_file = entry
+        .key_file
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_data_root().join(format!("masterkey-{name}.json")));
+    Some(
+        StoreConfig {
+            repo_root,
+            key_file,
+            connections: 0,
+            options: entry.options.clone(),
+            cache_dir: entry
+                .cache_dir
+                .as_deref()
+                .or(config.rustic_cache_dir.as_deref())
+                .map(PathBuf::from),
+            // reason: an unset Option<bool> here means "use the default (cache on)"
+            // — a config default, not an unknown read result collapsed to false.
+            no_cache: entry.no_cache.or(config.rustic_no_cache).unwrap_or(false),
+        }
+        .with_capped_connections(entry.connections.or(config.rustic_connections)),
+    )
+}
+
+/// Connect once to every declared destination, read-only.
+///
+/// Deliberately not called from [`run()`]: `run()` is a library entry point
+/// that a dozen integration tests call, and an SFTP connect is not something a
+/// test may do. The real connection belongs to the CLI, so `cmd_doctor` fills
+/// the report in. The probe only ever lists — it creates nothing, so running
+/// `doctor` can never be the reason a repository appears.
+pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
+    config
+        .destinations
+        .iter()
+        .map(|(name, entry)| {
+            let Some(cfg) = destination_store_config(config, name, entry) else {
+                return DestinationProbe {
+                    name: name.clone(),
+                    repo_root: "(not configured)".to_string(),
+                    outcome: DestinationOutcome::NotConfigured {
+                        detail: "this destination declares no `repo`, so no connection was \
+                                 attempted and nothing about it is known"
+                            .to_string(),
+                    },
+                };
+            };
+            let repo_root = cfg.repo_root.clone();
+            let outcome = match crate::remote_err::probe_destination_connectivity(&cfg) {
+                Ok(repository_exists) => DestinationOutcome::Reached { repository_exists },
+                Err(e) => DestinationOutcome::Unreachable {
+                    kind: crate::remote_err::classify_error_str(&format!("{e:#}")),
+                    detail: crate::remote_err::format_remote_error("doctor", &e, &cfg),
+                },
+            };
+            DestinationProbe {
+                name: name.clone(),
+                repo_root,
+                outcome,
+            }
+        })
+        .collect()
+}
+
+/// JSON shape for one destination probe.
+fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
+    match &p.outcome {
+        DestinationOutcome::Reached { repository_exists } => serde_json::json!({
+            "name": p.name,
+            "repo_root": p.repo_root,
+            "kind": if *repository_exists { "repository_present" } else { "repository_absent" },
+        }),
+        DestinationOutcome::Unreachable { kind, detail } => serde_json::json!({
+            "name": p.name,
+            "repo_root": p.repo_root,
+            "kind": "unreachable",
+            // Classifier verdict, or null when the failure matched no known
+            // signature — never a fabricated category.
+            "error_kind": kind.map(|k| k.slug()),
+            "detail": detail,
+        }),
+        DestinationOutcome::NotConfigured { detail } => serde_json::json!({
+            "name": p.name,
+            "repo_root": p.repo_root,
+            "kind": "not_configured",
+            "detail": detail,
+        }),
+    }
 }
 
 /// Run every check against the real machine and assemble the report.
@@ -908,6 +1045,9 @@ pub fn run() -> DoctorReport {
         probes,
         archive_gaps,
         scan_failed,
+        // Filled in by the CLI: connecting to a destination is a real network
+        // action and this entry point is called directly by the test suite.
+        destinations: Vec::new(),
     }
 }
 
@@ -1302,6 +1442,7 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "cache": cache_json(&r.cache),
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
+        "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
     })
 }
 
@@ -1671,6 +1812,7 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!("D6 · Local metadata cache occupancy");
         print_cache(&r.cache);
         eprintln!();
+        print_destinations(&r.destinations);
         return;
     }
 
@@ -1749,6 +1891,61 @@ pub fn print_report(r: &DoctorReport) {
     // D6 — how much the local metadata cache actually occupies
     eprintln!("D6 · Local metadata cache occupancy");
     print_cache(&r.cache);
+    eprintln!();
+
+    // D7 — can each declared destination actually be reached? (ADR-023)
+    print_destinations(&r.destinations);
+}
+
+/// D7 printing — shared by the normal path and the scan-failed early return.
+///
+/// Silent when no destination was probed, because an empty list here means
+/// "nobody asked" rather than "there are none".
+fn print_destinations(probes: &[DestinationProbe]) {
+    if probes.is_empty() {
+        return;
+    }
+    eprintln!("D7 · Declared destinations — one read-only connection each (ADR-023)");
+    for p in probes {
+        match &p.outcome {
+            DestinationOutcome::Reached { repository_exists } => {
+                eprintln!(
+                    "  {:<12} {} — reachable; repository {}",
+                    p.name,
+                    p.repo_root,
+                    if *repository_exists {
+                        "present"
+                    } else {
+                        "NOT there yet (nothing has been pushed to it)"
+                    }
+                );
+            }
+            DestinationOutcome::Unreachable { kind, detail } => {
+                eprintln!(
+                    "  {:<12} {} — NOT REACHED ({})",
+                    p.name,
+                    p.repo_root,
+                    kind.map(|k| k.label()).unwrap_or("unclassified")
+                );
+                for line in detail.lines() {
+                    eprintln!("               {line}");
+                }
+                eprintln!(
+                    "               Whether this destination still holds the archive is UNKNOWN, \
+                     not empty."
+                );
+            }
+            DestinationOutcome::NotConfigured { detail } => {
+                eprintln!(
+                    "  {:<12} {} — NOTHING WAS ATTEMPTED (not configured)",
+                    p.name, p.repo_root
+                );
+                for line in detail.lines() {
+                    eprintln!("               {line}");
+                }
+            }
+        }
+    }
     eprintln!();
 }
 
@@ -2308,11 +2505,16 @@ mod json_tests {
             probes: vec![probe()],
             archive_gaps: Vec::new(),
             scan_failed: false,
+            destinations: Vec::new(),
         }
     }
 
     /// Top-level field-name stability. Bumping a key here is a breaking change
     /// for every script that parsed `doctor --json`, so the names are pinned.
+    ///
+    /// ADR-023 added `destinations`, and this list is the place that change is
+    /// forced to be visible: it is a new key, not a renamed or removed one, so
+    /// a script that reads the keys it already knew about keeps working.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -2325,6 +2527,7 @@ mod json_tests {
                 "claude",
                 "command",
                 "config_source",
+                "destinations",
                 "footprints",
                 "gemini",
                 "other_present",

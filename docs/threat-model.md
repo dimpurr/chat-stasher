@@ -32,7 +32,7 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/download.ts:28-32`).
 3. The Rust CLI reads those files (`ingest`) and/or reads local coding-harness
    session stores (`collect`, `status`), and produces *sealed shards* in a stage
-   directory (`crates/chat-stasher/src/main.rs:471-529`).
+   directory (`crates/chat-stasher/src/main.rs:477-535`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
    (`crates/chat-stasher/src/main.rs:146-183`).
@@ -254,7 +254,7 @@ machine:
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:530-562`).
+  the old inode (`crates/chat-stasher/src/main.rs:536-568`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -272,20 +272,20 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:4146-4239`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:4224-4317`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:4118-4125`).
+  (`crates/chat-stasher/src/main.rs:4196-4203`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
   collected for it — a fact), `SuspectedLoss` (we have a record and it cannot be
   read — possible data loss, reported loudly), and `Unknown` (no record and we
   cannot determine what is there)
-  (`crates/chat-stasher/src/destinit.rs:104-118`, `:387-395`). The rationale is
+  (`crates/chat-stasher/src/destinit.rs:104-118`, `:391-399`). The rationale is
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:2855-2911`).
+  as many words (`crates/chat-stasher/src/main.rs:2933-2989`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -324,10 +324,10 @@ a real limitation of the current code.
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:44-821`); **a bulk restore-to-disk command
+   (`crates/chat-stasher/src/main.rs:44-827`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:223-225,4216-4247`), and note that `read` therefore
+   (`crates/chat-stasher/src/main.rs:223-225,4294-4325`), and note that `read` therefore
    *is* a payload-output command — it prints conversation content. Restoring a
    whole archive is not something you can currently do with one command. If
    getting everything back in bulk matters to you, this is not ready for you
@@ -335,10 +335,10 @@ a real limitation of the current code.
 
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
    never fetches or decrypts a data blob; full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:364-379`). It also distinguishes "nothing
+   (`crates/chat-stasher/src/main.rs:370-385`). It also distinguishes "nothing
    matched" from "could not finish reading", which is the same
    unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:376-379`).
+   (`crates/chat-stasher/src/main.rs:382-385`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the

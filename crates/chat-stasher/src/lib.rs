@@ -22,6 +22,7 @@ pub mod overview;
 pub mod push_progress;
 pub mod readback;
 pub mod reap;
+pub mod remote_err;
 pub mod runstate;
 pub mod scanner;
 pub mod schedule;

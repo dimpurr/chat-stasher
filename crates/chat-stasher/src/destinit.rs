@@ -314,7 +314,11 @@ fn probe_classified(cfg: &StoreConfig, machine: &str) -> Result<ReadAllReport, (
         Err(e) => {
             return Err((
                 Absence::Indeterminate,
-                format!("cannot establish whether a repository is there: {e:#}"),
+                crate::remote_err::format_remote_error(
+                    "cannot establish whether a repository is there",
+                    &e,
+                    cfg,
+                ),
             ));
         }
     }

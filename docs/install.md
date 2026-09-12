@@ -23,7 +23,7 @@ It is not one app, it is **two pieces**, each doing its own job:
 **On the CLI side:** its self-description is "Append-only archive for every LLM
 conversation, across harnesses." (`crates/chat-stasher/src/main.rs:34`). It
 reads session files that already exist on your machine, and reads them
-read-only (`crates/chat-stasher/src/main.rs:496`).
+read-only (`crates/chat-stasher/src/main.rs:502`).
 
 **On the extension side:** it currently recognizes **six** web platforms —
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
@@ -37,7 +37,7 @@ files at `chat-stasher/inbox/<name>.json` under the download directory
 
 **How the two sides connect:** the extension only writes files to disk; the CLI
 takes them away with `ingest --inbox <your-inbox> --stage <your-stage>`
-(`crates/chat-stasher/src/main.rs:471-493`).
+(`crates/chat-stasher/src/main.rs:477-499`).
 
 🔴 **"Recognizing the platform" does not mean "it can recover your history on
 that platform."** The extension has two legs; please read them separately:
@@ -226,7 +226,97 @@ with owner-only-readable permissions, on platforms that can express them
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
-### 4.4 Install a timer (optional, but this is the key to "install once and forget it")
+### 4.4 🔴 A remote destination: the first connection needs a human
+
+Skip this if your archive lives on a local path. It applies when `repo` names a
+remote backend such as `opendal:sftp` — the options you write under
+`[destinations.<name>.options]` are forwarded verbatim to the backend
+(`crates/chat-stasher/src/store.rs:153-156`, `:271-275`; the config field itself
+is `crates/chat-stasher/src/config.rs:175-176`).
+
+**Why this step exists.** A remote destination is reached by running the system
+`ssh` client. The first time it meets a host it has no record of, it refuses:
+that host's key is not in `~/.ssh/known_hosts`, so the key the server just
+presented has nothing to be compared against. **That refusal is the feature.**
+It is the one moment at which "is this really my storage box?" can be answered
+by you rather than by whoever is on the network path.
+
+**This tool never answers it for you.** `--trust-host` is the only thing in the
+program that writes to `known_hosts`
+(`crates/chat-stasher/src/main.rs:2737-2750`); without it, an unattended
+scheduled run that meets a new host stops instead of quietly trusting it.
+
+**What you see when it happens.** `dest-init` connects once, read-only, before
+it does anything else (`crates/chat-stasher/src/main.rs:2773-2797`). An
+untrusted host stops the command there with exit code `3` — "did not finish
+reading", which is *not* the same as "the destination is empty" — and prints
+which host is untrusted, the fingerprints it received, and the next step
+(`crates/chat-stasher/src/remote_err.rs:180-187`, `:454-483`).
+
+**Step 1: check the fingerprint out of band.** See the key the network hands
+out, without logging in:
+
+```sh
+ssh-keyscan -p <your-port> <your-host>
+```
+
+🔴 **What that output is worth — read this before using it.** OpenSSH's own
+manual says: "ssh-keyscan cannot verify the authenticity of the host keys it
+obtains", and that a network attacker can substitute their own key, so its
+output "should be verified out of band"
+(<https://man.openbsd.org/ssh-keyscan>). So compare the fingerprint it printed
+against the one your provider publishes — Hetzner, for example, lists them in
+the Storage Box overview, and its SFTP/SCP guide says comparing your connection's
+fingerprint with those "confirms the authenticity of the connection"
+(<https://docs.hetzner.com/storage/storage-box/access/access-sftp-scp/>). **If
+they do not match, stop here** and do not go on to step 2.
+
+**Step 2: record it, once, with `--trust-host`.** Only after the fingerprints
+match:
+
+```sh
+chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
+```
+
+It prints the fingerprints it found and each record it writes, then appends them
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:2752-2761`;
+`crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
+destinations only: on a local path it is refused with exit code `2` rather than
+silently doing nothing (`crates/chat-stasher/src/main.rs:2740-2748`).
+
+🔴 **Never do this for a host whose key has *changed*.** If a host you already
+trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
+HAS CHANGED`, and that can mean someone is impersonating your destination. The
+program classifies that case separately from "a host I have never seen" and
+refuses it; it is never accepted as a new host, and none of the options below
+should be used to push past it
+(`crates/chat-stasher/src/remote_err.rs:101-112`). Find out why the key changed
+before editing `known_hosts`.
+
+**Optional: `known_hosts_strategy`.** A destination's options table also accepts
+`known_hosts_strategy`, alongside `endpoint`, `user`, `key` and `root`:
+
+```toml
+[destinations.storagebox.options]
+endpoint = "ssh://<your-host>:<your-port>"
+user = "<your-user>"
+key = "~/.ssh/id_ed25519"
+known_hosts_strategy = "strict"
+```
+
+What the pinned backend does with the three accepted values — read from its own
+source (opendal-service-sftp 0.57.0, `src/backend.rs` lines 148-165, which maps
+onto the `openssh` crate's `KnownHosts`): leaving the option out means `strict`;
+`add` also accepts a host that is not known yet and records it
+(`StrictHostKeyChecking=accept-new`); `accept` takes whatever key the server
+presents (`StrictHostKeyChecking=no`), which includes a changed key. **This
+project sets none of this for you and does not change the default** — omitting
+the option is `strict`, which is the behaviour described above. `add` and
+`accept` move the trust decision away from you; choose them deliberately if you
+choose them at all, and note that `accept` weakens exactly the case step 2's
+warning is about.
+
+### 4.5 Install a timer (optional, but this is the key to "install once and forget it")
 
 `chat-stasher schedule` **renders** a launchd plist or systemd user
 service/timer — note its own words are "never installs it", i.e. it only
@@ -249,12 +339,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:5723-5724`). This is the
+does not (`crates/chat-stasher/src/main.rs:5813-5814`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:5504-5505`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:5594-5595`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -270,7 +360,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:5714-5724`):
+(`crates/chat-stasher/src/main.rs:5804-5814`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -283,7 +373,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:5572-5579`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:5662-5669`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -300,6 +390,16 @@ There is also a related command: `doctor`. It answers a different question —
 only paths, counts, bytes, and timestamps
 (`crates/chat-stasher/src/main.rs:268-279`).
 
+`doctor` also **connects once to each destination you declared**, read-only, and
+reports what came back in three separate states rather than two: reached (and
+whether a repository is there), not reached (with the classifier's verdict
+attached), and not configured at all — a destination with no `repo` was never
+dialled, and calling it "unreachable" would put a config mistake and a dead
+network in one bucket (`crates/chat-stasher/src/doctor.rs:806-835`, `:873-911`).
+It creates nothing, so a destination it reports as "not there yet" is still not
+created by running `doctor`. This is the one thing `doctor` does that touches
+the network; see section 4.4 if it reports a host it cannot trust.
+
 ---
 
 ## 6. 🔴 Things that do not exist yet
@@ -309,7 +409,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` (bulk recovery) command. Not in phase one.** The
   subcommand table has no `restore` entry
-  (`crates/chat-stasher/src/main.rs:44-821`). What you can do is `read`, which
+  (`crates/chat-stasher/src/main.rs:44-827`). What you can do is `read`, which
   dumps **one** conversation to standard output at a time
   (`crates/chat-stasher/src/main.rs:223-267`). Bulk restore = for now you have
   to write your own script loop.
@@ -381,6 +481,7 @@ touch it again.**
 - `chat-stasher init`
 - Decide where the archive lives
 - 🔴 Back up the master key file
+- 🔴 If the destination is remote, trust its host key once (section 4.4)
 - Install the timer
 
 **Then it runs automatically:** the timer runs `run-once` at each scheduled
@@ -400,9 +501,10 @@ not need you to confirm anything.
 - Run `doctor` occasionally, to check whether any tool has started deleting
   your history.
 
-**This is not "zero config."** Those five things above genuinely require you,
-and the one about backing up the key is something no one can do for you. But it
-is indeed **one-time** — once done, you do not have to think about it again.
+**This is not "zero config."** Those six things above genuinely require you (the
+host-key one only if your destination is remote), and the ones about backing up
+the key and checking a fingerprint are things no one can do for you. But it is
+indeed **one-time** — once done, you do not have to think about it again.
 
 ---
 
@@ -420,6 +522,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |
 | The minimum Node / pnpm version to build the extension | **Unverified** (the repository does not declare it) |
 | The concrete installation steps for a launchd / systemd timer | **Unverified** (`schedule` only renders templates, does not install) |
+| How `known_hosts_strategy` behaves against a real server | **Partly verified** (the three values and their `StrictHostKeyChecking` equivalents were read from the pinned dependency's source — opendal-service-sftp 0.57.0 `src/backend.rs` lines 148-165 and the `openssh` crate it maps onto — but we have not exercised `add` or `accept` against a live host. Section 4.4 describes what each one gives up.) |
 | Whether passive capture actually saves anything on Perplexity | **Unverified** (reading the code, the conclusion is "cannot recognize a session id, therefore saves nothing"; see section 1. We have not tried it on a real page.) |
 | Whether the DeepSeek / Perplexity conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:549-557`, `:612-621`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
 
