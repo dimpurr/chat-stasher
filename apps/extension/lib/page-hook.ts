@@ -171,11 +171,60 @@ export function installPageFetchHook(options: PageHookOptions): void {
     post({ type: options.readyMessage, version: options.version, token: record.token });
   });
 
+  /**
+   * The one capture decision, shared by fetch and XHR: platform, origin,
+   * method, path, status, size and response shape. A request that is not a
+   * candidate is ignored; a candidate whose body does not match gets the
+   * metadata-only shape warning. Never throws into the page.
+   */
+  const captureCandidate = (rawUrl: string, method: string, status: number, text: string): void => {
+    try {
+      const parsed = new URL(rawUrl, baseUrl);
+      const platform = getPlatform(parsed.href);
+      const normalizedMethod = method.toUpperCase();
+      if (
+        !platform ||
+        parsed.origin !== pageOrigin ||
+        !platform.methods.includes(normalizedMethod) ||
+        !platform.pathHints.some((hint) => parsed.pathname.includes(hint)) ||
+        status < platform.status.min ||
+        status > platform.status.max
+      ) return;
+
+      const bytes = new TextEncoder().encode(text).byteLength;
+      if (bytes > options.maxRawBytes) return;
+      if (!matchesShape(platform, text)) {
+        // Keep the signal metadata-only: never print URL, body, or identifiers.
+        console.warn('[chat-stasher] capture skipped: response shape mismatch');
+        return;
+      }
+      post({
+        type: options.captureMessage,
+        payload: {
+          url: parsed.href,
+          method: normalizedMethod,
+          status,
+          text,
+          pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
+          capturedAt: Date.now(),
+        },
+      });
+    } catch {
+      // Capture is best-effort and must never alter page behaviour.
+    }
+  };
+
+  // ---- XMLHttpRequest -----------------------------------------------------
+  // Some platforms load conversations over XHR rather than fetch (DeepSeek's
+  // /api/v0/chat/history_messages, observed in a live session 2026-09-13).
+  // A readable body goes through the same capture decision as fetch. Only
+  // bodies that cannot be read without changing what the page sees
+  // (arraybuffer / blob / document) stay a visible "unsupported" warning.
   const xhrConstructor = pageWindow.XMLHttpRequest;
   if (typeof xhrConstructor === 'function') {
     const originalOpen = xhrConstructor.prototype.open;
     const originalSend = xhrConstructor.prototype.send;
-    const xhrUrls = new WeakMap<object, string>();
+    const xhrRequests = new WeakMap<object, { url: string; method: string }>();
 
     xhrConstructor.prototype.open = function (
       this: XMLHttpRequest,
@@ -183,17 +232,34 @@ export function installPageFetchHook(options: PageHookOptions): void {
       url: string | URL,
       ...rest: unknown[]
     ): void {
-      xhrUrls.set(this, String(url));
+      xhrRequests.set(this, { url: String(url), method: String(method ?? 'GET') });
       originalOpen.apply(this, [method, url, ...rest] as never);
     };
     xhrConstructor.prototype.send = function (
       this: XMLHttpRequest,
       body?: Document | XMLHttpRequestBodyInit | null,
     ): void {
-      const url = xhrUrls.get(this);
-      if (url) {
+      const request = xhrRequests.get(this);
+      if (request) {
         this.addEventListener('load', () => {
-          if (this.status >= 200 && this.status < 300) warnUnsupportedTransport('xhr', url);
+          try {
+            if (this.status < 200 || this.status >= 300) return;
+            const type = this.responseType;
+            let text: string | null = null;
+            if (type === '' || type === 'text') {
+              text = this.responseText;
+            } else if (type === 'json' && this.response !== null && this.response !== undefined) {
+              // Re-serialised, so not byte-identical to the wire; the structure is.
+              text = JSON.stringify(this.response);
+            }
+            if (text === null) {
+              warnUnsupportedTransport('xhr', request.url);
+              return;
+            }
+            captureCandidate(request.url, request.method, this.status, text);
+          } catch {
+            // Never let observation break the page's own request.
+          }
         }, { once: true });
       }
       originalSend.call(this, body);
@@ -329,25 +395,9 @@ export function installPageFetchHook(options: PageHookOptions): void {
         response.status > platform.status.max
       ) return;
 
+      // Only candidates are cloned and read; the decision itself is shared with XHR.
       const text = await response.clone().text();
-      const bytes = new TextEncoder().encode(text).byteLength;
-      if (bytes > options.maxRawBytes) return;
-      if (!matchesShape(platform, text)) {
-        // Keep the signal metadata-only: never print URL, body, or identifiers.
-        console.warn('[chat-stasher] capture skipped: response shape mismatch');
-        return;
-      }
-      post({
-        type: options.captureMessage,
-        payload: {
-          url: parsed.href,
-          method: normalizedMethod,
-          status: response.status,
-          text,
-          pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
-          capturedAt: Date.now(),
-        },
-      });
+      captureCandidate(parsed.href, normalizedMethod, response.status, text);
     } catch {
       // Capture is best-effort and must never alter page fetch behaviour.
     }

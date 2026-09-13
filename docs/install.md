@@ -29,7 +29,7 @@ read-only (`crates/chat-stasher/src/main.rs:502`).
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`)
-(`apps/extension/lib/contract.ts:70,113,131,147,163,233`).
+(`apps/extension/lib/contract.ts:70,121,139,155,171,241`).
 It requests four permissions — `nativeMessaging`, `storage`, `alarms` and
 `unlimitedStorage` — and **no host permissions at all**
 (`apps/extension/wxt.config.ts:63`). There is no `downloads` permission and no
@@ -59,13 +59,13 @@ that platform."** The extension has two legs; please read them separately:
 - **Passive capture** (on by default): the conversation you are currently
   viewing is saved as a side effect when the page fetches its own data. Each
   platform registers in that table which route, method, and response shape
-  count (`apps/extension/lib/contract.ts:67-306`).
+  count (`apps/extension/lib/contract.ts:67-313`).
   🔴 **Perplexity is an exception; read it as it is:** its row registers only
   the **conversation-list** route, and registers no rule for recognizing a
-  session id from a URL (`apps/extension/lib/contract.ts:112-127`; the empty
-  list is `apps/extension/lib/contract.ts:124`). Reading the
+  session id from a URL (`apps/extension/lib/contract.ts:120-135`; the empty
+  list is `apps/extension/lib/contract.ts:132`). Reading the
   code, passive capture on Perplexity **cannot recognize a session id and
-  therefore delivers nothing** (`apps/extension/lib/contract.ts:531-559`) — this
+  therefore delivers nothing** (`apps/extension/lib/contract.ts:539-567`) — this
   is a conclusion drawn from reading the code; **we have not tested it on a
   real perplexity.ai page**.
 - **History backfill** (off by default; see section 6): digs up your **past**
@@ -111,7 +111,7 @@ The popup shows these three tiers in the same terms as the table above
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the six platforms above are each registered in the table at
-`apps/extension/lib/contract.ts:67-306`, a separate matter from backfill.)
+`apps/extension/lib/contract.ts:67-313`, a separate matter from backfill.)
 
 ---
 

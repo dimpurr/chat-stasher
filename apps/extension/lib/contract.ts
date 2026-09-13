@@ -74,6 +74,14 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     responseShape: {
       encoding: 'json',
       requiredAnyPaths: [
+        // Live shape of GET /api/v0/chat/history_messages, observed in a
+        // logged-in session on 2026-09-13 (key names only, loaded over XHR):
+        // { code, msg, data: { biz_code, biz_msg, biz_data: { chat_session: {
+        // id, ... }, chat_messages: [...], cache_control, cache_reset_at } } }.
+        // None of the older paths below match it; they are kept for the other
+        // endpoints and earlier shapes this row has matched.
+        'data.biz_data.chat_messages',
+        'data.biz_data.chat_session.id',
         'session_id',
         'sessionId',
         'data.session_id',
