@@ -79,7 +79,12 @@ type ActionApi = {
 };
 
 function actionApi(): ActionApi | null {
-  const action = (globalThis as { browser?: { action?: ActionApi } }).browser?.action;
+  // Chrome exposes the extension APIs on `chrome`; only Firefox defines a
+  // global `browser`. Looking at `browser` alone left the badge unpainted in
+  // every Chromium browser while every unit test (which stubs `browser`) stayed
+  // green — found by the real-browser E2E run.
+  const g = globalThis as { browser?: { action?: ActionApi }; chrome?: { action?: ActionApi } };
+  const action = g.browser?.action ?? g.chrome?.action;
   return action && typeof action.setBadgeText === 'function' ? action : null;
 }
 

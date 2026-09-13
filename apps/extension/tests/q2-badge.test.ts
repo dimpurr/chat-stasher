@@ -146,9 +146,26 @@ describe('Q2 · refreshBadge (against the real outbox)', () => {
   it('🔴 in a browser build with no action API it no-ops silently (the badge must never drag captures down with it)', async () => {
     const { refreshBadge } = await badgeModule();
     vi.stubGlobal('browser', withI18n({ runtime: { id: 'no-action' } }));
+    // "No action API" means on either global: Chrome only has `chrome`, so a
+    // build without `chrome.action` is the case this test is named for.
+    vi.stubGlobal('chrome', withI18n({ runtime: { id: 'no-action' } }));
     await enqueueOne();
     // No throw and no badge API called at all — the badge is decorative and must not bubble up its own problems.
     await expect(refreshBadge()).resolves.toBeDefined();
     expect(badgeCalls).toEqual([]);
+  });
+});
+
+describe('Q2 · Chrome shape: no global `browser`, only `chrome`', () => {
+  it('🔴 the badge is still painted through chrome.action (the real-Chrome shape)', async () => {
+    // Real Chrome defines `chrome` and no `browser` global. The other suites stub
+    // `browser`, which is exactly what hid this: the badge was never painted in Chrome.
+    vi.stubGlobal('browser', undefined);
+    vi.stubGlobal('chrome', withI18n(fakeBrowser));
+    await enqueueOne();
+    const { refreshBadge } = await badgeModule();
+    const plan = await refreshBadge();
+    expect(plan?.text).toBe('1');
+    expect(last('text')?.text).toBe('1');
   });
 });
