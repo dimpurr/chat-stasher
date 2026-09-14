@@ -663,6 +663,61 @@ fn the_view_alias_is_deprecated_on_stderr_and_behaves_like_ui() {
     );
 }
 
+/// **A stdout that nobody reads must not take the dashboard down.**
+///
+/// This is the W23 flake, made deterministic. `Ui::start` above takes the
+/// child's stdout, reads until the URL, and drops the reader; `println!` panics
+/// when its write fails, so the *next* line `ui` printed raised `Broken pipe`
+/// and the process died before `serve` was entered. The tests then failed at
+/// `w15_ui_test.rs:210` with `raw="" bytes=0` — a zero-byte response from a
+/// socket whose process was already gone. Every observed failure was on the
+/// *first* request after a `Ui::start`, which is the only window this covers.
+///
+/// The harness's behaviour is legitimate (a supervisor that reads one line and
+/// stops is a normal client, and `chat-stasher ui | head -1` is the same
+/// shape), so the fix is in the binary: narration is not the product. Here the
+/// pipe is closed at spawn rather than after the URL — the widest form of the
+/// window, and the only one that is deterministic rather than a race. Unfixed,
+/// the first narration line kills the launch and the exit code is 101.
+#[test]
+fn a_closed_stdout_does_not_fail_the_launch() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let home = sb.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut child = bin()
+        .args([
+            "ui",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--no-open",
+            "--idle-timeout",
+            "1",
+            "--keep-ssh-masters",
+        ])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", sb.path().join("config"))
+        .env("XDG_DATA_HOME", sb.path().join("data"))
+        .env("XDG_STATE_HOME", sb.path().join("state"))
+        .env("CHAT_STASHER_REGISTRY", sb.path().join("registry.json"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn ui");
+    // Every line the child writes from here on fails. Nothing about that is a
+    // reason for the dashboard to die.
+    drop(child.stdout.take());
+    let status = child.wait().expect("wait for the ui child");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a launch whose stdout nobody reads must still start, serve its idle \
+         timeout out, and exit cleanly"
+    );
+}
+
 /// The launch filter is the shared selector too, and the page says which filter
 /// is in force rather than quietly showing a subset.
 #[test]

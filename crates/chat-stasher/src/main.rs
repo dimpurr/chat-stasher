@@ -27,6 +27,53 @@ use std::time::Duration;
 
 const UNRESOLVED_MACHINE: &str = "<machine-identity-unavailable>";
 
+/// Narrate one line on stdout, and let a failed write be a non-event.
+///
+/// `println!` panics when its write fails, which is the right default for a
+/// command whose output *is* stdout. `ui` is not one: its product is the
+/// socket. A reader that stops reading — `chat-stasher ui | head -1`, a
+/// terminal that goes away, a supervisor that takes the URL and closes — must
+/// not take the dashboard down, least of all in the window between announcing
+/// the URL and accepting the first request.
+///
+/// Measured, not hypothetical: narration dying on `Broken pipe` is what made
+/// `tests/w15_ui_test.rs` flaky. Its harness reads the URL and closes the pipe
+/// (its `Ui::start` drops the reader it took); the next line printed killed the
+/// process before `serve` was ever entered, so the first request was answered
+/// by nothing and the client read zero bytes.
+///
+/// Split from [`say`] so that a writer which always fails can be handed in — the
+/// same reason `view::route` takes no socket.
+///
+/// Spelled as `write_fmt` plus an explicit newline rather than `writeln!(out,
+/// "{args}")`, which would work but would put a `"{args}"` entry in
+/// `docs/output-inventory.txt`: that file is a human-readable list of
+/// user-visible text, and a formatter is not one.
+fn say_to(out: &mut dyn std::io::Write, args: std::fmt::Arguments<'_>) {
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "Dropping the error is this function's whole job: the dashboard's output is the socket, so a closed stdout is not a failure of the command."
+    )]
+    {
+        let _ = out.write_fmt(args);
+        let _ = out.write_all(b"\n");
+    }
+}
+
+/// [`say_to`] on this process's own stdout.
+fn say(args: std::fmt::Arguments<'_>) {
+    say_to(&mut std::io::stdout(), args);
+}
+
+/// `println!`'s shape with [`say`]'s failure behaviour. The call sites keep
+/// their exact text, so a diff that only changes the macro name cannot have
+/// altered a message.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        say(format_args!($($arg)*))
+    };
+}
+
 #[derive(Parser)]
 #[command(
     name = "chat-stasher",
@@ -2921,11 +2968,11 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     reap_remote(&cfg, keep_ssh_masters);
 
     for path in &report.unreadable {
-        println!("  !! unreadable: {path}");
+        say!("  !! unreadable: {path}");
     }
     if report.hits.is_empty() {
-        println!("{}", report.no_hit_line());
-        println!("ui: nothing to show, so no server was started");
+        say!("{}", report.no_hit_line());
+        say!("ui: nothing to show, so no server was started");
         return if report.complete() {
             ExitCode::from(1)
         } else {
@@ -2968,19 +3015,20 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         Duration::from_secs(idle_timeout)
     };
     let url = format!("http://{addr}/?token={token}");
-    println!("[ui] destination  : {}", data.destination_label);
-    println!(
+    say!("[ui] destination  : {}", data.destination_label);
+    say!(
         "[ui] snapshots    : {} scanned / {} in repo",
-        data.snapshots_scanned, data.snapshots_in_repo
+        data.snapshots_scanned,
+        data.snapshots_in_repo
     );
-    println!(
+    say!(
         "[ui] sessions     : {listed} in view / {} in the archive",
         data.sessions.len()
     );
     if let Some(text) = chat_stasher::ui::describe_selector(&data.launch) {
-        println!("[ui] filter       : {text}");
+        say!("[ui] filter       : {text}");
     }
-    println!(
+    say!(
         "[ui] machines     : {} · sources {}",
         data.machine_keys().len(),
         chat_stasher::ui::select(&data.sessions, &data.launch)
@@ -2990,9 +3038,9 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             .collect::<std::collections::BTreeSet<_>>()
             .len()
     );
-    println!("[ui] data blobs read: {}", data.data_blobs_read);
-    println!("[ui] bound        : {addr} (loopback only, OS-assigned port)");
-    println!(
+    say!("[ui] data blobs read: {}", data.data_blobs_read);
+    say!("[ui] bound        : {addr} (loopback only, OS-assigned port)");
+    say!(
         "[ui] idle timeout : {}",
         if idle_timeout == 0 {
             "none (Ctrl+C to exit)".to_string()
@@ -3000,18 +3048,18 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             format!("{idle_timeout}s")
         }
     );
-    println!(
+    say!(
         "[ui] payload      : NOT loaded — session content is fetched only when you click it, and its cost is shown first"
     );
-    println!("[ui] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it.");
-    println!("{url}");
+    say!("[ui] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it.");
+    say!("{url}");
 
     if no_open {
-        println!("[ui] browser      : not opened (--no-open)");
+        say!("[ui] browser      : not opened (--no-open)");
     } else if let Err(e) = chat_stasher::view::open_in_browser(&url) {
         eprintln!("[ui] browser      : could not open ({e}) — use the URL above, or --no-open");
     } else {
-        println!("[ui] browser      : opened");
+        say!("[ui] browser      : opened");
     }
 
     let content = RepoContent {
@@ -3025,13 +3073,15 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    println!(
+    say!(
         "[ui] exiting      : idle for {}s · requests served={} rejected={}",
-        idle_timeout, stats.served, stats.rejected
+        idle_timeout,
+        stats.served,
+        stats.rejected
     );
 
     if !report.complete() {
-        println!(
+        say!(
             "ui: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more",
             data.destination_label,
             report.unreadable.len()
@@ -4654,7 +4704,7 @@ fn masterkey(config: &StoreConfig) -> anyhow::Result<(MasterKey, bool)> {
 /// option was given (a local repo has no ssh masters to reap).
 fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
     if keep_ssh_masters {
-        println!("[reap] skipped (--keep-ssh-masters)");
+        say!("[reap] skipped (--keep-ssh-masters)");
         return;
     }
     let Some(endpoint) = cfg.options.get("endpoint") else {
@@ -4665,9 +4715,9 @@ fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
         return;
     };
     match reap::reap_masters_for_host(&host) {
-        Ok(n) => println!("[reap] host {host} · ssh masters shut down: {n}"),
+        Ok(n) => say!("[reap] host {host} · ssh masters shut down: {n}"),
         Err(e) => {
-            println!("[reap] host {host} · ssh masters shut down: unknown (could not read the process list: {e})")
+            say!("[reap] host {host} · ssh masters shut down: unknown (could not read the process list: {e})")
         }
     }
 }
@@ -6625,4 +6675,57 @@ fn render_archive_gap_notice(report: &scanner::ScanReport) -> String {
         "  advice: do not treat scanner records as the total number of recognised sessions; run collect again once the harness produces SessionRecords.\n",
     );
     output
+}
+
+#[cfg(test)]
+mod narration_tests {
+    use super::*;
+
+    /// A writer that fails the way a closed pipe does.
+    struct BrokenPipe;
+
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ))
+        }
+    }
+
+    /// **Narration must not be able to kill `ui`.** The writer below fails
+    /// exactly as a stdout whose reader has gone away does, and `say_to` must
+    /// return rather than panic.
+    ///
+    /// This is the half of the W23 flake that lives in the binary: the other
+    /// half is that a client may legitimately stop reading after the URL.
+    /// `println!` here would reproduce the flake verbatim — process panics at
+    /// `library/std/src/io/stdio.rs`, exit 101, every later request answered by
+    /// a socket belonging to a dead process.
+    #[test]
+    fn a_broken_stdout_does_not_panic_the_narration() {
+        say_to(
+            &mut BrokenPipe,
+            format_args!("[ui] bound        : {}", "127.0.0.1:1"),
+        );
+    }
+
+    /// The instrument can say something, so the test above is not passing
+    /// because `say_to` never writes at all.
+    #[test]
+    fn narration_reaches_a_working_writer() {
+        let mut out: Vec<u8> = Vec::new();
+        say_to(&mut out, format_args!("[ui] sessions     : {} in view", 3));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "[ui] sessions     : 3 in view\n"
+        );
+    }
 }
