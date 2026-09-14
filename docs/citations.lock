@@ -301,7 +301,7 @@ crates/chat-stasher/src/inbox.rs:853-881  81d263fdddc2  lines=29
   <- docs/install.md:272, docs/threat-model.md:277  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:34  51c934204980  lines=1
   <- README.md:3, docs/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:44-837  327c0f03932b  lines=794
+crates/chat-stasher/src/main.rs:44-851  45c601528483  lines=808
   <- README.md:74, docs/install.md:494, docs/privacy.md:393, docs/threat-model.md:397  :: #[derive(Subcommand)]
 crates/chat-stasher/src/main.rs:45-46  82ade6217eb6  lines=2
   <- README.md:76  :: enum Command {
@@ -347,61 +347,59 @@ crates/chat-stasher/src/main.rs:302-307  7de330febae7  lines=6
   <- docs/install.md:300  :: destination: Option<String>,
 crates/chat-stasher/src/main.rs:319-369  765f80b3aba3  lines=51
   <- README.md:84  :: /// Initialise a new destination as a *full extra copy* (AD…
-crates/chat-stasher/src/main.rs:370-430  f7ed58f426b8  lines=61
+crates/chat-stasher/src/main.rs:370-431  5a6eaacbfe27  lines=62
   <- README.md:85  :: /// Search one destination's archive by session metadata.
-crates/chat-stasher/src/main.rs:370-399  6dea5ddba048  lines=30
+crates/chat-stasher/src/main.rs:370-400  b2d69f40650a  lines=31
   <- docs/threat-model.md:409  :: /// Search one destination's archive by session metadata.
-crates/chat-stasher/src/main.rs:395-399  1ea5d27e0f6f  lines=5
+crates/chat-stasher/src/main.rs:396-400  1ea5d27e0f6f  lines=5
   <- docs/threat-model.md:421  :: /// Exit codes distinguish the three answers, because two o…
-crates/chat-stasher/src/main.rs:431-486  453f8c52ff3d  lines=56
+crates/chat-stasher/src/main.rs:432-487  453f8c52ff3d  lines=56
   <- README.md:86  :: /// Open an ephemeral local web view of one destination's s…
-crates/chat-stasher/src/main.rs:486-508  f03b724b2101  lines=23
+crates/chat-stasher/src/main.rs:487-509  f03b724b2101  lines=23
   <- README.md:87, README.md:101, README.md:105, README.md:115  :: },
-crates/chat-stasher/src/main.rs:494-544  4273707c50b1  lines=51
+crates/chat-stasher/src/main.rs:495-545  4273707c50b1  lines=51
   <- docs/threat-model.md:44  :: Ingest {
-crates/chat-stasher/src/main.rs:509-544  87944c7ec189  lines=36
+crates/chat-stasher/src/main.rs:510-545  87944c7ec189  lines=36
   <- README.md:88  :: },
-crates/chat-stasher/src/main.rs:512  cf775be2a229  lines=1
+crates/chat-stasher/src/main.rs:513  cf775be2a229  lines=1
   <- docs/install.md:26  :: /// Harness sources are opened read-only. File-backed JSONL…
-crates/chat-stasher/src/main.rs:545-577  5035d443e4a5  lines=33
-  <- README.md:89, README.md:102, README.md:121  :: },
-crates/chat-stasher/src/main.rs:546-578  42a71db27ac9  lines=33
-  <- docs/threat-model.md:326  :: /// Seal one file already inside our stage into the next se…
-crates/chat-stasher/src/main.rs:625-647  f05337c1507c  lines=23
+crates/chat-stasher/src/main.rs:547-579  42a71db27ac9  lines=33
+  <- README.md:89, README.md:102, README.md:121, docs/threat-model.md:326  :: /// Seal one file already inside our stage into the next se…
+crates/chat-stasher/src/main.rs:626-648  f05337c1507c  lines=23
   <- docs/install.md:203  :: /// Register this executable as the browsers' Native Messag…
-crates/chat-stasher/src/main.rs:648-690  00c9d6ccdc4b  lines=43
+crates/chat-stasher/src/main.rs:649-691  00c9d6ccdc4b  lines=43
   <- README.md:90, docs/install.md:41  :: InstallNativeHost {
-crates/chat-stasher/src/main.rs:691-712  ebb71dce29b8  lines=22
+crates/chat-stasher/src/main.rs:692-713  ebb71dce29b8  lines=22
   <- README.md:91  :: /// The Native Messaging host process itself.
-crates/chat-stasher/src/main.rs:1565-1575  91658be625f3  lines=11
+crates/chat-stasher/src/main.rs:1566-1576  91658be625f3  lines=11
   <- README.md:91  :: /// stdout, which is exactly what the browser launch path d…
-crates/chat-stasher/src/main.rs:2812-2825  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:2813-2826  6e297c93e74c  lines=14
   <- docs/install.md:328  :: Err(e) => {
-crates/chat-stasher/src/main.rs:2815-2823  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:2816-2824  7606cd68232e  lines=9
   <- docs/install.md:367  :: }
-crates/chat-stasher/src/main.rs:2827-2836  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:2828-2837  a14261353a59  lines=10
   <- docs/install.md:364  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:2848-2872  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:2849-2873  6d97af905715  lines=25
   <- docs/install.md:332  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:3008-3064  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:3009-3065  d1e3f53d40dc  lines=57
   <- docs/threat-model.md:357  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:4271-4278  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:4272-4279  f369ca3fd940  lines=8
   <- docs/threat-model.md:346  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:4299-4392  6a9b80831596  lines=94
+crates/chat-stasher/src/main.rs:4300-4393  6a9b80831596  lines=94
   <- docs/threat-model.md:344  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:4369-4400  4920236fc60d  lines=32
-  <- README.md:105, README.md:152, docs/threat-model.md:400  :: }
-crates/chat-stasher/src/main.rs:4382-4391  fae6f081f82c  lines=10
+crates/chat-stasher/src/main.rs:4383-4392  fae6f081f82c  lines=10
   <- SECURITY.md:67  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:5669-5670  a70af44131aa  lines=2
+crates/chat-stasher/src/main.rs:4625-4743  6179727696b7  lines=119
+  <- README.md:105, README.md:152, docs/threat-model.md:400  :: fn cmd_read(
+crates/chat-stasher/src/main.rs:5670-5671  a70af44131aa  lines=2
   <- docs/install.md:429  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:5737-5744  e726e719a9a4  lines=8
+crates/chat-stasher/src/main.rs:5738-5745  e726e719a9a4  lines=8
   <- docs/install.md:458  :: Err(ActivityIndexError::Write(message)) => {
-crates/chat-stasher/src/main.rs:5879-5889  962afa583ed8  lines=11
+crates/chat-stasher/src/main.rs:5880-5890  962afa583ed8  lines=11
   <- docs/install.md:445  :: )
-crates/chat-stasher/src/main.rs:5888-5889  52b8c92908b4  lines=2
+crates/chat-stasher/src/main.rs:5889-5890  52b8c92908b4  lines=2
   <- docs/install.md:424  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:5993-6020  37bbae2ee352  lines=28
+crates/chat-stasher/src/main.rs:5994-6021  37bbae2ee352  lines=28
   <- README.md:99, README.md:105  :: /// What the exit code means, in words — the piece a 20-lin…
 crates/chat-stasher/src/nativehost.rs:64-77  b160255bd493  lines=14
   <- docs/privacy.md:336, docs/threat-model.md:263  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
