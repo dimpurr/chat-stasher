@@ -118,7 +118,41 @@ export type HaltReason =
    * Permanent: no amount of waiting makes a malformed record parse; a human has to
    * look at it.
    */
-  | 'state-unreadable';
+  | 'state-unreadable'
+  /**
+   * 🔴 W31 · **The account has more than one organization and nothing on the page
+   * named which one.**
+   *
+   * This is claude.ai's own shape: every request carries an organization id in its
+   * path, the id is not in the page URL, and an account may belong to several. The
+   * resolver (lib/backfill/claude-org.ts) reads the id from the page's own
+   * requests first and from the `lastActiveOrg` cookie second; this reason is what
+   * it produces when neither answered and `GET /api/organizations` listed more
+   * than one.
+   *
+   * 🔴 What it is **not**: an error, a rate limit, or "you have no conversations".
+   *    It holds **before any list request is issued** — zero conversations were
+   *    enumerated, and none was written off. Picking one of the organizations
+   *    would read a different organization's history than the page the user is
+   *    looking at, and iterating them until one answers is the same mistake with
+   *    more requests; so the leg stops, named, and waits for a human.
+   *
+   * Permanent by construction (`haltClassOf`'s default): the next tick would ask
+   * the same three sources and reach the same answer. It clears when the resolver
+   * has an answer — the page showing its own organization, or a person acting.
+   */
+  | 'org-ambiguous'
+  /**
+   * 🔴 W31 · **No organization could be named at all** — the page showed none, the
+   * cookie held none, and `GET /api/organizations` answered with an empty list or
+   * with a body that is not that list.
+   *
+   * A separate reason from 'org-ambiguous' because the two are different facts
+   * about the account: there, several candidates and no way to choose; here, not
+   * one candidate. Both hold before any request for conversation data, and neither
+   * may be recorded as "no conversations".
+   */
+  | 'org-unresolved';
 
 /**
  * 🔴 C28 · The two observable outcomes of an "empty" body.

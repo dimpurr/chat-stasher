@@ -278,6 +278,8 @@ failure:
     这条会话只回来了一部分——平台那边还有，我们不取剩下的——所以什么都没有存
   detailTooLong: >-
     这条会话比我们一次取的部分多，所以什么都没有存
+  detailTreeIncomplete: >-
+    这条会话只取回了一部分——从最新一条往回追，追到一条这次回复里没有的消息——所以什么都没有存
   unknownReason: "理由码 {reason}"
   shortIdEmpty: "（空）"
 

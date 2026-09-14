@@ -324,9 +324,18 @@ describe('W13-3 · the permanent stops are unchanged (the regression nail)', () 
       called += 1;
       throw new Error('MUST NOT be called');
     };
-    // claude is in the platform table and in BACKFILL_UNSUPPORTED: a platform that
-    // cannot enumerate at all, which is the *other* permanent family.
-    const claude = { ...opts(store, http, clock), platform: 'claude', origin: 'https://claude.ai', scope: 'w13-noplan' };
+    // A platform that cannot enumerate at all, which is the *other* permanent family.
+    // 🔴 W31 (2026-09-14) · This used to name claude, which was the last row of
+    //    BACKFILL_UNSUPPORTED. Its plan was filled in from the W20 research, the table is now
+    //    empty, and the protagonist moves to the lookup that used to answer for it — the family,
+    //    the reasoning and every assertion below are unchanged.
+    const claude = {
+      ...opts(store, http, clock),
+      platform: 'claude',
+      origin: 'https://claude.ai',
+      scope: 'w13-noplan',
+      plans: () => null,
+    };
 
     const r1 = await runBackfill(claude);
     expect(r1.stopped).toBe('halted');

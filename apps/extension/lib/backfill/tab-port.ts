@@ -107,7 +107,9 @@ import {
   formQueryMatches,
   formSegmentFor,
   isFormPostSpec,
+  pinnedQueryMatches,
   postSpecFor,
+  scopePathMatches,
   ALLOWED_BACKFILL_CONTENT_TYPES,
   ALLOWED_BACKFILL_METHODS,
   MAX_BODY_ARRAY_ITEMS,
@@ -278,8 +280,22 @@ function isScalar(v: unknown): boolean {
 function checkDetailQuery(
   plan: BackfillEnumPlan,
   u: URL,
-  segment: 'detail' | 'detail2',
+  segment: BackfillSegment,
 ): string | null {
+  /**
+   * 🔴 W31 · **A pinned query** (claude.ai's tree request). Its parameters are
+   * constants of the endpoint rather than a value this plan carries, so there is
+   * no `detailQueryKey` to compare a value against — the whole set is the
+   * declaration, and `pinnedQueryMatches` is the same rule a form segment's
+   * pinned query already follows. Checked **instead of**, never in addition to,
+   * the one-key rule: a plan declares one or the other.
+   */
+  if (segment === 'detail' && plan.detailQueryPinned) {
+    if (!pinnedQueryMatches(plan.detailQueryPinned, u)) {
+      return 'body url carries a query the plan did not declare';
+    }
+    return u.hash === '' ? null : 'body url carries a fragment the plan did not declare';
+  }
   // 🔴 W21 · The second step's URL is always query-free, and its own declaration
   //    carries no query key at all (see DetailStep2Spec): everything variable about
   //    step 2 travels in its POST body, which is validated below. So the rule for
@@ -358,6 +374,15 @@ export function checkBackfillRequest(
   spec: BackfillRequestSpec,
   pageOrigin: string,
   lookup: PlanLookup = backfillPlanFor,
+  /**
+   * 🔴 W31 · **The scope this page side resolved**, for a plan whose paths carry it
+   * (claude.ai's organization). It is a parameter rather than something read out
+   * of the URL on purpose: a check that reads the value it is checking is not a
+   * check. `null` means "no scope was resolved", and for a scoped plan that
+   * refuses every list/body URL — a request naming an organization this page did
+   * not resolve is exactly the request that must not go out.
+   */
+  scope: string | null = null,
 ): RequestVerdict {
   let u: URL;
   try {
@@ -381,7 +406,25 @@ export function checkBackfillRequest(
   //    this line — formSegmentFor returns null for it.
   let segment: BackfillSegment;
   const viaForm = formSegmentFor(plan, u);
-  if (viaForm !== null) segment = viaForm;
+  /**
+   * 🔴 W31 · **A plan whose paths carry the scope** is dispatched by
+   * `scopePathMatches` against the plan's own templates, segment by segment, with
+   * the scope the page side resolved. Two consequences worth stating:
+   *  · the resolution-only path is answered **first**, so a URL that is exactly
+   *    `/api/organizations` can never be read as the list path. The list template
+   *    has two more segments, so the two cannot collide by construction — but the
+   *    order makes that a property of this code rather than of the templates;
+   *  · the `{org}` segment is compared with `scope`, so a request naming another
+   *    organization is refused here rather than forwarded.
+   *
+   * A plan that declares no `scopeInPath` is untouched: this is one `if` in front
+   * of the dispatch every existing plan already used.
+   */
+  const scopePaths = plan.scopeInPath;
+  if (scopePaths && u.pathname === scopePaths.resolvePath) segment = 'resolve';
+  else if (scopePaths && scopePathMatches(scopePaths.listPath, u.pathname, scope)) segment = 'list';
+  else if (scopePaths && scopePathMatches(scopePaths.detailPath, u.pathname, scope)) segment = 'detail';
+  else if (viaForm !== null) segment = viaForm;
   else if (u.pathname === plan.listPath) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
   //    is not — Perplexity). null ⇒ this platform has **no** permitted body URL. The
@@ -393,6 +436,36 @@ export function checkBackfillRequest(
   //    exactly the same set of URLs it permitted before this change.
   else if (plan.detailStep2 && detailPathMatches(plan.detailStep2.path, u.pathname)) segment = 'detail2';
   else return refuseUrl('path is not a backfill endpoint');
+
+  /**
+   * 🔴 W31 · **The resolution-only path** (claude.ai's `GET /api/organizations`).
+   *
+   * It carries no conversation data and no parameter of any kind: what it answers
+   * is "which organization is this account using", and its answer is read once,
+   * page-side, by the resolver. So it is admitted under exactly one shape — GET,
+   * no query, no fragment, no body, no Content-Type — and every other shape is
+   * refused with a sentence of its own rather than being pushed through the
+   * list/body rules.
+   *
+   * 🔴 It is **not** a relaxation: this path is admitted only because this plan
+   *    declared it (`scopeInPath.resolvePath`), and a plan that declares nothing
+   *    permits exactly the URLs it permitted before. Both the method and the
+   *    bodylessness are also enforced by the ordinary branch below
+   *    (`postSpecFor` answers null for this segment), so this block adds the two
+   *    URL rules that the list/body rules would have worded as if this were a
+   *    conversation request.
+   */
+  if (segment === 'resolve') {
+    if (u.search !== '') return refuseUrl('the resolution-only path carries a query the plan did not declare');
+    if (u.hash !== '') return refuseUrl('the resolution-only path carries a fragment the plan did not declare');
+    if ((spec.method ?? 'GET') !== 'GET') {
+      return refuseRequest('refused: the resolution-only path is a GET');
+    }
+    if (spec.body !== undefined || spec.contentType !== undefined) {
+      return refuseRequest('refused: the resolution-only path carries a body or a content-type');
+    }
+    return { ok: true, url: spec.url, method: 'GET' };
+  }
 
   const post = postSpecFor(plan, segment);
 
@@ -630,8 +703,12 @@ function sanitiseMethod(method: string): string {
  * allowlist" and the "method/body allowlist" cannot tell different stories — there
  * is only one decision.
  */
-export function isAllowedBackfillUrl(url: string, pageOrigin: string): boolean {
-  return checkBackfillRequest({ url }, pageOrigin).ok;
+export function isAllowedBackfillUrl(
+  url: string,
+  pageOrigin: string,
+  scope: string | null = null,
+): boolean {
+  return checkBackfillRequest({ url }, pageOrigin, backfillPlanFor, scope).ok;
 }
 
 export type FetchLike = (
@@ -651,10 +728,11 @@ export async function serveBackfillFetch(
   pageOrigin: string,
   fetchImpl: FetchLike,
   lookup: PlanLookup = backfillPlanFor,
+  scope: string | null = null,
 ): Promise<BackfillFetchReply> {
   // The string form is C22's calling convention, kept: equivalent to "this URL, with its segment's default method".
   const spec: BackfillRequestSpec = typeof request === 'string' ? { url: request } : request;
-  const verdict = checkBackfillRequest(spec, pageOrigin, lookup);
+  const verdict = checkBackfillRequest(spec, pageOrigin, lookup, scope);
   if (!verdict.ok) {
     // 🔴 A trace: a refusal has to be sayable too, and it goes through the same
     //    error channel as a failed fetch ({ok:false} → tabHttpPort throw → the
@@ -691,10 +769,16 @@ export function handleBackfillMessage(
   pageOrigin: string,
   fetchImpl: FetchLike,
   lookup: PlanLookup = backfillPlanFor,
+  /**
+   * 🔴 W31 · The scope this page side resolved, for a plan whose paths carry it.
+   * It is the same value the content script hands to `fetch`'s URL builder, so
+   * "the URL we validated" and "the URL we send" carry one organization, not two.
+   */
+  scope: string | null = null,
 ): Promise<BackfillFetchReply | { ok: true; origin: string }> | null {
   if (isBackfillPing(message)) return Promise.resolve({ ok: true as const, origin: pageOrigin });
   if (isBackfillFetchRequest(message)) {
-    return serveBackfillFetch(specFromMessage(message), pageOrigin, fetchImpl, lookup);
+    return serveBackfillFetch(specFromMessage(message), pageOrigin, fetchImpl, lookup, scope);
   }
   return null;
 }

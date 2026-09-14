@@ -217,6 +217,10 @@ describe('C27-4 · the Perplexity backfill allowlist', () => {
     // 🔴 W29 (2026-09-14) · gemini joins it as well, from a measured probe rather than from
     //    sources. Perplexity is *still* the only half-declared plan, which is what this test is
     //    about — the roster grew, the criterion did not move.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'kimi', 'grok']);
+    // 🔴 W31 (2026-09-14) · claude joins it from the W20 research, the same way each row before it
+    //    moved: its organization resolver, its paging parameters and its list shape were read out of
+    //    sources and written into a plan. Perplexity remains the only half-declared plan, which is
+    //    what this test is about; the roster grew, the criterion did not move.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
   });
 });

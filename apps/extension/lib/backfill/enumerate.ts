@@ -337,6 +337,98 @@ export function detailPathMatches(detailPath: string, pathname: string): boolean
   return between.length > 0 && !between.includes('/');
 }
 
+/** 🔴 W31 · The placeholder a scoped plan's path templates carry where the archive scope sits. */
+export const SCOPE_ID_TOKEN = '{org}';
+
+/**
+ * 🔴 W31 · **Does a scoped plan's path template name exactly this pathname?**
+ *
+ * Segment by segment, and nothing else: the same number of segments, every
+ * literal segment equal character for character, and every `{…}` placeholder
+ * matching exactly one non-empty segment. Two placeholders are recognised —
+ * `{org}` (the scope) and `{id}` (the conversation) — and `scope` is compared
+ * with the captured `{org}` segment rather than merely accepted, so a request
+ * naming a different organization is refused rather than forwarded.
+ *
+ * Why segment-wise rather than the substring rule `detailPathMatches` uses: a
+ * template with a placeholder in the **middle** cannot be checked by prefix and
+ * suffix alone without letting the placeholder swallow a '/'. Splitting on '/'
+ * makes "one segment" structural, which is the property that matters.
+ *
+ * A template with no placeholder at all is still handled correctly (it degenerates
+ * to an exact pathname comparison), so this function is safe to call for any plan.
+ */
+export function scopePathMatches(
+  template: string,
+  pathname: string,
+  scope: string | null,
+): boolean {
+  const wanted = template.split('/');
+  const found = pathname.split('/');
+  if (wanted.length !== found.length) return false;
+  for (let i = 0; i < wanted.length; i += 1) {
+    const part = wanted[i]!;
+    const value = found[i]!;
+    if (part === SCOPE_ID_TOKEN) {
+      // 🔴 Compared, not accepted: the run's own scope is the only organization
+      //    this plan may address. An unresolved scope (null) matches nothing.
+      if (scope === null || scope.length === 0 || value !== scope) return false;
+      continue;
+    }
+    if (part === DETAIL_ID_TOKEN) {
+      if (value.length === 0) return false;
+      continue;
+    }
+    if (part !== value) return false;
+  }
+  return true;
+}
+
+/**
+ * 🔴 W31 · **Substitute the run's scope into a URL a plan built.**
+ *
+ * The one place a scope reaches a request. Returns null — never a URL with the
+ * token still in it — when the plan needs a scope and there is none to
+ * substitute: sending `/api/organizations/{org}/…` would be a request against a
+ * path the platform does not have, and the leg says so instead.
+ *
+ * A plan that declares no `scopeInPath` is returned **byte-identical**, so no
+ * existing platform's URL moves.
+ */
+export function applyScope(plan: BackfillEnumPlan, url: string, scope: string | null): string | null {
+  if (!plan.scopeInPath) return url;
+  if (!url.includes(SCOPE_ID_TOKEN)) return url;
+  if (scope === null || scope.length === 0) return null;
+  // 🔴 encodeURIComponent, because the value goes into a path segment: a scope
+  //    carrying a '/' or a '?' would otherwise build a different request than the
+  //    allowlist validated. A resolved uuid contains neither, so this changes
+  //    nothing for the real value — it is here so that "we validated URL A and
+  //    sent URL B" cannot happen.
+  return url.split(SCOPE_ID_TOKEN).join(encodeURIComponent(scope));
+}
+
+/**
+ * 🔴 W31 · Does this URL's query equal the plan's pinned key → value set, exactly?
+ *
+ * The same rule `formQueryMatches` applies to a form request, for a GET whose
+ * query is a set of constants: every pinned key present exactly once with its
+ * pinned value, and **no other key**. A fragment is a difference between the URL
+ * that was checked and the URL that is fetched, and is refused by the caller.
+ */
+export function pinnedQueryMatches(
+  pinned: readonly { readonly key: string; readonly value: string }[],
+  url: URL,
+): boolean {
+  const names = new Set<string>();
+  for (const name of url.searchParams.keys()) names.add(name);
+  if (names.size !== pinned.length) return false;
+  for (const { key, value } of pinned) {
+    const values = url.searchParams.getAll(key);
+    if (values.length !== 1 || values[0] !== value) return false;
+  }
+  return true;
+}
+
 /**
  * 🔴 W21 · The **second step** of one conversation's body.
  *
@@ -509,7 +601,19 @@ export type DetailPageStep =
  */
 export const MAX_BODY_ARRAY_ITEMS = 5000;
 
-export type BackfillSegment = 'list' | 'detail' | 'detail2';
+/**
+ * 🔴 W31 · `resolve` is not a backfill segment: it carries **no conversation
+ * data at all**. It is the one request that answers "which organization is this
+ * account using" (claude.ai), it is admitted by the allowlist only because a
+ * plan declared it under `scopeInPath.resolvePath`, and it exists in this union
+ * so that "what is sent" and "what is allowed" go through the same dispatch
+ * rather than through a second, parallel list of permitted URLs.
+ *
+ * It is deliberately **not** on the `BackfillSegment` values the engine can ask
+ * for a body of: `postSpecFor` answers null for it and `expectedMethodFor` says
+ * GET, exactly as for any other bodyless segment.
+ */
+export type BackfillSegment = 'list' | 'detail' | 'detail2' | 'resolve';
 
 /**
  * 🔴 W22 · What a body parser may say about a body whose **shape is recognised**.
@@ -532,7 +636,25 @@ export type BackfillSegment = 'list' | 'detail' | 'detail2';
  *    would halt the whole leg on a conversation that is merely long, and would
  *    say "the platform changed" about a platform that did not.
  */
-export type DetailParseOutcome = 'non-empty' | DetailOutcome | 'detail-paged-unsupported';
+export type DetailParseOutcome =
+  | 'non-empty'
+  | DetailOutcome
+  | 'detail-paged-unsupported'
+  /**
+   * 🔴 W31 · The response is the platform's own tree, its shape is recognised,
+   * and **walking the active branch from `current_leaf_message_uuid` upward hits
+   * a parent that is not in the response**. The body is therefore real content
+   * and may be missing messages, so it is not the conversation and must not be
+   * archived (claude.ai; see parseClaudeDetailPage).
+   *
+   * A per-conversation fact, exactly like 'detail-paged-unsupported': every other
+   * conversation in the same run is unaffected, so it takes the failure path and
+   * the run carries on — never a halt of the leg. What it must **not** be is
+   * 'shape-changed' (the shape is precisely what the row describes) or an
+   * archived conversation (that would put a partial tree in the archive with
+   * nothing marking it partial).
+   */
+  | 'detail-tree-incomplete';
 
 /**
  * The result of a body parser. 'non-empty' is not an outcome to persist, it just
@@ -550,6 +672,53 @@ export type DetailParseResult =
  * seven and it can be backfilled; miss one and it cannot.
  * Adding a platform = adding one of these structures, with no engine change.
  */
+/**
+ * 🔴 W31 · **The archive scope, as a position in a request path.**
+ *
+ * Some platforms put the account identifier in the path of every conversation
+ * request (claude.ai: `/api/organizations/<org>/chat_conversations/<id>`), and it
+ * is nowhere in the page URL. The plan's own URL builders therefore emit the
+ * literal token `{org}` where the scope goes, and the engine substitutes the
+ * run's scope into it (`applyScope`) — one substitution point, exactly as
+ * `{id}` has one in `detailPath`.
+ *
+ * Why a template with a token rather than a second `listUrl` signature that takes
+ * the scope: the scope would then have to be threaded through every caller of
+ * every builder, and a plan that does not need it would still have to accept it.
+ * The token keeps the six existing plans byte-identical and puts the fact in one
+ * readable place.
+ *
+ * 🔴 What it does **not** relax. The allowlist still compares segment by segment
+ *    and still refuses anything a plan did not write down: `scopePathMatches`
+ *    requires the same number of segments, every literal segment to match
+ *    character for character, and the captured scope to **equal the scope the
+ *    page side resolved** — a request naming a different organization is refused,
+ *    not forwarded. The token is a position, not a wildcard.
+ *
+ * 🔴 `resolvePath` is the third path this plan may use, and it is deliberately
+ *    **resolution-only**: the one request that answers "which organization is
+ *    this account using" (a GET with no query and no body). It is not the list
+ *    path and not the body path, cannot be pointed at either, and cannot carry a
+ *    query; see tab-port.ts's checkBackfillRequest.
+ */
+export interface ScopeInPathSpec {
+  /** The list path template, with `{org}` where the scope sits. Compared segment by segment. */
+  listPath: string;
+  /** The body path template, with `{org}` and `{id}`. */
+  detailPath: string;
+  /** The resolution-only path: GET, no query, no body. Used by the resolver and by nothing else. */
+  resolvePath: string;
+  /**
+   * Whether the token names the scope or, for a platform whose token is a
+   * different account axis, something else. Today this is only ever true; it is
+   * spelled out rather than assumed because the allowlist reads this field to
+   * decide that `{org}` must equal the resolved scope, and a future platform
+   * whose path carries a non-scope account segment must not silently inherit that
+   * rule.
+   */
+  tokenIsScope: true;
+}
+
 export interface BackfillEnumPlan {
   /** Must equal the id in lib/contract.ts's platform table, character for character. */
   platform: string;
@@ -760,6 +929,63 @@ export interface BackfillEnumPlan {
    * No such field = this plan is complete (both list and body work).
    */
   partial?: PartialBackfill;
+  /**
+   * 🔴 W31 · **This plan's request paths carry the archive scope** (see
+   * ScopeInPathSpec). Declaring it means: the URL builders below emit `{org}`,
+   * the engine substitutes `opts.scope` into every URL before it is sent, and the
+   * allowlist matches the plan's own templates with that same scope.
+   */
+  scopeInPath?: ScopeInPathSpec;
+  /**
+   * 🔴 W31 · **Offset paging with no termination field** (claude.ai).
+   *
+   * The response is a bare array: no `has_more`, no `next_cursor`, no next-page
+   * token, and no `total` worth reading. Two consequences, both of them
+   * inferences, and both named as such:
+   *  · **a short page ends the listing** — the same client inference Perplexity's
+   *    three sources share, so it is recorded as `short-page-inferred` with
+   *    `complete` left **false** (an inference must not be written as "we listed
+   *    everything"); the empty page, which is a real observation, still sets
+   *    complete on its own branch above;
+   *  · **the repeat-page guard runs** on a non-first page. For a token plan the
+   *    guard asks "did the cursor move"; here it asks the same question about the
+   *    offset parameter the plan itself emits. A page whose ids this enumeration
+   *    has already seen means the parameter was ignored, and hammering the same
+   *    page forever while the ledger says it is advancing is the failure it
+   *    prevents.
+   *
+   * 🔴 `total` is deliberately not read even as a hint: claude.ai's list response
+   *    has no such field, and W10 already measured that a `total` this endpoint
+   *    class of API prints is not the size of the account. parseClaudeListPage
+   *    returns `total: null`, which is "the API gave us none", not zero.
+   */
+  listOffsetInferred?: true;
+  /**
+   * 🔴 W31 · **The page size this plan itself asks for.**
+   *
+   * Until this field, one number decided both the request and the ending: the
+   * engine's `listLimit` (default 100) went into the URL's `limit=` *and* was the
+   * value a short page was compared against. A plan whose sources name a
+   * different page size could only get one of the two right — asking for 50 while
+   * calling 50 rows "short" would end the listing one page early and record it as
+   * an inference.
+   *
+   * An explicit `opts.listLimit` (a caller's own choice, used by tests) still
+   * wins: this field is a default, not an override of the caller.
+   */
+  listPageSize?: number;
+  /**
+   * 🔴 W31 · **The exact query the body segment's own builder emits.**
+   *
+   * A fixed key → value set, each key exactly once, nothing else — the same rule
+   * `FormPostSpec.query` applies to a form request, for the first platform whose
+   * *GET* carries more than one parameter (claude.ai's tree request pins three).
+   * It replaces, rather than widens, `detailQueryKey`: that field describes one
+   * key carrying a **value**, and this one describes parameters that are
+   * constants of the endpoint. A plan declares one or the other, and the allowlist
+   * checks whichever it declares.
+   */
+  detailQueryPinned?: readonly { readonly key: string; readonly value: string }[];
   /** 7 · Provenance. Same standard as the credibility note in contract.ts. */
   provenance: string;
 }
@@ -2364,6 +2590,371 @@ export const GEMINI_PLAN: BackfillEnumPlan = {
     + 'browser session run by the main session, not by this change.',
 };
 
+// ---------------------------------------------------------------------------
+// 🔴 W31 · claude.ai
+//
+// Everything below rests on the W20 research (`nm/W20-OUT.md` §Claude), which is
+// **source-backed and never measured**: claude.ai cannot be opened by this
+// project's browser-automation tool, so no request was issued to it by this
+// change or by the research before it. Every fact here therefore carries its
+// evidence strength, and the two facts the sources disagree on are written out
+// rather than averaged.
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 The list route, as a **template**: the organization id is a path segment and
+ * it is not in the page URL. `/api/organizations/<org>/chat_conversations`, and
+ * one source writes the same route without a trailing slash.
+ */
+export const CLAUDE_LIST_PATH_TEMPLATE = '/api/organizations/{org}/chat_conversations';
+/**
+ * 🔴 The body route, the same path plus the conversation id. This is also the
+ * route the **live capture** sees (lib/contract.ts's claude row), which is what
+ * makes a debt key and a live capture name the same conversation: both are the
+ * uuid from this path (see the sessionIdPatterns note on that row).
+ */
+export const CLAUDE_DETAIL_PATH_TEMPLATE = '/api/organizations/{org}/chat_conversations/{id}';
+/**
+ * 🔴 **The resolution-only path** (see ScopeInPathSpec). One source reads the
+ * organization from a cookie and two from this route; nothing else in this plan
+ * touches it, and the allowlist admits it as GET with no query and no body.
+ */
+export const CLAUDE_RESOLVE_PATH = '/api/organizations';
+
+/**
+ * 🔴 W31 · How many rows one list page asks for.
+ *
+ * The sources use 100 in one implementation and 50 in another, and the page-size
+ * value is a **request parameter this plan builds**, so either is a legal request
+ * to the endpoint. 50 is chosen rather than 100 for the reason the whole list leg
+ * exists in its current shape: one conversation is one more request, the debt set
+ * is persisted per page, and a smaller page keeps the first body a shorter
+ * distance behind the listing (W10). Nothing here is a measurement of the
+ * server's cap — the end of the listing is still the API's own short or empty
+ * page, not "we asked for 50 and got 50".
+ */
+export const CLAUDE_LIST_LIMIT = 50;
+
+/**
+ * 🔴 The body request's query, **pinned key by key and value by value** — three
+ * constants, no value that varies per conversation.
+ *
+ * The three are the tree flag, the rendering mode and the tool-rendering flag, in
+ * the casing the W20 research recorded verbatim. They are constants of the
+ * endpoint rather than parameters of one conversation, which is why they are
+ * declared as `detailQueryPinned` (a fixed set) and not through `detailQueryKey`
+ * (one key carrying the conversation id): nothing in this plan's URL varies except
+ * the two path segments, and both of those are matched by `scopePathMatches`.
+ *
+ * ⚠️ The sources disagree on the **casing of the tree flag** (`?tree=true` vs
+ * `?tree=True`); the research recorded the URL that the code producing the
+ * response envelope actually sends, and that is the one pinned here. A server
+ * that only accepts the other casing answers 4xx, which this leg records as a
+ * refusal — never as "this conversation is empty".
+ */
+export const CLAUDE_DETAIL_QUERY: readonly { readonly key: string; readonly value: string }[] = [
+  { key: 'tree', value: 'True' },
+  { key: 'rendering_mode', value: 'messages' },
+  { key: 'render_all_tools', value: 'true' },
+];
+
+/**
+ * 🔴 **The two spellings the sources disagree on** for a message's link to its
+ * parent. The record notes `parent_message_uuid`; one implementation's own notes
+ * write `parent_uuid` for the same field.
+ *
+ * The rule is "accept either, and record which was seen" — so the walk below
+ * reads the first of these that the message actually carries, and
+ * `claudeParentKeyIn` answers which spelling this response used. That is what
+ * makes the disagreement a **decidable fact about a real response** instead of a
+ * remembered guess, and it is the one thing a later probe needs to settle it.
+ */
+export const CLAUDE_PARENT_KEYS: readonly string[] = ['parent_message_uuid', 'parent_uuid'];
+
+/** Which parent-link spelling one message carried; null when it carries neither (i.e. it is a root). */
+export function claudeParentKeyOf(message: Record<string, unknown>): string | null {
+  for (const key of CLAUDE_PARENT_KEYS) {
+    const value = message[key];
+    if (typeof value === 'string' && value.length > 0) return key;
+  }
+  return null;
+}
+
+/** Which spelling a whole response used; null when every message is a root (or nothing was read). */
+export function claudeParentKeyIn(text: string): string | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const messages = (body as Record<string, unknown>).chat_messages;
+  if (!Array.isArray(messages)) return null;
+  for (const message of messages) {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) continue;
+    const key = claudeParentKeyOf(message as Record<string, unknown>);
+    if (key !== null) return key;
+  }
+  return null;
+}
+
+/**
+ * 🔴 W31 · **Can this response prove it is the whole active branch?**
+ *
+ * The walk, and why it is the completeness check rather than a count: the
+ * response is a **tree** (every message names its parent), and
+ * `current_leaf_message_uuid` names the newest message of the branch the user was
+ * looking at. So the branch is exactly the chain that starts at that leaf and
+ * follows parent links upward. If every step of that chain resolves to a message
+ * present in `chat_messages` and it ends at a root, the chain is complete — and
+ * what is delivered is that chain, top-down.
+ *
+ * If a parent is **missing** from the response, the tree this response carries
+ * does not hold the whole branch: the wire is truncated (a long conversation
+ * capped server-side is the open question the research records and cannot
+ * answer), and the honest outcome is a named, per-conversation failure — never an
+ * archived conversation that is silently missing its middle.
+ *
+ * 🔴 The walk is bounded by the number of messages: a response whose parent links
+ *    form a cycle would otherwise loop forever. A cycle is not "complete" — it is
+ *    a shape this code cannot read — so it is reported as incomplete rather than
+ *    as a root.
+ *
+ * 🔴 Requested order and delivered order are different things. The delivered
+ *    document is the chain **from the root down to the leaf**, because that is
+ *    the conversation as a person reads it; the walk starts at the leaf because
+ *    that is the only end the response names.
+ */
+export function parseClaudeDetailTree(
+  text: string,
+): { ok: true; ordered: string[] } | { ok: false; outcome: 'detail-tree-incomplete'; detail: string } {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the detail response is not an object' };
+  }
+  const record = body as Record<string, unknown>;
+  const messages = record.chat_messages;
+  if (!Array.isArray(messages)) {
+    return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the detail response has no chat_messages array' };
+  }
+  const byUuid = new Map<string, Record<string, unknown>>();
+  for (const message of messages) {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      return { ok: false, outcome: 'detail-tree-incomplete', detail: 'a chat message is not an object' };
+    }
+    const messageRecord = message as Record<string, unknown>;
+    const uuid = messageRecord.uuid;
+    if (typeof uuid !== 'string' || uuid.length === 0) {
+      return { ok: false, outcome: 'detail-tree-incomplete', detail: 'a chat message carries no non-empty uuid' };
+    }
+    byUuid.set(uuid, messageRecord);
+  }
+  const leaf = record.current_leaf_message_uuid;
+  if (typeof leaf !== 'string' || leaf.length === 0) {
+    return {
+      ok: false,
+      outcome: 'detail-tree-incomplete',
+      detail: 'the detail response names no current_leaf_message_uuid',
+    };
+  }
+  if (!byUuid.has(leaf)) {
+    return {
+      ok: false,
+      outcome: 'detail-tree-incomplete',
+      detail: 'the current leaf is not among the chat messages this response carries',
+    };
+  }
+
+  const chain: string[] = [];
+  const visited = new Set<string>();
+  let current: string | null = leaf;
+  while (current !== null) {
+    if (visited.has(current)) {
+      return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the parent chain revisits a message' };
+    }
+    visited.add(current);
+    const message = byUuid.get(current);
+    if (!message) {
+      return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the parent chain leaves the messages this response carries' };
+    }
+    chain.push(current);
+    const parentKey = claudeParentKeyOf(message);
+    // No non-empty parent link ⇒ this is the root of the branch, and the chain is whole.
+    current = parentKey === null ? null : (message[parentKey] as string);
+  }
+  // Root first: the conversation as it was read, not as it was walked.
+  return { ok: true, ordered: chain.reverse() };
+}
+
+/**
+ * 🔴 W31 · The **list** page. The response is a bare JSON **array** of conversation
+ * summaries, each carrying `uuid` — the same value the body route puts in its
+ * path, which is what makes a debt key and a live capture name the same
+ * conversation.
+ *
+ * Three refusal rules, each of them the "do not record an unknown as empty" line:
+ *  · a body that is not an array is `{ok:false}` — halt('shape-changed'). It is
+ *    **never** an empty account;
+ *  · an element that is not an object, or that carries no non-empty string
+ *    `uuid`, is `{ok:false}` rather than a skipped row: a row this code cannot
+ *    classify might be a conversation, and dropping it would lose that
+ *    conversation while the leg reported success;
+ *  · `total` is **not read at all**. The response has no such field, and where an
+ *    endpoint does print one, W10 measured that it is not the size of the
+ *    account. `total: null` here means "the API gave us none".
+ *
+ * ⚠️ Not one of these refusals is a diagnosis: the sources' evidence for this
+ * route is a URL and a shape read out of reference implementations, not a
+ * measured response, so the shapes above are the ones the sources describe and a
+ * different one halts with a trace.
+ */
+export function parseClaudeListPage(text: string): ParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'claude list response is not JSON' };
+  }
+  if (!Array.isArray(body)) {
+    return { ok: false, detail: 'claude list response is not an array of conversation summaries' };
+  }
+  const ids: string[] = [];
+  for (const entry of body) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { ok: false, detail: 'a claude list entry is not an object' };
+    }
+    const uuid = (entry as Record<string, unknown>).uuid;
+    if (typeof uuid !== 'string' || uuid.length === 0) {
+      return { ok: false, detail: 'a claude list entry carries no non-empty uuid' };
+    }
+    ids.push(uuid);
+  }
+  return { ok: true, page: { ids, total: null } };
+}
+
+/**
+ * 🔴 W31 · The **body** page, as the plan's completeness hook
+ * (`BackfillPlan.parseDetailPage`).
+ *
+ * What it decides, in order:
+ *  1. the envelope must be the one the row describes — a JSON object with a
+ *     `chat_messages` **array**. Anything else is `{ok:false}` ⇒
+ *     halt('shape-changed'), which is the body gate that already existed;
+ *  2. an **empty** `chat_messages` is `detail-empty-unverified`: a legitimate
+ *     empty conversation is not something any source establishes for this route,
+ *     and "we read an empty body" must not become "this conversation was empty";
+ *  3. otherwise the branch is walked from `current_leaf_message_uuid` upward. A
+ *     whole chain ⇒ 'non-empty' and the body is delivered. A chain that hits a
+ *     missing parent, a missing leaf, or a cycle ⇒ **'detail-tree-incomplete'**:
+ *     the response is real content and does not hold the whole conversation, so
+ *     nothing is archived and the conversation gets a named receipt on the
+ *     failure list.
+ */
+export function parseClaudeDetailPage(text: string): DetailParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'claude detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'claude detail response is not a JSON object' };
+  }
+  const messages = (body as Record<string, unknown>).chat_messages;
+  if (!Array.isArray(messages)) {
+    // 🔴 The existing gate, kept exactly: a body without chat_messages is the
+    //    drift case and must be warned about, not read as an empty conversation.
+    return { ok: false, detail: 'claude detail response has no `chat_messages` array (shape changed?)' };
+  }
+  if (messages.length === 0) {
+    return { ok: true, outcome: 'detail-empty-unverified' };
+  }
+  const walked = parseClaudeDetailTree(text);
+  return walked.ok ? { ok: true, outcome: 'non-empty' } : { ok: true, outcome: walked.outcome };
+}
+
+const claudeListUrl = (origin: string, offset: number, limit: number): string =>
+  `${origin}${CLAUDE_LIST_PATH_TEMPLATE}?limit=${limit}&offset=${offset}`;
+const claudeDetailUrl = (origin: string, conversationId: string): string =>
+  `${origin}/api/organizations/{org}/chat_conversations/${encodeURIComponent(conversationId)}`
+  + `?${CLAUDE_DETAIL_QUERY.map(({ key, value }) => `${key}=${value}`).join('&')}`;
+
+/**
+ * ## W31 · claude.ai, and the two things this plan does not decide
+ *
+ *  · **The list**: GET `/api/organizations/<org>/chat_conversations?limit=&offset=`
+ *    — integer offset paging, the end inferred from a short or empty page, and
+ *    neither a `total` nor any termination field to read. (W20 §Claude 2.)
+ *  · **The body**: GET `/api/organizations/<org>/chat_conversations/<uuid>` with
+ *    the three tree parameters, i.e. the very request the page itself makes when
+ *    a past conversation is opened — the same route the live capture row watches.
+ *    (W20 §Claude 1 and 3.)
+ *  · **The organization**: resolved by `lib/backfill/claude-org.ts` from the
+ *    page's own requests, then the `lastActiveOrg` cookie, then
+ *    `GET /api/organizations` — and when none of the three names exactly one
+ *    organization, the leg halts `org-ambiguous` **before issuing a list
+ *    request**. It is never guessed and the organizations are never iterated.
+ *    The value becomes this run's `scope`, which is what `{org}` is substituted
+ *    with (applyScope) and what the allowlist compares the path segment against.
+ *
+ * ⚠️ Unverified, and said so rather than implied: the record notes
+ * `parent_message_uuid` while one implementation's notes write `parent_uuid`, so
+ * both are accepted and `claudeParentKeyIn` reports which a response used; the
+ * casing of the tree flag disagrees between sources and the research's spelling
+ * is pinned; and whether a very long conversation is capped server-side inside
+ * one `chat_messages` array is **not found in any source** — which is exactly the
+ * case `detail-tree-incomplete` exists to refuse rather than archive.
+ * No request was issued to claude.ai by this change.
+ */
+export const CLAUDE_PLAN: BackfillEnumPlan = {
+  platform: 'claude',
+  listPath: CLAUDE_LIST_PATH_TEMPLATE,
+  // 🔴 The offset is not a free parameter for this plan: `limit` is this plan's own
+  //    measured-looking constant (CLAUDE_LIST_LIMIT) and the engine's `limit`
+  //    argument is passed through so that one number decides every page.
+  listUrl: claudeListUrl,
+  listPageSize: CLAUDE_LIST_LIMIT,
+  listOffsetInferred: true,
+  parseListPage: parseClaudeListPage,
+  detailPath: CLAUDE_DETAIL_PATH_TEMPLATE,
+  detailUrl: claudeDetailUrl,
+  detailQueryPinned: CLAUDE_DETAIL_QUERY,
+  parseDetailPage: parseClaudeDetailPage,
+  scopeInPath: {
+    listPath: CLAUDE_LIST_PATH_TEMPLATE,
+    detailPath: CLAUDE_DETAIL_PATH_TEMPLATE,
+    resolvePath: CLAUDE_RESOLVE_PATH,
+    tokenIsScope: true,
+  },
+  provenance:
+    'W31 · every fact here is SECOND-HAND: read out of three independent reference implementations '
+    + '(source code, not READMEs), never from a logged-in claude.ai session — this project\'s '
+    + 'browser-automation tool cannot open claude.ai, and this change issued no request to it. '
+    + 'List: GET /api/organizations/<org>/chat_conversations?limit=&offset=, a bare JSON array of '
+    + 'summaries carrying uuid; the end is a short page (one source: `if (items.length < limit)`) or '
+    + 'an empty page (`if (items.length === 0) break`), and neither implementation reads a has_more '
+    + 'or a next_cursor field — checked in both. One source reads a data.total, but its own stop is '
+    + 'the short-page check, so total is not read here at all. '
+    + 'Body: GET /api/organizations/<org>/chat_conversations/<uuid>?tree=True&rendering_mode=messages'
+    + '&render_all_tools=true, returning { uuid, name, model, current_leaf_message_uuid, '
+    + 'chat_messages: [{ uuid, parent_uuid, index, sender, created_at, content }] }; the same route '
+    + 'the live capture row watches, which is why a debt key and a live capture are the same value. '
+    + 'The tree is the completeness check: the active branch is the chain from current_leaf_message_uuid '
+    + 'up parent links, and a chain that reaches a root without a missing parent is the whole branch. '
+    + '⚠️ Sources disagree on parent_message_uuid vs parent_uuid (both accepted, and which one a '
+    + 'response used is readable through claudeParentKeyIn) and on the casing of the tree flag '
+    + '(the URL recorded above is pinned). Auth is cookies only, no bearer and no CSRF token; the '
+    + 'organization is required in the path and is not in the page URL, which is why the resolver '
+    + 'exists. Whether a very long conversation is capped server-side inside one chat_messages array '
+    + 'is not found in any source — detail-tree-incomplete refuses such a body instead of archiving it.',
+};
+
 /**
  * The plans, in one place. A platform is backfillable when it has an entry here;
  * the two tables below cover the rest, and tests/c22-enumplat.test.ts asserts
@@ -2376,6 +2967,7 @@ const PLANS: readonly BackfillEnumPlan[] = [
   GEMINI_PLAN,
   GROK_PLAN,
   KIMI_PLAN,
+  CLAUDE_PLAN,
 ];
 
 // ---------------------------------------------------------------------------
@@ -2400,22 +2992,30 @@ const PLANS: readonly BackfillEnumPlan[] = [
 //    exactly one of "has a plan" / "registered as temporarily impossible", and
 //    tests/c22-enumplat.test.ts still watches it.
 export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
-  {
-    platform: 'claude',
-    known: [
-      // lib/contract.ts:148-153 states the conversation-LIST route is
-      // '/chat_conversations' (the one without the trailing slash), and 176-184
-      // records that a reference implementation (read 2026-08-08) requests
-      // /api/organizations/<org>/chat_conversations/<uuid>.
-      'listPath is sourced: /api/organizations/<org>/chat_conversations (lib/contract.ts:148-153, 176-184, quoting a reference implementation read 2026-08-08)',
-    ],
-    missing: [
-      'listUrl: where the <org> organization id in the route comes from has NO source — it is not in the page URL and has to be fetched from another endpoint first; we have no source for that endpoint, and inventing one would make the user believe history is being backfilled',
-      'listUrl: the paging parameter names are unknown',
-      'parseListPage: the conversation array / total field names of the list response are unknown (the chat_messages recorded in this repository belongs to the BODY route, not the list)',
-    ],
-    userNoteKey: 'platformNote.claude.unsupported',
-  },
+  // 🔴 W31 · The **claude row was moved out**, not deleted and forgotten. All three
+  //    gaps it named were closed by evidence, and the third one is worth reading
+  //    because it is the only one this change added to rather than merely filled:
+  //      · "where the <org> comes from has NO source" — the W20 research recorded
+  //        four sources for it (the page's own request URLs, the `lastActiveOrg`
+  //        cookie, GET /api/organizations, GET /api/auth/session, GET /api/bootstrap).
+  //        The resolver (lib/backfill/claude-org.ts) uses the first three, in that
+  //        order, and **halts** rather than guessing when several organizations
+  //        remain; the third path is declared on the plan so the allowlist admits
+  //        it and nothing else does.
+  //      · "the paging parameter names are unknown" — `limit` and `offset`
+  //        (W20 §Claude 2), with the end inferred from a short or empty page.
+  //      · "the list response's field names are unknown" — a bare array of
+  //        summaries carrying `uuid` (W20 §Claude 2), which is now
+  //        parseClaudeListPage. The row's own worry ("the recorded chat_messages
+  //        belongs to the BODY route") was right, and the two are now separate
+  //        parsers rather than one guessed shape.
+  //    What the plan still cannot say is written at CLAUDE_PLAN (the parent-link
+  //    spelling disagreement, the tree-flag casing, and whether a long
+  //    conversation is capped server-side).
+  //    The rule C22 set still holds: every row of the platform table lands on
+  //    exactly one of "has a plan" / "registered as temporarily impossible", and
+  //    tests/c22-enumplat.test.ts still watches it.
+
   // 🔴 W22 · The **kimi row was moved out**, not deleted and forgotten: the
   //    2026-09-14 logged-in probe measured both routes, both request bodies and
   //    both response envelopes (see KIMI_PLAN's head), so kimi now has a plan on
@@ -2475,6 +3075,10 @@ export function postSpecFor(
   // 🔴 W29 · Same rule for a body token in a **form** (`listTokenForm`), and for
   //    a detail segment declared as a form (`detailForm`). The order below is the
   //    order of precedence, not a set of alternatives a plan is expected to mix.
+  // 🔴 W31 · The resolution-only path is a GET with nothing in it. Answering null
+  //    here is what makes `expectedMethodFor` say GET for it, and it is the same
+  //    answer every bodyless segment gets — there is no second rule for it.
+  if (segment === 'resolve') return null;
   if (segment === 'list') return plan.listTokenPost ?? plan.listPost ?? plan.listTokenForm ?? null;
   if (segment === 'detail') return plan.detailPost ?? plan.detailForm ?? null;
   // 🔴 W21 · The second detail step is always a POST: its whole reason to exist is

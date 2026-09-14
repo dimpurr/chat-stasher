@@ -161,7 +161,19 @@ describe('C22-3 · "we cannot read your history yet" and "you have no history" m
   //    DeepSeek's own new outcome (the list can be listed, the body segment has no source ⇒ halt('detail-unsupported'))
   //    is watched separately in tests/c27-pplx.test.ts — 🔴 W8 moved that outcome's protagonist from
   //    deepseek to perplexity, for the same reason C26 moved this one, and the criterion is unchanged.
-  it('a platform not supported yet ⇒ halt(unsupported-platform), and not one request was sent', async () => {
+  // 🔴 W31 (2026-09-14) changed this case's **protagonist** for the third time (deepseek → claude →
+  //    "a platform whose plan lookup answers null"), and this time the reason is structural rather
+  //    than a roster move: claude was the last row in BACKFILL_UNSUPPORTED, its three gaps were
+  //    closed by the W20 research, and the table is now empty — so **no platform in the platform
+  //    table is undeclared any more**, and there is nothing left that reaching for the real table
+  //    could exercise.
+  //    What is exercised here is the mechanism, and it is exercised from the same place it always
+  //    was: the plan lookup the engine is handed. `plans: () => null` is "this platform's plan is
+  //    absent", which is precisely what BACKFILL_UNSUPPORTED used to say about a real row — the
+  //    criterion (a platform with no plan halts by name, before any request, and the trace says
+  //    what is missing) is unchanged, and the two assertions this test always made are still made
+  //    against the very branch that used to serve claude.
+  it('a platform with no plan ⇒ halt(unsupported-platform), and not one request was sent', async () => {
     const store = memoryStore();
     const be = backend([]);
 
@@ -172,15 +184,18 @@ describe('C22-3 · "we cannot read your history yet" and "you have no history" m
       store,
       http: be.http,
       clock: fakeClock(),
+      plans: () => null,
     });
 
     expect(report.stopped).toBe('halted');
     expect(report.halted?.reason).toBe('unsupported-platform');
     // 🔴 It stops **before** issuing any request — this used to fire ChatGPT's path at DeepSeek.
     expect(be.calls).toEqual([]);
-    // The trace must name what is missing, not just say "not supported".
-    expect(report.halted?.detail).toContain('missing:');
-    expect(report.halted?.detail).toContain('parseListPage');
+    // The trace must name what is missing, not just say "not supported". With the table empty,
+    // the branch that fires is the one that says a row is registered in neither table, and it names
+    // both of them — which is the same promise: the trace points at where the gap has to be closed.
+    expect(report.halted?.detail).toContain('registered in neither');
+    expect(report.halted?.detail).toContain('BACKFILL_UNSUPPORTED');
   });
 
   it('the control: a supported platform whose list really is empty ⇒ not a halt, but "finished, no history"', async () => {
@@ -270,12 +285,21 @@ describe('C22-4 · every platform must have a definite conclusion', () => {
     //    2026-09-14 probe measured both rpcids and both response payloads, the W20 research
     //    recorded the request's content type, and the one declaration that was missing —
     //    "the channel's Content-Type closed set holds only application/json" — was widened with
-    //    that evidence rather than by relaxing anything. What remains unsupported is claude
-    //    alone, and the array below is where that shows.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'kimi', 'grok']);
-    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([
-      'perplexity', 'claude',
-    ]);
+    //    that evidence rather than by relaxing anything.
+    // 🔴 W31 (2026-09-14) moved the **last** row across and left BACKFILL_UNSUPPORTED **empty**,
+    //    which is a state worth naming rather than letting a reader discover it from an empty
+    //    array: claude's three recorded gaps were closed by the W20 research (the organization
+    //    resolver, the limit/offset paging parameters, and the list response's array of `uuid`
+    //    summaries). So every row of the platform table now has a plan, and the only platform not
+    //    on the supported side is Perplexity — which is *half*-declared, not undeclared, and
+    //    appears below through `BACKFILL_UNSUPPORTED_PLATFORMS` because that list means "cannot
+    //    backfill history in full", not "has no plan".
+    //    The `unsupported-platform` halt path and the BACKFILL_UNSUPPORTED table are therefore
+    //    unreachable from the real platform table today. They are **kept**, and C22-3 below now
+    //    exercises them with a plan lookup that returns null, so the mechanism stays covered for
+    //    the next platform that needs it. Nothing about the criterion moved.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
+    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual(['perplexity']);
   });
 
   it('every "temporarily impossible" must name what is missing plus give the user one plain sentence', () => {
@@ -321,7 +345,13 @@ describe('C22-5 · the popup\'s honest explanation', () => {
     //    2026-09-14 probe and the W20 research), so the note that has to be readable is claude's —
     //    the last platform with no plan at all. The criterion is unchanged: a platform whose
     //    history cannot be backfilled yet has to say so where the user can read it.
-    expect(out).toContain('Claude: history cannot be backfilled yet');
+    // 🔴 W31 (2026-09-14) · claude's plan was filled in from the W20 research too, so
+    //    BACKFILL_UNSUPPORTED is now empty and there is no such platform left to point at. The
+    //    assertion is turned around rather than deleted, and it is the same fact read the other
+    //    way: a platform that **has** a plan must not be described as one that cannot be
+    //    backfilled. The catalog still holds claude's old sentence (nothing consumes it), so this
+    //    line fails the moment some future code starts rendering a note for a supported platform.
+    expect(out).not.toContain('Claude: history cannot be backfilled yet');
   });
 
   it('with halted=unsupported-platform it says "not implemented yet", not "the platform changed"', () => {
