@@ -182,7 +182,7 @@ from it. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
 `/api/auth/session` (`apps/extension/lib/page-hook.ts:396-401`;
-`apps/extension/entrypoints/dw-bridge.content.ts:195-221`;
+`apps/extension/entrypoints/dw-bridge.content.ts:196-222`;
 `apps/extension/lib/platform-auth.ts:88-107`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already

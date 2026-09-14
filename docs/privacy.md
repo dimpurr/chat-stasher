@@ -89,7 +89,7 @@ the sentence.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
    page, on the same origin (`apps/extension/lib/page-hook.ts:396-401`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:195-221`). That request —
+   `apps/extension/entrypoints/dw-bridge.content.ts:196-222`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin. The token is held only
@@ -109,7 +109,7 @@ the sentence.
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
    conversations” (`apps/extension/lib/platform-auth.ts:203-235`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:161-169`).
+   `apps/extension/entrypoints/dw-bridge.content.ts:162-170`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,

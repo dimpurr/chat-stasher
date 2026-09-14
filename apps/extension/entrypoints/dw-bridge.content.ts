@@ -13,6 +13,7 @@ import {
   serveBackfillFetch,
   type FetchLike,
 } from '../lib/backfill/tab-port';
+import { installTabHello } from '../lib/backfill/tab-hello';
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
@@ -252,9 +253,19 @@ export default defineContentScript({
     // background, so that **when the alarm wakes** it knows which tab to fetch
     // through. A failure is harmless — the live leg uses the sender it has at the
     // time and does not depend on this registry.
-    browser.runtime
-      .sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin })
-      .catch(() => { /* background asleep / nobody listening: do not disturb the page */ });
+    // 🔴 W27 · And **keep** checking in. One hello per page load was not enough:
+    //    reloading the extension tears this script down, and nothing puts the tab
+    //    back until the user reloads the page, so the tick reported 'no-http-port'
+    //    with the site wide open on screen. installTabHello repeats the same
+    //    message on a jittered interval and when the tab becomes visible; the
+    //    cadence, and why it is a plain page timer rather than an alarm, are in
+    //    lib/backfill/tab-hello.ts. Background dedups by tab id, so repeats cost
+    //    one message and change nothing else.
+    installTabHello({
+      hello: () => browser.runtime.sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin }),
+      // A test running under node has no `document`; the page always does.
+      visibility: typeof document === 'undefined' ? null : document,
+    });
 
     window.addEventListener('message', onMessage);
     // A tokenized probe makes the readiness handshake insensitive to which

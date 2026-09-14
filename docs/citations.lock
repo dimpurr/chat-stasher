@@ -33,9 +33,9 @@ apps/extension/entrypoints/background.ts:631-650  b0901302e63f  lines=20
   <- docs/privacy.md:235  :: export function backfillTargetFor(
 apps/extension/entrypoints/background.ts:649  6539997ed831  lines=1
   <- docs/privacy.md:237  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/dw-bridge.content.ts:161-169  cbd84f69be4a  lines=9
+apps/extension/entrypoints/dw-bridge.content.ts:162-170  cbd84f69be4a  lines=9
   <- docs/privacy.md:112  :: // 🔴 W22 · Kimi's two backfill paths need the page origin's…
-apps/extension/entrypoints/dw-bridge.content.ts:195-221  119bab292d93  lines=27
+apps/extension/entrypoints/dw-bridge.content.ts:196-222  119bab292d93  lines=27
   <- docs/privacy.md:92, docs/threat-model.md:185  :: const seenGate = createSeenGate(15_000);
 apps/extension/entrypoints/dw-fetch-main.content.ts:13-15  0a41796be631  lines=3
   <- docs/threat-model.md:177  :: matches: CONTENT_MATCHES,

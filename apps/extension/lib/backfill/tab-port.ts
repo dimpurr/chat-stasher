@@ -568,6 +568,52 @@ export type TabSend = (tabId: number, message: unknown) => Promise<unknown>;
 export const BACKFILL_TAB_REPLY_TIMEOUT_MS = 90_000;
 
 /**
+ * 🔴 W27 · **How long one liveness ping may take before the tab is counted as
+ * having missed it.**
+ *
+ * Why a ping needs a budget at all, when W7 gave the fetch channel one: the ping
+ * is answered by the *same* `tabs.sendMessage` channel and inherits the same
+ * property — **it has no timeout of its own**. A content script whose context is
+ * gone (extension reloaded, page reloaded, renderer wedged) can leave the promise
+ * unsettled forever, and then `pickLiveTab` never reaches its next candidate:
+ * `resolveHttpPort` returns nothing, the tick answers 'no-http-port', and the
+ * whole fetch channel is lost even though a perfectly good second tab of that
+ * origin is sitting in the registry behind the hung one.
+ *
+ * **Why exactly 10 seconds.**
+ *  · It is not the fetch budget, because a ping is not a fetch. The 90 s above
+ *    exists to cover one 16 MiB conversation body plus its transfer; a ping
+ *    carries **no payload in either direction** and is answered by a listener
+ *    that only returns `{ok:true, origin}`. The largest legitimate round is one
+ *    IPC hop plus one queued task on the page's thread, which is milliseconds.
+ *  · It must still clear a renderer that is busy rather than dead — the exact
+ *    case W13 stopped treating as death. 10 s is orders of magnitude above a
+ *    healthy round and far above any plausible scheduling delay, so a page that
+ *    answers *at all* answers inside it.
+ *  · It must stay well below the shortest alarm gap (5 minutes,
+ *    `BACKFILL_TICK_DELAY_MIN_MINUTES`), so that even the worst case — every
+ *    registered tab of that origin hung — is decided inside one tick. **12 tabs
+ *    is the registry's ceiling (`MAX_TAB_ENTRIES`), and 12 × 10 s = 120 s < the
+ *    300 s floor**, so the sweep always finishes before the next alarm can arrive,
+ *    whatever the registry holds.
+ *
+ * 🔴 A timeout here is **not** "this tab has no channel" and not "there is no
+ *    tab": it is "we did not get an answer in time", which is why it counts
+ *    exactly like any other failed ping (`TAB_PING_MISSES_BEFORE_FORGET`) rather
+ *    than evicting the tab on the spot.
+ */
+export const BACKFILL_PING_TIMEOUT_MS = 10_000;
+
+/**
+ * 🔴 W27 · A reply that did not arrive in time. A named type rather than a bare
+ * `Error`, because the two callers have to tell "timed out" from "the channel
+ * rejected" — a rejection is the browser answering at once (a dead tab), while a
+ * timeout is a tab that is *there* and silent (a wedged renderer). They count the
+ * same way toward forgetting, but only the second one is worth a log line.
+ */
+export class BackfillReplyTimeoutError extends Error {}
+
+/**
  * 🔴 W7 · Bound one `send` by a timeout.
  *
  * Why this has to exist: `browser.tabs.sendMessage` **has no timeout of its own**.
@@ -581,11 +627,16 @@ export const BACKFILL_TAB_REPLY_TIMEOUT_MS = 90_000;
  * The timer is cleared on both outcomes, so a round that answers in time leaves no
  * timer pending. (A `pending` that settles after the timeout is already handled by
  * Promise.race's own subscription, so it cannot surface as an unhandled rejection.)
+ *
+ * 🔴 W27 · `what` names the message whose answer timed out. It is part of the
+ *    sentence so that the two budgets this file now holds — the fetch's 90 s and
+ *    the ping's 10 s — cannot be confused in a log or in a halt detail.
  */
 async function withReplyTimeout<T>(
   pending: Promise<T>,
   tabId: number,
   timeoutMs: number,
+  what: string,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -595,7 +646,9 @@ async function withReplyTimeout<T>(
         timer = setTimeout(() => {
           // Only technical facts on the wire: the tab id and the budget. Never the
           // URL, the conversation id or any body text.
-          reject(new Error(`tab ${tabId} did not answer the backfill fetch within ${timeoutMs / 1000} s`));
+          reject(new BackfillReplyTimeoutError(
+            `tab ${tabId} did not answer ${what} within ${timeoutMs / 1000} s`,
+          ));
         }, timeoutMs);
       }),
     ]);
@@ -624,7 +677,7 @@ export function tabHttpPort(
     const message = !init || (init.method === 'GET' && init.body === undefined)
       ? { type: BACKFILL_FETCH_MESSAGE, url }
       : { type: BACKFILL_FETCH_MESSAGE, url, method: init.method, body: init.body, contentType: init.contentType };
-    const reply = await withReplyTimeout(send(tabId, message), tabId, timeoutMs);
+    const reply = await withReplyTimeout(send(tabId, message), tabId, timeoutMs, 'the backfill fetch');
     if (!isRecord(reply)) {
       throw new Error(`tab ${tabId} gave no reply for the backfill fetch`);
     }
@@ -642,8 +695,8 @@ export function tabHttpPort(
 // The registry of live tabs
 //
 // Why it is needed: when the alarm wakes, the SW is **brand new** with no in-memory
-// state and no idea which pages the user has open. The content script checks in once
-// on every load (sender.tab.id is filled in by the browser; no 'tabs' permission
+// state and no idea which pages the user has open. The content script checks in on
+// every load (sender.tab.id is filled in by the browser; no 'tabs' permission
 // needed), and background records it in storage.local. When the alarm wakes it pings
 // down this list; a ping that fails (the tab is closed) counts as no port — the
 // list converges on its own.
@@ -654,6 +707,21 @@ export function tabHttpPort(
 // back, the backfill lost its fetch channel until the user reloaded. The rule now
 // needs `TAB_PING_MISSES_BEFORE_FORGET` consecutive misses, which still converges
 // within one tick for a genuinely dead tab.
+//
+// 🔴 W27 · Two halves of the same story then had to be finished, and they are the
+// reason this section is longer than "a list of tab ids":
+//  · **A ping could hang.** `tabs.sendMessage` has no timeout (same fact as W7's
+//    fetch channel), so one wedged tab stopped `pickLiveTab` from ever reaching
+//    the next candidate — see `BACKFILL_PING_TIMEOUT_MS`. A timeout is now just
+//    another missed ping: it counts toward the same 2-strike rule, and the sweep
+//    moves on. `resolveHttpPort` therefore always terminates, and always with the
+//    *first tab that answers* rather than the first tab that was written down.
+//  · **Only a page load put a tab back.** Reloading the extension tears the
+//    content scripts down and reloading the page is the only thing that re-sends a
+//    hello, so a service-worker restart or an extension reload left the registry
+//    holding tabs that no longer exist, and the tick said 'no-http-port' until the
+//    user happened to reload that tab. The content script now repeats its hello —
+//    see lib/backfill/tab-hello.ts for the cadence and why it is not an alarm.
 // ---------------------------------------------------------------------------
 
 function isTabEntry(v: unknown): v is TabEntry {
@@ -711,23 +779,46 @@ async function setTabMisses(store: BackfillStore | null, tabId: number, misses: 
  * merely busy for a few seconds keeps its place, while a closed tab still converges
  * out of the list within one tick.
  *
+ * 🔴 W27 · **Each ping is bounded, and the sweep always moves on.** The awaited
+ * `ping` used to be able to hang forever (a content script whose context is gone,
+ * or a wedged renderer), and because the loop `await`s it, one such tab stopped
+ * every later candidate from ever being tried: `resolveHttpPort` returned nothing
+ * and the tick reported 'no-http-port' while a healthy tab of that origin sat in
+ * the registry. `BACKFILL_PING_TIMEOUT_MS` bounds it, and a timeout is handled
+ * exactly like a rejection — counted as a miss, then the loop continues.
+ *
+ * 🔴 What is deliberately *not* changed: the registry order is still the order
+ *    candidates are tried in (`setTabMisses` explains why a miss must not reorder
+ *    it), and a tab is still only forgotten at `TAB_PING_MISSES_BEFORE_FORGET`
+ *    consecutive misses. A timeout is one miss, not an eviction.
+ *
  * origin = null means "any platform will do" (used when the popup asks for
  * transportWired).
+ *
+ * `pingTimeoutMs` is injectable **for tests only** — production callers pass no
+ * fourth argument and get BACKFILL_PING_TIMEOUT_MS.
  */
 export async function pickLiveTab(
   store: BackfillStore | null,
   origin: string | null,
   ping: (tabId: number) => Promise<unknown>,
+  pingTimeoutMs: number = BACKFILL_PING_TIMEOUT_MS,
 ): Promise<TabEntry | null> {
   // Loaded once, so a write inside the loop cannot change what this pass iterates.
   for (const entry of await loadTabs(store)) {
     if (origin !== null && entry.origin !== origin) continue;
     let alive = false;
     try {
-      const reply = await ping(entry.tabId);
+      const reply = await withReplyTimeout(ping(entry.tabId), entry.tabId, pingTimeoutMs, 'the backfill ping');
       alive = isRecord(reply) && reply.ok === true;
-    } catch {
+    } catch (err) {
       // The tab is closed / the content script is not there: not an error, the normal case.
+      // 🔴 A timeout is the one case worth saying out loud: the tab is still in the
+      //    registry and its silence is about to cost it a strike, so a user who
+      //    wonders where their tab went finds a reason in the log instead of a gap.
+      if (err instanceof BackfillReplyTimeoutError) {
+        console.warn(`[chat-stasher] ${err.message}; counting it as a missed ping`);
+      }
       alive = false;
     }
     if (alive) {
