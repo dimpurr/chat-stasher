@@ -130,6 +130,7 @@ import {
 } from './enumerate';
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
+import { TAB_HELLO_MIN_INTERVAL_MS } from './tab-hello';
 
 /** background → content script: fetch this URL for me. */
 export const BACKFILL_FETCH_MESSAGE = 'cs-backfill-fetch';
@@ -1089,6 +1090,19 @@ export async function askTabForClaudeOrg(
 //    holding tabs that no longer exist, and the tick said 'no-http-port' until the
 //    user happened to reload that tab. The content script now repeats its hello —
 //    see lib/backfill/tab-hello.ts for the cadence and why it is not an alarm.
+//
+// 🔴 W33 · The repeating hello then made every hello cost a full read-modify-write
+// of storage.local, once per open platform tab every 4–6 minutes, for a row that
+// already says exactly what the hello would say. The rule now: **a repeat hello
+// whose tab is already in the registry, from the same origin, younger than half the
+// hello's floor interval, is a no-op** (`REGISTRY_WRITE_SKIP_MS`). A hello from an
+// unknown tab, from a changed origin, or one that arrives after that window still
+// writes at once — those are the ones that carry news. The decision is made against
+// an **in-memory mirror** of the registry so the no-op costs no read either; the
+// mirror is written by every path that writes the registry (see writeRegistry) and
+// starts out empty in a fresh worker, where the first decision falls back to
+// reading storage. Storage stays the source of truth: the mirror is never what a
+// restart resumes from.
 // ---------------------------------------------------------------------------
 
 function isTabEntry(v: unknown): v is TabEntry {
@@ -1099,25 +1113,88 @@ function isTabEntry(v: unknown): v is TabEntry {
     && typeof v.at === 'number';
 }
 
+/**
+ * How young a registry row has to be for a repeat hello to be a no-op.
+ *
+ * Half of `TAB_HELLO_MIN_INTERVAL_MS`: the shortest gap between two hellos of one
+ * tab is the floor of the draw (4 minutes), so nothing legitimate can land inside
+ * 2 minutes of the previous one. A hello that does is a duplicate — the tab is
+ * already registered, and rewriting the row would only move it to the front and
+ * stamp a newer `at` on a fact that has not changed.
+ */
+const REGISTRY_WRITE_SKIP_MS = TAB_HELLO_MIN_INTERVAL_MS / 2;
+
+/**
+ * The in-memory mirrors, one per store. A store with no entry here has not been
+ * read by this worker yet — **absent is the honest "we do not know", not "empty"**:
+ * `readRegistry` loads from storage in that case, which is also what a fresh worker
+ * does on its first hello. It is keyed by the store rather than being one global
+ * because two stores are two registries, and answering one from the other's rows
+ * would be a wrong write, not a saved read.
+ *
+ * Deliberately module state: an MV3 worker being reclaimed loses it, and storage
+ * stays the source of truth it resumes from.
+ */
+let tabRegistryMirrors = new WeakMap<BackfillStore, TabEntry[]>();
+
+/** For tests only: an SW being reclaimed ⇒ module state resets. */
+export function resetTabRegistryMirrorForTest(): void {
+  tabRegistryMirrors = new WeakMap();
+}
+
 export async function loadTabs(store: BackfillStore | null): Promise<TabEntry[]> {
   if (!store) return [];
   const raw = await store.load(BACKFILL_TABS_KEY);
   return Array.isArray(raw) ? raw.filter(isTabEntry) : [];
 }
 
+/**
+ * The registry as this worker last saw it; reads storage only when the mirror is
+ * cold, and warms it from that one read — otherwise every hello after a worker
+ * restart would re-read until something happened to write.
+ */
+async function readRegistry(store: BackfillStore): Promise<TabEntry[]> {
+  const known = tabRegistryMirrors.get(store);
+  if (known !== undefined) return known;
+  const loaded = await loadTabs(store);
+  tabRegistryMirrors.set(store, loaded);
+  return loaded;
+}
+
+/**
+ * The one place the registry is written. Keeps the mirror equal to what was just
+ * saved — a stale mirror must not be able to make `rememberTab` skip a write for a
+ * tab the registry no longer holds.
+ */
+async function writeRegistry(store: BackfillStore, next: TabEntry[]): Promise<void> {
+  tabRegistryMirrors.set(store, next);
+  await store.save(BACKFILL_TABS_KEY, next);
+}
+
 /** Record one (deduplicated by tabId, most recent first). */
 export async function rememberTab(store: BackfillStore | null, entry: TabEntry): Promise<TabEntry[]> {
   if (!store) return [];
-  const rest = (await loadTabs(store)).filter((t) => t.tabId !== entry.tabId);
+  const known = await readRegistry(store);
+  const previous = known.find((t) => t.tabId === entry.tabId);
+  if (
+    previous !== undefined
+    && previous.origin === entry.origin
+    && entry.at - previous.at < REGISTRY_WRITE_SKIP_MS
+  ) {
+    // The registry already says this. Answering `{ok:true}` is still truthful:
+    // the alarm can find this tab, which is the whole promise the hello carries.
+    return known;
+  }
+  const rest = known.filter((t) => t.tabId !== entry.tabId);
   const next = [entry, ...rest].slice(0, MAX_TAB_ENTRIES);
-  await store.save(BACKFILL_TABS_KEY, next);
+  await writeRegistry(store, next);
   return next;
 }
 
 export async function forgetTab(store: BackfillStore | null, tabId: number): Promise<void> {
   if (!store) return;
-  const next = (await loadTabs(store)).filter((t) => t.tabId !== tabId);
-  await store.save(BACKFILL_TABS_KEY, next);
+  const next = (await readRegistry(store)).filter((t) => t.tabId !== tabId);
+  await writeRegistry(store, next);
 }
 
 /**
@@ -1131,9 +1208,9 @@ export async function forgetTab(store: BackfillStore | null, tabId: number): Pro
  */
 async function setTabMisses(store: BackfillStore | null, tabId: number, misses: number): Promise<void> {
   if (!store) return;
-  const tabs = await loadTabs(store);
+  const tabs = await readRegistry(store);
   const next = tabs.map((t) => (t.tabId === tabId ? { ...t, misses } : t));
-  await store.save(BACKFILL_TABS_KEY, next);
+  await writeRegistry(store, next);
 }
 
 /**

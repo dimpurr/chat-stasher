@@ -76,11 +76,30 @@ function localArea(): LocalArea | null {
   return area;
 }
 
+/**
+ * The one store for the one `storage.local` area.
+ *
+ * 🔴 W33 · Why this is memoised rather than built fresh on every call: the tab
+ * registry keeps an in-memory mirror of its rows so a repeat hello can be answered
+ * without a read-modify-write (lib/backfill/tab-port.ts). A mirror has to be
+ * attached to *something* stable — and callers reach for `browserLocalStore()`
+ * afresh on every path (background's hello handler among them), so a new object per
+ * call would make every mirror cold and the optimisation dead code.
+ *
+ * The identity that matters is the **area**, not this function: a different
+ * `storage.local` (a test swapping the fake browser, an embedder replacing the
+ * object) or no area at all returns a different answer than last time, exactly as
+ * before. Only the "same area, asked twice" case changed — it used to hand back two
+ * objects that were indistinguishable in what they did.
+ */
+let cachedLocalStore: { area: LocalArea; store: BackfillStore } | null = null;
+
 /** Returns null when storage.local is unavailable — so the caller must handle "cannot persist" explicitly. */
 export function browserLocalStore(): BackfillStore | null {
   const area = localArea();
   if (!area) return null;
-  return {
+  if (cachedLocalStore?.area === area) return cachedLocalStore.store;
+  const store: BackfillStore = {
     async load(key: string): Promise<unknown> {
       const got = await area.get({ [key]: null });
       return got[key] ?? null;
@@ -92,6 +111,8 @@ export function browserLocalStore(): BackfillStore | null {
       await area.remove(key);
     },
   };
+  cachedLocalStore = { area, store };
+  return store;
 }
 
 /**

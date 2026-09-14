@@ -401,10 +401,6 @@ platformNote:
       Perplexity: past conversation bodies cannot be backfilled yet. Your past
       conversations can already be listed, but we do not fetch the content of
       each one yet, so for now not a single one will be stored.
-  claude:
-    unsupported: >-
-      Claude: history cannot be backfilled yet. The list endpoint's address
-      contains an organization number, and we have no reliable way to obtain it.
   gemini:
     unsupported: >-
       Gemini: history cannot be backfilled yet. We did not find a reliable

@@ -19,6 +19,13 @@
 #    own edit and reported the selftest itself as void. That is why every probe
 #    below checks that its edit landed *before* it judges the checker — a stale
 #    coordinate must fail loudly here, never pass quietly.
+#
+#    Probe 1 goes one step further since W33: its line number is not written
+#    down at all. A two-line edit elsewhere in docs/threat-model.md moved the
+#    dashboard row from :148 to :150 and the hardcoded 148 silently stopped
+#    pointing at it. The probe now finds the line by its content and refuses to
+#    run unless exactly one line matches, so the next such move is a loud void
+#    here instead of a probe that edits an uncited line and passes.
 
 set -u
 
@@ -49,7 +56,15 @@ expect() { # expect <期望退出码> <实际退出码> <说明>
 echo "=============================================================="
 echo "Probe 1: move a citation to a line that exists, is not empty, and"
 echo "  has nothing to do with the claim it is attached to."
-echo "  Target: docs/threat-model.md:148, \`:180\` -> \`:1\`"
+# The coordinate is a content match, never a line number: a hardcoded number
+# rotted once already (W33) and the probe then edited an unrelated line. The
+# anchor is the citation itself — view.rs:256 immediately followed by the
+# continuation `:180` on the dashboard row — and the guard below refuses to run
+# unless it is on exactly one line.
+PROBE1_ANCHOR='view.rs:256`, `:180`'
+PROBE1_HITS="$(grep -c -F "$PROBE1_ANCHOR" "$REPO/docs/threat-model.md")"
+PROBE1_LINE="$(grep -n -F "$PROBE1_ANCHOR" "$REPO/docs/threat-model.md" | head -1 | cut -d: -f1)"
+echo "  Target: docs/threat-model.md:${PROBE1_LINE:-none}, \`:180\` -> \`:1\`"
 echo "  (Chosen because it is a *continuation* citation: the file name is"
 echo "   omitted and inferred from the citation before it on the same line, so"
 echo "   this exercises the other parsing branch. view.rs:1 is that module's own"
@@ -58,11 +73,19 @@ echo "   the constant-time token check the sentence cites. That is exactly what"
 echo "   the previous checker let through: bounds and non-emptiness were the"
 echo "   whole test.)"
 echo "=============================================================="
-cp "$REPO/docs/threat-model.md" "$TMP/threat-model.md"
-sed -i '' '148s/`:180`/`:1`/' "$REPO/docs/threat-model.md"
-if ! grep -q '`:1`' "$REPO/docs/threat-model.md"; then
-  echo "  ✘ probe 1 could not modify the document; the selftest itself is void"
+if [ "$PROBE1_HITS" != "1" ] || [ -z "$PROBE1_LINE" ]; then
+  echo "  ✘ probe 1's anchor is on ${PROBE1_HITS} line(s) of docs/threat-model.md, not 1;"
+  echo "    the selftest itself is void (the citation moved, or the wording changed)"
   FAILED=1
+  PROBE1_LINE=""
+fi
+cp "$REPO/docs/threat-model.md" "$TMP/threat-model.md"
+if [ -n "$PROBE1_LINE" ]; then
+  sed -i '' "${PROBE1_LINE}s/\`:180\`/\`:1\`/" "$REPO/docs/threat-model.md"
+  if ! sed -n "${PROBE1_LINE}p" "$REPO/docs/threat-model.md" | grep -q -F '`:1`'; then
+    echo "  ✘ probe 1 could not modify the document; the selftest itself is void"
+    FAILED=1
+  fi
 fi
 $CHECK
 rc=$?

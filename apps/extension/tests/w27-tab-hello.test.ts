@@ -423,7 +423,15 @@ describe('W27-C · the real bridge re-announces its tab', () => {
 
     // Visible again: one hello, right now — this is what heals a registry that went
     // stale while the tab sat in the background.
-    await forgetTab(registry, TAB_ID);
+    //
+    // 🔴 The forget goes through the module instance the *background* is running,
+    //    not through this file's static import of the same file. `vi.resetModules()`
+    //    above gives background (and `bootBackground`'s dynamic imports) a fresh
+    //    instance, and W33's registry mirror is per-worker state: a forget applied
+    //    by another instance would clear storage without clearing the mirror, which
+    //    is two workers in one test, not the single worker the browser runs.
+    const tabPort: typeof import('../lib/backfill/tab-port') = await import('../lib/backfill/tab-port');
+    await tabPort.forgetTab(registry, TAB_ID);
     page.setVisibility('visible');
     await drain();
     console.log('[W27-C] hellos after becoming visible:', hellos.length);
