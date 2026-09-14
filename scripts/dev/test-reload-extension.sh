@@ -34,6 +34,14 @@ cat > "$STUB" <<'EOF'
 set -euo pipefail
 [ $# -eq 2 ] || exit 99
 extdir="$1"; n="$2"
+# The reload script must build from a throwaway worktree of the ref, never from
+# the checkout it was invoked in. An untracked marker in that checkout is
+# therefore invisible here; if the build can see it, the build did not come from
+# a worktree. Cases 8 and 9 lean on this.
+if [ -e "$extdir/UNCOMMITTED-MARKER" ]; then
+  echo "stub build: uncommitted edits leaked into the build" >&2
+  exit 98
+fi
 if [ "${CS_STUB_FAIL:-0}" = "1" ]; then
   echo "stub build: configured to fail" >&2
   exit 1
@@ -114,6 +122,32 @@ fi
 [ "$(manifest_version "$LOAD/manifest.json")" = "$before" ] || fail "load dir changed after a failed build"
 [ "$(manifest_version "$LOAD.prev/manifest.json")" = "$before_prev" ] || fail ".prev changed after a failed build"
 note "a failed build leaves the load dir and .prev untouched"
+
+# 8. uncommitted edits in the invoking checkout never reach the build. The
+#    script builds from a throwaway worktree of the ref, so a file that exists
+#    only in the working tree is absent there; the stub exits 98 if it sees one,
+#    which makes this case pass only when the build really came from a worktree.
+printf 'uncommitted\n' > "$REPO/apps/extension/UNCOMMITTED-MARKER"
+before="$(manifest_version "$LOAD/manifest.json")"
+if ! bash "$RELOAD" --load-dir "$LOAD" --build-number 60 >"$SCRATCH/o8" 2>&1; then
+  fail "a reload must succeed with uncommitted edits in the invoking checkout"
+  cat "$SCRATCH/o8" >&2
+fi
+rm -f "$REPO/apps/extension/UNCOMMITTED-MARKER"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.60" ] || fail "expected 0.1.0.60"
+grep -q "old -> new: $before -> 0.1.0.60" "$SCRATCH/o8" || fail "should print old->new"
+note "uncommitted edits never reach the build (it runs from a worktree of the ref)"
+
+# 9. the same holds for --ref: a ref other than HEAD is what gets built, so a
+#    marker added after the ref's commit is still absent from the build.
+printf 'uncommitted\n' > "$REPO/apps/extension/UNCOMMITTED-MARKER"
+if ! bash "$RELOAD" --load-dir "$LOAD" --ref HEAD --build-number 61 >"$SCRATCH/o9" 2>&1; then
+  fail "--ref HEAD reload failed with an uncommitted marker present"; cat "$SCRATCH/o9" >&2
+fi
+rm -f "$REPO/apps/extension/UNCOMMITTED-MARKER"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.61" ] || fail "expected 0.1.0.61"
+[ "$(manifest_version "$LOAD.prev/manifest.json")" = "0.1.0.60" ] || fail ".prev should hold 0.1.0.60"
+note "--ref builds the ref, not the working tree"
 
 echo
 echo "test-reload-extension: ${PASS} cases passed"
