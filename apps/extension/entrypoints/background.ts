@@ -50,6 +50,10 @@ import {
   type AlarmsApi,
 } from '../lib/backfill/alarm';
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
+// 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
+//    captured URL, and the plan table is asked whether this platform is one of them.
+import { backfillPlanFor } from '../lib/backfill/enumerate';
+import { orgFromRequestUrl } from '../lib/backfill/claude-org';
 import {
   BACKFILL_PING_MESSAGE,
   isTabHello,
@@ -643,6 +647,28 @@ export function backfillTargetFor(
     } catch { /* not a valid URL ⇒ try the next candidate */ }
   }
   if (!origin) return null;
+  /**
+   * 🔴 W31 · **A plan whose paths carry the scope takes it from the page's own
+   * request, and only from there.**
+   *
+   * claude.ai addresses every conversation by organization, and the value is not in
+   * the page URL — but it *is* in the URL of the request that produced this
+   * capture, because every request the page makes carries it. So for such a plan the
+   * scope is read out of that URL (`orgFromRequestUrl`) and **the identity
+   * heuristic is not consulted at all**: this is the "the page's own requests win"
+   * source of lib/backfill/claude-org.ts, and it is evidence about this page rather
+   * than a guess about an account.
+   *
+   * 🔴 Returning **null** when the URL carries no organization is the point: no
+   *    target is registered, so no tick runs, so no list request is sent and no
+   *    `'default'` sentinel ever reaches a path. Registering the target with
+   *    'default' would be worse than doing nothing — see the engine's refusal of
+   *    that word for a scoped plan.
+   */
+  if (backfillPlanFor(row.id)?.scopeInPath) {
+    const scope = orgFromRequestUrl(captured.url);
+    return scope === null ? null : { platform: row.id, origin, scope };
+  }
   // The archive-scope key follows ADR-002's account axis; an untellable account
   // is 'default' (consistent with the write-down path).
   const identity = extractIdentity(captured.text, extractSessionId(captured.url, captured.text, captured.pageUrl));

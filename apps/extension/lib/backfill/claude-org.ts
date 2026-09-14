@@ -197,3 +197,35 @@ export function resolveClaudeOrg(input: OrgResolutionInput): OrgResolution {
   }
   return { ok: true, org: parsed.orgs[0]!, source: 'endpoint' };
 }
+
+/**
+ * 🔴 W31 · **The whole resolution, including the one request it may need.**
+ *
+ * `resolveClaudeOrg` above is the decision; this is the sequence a caller on the
+ * page side actually runs, and the reason it is a function rather than three lines
+ * at each call site is the **when**: `fetchOrganizations` may be called at most
+ * once, and only when the two free sources answered nothing. A caller that fetched
+ * first and asked afterwards would spend a request per tick on an account whose
+ * page already says which organization it is — and, worse, would have a second
+ * answer to reconcile with the first.
+ *
+ * 🔴 `fetchOrganizations` is a parameter rather than a `fetch` call made here: this
+ *    module stays free of the network, and the caller that owns the page context is
+ *    the one that knows the URL is on the allowlist (`ScopeInPathSpec.resolvePath`).
+ *    A throw or a rejection from it is the `{kind:'failed'}` reading — the request
+ *    did not complete — and it never becomes "no organizations".
+ */
+export async function resolveClaudeOrgOnPage(
+  input: { seen: string | null; cookie: string },
+  fetchOrganizations: () => Promise<string>,
+): Promise<OrgResolution> {
+  const settled = resolveClaudeOrg({ ...input, endpoint: { kind: 'not-asked' } });
+  if (settled.ok) return settled;
+  let text: string;
+  try {
+    text = await fetchOrganizations();
+  } catch (err) {
+    return { ok: false, halt: 'transport-error', detail: (err as Error).message };
+  }
+  return resolveClaudeOrg({ ...input, endpoint: { kind: 'text', text } });
+}

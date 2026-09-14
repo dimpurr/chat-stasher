@@ -585,6 +585,32 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       `platform ${plan.platform} addresses conversations by account scope, and this run has none`,
     );
   }
+  /**
+   * 🔴 W31 · **'default' is not an organization.**
+   *
+   * `'default'` is this repository's existing spelling for "the account identifier
+   * cannot be told" (entrypoints/background.ts's `identity.value || 'default'`, and
+   * the C33 registration that writes it deliberately). For a platform whose *path*
+   * carries the scope that word is not a placeholder — it is a string that would be
+   * substituted into `/api/organizations/<scope>/chat_conversations` and sent
+   * straight at the server. That is the first invariant broken in the most literal
+   * way available: an unknown written into a request as if it were a value.
+   *
+   * So a scoped plan refuses it, with the same reason as "no scope at all", and
+   * **before any request**. The cost is written down rather than hidden: the
+   * popup's start button registers a target with `scope: 'default'`, so starting
+   * claude from that button halts here until the page's own request supplies the
+   * organization (entrypoints/background.ts's `backfillTargetFor`, which reads it
+   * out of the captured URL). The alternative — substituting the sentinel — would
+   * fire a request against an organization that does not exist.
+   */
+  if (plan.scopeInPath && opts.scope === 'default') {
+    return halt(
+      'org-unresolved',
+      `platform ${plan.platform} addresses conversations by account scope, and 'default'`
+      + ' means the identifier could not be told — it is not an organization',
+    );
+  }
 
   // ---- Segment one: enumeration (cheap; one page per tick when bodies follow) ----
   //
