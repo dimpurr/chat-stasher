@@ -22,7 +22,7 @@ const CLAUDE_API_URL =
   `https://claude.ai/api/organizations/${SYNTHETIC_ORG}` +
   `/chat_conversations/${SYNTHETIC_CONVERSATION}?tree=true&rendering_mode=messages`;
 
-/** Shape as documented by the MIT exporter's own API contract notes. */
+/** Shape as documented by the reference implementation's own API contract notes. */
 const goodBody = JSON.stringify({
   name: 'synthetic conversation',
   model: 'synthetic-model',

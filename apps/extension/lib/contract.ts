@@ -94,20 +94,17 @@ export const PLATFORMS: readonly ChatPlatform[] = [
       '/chat/session/([0-9a-fA-F-]{8,})',
       '[?&]chat_session_id=([^&]+)',
     ],
-    // External source evidence checked 2026-08-17 (source code, not README):
-    // deepseek-pp (Apache-2.0; commit 0a02c72b135bf2936e11aa78fd6136931ed65908,
-    // 2026-08-14) uses https://chat.deepseek.com plus
-    // /api/v0/chat/history_messages and /api/v0/chat_session/fetch_page, and
-    // requires chat_sessions/chat_messages in the decoded business data:
-    // https://github.com/zhu1090093659/deepseek-pp/blob/0a02c72b135bf2936e11aa78fd6136931ed65908/core/deepseek/conversation-export.ts#L105-L186
-    // https://github.com/zhu1090093659/deepseek-pp/blob/0a02c72b135bf2936e11aa78fd6136931ed65908/core/export/normalize.ts#L44-L73
-    // better-deepseek (MIT; commit f558441ac616a174119ba434571c1ee0a2b84ddb,
-    // 2026-08-15) independently uses /api/v0/chat/history_messages, /chat/s/<id>,
-    // role/fragments and non-empty content for export:
-    // https://github.com/EdgeTypE/better-deepseek/blob/f558441ac616a174119ba434571c1ee0a2b84ddb/src/content/tools/exporter.js#L23-L127
-    // Context Sync (MIT; commit 66a548840c1e11f4080e0f059783728173494998,
-    // 2026-04-05) independently identifies non-empty DeepSeek DOM message nodes:
-    // https://github.com/Vineetpandey0/context-sync/blob/66a548840c1e11f4080e0f059783728173494998/injectors/deepseek.js#L94-L120
+    // External source evidence checked 2026-08-17 (source code, not README), from
+    // THREE independent reference implementations. No project name, licence
+    // identifier, commit hash or URL is recorded here on purpose: the public
+    // surface of this repository does not name third-party exporters.
+    //  · The first (2026-08-14) uses https://chat.deepseek.com plus
+    //    /api/v0/chat/history_messages and /api/v0/chat_session/fetch_page, and
+    //    requires chat_sessions/chat_messages in the decoded business data.
+    //  · A second (2026-08-15) independently uses /api/v0/chat/history_messages,
+    //    /chat/s/<id>, role/fragments and non-empty content for export.
+    //  · A third (2026-04-05) independently identifies non-empty DeepSeek DOM
+    //    message nodes.
     // The external API route/shape differences may represent different entry
     // points or versions; this task changes credibility only, not match data.
     credibility: 'from-source',
@@ -118,18 +115,68 @@ export const PLATFORMS: readonly ChatPlatform[] = [
   {
     id: 'perplexity',
     origins: ['https://www.perplexity.ai'],
-    // 🔴 C27 · Register exactly the one conversation-list path; the body path has no source and must not be loosened into a prefix.
-    pathHints: ['/rest/thread/list_ask_threads'],
-    methods: ['POST'],
+    // 🔴 W28 · The route this row registers is now the CONVERSATION-CONTENT one,
+    // and the conversation-LIST route ('/rest/thread/list_ask_threads') is
+    // deliberately outside it. That reverses C27, and the reason C27 gave no
+    // longer holds: C27 registered the list route because "the body path has no
+    // source" and must not be loosened into a prefix. The body path now has a
+    // source (four independent reference implementations and the endpoint table
+    // extracted from the site's own front-end bundle; checked 2026-08-17), so the
+    // route that carries a conversation is the one worth capturing — exactly the
+    // call the kimi row makes when it keeps the message route and lets the
+    // conversation-INDEX route fall outside.
+    // Not a prefix by accident: '/rest/thread/' also covers the named sibling
+    // routes the page posts to (list, mark-viewed, set-title, delete), and those
+    // are not conversation data. What separates them is the METHOD below — the
+    // content route is the GET under this prefix, and the siblings are POSTs —
+    // which is why `methods` is exactly ['GET'] and why the shape gate below can
+    // be strict without the list request ever reaching it.
+    pathHints: ['/rest/thread/'],
+    // Measured route, and the only method the content route uses: the page GETs
+    // /rest/thread/<entry_uuid_or_slug> with the thread's own id in the path. The
+    // list (POST) is out of scope for capture; the backfill leg reaches it through
+    // its own allowlist (lib/backfill/tab-port.ts), not through this row.
+    methods: ['GET'],
     status: { min: 200, max: 299 },
-    // The backfill enumerator applies a stricter top-level-array + thread_id check
-    // to the list shape; this generic capture gate only has to stop non-JSON being
-    // taken as traffic for this platform.
-    responseShape: { encoding: 'json' },
-    // A list response is not a body capture, and this change has no source for a
-    // single-body URL either, so no URL id is guessed.
-    sessionIdPatterns: [],
-    // R26 cross-check of three sources (2026-08-17); no real end-to-end verification was done.
+    // 🔴 The one field the content response is keyed by in every source:
+    // { entries: [{ uuid, query_str, blocks, updated_datetime, thread_title }] }.
+    // Required (not "any of"): on this route a body without `entries` is the drift
+    // case, so it must fail the shape gate and get warned about rather than pass
+    // through as an empty-looking capture. An EMPTY array passes — `[]` is a
+    // measurement, not a missing field. One source spells the same array
+    // `messages` as a fallback; that name reaches one source only, so it is not
+    // required here (naming both would accept a body neither source agrees on).
+    responseShape: { encoding: 'json', requiredPaths: ['entries'] },
+    // 🔴 Where the session id comes from, and why this order.
+    // The thread's identity on the wire is the SLUG: the page URL is
+    // /search/<slug>, the list response carries `slug` on each record, and the
+    // content route accepts slug or uuid but is fed the slug first. The live leg
+    // has to name a file by the value the backfill list would give that same
+    // thread, or the same conversation lands under two names — so the page URL is
+    // tried first: it is the only place where the value is unambiguously the slug.
+    // A prefetched request for a different thread would then be named after the
+    // address bar; that is the same trade the kimi row takes, and it is preferred
+    // here to the alternative failure, where the same thread is filed twice.
+    // The second pattern is the content URL itself. Its path parameter is named
+    // `entry_uuid_or_slug`, so a value read there may be either shape; it is the
+    // fallback for a page whose URL carries no slug yet (a brand-new thread) and
+    // for a capture with no page URL at all. Its lookahead is what keeps the
+    // named sibling routes from being read as ids: without it the list request
+    // would yield the string 'list_ask_threads' and a list response would be
+    // filed as if it were a conversation. A negative list is a closed set of
+    // known route names, so a NEW sibling route would have to be added here; the
+    // method gate above is the primary defence and this is the second.
+    sessionIdPatterns: [
+      '/search/([^/?#]+)',
+      '/rest/thread/(?!(?:list_ask_threads|list_recent|list_threads|mark_viewed|set_thread_title|delete_thread_by_entry_uuid)(?:[/?#]|$))([^/?#]+)',
+    ],
+    // R26 cross-check (2026-08-17) supplied the list route and its request shape;
+    // W28 (2026-09-14) read the content route out of four independent reference
+    // implementations and the site's own extracted endpoint table. Still
+    // 'from-source': nobody on either change opened a logged-in perplexity.ai
+    // page, so the capture path is source-backed, never live-verified. If the
+    // real route or envelope differs, the shape gate above rejects it and
+    // page-hook.ts warns — it never guesses.
     credibility: 'from-source',
     webSocketCapture: false,
   },
@@ -182,7 +229,8 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     status: { min: 200, max: 299 },
     responseShape: {
       encoding: 'json',
-      // Exactly the check the MIT exporter performs before it will export.
+      // Exactly the check the reference implementation performs before it will
+      // export.
       // Required (not "any of"): on this route a body without chat_messages is
       // the drift case, so it must fail the shape gate and get warned about
       // rather than pass through as an empty-looking capture.
@@ -198,30 +246,25 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // live-verified. If the real route or envelope differs, the generic gate
     // above rejects it and page-hook.ts warns — it never guesses.
     //
-    // External source evidence checked 2026-08-17 (source code, not README):
-    // claude-chat-exporter (MIT; commit
-    // 12da324dd158e9472251590d89d957fc767c0d85, 2026-08-08) requests
-    // /api/organizations/<org>/chat_conversations/<uuid>?tree=true&... and
-    // validates the response with Array.isArray(data.chat_messages), treating a
-    // missing chat_messages as "the endpoint may have changed" rather than as
-    // an empty conversation:
-    // https://github.com/agarwalvishal/claude-chat-exporter/blob/12da324dd158e9472251590d89d957fc767c0d85/claude-chat-exporter.js#L66
-    // https://github.com/agarwalvishal/claude-chat-exporter/blob/12da324dd158e9472251590d89d957fc767c0d85/claude-chat-exporter.js#L449-L452
-    // Its CLAUDE.md documents the envelope as { name, model,
-    // current_leaf_message_uuid, chat_messages: [{ uuid, parent_message_uuid,
-    // index, sender, created_at, content }] }.
-    // claude-extension (Apache-2.0; commit
-    // 89a20167bd71d0d5700a3679f22b5458c32b7e58, 2026-06-10) independently hooks
-    // the same route from a MAIN-world fetch interceptor with
-    // /^https:\/\/claude\.ai\/api\/organizations\/[\w-]+\/chat_conversations\/[\w-]+\?tree=True/ :
-    // https://github.com/abhimanyu-sikarwar/claude-extension/blob/89a20167bd71d0d5700a3679f22b5458c32b7e58/src/content/inject.js#L5
-    // That one matches on URL alone and never inspects the body, so it cannot
-    // tell drift from an empty chat — which is exactly why we add the body gate
-    // instead of copying its approach.
-    // A third project (withLinda/claude-project-conversations-exporter)
-    // documents the same GET /api/organizations/[org]/chat_conversations/[conv]
-    // but ships NO LICENSE, so it was read for architecture only and no code
-    // from it was used.
+    // External source evidence checked 2026-08-17 (source code, not README), from
+    // three independent reference implementations. No project name, licence
+    // identifier, commit hash or URL is recorded here on purpose: the public
+    // surface of this repository does not name third-party exporters.
+    //  · The first (2026-08-08) requests
+    //    /api/organizations/<org>/chat_conversations/<uuid>?tree=true&... and
+    //    validates the response with Array.isArray(data.chat_messages), treating
+    //    a missing chat_messages as "the endpoint may have changed" rather than
+    //    as an empty conversation. Its own notes document the envelope as
+    //    { name, model, current_leaf_message_uuid, chat_messages: [{ uuid,
+    //    parent_message_uuid, index, sender, created_at, content }] }.
+    //  · A second (2026-06-10) independently hooks the same route from a
+    //    MAIN-world fetch interceptor, matching on the URL alone
+    //    (/api/organizations/<org>/chat_conversations/<uuid> with the tree flag)
+    //    and never inspecting the body, so it cannot tell drift from an empty
+    //    chat — which is exactly why we add the body gate instead of copying its
+    //    approach.
+    //  · A third documents the same GET route but ships NO licence, so it was
+    //    read for architecture only and no code from it was used.
     credibility: 'from-source',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
@@ -324,39 +367,31 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // The external source evidence below was what stood here BEFORE that
     // measurement. It is kept: it is the record of how the row was first
     // written, and it independently corroborates the route above (checked
-    // 2026-08-17, source code, not README):
-    // conreo/kimi-chat-exporter (MIT; commit
-    // 9e3956b17ee44bceb453fea2107b9d6263ac0cd6, 2026-06-06) POSTs JSON to
-    // https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages
-    // with { chatId }, reads `data.messages`, and treats an absent/empty list
-    // as an error rather than as an empty conversation; its own manifest
-    // matches only https://www.kimi.com/* and its page menus key off
-    // https://www.kimi.com/chat/*:
-    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/background.js#L78-L80
-    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/background.js#L117-L123
-    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/manifest.json#L42-L44
-    // AshleyOSLab/kimi-chat-exporter (MIT; commit
-    // f27ca71d58eef9012535b2c7708c8865f641946e, 2026-03-15) independently uses
-    // BASE_URL https://www.kimi.com and a ListMessages call keyed by chat id,
-    // reading `messages` (with `items` / `data.messages` as fallbacks) — note
-    // it spells the service 'kimi.chat.v1.ChatService', which is why the path
-    // hint above stops at 'ChatService/ListMessages':
-    // https://github.com/AshleyOSLab/kimi-chat-exporter/blob/f27ca71d58eef9012535b2c7708c8865f641946e/exporters/kimi_exporter.py#L103-L115
-    // springrain1/kimi-pp (Apache-2.0; commit
-    // 6edf5494532845102e174d5f22669548309f5d18, 2026-08-02) independently hooks
-    // the same '/apiv2/kimi.gateway.chat.v1.ChatService/' gateway on
-    // www.kimi.com from a MAIN-world fetch interceptor:
-    // https://github.com/springrain1/kimi-pp/blob/6edf5494532845102e174d5f22669548309f5d18/core/kimi/fetch-interceptor.ts#L6
-    // chopper1026/kimi2api (MIT; commit
-    // 7f046d8627f275432f82788a6547bc905038738c, 2026-05-14) independently
-    // hard-codes KIMI_API_BASE = https://www.kimi.com and the same
-    // '/apiv2/kimi.gateway.chat.v1.ChatService/' service prefix:
-    // https://github.com/chopper1026/kimi2api/blob/7f046d8627f275432f82788a6547bc905038738c/app/config.py#L48
-    // https://github.com/chopper1026/kimi2api/blob/7f046d8627f275432f82788a6547bc905038738c/app/kimi/protocol.py#L8
-    // xiaoY233/Kimi-Free-API is GPL-3.0, so it was read for architecture only
-    // and no code from it was used; it is cited solely for the fact that the
-    // LEGACY origin https://kimi.moonshot.cn used an unrelated '/api/chat/...'
-    // route family, which is why that origin is not in `origins`.
+    // 2026-08-17, source code, not README), from FOUR reference implementations.
+    // No project name, licence identifier, commit hash or URL is recorded here on
+    // purpose: the public surface of this repository does not name third-party
+    // exporters.
+    //  · The first (2026-06-06) POSTs JSON to
+    //    https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages
+    //    with { chatId }, reads `data.messages`, and treats an absent/empty list
+    //    as an error rather than as an empty conversation; its own manifest
+    //    matches only https://www.kimi.com/* and its page menus key off
+    //    https://www.kimi.com/chat/*.
+    //  · A second (2026-03-15) independently uses BASE_URL
+    //    https://www.kimi.com and a ListMessages call keyed by chat id, reading
+    //    `messages` (with `items` / `data.messages` as fallbacks) — note it
+    //    spells the service 'kimi.chat.v1.ChatService', which is why the path
+    //    hint above stops at 'ChatService/ListMessages'.
+    //  · A third (2026-08-02) independently hooks the same
+    //    '/apiv2/kimi.gateway.chat.v1.ChatService/' gateway on www.kimi.com from
+    //    a MAIN-world fetch interceptor.
+    //  · A fourth (2026-05-14) independently hard-codes its API base as
+    //    https://www.kimi.com and the same
+    //    '/apiv2/kimi.gateway.chat.v1.ChatService/' service prefix.
+    // One further reference implementation is GPL-3.0, so it was read for
+    // architecture only and no code from it was used; it is cited solely for the
+    // fact that the LEGACY origin https://kimi.moonshot.cn used an unrelated
+    // '/api/chat/...' route family, which is why that origin is not in `origins`.
     credibility: 'from-source',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
@@ -515,10 +550,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
 
+/**
+ * 🔴 W28 · **Own properties only.** The `in` operator walks the prototype chain,
+ * and an array inherits a method from `Array.prototype` for every name that
+ * collides with one — `entries`, `keys`, `values`, `map`, `find`, `slice`, ...
+ * So `'entries' in []` is TRUE and `[]['entries']` is a FUNCTION, which is not
+ * null and therefore used to satisfy the shape gate. A top-level array would
+ * then pass a `requiredPaths: ['entries']` gate and be captured as if it were
+ * the content envelope — the "an unknown recorded as a known" failure this
+ * gate exists to prevent, arriving through the one path nobody looks at.
+ * The gate asks "did the body NAME this field", so it must ask the object's own
+ * keys. Kept in step with the copy in lib/page-hook.ts: the page hook posts a
+ * payload iff its copy passes, and the bridge accepts it iff this one does.
+ */
 function getJsonPath(value: unknown, path: string): unknown {
   let current: unknown = value;
   for (const part of path.split('.')) {
-    if (!current || typeof current !== 'object' || !(part in current)) return undefined;
+    if (!current || typeof current !== 'object') return undefined;
+    if (!Object.prototype.hasOwnProperty.call(current, part)) return undefined;
     current = (current as Record<string, unknown>)[part];
   }
   return current;

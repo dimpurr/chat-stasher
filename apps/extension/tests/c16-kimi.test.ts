@@ -21,7 +21,7 @@ const KIMI_PAGE_URL = `https://www.kimi.com/chat/${SYNTHETIC_CHAT_ID}`;
 /** The chat id travels in the POST body, so the API URL carries no id at all. */
 const KIMI_API_URL = 'https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages';
 
-/** Envelope as read by the MIT exporter: a top-level `messages` array. */
+/** Envelope as read by the reference implementation: a top-level `messages` array. */
 const goodBody = JSON.stringify({
   messages: [
     { id: 'm1', role: 'user', content: [{ type: 'text', text: 'synthetic prompt' }] },

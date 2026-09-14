@@ -248,7 +248,7 @@ describe('W13-2 · the backoff ladder itself', () => {
     }
   });
 
-  it('rate-limited starts higher and is capped higher than a transport error, as Echoes does for 429', () => {
+  it('rate-limited starts higher and is capped higher than a transport error, as a reference implementation does for 429', () => {
     expect(TRANSIENT_RETRY_BASE_MS['rate-limited']).toBeGreaterThan(TRANSIENT_RETRY_BASE_MS['transport-error']);
     expect(TRANSIENT_RETRY_MAX_MS['rate-limited']).toBeGreaterThan(TRANSIENT_RETRY_MAX_MS['transport-error']);
     // 🔴 Both bases are at least one whole alarm tick. A base below the tick period
