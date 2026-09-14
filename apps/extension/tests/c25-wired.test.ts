@@ -101,7 +101,10 @@ function seedTargetAndLiveTab(): void {
 
 async function boot(): Promise<any> {
   const mod: any = await import('../entrypoints/background');
-  await mod.default();
+  // main() is synchronous now (MV3: listeners before any await); its async setup
+  // is awaited through the exported handle instead.
+  expect(mod.default()).toBeUndefined();
+  await mod.backgroundSetupSettled();
   return mod;
 }
 
@@ -142,6 +145,19 @@ describe('C25 · background wiring', () => {
     await waitForAsyncEvent();
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
     expect(alarmClears).toContain(BACKFILL_ALARM_NAME);
+  });
+
+  it('main() is synchronous and registers onStartup / onAlarm before its async setup runs', async () => {
+    const mod: any = await import('../entrypoints/background');
+    const startupBefore = startupListeners.length;
+    const alarmBefore = alarmListeners.length;
+    const returned = mod.default();
+    // Checked before awaiting anything: a listener added after an await would
+    // miss the event that woke a reclaimed worker.
+    expect(returned).toBeUndefined();
+    expect(startupListeners.length).toBe(startupBefore + 1);
+    expect(alarmListeners.length).toBe(alarmBefore + 1);
+    await mod.backgroundSetupSettled();
   });
 
   it('starting with the default (off) creates no alarm, and an alarm event runs no backfill either', async () => {

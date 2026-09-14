@@ -782,7 +782,18 @@ function addBackfillSwitchListener(): void {
   });
 }
 
-export default defineBackground(async () => {
+/** The detached async setup started by main(); resolved once it has finished. */
+let backgroundSetup: Promise<void> = Promise.resolve();
+
+/** Wait for main()'s async setup (locale, badge, alarms). main() itself stays synchronous. */
+export function backgroundSetupSettled(): Promise<void> {
+  return backgroundSetup;
+}
+
+// 🔴 main() is synchronous and registers every listener before any await: MV3
+//    wakes a reclaimed worker with the event itself, and WXT warns that an async
+//    main is unsupported. The async setup runs detached at the end.
+export default defineBackground(() => {
   browser.runtime.onMessage.addListener(
     (message: { type?: string; payload?: CapturedFetch }, sender, sendResponse) => {
       // C18: the popup asks, when it opens, "is the fetch channel connected".
@@ -896,34 +907,38 @@ export default defineBackground(async () => {
   // wake-up. The listener itself is synchronous, as required by MV3.
   addBackfillSwitchListener();
 
-  // 🔴 Load the language the user chose before anything paints text. The badge
-  //    tooltip is set from this worker, so the overlay has to be initialised here
-  //    too — otherwise the tooltip would stay in the browser's language while the
-  //    popup follows the setting. A failure is only logged: falling back to
-  //    browser.i18n is the pre-existing behaviour, not a reason to skip the badge.
-  await initUiLocale().catch((err) => {
-    console.warn('[chat-stasher] ui locale init failed', (err as Error).message);
-  });
-
-  // Every SW wake (fresh start AND runtime.onStartup) re-asserts the badge's
-  // truth, so a dead-worker leftover badge gets cleared once 5 min pass.
-  void refreshBadge();
-  // The switch is persistent, so the alarm should be too. Every SW wake re-syncs:
-  // on ⇒ make sure an alarm exists; off ⇒ make sure none does — 🔴 with the
-  // default (off) this only ever clears, and never creates one out of nowhere.
-  await syncAlarmWithSwitch().catch((err) => {
-    console.warn('[chat-stasher] backfill alarm sync failed', (err as Error).message);
-  });
-  // The outbox timer follows the outbox, not the switch (§10).
-  await syncOutboxAlarmSafely();
+  // Registered before any await, like every other listener (see the note on main()).
   browser.runtime.onStartup.addListener(() => {
     void refreshBadge();
-    void syncAlarmWithSwitch().catch(() => { /* already logged on the path above */ });
+    void syncAlarmWithSwitch().catch(() => { /* already logged on the path below */ });
     void syncOutboxAlarmSafely();
   });
 
-  console.log(
-    '[chat-stasher] background ready: captures are queued in the outbox and delivered'
-    + ' to the chat-stasher native host; nothing is ever downloaded',
-  );
+  backgroundSetup = (async () => {
+    // 🔴 Load the language the user chose before anything paints text. The badge
+    //    tooltip is set from this worker, so the overlay has to be initialised here
+    //    too — otherwise the tooltip would stay in the browser's language while the
+    //    popup follows the setting. A failure is only logged: falling back to
+    //    browser.i18n is the pre-existing behaviour, not a reason to skip the badge.
+    await initUiLocale().catch((err) => {
+      console.warn('[chat-stasher] ui locale init failed', (err as Error).message);
+    });
+
+    // Every SW wake (fresh start AND runtime.onStartup) re-asserts the badge's
+    // truth, so a dead-worker leftover badge gets cleared once 5 min pass.
+    void refreshBadge();
+    // The switch is persistent, so the alarm should be too. Every SW wake re-syncs:
+    // on ⇒ make sure an alarm exists; off ⇒ make sure none does — 🔴 with the
+    // default (off) this only ever clears, and never creates one out of nowhere.
+    await syncAlarmWithSwitch().catch((err) => {
+      console.warn('[chat-stasher] backfill alarm sync failed', (err as Error).message);
+    });
+    // The outbox timer follows the outbox, not the switch (§10).
+    await syncOutboxAlarmSafely();
+
+    console.log(
+      '[chat-stasher] background ready: captures are queued in the outbox and delivered'
+      + ' to the chat-stasher native host; nothing is ever downloaded',
+    );
+  })();
 });
