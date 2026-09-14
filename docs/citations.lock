@@ -275,8 +275,8 @@ apps/extension/package.json:10-11  399cf17b824a  lines=2
   <- docs/install.md:183  :: "build": "wxt build",
 apps/extension/package.json:10-13  a1f981eadaba  lines=4
   <- docs/install.md:614  :: "build": "wxt build",
-apps/extension/package.json:15  7da79dd35521  lines=1
-  <- docs/install.md:188  :: "test": "vitest run",
+apps/extension/package.json:15  638646294372  lines=1
+  <- docs/install.md:188  :: "test": "node scripts/check-test-inventory.mjs",
 apps/extension/wxt.config.ts:40  8973cb78d41e  lines=1
   <- docs/install.md:685  :: default_locale: 'en',
 apps/extension/wxt.config.ts:51  c5961dc1034c  lines=1
