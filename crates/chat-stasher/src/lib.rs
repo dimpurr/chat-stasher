@@ -10,6 +10,7 @@ pub mod collect;
 pub mod config;
 pub mod destinit;
 pub mod doctor;
+pub mod export;
 pub mod id;
 pub mod identity;
 pub mod inbox;

@@ -14,6 +14,9 @@ Coverage (grep-verified against this repo, 2026-08-26 — the task insisted we
 grep first, not transcribe a list):
 
   - println! / print! / eprintln! / eprint! / write! / writeln!   → first string literal
+  - say!  (main.rs: narration for a command whose output is a socket rather than
+    stdout, so a failed write must not kill it — but the text is still
+    user-visible and still tracked here)
   - anyhow::bail! / anyhow! / .context(...) / .with_context(...)  → first string literal
   - panic! / unreachable! / todo! / unimplemented!                → first string literal
       (today every one lives inside #[cfg(test)]; they are still extracted and
@@ -52,14 +55,18 @@ from dataclasses import dataclass
 MACRO_NAMES = (
     "println", "print", "eprintln", "eprint",
     "write", "writeln",
+    "say",
     "bail", "anyhow",
     "panic", "unreachable", "todo", "unimplemented",
 )
+#: `say` is deliberately absent: it takes a format string by construction, so
+#: the "blank print" fallback below (println!() with no literal) has no meaning
+#: for it — recording one would claim empty user-visible text that is not there.
 PRINT_FAMILY = {"println", "print", "eprintln", "eprint"}
 
 #: identifier-start letters of the tracked macros / methods, used to skip
 #: positions that cannot begin one (this is a hot loop over ~250 KB of source)
-_MACRO_START = frozenset("pebawcuti.")
+_MACRO_START = frozenset("pebawcutis.")
 
 
 @dataclass(frozen=True)
@@ -408,7 +415,7 @@ class _Scanner:
                             continue
                 else:
                     mm = re.match(
-                        r"(?:anyhow::)?(println|print|eprintln|eprint|write|writeln|"
+                        r"(?:anyhow::)?(println|print|eprintln|eprint|write|writeln|say|"
                         r"bail|anyhow|panic|unreachable|todo|unimplemented)!\s*\(",
                         t[i:],
                     )

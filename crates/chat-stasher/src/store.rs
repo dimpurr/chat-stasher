@@ -595,25 +595,7 @@ impl BackupStore {
             .collect::<rustic_core::RusticResult<Vec<_>>>()
             .context("collect snapshot entries for session content")?;
 
-        // (sort key, entry index, the shard's real file name)
-        let mut shards: Vec<(u64, usize, String)> = Vec::new();
-        for (i, (path, node)) in entries.iter().enumerate() {
-            if node.node_type != NodeType::File {
-                continue;
-            }
-            let Some((found_machine, session, shard)) = crate::readback::bucket_shard_path(path)
-            else {
-                continue;
-            };
-            if found_machine != machine || session != session_id {
-                continue;
-            }
-            // reason: a non-numeric shard name sorts last rather than being
-            // dropped — the same rule `readback` uses, so the two readers cannot
-            // disagree about which shards a session has. Its *name* is reported
-            // as it is on disk, never re-derived from the sort key.
-            shards.push((parse_shard_seq(&shard).unwrap_or(u64::MAX), i, shard));
-        }
+        let shards = session_shard_slots(&entries, machine, session_id);
         if shards.is_empty() {
             return Err(anyhow!(
                 "session `{}` is not in the newest snapshot for machine `{machine}` — \
@@ -621,19 +603,128 @@ impl BackupStore {
                 crate::id::short_session_id(session_id)
             ));
         }
-        shards.sort_by_key(|(seq, idx, _)| (*seq, *idx));
-
-        let mut concat = Vec::new();
-        let mut hashes = Vec::new();
-        for (_, idx, name) in shards {
-            let mut buf = Vec::new();
-            repo.dump(&entries[idx].1, &mut buf)
-                .context("dump shard for session content")?;
-            concat.extend_from_slice(&buf);
-            hashes.push((name, hex_digest(&Sha256::digest(&buf))));
-        }
+        let (concat, hashes) = dump_shard_slots(&repo, &entries, &shards)?;
         Ok((concat, hashes))
     }
+
+    /// Dump the sealed shards of **several** selected sessions in one repository
+    /// open, keyed by `(machine, session id)`.
+    ///
+    /// [`Self::read_session_concat`] answers the same question for one session
+    /// and pays one repository open for it. `export` asks about a whole selected
+    /// set, and on a remote backend that difference is the whole command: N
+    /// opens is N handshakes, so the batch is not just an optimisation. The two
+    /// paths share [`session_shard_slots`] and [`dump_shard_slots`], which is
+    /// what keeps their bytes identical — the property `export`'s tests pin.
+    ///
+    /// A session in `wanted` that the newest snapshot of its machine does not
+    /// hold is **absent** from the result, never present with zero bytes; the
+    /// caller must treat "asked for, not returned" as a failure, exactly like
+    /// [`Self::dump_machine_sessions`].
+    pub fn read_selected_sessions(
+        &self,
+        mk: &MasterKey,
+        wanted: &BTreeSet<(String, String)>,
+    ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
+        let mut out = BTreeMap::new();
+        if wanted.is_empty() {
+            return Ok(out);
+        }
+        let backends = self.backends()?;
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
+            .open(&Credentials::Masterkey(mk.clone()))
+            .context("open repository for export")?
+            .to_indexed()
+            .context("index repository for export")?;
+        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+
+        for snap in crate::readback::newest_snapshot_per_host(snaps) {
+            let machine = snap.hostname.clone();
+            let wanted_here: BTreeSet<&str> = wanted
+                .iter()
+                .filter(|(m, _)| m == &machine)
+                .map(|(_, s)| s.as_str())
+                .collect();
+            if wanted_here.is_empty() {
+                continue;
+            }
+            let root = repo
+                .node_from_snapshot_and_path(&snap, "")
+                .with_context(|| format!("read snapshot root for machine `{machine}`"))?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())
+                .with_context(|| format!("ls snapshot root for machine `{machine}`"))?
+                .collect::<rustic_core::RusticResult<Vec<_>>>()
+                .with_context(|| format!("collect snapshot entries for machine `{machine}`"))?;
+            for session_id in wanted_here {
+                let shards = session_shard_slots(&entries, &machine, session_id);
+                if shards.is_empty() {
+                    continue;
+                }
+                let (concat, hashes) = dump_shard_slots(&repo, &entries, &shards)?;
+                out.insert((machine.clone(), session_id.to_string()), (concat, hashes));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The shards of one session inside `entries`, in global sequence order.
+///
+/// `(sort key, index into `entries`, the shard's real file name on disk)`. This
+/// is the **one** rule that decides which files make up a session, shared by
+/// [`BackupStore::read_session_concat`], [`BackupStore::read_selected_sessions`]
+/// and, through those, `export`; `readback` applies the same rule for its own
+/// bulk reads. One rule is the reason two readers cannot disagree about a
+/// session's bytes.
+///
+/// reason: a non-numeric shard name sorts last (`u64::MAX`) rather than being
+/// dropped — dropping it would silently shorten a session, which is the failure
+/// this repo forbids. Its *name* is reported as it is on disk, never re-derived
+/// from the sort key.
+pub(crate) fn session_shard_slots(
+    entries: &[(PathBuf, rustic_core::repofile::Node)],
+    machine: &str,
+    session_id: &str,
+) -> Vec<(u64, usize, String)> {
+    let mut shards: Vec<(u64, usize, String)> = Vec::new();
+    for (i, (path, node)) in entries.iter().enumerate() {
+        if node.node_type != NodeType::File {
+            continue;
+        }
+        let Some((found_machine, session, shard)) = crate::readback::bucket_shard_path(path) else {
+            continue;
+        };
+        if found_machine != machine || session != session_id {
+            continue;
+        }
+        shards.push((parse_shard_seq(&shard).unwrap_or(u64::MAX), i, shard));
+    }
+    shards.sort_by_key(|(seq, idx, _)| (*seq, *idx));
+    shards
+}
+
+/// Decrypt and concatenate the shards named by [`session_shard_slots`], with one
+/// sha256 per shard.
+///
+/// `S` is the repository's *status*, not its backend: `dump` is only defined for
+/// an [`IndexedFull`](rustic_core::IndexedFull) repository, which is the state
+/// both callers open into.
+fn dump_shard_slots<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    entries: &[(PathBuf, rustic_core::repofile::Node)],
+    shards: &[(u64, usize, String)],
+) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+    let mut concat = Vec::new();
+    let mut hashes = Vec::new();
+    for (_, idx, name) in shards {
+        let mut buf = Vec::new();
+        repo.dump(&entries[*idx].1, &mut buf)
+            .context("dump shard for session content")?;
+        concat.extend_from_slice(&buf);
+        hashes.push((name.clone(), hex_digest(&Sha256::digest(&buf))));
+    }
+    Ok((concat, hashes))
 }
 
 /// sha256 of concatenated source shards on disk (the expected value).

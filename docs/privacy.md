@@ -115,7 +115,7 @@ the sentence.
    `apps/extension/lib/outbox.ts:379-394`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:188-225`;
+   (`crates/chat-stasher/src/main.rs:235-272`;
    `crates/chat-stasher/src/store.rs:261-296`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
@@ -407,7 +407,7 @@ Retention on **your** machine is under your control:
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (backfill progress, host status, pause record, last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `install-native-host`, `native-host` (`crates/chat-stasher/src/main.rs:83-863`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `install-native-host`, `native-host` (`crates/chat-stasher/src/main.rs:130-991`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension stops all capture immediately** and removes its
 local storage, which is where the outbox lives — so uninstalling also deletes
