@@ -1362,8 +1362,8 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
 export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
 
 /**
- * 🔴 C27 · Perplexity's conversation list. **The list segment only**; the body
- * segment still has no source.
+ * 🔴 C27 · Perplexity's conversation list. **The list segment only**, and W28
+ * (2026-09-14) did not fill in the body segment either.
  *
  * Request facts (R26 research, 2026-08-17; this change does not go online, does
  * not log in, and sends no request to perplexity.ai), each with its independent
@@ -1387,8 +1387,19 @@ export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
  * 🔴 Channel B (GraphQL) needs a sha256 persisted-query hash that changes with
  * every front-end release and has no public stable value, so it is not used; the
  * Space / Collection threads routes have only paths, no parameters and no
- * response provenance, so they are not done either. The body segment has no
- * source, so detailPath/detailUrl must stay null.
+ * response provenance, so they are not done either.
+ *
+ * 🔴 The body segment is a **decision**, not a hole in the research. The route
+ * that carries one thread's content is known — W28 (2026-09-14) read it out of
+ * four independent reference implementations and the endpoint table extracted
+ * from the site's own front-end bundle, and the extension's live-capture row now
+ * registers it (lib/contract.ts:134-149) — but this plan does not spend it. The
+ * sources disagree about that route's parameters, and not one of them
+ * establishes whether a single response holds a whole long conversation. So
+ * detailPath/detailUrl stay null and Perplexity stays LIST_ONLY: a wrong guess
+ * here would not error, it would archive the first few turns of every
+ * conversation while reporting success, which is the loss this project exists to
+ * make impossible.
  */
 export const PERPLEXITY_PLAN: BackfillEnumPlan = {
   platform: 'perplexity',
@@ -1407,14 +1418,18 @@ export const PERPLEXITY_PLAN: BackfillEnumPlan = {
     }),
   },
   parseListPage: parsePerplexityListPage,
-  // 🔴 Body segment: no source whatsoever, and this change guesses neither path nor parameters.
+  // 🔴 Body segment: the route is known (see this plan's own doc block and
+  // lib/contract.ts:134-149) but its parameter profile is not, and neither is the
+  // completeness question. Neither path nor parameters are guessed here.
   detailPath: null,
   detailUrl: null,
   partial: {
     missing: [
-      'detailPath / detailUrl: this change has no source at all for the route and '
-      + 'parameters of a single thread\'s body; the body segment is not guessed, so '
-      + 'Perplexity only enters LIST_ONLY.',
+      'detailPath / detailUrl: the route that carries one thread\'s content is '
+      + 'known, but the sources disagree about its parameters and none of them '
+      + 'establishes whether a single response holds a whole long conversation. The '
+      + 'body segment is therefore not filled in — not guessed — so Perplexity only '
+      + 'enters LIST_ONLY.',
     ],
     userNoteKey: 'platformNote.perplexity.partial',
   },
@@ -1429,7 +1444,10 @@ export const PERPLEXITY_PLAN: BackfillEnumPlan = {
     + 'treated as API fields; the GraphQL channel needs a sha256 persisted-query hash '
     + 'with no public stable value, so it is not used; the Space / Collection threads '
     + 'routes have only paths and no parameters or response provenance, so they are not '
-    + 'used; the single-body segment has no source, so detailPath/detailUrl stay null.',
+    + 'used; the single-body route is known (W28, 2026-09-14: four reference '
+    + 'implementations and the site\'s extracted endpoint table) but its parameters and '
+    + 'its completeness for a long conversation are not, so detailPath/detailUrl stay '
+    + 'null by decision.',
 };
 
 export const GROK_LIST_PATH = '/rest/app-chat/conversations';

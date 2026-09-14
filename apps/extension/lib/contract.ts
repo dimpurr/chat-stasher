@@ -115,18 +115,68 @@ export const PLATFORMS: readonly ChatPlatform[] = [
   {
     id: 'perplexity',
     origins: ['https://www.perplexity.ai'],
-    // 🔴 C27 · Register exactly the one conversation-list path; the body path has no source and must not be loosened into a prefix.
-    pathHints: ['/rest/thread/list_ask_threads'],
-    methods: ['POST'],
+    // 🔴 W28 · The route this row registers is now the CONVERSATION-CONTENT one,
+    // and the conversation-LIST route ('/rest/thread/list_ask_threads') is
+    // deliberately outside it. That reverses C27, and the reason C27 gave no
+    // longer holds: C27 registered the list route because "the body path has no
+    // source" and must not be loosened into a prefix. The body path now has a
+    // source (four independent reference implementations and the endpoint table
+    // extracted from the site's own front-end bundle; checked 2026-08-17), so the
+    // route that carries a conversation is the one worth capturing — exactly the
+    // call the kimi row makes when it keeps the message route and lets the
+    // conversation-INDEX route fall outside.
+    // Not a prefix by accident: '/rest/thread/' also covers the named sibling
+    // routes the page posts to (list, mark-viewed, set-title, delete), and those
+    // are not conversation data. What separates them is the METHOD below — the
+    // content route is the GET under this prefix, and the siblings are POSTs —
+    // which is why `methods` is exactly ['GET'] and why the shape gate below can
+    // be strict without the list request ever reaching it.
+    pathHints: ['/rest/thread/'],
+    // Measured route, and the only method the content route uses: the page GETs
+    // /rest/thread/<entry_uuid_or_slug> with the thread's own id in the path. The
+    // list (POST) is out of scope for capture; the backfill leg reaches it through
+    // its own allowlist (lib/backfill/tab-port.ts), not through this row.
+    methods: ['GET'],
     status: { min: 200, max: 299 },
-    // The backfill enumerator applies a stricter top-level-array + thread_id check
-    // to the list shape; this generic capture gate only has to stop non-JSON being
-    // taken as traffic for this platform.
-    responseShape: { encoding: 'json' },
-    // A list response is not a body capture, and this change has no source for a
-    // single-body URL either, so no URL id is guessed.
-    sessionIdPatterns: [],
-    // R26 cross-check of three sources (2026-08-17); no real end-to-end verification was done.
+    // 🔴 The one field the content response is keyed by in every source:
+    // { entries: [{ uuid, query_str, blocks, updated_datetime, thread_title }] }.
+    // Required (not "any of"): on this route a body without `entries` is the drift
+    // case, so it must fail the shape gate and get warned about rather than pass
+    // through as an empty-looking capture. An EMPTY array passes — `[]` is a
+    // measurement, not a missing field. One source spells the same array
+    // `messages` as a fallback; that name reaches one source only, so it is not
+    // required here (naming both would accept a body neither source agrees on).
+    responseShape: { encoding: 'json', requiredPaths: ['entries'] },
+    // 🔴 Where the session id comes from, and why this order.
+    // The thread's identity on the wire is the SLUG: the page URL is
+    // /search/<slug>, the list response carries `slug` on each record, and the
+    // content route accepts slug or uuid but is fed the slug first. The live leg
+    // has to name a file by the value the backfill list would give that same
+    // thread, or the same conversation lands under two names — so the page URL is
+    // tried first: it is the only place where the value is unambiguously the slug.
+    // A prefetched request for a different thread would then be named after the
+    // address bar; that is the same trade the kimi row takes, and it is preferred
+    // here to the alternative failure, where the same thread is filed twice.
+    // The second pattern is the content URL itself. Its path parameter is named
+    // `entry_uuid_or_slug`, so a value read there may be either shape; it is the
+    // fallback for a page whose URL carries no slug yet (a brand-new thread) and
+    // for a capture with no page URL at all. Its lookahead is what keeps the
+    // named sibling routes from being read as ids: without it the list request
+    // would yield the string 'list_ask_threads' and a list response would be
+    // filed as if it were a conversation. A negative list is a closed set of
+    // known route names, so a NEW sibling route would have to be added here; the
+    // method gate above is the primary defence and this is the second.
+    sessionIdPatterns: [
+      '/search/([^/?#]+)',
+      '/rest/thread/(?!(?:list_ask_threads|list_recent|list_threads|mark_viewed|set_thread_title|delete_thread_by_entry_uuid)(?:[/?#]|$))([^/?#]+)',
+    ],
+    // R26 cross-check (2026-08-17) supplied the list route and its request shape;
+    // W28 (2026-09-14) read the content route out of four independent reference
+    // implementations and the site's own extracted endpoint table. Still
+    // 'from-source': nobody on either change opened a logged-in perplexity.ai
+    // page, so the capture path is source-backed, never live-verified. If the
+    // real route or envelope differs, the shape gate above rejects it and
+    // page-hook.ts warns — it never guesses.
     credibility: 'from-source',
     webSocketCapture: false,
   },
@@ -500,10 +550,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
 
+/**
+ * 🔴 W28 · **Own properties only.** The `in` operator walks the prototype chain,
+ * and an array inherits a method from `Array.prototype` for every name that
+ * collides with one — `entries`, `keys`, `values`, `map`, `find`, `slice`, ...
+ * So `'entries' in []` is TRUE and `[]['entries']` is a FUNCTION, which is not
+ * null and therefore used to satisfy the shape gate. A top-level array would
+ * then pass a `requiredPaths: ['entries']` gate and be captured as if it were
+ * the content envelope — the "an unknown recorded as a known" failure this
+ * gate exists to prevent, arriving through the one path nobody looks at.
+ * The gate asks "did the body NAME this field", so it must ask the object's own
+ * keys. Kept in step with the copy in lib/page-hook.ts: the page hook posts a
+ * payload iff its copy passes, and the bridge accepts it iff this one does.
+ */
 function getJsonPath(value: unknown, path: string): unknown {
   let current: unknown = value;
   for (const part of path.split('.')) {
-    if (!current || typeof current !== 'object' || !(part in current)) return undefined;
+    if (!current || typeof current !== 'object') return undefined;
+    if (!Object.prototype.hasOwnProperty.call(current, part)) return undefined;
     current = (current as Record<string, unknown>)[part];
   }
   return current;

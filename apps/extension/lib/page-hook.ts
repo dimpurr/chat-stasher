@@ -131,10 +131,15 @@ export function installPageFetchHook(options: PageHookOptions): void {
     console.warn(unsupportedTransportWarning);
   };
 
+  // 🔴 W28 · Own properties only — `'entries' in []` is true, because an array
+  // inherits `Array.prototype.entries`. See the same walker in lib/contract.ts:
+  // the two copies must agree, because this one decides whether a payload is
+  // posted and that one decides whether the bridge accepts it.
   const getJsonPath = (value: unknown, path: string): unknown => {
     let current: unknown = value;
     for (const part of path.split('.')) {
-      if (!current || typeof current !== 'object' || !(part in current)) return undefined;
+      if (!current || typeof current !== 'object') return undefined;
+      if (!Object.prototype.hasOwnProperty.call(current, part)) return undefined;
       current = (current as Record<string, unknown>)[part];
     }
     return current;
