@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+  A stand-in for a platform page. It is served by the Playwright route handler
+  from `https://chatgpt.com` / `https://chat.deepseek.com`, so the extension's
+  content scripts are injected into it exactly as they would be on the real
+  site. It does exactly one thing: perform one same-origin request to the
+  conversation endpoint this fixture's platform row declares.
+
+  `__CS_API_PATH__` is replaced by the route handler. The request is made from
+  the page's own world, which is the only thing the capture hook observes — it
+  never issues a request of its own.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chat-stasher e2e fixture</title>
+  </head>
+  <body>
+    <p id="fixture">e2e fixture page</p>
+    <script>
+      window.__csCapture = (async () => {
+        const response = await fetch('__CS_API_PATH__', {
+          headers: { accept: 'application/json' },
+        });
+        const text = await response.text();
+        // Length only: the test asserts the page really received the fixture
+        // bytes, and no assertion ever needs to print conversation-shaped text.
+        return { status: response.status, bytes: text.length };
+      })();
+    </script>
+  </body>
+</html>
