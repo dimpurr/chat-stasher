@@ -184,6 +184,24 @@ fn pattern_matches(pattern: &str, text: &str) -> bool {
                 None => false,
             }
         }
+        // dashboardResponse.url (§6.5): loopback, a port, and a 64-hex token.
+        "^http://127\\.0\\.0\\.1:[0-9]{1,5}/\\?token=[0-9a-f]{64}$" => {
+            match text.strip_prefix("http://127.0.0.1:") {
+                Some(rest) => match rest.split_once("/?token=") {
+                    Some((port, token)) => {
+                        !port.is_empty()
+                            && port.len() <= 5
+                            && port.bytes().all(|b| b.is_ascii_digit())
+                            && token.len() == 64
+                            && token
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    }
+                    None => false,
+                },
+                None => false,
+            }
+        }
         other => panic!(
             "the schema contains a pattern this test cannot evaluate ({other}); \
              teach `pattern_matches` about it rather than letting it pass unverified"
@@ -925,4 +943,376 @@ fn a_machine_without_an_identity_is_a_config_nack_and_no_identity_is_created() {
         !fixture.stage.join("sessions").exists(),
         "nothing may be written when the machine is unknown"
     );
+}
+
+// ------------------------------------------------------------------ §6.4 summary
+
+impl Fixture {
+    /// What `hello` reports for the machine, so a test never restates how the
+    /// partition is built. Same helper the deliver tests use.
+    fn machine(&self) -> String {
+        first_machine(self)
+    }
+
+    /// Seed `run-state.json` the way `run-once` writes it: the most recent pass,
+    /// with the outcome that decides whether a push time can be read off it.
+    fn seed_run_state(&self, outcome: &str, finished_at_unix: u64) {
+        let dir = self.home.join("data").join("chat-stasher").join("state");
+        fs::create_dir_all(&dir).expect("state dir");
+        let state = json!({
+            "version": 1,
+            "finished_at_unix": finished_at_unix,
+            "duration_ms": 1200,
+            "outcome": outcome,
+            "failed_step": null,
+            "shards_written": 0,
+            "stage_shards": 0,
+            "snapshot_created": outcome == "completed",
+            "collect_errors": 0,
+            "archive_gaps": 0,
+            "machine_digest": "0123456789ab",
+        });
+        fs::write(
+            dir.join("run-state.json"),
+            serde_json::to_vec_pretty(&state).expect("state json"),
+        )
+        .expect("write run state");
+    }
+
+    /// Point `[native_host]` at this fixture's stage and name a destination.
+    fn configure_dashboard(&self, destination: &str) {
+        self.write_config(&format!(
+            "[native_host]\nstage = {stage}\ndestination = {destination}\n\n\
+             [destinations.laptop]\nrepo = {repo}\n\n\
+             [destinations.storagebox]\nrepo = {repo}\n",
+            stage = serde_json::to_string(&self.stage.to_string_lossy()).expect("stage"),
+            destination =
+                serde_json::to_string(destination).expect("a destination name is a TOML string"),
+            repo = serde_json::to_string(&self.dir.path().join("nowhere").to_string_lossy())
+                .expect("repo"),
+        ));
+    }
+
+    fn summary(&self) -> Value {
+        let out = self.chrome(&frame(&json!({"protocol": 1, "type": "summary"})));
+        assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+        let response = one_frame(&out.stdout);
+        assert_matches_schema(&response);
+        response
+    }
+}
+
+#[test]
+fn summary_counts_the_stage_by_harness_and_reports_a_recorded_push() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    deliver(&fixture, "r-1", "sess-a", "hello a");
+    deliver(&fixture, "r-2", "sess-b", "hello b");
+    const PUSH_AT: u64 = 1_760_000_000;
+    fixture.seed_run_state("completed", PUSH_AT);
+
+    let response = fixture.summary();
+    assert_eq!(response["type"], "summary");
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["window_hours"], 24);
+    assert_eq!(response["complete"], true, "{response}");
+
+    assert_eq!(
+        response["sessions"]["total"],
+        json!({"kind": "known", "count": 2}),
+        "the two delivered sessions are the stage's whole content: {response}"
+    );
+    assert_eq!(
+        response["sessions"]["last_24h"],
+        json!({"kind": "known", "count": 2}),
+        "both shards were written just now: {response}"
+    );
+    assert_eq!(
+        response["last_push"],
+        json!({"kind": "known", "unix": PUSH_AT})
+    );
+
+    let buckets = response["sessions"]["by_harness"]
+        .as_array()
+        .expect("by_harness is an array");
+    assert_eq!(buckets.len(), 1, "{response}");
+    assert_eq!(buckets[0]["harness"], "deepseek");
+    assert_eq!(buckets[0]["total"]["count"], 2);
+    assert_eq!(buckets[0]["last_24h"]["count"], 2);
+
+    // The counts are the whole answer: no session id, no shard name, no path
+    // but the stage `hello` already returns.
+    let text = response.to_string();
+    assert!(!text.contains("sess-a"), "{text}");
+    assert!(!text.contains("sess-b"), "{text}");
+    assert!(!text.contains("000001"), "{text}");
+}
+
+#[test]
+fn summary_reports_an_unrecorded_push_as_unknown_and_not_as_a_time() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    deliver(&fixture, "r-1", "sess-a", "hello a");
+
+    // No run-state.json at all: run-once has never completed here.
+    let response = fixture.summary();
+    assert_eq!(response["complete"], false, "{response}");
+    let why = response["last_push"]["why"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("no run-once pass has ever been recorded"),
+        "{why}"
+    );
+    assert_eq!(
+        response["sessions"]["total"],
+        json!({"kind": "known", "count": 1}),
+        "an unknown push time says nothing about the counts: {response}"
+    );
+
+    // A passing run that pushed nothing is also not a push time — the record
+    // holds only the most recent pass, so the earlier one is simply not here.
+    fixture.seed_run_state("noop", 1_760_000_000);
+    let response = fixture.summary();
+    assert_eq!(response["complete"], false, "{response}");
+    let why = response["last_push"]["why"].as_str().unwrap_or_default();
+    assert!(why.contains("no change"), "{why}");
+    assert!(why.contains("only the most recent pass"), "{why}");
+}
+
+#[test]
+fn summary_of_an_empty_stage_is_a_measured_zero() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    fixture.seed_run_state("completed", 1_760_000_000);
+
+    // A stage that exists and has never received a bundle: the answer is zero,
+    // and it is a measurement rather than an unknown.
+    let response = fixture.summary();
+    assert_eq!(response["complete"], true, "{response}");
+    assert_eq!(
+        response["sessions"]["total"],
+        json!({"kind": "known", "count": 0})
+    );
+    assert_eq!(
+        response["sessions"]["last_24h"],
+        json!({"kind": "known", "count": 0})
+    );
+    assert_eq!(response["sessions"]["by_harness"], json!([]));
+}
+
+/// The honesty rule, through the real binary: a machine partition nobody can
+/// list must never be counted as `0` sessions, and the reason must name where
+/// the read stopped without naming a path inside the stage.
+///
+/// Unix-only, because "a directory that exists and cannot be read" is injected
+/// with file permissions and Windows has no standard-API equivalent. The
+/// property itself is pinned on every platform by
+/// `nativehost::tests::an_unreadable_partition_is_unknown_never_zero`, which
+/// feeds `build_summary` a scan directly; this test is the filesystem half.
+#[cfg(unix)]
+#[test]
+fn summary_reports_an_unreadable_partition_as_unknown_never_zero() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    deliver(&fixture, "r-1", "sess-a", "hello a");
+
+    let locked = fixture
+        .stage
+        .join("sessions")
+        .join("ffffffffffffffffffffffffffffffff");
+    fs::create_dir_all(&locked).expect("a second machine partition");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock the partition");
+    if fs::read_dir(&locked).is_ok() {
+        eprintln!("w30: this sandbox cannot make a directory unreadable (root?), case skipped");
+        return;
+    }
+
+    let response = fixture.summary();
+    assert_eq!(response["complete"], false, "{response}");
+    assert_eq!(
+        response["sessions"]["total"]["kind"], "unknown",
+        "a partition that could not be listed must not become a number: {response}"
+    );
+    let why = response["sessions"]["total"]["why"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(why.contains("lower bound"), "{why}");
+    let fingerprint = chat_stasher::store::machine_fingerprint("ffffffffffffffffffffffffffffffff");
+    assert!(
+        why.contains(&fingerprint),
+        "the reason names the partition: {why}"
+    );
+    assert_eq!(
+        response["sessions"]["by_harness"],
+        json!([]),
+        "a split of a lower bound is not a measurement: {response}"
+    );
+}
+
+#[test]
+fn summary_refuses_a_request_with_a_field_it_does_not_define() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    deliver(&fixture, "r-1", "sess-a", "hello a");
+
+    let response = one_frame(
+        &fixture
+            .chrome(&frame(
+                &json!({"protocol": 1, "type": "summary", "machine": "somewhere"}),
+            ))
+            .stdout,
+    );
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "bad-request", "{response}");
+    assert_eq!(response["retryable"], false, "{response}");
+    assert!(
+        response["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("machine"),
+        "the refusal names the field it will not take: {response}"
+    );
+}
+
+#[test]
+fn summary_without_a_configured_stage_is_the_same_refusal_hello_gives() {
+    let fixture = Fixture::new();
+    let response = fixture.summary();
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "config", "{response}");
+    assert!(
+        response["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("install-native-host"),
+        "detail names the fix: {response}"
+    );
+}
+
+// ------------------------------------------------------- §6.5 open_dashboard
+
+#[test]
+fn open_dashboard_without_a_configured_destination_is_refused_before_anything_starts() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+
+    let out = fixture.chrome(&frame(&json!({"protocol": 1, "type": "open_dashboard"})));
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+    let response = one_frame(&out.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "config", "{response}");
+    assert_eq!(response["retryable"], false, "{response}");
+    let detail = response["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("[native_host] destination"), "{detail}");
+    assert!(detail.contains("no default destination"), "{detail}");
+}
+
+#[test]
+fn open_dashboard_naming_an_undeclared_destination_lists_what_is_declared() {
+    let fixture = Fixture::new();
+    fixture.configure_dashboard("elsewhere");
+
+    let out = fixture.chrome(&frame(&json!({"protocol": 1, "type": "open_dashboard"})));
+    let response = one_frame(&out.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["kind"], "config", "{response}");
+    let detail = response["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("elsewhere"), "{detail}");
+    assert!(
+        detail.contains("laptop"),
+        "declared names are listed: {detail}"
+    );
+    assert!(detail.contains("storagebox"), "{detail}");
+}
+
+#[test]
+fn open_dashboard_that_cannot_read_the_archive_reports_why_without_naming_the_repository() {
+    let fixture = Fixture::new();
+    fixture.configure_dashboard("laptop");
+
+    // The destination is declared and its key file does not exist, so the real
+    // `chat-stasher ui` starts, fails to read anything, and exits 3 without
+    // ever binding a socket. The host must report that as a nack — and must not
+    // relay the child's stderr, which would carry the repository path.
+    let out = fixture.chrome(&frame(&json!({"protocol": 1, "type": "open_dashboard"})));
+    let response = one_frame(&out.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "io", "{response}");
+    assert_eq!(response["retryable"], true, "{response}");
+    let detail = response["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("did not start"), "{detail}");
+    assert!(
+        detail.contains("exited 3"),
+        "the exit status is reported: {detail}"
+    );
+    assert!(
+        !detail.contains(&fixture.dir.path().to_string_lossy().into_owned()),
+        "no path from the child's own output may reach the extension: {detail}"
+    );
+}
+
+#[test]
+fn the_shapes_the_new_queries_produce_match_the_committed_schema() {
+    use chat_stasher::json_out::{CountState, TimeState};
+    use chat_stasher::nativehost::{build_summary, dashboard_response, StageScan, StageSession};
+
+    // `open_dashboard`'s success response cannot be reached end to end without a
+    // real repository (the launch itself is pinned by the stubbed-spawn unit
+    // tests), so its shape is checked here against the committed schema rather
+    // than against a hand-copied list of fields.
+    assert_matches_schema(&dashboard_response(
+        "http://127.0.0.1:51234/?token=abababababababababababababababababababababababababababababababab",
+    ));
+
+    // The same for the two states of a `summary` that a fixture stage cannot
+    // produce: everything measured, and everything unreadable.
+    let known = StageScan {
+        sessions: vec![
+            StageSession {
+                harness: Some("deepseek".to_string()),
+                newest_mtime: Some(1_760_000_000),
+            },
+            StageSession {
+                harness: None,
+                newest_mtime: None,
+            },
+        ],
+        unreadable: Vec::new(),
+        time_unknown: Vec::new(),
+    };
+    assert_matches_schema(&build_summary(
+        &known,
+        TimeState::known(1_759_000_000),
+        24,
+        Ok(1_760_000_001),
+    ));
+
+    let unreadable = StageScan {
+        sessions: Vec::new(),
+        unreadable: vec!["a machine partition could not be listed: Permission denied".to_string()],
+        time_unknown: Vec::new(),
+    };
+    let summary = build_summary(
+        &unreadable,
+        TimeState::unknown("no run-once pass has ever been recorded"),
+        24,
+        Ok(1_760_000_001),
+    );
+    assert_eq!(
+        summary["sessions"]["total"]["kind"], "unknown",
+        "sanity: this really is the unknown shape: {summary}"
+    );
+    assert_eq!(
+        summary["sessions"]["total"],
+        serde_json::to_value(CountState::unknown(
+            summary["sessions"]["total"]["why"].as_str().expect("a why"),
+        ))
+        .expect("the unknown shape serialises"),
+        "the wire shape is json_out::CountState's, verbatim: {summary}"
+    );
+    assert_matches_schema(&summary);
 }

@@ -305,7 +305,9 @@ fn human_age(secs: u64) -> String {
     }
 }
 
-fn outcome_word(outcome: RunOutcome) -> &'static str {
+/// One word for how a pass ended. Shared with the native host's `summary`
+/// answer (`nativehost.rs`), so the same record is never described two ways.
+pub fn outcome_word(outcome: RunOutcome) -> &'static str {
     match outcome {
         RunOutcome::Completed => "success (snapshot created)",
         RunOutcome::Noop => "success (no change)",

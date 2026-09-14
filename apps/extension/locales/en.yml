@@ -116,6 +116,72 @@ popup:
     auto: Auto
     english: English
     chinese: 中文
+  # 🔴 W30 · The stage summary (the host's answer to §6.4) and the dashboard
+  # button (§6.5). Every count in these sentences is either a number the host
+  # measured or the word for unknown. Nothing is ever filled in with a default,
+  # and a part the host could not read never becomes 0.
+  summary:
+    line: "{recent} · {total} · {push}"
+    recent: "Last {hours} h: {count} sessions"
+    recentNamed: "Last {hours} h: {count} sessions ({list})"
+    recentUnknown: "Last {hours} h: unknown"
+    totalNamed: "{count} in the stage"
+    totalUnknown: "stage total unknown"
+    harnessEntry: "{harness} {count}"
+    harnessMore: "{list}, and {rest} more"
+    noHarness: "(no harness prefix)"
+    pushAgo: "last push {ago}"
+    pushUnknown: "last push unknown"
+    pushFuture: >-
+      last push recorded at {at}, which has not happened yet — the clock and the
+      record disagree
+    agoJustNow: just now
+    agoMinutes: "{count} min ago"
+    agoHours: "{count} h ago"
+    agoDays: "{count} d ago"
+    unasked: >-
+      Stage summary: this popup has not asked the host yet, so it has nothing to
+      count.
+    hostMissing: >-
+      Stage summary: no answer from the chat-stasher host, so nothing is being
+      counted here. It is installed by `chat-stasher install-native-host --stage
+      <your stage path>`, pointing at a directory that exists.
+    olderHost: >-
+      Stage summary: the host installed in your browsers is older than this
+      extension, so it does not answer a summary request at all.
+    olderHostNote: >-
+      The host answered “unknown message type”, which is an old host's way of
+      saying it does not know this request. Install the current binary and re-run
+      `chat-stasher install-native-host --stage <your stage path>`, then reopen
+      this popup.
+    unavailable: "Stage summary: the host did not answer (reason: {reason})."
+    failedNote: "Stage summary: no answer from the host — {detail}"
+    noteTotal: "Why the stage total is unknown — {why}"
+    noteRecent: "Why the count for the window above is unknown — {why}"
+    notePush: "Why the last push time is unknown — {why}"
+  dashboard:
+    label: Open dashboard
+    opening: >-
+      Starting the dashboard… the host is launching it now, so the button stays
+      disabled until it answers — a second press would start a second one.
+    opened: "Dashboard opened in a new tab. The URL in it is a secret while it runs — do not share it."
+    refusedUrl: >-
+      No tab was opened: the host's answer was not a dashboard URL on 127.0.0.1,
+      so this extension did not open it.
+    failed: "No tab was opened: {detail}"
+    reason:
+      noAnswer: >-
+        Open dashboard is unavailable: the host has not answered a summary
+        request, so there is nothing it could open.
+      hostMissing: >-
+        Open dashboard is unavailable: the chat-stasher host does not answer.
+        Install it with `chat-stasher install-native-host --stage <your stage
+        path>`.
+      olderHost: >-
+        Open dashboard is unavailable: the installed host is older than this
+        extension and does not know this request. Install the current binary and
+        re-run `chat-stasher install-native-host --stage <your stage path>`.
+      failed: "Open dashboard is unavailable: {detail}"
   status:
     hostPaused: >-
       Status: the switch is ON, but this machine's host is unreachable, so

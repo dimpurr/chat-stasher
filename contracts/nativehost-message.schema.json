@@ -18,6 +18,18 @@
     },
     {
       "$ref": "#/$defs/nack"
+    },
+    {
+      "$ref": "#/$defs/summaryRequest"
+    },
+    {
+      "$ref": "#/$defs/summaryResponse"
+    },
+    {
+      "$ref": "#/$defs/dashboardRequest"
+    },
+    {
+      "$ref": "#/$defs/dashboardResponse"
     }
   ],
   "$defs": {
@@ -31,6 +43,80 @@
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "countState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "count"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "known"
+            },
+            "count": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "why"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "unknown"
+            },
+            "why": {
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "description": "A count that is measured (`known`, where count 0 means 'looked and found none') or explicitly unknown with a reason. Never collapsed into 0/null/absent (nativehost-protocol.md §6.4)."
+    },
+    "timeState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "unix"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "known"
+            },
+            "unix": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "why"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "unknown"
+            },
+            "why": {
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "description": "A unix time that is either known or explicitly unknown with a reason."
     },
     "helloRequest": {
       "type": "object",
@@ -204,6 +290,151 @@
             "type": "integer"
           },
           "description": "Present on kind protocol-version."
+        }
+      }
+    },
+    "summaryRequest": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "summary"
+        }
+      },
+      "description": "Parameterless: unlike hello/deliver, any extra field is refused (nativehost-protocol.md §6.4)."
+    },
+    "summaryResponse": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type",
+        "ok",
+        "window_hours",
+        "complete",
+        "sessions",
+        "last_push"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "summary"
+        },
+        "ok": {
+          "const": true
+        },
+        "window_hours": {
+          "type": "integer",
+          "description": "The window the last_24h counts cover. 24 today; the field exists so the extension never has to assume a number."
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "True exactly when every count and last_push is `known`."
+        },
+        "sessions": {
+          "type": "object",
+          "required": [
+            "total",
+            "last_24h",
+            "by_harness"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "total": {
+              "$ref": "#/$defs/countState"
+            },
+            "last_24h": {
+              "$ref": "#/$defs/countState"
+            },
+            "by_harness": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "harness",
+                  "total",
+                  "last_24h"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "harness": {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Leading dot-segment of the session directory name; null when it has no usable prefix. That bucket is still counted."
+                  },
+                  "total": {
+                    "$ref": "#/$defs/countState"
+                  },
+                  "last_24h": {
+                    "$ref": "#/$defs/countState"
+                  }
+                }
+              },
+              "description": "Empty — and only empty — when sessions.total is unknown. Otherwise the per-harness totals add up to sessions.total."
+            }
+          }
+        },
+        "last_push": {
+          "$ref": "#/$defs/timeState",
+          "description": "finished_at_unix of the most recent run-once pass recorded as `completed`."
+        }
+      }
+    },
+    "dashboardRequest": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "open_dashboard"
+        }
+      },
+      "description": "Parameterless on purpose: the extension cannot name a destination, a repository or a key (nativehost-protocol.md §6.5)."
+    },
+    "dashboardResponse": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type",
+        "ok",
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "open_dashboard"
+        },
+        "ok": {
+          "const": true
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}/\\?token=[0-9a-f]{64}$",
+          "description": "Loopback only, with the per-launch token. This response is the only copy of the URL outside the dashboard process."
         }
       }
     }

@@ -43,7 +43,7 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:451-460`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:775-784`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
 (`apps/extension/lib/outbox.ts:379-394`). There is no "probably delivered".
@@ -129,7 +129,7 @@ content-endpoint profile — a wrong guess would not error; it would save only t
 first few turns of every conversation while you believed you had it all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:634-647`).
+(`apps/extension/lib/popup-view.ts:684-697`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -164,7 +164,7 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:135-136`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,491-502`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,500-511`).
 
 ---
 
@@ -204,7 +204,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:923-934`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:933-944`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -269,7 +269,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:923-934`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:933-944`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -281,10 +281,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:853-881`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:875-935`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:885-945`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:1113-1117`). In every case the reason
+  (`crates/chat-stasher/src/nativehost.rs:1132-1136`). In every case the reason
   names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -294,7 +294,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:940-969`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:950-979`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -657,7 +657,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Item | Status |
 | --- | --- |
 | Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:87`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
-| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:200-289`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
+| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:210-299`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
 | Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:40`; we did not test every browser's locale resolution) |
 | Each browser's menu path for "Load unpacked extension" | **Unverified** |
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |

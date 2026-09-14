@@ -22,6 +22,13 @@
  */
 
 import { currentUiLocale, t, type UiLocale } from './i18n';
+import {
+  parseDashboardUrl,
+  type DashboardResult,
+  type StageSummary,
+  type TimeState,
+  type UndeliveredReason,
+} from './native-host';
 import { formatProgress, progressOfHeader, retryMinutesLeft } from './backfill/progress';
 import {
   describeFailureReason,
@@ -176,7 +183,36 @@ export interface PopupModel {
    * *whether* to retry; that decision belongs to the engine's clock alone.
    */
   now?: number;
+  /**
+   * 🔴 W30 · The host's answer to §6.4's `summary`, as the popup received it.
+   *
+   * Three states, and the difference between them is the whole point:
+   * an *answer* (which may still contain unknown parts, each with its reason), a
+   * *failure* (the host missing, older than this extension, or refusing), and
+   * *unasked*. Omitted ⇒ unasked, the same optional-field pattern as above, so
+   * no existing call site changes a character.
+   */
+  summary?: SummaryState;
 }
+
+/**
+ * 🔴 W30 · What the popup knows about the stage summary.
+ *
+ * `failed` is not "zero sessions": it is "no answer", and the two must never
+ * render as the same sentence. `reason` is the wire-level reason code, kept so
+ * the wording can distinguish "the host is not installed" from "the host
+ * refused" without re-parsing a sentence.
+ */
+export type SummaryState =
+  | { kind: 'answer'; summary: StageSummary }
+  | {
+      kind: 'failed';
+      reason: UndeliveredReason;
+      detail?: string;
+      /** True when the installed host predates §6.4 (a `bad-request` nack). */
+      olderHost: boolean;
+    }
+  | { kind: 'unasked' };
 
 /** How the outbox is presented: only the numbers the UI needs, never the payload. */
 export interface PopupOutbox {
@@ -280,6 +316,18 @@ export interface PopupView {
    *    changes this wording automatically instead of letting it drift.
    */
   coverage: string;
+  /**
+   * 🔴 W30 · The one summary line: what the host counts in the stage (last
+   * `window_hours` and in total, split by harness) and when the last successful
+   * push was. An unknown part says so in the line; the reason is in the notes.
+   */
+  summary: string;
+  /**
+   * 🔴 W30 · The "Open dashboard" button. Disabled — with the reason stated —
+   * when there is no usable answer from the host, because a button that cannot
+   * do anything must not look like one that can.
+   */
+  dashboard: { label: string; enabled: boolean; reason: string | null };
   /** Supplementary notes, possibly empty. */
   notes: string[];
   toggle: { label: string; checked: boolean; disabled: boolean };
@@ -407,6 +455,8 @@ export function renderPopup(model: PopupModel): PopupView {
     missing,
     progress,
     coverage: coverageLine(),
+    summary: summaryLine(model),
+    dashboard: dashboardButton(model),
     notes: notesFor(model),
     clearFailures: { label: clearFailuresLabel(), visible: hasFailures },
     startBackfill: { label: startBackfillLabel(), visible: canStartBackfillHere(model) },
@@ -646,6 +696,242 @@ export function coverageLine(): string {
   return t('popup.coverage.partial', { yes, no });
 }
 
+// ---------------------------------------------------------------------------
+// 🔴 W30 · The stage summary and the dashboard button
+// ---------------------------------------------------------------------------
+
+/** How many harness names the summary line shows before it says "and N more". */
+export const MAX_SUMMARY_HARNESSES = 5;
+
+/**
+ * A duration in the largest unit that is still true.
+ *
+ * 🔴 It never says "0 minutes": under 90 seconds the honest sentence is "just
+ *    now". Nothing here estimates a rate or a time-to-completion; this is an
+ *    age of something that already happened.
+ */
+export function agoText(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return t('common.unknownTimeShort');
+  if (seconds < 90) return t('popup.summary.agoJustNow');
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return t('popup.summary.agoMinutes', { count: minutes });
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return t('popup.summary.agoHours', { count: hours });
+  return t('popup.summary.agoDays', { count: Math.round(hours / 24) });
+}
+
+/**
+ * When the last successful push was.
+ *
+ * 🔴 Three outcomes, and they stay three: an age, "unknown" (with the reason in
+ *    the notes), or — when the record's timestamp is in the future — the
+ *    timestamp itself, because "in 3 hours" is not an age and pretending
+ *    otherwise would hide a disagreement between the clock and the record.
+ */
+export function pushText(push: TimeState, now: number): string {
+  if (push.kind === 'unknown') return t('popup.summary.pushUnknown');
+  const seconds = Math.round(now / 1000) - push.unix;
+  if (seconds < 0) {
+    return t('popup.summary.pushFuture', { at: ui.stamp(push.unix * 1000) });
+  }
+  return t('popup.summary.pushAgo', { ago: agoText(seconds) });
+}
+
+/**
+ * The harness split of the window's sessions: "deepseek 3, claude-code 9".
+ *
+ * 🔴 These are the harness ids **verbatim from the host**, never a prettier name
+ *    this file invented — the popup has no authority to rename what it was told.
+ *    A bucket whose name was unusable is labelled, not dropped.
+ * 🔴 A bucket that is unknown is not listed here; the line says the window
+ *    itself is unknown and the note says why.
+ */
+export function harnessBreakdown(summary: StageSummary): string {
+  if (summary.last24h.kind !== 'known') return '';
+  const rows: Array<{ label: string; count: number }> = [];
+  for (const row of summary.byHarness) {
+    if (row.last_24h.kind !== 'known' || row.last_24h.count === 0) continue;
+    rows.push({ label: row.harness ?? t('popup.summary.noHarness'), count: row.last_24h.count });
+  }
+  rows.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  const shown = rows.slice(0, MAX_SUMMARY_HARNESSES);
+  const list = shown
+    .map((row) => t('popup.summary.harnessEntry', { harness: row.label, count: row.count }))
+    .join(', ');
+  if (rows.length > shown.length) {
+    return t('popup.summary.harnessMore', { list, rest: rows.length - shown.length });
+  }
+  return list;
+}
+
+/** The summary line for the "no usable answer" states: never a zero, always the reason. */
+function summaryFailureLine(state: Exclude<SummaryState, { kind: 'answer' }>): string {
+  if (state.kind === 'unasked') return t('popup.summary.unasked');
+  if (state.olderHost) return t('popup.summary.olderHost');
+  if (state.reason === 'no-runtime-api' || state.reason === 'send-failed') {
+    return t('popup.summary.hostMissing');
+  }
+  return t('popup.summary.unavailable', { reason: state.detail || state.reason });
+}
+
+/**
+ * 🔴 W30 · The one summary line.
+ *
+ * Every part is either a number the host measured or the word for unknown — no
+ * part of it is ever filled in with a plausible default, and a part the host
+ * could not read never becomes `0`.
+ */
+export function summaryLine(model: PopupModel): string {
+  const state = model.summary;
+  if (!state || state.kind !== 'answer') {
+    return summaryFailureLine(state ?? { kind: 'unasked' });
+  }
+  const summary = state.summary;
+  // 🔴 The parentheses around the split live in the catalog, in
+  //    `popup.summary.recentNamed` — an unknown or empty split must not leave an
+  //    empty `()` on screen, and assembling punctuation here would be a second
+  //    place the sentence is decided.
+  const breakdown = harnessBreakdown(summary);
+  const recent =
+    summary.last24h.kind !== 'known'
+      ? t('popup.summary.recentUnknown', { hours: summary.windowHours })
+      : breakdown.length === 0
+        ? t('popup.summary.recent', {
+            hours: summary.windowHours,
+            count: summary.last24h.count,
+          })
+        : t('popup.summary.recentNamed', {
+            hours: summary.windowHours,
+            count: summary.last24h.count,
+            list: breakdown,
+          });
+  const total =
+    summary.total.kind === 'known'
+      ? t('popup.summary.totalNamed', { count: summary.total.count })
+      : t('popup.summary.totalUnknown');
+  return t('popup.summary.line', {
+    recent,
+    total,
+    push: pushText(summary.lastPush, model.now ?? Date.now()),
+  });
+}
+
+/** The button's fixed wording. */
+export function dashboardLabel(): string {
+  return t('popup.dashboard.label');
+}
+
+/**
+ * 🔴 W30 · Whether the button can be pressed, and — when it cannot — why.
+ *
+ * The condition is deliberately narrow: the host must have *answered* §6.4. An
+ * answer whose counts are partly unknown still means the host is reachable, so
+ * the button stays usable; only "no answer" disables it. A disabled button
+ * always carries its reason, so it is never a dead control with no explanation.
+ */
+export function dashboardButton(model: PopupModel): {
+  label: string;
+  enabled: boolean;
+  reason: string | null;
+} {
+  const label = dashboardLabel();
+  const state = model.summary;
+  if (!state || state.kind === 'unasked') {
+    return { label, enabled: false, reason: t('popup.dashboard.reason.noAnswer') };
+  }
+  if (state.kind === 'answer') {
+    return { label, enabled: true, reason: null };
+  }
+  if (state.olderHost) {
+    return { label, enabled: false, reason: t('popup.dashboard.reason.olderHost') };
+  }
+  if (state.reason === 'no-runtime-api' || state.reason === 'send-failed') {
+    return { label, enabled: false, reason: t('popup.dashboard.reason.hostMissing') };
+  }
+  return {
+    label,
+    enabled: false,
+    reason: t('popup.dashboard.reason.failed', { detail: state.detail || state.reason }),
+  };
+}
+
+/** The reasons behind the summary's unknown parts. Empty when there are none. */
+function summaryNotes(model: PopupModel): string[] {
+  const state = model.summary;
+  if (!state || state.kind === 'unasked') return [];
+  if (state.kind === 'failed') {
+    return [
+      state.olderHost
+        ? t('popup.summary.olderHostNote')
+        : t('popup.summary.failedNote', { detail: state.detail || state.reason }),
+    ];
+  }
+  const summary = state.summary;
+  const notes: string[] = [];
+  // 🔴 One note per unknown part, each with the host's own reason. A response
+  //    that is complete produces none — there is nothing to explain.
+  if (summary.total.kind === 'unknown') {
+    notes.push(t('popup.summary.noteTotal', { why: summary.total.why }));
+  }
+  if (summary.last24h.kind === 'unknown') {
+    notes.push(t('popup.summary.noteRecent', { why: summary.last24h.why }));
+  }
+  if (summary.lastPush.kind === 'unknown') {
+    notes.push(t('popup.summary.notePush', { why: summary.lastPush.why }));
+  }
+  return notes;
+}
+
+/**
+ * 🔴 W30 · Ask the host for a dashboard and open **exactly** what it answered.
+ *
+ * The rules this function exists to hold:
+ *  1. nothing is opened unless the host answered `ok` — a refusal, a timeout, a
+ *     missing host or a malformed response opens nothing at all;
+ *  2. the URL is checked with [`parseDashboardUrl`] before it is used, so a
+ *     response that is not a loopback URL with a token opens nothing;
+ *  3. the opener is called at most once, and only with the host's own URL.
+ *
+ * `ask` and `open` are parameters so this runs under `node` in the test suite:
+ * the popup's own wiring cannot be exercised there, and these three rules are
+ * exactly what must not depend on the popup being open in a real browser.
+ */
+export async function openDashboardTab(
+  ask: () => Promise<DashboardResult>,
+  // `Promise<unknown>` rather than `Promise<void>`: the real opener is
+  // `browser.tabs.create`, which resolves with the created tab and has no
+  // business being told to throw that away.
+  open: (url: string) => void | Promise<unknown>,
+): Promise<{ url: string | null; message: string }> {
+  let result: DashboardResult;
+  try {
+    result = await ask();
+  } catch (err) {
+    return {
+      url: null,
+      message: t('popup.dashboard.failed', { detail: (err as Error)?.message ?? String(err) }),
+    };
+  }
+  if (!result.ok) {
+    if (result.olderHost) return { url: null, message: t('popup.dashboard.reason.olderHost') };
+    return {
+      url: null,
+      message: t('popup.dashboard.failed', { detail: result.detail || result.reason }),
+    };
+  }
+  const url = parseDashboardUrl(result.url);
+  if (url === null) return { url: null, message: t('popup.dashboard.refusedUrl') };
+  try {
+    await open(url);
+  } catch (err) {
+    return {
+      url: null,
+      message: t('popup.dashboard.failed', { detail: (err as Error)?.message ?? String(err) }),
+    };
+  }
+  return { url, message: t('popup.dashboard.opened') };
+}
+
 /** What each platform is missing. Goes into the notes for a user who wants a closer look — the main line gives only the conclusion. */
 function coverageNote(): string {
   const lines = [t('popup.coverage.noteTitle')];
@@ -726,6 +1012,10 @@ function notesFor(model: PopupModel): string[] {
     }
   }
 
+  // 🔴 W30 · Why the summary line says "unknown", before the long-term coverage
+  //    note: an unreadable count is current state, and the user asked for it.
+  notes.push(...summaryNotes(model));
+
   // 🔴 The coverage note comes last: it is a long-term fact, not the current state.
   if (BACKFILL_UNSUPPORTED.length > 0 || BACKFILL_PARTIAL.length > 0) notes.push(coverageNote());
   return notes;
@@ -749,6 +1039,13 @@ export function popupText(view: PopupView): string {
   if (view.startBackfill.visible) lines.push(t('popup.buttonTag', { label: view.startBackfill.label }));
   if (view.exportFile.visible) lines.push(t('popup.buttonTag', { label: view.exportFile.label }));
   lines.push(view.progress);
+  // 🔴 W30: the summary line and its button. The button is always on screen, so
+  //    it is always in the flattened text — and when it is disabled its reason
+  //    is printed next to it, because a control nobody can use must come with
+  //    the explanation rather than a tooltip a text report cannot show.
+  lines.push(view.summary);
+  lines.push(t('popup.buttonTag', { label: view.dashboard.label }));
+  if (view.dashboard.reason) lines.push(view.dashboard.reason);
   lines.push(view.coverage);
   for (const n of view.notes) lines.push('', n);
   return lines.join('\n');

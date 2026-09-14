@@ -37,12 +37,34 @@ export interface SyntheticHostOptions {
   stage?: string;
   machine?: string;
   hostVersion?: string;
+  /**
+   * The exact §6.4 answer. Omitted ⇒ a complete, empty-but-measured stage. A
+   * test that wants an *unknown* count, a broken sum or an extra field passes
+   * the whole object, so the stub can stay dumb and one shared copy still
+   * covers every shape the extension must survive.
+   */
+  summary?: unknown;
+  /** true ⇒ `summary`/`open_dashboard` get the nack an older host sends. */
+  unsupported?: boolean;
+  /** The §6.5 answer's URL. Omitted ⇒ a well-formed loopback URL. */
+  dashboardUrl?: string;
+  /** Non-null ⇒ every `open_dashboard` gets this nack instead of a URL. */
+  dashboardNack?: { kind: string; retryable: boolean; detail: string } | null;
 }
+
+/** A well-formed dashboard URL, shaped exactly like the one `ui` prints. */
+export const SYNTHETIC_DASHBOARD_URL = `http://127.0.0.1:51234/?token=${'ab'.repeat(32)}`;
 
 export interface SyntheticHost {
   deliveries: SyntheticDelivery[];
   /** How many `hello` requests the extension actually sent. */
   helloCount(): number;
+  /** How many §6.4 `summary` requests the extension actually sent. */
+  summaryCount(): number;
+  /** How many §6.5 `open_dashboard` requests the extension actually sent. */
+  dashboardCount(): number;
+  /** Every request body the extension sent, in order. */
+  requests(): Array<Record<string, unknown>>;
   /**
    * Pass this as `browser.runtime.sendNativeMessage`. Written as an arrow so it
    * keeps working when the browser object calls it as `runtime.sendNativeMessage(...)`
@@ -68,11 +90,17 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
   const deliveries: SyntheticDelivery[] = [];
   const sealed = new Set<string>();
+  const requests: Array<Record<string, unknown>> = [];
   let hellos = 0;
+  let summaries = 0;
+  let dashboards = 0;
 
   return {
     deliveries,
     helloCount: () => hellos,
+    summaryCount: () => summaries,
+    dashboardCount: () => dashboards,
+    requests: () => [...requests],
     names: () => deliveries.map((d) => d.name),
     sessionIds: () => deliveries.map((d) => {
       try {
@@ -85,6 +113,49 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
       if (!up) throw new Error('Specified native messaging host not found.');
       if (host !== NATIVE_HOST_NAME) throw new Error(`Unknown host ${host}`);
       const msg = message as Record<string, unknown>;
+      requests.push(msg);
+
+      // An older host answers both §6.4/§6.5 messages with this, exactly as
+      // `nativehost.rs` does for an unknown `type`.
+      if (
+        options.unsupported &&
+        (msg.type === 'summary' || msg.type === 'open_dashboard')
+      ) {
+        return {
+          protocol: 1, type: 'nack', request_id: null,
+          kind: 'bad-request', retryable: false,
+          detail: `unknown message type ${JSON.stringify(String(msg.type))}`,
+        };
+      }
+
+      if (msg.type === 'summary') {
+        summaries += 1;
+        if (options.summary !== undefined) return options.summary;
+        return {
+          protocol: 1, type: 'summary', ok: true, window_hours: 24, complete: true,
+          sessions: {
+            total: { kind: 'known', count: 0 },
+            last_24h: { kind: 'known', count: 0 },
+            by_harness: [],
+          },
+          last_push: { kind: 'known', unix: 1_760_000_000 },
+        };
+      }
+
+      if (msg.type === 'open_dashboard') {
+        dashboards += 1;
+        if (options.dashboardNack) {
+          return {
+            protocol: 1, type: 'nack', request_id: null,
+            kind: options.dashboardNack.kind, retryable: options.dashboardNack.retryable,
+            detail: options.dashboardNack.detail,
+          };
+        }
+        return {
+          protocol: 1, type: 'open_dashboard', ok: true,
+          url: options.dashboardUrl ?? SYNTHETIC_DASHBOARD_URL,
+        };
+      }
 
       if (msg.type === 'hello') {
         hellos += 1;

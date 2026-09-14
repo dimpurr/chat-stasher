@@ -90,6 +90,13 @@ reject a real conversation for a reason no document states. Responses are the
 other way round: they carry exactly the fields listed here, and the extension
 treats any extra or missing field as a malformed response.
 
+The one exception is the two **parameterless** messages added in §6.4 and §6.5:
+they take no request fields at all, so an extra field is a request this document
+does not define and is refused with `bad-request`. That rule costs nothing —
+neither message carries an item — and it means a future version that wants to
+give one of them a parameter has to be a protocol change rather than a field an
+older host silently ignores.
+
 ### 6.1 `hello` — is the host there, and where does it write?
 
 Request:
@@ -164,6 +171,147 @@ but once it is fixed, every waiting item must go through). Only an *item*-scope
 `nack` with `retryable: false` marks that one item rejected. The scope is fixed
 by `kind` and is not sent on the wire.
 
+### 6.4 `summary` — how much is in the stage, in counts only
+
+Request:
+
+```json
+{"protocol": 1, "type": "summary"}
+```
+
+This message takes **no parameters** (§6): any field other than `protocol` and
+`type` is `nack` `bad-request`.
+
+Response on success:
+
+```json
+{"protocol": 1, "type": "summary", "ok": true,
+ "window_hours": 24,
+ "complete": true,
+ "sessions": {
+   "total": {"kind": "known", "count": 41},
+   "last_24h": {"kind": "known", "count": 12},
+   "by_harness": [
+     {"harness": "claude-code", "total": {"kind": "known", "count": 9},
+      "last_24h": {"kind": "known", "count": 3}}
+   ]
+ },
+ "last_push": {"kind": "known", "unix": 1757800000}}
+```
+
+**What it reads.** Directory entries under `<stage>/sessions/`, the names of the
+sealed shards in each session directory, each shard's own mtime, and
+`run-state.json` in the CLI's state directory. It never opens a shard, never
+decrypts the repository, never touches the network, and reads no configuration
+beyond the stage and the machine id `hello` already resolves. The response
+carries counts, one word per harness, the window, and the run-state timestamp —
+no conversation content, no titles, no session ids, no paths beyond what
+`hello` already returns.
+
+**What a number means.**
+
+- A *session* is a directory under `<stage>/sessions/<machine>/` holding at
+  least one sealed shard. A directory with no shard is not a session (and must
+  not make an empty stage look populated).
+- `total` counts sessions, `last_24h` counts those whose **newest sealed shard
+  was written** within the last `window_hours`. That is file mtime, not the
+  conversation's own time, because reading the conversation's time would mean
+  opening the shard.
+- `by_harness` splits both counts by the leading dot-segment of the session
+  directory name (`deepseek.abc` → `deepseek`), which is the same rule
+  `sidecar::infer_harness` applies to archived ids. `harness` is `null` for a
+  directory name with no usable prefix; that bucket is still counted, so the
+  per-harness totals always add up to `total`. `by_harness` is empty — and only
+  empty — when `total` is `unknown`.
+
+**Unknown is never zero.** Every count is one of `{"kind": "known", "count": n}`
+or `{"kind": "unknown", "why": "..."}`, and `last_push` is either
+`{"kind": "known", "unix": n}` or `{"kind": "unknown", "why": "..."}`. A part
+that could not be read is `unknown` with a reason; a measured zero is
+`{"kind": "known", "count": 0}`. `complete` is `true` exactly when every count
+and `last_push` is `known` — it is the same statement as "no `unknown` appears
+anywhere in this response", and the two are asserted equal by the test
+`complete_is_true_exactly_when_nothing_is_unknown` in
+`crates/chat-stasher/src/nativehost.rs` rather than left to a reader.
+
+**Cost.** `summary` lists directories and reads file metadata only; it never
+opens a shard, decrypts anything or touches the network. Its cost grows with
+the total number of sessions and shards in the stage, not with the 24-hour
+window, and it has no timeout of its own: on a very large or slow (for example
+network-mounted) stage the popup's own 3-second limit can expire first, and the
+popup then says the host did not answer.
+
+`last_push` is the `finished_at_unix` of the most recent `run-once` pass whose
+recorded outcome was `completed` (a snapshot was created). When the record is
+missing, unreadable, describes a failed pass, or describes a pass that had
+nothing to archive, the answer is `unknown` with that reason — the file holds
+only the most recent pass, and none of those cases establish when the last
+successful push was.
+
+### 6.5 `open_dashboard` — start the dashboard and hand back its URL
+
+Request:
+
+```json
+{"protocol": 1, "type": "open_dashboard"}
+```
+
+This message takes **no parameters** (§6); in particular the extension cannot
+name a destination, a repository or a key.
+
+Response on success:
+
+```json
+{"protocol": 1, "type": "open_dashboard", "ok": true,
+ "url": "http://127.0.0.1:51234/?token=<64 lowercase hex chars>"}
+```
+
+**What it does.** The host starts *its own binary* — `std::env::current_exe()`,
+so the same build and the same config file — as
+`chat-stasher ui --no-open --destination <name>`, where `<name>` is
+`[native_host] destination` from the config. It then reads the child's stdout
+until the dashboard prints its URL. That line is emitted only after the socket
+is bound and listening, so its arrival is the listen event; no second probe is
+attempted. The child's stdin is closed and its stdout is a pipe to the host, so
+the child can never write on the host's own stdout (§2).
+
+**The token goes to the extension and nowhere else.** The host does not log the
+URL, does not write it to disk, and does not print it: the only copy of it
+outside the child's own memory is the `url` field of this response.
+
+**Destination.** There is no default destination (ADR-013) and this message
+does not invent one: `[native_host] destination` must name a declared
+destination. Missing or empty is `nack` `config`, and `detail` names the key
+and the file to put it in.
+
+**A second dashboard.** The host cannot tell whether one is already running, and
+does not try. The browser starts one host process per request, so there is no
+session in which a previous launch could be remembered; and the token is
+per-launch and never persisted, so the URL of an earlier dashboard does not
+exist anywhere the host could look. Searching the process table was rejected as
+unreliable across the platforms this ships on (and a process table names the
+*command*, not the token). Every `open_dashboard` therefore starts a new
+dashboard; each one exits on its own after its idle timeout (see `chat-stasher ui
+--help`).
+This is a statement about a limit, not a promise that a second one would be
+harmless — an old tab keeps working until it idles out.
+
+**Failure.** A dashboard that does not come up is a `nack`; the extension opens
+nothing.
+
+| Situation | `nack` | `retryable` | `detail` says |
+|---|---|---|---|
+| `[native_host] destination` missing or empty | `config` | false | which key to set, and where |
+| the child exited before it printed a URL | `io` | true | the exit status, mapped to the meaning `chat-stasher ui` documents for it (usage error / nothing to show / could not read the archive) |
+| no URL within the host's start timeout | `io` | true | that the child was killed, and that no browser tab was opened |
+| the URL line could not be read at all | `io` | true | that the child's output could not be read |
+
+The child's own stderr is deliberately **not** relayed: it can carry a
+repository URL, which is a real hostname, and this response goes to an extension
+that has no business holding one. The exit status is enough to say which of the
+CLI's documented outcomes happened; the detail points at running `chat-stasher
+ui` by hand for the full text.
+
 ## 7. Idempotency
 
 The duplicate key is the SHA-256 of the payload bytes — the same `fileSha256`
@@ -209,3 +357,9 @@ version is a new document section, never an edit to an existing one.
   pending item, the extension keeps its own low-frequency retry timer, and
   clears it once the outbox is empty.
 - There is no automatic file download anywhere.
+- The popup asks `summary` **once, when it opens**. It does not poll, and it has
+  no timer of its own.
+- The popup opens a browser tab **only** with the `url` of a successful
+  `open_dashboard` response, and only after checking that it is
+  `http://127.0.0.1:<port>/?token=<hex>`. A `nack`, a timeout, a malformed
+  response or a URL that is not loopback opens nothing.

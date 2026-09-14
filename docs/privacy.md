@@ -121,13 +121,13 @@ the sentence.
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
    `runtime.sendNativeMessage`
-   (`apps/extension/lib/native-host.ts:30`, `:431-481`). The host seals it into
+   (`apps/extension/lib/native-host.ts:30`, `:755-805`). The host seals it into
    the stage you configured, using the same code path and the same guarantees as
-   `ingest` (`crates/chat-stasher/src/nativehost.rs:1090-1117`).
+   `ingest` (`crates/chat-stasher/src/nativehost.rs:1109-1136`).
    🔴 **The bundle is deleted from the outbox only when the host answers an
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
-   (`apps/extension/lib/native-host.ts:451-460`;
+   (`apps/extension/lib/native-host.ts:775-784`;
    `apps/extension/lib/outbox.ts:379-394`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
@@ -144,10 +144,42 @@ is one you registered yourself.
 That is not a promise we are keeping — it is a property of there being no such
 link in the code.
 
+### What the host answers back
+
+Two answers travel the other way — from the binary you installed to the
+extension you installed. Both are read-only, and neither carries a conversation:
+
+- **`summary`** — how many sessions are in the stage: in total, in the last 24
+  hours, and split by harness name, plus when the last successful push was. It
+  is computed from the stage's directory entries, each shard's own mtime and the
+  local `run-state.json`; the host does not open a shard, does not decrypt the
+  repository and does not touch the network, and the answer holds no session id,
+  no title and no path beyond the stage path `hello` already returns
+  (`crates/chat-stasher/src/nativehost.rs`;
+  `contracts/nativehost-protocol.md` §6.4). A count the host could not read is
+  reported as *unknown* with its reason — never as `0`, which would say "your
+  archive is empty" when the truth is "that part of the stage could not be
+  listed".
+- **`open_dashboard`** — the URL of a dashboard the host starts for you
+  (`chat-stasher ui`, on `127.0.0.1`, with a per-launch access token). For as
+  long as the dashboard runs, that URL **is** a secret, and the host hands it to
+  the extension and to nothing else: it is not logged, not written to disk and
+  not printed (`contracts/nativehost-protocol.md` §6.5; `docs/threat-model.md`,
+  "The local dashboard").
+
+Neither answer leaves your machine, and neither reaches us: they travel one hop,
+from the binary you installed to the extension you installed.
+
 ## 2. What we collect
 
 **We collect nothing.** No personal information, no conversation content, no
 identifiers, no analytics, no diagnostics.
+
+The counts the popup shows ("12 sessions in the last 24 h") are computed on your
+machine by the `chat-stasher` binary you installed and handed back to the
+extension over the browser's local Native Messaging channel
+(`crates/chat-stasher/src/nativehost.rs`). They are not sent anywhere else, and
+no request in this repository transmits them.
 
 Because "we do not collect" is the easiest sentence in any privacy policy to
 write and the hardest to believe, here is how **you** can check it without
@@ -376,7 +408,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:64-77`, `:301-345`, `:1150-1184`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:74-87`, `:311-355`, `:1876-1910`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-28`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:65-77`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the chat tab open; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:65`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:53`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:77`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |

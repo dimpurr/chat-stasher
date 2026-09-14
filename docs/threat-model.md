@@ -35,10 +35,10 @@ Understanding the roles below requires knowing the path the content takes.
    `chat-stasher install-native-host --stage <path>` — over
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
-   (`apps/extension/lib/native-host.ts:431-481`;
-   `crates/chat-stasher/src/nativehost.rs:1090-1117`). The bundle leaves the
+   (`apps/extension/lib/native-host.ts:755-805`;
+   `crates/chat-stasher/src/nativehost.rs:1109-1136`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:451-460`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:775-784`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
    (`crates/chat-stasher/src/main.rs:635-685`).
@@ -147,9 +147,52 @@ your user, it is the dominant risk in this document.
 | **Can see** | Any program running as you can connect to the dashboard's port, because it listens on `127.0.0.1` (`crates/chat-stasher/src/view.rs:173`). Loopback is not a security boundary. |
 | **Cannot see** | Anything, without the random token printed in the URL at launch. Every route checks it with a constant-time comparison before doing anything else, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:256`, `:180`). |
 
+**Who can start it.** There are two ways, and both end in the same
+loopback-only, token-gated server:
+
+- You run `chat-stasher ui` yourself, by hand.
+- **The pinned extension can ask the native host to start it**
+  (`open_dashboard`, `contracts/nativehost-protocol.md` §6.5). The host is a
+  Native Messaging host, so the browser starts it only for an extension whose id
+  is in the host manifest that `chat-stasher install-native-host` wrote;
+  `crates/chat-stasher/src/nativehost.rs` refuses every other origin
+  (`crates/chat-stasher/src/nativehost.rs:1876-1910`). The extension therefore cannot be *any* extension you happen to
+  have installed — it has to be this one, with the pinned id, on a manifest you
+  registered yourself.
+
+What that new path does and does not change:
+
+- **It does not widen who can reach the dashboard.** The socket is still bound to
+  `127.0.0.1` with an OS-assigned port, and the token is still generated from the
+  OS CSPRNG at launch (`crates/chat-stasher/src/view.rs:138-150`, `:158-172`).
+  The host starts the same binary with the same config
+  (`dashboard_argv`), so a dashboard opened from the popup is the same object as
+  one you typed.
+- **It hands the token to one more local party: this extension.** The URL is
+  returned in the `open_dashboard` response and is not logged, not written to
+  disk and not printed by the host
+  (`crates/chat-stasher/src/nativehost.rs`). The extension opens it in a tab
+  (`apps/extension/entrypoints/popup/main.ts`) only after checking it is
+  `http://127.0.0.1:<port>/?token=<64 hex>`
+  (`apps/extension/lib/native-host.ts`). Anything else — a `nack`, a timeout, a
+  missing host, a URL that is not loopback — opens nothing.
+- **The destination is never chosen by the extension.** There is no default
+  destination (ADR-013), and the message is parameterless, so the dashboard opens
+  the destination named by `[native_host] destination` in your config or not at
+  all. An extension cannot point the dashboard at a repository, a key file or a
+  flag of its choosing.
+- 🔴 **The token's lifetime is now less predictable to you.** A dashboard you
+  started by hand is one you can see in a terminal. One started from the popup
+  exists because you clicked a button, runs until its idle timeout
+  (`chat-stasher ui --help`), and each click starts a **new** dashboard — the
+  host cannot tell whether one is already running, because it is a
+  one-process-per-request host with no state and the token is per-launch and
+  never persisted. Closing the tab does not stop the process; its idle timeout
+  does.
+
 Two things worth stating plainly:
 
-- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui.rs:550`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs.
+- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui.rs:550`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
 - **Whether the macOS application firewall prompts for a server bound only to `127.0.0.1` is documented, not verified.** Apple's firewall documentation describes protection against connections from other computers and does not mention loopback either way; third-party documentation states that the application firewall does not filter loopback. We have not observed the behaviour on a machine with the firewall turned on.
 
 ### Someone with physical access to your machine, or your stolen disk
@@ -275,7 +318,7 @@ by something other than our own code.
 
 | | |
 |---|---|
-| **Can see** | Every bundle the extension delivers: the conversation text, the platform name, the session id, the account identity in it. It is the local process that writes your archive's input. |
+| **Can see** | Every bundle the extension delivers: the conversation text, the platform name, the session id, the account identity in it. It is the local process that writes your archive's input. It also answers the extension's two read-only questions — a count-only summary of the stage, and a request to start the dashboard (see the two bullets at the end of this section). |
 | **Cannot see** | Nothing is withheld from it: it sees every bundle it is asked to archive. But it is *not* a network service — it opens no socket, the browser starts one process per request, and it writes only into the stage you configured. |
 
 The properties that bound this boundary:
@@ -285,17 +328,17 @@ The properties that bound this boundary:
   pinned constants — `gihmdkkmmmkeiagjjiimacmgkdilofhi` and
   `chat-stasher@team.iopho.com` — and the extension's own Chrome id is pinned by
   a public key in its manifest, so it cannot vary per machine
-  (`crates/chat-stasher/src/nativehost.rs:64-77`, `:301-345`;
+  (`crates/chat-stasher/src/nativehost.rs:74-87`, `:311-355`;
   `apps/extension/wxt.config.ts:88-94`).
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:1150-1184`).
+  (`crates/chat-stasher/src/nativehost.rs:1876-1910`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:875-935`, `:940-969`).
+  (`crates/chat-stasher/src/nativehost.rs:885-945`, `:950-979`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
@@ -306,11 +349,29 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:1066-1075`;
-  `apps/extension/lib/native-host.ts:451-460`).
+  (`crates/chat-stasher/src/nativehost.rs:1085-1094`;
+  `apps/extension/lib/native-host.ts:775-784`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:1082-1088`).
+  (`crates/chat-stasher/src/nativehost.rs:1101-1107`).
+- **The host also answers two read-only questions, and writes nothing for
+  either.** `summary` counts the sessions in the stage from its directory
+  entries and each shard's own mtime plus the local `run-state.json` — it does
+  not open a shard, does not decrypt the repository and does not touch the
+  network — and answers with counts, harness names, a window length and a push
+  timestamp, never a session id or a title
+  (`crates/chat-stasher/src/nativehost.rs`;
+  `contracts/nativehost-protocol.md` §6.4). `open_dashboard` starts this same
+  binary as `ui --no-open` for the destination named in your config and returns
+  the per-launch URL to the extension only; "The local dashboard" section above
+  covers what that hands over and to whom.
+- 🔴 **Both are parameterless, and anything else is refused.** An
+  `open_dashboard` carrying a `destination`, a `repo`, a `key_file` or any other
+  field the document does not define is answered `nack` `bad-request`, so a
+  compromised or hostile extension — or a call from one of your *other*
+  extensions, if it could reach this host at all, which it cannot — cannot
+  direct the dashboard at a repository or a flag of its choosing
+  (`contracts/nativehost-protocol.md` §6, §6.5).
 
 What this boundary does **not** buy you: the host is an ordinary binary running
 as you, so anything that can replace it can do anything it can — see "A replaced

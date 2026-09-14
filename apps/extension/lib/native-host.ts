@@ -81,6 +81,127 @@ export interface HelloOk {
   hostVersion: string;
 }
 
+// ---------------------------------------------------------------------------
+// §6.4 summary / §6.5 open_dashboard — the two read-only queries
+// ---------------------------------------------------------------------------
+
+/**
+ * A count the host measured, or an explicit unknown with its reason.
+ * 🔴 `{kind: 'known', count: 0}` is a *measurement* ("looked, found none") and
+ *    is a different claim from `{kind: 'unknown'}`. Nothing here may collapse
+ *    one into the other (nativehost-protocol.md §6.4).
+ */
+export type CountState = { kind: 'known'; count: number } | { kind: 'unknown'; why: string };
+
+/** A unix time the host knows, or an explicit unknown with its reason. */
+export type TimeState = { kind: 'known'; unix: number } | { kind: 'unknown'; why: string };
+
+/** One row of the summary's per-harness split. `harness` is null when the
+ * session directory name carried no usable prefix — that bucket still counts. */
+export interface HarnessSummary {
+  harness: string | null;
+  total: CountState;
+  last_24h: CountState;
+}
+
+/** What §6.4 answers, in the popup's own vocabulary. */
+export interface StageSummary {
+  /** The window the `last24h` counts cover. Read from the host, never assumed. */
+  windowHours: number;
+  /** True exactly when every count and `lastPush` is known (no unknown anywhere). */
+  complete: boolean;
+  total: CountState;
+  last24h: CountState;
+  byHarness: HarnessSummary[];
+  lastPush: TimeState;
+}
+
+export interface SummaryOk {
+  ok: true;
+  summary: StageSummary;
+}
+
+export interface SummaryFailed {
+  ok: false;
+  reason: UndeliveredReason;
+  /** Present when the host answered `nack`. */
+  kind?: NackKind;
+  detail?: string;
+  retryable: boolean;
+  /**
+   * 🔴 The installed host predates these messages: a `bad-request` nack is how
+   * it says "unknown message type". `detail` is still carried — see
+   * [`looksLikeOlderHost`].
+   */
+  olderHost: boolean;
+}
+
+export type SummaryResult = SummaryOk | SummaryFailed;
+
+export interface DashboardOk {
+  ok: true;
+  /** `http://127.0.0.1:<port>/?token=<64 hex>` — checked before it is used. */
+  url: string;
+}
+
+export interface DashboardFailed {
+  ok: false;
+  reason: UndeliveredReason;
+  kind?: NackKind;
+  detail?: string;
+  retryable: boolean;
+  olderHost: boolean;
+}
+
+export type DashboardResult = DashboardOk | DashboardFailed;
+
+/**
+ * Timeout for the popup's `summary` question. Same reasoning as
+ * [`HELLO_PROBE_TIMEOUT_MS`]: the answer is a directory listing, so a healthy
+ * host is back in milliseconds and a wedged one must not hold the popup.
+ */
+export const SUMMARY_PROBE_TIMEOUT_MS = 3_000;
+
+/**
+ * 🔴 The only URL shape this extension will open.
+ *
+ * It mirrors `contracts/nativehost-message.schema.json`'s `dashboardResponse.url`
+ * pattern — loopback literal, a port, and a 64-hex token — and additionally
+ * re-parses the URL, because a regex that is subtly wrong is exactly the kind
+ * of defect a second, independent check catches. `localhost` is deliberately
+ * *not* accepted: the host prints the literal address it bound, and accepting a
+ * name would put DNS between the token and the socket.
+ */
+export const DASHBOARD_URL_RE = /^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/\?token=[0-9a-f]{64}$/;
+
+/** The URL to open, or null when this extension will not open it. */
+export function parseDashboardUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !DASHBOARD_URL_RE.test(raw)) return null;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:') return null;
+    if (parsed.hostname !== '127.0.0.1') return null;
+    if (parsed.port.length === 0) return null;
+    if (parsed.pathname !== '/') return null;
+    const token = parsed.searchParams.get('token');
+    if (token === null || !/^[0-9a-f]{64}$/.test(token)) return null;
+  } catch {
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * 🔴 A `bad-request` nack to a §6.4/§6.5 message has one overwhelmingly likely
+ * cause: the host on this machine is older than this extension and does not
+ * know the message. That is a *conclusion*, so the popup may say it — but the
+ * host's own `detail` is reported alongside it, because "overwhelmingly likely"
+ * is not "certain" and a silent guess is the thing this codebase forbids.
+ */
+export function looksLikeOlderHost(result: { reason: UndeliveredReason; kind?: NackKind }): boolean {
+  return result.reason === 'nack' && result.kind === 'bad-request';
+}
+
 export interface HelloFailed {
   ok: false;
   reason: UndeliveredReason;
@@ -267,6 +388,151 @@ function validateHello(value: Record<string, unknown>): HelloResponse | string {
   return { machine: value.machine, stage: value.stage, host_version: value.host_version };
 }
 
+/**
+ * One tagged count/unknown (§6.4). Written with `keysOk`, so an object carrying
+ * an extra field is a malformed response rather than something half-read.
+ */
+function validateCountState(value: unknown, where: string): CountState | string {
+  if (!isRecord(value)) return `${where} is not an object`;
+  const kind = value.kind;
+  if (kind === 'known') {
+    const bad = keysOk(value, ['kind', 'count']);
+    if (bad) return `${where}: ${bad}`;
+    const count = value.count;
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+      return `${where}.count is not a non-negative integer`;
+    }
+    return { kind: 'known', count };
+  }
+  if (kind === 'unknown') {
+    const bad = keysOk(value, ['kind', 'why']);
+    if (bad) return `${where}: ${bad}`;
+    const why = value.why;
+    if (typeof why !== 'string') return `${where}.why is not a string`;
+    return { kind: 'unknown', why };
+  }
+  return `${where}.kind is neither 'known' nor 'unknown'`;
+}
+
+/** One tagged unix time/unknown (§6.4). Same discipline as [`validateCountState`]. */
+function validateTimeState(value: unknown, where: string): TimeState | string {
+  if (!isRecord(value)) return `${where} is not an object`;
+  const kind = value.kind;
+  if (kind === 'known') {
+    const bad = keysOk(value, ['kind', 'unix']);
+    if (bad) return `${where}: ${bad}`;
+    const unix = value.unix;
+    if (typeof unix !== 'number' || !Number.isInteger(unix)) {
+      return `${where}.unix is not an integer`;
+    }
+    return { kind: 'known', unix };
+  }
+  if (kind === 'unknown') {
+    const bad = keysOk(value, ['kind', 'why']);
+    if (bad) return `${where}: ${bad}`;
+    const why = value.why;
+    if (typeof why !== 'string') return `${where}.why is not a string`;
+    return { kind: 'unknown', why };
+  }
+  return `${where}.kind is neither 'known' nor 'unknown'`;
+}
+
+/**
+ * §6.4's answer, checked against the parts of the contract a per-field check
+ * cannot see: the counts must add up, `by_harness` may be empty *only* when the
+ * total is unknown, and `complete` must be exactly "nothing here is unknown".
+ *
+ * Those three invariants are stated in the protocol document. Re-deriving them
+ * here, rather than trusting the host, is what makes "the split disagrees with
+ * the total" a malformed response instead of a sentence the popup would show.
+ */
+function validateSummary(value: Record<string, unknown>): StageSummary | string {
+  if (value.protocol !== PROTOCOL) return `protocol is not ${PROTOCOL}`;
+  if (value.type !== 'summary') return "type is not 'summary'";
+  const bad = keysOk(value, [
+    'protocol',
+    'type',
+    'ok',
+    'window_hours',
+    'complete',
+    'sessions',
+    'last_push',
+  ]);
+  if (bad) return bad;
+  if (value.ok !== true) return 'ok is not true';
+  const windowHours = value.window_hours;
+  if (typeof windowHours !== 'number' || !Number.isInteger(windowHours) || windowHours <= 0) {
+    return 'window_hours is not a positive integer';
+  }
+  if (typeof value.complete !== 'boolean') return 'complete is not a boolean';
+
+  const sessions = value.sessions;
+  if (!isRecord(sessions)) return 'sessions is not an object';
+  const badSessions = keysOk(sessions, ['total', 'last_24h', 'by_harness']);
+  if (badSessions) return `sessions: ${badSessions}`;
+
+  const total = validateCountState(sessions.total, 'sessions.total');
+  if (typeof total === 'string') return total;
+  const last24h = validateCountState(sessions.last_24h, 'sessions.last_24h');
+  if (typeof last24h === 'string') return last24h;
+
+  if (!Array.isArray(sessions.by_harness)) return 'sessions.by_harness is not an array';
+  const byHarness: HarnessSummary[] = [];
+  for (let index = 0; index < sessions.by_harness.length; index += 1) {
+    const where = `sessions.by_harness[${index}]`;
+    const row = sessions.by_harness[index];
+    if (!isRecord(row)) return `${where} is not an object`;
+    const badRow = keysOk(row, ['harness', 'total', 'last_24h']);
+    if (badRow) return `${where}: ${badRow}`;
+    if (row.harness !== null && typeof row.harness !== 'string') {
+      return `${where}.harness is neither a string nor null`;
+    }
+    const rowTotal = validateCountState(row.total, `${where}.total`);
+    if (typeof rowTotal === 'string') return rowTotal;
+    const rowRecent = validateCountState(row.last_24h, `${where}.last_24h`);
+    if (typeof rowRecent === 'string') return rowRecent;
+    byHarness.push({ harness: row.harness as string | null, total: rowTotal, last_24h: rowRecent });
+  }
+
+  if (total.kind === 'known') {
+    if (byHarness.some((row) => row.total.kind !== 'known')) {
+      return 'a by_harness bucket is unknown while sessions.total is known';
+    }
+    const sum = byHarness.reduce(
+      (running, row) => running + (row.total.kind === 'known' ? row.total.count : 0),
+      0,
+    );
+    if (sum !== total.count) {
+      return `by_harness totals sum to ${sum}, not ${total.count}`;
+    }
+  } else if (byHarness.length > 0) {
+    return 'by_harness is non-empty while sessions.total is unknown';
+  }
+
+  const lastPush = validateTimeState(value.last_push, 'last_push');
+  if (typeof lastPush === 'string') return lastPush;
+
+  const complete =
+    total.kind === 'known' && last24h.kind === 'known' && lastPush.kind === 'known';
+  if (value.complete !== complete) {
+    return `complete is ${String(value.complete)} but the answer's own parts say ${complete}`;
+  }
+
+  return { windowHours, complete, total, last24h, byHarness, lastPush };
+}
+
+/** §6.5's answer. The URL is checked here, so no caller has to remember to. */
+function validateDashboard(value: Record<string, unknown>): { url: string } | string {
+  if (value.protocol !== PROTOCOL) return `protocol is not ${PROTOCOL}`;
+  if (value.type !== 'open_dashboard') return "type is not 'open_dashboard'";
+  const bad = keysOk(value, ['protocol', 'type', 'ok', 'url']);
+  if (bad) return bad;
+  if (value.ok !== true) return 'ok is not true';
+  const url = parseDashboardUrl(value.url);
+  if (url === null) return 'url is not http://127.0.0.1:<port>/?token=<64 hex chars>';
+  return { url };
+}
+
 // ---------------------------------------------------------------------------
 // The call itself
 // ---------------------------------------------------------------------------
@@ -418,6 +684,64 @@ export async function hello(options: { timeoutMs?: number } = {}): Promise<Hello
   }
   const res = classified.value as HelloResponse;
   return { ok: true, machine: res.machine, stage: res.stage, hostVersion: res.host_version };
+}
+
+/**
+ * §6.4 — how much is in the stage, in counts only.
+ *
+ * Read-only, and the popup asks it once per open. A failure is a *failure*: the
+ * caller gets `ok: false` and a named reason, never a zero-valued summary that
+ * would read as "nothing is archived".
+ */
+export async function summary(options: { timeoutMs?: number } = {}): Promise<SummaryResult> {
+  const outcome = await sendOnce(
+    getRuntime(),
+    { protocol: PROTOCOL, type: 'summary' },
+    options.timeoutMs ?? SUMMARY_PROBE_TIMEOUT_MS,
+  );
+  const classified = classify(outcome, (value) => validateSummary(value));
+  if (!classified.ok) {
+    return {
+      ok: false,
+      reason: classified.reason,
+      kind: classified.kind,
+      detail: classified.detail,
+      retryable: classified.retryable,
+      olderHost: looksLikeOlderHost(classified),
+    };
+  }
+  return { ok: true, summary: classified.value as StageSummary };
+}
+
+/**
+ * §6.5 — ask the host to start the dashboard, and get its URL back.
+ *
+ * 🔴 The URL in the result is the *only* thing the popup may open a tab with
+ *    (§10), and it has already been checked by [`parseDashboardUrl`]. Nothing
+ *    here retries: a second call would start a *second* dashboard, which the
+ *    host says plainly it cannot deduplicate.
+ */
+export async function openDashboard(options: { timeoutMs?: number } = {}): Promise<DashboardResult> {
+  const outcome = await sendOnce(
+    getRuntime(),
+    { protocol: PROTOCOL, type: 'open_dashboard' },
+    // The host waits up to 45 s for the dashboard to listen, so the extension's
+    // own 60 s budget (§2) is the right one here — the popup probe timeout
+    // would cut a launch short while it was still reading the archive.
+    options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+  );
+  const classified = classify(outcome, (value) => validateDashboard(value));
+  if (!classified.ok) {
+    return {
+      ok: false,
+      reason: classified.reason,
+      kind: classified.kind,
+      detail: classified.detail,
+      retryable: classified.retryable,
+      olderHost: looksLikeOlderHost(classified),
+    };
+  }
+  return { ok: true, url: (classified.value as { url: string }).url };
 }
 
 /**
