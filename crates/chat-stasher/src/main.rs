@@ -471,6 +471,87 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
+    /// Write every session the shared selector selects to files.
+    ///
+    /// One destination per run, always named, exactly like `search` — and the
+    /// selection is literally the same code path: `export` writes the sessions
+    /// `search` returns for the same flags, so `search` is the dry run of this
+    /// command with a different name, and `--dry-run` prints the same price
+    /// `search --cost` reports before anything is fetched.
+    ///
+    /// Layout: `<out>/<machine>/<harness>/<session-id>.jsonl`, each file holding
+    /// that session's archived lines in their native format, byte-identical to
+    /// what `read` returns for it. Plus `<out>/manifest.json`: per session its
+    /// machine, harness, id, first and last message time, shard count, bytes
+    /// written, sha256 of the written file and the filters that were applied —
+    /// and, at the top level, the sessions no filter could place, the machines
+    /// whose activity index could not be read, the sessions that could not be
+    /// written, and the exit status this run returns.
+    ///
+    /// `--turns user` keeps only the lines that are the user's own messages.
+    /// That is answerable only where the harness's format makes it certain (see
+    /// `export::USER_TURNS_HARNESSES`); elsewhere every line is written and the
+    /// session records `turns_filter: "not-supported"`. The flag is never
+    /// silently ignored and content is never silently dropped.
+    ///
+    /// `--trim-to-window` drops lines whose own timestamp is outside
+    /// `--day`/`--since`/`--until`. A line whose timestamp cannot be read is
+    /// kept and counted in `untimed_lines`.
+    ///
+    /// `--out` must be empty or absent unless `--force` is given. Nothing is
+    /// ever deleted, and nothing is ever written outside `--out`.
+    ///
+    /// Exit codes, the same family `search` uses: `0` wrote at least one
+    /// session and answered every session the query touched · `1` read the
+    /// whole destination and selected nothing · `3` did not finish — part of
+    /// the archive was unreadable, a session could not be placed, or a selected
+    /// session could not be written — so the output on disk is real but
+    /// incomplete, and the manifest says what is missing · `2` usage error.
+    Export {
+        /// Destination to export from. Required unless an explicit `--repo` is given.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Directory to write into. Must be empty or absent unless `--force`.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// The shared filters (session / machine / harness / time window).
+        #[command(flatten)]
+        filters: chat_stasher::selector::SelectorArgs,
+        /// Which lines to write: `all` (default), or `user` for only the user's
+        /// own messages — kept only for harnesses whose format makes that
+        /// certain; for any other harness every line is written and the
+        /// manifest records `turns_filter: "not-supported"`.
+        #[arg(long, value_enum, default_value = "all")]
+        turns: TurnsArg,
+        /// With a time window, also drop lines whose own timestamp lies outside
+        /// it. Lines whose time cannot be read are kept and counted in the
+        /// manifest's `untimed_lines`. Requires a window.
+        #[arg(long)]
+        trim_to_window: bool,
+        /// Write into a non-empty `--out`. Nothing is ever deleted, so files
+        /// from an earlier export stay where they are.
+        #[arg(long)]
+        force: bool,
+        /// Print the plan and stop: no directory is created and no file is
+        /// written.
+        #[arg(long)]
+        dry_run: bool,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
     /// Open the archive dashboard in a browser: totals, the machine × source
     /// matrix, a weekly activity heatmap, and drill-down into any cell.
     ///
@@ -862,6 +943,25 @@ enum Command {
     },
 }
 
+/// export `--turns` selector. A value enum rather than a string so an unknown
+/// value is a clap usage error (exit 2) instead of being quietly read as
+/// `all` — a filter that silently does nothing is the failure this flag exists
+/// to avoid.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TurnsArg {
+    All,
+    User,
+}
+
+impl TurnsArg {
+    fn to_turns(self) -> chat_stasher::export::Turns {
+        match self {
+            TurnsArg::All => chat_stasher::export::Turns::All,
+            TurnsArg::User => chat_stasher::export::Turns::User,
+        }
+    }
+}
+
 /// verify `--level` selector.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum VerifyLevel {
@@ -1133,6 +1233,33 @@ fn run() -> ExitCode {
             &filters,
             json,
             cost,
+            repo,
+            key_file,
+            connections,
+            &options,
+            keep_ssh_masters,
+        ),
+        Command::Export {
+            destination,
+            out,
+            filters,
+            turns,
+            trim_to_window,
+            force,
+            dry_run,
+            repo,
+            key_file,
+            connections,
+            options,
+            keep_ssh_masters,
+        } => cmd_export(
+            destination,
+            &out,
+            &filters,
+            turns,
+            trim_to_window,
+            force,
+            dry_run,
             repo,
             key_file,
             connections,
@@ -2574,6 +2701,115 @@ fn describe_span(first_unix: Option<i64>, last_unix: Option<i64>, why: Option<&s
             why.unwrap_or("no reason was recorded for this session")
         ),
     }
+}
+
+/// `export` — write the selected sessions to files.
+///
+/// The filter is resolved before the network is touched (a date that is not a
+/// date costs nothing and reads nothing), the selection is `search`'s own code
+/// path, and the price is printed between the two: after the selection is known
+/// and before any session byte is fetched. `--dry-run` stops after it.
+#[allow(clippy::too_many_arguments)]
+fn cmd_export(
+    destination: Option<String>,
+    out: &Path,
+    filters: &chat_stasher::selector::SelectorArgs,
+    turns: TurnsArg,
+    trim_to_window: bool,
+    force: bool,
+    dry_run: bool,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    keep_ssh_masters: bool,
+) -> ExitCode {
+    let resolved = match filters.resolve() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("export: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for warning in &resolved.warnings {
+        // The deprecation notice `search` prints names `search`; reword it for
+        // this command rather than letting it name the wrong one.
+        eprintln!("{}", warning.replace("search:", "export:"));
+    }
+    let selector = resolved.selector;
+
+    let config = Config::load();
+    if destination.is_none() && repo.is_none() {
+        eprintln!(
+            "export: name the destination to export from (`--destination <name>`, or an explicit `--repo`)"
+        );
+        eprintln!(
+            "export: there is no default destination and no cross-destination merge — archives are not required to agree"
+        );
+        return ExitCode::from(2);
+    }
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+    // Same as `search`: the machine flag is a query over `sessions/<machine>/`,
+    // never this machine's identity.
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!("export: {e}");
+            eprintln!("export: without the key nothing was read — this is not an empty export");
+            reap_remote(&cfg, keep_ssh_masters);
+            // 3, not 1: the archive was never consulted.
+            return ExitCode::from(3);
+        }
+    };
+
+    let opts = chat_stasher::export::ExportOptions {
+        out: out.to_path_buf(),
+        turns: turns.to_turns(),
+        trim_to_window,
+        force,
+        dry_run,
+    };
+    for line in chat_stasher::export::print_header(&cfg.repo_root, &opts, selector.window.as_ref())
+    {
+        println!("{line}");
+    }
+    let on_plan = |plan: &chat_stasher::export::ExportPlan| {
+        println!("{}", chat_stasher::export::print_plan(plan));
+    };
+    let report =
+        match chat_stasher::export::export_sessions(&store, &mk, &selector, &opts, &on_plan) {
+            Ok(r) => r,
+            Err(e) => {
+                let code = chat_stasher::export::exit_status_for_error(&e);
+                if let Some(usage) = e.downcast_ref::<chat_stasher::selector::UsageError>() {
+                    eprintln!("export: {usage}");
+                } else {
+                    eprintln!("export: {e:#}");
+                    if code == 3 {
+                        eprintln!(
+                        "export: `{}` was not read to the end — nothing here proves what it holds",
+                        cfg.repo_root
+                    );
+                    }
+                }
+                reap_remote(&cfg, keep_ssh_masters);
+                return ExitCode::from(code);
+            }
+        };
+
+    for line in chat_stasher::export::print_report(&report) {
+        println!("{line}");
+    }
+    reap_remote(&cfg, keep_ssh_masters);
+    ExitCode::from(report.exit_status())
 }
 
 /// `view` — an ephemeral loopback web view of one destination's session list.

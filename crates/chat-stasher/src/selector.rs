@@ -312,6 +312,11 @@ impl std::fmt::Display for UsageError {
     }
 }
 
+// A usage error is a real error value, not just a message: callers that return
+// `anyhow::Result` (export) carry it out through `anyhow`, and the CLI tells it
+// apart from an IO failure with `downcast_ref` to decide on exit code 2.
+impl std::error::Error for UsageError {}
+
 impl SelectorArgs {
     /// Turn the flags into a [`Selector`], or explain why they cannot be.
     ///
