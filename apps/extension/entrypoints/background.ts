@@ -37,11 +37,12 @@ import {
   tickBlockReason,
   type TickResult,
 } from '../lib/backfill/schedule';
-import type { BackfillOptions, HttpPort } from '../lib/backfill/engine';
+import { recordBackfillHalt, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
 import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
+  forgetTarget,
   isBackfillChainArmed,
   loadTargets,
   rememberTarget,
@@ -53,9 +54,11 @@ import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
 //    captured URL, and the plan table is asked whether this platform is one of them.
 import { backfillPlanFor } from '../lib/backfill/enumerate';
-import { orgFromRequestUrl } from '../lib/backfill/claude-org';
+import { orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
+import { haltClassOf, isHeader, stateKey } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
+  askTabForClaudeOrg,
   isTabHello,
   pickLiveTab,
   rememberTab,
@@ -566,17 +569,130 @@ export async function popupHostStatus(): Promise<BackfillRuntimeStatus> {
 async function liveTransport(): Promise<{
   wired: boolean;
   target: { platform: string; origin: string } | null;
+  /**
+   * 🔴 W31c · **The tab the channel is live on.** The registration below has to
+   * ask *this* page which organization it is using, and it has just proved it is
+   * alive — asking a second time (as `pickLiveTab` would) could reach a different
+   * tab, or none. `null` under the explicit override, where there is no tab at all.
+   */
+  tabId: number | null;
 }> {
-  if (backfillTransport) return { wired: true, target: null };
+  if (backfillTransport) return { wired: true, target: null, tabId: null };
   const tabs = tabsApi();
-  if (!tabs) return { wired: false, target: null };
+  if (!tabs) return { wired: false, target: null, tabId: null };
   const live = await pickLiveTab(browserLocalStore(), null, (id) =>
     tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
-  if (!live) return { wired: false, target: null };
+  if (!live) return { wired: false, target: null, tabId: null };
   const row = getPlatformByOrigin(live.origin);
   // The origin is not in the platform table ⇒ we cannot answer "which platform is
   // this" ⇒ say null plainly, never guess one.
-  return { wired: true, target: row ? { platform: row.id, origin: live.origin } : null };
+  return { wired: true, target: row ? { platform: row.id, origin: live.origin } : null, tabId: live.tabId };
+}
+
+/**
+ * 🔴 W31c · **The scope a scoped platform's target carries until its page has
+ * been asked, and the word this repository already uses for "the account
+ * identifier cannot be told".**
+ *
+ * It is a *registration* value and never a request value: lib/backfill/engine.ts
+ * refuses it for a plan whose paths carry the scope, before any request, precisely
+ * so that it can sit in the registry as "not known yet" without ever being
+ * substituted into a URL.
+ */
+export const UNRESOLVED_SCOPE = 'default';
+
+/**
+ * 🔴 W31c · **Who can turn "this page" into an account scope.**
+ *
+ * The question this answers is not "which platform is this" (the platform table
+ * does that) but "this platform needs an account identifier that is not in the
+ * page URL — can we get it?". Only one platform can, and only from its own page:
+ * claude.ai's organization lives in a cookie and behind a same-origin endpoint,
+ * which is why the ask travels over the tab channel (lib/backfill/tab-port.ts).
+ *
+ * 🔴 It is a **lookup, not a wildcard**: a platform that declares `scopeInPath`
+ *    and has no entry here keeps the pre-W31c behaviour (the target is registered
+ *    with the unresolved sentinel and the engine halts by name), rather than
+ *    having some other platform's resolver run against its page. A second scoped
+ *    platform gets its own entry, and this table is where that decision is made.
+ */
+export type ScopeResolver = (tabId: number | null, origin: string) => Promise<OrgResolution>;
+
+export function scopeResolverFor(platform: string): ScopeResolver | null {
+  return platform === 'claude' ? claudeScopeFromTab : null;
+}
+
+/**
+ * 🔴 W31c · **Ask a live claude.ai page which organization it is using.**
+ *
+ * `tabId` is the tab the caller already proved alive (registration); `null` means
+ * "find one" (the alarm's path, which holds no tab). Either way the question is
+ * put to the page and the answer is passed back unchanged — this function decides
+ * nothing about organizations.
+ *
+ * 🔴 Every way of failing here is the resolver's transient `transport-error`
+ *    (`askTabForClaudeOrg`), and it is deliberately not "no organization": a
+ *    closed tab, a reloaded extension and a wedged renderer are facts about the
+ *    channel, and the account is not implicated by any of them.
+ */
+async function claudeScopeFromTab(tabId: number | null, origin: string): Promise<OrgResolution> {
+  const tabs = tabsApi();
+  if (!tabs) {
+    return { ok: false, halt: 'transport-error', detail: 'the tabs API is not available, so the page cannot be asked' };
+  }
+  if (tabId === null) {
+    const live = await pickLiveTab(browserLocalStore(), origin, (id) =>
+      tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
+    if (!live) {
+      return {
+        ok: false,
+        halt: 'transport-error',
+        detail: 'no open page of that platform answered, so its organization could not be asked for',
+      };
+    }
+    return askTabForClaudeOrg(live.tabId, tabs.sendMessage);
+  }
+  return askTabForClaudeOrg(tabId, tabs.sendMessage);
+}
+
+/**
+ * 🔴 W31c · **Is it worth asking the page again yet?**
+ *
+ * The alarm re-asks a target whose scope is unresolved, because that is the only
+ * thing that retries a *transient* resolution failure (see the registration below:
+ * the popup's start button is hidden once a target exists, so nothing else will).
+ * Two records say "do not spend a question on this yet":
+ *
+ *  · **a permanent halt** for that scope. Its reason is already the answer the
+ *    resolver would reach again — several organizations and no signal, or none at
+ *    all — and re-asking every tick would turn "stop and wait for a human" into a
+ *    slow poll of the account. The remedy the popup names is a human action
+ *    (opening a conversation), and that arrives as a real capture, which
+ *    registers the organization's own target and clears the path by itself;
+ *  · **a transient halt whose backoff has not elapsed**. This is the engine's own
+ *    rule (engine.ts: a waiting round issues no request and writes nothing), and
+ *    re-asking before `retryAt` would both spend the question early and push the
+ *    ladder's next rung further out.
+ *
+ * 🔴 `now` is a parameter rather than a call to `Date.now()` here: this is a
+ *    decision about a clock, and a decision about a clock that cannot be handed a
+ *    clock cannot be tested at its boundary.
+ */
+export async function scopeRetryDue(
+  store: ReturnType<typeof browserLocalStore>,
+  platform: string,
+  scope: string,
+  now: number,
+): Promise<boolean> {
+  if (!store) return false;
+  const raw = await store.load(stateKey(platform, scope));
+  // No record, or one this build cannot read: nothing has been decided, so ask.
+  // (An unreadable record already halted the engine by name; asking again is not
+  // the thing that would make it worse, and refusing to ask would freeze a target
+  // for a reason that is about parsing, not about organizations.)
+  if (!isHeader(raw) || raw.halted === null) return true;
+  if (haltClassOf(raw.halted.reason) === 'permanent') return false;
+  return raw.halted.retryAt === undefined || now >= raw.halted.retryAt;
 }
 
 /**
@@ -590,38 +706,66 @@ async function liveTransport(): Promise<{
  * target's source changed from "a real capture" to "the user pressing this".
  * Neither source is invented by us.
  *
- * 🔴 What about scope (the account identifier): **it records 'default'**, and the
- * reason is written here rather than quietly inventing a value.
- *  · The channel hop (the content script's ping) brings back the origin only,
- *    **no account information at all** — getting a real account would mean
- *    reading a response body out of the page, which is a guess, and this change
- *    does not do it;
- *  · 'default' is not a new invention: it is this repository's existing spelling
- *    for "the account cannot be told" (entrypoints/background.ts:303's
+ * 🔴 What about scope (the account identifier), for a platform whose requests
+ * carry one: **this is where W31c asks the page.**
+ *  · Before W31c this function recorded `'default'` for every platform, and the
+ *    comment here said the channel "brings back the origin only, no account
+ *    information at all". For a scoped platform that was fatal: 'default' is not
+ *    an organization, engine.ts refuses it by name before any request, and the
+ *    start button therefore halted `org-unresolved` forever. The page **is**
+ *    asked now, through `scopeResolverFor` — one question over the same tab
+ *    channel, whose answer is the resolver's decision (an organization, or a
+ *    named halt), not a guess (lib/backfill/claude-org.ts).
+ *  · For a platform with no resolver the old sentence still holds exactly: the
+ *    channel brings back the origin only, and 'default' is recorded. That word is
+ *    not an invention of this function — it is this repository's existing spelling
+ *    for "the account cannot be told" (`backfillTargetFor`'s
  *    `identity.value || 'default'`, lib/popup-view.ts's emptyStateFor,
- *    lib/contract.ts's IdentityLevel 'default'), and it means, literally,
- *    "the identity is unreliable", not an impersonation of some specific account;
- *  · fetching still uses the login of the user's own page, so **what comes back
- *    really is their own history**; scope is only the partition key of the debt
- *    ledger, and writing 'default' does not pull anyone else's material in here.
- *  · The cost (written down honestly): a later real capture registers a second
- *    target carrying the real account, so there will be two debt sets under the
- *    same platform and the same conversations may be cleared once each.
- *    File names are platform-sessionId and writes overwrite ⇒ no cross-talk and
- *    no erasing each other; the only extra cost is duplicate fetching and writing.
- *    Against "backfill never starts at all", that is worth paying.
+ *    lib/contract.ts's IdentityLevel 'default').
+ *  · A **failed** resolution still registers the target, carrying
+ *    `UNRESOLVED_SCOPE`, and writes the named halt down
+ *    (`recordBackfillHalt`) so the popup can say which of the four facts it is.
+ *    Registering rather than staying silent is what gives the alarm something to
+ *    retry a transient failure through: once a target exists this popup's button
+ *    is hidden (`canStartBackfillHere`), so nothing else would ever ask again.
+ *    The engine then refuses to tick it by name, before any request, so a row
+ *    with no organization still fetches nothing.
+ *  · The cost (written down honestly, and unchanged from C33): a scoped target
+ *    that first registered as unresolved and is later resolved is replaced by one
+ *    carrying the real organization (`forgetTarget` + `rememberTarget` in the
+ *    alarm's path), while the *halt record* written under the unresolved scope
+ *    stays where it is. Nothing is archived under it, no debt is written under it,
+ *    and a later real capture registers the organization's own target anyway.
  */
 export async function registerBackfillTargetHere(): Promise<
   | { ok: true; target: { platform: string; origin: string; scope: string } }
-  | { ok: false; reason: 'no-store' | 'no-live-transport' | 'origin-not-a-platform' }
+  | {
+    ok: false;
+    reason: 'no-store' | 'no-live-transport' | 'origin-not-a-platform'
+      | 'org-ambiguous' | 'org-unresolved' | 'transport-error';
+  }
 > {
   const store = browserLocalStore();
   if (!store) return { ok: false, reason: 'no-store' };
   const live = await liveTransport();
   if (!live.wired) return { ok: false, reason: 'no-live-transport' };
   if (!live.target) return { ok: false, reason: 'origin-not-a-platform' };
-  // 🔴 scope = 'default': see the block above. That is an existing convention, not a new value.
-  const target = { platform: live.target.platform, origin: live.target.origin, scope: 'default' };
+  const { platform, origin } = live.target;
+  let scope = UNRESOLVED_SCOPE;
+  const resolver = scopeResolverFor(platform);
+  if (resolver) {
+    const resolved = await resolver(live.tabId, origin);
+    if (resolved.ok) {
+      scope = resolved.org;
+    } else {
+      await recordBackfillHalt(store, {
+        platform, scope, reason: resolved.halt, detail: resolved.detail,
+      });
+      await rememberTarget(store, { platform, origin, scope, at: Date.now() });
+      return { ok: false, reason: resolved.halt };
+    }
+  }
+  const target = { platform, origin, scope };
   await rememberTarget(store, { ...target, at: Date.now() });
   return { ok: true, target };
 }
@@ -750,6 +894,52 @@ async function rearmBackfillTick(): Promise<void> {
   }
 }
 
+/**
+ * 🔴 W31c · **The scope one alarm tick should run under, asking the page when the
+ * registered one is not an organization.**
+ *
+ * The case this exists for is the target a failed registration left behind (see
+ * `registerBackfillTargetHere`): it carries `UNRESOLVED_SCOPE`, so the engine would
+ * refuse it by name forever. Asking again here is the **only** retry a transient
+ * resolution failure gets — once any target exists, the popup's start button is
+ * hidden — and it is also how a permanent one clears without a new capture: the
+ * resolver's first source is the page's own requests, so the moment the page shows
+ * an organization the next tick picks it up.
+ *
+ * 🔴 `scopeRetryDue` is asked **before** the question, so a tick that is inside a
+ *    backoff (or that is standing on a permanent halt) spends nothing and simply
+ *    falls through to the engine, which reports the halt that is already written.
+ *
+ * 🔴 When the question succeeds, the sentinel row is **replaced**, not joined: a
+ *    target whose scope names no account is not a target, and leaving it in the
+ *    registry would have the alarm wake for it every tick (`forgetTarget`).
+ *    Nothing about the archive or the debt set moves here — a registration is not
+ *    a fact.
+ */
+async function resolveScopeForTick(
+  store: ReturnType<typeof browserLocalStore>,
+  target: { platform: string; origin: string; scope: string },
+): Promise<string> {
+  if (!backfillPlanFor(target.platform)?.scopeInPath) return target.scope;
+  if (target.scope.length > 0 && target.scope !== UNRESOLVED_SCOPE) return target.scope;
+  const resolver = scopeResolverFor(target.platform);
+  if (!resolver) return target.scope;
+  if (!(await scopeRetryDue(store, target.platform, target.scope, Date.now()))) return target.scope;
+  const resolved = await resolver(null, target.origin);
+  if (!resolved.ok) {
+    await recordBackfillHalt(store, {
+      platform: target.platform, scope: target.scope, reason: resolved.halt, detail: resolved.detail,
+    });
+    // The engine now finds the halt record and stops by name, issuing nothing.
+    return target.scope;
+  }
+  await forgetTarget(store, target.platform, target.scope);
+  await rememberTarget(store, {
+    platform: target.platform, origin: target.origin, scope: resolved.org, at: Date.now(),
+  });
+  return resolved.org;
+}
+
 async function runAlarmTickBody(): Promise<TickResult> {
   const store = browserLocalStore();
 
@@ -791,7 +981,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     const result = await tickBackfill({
       platform: target.platform,
       origin: target.origin,
-      scope: target.scope,
+      scope: await resolveScopeForTick(store, target),
       store,
       http: await resolveHttpPort(target.origin),
       // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,

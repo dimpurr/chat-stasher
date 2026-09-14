@@ -27,12 +27,20 @@
  *      one. Iterating the organizations until one answers is exactly the
  *      behaviour that makes "your history" mean "whatever we found first".
  *
+ * ## Who runs it
+ * 🔴 `lib/backfill/claude-page.ts` — the page-side half, which is where the cookie
+ * and a same-origin `fetch` live. It is reached by the background over the backfill
+ * tab channel (`entrypoints/background.ts` asks when it registers a Claude target
+ * or wakes one whose scope is still unresolved). W31 wrote this decision and left
+ * that caller unwritten, which is why the review's first finding was *the resolver
+ * is dead code*; the two files now exist as a pair and neither is usable alone.
+ *
  * ## What this module does not do
  * No DOM, no `fetch`, no cookies API, no chrome.* API. It is a pure decision over
  * three inputs the caller has already collected, so the decision can be tested
  * without a browser — and so that the one request it needs is made by the caller
- * that owns the page context (see `lib/backfill/tab-port.ts`'s allowlist entry
- * for `resolvePath`).
+ * that owns the page context, through the same allowlist every other backfill
+ * request goes through (`ScopeInPathSpec.resolvePath`).
  */
 
 /** The cookie the sources read the active organization from. */

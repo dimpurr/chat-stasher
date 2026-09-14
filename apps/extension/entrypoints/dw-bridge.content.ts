@@ -19,6 +19,8 @@ import {
   type FetchLike,
 } from '../lib/backfill/tab-port';
 import { installTabHello } from '../lib/backfill/tab-hello';
+import { backfillPlanFor } from '../lib/backfill/enumerate';
+import { createClaudePageScope } from '../lib/backfill/claude-page';
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
@@ -91,6 +93,11 @@ export default defineContentScript({
       }
 
       if (!isCaptureMessage(event.data)) return;
+      // 🔴 W31c · The page's own requests are the resolver's first and strongest
+      //    source of "which organization is this page using" — see
+      //    lib/backfill/claude-page.ts. Recorded **before** delivery, so it is
+      //    remembered even when the delivery path itself bails out.
+      claudePage.rememberRequest(event.data.payload.url);
       void deliverCapture(event.data.payload);
     };
 
@@ -290,6 +297,26 @@ export default defineContentScript({
       return { status: res.status, text: () => res.text() };
     };
 
+    /**
+     * 🔴 W31c · **The page-side half of the organization resolver** — the caller
+     * `lib/backfill/claude-org.ts` did not have.
+     *
+     * It lives in its own module (lib/backfill/claude-page.ts) rather than here, and
+     * that is a deliberate choice about what can be tested: this file boots against
+     * a real page and cannot be driven under node, so glue written inline here would
+     * be reachable and unverifiable at the same time. What stays here is the wiring
+     * — the three facts it cannot get for itself (the origin, this page's fetch, and
+     * `document.cookie`), the message it answers, and the scope the fetch channel
+     * below is handed.
+     */
+    const claudePage = createClaudePageScope({
+      pageOrigin,
+      fetchImpl: pageFetch,
+      // 🔴 Read **at ask time**, never cached: a tab that has switched organizations
+      //    must not be answered from a cookie value taken before the switch.
+      readCookie: () => (typeof document === 'undefined' ? null : document.cookie),
+    });
+
     // Live leg for ChatGPT's paged navigation: fetch the full conversation
     // through the same allowlist the backfill leg uses, then hand it to
     // background exactly like a passive capture (same shape checks, outbox, ack).
@@ -340,7 +367,27 @@ export default defineContentScript({
     // -----------------------------------------------------------------------
     browser.runtime.onMessage.addListener(
       (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
-        const pending = handleBackfillMessage(message, pageOrigin, pageFetch);
+        // 🔴 W31c · The organization question, asked **before** the fetch channel
+        //    below only because it is a different kind of thing: it carries no URL
+        //    and no body, and its answer is a decision. Both paths return null for a
+        //    message that is not theirs, so the order between them decides nothing.
+        const orgPending = claudePage.handleMessage(message);
+        if (orgPending) {
+          orgPending
+            .then(sendResponse)
+            .catch((err: Error) => sendResponse({ ok: false, halt: 'transport-error', detail: err.message }));
+          return true;
+        }
+        // 🔴 W31c · The fifth argument is the scope **this page is allowed to
+        //    address**. For a plan whose paths carry an account scope (claude.ai)
+        //    the allowlist compares the `{org}` path segment against it and refuses
+        //    a request naming another organization — and refuses every request at
+        //    all when it is null, which is why a resolved organization alone would
+        //    not have been enough. Every other platform's plan declares no scope, so
+        //    the value is not read for them and their URLs are unchanged.
+        const pending = handleBackfillMessage(
+          message, pageOrigin, pageFetch, backfillPlanFor, claudePage.allowedScope(),
+        );
         if (!pending) return;   // not a message for me; leave it to the other listeners
         pending
           .then(sendResponse)

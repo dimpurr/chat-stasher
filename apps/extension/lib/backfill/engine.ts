@@ -39,7 +39,7 @@ import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
-import { openLedger, type Ledger } from './ledger';
+import { openLedger, saveHeader, type Ledger } from './ledger';
 import {
   dayKeyOf,
   haltClassOf,
@@ -289,6 +289,72 @@ export async function loadState(
   const carrier = initialState(platform, scope);
   carrier.halted = { reason: opened.refusal.reason, at: Date.now(), detail: opened.refusal.detail };
   return carrier;
+}
+
+/**
+ * 🔴 W31c · **Write down a named stop that happened before the leg made a single
+ * request**, so the popup can say why instead of showing silence.
+ *
+ * ## Why this is not "just run the leg and let it halt"
+ *
+ * For claude.ai the organization is resolved *outside* the run: the background
+ * asks the page (lib/backfill/tab-port.ts's `askTabForClaudeOrg`), because only
+ * the page has the cookie and the same-origin `fetch`. So the refusal is reached
+ * by code that never entered `runBackfill` — and without this function its only
+ * outcome would be "no target registered", which the user reads as *nothing
+ * happened*. The four reasons are facts about the account and each has a
+ * different remedy; dropping them on the floor would be the same class of mistake
+ * as recording an empty result for an unknown one.
+ *
+ * ## What it writes, and what it deliberately does not
+ *  · **the header only** (`saveHeader`): no debt id moves, no counter moves, no
+ *    cursor moves. This is a note about why the leg is not running, not progress;
+ *  · **nothing at all** when the record cannot be read (`openLedger` refuses) —
+ *    the same rule `runBackfill` follows, because writing over a record we could
+ *    not read is the failure W18 exists to prevent;
+ *  · **false** when there is no store: the caller is told the note was not
+ *    written, rather than being told it was.
+ *
+ * 🔴 The streak rule is `runBackfill`'s, read from the **persisted** record rather
+ *    than from a run-local counter, and that difference is forced by where this
+ *    runs: a resolver failure is one tick's whole event, so "consecutive" can only
+ *    mean "the record that was already there says the same reason". A transient
+ *    record therefore keeps counting up across ticks (5 → 15 → 30 → 60 minutes,
+ *    `transientRetryDelayMs`), and a run that stops for another reason resets it
+ *    simply by writing its own record over this one.
+ */
+export async function recordBackfillHalt(
+  store: BackfillStore | null,
+  opts: {
+    platform: string;
+    scope: string;
+    reason: HaltReason;
+    detail: string;
+    /** Test seams, in the same family as runBackfill's: omitted ⇒ the real clock and Math.random. */
+    clock?: Clock;
+    random?: RandomFn;
+  },
+): Promise<boolean> {
+  if (!store) return false;
+  const opened = await openLedger(store, opts.platform, opts.scope);
+  if (!opened.ok) return false;
+  const at = (opts.clock ?? systemClock).now();
+  const state = opened.state;
+  if (haltClassOf(opts.reason) === 'transient' && isTransientReason(opts.reason)) {
+    const previous = state.halted;
+    const streak = (previous?.reason === opts.reason ? (previous.attempts ?? 0) : 0) + 1;
+    state.halted = {
+      reason: opts.reason,
+      at,
+      detail: opts.detail,
+      attempts: streak,
+      retryAt: at + transientRetryDelayMs(opts.reason, streak, opts.random ?? systemRandom),
+    };
+  } else {
+    state.halted = { reason: opts.reason, at, detail: opts.detail };
+  }
+  await saveHeader(store, state);
+  return true;
 }
 
 /** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
@@ -597,12 +663,15 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * way available: an unknown written into a request as if it were a value.
    *
    * So a scoped plan refuses it, with the same reason as "no scope at all", and
-   * **before any request**. The cost is written down rather than hidden: the
-   * popup's start button registers a target with `scope: 'default'`, so starting
-   * claude from that button halts here until the page's own request supplies the
-   * organization (entrypoints/background.ts's `backfillTargetFor`, which reads it
-   * out of the captured URL). The alternative — substituting the sentinel — would
-   * fire a request against an organization that does not exist.
+   * **before any request**. The cost is written down rather than hidden: a target
+   * whose scope has not been resolved yet is stored with this sentinel
+   * (entrypoints/background.ts's `UNRESOLVED_SCOPE`), so it ticks, says by name
+   * why it cannot proceed, and issues nothing. W31c is what makes that a *passing*
+   * state rather than a permanent one: the organization is asked for in the page
+   * (lib/backfill/claude-page.ts), at the popup's start button and on a wake-up
+   * whose recorded scope is still this word, and a resolved organization replaces
+   * the sentinel row. The alternative — substituting the sentinel — would fire a
+   * request against an organization that does not exist.
    */
   if (plan.scopeInPath && opts.scope === 'default') {
     return halt(
