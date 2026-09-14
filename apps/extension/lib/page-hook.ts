@@ -168,16 +168,6 @@ export function installPageFetchHook(options: PageHookOptions): void {
     window.postMessage(message, pageOrigin);
   };
 
-  window.addEventListener('message', (event: MessageEvent<unknown>) => {
-    if (event.source !== window || event.origin !== pageOrigin) return;
-    const data = event.data;
-    if (!data || typeof data !== 'object') return;
-    const record = data as Record<string, unknown>;
-    if (record.type !== options.probeMessage || typeof record.token !== 'string') return;
-    if (record.token.length < 8) return;
-    post({ type: options.readyMessage, version: options.version, token: record.token });
-  });
-
   /**
    * The one capture decision, shared by fetch and XHR: platform, origin,
    * method, path, status, size and response shape. A request that is not a
@@ -447,6 +437,31 @@ export function installPageFetchHook(options: PageHookOptions): void {
     writable: false,
   });
   window.fetch = hookedFetch;
+
+  // 🔴 The probe listener is registered **here**, after the wrapper is actually
+  //    in place, and not a line earlier. Answering a probe is the isolated
+  //    side's proof that this hook is installed (it is what replaced the inline
+  //    verifier DeepSeek's CSP refuses to execute), so "answered" has to imply
+  //    "installed" by construction rather than by luck.
+  //    Registered before the patch it did not: everything from here back up to
+  //    the top of this function can throw on a page that froze a global
+  //    (`XMLHttpRequest.prototype`, `EventSource`, a read-only `fetch` — the
+  //    WebSocket case below already guards for exactly this), and a listener
+  //    left behind by such a throw would answer the probe while the page was
+  //    still talking to the original `fetch` — the one failure this handshake
+  //    exists to detect.
+  //    Still atomic with respect to the probe: `window.postMessage` is delivered
+  //    as a task, so no probe can be dispatched in the middle of this function.
+  window.addEventListener('message', (event: MessageEvent<unknown>) => {
+    if (event.source !== window || event.origin !== pageOrigin) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object') return;
+    const record = data as Record<string, unknown>;
+    if (record.type !== options.probeMessage || typeof record.token !== 'string') return;
+    if (record.token.length < 8) return;
+    post({ type: options.readyMessage, version: options.version, token: record.token });
+  });
+
   pageWindow[options.stateKey] = options.version;
   // Best-effort initial signal; the isolated side also probes with a token so
   // this signal cannot be lost merely because content-script order differs.

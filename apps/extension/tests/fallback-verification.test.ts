@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   FALLBACK_HOOK_VERIFICATION_WARNING,
+  createFallbackWarningGate,
   isFallbackHookVerified,
   warnIfFallbackHookUnverified,
 } from '../lib/fallback-verification';
@@ -27,5 +28,30 @@ describe('fallback page hook verification', () => {
     expect(warn.mock.calls[0]).toHaveLength(1);
     expect(warn.mock.calls[0]?.[0] ?? '').not.toContain(responseContent);
     expect(FALLBACK_HOOK_VERIFICATION_WARNING).not.toContain(responseContent);
+  });
+
+  it('warns at most once per page, however many times the fallback fails to verify', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const gate = createFallbackWarningGate();
+
+    // The two occasions a page can produce: the append itself refused, and then
+    // the probe never answered. A page that keeps failing must not become a wall
+    // of identical lines — a warning nobody reads is the silence this is for.
+    gate({ scriptAppended: false, markerInstalled: false });
+    gate({ scriptAppended: true, markerInstalled: false });
+    gate({ scriptAppended: true, markerInstalled: false });
+
+    expect(warn.mock.calls.filter((c) => c[0] === FALLBACK_HOOK_VERIFICATION_WARNING)).toHaveLength(1);
+  });
+
+  it('a verified result does not consume the one warning a genuine failure may still need', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const gate = createFallbackWarningGate();
+
+    gate({ scriptAppended: true, markerInstalled: true });
+    expect(warn).not.toHaveBeenCalled();
+
+    gate({ scriptAppended: true, markerInstalled: false });
+    expect(warn.mock.calls.filter((c) => c[0] === FALLBACK_HOOK_VERIFICATION_WARNING)).toHaveLength(1);
   });
 });

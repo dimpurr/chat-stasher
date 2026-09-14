@@ -7,7 +7,6 @@
 export const CAPTURE_MESSAGE = '__chat_stasher_capture__';
 export const MAIN_READY_MESSAGE = '__chat_stasher_main_ready__';
 export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
-export const MAIN_VERIFY_RESULT_MESSAGE = '__chat_stasher_main_verify_result__';
 /**
  * Page-world signal for an OBSERVED WebSocket frame. Deliberately a separate
  * name from CAPTURE_MESSAGE: observation is not capture, nothing downstream
@@ -466,19 +465,6 @@ export function isMainReadyMessage(
     value.version === PAGE_HOOK_VERSION &&
     typeof value.token === 'string' &&
     value.token.length >= 8
-  );
-}
-
-export function isMainVerifyResultMessage(
-  value: unknown,
-): value is { type: typeof MAIN_VERIFY_RESULT_MESSAGE; version: string; token: string; installed: boolean } {
-  return (
-    isRecord(value) &&
-    value.type === MAIN_VERIFY_RESULT_MESSAGE &&
-    value.version === PAGE_HOOK_VERSION &&
-    typeof value.token === 'string' &&
-    value.token.length >= 8 &&
-    typeof value.installed === 'boolean'
   );
 }
 

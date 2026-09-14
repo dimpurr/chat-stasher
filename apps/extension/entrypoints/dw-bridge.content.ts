@@ -3,12 +3,8 @@ import {
   PLATFORMS,
   MAIN_FALLBACK_TIMEOUT_MS,
   MAIN_PROBE_MESSAGE,
-  PAGE_HOOK_FETCH_MARKER,
-  PAGE_HOOK_VERSION,
-  MAIN_VERIFY_RESULT_MESSAGE,
   isCaptureMessage,
   isMainReadyMessage,
-  isMainVerifyResultMessage,
 } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 import {
@@ -23,10 +19,7 @@ import {
   createSeenGate,
   isConversationSeenMessage,
 } from '../lib/platform-auth';
-import {
-  warnIfFallbackHookUnverified,
-  FALLBACK_HOOK_VERIFICATION_WARNING,
-} from '../lib/fallback-verification';
+import { createFallbackWarningGate } from '../lib/fallback-verification';
 
 /**
  * ISOLATED-world bridge. WHY ISOLATED: MAIN/page world has no extension API
@@ -42,9 +35,10 @@ export default defineContentScript({
     let mainReady = false;
     let fallbackInjectionAttempted = false;
     let fallbackScriptAppended = false;
-    let mainVerificationRequested = false;
     let fallbackVerificationRequested = false;
     let fallbackVerificationTimer: ReturnType<typeof setTimeout> | undefined;
+    /** 🔴 At most one fallback warning per page; see lib/fallback-verification.ts. */
+    const warnFallbackUnverified = createFallbackWarningGate();
 
     const pageOrigin = window.location.origin;
     const isPageMessage = (event: MessageEvent<unknown>): boolean =>
@@ -56,42 +50,25 @@ export default defineContentScript({
       if (!isPageMessage(event)) return;
 
       if (isMainReadyMessage(event.data) && event.data.token === probeToken) {
-        if (!mainReady && !mainVerificationRequested && !fallbackVerificationRequested) {
-          mainVerificationRequested = true;
-          if (!injectPageVerifier(probeToken)) {
-            mainVerificationRequested = false;
-            injectFallbackHook();
-          }
-        }
-        return;
-      }
-
-      if (isMainVerifyResultMessage(event.data) && event.data.token === probeToken) {
+        // 🔴 This answer **is** the verification, and it is why no inline script
+        //    is injected any more. `installPageFetchHook` registers the listener
+        //    that produces it only after `window.fetch` has been replaced
+        //    (lib/page-hook.ts), so a token this handshake invented, echoed back
+        //    from the page world, says the hook is installed there. The <script>
+        //    this replaces read the same fact off `window.fetch` by hand — and on
+        //    chat.deepseek.com the page's `script-src` refuses to execute it, so
+        //    every page load filed a CSP violation while proving nothing that the
+        //    probe had not already proved.
         if (fallbackVerificationRequested) {
           fallbackVerificationRequested = false;
-          if (fallbackVerificationTimer !== undefined) {
-            clearTimeout(fallbackVerificationTimer);
-            fallbackVerificationTimer = undefined;
-          }
-          if (
-            warnIfFallbackHookUnverified({
-              scriptAppended: fallbackScriptAppended,
-              markerInstalled: event.data.installed,
-            })
-          ) {
-            return;
-          }
-          mainReady = true;
-          return;
+          clearFallbackVerificationTimer();
+          // Reported through the gate rather than assumed: a hook that answered
+          // is a hook that verified, so this is a no-op. It is routed here so
+          // that "verified or not" stays one decision in one module instead of
+          // being re-derived at each call site.
+          warnFallbackUnverified({ scriptAppended: fallbackScriptAppended, markerInstalled: true });
         }
-
-        if (!mainVerificationRequested) return;
-        mainVerificationRequested = false;
-        if (event.data.installed) {
-          mainReady = true;
-        } else {
-          injectFallbackHook();
-        }
+        mainReady = true;
         return;
       }
 
@@ -121,20 +98,10 @@ export default defineContentScript({
       return true;
     }
 
-    function injectPageVerifier(token: string): boolean {
-      const marker = JSON.stringify(PAGE_HOOK_FETCH_MARKER);
-      const version = JSON.stringify(PAGE_HOOK_VERSION);
-      const origin = JSON.stringify(pageOrigin);
-      return injectPageScript(`(() => {
-        const fetchFn = window.fetch;
-        const installed = typeof fetchFn === 'function' && fetchFn[${marker}] === ${version};
-        window.postMessage({
-          type: ${JSON.stringify(MAIN_VERIFY_RESULT_MESSAGE)},
-          version: ${version},
-          token: ${JSON.stringify(token)},
-          installed,
-        }, ${origin});
-      })();`);
+    function clearFallbackVerificationTimer(): void {
+      if (fallbackVerificationTimer === undefined) return;
+      clearTimeout(fallbackVerificationTimer);
+      fallbackVerificationTimer = undefined;
     }
 
     function injectFallbackHook(): void {
@@ -143,21 +110,25 @@ export default defineContentScript({
       const source = `(${installPageFetchHook.toString()})(${JSON.stringify(PAGE_HOOK_OPTIONS)});`;
       fallbackScriptAppended = injectPageScript(source);
       if (!fallbackScriptAppended) {
-        console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
+        warnFallbackUnverified({ scriptAppended: false, markerInstalled: false });
         return;
       }
 
+      // 🔴 The fallback script is an `installPageFetchHook` instance, so if it
+      //    really ran it answers this very probe from its own listener; silence
+      //    means it did not. That distinction is the one thing an `appendChild`
+      //    return value cannot carry, because appending an inline <script>
+      //    succeeds even when the page's CSP refuses to execute it — the
+      //    fallback's whole failure mode on chat.deepseek.com. So we ask the page
+      //    world rather than inspecting it, which is also why this path no longer
+      //    needs a <script> of its own to check the first one.
       fallbackVerificationRequested = true;
-      if (!injectPageVerifier(probeToken)) {
-        fallbackVerificationRequested = false;
-        console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
-        return;
-      }
+      window.postMessage({ type: MAIN_PROBE_MESSAGE, token: probeToken }, pageOrigin);
       fallbackVerificationTimer = setTimeout(() => {
         if (!fallbackVerificationRequested) return;
         fallbackVerificationRequested = false;
         fallbackVerificationTimer = undefined;
-        console.warn(FALLBACK_HOOK_VERIFICATION_WARNING);
+        warnFallbackUnverified({ scriptAppended: fallbackScriptAppended, markerInstalled: false });
       }, MAIN_FALLBACK_TIMEOUT_MS);
     }
 
@@ -256,10 +227,11 @@ export default defineContentScript({
 
     window.addEventListener('message', onMessage);
     // A tokenized probe makes the readiness handshake insensitive to which
-    // document_start content script runs first.
+    // document_start content script runs first, and its answer is the whole of
+    // the readiness decision — nothing else is injected to look at the page.
     window.postMessage({ type: MAIN_PROBE_MESSAGE, token: probeToken }, pageOrigin);
     setTimeout(() => {
-      if (!mainReady && !mainVerificationRequested && !fallbackVerificationRequested) {
+      if (!mainReady && !fallbackVerificationRequested) {
         injectFallbackHook();
       }
     }, MAIN_FALLBACK_TIMEOUT_MS);

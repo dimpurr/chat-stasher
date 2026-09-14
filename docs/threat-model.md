@@ -23,8 +23,8 @@ trust the code and treat the sentence as unverified.
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:41-66`, `:318-320`;
-   `apps/extension/lib/page-hook.ts:295`, `:319`, `:360`).
+   the raw response text (`apps/extension/lib/contract.ts:40-65`, `:317-319`;
+   `apps/extension/lib/page-hook.ts:285`, `:309`, `:350`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
@@ -162,15 +162,15 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:295`, `:319`, `:343-360`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:481-510`, `:688-710`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:285`, `:309`, `:333-350`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:481-510`, `:688-710`). |
 
 **Caveat, stated honestly:** on every platform except ChatGPT the passive hook
 adds no traffic, so there is nothing distinctive for the platform to observe
 from it. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:406-411`;
-`apps/extension/entrypoints/dw-bridge.content.ts:193-219`;
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:396-401`;
+`apps/extension/entrypoints/dw-bridge.content.ts:164-190`;
 `apps/extension/lib/platform-auth.ts:74-93`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
@@ -206,7 +206,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:490-503`, `:649-665`). That value is written
+(`apps/extension/lib/contract.ts:476-489`, `:635-651`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:124-126`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -223,17 +223,17 @@ questions we did **not** answer, and which a reader should not assume are safe:
 
 - Whether an extension with broad host permissions on a chat origin can observe
   our MAIN-world hook, the `window.postMessage` traffic between the page hook
-  and the bridge (`apps/extension/lib/contract.ts:6-17`), or the page-world
-  markers we set (`apps/extension/lib/contract.ts:19-21`).
+  and the bridge (`apps/extension/lib/contract.ts:6-16`), or the page-world
+  markers we set (`apps/extension/lib/contract.ts:18-20`).
 - Whether a second extension can reach another extension's IndexedDB — which is
   where the outbox, and therefore the undelivered conversations, live
   (`apps/extension/lib/outbox.ts:34-37`).
 - Whether the download-history entry for an export file is readable by other
   extensions.
 
-The message contract does carry a token check on ready/verify messages
-(`apps/extension/lib/contract.ts:460-483`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:425-458`). Those
+The message contract does carry a token check on the hook's ready message
+(`apps/extension/lib/contract.ts:459-469`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:424-457`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.

@@ -90,20 +90,33 @@ function actionApi(): ActionApi | null {
 
 /** Cosmetic: a missing action surface is never fatal. */
 export async function clearBadge(): Promise<void> {
-  const action = actionApi();
-  if (!action) return;
-  await action.setBadgeText({ text: '' });
+  await paint(null);
 }
 
 async function paint(plan: BadgePlan | null): Promise<void> {
   const action = actionApi();
   if (!action) return;
   if (plan === null) {
+    // 🔴 Both slots, every time. The tooltip is **not** a property of the
+    //    number: the browser keeps the last title it was handed until something
+    //    writes a new one, so clearing the text alone leaves the previous
+    //    sentence on the toolbar while the icon itself goes blank. A real
+    //    machine sat in exactly that state — "1 capture(s) waiting" in the
+    //    tooltip over an outbox with zero rows — and restarting the service
+    //    worker did not clear it, because every wake recomputed the same empty
+    //    plan and repainted the same half of the surface. An empty badge and a
+    //    stale tooltip are two different claims; only one of them was being
+    //    withdrawn.
     await action.setBadgeText({ text: '' });
+    // '' hands the tooltip back to the browser's own default (the extension
+    // name), which is the truthful "nothing is waiting" state.
+    await action.setTitle?.({ title: '' });
     return;
   }
   await action.setBadgeText({ text: plan.text });
   await action.setBadgeBackgroundColor?.({ color: plan.color });
+  // 🔴 Always written, including on the empty plan above: a title that is only
+  //    ever *set* and never *restored* outlives the state it described.
   await action.setTitle?.({ title: plan.title });
 }
 
