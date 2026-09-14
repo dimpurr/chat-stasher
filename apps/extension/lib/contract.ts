@@ -241,39 +241,90 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // Deliberately NOT '/apiv2/' or 'ChatService' — every gateway call (send,
     // list, usage, ...) would then become a "conversation data" candidate and
     // the shape-mismatch warning would turn into noise. This hint is the
-    // message-LIST-for-one-conversation route only. Written without the leading
-    // service package because two sources disagree on it
-    // ('kimi.gateway.chat.v1.ChatService' vs 'kimi.chat.v1.ChatService'), and
-    // both are the same call. The conversation-INDEX route ('.../ListChats', an
-    // array of chat summaries we do not capture) falls outside and is skipped
-    // silently, which is correct: it is not the data we claim to back up.
+    // message-LIST-for-one-conversation route only.
+    // 🔴 Measured 2026-09-14, this is the call the page makes to load one
+    // conversation's messages, and the only one on the origin carrying a
+    // conversation. The hint stops at 'ChatService/ListMessages' rather than
+    // naming a service package: the measured package is
+    // 'kimi.gateway.chat.v1.ChatService' and one external implementation spells
+    // the same call 'kimi.chat.v1.ChatService', so the shorter hint matches the
+    // call under either spelling and the response-shape gate below is what
+    // decides whether a body really is conversation data.
+    // The conversation-INDEX route (measured: 'FeedService/ListFeeds', a paged
+    // array of feed items whose chat entries carry a NAME and a
+    // `messageContent` preview, not messages) falls outside this hint and is
+    // skipped silently, which is correct for the capture leg: a preview is not
+    // the conversation, and capturing it would file a summary as the data.
     pathHints: ['ChatService/ListMessages'],
     // Connect-style unary RPC: the request is a POST with a JSON body, and the
-    // chat id lives in that body, not in the URL. Hence the page-URL fallback
-    // in sessionIdPatterns below.
+    // chat id lives in that body (`{ chat_id }`, measured), not in the URL.
+    // Hence the page-URL fallback in sessionIdPatterns below.
     methods: ['POST'],
     status: { min: 200, max: 299 },
     responseShape: {
       encoding: 'json',
-      // Exactly the field the MIT exporter reads before it will export.
-      // Required (not "any of"): on this route a body without `messages` is the
-      // drift case, so it must fail the shape gate and get warned about rather
-      // than pass through as an empty-looking capture.
+      // Measured 2026-09-14: the response carries `messages` at the top level and
+      // nothing beside it that names the conversation. Each message carries
+      // `id, parentId, role, status, blocks, scenario, createTime, isGoal`; not
+      // one of those is required here, because the gate's job is "is this the
+      // messages envelope at all", and pinning a nested key would turn a
+      // *message* shape change into a dropped conversation rather than a
+      // warning. Required (not "any of"): a body without `messages` is the drift
+      // case, so it must fail the shape gate and be warned about rather than
+      // pass through as an empty-looking capture.
       requiredPaths: ['messages'],
     },
-    // Only the page URL carries the id, so a capture without pageUrl yields no
-    // session id and is skipped (logged, not saved) — the existing behaviour.
-    sessionIdPatterns: ['/chat/([A-Za-z0-9_-]{8,})'],
-    // 🔴 The route shape below is SOURCE-BACKED but NOT live-verified: it comes
-    // from reading public open-source projects, NOT from a logged-in Kimi
-    // session. Nobody on this change ever opened kimi.com, so this row is
-    // 'from-source', never 'verified'. If the real route or envelope differs,
-    // the generic gate above rejects it and page-hook.ts warns — it never
-    // guesses. Kimi is also known to run front-end signing/WAF challenges; that
-    // affects the page's own requests, not us — we only read what the page
-    // already fetched.
+    // 🔴 Measured 2026-09-14: chat ids appear in `/chat/<id>`, and the ids seen
+    // have more than one shape (one hex-like, one alphanumeric), so the character
+    // class is deliberately wide and there is **no** minimum length. The cost of
+    // that width is stated rather than hidden: a `/chat/<segment>` URL that is not
+    // a conversation id would also yield a value, and it becomes the file name
+    // fragment. What keeps that from being a way to file one conversation under
+    // another name is everything else that has to pass first — same origin, POST,
+    // this row's path hint, a 2xx, and a body carrying `messages` — plus the fact
+    // that the value comes from the page's own URL, not from the page's message.
+    // An over-narrow pattern, by contrast, silently drops real conversations
+    // whose ids happen not to match it, and "we did not save it" is worse here
+    // than "we saved it under the id in the address bar".
+    sessionIdPatterns: ['/chat/([A-Za-z0-9_-]+)'],
+    // 🔴 OBSERVED IN A LOGGED-IN SESSION on 2026-09-14 — list + short-chat
+    // detail; long-chat paging unverified. Counts and field names only:
+    //  · list    POST /apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds, body
+    //            `{ page_size, page_token }`. The response is
+    //            `{ items, nextPageToken }`, each item
+    //            `{ type: 'FEED_TYPE_CHAT', chat: { id, name, messageContent,
+    //            createTime, updateTime } }`. page_size 3 returned 3 items and a
+    //            non-empty token; the next page returned 2 items with the token
+    //            ABSENT and the two pages did not overlap.
+    //  · detail  POST /apiv2/kimi.gateway.chat.v1.ChatService/ListMessages, body
+    //            `{ chat_id }`. The response carries `messages` at the top level
+    //            (the message keys are on the shape gate above). Five
+    //            conversations were sampled, each 2-3 messages.
+    //  · auth    the page sends `authorization: Bearer <token>` — the JWT this
+    //            origin keeps in localStorage under `access_token` — plus
+    //            `x-msh-platform: web`, `x-language: <locale>` and
+    //            `content-type: application/json`. A COOKIE-ONLY list request
+    //            answers HTTP 401 with a body carrying `code` and `details`:
+    //            a refusal, not an empty list. Hence "a 401 is an auth halt,
+    //            never 'you have no conversations'"; what the backfill leg does
+    //            with that is in lib/platform-auth.ts and lib/backfill/engine.ts.
+    //  · 🔴 NOT verified, and this row must not be read as if it were: whether a
+    //            LONG conversation's detail response pages. Every sampled
+    //            conversation was short and carried no page-token field, so the
+    //            implementation treats a page-token field appearing as an
+    //            incomplete body and refuses to archive it (parseKimiDetailPage,
+    //            lib/backfill/enumerate.ts) rather than storing a truncated
+    //            conversation as a complete one.
+    // The generic gate above is what decides whether a body is conversation data
+    // at all: if the envelope differs, it is rejected and page-hook.ts warns —
+    // it never guesses. Kimi is also known to run front-end signing/WAF
+    // challenges; that affects the page's own requests, not us — we only read
+    // what the page already fetched.
     //
-    // External source evidence checked 2026-08-17 (source code, not README):
+    // The external source evidence below was what stood here BEFORE that
+    // measurement. It is kept: it is the record of how the row was first
+    // written, and it independently corroborates the route above (checked
+    // 2026-08-17, source code, not README):
     // conreo/kimi-chat-exporter (MIT; commit
     // 9e3956b17ee44bceb453fea2107b9d6263ac0cd6, 2026-06-06) POSTs JSON to
     // https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages

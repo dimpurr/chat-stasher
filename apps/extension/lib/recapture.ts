@@ -41,6 +41,29 @@ export const MAX_REMEMBERED = 2000;
  *    re-deliver. This table cannot express "order an array" (it deletes fields,
  *    never normalises), and the safe direction of that error is an extra copy —
  *    never a change that went unnoticed.
+ *
+ * 🔴 W22 · **No entry for kimi either, and the reason this one was looked for
+ *    rather than assumed.** The measured detail response is `{ messages: [...] }`
+ *    and each message carries `id, parentId, role, status, blocks, scenario,
+ *    createTime, isGoal` (observed in a logged-in session on 2026-09-14). The
+ *    question this table exists to answer is "does anything in there change on
+ *    every fetch?", and the honest answer is: **nothing observed does** — no
+ *    signed URL, no URL with an expiry, no fetch-time stamp appeared anywhere in
+ *    what was measured, on the envelope or on a message.
+ *
+ *    Two things are deliberately NOT done about the gap that leaves:
+ *     · a key is not registered on the strength of "blocks usually carry images
+ *       and images usually carry signed URLs" — that is a guess about a field
+ *       whose contents were not enumerated, and a wrong key here is not neutral:
+ *       `contentFingerprint` **deletes** it before comparing, so a real change
+ *       inside it would be skipped while the user was told nothing had changed;
+ *     · the residual is not hidden either: if a message's `blocks` do carry
+ *       per-fetch URLs, two views of one unchanged conversation serialise
+ *       differently and the second one is delivered as a new copy. The safe
+ *       direction of that error is an extra copy, and the raw body stays
+ *       authoritative — but this table could not fix it even if the URLs were
+ *       known, because it deletes **top-level** keys and cannot reach inside an
+ *       array of blocks. Recording that limit here is the point of this note.
  */
 const VOLATILE_KEYS: Readonly<Record<string, readonly string[]>> = {
   chatgpt: ['safe_urls'],

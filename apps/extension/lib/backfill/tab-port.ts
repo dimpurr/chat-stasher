@@ -66,6 +66,12 @@
  * 10. one key of a POST body may be declared as an **array of non-empty strings**
  *     (`bodyArrayKeys`), bounded by MAX_BODY_ARRAY_ITEMS and refused for anything
  *     nested, empty, non-string or on an undeclared key.
+ *  --- 🔴 W22 added no new dimension, and that is worth saying out loud: a plan
+ *  --- whose list cursor travels **inside the POST body** (Kimi) is covered by
+ *  --- rules 5-7 exactly — same closed key set, same scalar-value limit, same
+ *  --- Content-Type rule. What a stuffed message could change there is the same
+ *  --- thing it could change before ("spell the cursor as a different string"), and
+ *  --- nothing wider.
  * Failing any one of these refuses the request with an error; never send it anyway.
  *
  * ## 🔴 Why this is still not a "general-purpose proxy"

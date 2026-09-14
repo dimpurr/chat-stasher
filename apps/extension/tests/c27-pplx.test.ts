@@ -210,9 +210,10 @@ describe('C27-4 · the Perplexity backfill allowlist', () => {
     //    "lists conversations, cannot fetch bodies" state — which is why this file also owns that state's
     //    engine test at line ~144 above.
     expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['perplexity']);
-    // 🔴 W21 (2026-09-14) · grok joins the supported side (both segments declared). Perplexity is
-    //    still the only half-declared plan, which is what this test is about; the roster grew by a
-    //    platform, the criterion did not move.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'grok']);
+    // 🔴 W21 (2026-09-14) · grok joins the supported side (both segments declared). 🔴 W22 (2026-09-14)
+    //    · kimi joins it too, from a logged-in probe rather than from sources. Perplexity is still the
+    //    only half-declared plan, which is what this test is about; the roster grew by a platform each
+    //    time, the criterion did not move.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'kimi', 'grok']);
   });
 });

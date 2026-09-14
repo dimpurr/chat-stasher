@@ -298,6 +298,9 @@ progress:
 failure:
   notSaved: the body was fetched, but no file was written
   identityMismatch: it was written, but the identity used for the file name does not match this debt
+  detailPagedUnsupported: >-
+    the conversation came back incomplete — the platform holds more of it, and we
+    do not fetch the rest — so nothing was stored
   unknownReason: "reason code {reason}"
   shortIdEmpty: (empty)
 
@@ -315,10 +318,6 @@ platformNote:
     unsupported: >-
       Claude: history cannot be backfilled yet. The list endpoint's address
       contains an organization number, and we have no reliable way to obtain it.
-  kimi:
-    unsupported: >-
-      Kimi: history cannot be backfilled yet. We do not know what parameters its
-      list endpoint needs, and we will not guess one.
   gemini:
     unsupported: >-
       Gemini: history cannot be backfilled yet. We did not find a reliable
