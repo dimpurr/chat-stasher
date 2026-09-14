@@ -75,11 +75,11 @@ that platform."** The extension has two legs; please read them separately:
 ### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
 
 The list below comes directly from the two tables in the code, not from
-marketing (`apps/extension/lib/backfill/enumerate.ts:985-991`, `:999-1005`, `:857`):
+marketing (`apps/extension/lib/backfill/enumerate.ts:1000-1006`, `:1014-1020`, `:872`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
-| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on either platform. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:733-736`). |
+| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on either platform. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:748-751`). |
 | **🔴 Can only list conversations, saves none of their content** | **Perplexity** | The extension can list which historical conversations you have, but **will not fetch each conversation's content**, so **not one of them is delivered or queued**. Your Perplexity history is **not backed up**. |
 | **Not implemented** | **Gemini**, **Claude**, **Kimi** | The backfill leg stops before issuing any request. Nothing happens. |
 
@@ -94,12 +94,12 @@ holds only their ids, not their content.
 fetches bodies, but we have **not verified** whether its body endpoint pages or
 truncates a long conversation. The extension does no paging, and nothing in the
 response envelope it reads tells a truncated body apart from a complete one
-(`apps/extension/lib/backfill/enumerate.ts:686-699`). So a very long DeepSeek
+(`apps/extension/lib/backfill/enumerate.ts:701-714`). So a very long DeepSeek
 conversation may be archived as only its first part while the extension reports
 success. The evidence for the endpoint itself is solid — it is the route
 DeepSeek's own page calls over XHR when a user opens a past conversation in a
 real logged-in session, and several mutually independent open-source exporters
-request the same route (`apps/extension/lib/backfill/enumerate.ts:670-684`) — but
+request the same route (`apps/extension/lib/backfill/enumerate.ts:685-699`) — but
 the completeness question is open, and it is not written here as answered.
 
 🔴 **Perplexity gets one more sentence:** per the passive-capture note above,
@@ -112,9 +112,9 @@ is there is backed up.
 The reason is written in the code, not because we are lazy: Perplexity's
 **conversation-list endpoint** has multiple independent open-source
 implementations that cross-check one another
-(`apps/extension/lib/backfill/enumerate.ts:820-831`), but the **endpoint for
+(`apps/extension/lib/backfill/enumerate.ts:835-846`), but the **endpoint for
 fetching a single conversation's content has none**, so it is left as `null`
-rather than guessed (`apps/extension/lib/backfill/enumerate.ts:810-819`). We will
+rather than guessed (`apps/extension/lib/backfill/enumerate.ts:825-834`). We will
 not guess a content-endpoint address — a wrong guess would not error; it would
 save only the first few turns of every conversation while you believed you had
 it all.
@@ -525,7 +525,7 @@ confirmed in the code, not a temporary disclaimer.
   unverified. Perplexity **only lists conversations, saving none of their
   content**; Gemini / Claude / Kimi are entirely unsupported. See section 1.1 for
   the list and the detailed explanation (list from
-  `apps/extension/lib/backfill/enumerate.ts:985-991`, `:999-1005`, `:857`). The
+  `apps/extension/lib/backfill/enumerate.ts:1000-1006`, `:1014-1020`, `:872`). The
   middle tier is the one most likely to make you think "I've backed it up", so it
   gets its own bullet here.
 
@@ -611,8 +611,8 @@ Collected in one place, so you know which spots to double-check yourself:
 | The concrete installation steps for a launchd / systemd timer | **Unverified** (`schedule` only renders templates, does not install) |
 | How `known_hosts_strategy` behaves against a real server | **Partly verified** (the three values and their `StrictHostKeyChecking` equivalents were read from the pinned dependency's source — opendal-service-sftp 0.57.0 `src/backend.rs` lines 148-165 and the `openssh` crate it maps onto — but we have not exercised `add` or `accept` against a live host. Section 4.4 describes what each one gives up.) |
 | Whether passive capture actually delivers anything on Perplexity | **Unverified** (reading the code, the conclusion is "cannot recognize a session id, therefore delivers nothing"; see section 1. We have not tried it on a real page.) |
-| Whether the DeepSeek / Perplexity conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:737-758`, `:820-831`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
-| Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Unverified** (the endpoint itself is well evidenced — it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:670-684`. But none of the reviewed implementations pages it and this extension adds no paging, so a long conversation may be stored as only its first part. Nothing the extension reads from the response envelope distinguishes a truncated body from a complete one; `apps/extension/lib/backfill/enumerate.ts:686-699`.) |
+| Whether the DeepSeek / Perplexity conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:752-773`, `:835-846`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
+| Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Unverified** (the endpoint itself is well evidenced — it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:685-699`. But none of the reviewed implementations pages it and this extension adds no paging, so a long conversation may be stored as only its first part. Nothing the extension reads from the response envelope distinguishes a truncated body from a complete one; `apps/extension/lib/backfill/enumerate.ts:701-714`.) |
 | Whether a ChatGPT or DeepSeek backfill run has ever completed end to end in a real browser | **Unverified** (both legs are implemented and wired to the host, but no complete run has been observed in a real browser. See section 1.1.) |
 
 "Unverified" = we have not tested it; it does not mean it does not exist, and

@@ -199,10 +199,14 @@ progress:
   haltedPrefix: "[已停止：{reason}] "
   unknownTotal: "已归档 {archived} 条，欠账 {pending} 条，总数未知（{reason}）"
   withTotal: "已归档 {archived} / 共 {total} 条（{percent}%），欠账 {pending} 条"
+  withContradictedTotal: >-
+    已归档 {archived} 条，欠账 {pending} 条 —— 目前至少已列出 {listed} 条；
+    接口自报的 total 已经被实际返回的行数超过，所以不用它当分母
   reason:
     noTotalFromApi: 接口未提供 total
     totalNotPositiveInt: total 不是可用的正整数
     totalExpired: 已归档数超过 total，分母已过期
+    totalContradicted: 接口自报的 total 已经被实际列出数超过
 
 failure:
   notSaved: 取到了正文，但没有写出任何文件

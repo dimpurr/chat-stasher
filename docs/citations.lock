@@ -41,31 +41,31 @@ apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
   <- docs/privacy.md:344  :: * In Chrome's permission-warning list, `alarms` — like `sto…
 apps/extension/lib/backfill/alarm.ts:106  b9377ab9524d  lines=1
   <- docs/privacy.md:204  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
-apps/extension/lib/backfill/engine.ts:75-78  5cfeee9f2531  lines=4
+apps/extension/lib/backfill/engine.ts:81-84  5cfeee9f2531  lines=4
   <- docs/privacy.md:257, docs/threat-model.md:60  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
-apps/extension/lib/backfill/engine.ts:275  4e88764df1da  lines=1
+apps/extension/lib/backfill/engine.ts:281  4e88764df1da  lines=1
   <- docs/privacy.md:251  :: export async function runBackfill(opts: BackfillOptions): P…
-apps/extension/lib/backfill/engine.ts:441-463  513c7e30d686  lines=23
+apps/extension/lib/backfill/engine.ts:481-510  f32f29d95713  lines=30
   <- docs/threat-model.md:165, docs/threat-model.md:179  :: ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (…
-apps/extension/lib/backfill/engine.ts:580-602  949bb172b815  lines=23
+apps/extension/lib/backfill/engine.ts:688-710  949bb172b815  lines=23
   <- docs/threat-model.md:165, docs/threat-model.md:179  :: while (state.pending.length > 0) {
-apps/extension/lib/backfill/enumerate.ts:670-684  30e272d8bf3f  lines=15
+apps/extension/lib/backfill/enumerate.ts:685-699  30e272d8bf3f  lines=15
   <- README.md:117, docs/install.md:102, docs/install.md:615  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
-apps/extension/lib/backfill/enumerate.ts:686-699  7ce980289073  lines=14
+apps/extension/lib/backfill/enumerate.ts:701-714  7ce980289073  lines=14
   <- README.md:117, docs/install.md:97, docs/install.md:615, docs/privacy.md:310, docs/threat-model.md:192, docs/threat-model.md:424  :: *  · 🔴 **Not verified: whether this endpoint pages or trunc…
-apps/extension/lib/backfill/enumerate.ts:733-736  cd978611dbc5  lines=4
+apps/extension/lib/backfill/enumerate.ts:748-751  cd978611dbc5  lines=4
   <- README.md:117, docs/install.md:82  :: detailPath: DEEPSEEK_DETAIL_PATH,
-apps/extension/lib/backfill/enumerate.ts:737-758  e36cdb1026ac  lines=22
+apps/extension/lib/backfill/enumerate.ts:752-773  e36cdb1026ac  lines=22
   <- docs/install.md:614  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:810-819  4ed65514e3c6  lines=10
+apps/extension/lib/backfill/enumerate.ts:825-834  4ed65514e3c6  lines=10
   <- README.md:118, docs/install.md:117  :: detailPath: null,
-apps/extension/lib/backfill/enumerate.ts:820-831  46dc3587ccaa  lines=12
+apps/extension/lib/backfill/enumerate.ts:835-846  46dc3587ccaa  lines=12
   <- README.md:118, docs/install.md:115, docs/install.md:614  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:857  ed62fe4313f7  lines=1
+apps/extension/lib/backfill/enumerate.ts:872  ed62fe4313f7  lines=1
   <- README.md:119, docs/install.md:78, docs/install.md:528, docs/privacy.md:265, docs/privacy.md:312, docs/threat-model.md:194, docs/threat-model.md:428  :: export const BACKFILL_UNSUPPORTED: readonly UnsupportedBack…
-apps/extension/lib/backfill/enumerate.ts:985-991  b0b623ad6b49  lines=7
+apps/extension/lib/backfill/enumerate.ts:1000-1006  b0b623ad6b49  lines=7
   <- README.md:117, docs/install.md:78, docs/install.md:528, docs/privacy.md:265, docs/privacy.md:310, docs/threat-model.md:192, docs/threat-model.md:421  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
-apps/extension/lib/backfill/enumerate.ts:999-1005  be15b15a0991  lines=7
+apps/extension/lib/backfill/enumerate.ts:1014-1020  be15b15a0991  lines=7
   <- README.md:118, docs/install.md:78, docs/install.md:528, docs/privacy.md:265, docs/privacy.md:311, docs/threat-model.md:193, docs/threat-model.md:426  :: export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/pace.ts:16-22  b558425f257e  lines=7
   <- docs/install.md:506  :: *  · detail minIntervalMs = 20000 (one conversation every 2…
@@ -83,9 +83,9 @@ apps/extension/lib/backfill/tab-port.ts:95  118cc6173392  lines=1
   <- docs/privacy.md:204  :: export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
 apps/extension/lib/backfill/tab-port.ts:280-318  c37e312cb80a  lines=39
   <- docs/threat-model.md:60  :: export function checkBackfillRequest(
-apps/extension/lib/backfill/types.ts:171-200  b379d801d379  lines=30
+apps/extension/lib/backfill/types.ts:191-220  b379d801d379  lines=30
   <- docs/privacy.md:205  :: export interface BackfillState {
-apps/extension/lib/backfill/types.ts:248-269  bb4a6e5ffd1d  lines=22
+apps/extension/lib/backfill/types.ts:268-289  bb4a6e5ffd1d  lines=22
   <- docs/privacy.md:205  :: export function initialState(platform: string, scope: strin…
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:227  :: export function badgeFor(state: OutboxSummary | null): Badg…

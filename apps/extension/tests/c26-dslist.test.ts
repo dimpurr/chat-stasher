@@ -164,6 +164,12 @@ describe('C26-1 · cursor paging', () => {
     const second = [session(4), session(5)];              // seq_id 996 / 995
     const be = backend([pageBody(first, true), pageBody(second, false)]);
 
+    // 🔴 W10 · Two pages are now two **ticks** (DeepSeek has a body segment, so a
+    //    tick reads at most one list page and then spends its body budget — the
+    //    segment order changed, the cursor rules did not). The whole assertion
+    //    below is unchanged in substance: the second request carries the cursor
+    //    the first tick persisted.
+    const tick1 = await run(store, be.http, 'acct-two-pages');
     const report = await run(store, be.http, 'acct-two-pages');
 
     // 🔴 The first page carries no cursor; the second page's cursor = the **smallest** seq_id on the first page (997), not the first and not the largest.
@@ -171,8 +177,11 @@ describe('C26-1 · cursor paging', () => {
       `${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}?count=${LIMIT}`,
       `${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}?count=${LIMIT}&before_seq_id=997`,
     ]);
-    expect(report.enumeratedPages).toBe(2);
-    expect(report.newDebts).toBe(5);
+    // One page per tick, and the cursor survived the tick boundary — which is what
+    // makes the second request the *continuation* rather than a first page again.
+    expect(tick1.enumeratedPages).toBe(1);
+    expect(report.enumeratedPages).toBe(1);
+    expect(tick1.newDebts + report.newDebts).toBe(5);
     expect(report.state.pending).toEqual([...first, ...second].map((s) => s.id));
     // has_more:false ⇒ it finished normally, with **no** truncation marker at all.
     expect(report.state.enumCursor.complete).toBe(true);
@@ -183,7 +192,9 @@ describe('C26-1 · cursor paging', () => {
     expect(report.state.totalSource).toBe('unknown');
     // 🔴 This page is far shorter than count (3 rows vs 100), but has_more:true means it must keep paging —
     //    "returned fewer than count ⇒ that is the end" treats an unknown as known, and this implementation does not infer it.
-    expect(report.enumeratedPages).toBeGreaterThan(1);
+    //    (W10 moved the second request to the next tick; the number of requests it
+    //     guards against — "stopped after the short first page" — is the same one.)
+    expect(be.calls.length).toBeGreaterThan(1);
   });
 
   it('the cursor survives: stopping half way lets the next run carry on from the persisted cursor', async () => {

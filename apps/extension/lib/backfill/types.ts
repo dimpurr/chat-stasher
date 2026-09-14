@@ -153,8 +153,28 @@ export type StopReason =
   | 'host-unavailable'
   | 'halted';
 
-/** Where `total` came from. Only 'response-total' is fit to be the progress bar's denominator. */
-export type TotalSource = 'response-total' | 'unknown';
+/**
+ * Where `total` came from. Only 'response-total' is fit to be the progress bar's
+ * denominator.
+ *
+ * 🔴 W10 · 'contradicted' — **the API's own total was disproved by what the list
+ *    actually returned.** A real account was measured with `total = 901` while
+ *    7,391 distinct conversation ids came back from the very same endpoint, so
+ *    `total` is not "how many conversations this account has"; it is at best a
+ *    number the endpoint happens to print.
+ *
+ *    The value is set by measurement only: after a page is read, if the rows
+ *    listed so far outnumber the total the API reported, the total is disproved
+ *    and never becomes a denominator again. The measurement is the evidence —
+ *    nothing here reads a field whose meaning is unknown (see the note in
+ *    lib/backfill/enumerate.ts on `has_missing_conversations`).
+ *
+ *    Two consequences that must hold wherever this value is read:
+ *     · no percentage — the denominator is known to be false, so any `n / total`
+ *       would be a fabricated number (progress.ts refuses it);
+ *     · the wording has to say what *is* known: "at least N listed".
+ */
+export type TotalSource = 'response-total' | 'unknown' | 'contradicted';
 
 /** The counting window for the daily quota, split by UTC date. */
 export interface DailyCounter {

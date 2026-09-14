@@ -110,8 +110,31 @@ describe('C11 criterion 1 · stop-and-resume', () => {
     expect(run2.archivedThisRun).not.toEqual(run1.archivedThisRun);
     expect(run2.state.archived).toHaveLength(6);
     expect(run2.state.pending).toHaveLength(24);
-    // Enumeration does not re-run: run2 did not hit the list endpoint again
-    expect(run2.enumeratedPages).toBe(0);
+    // 🔴 W10 · This assertion changed from `run2.enumeratedPages === 0`, and the
+    //    criterion it guards did not: "a restart carries on from the breakpoint
+    //    instead of from the start" is still exactly what is asserted — only the
+    //    evidence is now stronger. Two things moved at once, both deliberately:
+    //      · a tick reads **at most one list page** (the body segment follows it
+    //        in the same tick), so the first tick no longer pages the list to
+    //        the end;
+    //      · and the list is now declared finished by an **empty page**, not by
+    //        `offset >= total` (see engine.ts: the total is not a stopping
+    //        condition any more — a real account reported total=901 while
+    //        holding 7,391 conversations).
+    //    So run2 reads exactly one more list page — and it is the
+    //    **continuation** (offset=30), which is what "resumed rather than
+    //    restarted" means: a restart would have asked for offset=0 again.
+    expect(run2.enumeratedPages).toBe(1);
+    const listCalls = backend.calls.filter((u) => u.includes('/backend-api/conversations'));
+    expect(listCalls.filter((u) => u.includes('offset=0'))).toHaveLength(1); // never asked for the first page twice
+    expect(listCalls[listCalls.length - 1]).toContain('offset=30');
+    // And with that empty page the enumeration really is finished — no third tick will page again.
+    expect(run2.state.enumCursor.complete).toBe(true);
+    const run3 = await runBackfill({
+      platform: 'chatgpt', origin: ORIGIN, scope: 'acct-fixture', store,
+      http: backend.http, clock: fakeClock(), maxDetails: 0,
+    });
+    expect(run3.enumeratedPages).toBe(0);
   });
 });
 
@@ -234,25 +257,41 @@ describe('C11 criterion 4 · throttling takes effect (enumeration and body-fetch
   it('bodies go at 20s each and enumeration at 2s per page, the two segments not interfering', async () => {
     const store = memoryStore();
     const clock = fakeClock();
-    const backend = fakeBackend(ids(6), { pageSize: 2 }); // 6 rows => 3 pages
-
-    const run = await runBackfill({
+    // 6 rows => 3 pages of 2, plus the empty page that confirms the list is finished.
+    const backend = fakeBackend(ids(6), { pageSize: 2 });
+    const tick = (maxDetails: number) => runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'pace', store,
-      http: backend.http, clock, maxDetails: 4,
+      http: backend.http, clock, maxDetails,
     });
 
+    // 🔴 W10 · The tick is now "one list page, then this tick's body budget", so a
+    //    3-page list is three ticks rather than one loop. The criterion this case
+    //    guards is untouched — each segment makes up **its own** interval from the
+    //    persisted anchor and neither borrows the other's — and it is asserted on
+    //    exactly the seams the production alarm drives: first the list pages (with
+    //    the body budget at 0 so nothing else advances the clock), then the bodies
+    //    once the list is finished.
+    const listTicks = [await tick(0), await tick(0), await tick(0), await tick(0)];
+    const enumWaits = listTicks.flatMap((r) => r.paceTrace.enumerate);
+    // The first page does not wait; every later one makes up the full 2000ms.
+    expect(enumWaits).toEqual([0, 2000, 2000, 2000]);
+    // The list segment and the body segment do not touch each other's pacing.
+    expect(listTicks.every((r) => r.paceTrace.detail.length === 0)).toBe(true);
+    expect(listTicks[listTicks.length - 1]!.state.enumCursor.complete).toBe(true);
+
+    const run = await tick(4);
     console.log('[C11-4] defaults: enumerate', DEFAULT_ENUM_PACE.minIntervalMs, 'ms/page; detail',
       DEFAULT_DETAIL_PACE.minIntervalMs, 'ms/item, daily cap', DEFAULT_DETAIL_PACE.maxPerDay);
-    console.log('[C11-4] actual enumerate wait sequence (ms) =', JSON.stringify(run.paceTrace.enumerate));
+    console.log('[C11-4] actual enumerate wait sequence (ms) =', JSON.stringify(enumWaits));
     console.log('[C11-4] actual detail wait sequence (ms) =', JSON.stringify(run.paceTrace.detail));
     console.log('[C11-4] total virtual-clock advance =', clock.nowMs() - Date.parse('2026-08-17T00:00:00.000Z'), 'ms');
 
-    // 3 pages: the first does not wait, each later one makes up the full 2000ms
-    expect(run.paceTrace.enumerate).toEqual([0, 2000, 2000]);
+    // List finished ⇒ the body tick fetches no page at all (segment two alone).
+    expect(run.paceTrace.enumerate).toEqual([]);
     // 4 bodies: the first does not wait, each later one makes up the full 20000ms
     expect(run.paceTrace.detail).toEqual([0, 20000, 20000, 20000]);
     // Nothing really waited: the virtual-clock advance = the sum of all sleeps
-    expect(clock.sleeps.reduce((a, b) => a + b, 0)).toBe(4000 + 60000);
+    expect(clock.sleeps.reduce((a, b) => a + b, 0)).toBe(6000 + 60000);
   });
 
   it('hitting the daily cap stops gently (not a halt — a daily-cap)', async () => {

@@ -7,6 +7,11 @@
  *     restart carries on from the breakpoint;
  *  2. enumeration and body-fetching each use their own Pacer ⇒ the two segments are
  *     paced separately;
+ *  2b. 🔴 W10 · **the two segments interleave within one tick** (one list page, then
+ *     this tick's body budget) — a heavy account's first body must not wait for the
+ *     whole list to be paged through. Sequential ordering is not a requirement here;
+ *     "the newest is archived live, the old is filled in slowly, with a progress
+ *     bar" is. See the `listPagesThisTick` note in runBackfill;
  *  3. any non-2xx / unrecognised shape / inability to persist ⇒ halt and write it
  *     into state.halted; never swallow it and keep spinning.
  *
@@ -21,6 +26,7 @@ import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import {
   backfillPlanFor,
+  canBackfillDetail,
   detailRequestInit,
   listRequestInit,
   unsupportedBackfillFor,
@@ -425,13 +431,47 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt('unsupported-platform', detail);
   }
 
-  // ---- Segment one: enumeration (cheap, runs to completion) ----
+  // ---- Segment one: enumeration (cheap; one page per tick when bodies follow) ----
+  //
+  // 🔴 W10 · This segment and segment two are now **interleaved per tick**; see
+  //    `listPagesThisTick` below. Before that they were strictly sequential: the
+  //    list had to be finished in full before the first body was fetched, which
+  //    on a heavy account meant minutes-to-hours of "archiving" with an empty
+  //    archive, and it took a browser restart or an SW reclaim to make it worse.
   //
   // 🔴 C26: two paging schemes exist here, and **the plan decides**, not the
   // response content on the fly:
   //   · listCursorUrl declared     ⇒ cursor paging (DeepSeek: count + before_seq_id);
   //   · listCursorUrl not declared ⇒ offset paging (ChatGPT, byte-identical to C22).
   const cursorMode = plan.listCursorUrl !== undefined;
+  /**
+   * 🔴 W10 · **How many list pages one tick may read.**
+   *
+   * The defect this answers, as measured on a real account: 7,391 distinct
+   * conversations, 50 minutes with backfill on, and **not one body fetched**.
+   * The list segment was a loop that only ended when the whole list was read,
+   * and the body segment sat *after* it — so on a heavy account the first body
+   * waited for the entire list (74 pages at the default limit), and every
+   * interruption (MV3 reclaiming the SW, `shouldAbort`) put the body segment's
+   * entrance off to the next tick. Not a hang: a structure.
+   *
+   * So: a plan that can fetch bodies reads **at most one page per tick**, and
+   * the body budget for that same tick is spent right after it. The next tick
+   * carries on from the persisted cursor. Nothing about pacing changed — one
+   * page per tick is *fewer* requests per tick than the old loop, never more.
+   *
+   * 🔴 Why `canBackfillDetail` and not simply 1 for everybody: a plan with no
+   *    body segment (Perplexity, detailPath/detailUrl both null) has no body
+   *    fetch that a long list could starve. Capping it at one page would gain
+   *    nothing and would **lose** something: that plan's tick ends in
+   *    halt('detail-unsupported'), and a persisted halt stops every later tick
+   *    from reading page 2 at all — the list would be cut off at the first page
+   *    and the halt could never be reached with more than one page on disk.
+   *    So for list-only plans the list segment keeps running to the end of the
+   *    list, byte-for-byte as before (tests/c27-pplx.test.ts pins that path).
+   */
+  const listPagesThisTick = canBackfillDetail(plan) ? 1 : Number.POSITIVE_INFINITY;
+  let listPagesFetched = 0;
   // The trace has to say which page it stopped on. Under cursor mode `offset` is the
   // **number enumerated so far**, not a request parameter, so the two modes must be
   // worded differently — a trace that reads correctly but points at the wrong thing
@@ -440,7 +480,14 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     cursorMode
       ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
       : `list offset=${state.enumCursor.offset}`;
-  while (!state.enumCursor.complete && state.enumCursor.truncated === undefined) {
+  while (
+    !state.enumCursor.complete
+    && state.enumCursor.truncated === undefined
+    // 🔴 W10: at most `listPagesThisTick` pages here, then the body segment below
+    //    gets its turn within the same tick. The bound is on **pages per tick**,
+    //    not on the page itself: everything inside this loop is unchanged.
+    && listPagesFetched < listPagesThisTick
+  ) {
     if (opts.shouldAbort?.()) return report('aborted');
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
@@ -468,12 +515,21 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       return halt('shape-changed', `${listWhere()}: ${parsed.detail}`);
     }
     enumeratedPages += 1;
+    listPagesFetched += 1;
 
-    // Only the total the API gave is accepted as the denominator. When it is
-    // unavailable, 'unknown' stays, and progress refuses to show a percentage.
+    // 🔴 W10 · The total the API gave is recorded, but it is **not** trusted as
+    //    the denominator forever: it is a number this endpoint prints, not a
+    //    measurement of how many conversations the account has (measured on a
+    //    real account: `total = 901` while 7,391 distinct ids came back from
+    //    this very endpoint). So it is kept as-is — 'response-total' is still
+    //    the only value that can produce a percentage — and the page below
+    //    disproves it the moment the rows actually listed outnumber it.
+    //    🔴 Once disproved it is never trusted again: a fresh `total` from a
+    //    later page does not overwrite 'contradicted', because a total that
+    //    moves is itself evidence about how much the number is worth.
     if (parsed.page.total !== null) {
       state.totalKnown = parsed.page.total;
-      state.totalSource = 'response-total';
+      if (state.totalSource !== 'contradicted') state.totalSource = 'response-total';
     }
 
     // First measure how much of this page is "already settled" — the direct evidence for "fetch nothing twice".
@@ -493,6 +549,36 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     state.enumCursor.offset += plan.platform === 'perplexity'
       ? listLimit
       : parsed.page.ids.length;
+
+    /**
+     * 🔴 W10 · **Disproving the total by measurement.**
+     *
+     * `total` is not the size of the account (measured: 901 reported, 7,391
+     * distinct ids returned). The one thing that can be said about it with
+     * evidence is that it has been **falsified** — and the moment for that is
+     * exactly here: rows we actually hold in hand outnumber the number the API
+     * says exist. From then on it is not a denominator (progress.ts refuses to
+     * divide by it) and it is not a stopping condition (see the branch removed
+     * at the end of this block).
+     *
+     * 🔴 Only the measured row count is compared — `enumCursor.offset` is "how
+     *    many rows the list has handed us". Nothing is inferred from a field
+     *    whose meaning is unknown; in particular the list response's
+     *    `has_missing_conversations` is **not** read (its semantics have no
+     *    source — the only public declaration of it, pionxzh's src/api.ts:330-339,
+     *    annotates it with the author's own "// what is this for?").
+     */
+    if (state.totalSource !== 'contradicted'
+      && state.totalKnown !== null
+      && state.enumCursor.offset > state.totalKnown) {
+      state.totalSource = 'contradicted';
+      console.warn(
+        '[chat-stasher] backfill: the list endpoint reported total='
+        + `${state.totalKnown}, but ${state.enumCursor.offset} rows have already been listed;`
+        + ' the total is not used as a denominator any more',
+      );
+    }
+
     if (parsed.page.ids.length === 0) {
       if (plan.platform === 'perplexity') {
         // 🔴 Perplexity has no known termination field such as has_more / total /
@@ -531,9 +617,31 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       // this branch: read that field, and set complete=true only when it is
       // explicitly false.
       stopEnumerating('short-page-inferred', { complete: false });
-    } else if (state.totalKnown !== null && state.enumCursor.offset >= state.totalKnown) {
-      state.enumCursor.complete = true;
     }
+
+    /**
+     * 🔴 W10 · **The `offset >= totalKnown ⇒ complete` branch used to live here.
+     *    It was removed, not loosened.**
+     *
+     * It read `state.enumCursor.offset >= state.totalKnown` and set complete=true.
+     * On an account where the endpoint reported `total = 901` while really
+     * holding 7,391 conversations, that line stops the listing at row 901 and
+     * records complete=true — i.e. it writes "everything has been listed" over
+     * "6,490 conversations were never even named". `enumCursor.truncated` cannot
+     * catch it either: as far as that branch is concerned nothing went wrong.
+     *
+     * What terminates enumeration for offset paging now is the **empty page**
+     * (`parsed.page.ids.length === 0`, the `else` branch above) — one real
+     * observation ("this request came back with no rows"), the only stopping
+     * signal all three reviewed implementations share
+     * (pionxzh src/api.ts:610, pinguarmy src/contents/chatgpt-parser.ts:380-383,
+     * wanda1416 packages/adapter-chatgpt/src/parse.ts:253).
+     *
+     * The price, written down rather than hidden: a full enumeration now costs
+     * **one extra request** (the empty page at the end). What it buys is that
+     * "the list is finished" is never said on the strength of a number this
+     * endpoint has already printed wrongly.
+     */
     await persist(store, state);
   }
 

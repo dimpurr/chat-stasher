@@ -393,6 +393,21 @@ export interface UnsupportedBackfill {
  * Strict: `items` must be an array and every element must have a string `id`;
  * `total` is only accepted when it is a non-negative integer, otherwise
  * total = null (⇒ progress takes the "total unknown" branch).
+ *
+ * 🔴 W10 · **What this parser's `total` is, and is not.** It is read as "the
+ *    number this endpoint printed" and nothing more. It is not the size of the
+ *    account (measured on a real account: `total = 901` with 7,391 distinct
+ *    conversation ids returned by this same endpoint), so it must not be used to
+ *    decide that the list has ended (the branch that did that is gone from
+ *    engine.ts) and it stops being a denominator the moment the rows actually
+ *    listed outnumber it (totalSource 'contradicted', lib/backfill/types.ts).
+ *
+ *    One field is deliberately **not** read here, though the response carries it:
+ *    `has_missing_conversations`. Its semantics have no source — the only public
+ *    declaration found is pionxzh's `chatgpt-exporter/src/api.ts:330-339`, where
+ *    the author annotates it with his own "// what is this for?" — so acting on
+ *    it would be inventing a meaning. Recorded here so that the omission is
+ *    visibly a decision rather than an oversight.
  */
 export function parseConversationListPage(text: string): ParseResult {
   let body: unknown;

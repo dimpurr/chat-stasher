@@ -94,8 +94,23 @@ describe('C19 task 3 · BUG-3: the body-fetch minimum interval must take effect 
 
     // The first has no "previous one" to speak of ⇒ it waits 0, which is correct.
     expect(r1.paceTrace.detail).toEqual([0]);
-    // 🔴 The second and third are **new runBackfills**, but the moment of the last fetch is already persisted ⇒ the interval must be made up.
-    expect(r2.paceTrace.detail).toEqual([DEFAULT_DETAIL_PACE.minIntervalMs]);
+    /**
+     * 🔴 W10 · tick2's body wait is 18,000, not 20,000, and the reason is
+     *    arithmetic rather than a loosened interval: this tick also reads one
+     *    more list page — the **empty page that confirms the list is finished**
+     *    (the `offset >= total` stopping condition is gone; a real account
+     *    reported total=901 while holding 7,391 conversations). That page has to
+     *    make up the enumeration interval first, 2,000 ms of the virtual clock,
+     *    and the body interval is still measured from the **persisted** anchor:
+     *    2,000 (list page) + 18,000 (body) = the full 20,000.
+     *    The criterion is unchanged — the interval is made up in full across
+     *    ticks — and both waits are pinned so the split cannot silently move.
+     */
+    expect(r2.paceTrace.enumerate).toEqual([2_000]);
+    expect(r2.paceTrace.detail).toEqual([18_000]);
+    // tick3 has no list page left to read (the list is complete) ⇒ the body
+    // interval is made up in full, with no enumeration competing for the clock.
+    expect(r3.paceTrace.enumerate).toEqual([]);
     expect(r3.paceTrace.detail).toEqual([DEFAULT_DETAIL_PACE.minIntervalMs]);
 
     // All three debts were cleared: 3 body fetches in total, 20 seconds apart.

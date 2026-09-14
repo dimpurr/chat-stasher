@@ -190,20 +190,31 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
 
-    // ---- tick 1: enumeration finishes + the 1st debt is cleared ----
+    // ---- tick 1: the first list page + the 1st debt is cleared ----
     await bootAndDispatch(liveCapture());
     const listUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
     console.log('[C17-1] evidence A — the list pages actually requested:', listUrls);
-    expect(listUrls.length).toBe(2);            // 2 pages × pageSize 2 = 4 rows
+    // 🔴 W10 · This was `listUrls.length === 2` ("the whole list runs inside one
+    //    tick"), and the whole point of this change is that it no longer does:
+    //    a tick reads **at most one page**, then spends its body budget, so the
+    //    first debt is delivered in the same tick that names it. The criterion —
+    //    enumerate → debts → fetch one by one → write down → the debts shrink —
+    //    is unchanged; what changed is how many pages one tick may read.
+    expect(listUrls.length).toBe(1);            // 1 page × pageSize 2 = 2 rows named so far
 
     const s1 = stateOf();
     console.log('[C17-1] evidence B — the debt set (read back out of storage):', {
       key: STATE_KEY, pending: s1.pending, archived: s1.archived,
       totalKnown: s1.totalKnown, totalSource: s1.totalSource, enumCursor: s1.enumCursor,
     });
-    expect(s1.enumCursor.complete).toBe(true);
+    // 🔴 W10 · `complete: true` used to be reached here, via `offset >= total`.
+    //    It is now reached by the **empty page** (tick 3 below), because a real
+    //    account was measured with total=901 while holding 7,391 conversations:
+    //    a total that can be wrong cannot say "the list is finished".
+    expect(s1.enumCursor.complete).toBe(false);
     expect(s1.archived.length).toBe(1);
-    expect(s1.pending.length).toBe(3);
+    // 2 rows named on page 1, one of them already archived ⇒ 1 still owed.
+    expect(s1.pending.length).toBe(1);
 
     console.log('[C17-1] evidence C — the body URLs tick1 actually fetched:', detailCalls(server.calls));
     expect(detailCalls(server.calls).length).toBe(1);   // "one by one": a tick fetches exactly one
@@ -225,6 +236,18 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     console.log('[C17-1] evidence G — debts falling tick by tick, plus progress text:', trail);
     expect(trail.map((t) => t.pending)).toEqual([2, 1, 0]);
     expect(trail.map((t) => t.archived)).toEqual([2, 3, 4]);
+    // 🔴 W10 · The list really did finish — and it finished on the **empty page**
+    //    (tick 3), not on `offset >= total`: 4 rows are named, and the third tick
+    //    is the one that asked for offset=4 and got nothing back. Ticks 1 and 2
+    //    each named one page of two (the "at most one list page per tick" rule),
+    //    and the moment the list was finished the ticks stopped asking for pages
+    //    at all — tick 4 reads no page (which is why `complete` is checked on the
+    //    state after tick 3, and again below after tick 4).
+    expect(stateOf().enumCursor.complete).toBe(true);
+    const allListUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
+    // 3 in total, over 4 ticks: offset=0, offset=2, the confirming empty page at
+    // offset=4, and nothing at all on tick 4.
+    expect(allListUrls.map((u) => new URL(u).searchParams.get('offset'))).toEqual(['0', '2', '4']);
 
     // Fetched one by one: 4 detail requests, in FIFO order
     expect(detailCalls(server.calls).length).toBe(4);
@@ -271,8 +294,17 @@ describe('C17 task 2 · counter-case 1: a "browser restart" mid-way (in-memory s
     console.log('[C17-2.1] the bodies the first tick after the restart fetched:', detailCalls(server2.calls));
     console.log('[C17-2.1] after the restart:', { archived: after.archived, pending: after.pending });
 
-    // The key assertion: after the restart it does not re-enumerate, does not re-fetch what was archived, and carries on at the 3rd.
-    expect(server2.calls.filter((u) => u.includes('/conversations'))).toEqual([]);
+    // The key assertion: after the restart it does not re-enumerate from the
+    // start, does not re-fetch what was archived, and carries on at the 3rd.
+    // 🔴 W10 · `toEqual([])` became "exactly the continuation page", and that is
+    //    the same criterion read more precisely: a tick reads one list page and
+    //    the list is now closed by an **empty page** rather than by
+    //    `offset >= total`, so the tick after the restart asks for offset=4 —
+    //    the page after the ones tick 1 and tick 2 already read. A restart would
+    //    have asked for offset=0 again, which is what this rules out.
+    const listAfterRestart = server2.calls.filter((u) => u.includes('/conversations'));
+    expect(listAfterRestart).toHaveLength(1);
+    expect(new URL(listAfterRestart[0]!).searchParams.get('offset')).toBe('4');
     expect(detailCalls(server2.calls).map((u) => u.split('/').pop())).toEqual([UUIDS[2]]);
     expect(after.archived).toEqual([UUIDS[0], UUIDS[1], UUIDS[2]]);
   });
@@ -512,7 +544,23 @@ describe('C17 task 3 · seam B: which wins, the pacer or the pause / pacing whil
     // After C19: only the first is 0 (there really is no "previous one"), and every later one makes up the full 20 seconds —
     //           the moment of the last fetch lives in state.lastFetchAt, surviving ticks and restarts.
     expect(traces[0]!.detail).toEqual([0]);
-    for (const t of traces.slice(1)) expect(t.detail).toEqual([20_000]);
+    /**
+     * 🔴 W10 · Tick 2's body wait is 18,000 rather than 20,000, and it is not a
+     *    loosened interval — it is the same full interval, split between the two
+     *    segments by the clock. That tick also reads the **empty page that
+     *    confirms the list is finished** (the `offset >= total` stopping
+     *    condition is gone: a real account reported total=901 while holding
+     *    7,391 conversations), and the enumeration gate makes up its 2,000 ms
+     *    before the body gate does. 2,000 + 18,000 = the full 20,000, and the
+     *    body interval is still measured from the **persisted** anchor across
+     *    ticks, which is the whole point of BUG-3's fix. Both waits are pinned so
+     *    the split cannot drift unnoticed.
+     */
+    expect(traces[1]!.enumerate).toEqual([2_000]);
+    expect(traces[1]!.detail).toEqual([18_000]);
+    // Ticks 3 and 4 have no page left to read ⇒ the body interval is made up in full.
+    for (const t of traces.slice(2)) expect(t.enumerate).toEqual([]);
+    for (const t of traces.slice(2)) expect(t.detail).toEqual([20_000]);
     // All 4 bodies were still fetched; they are just spread over 60 seconds (3 intervals × 20 seconds).
     expect(detailCalls(server.calls).length).toBe(4);
     expect(fakeNow - 1_700_000_000_000).toBe(60_000);
