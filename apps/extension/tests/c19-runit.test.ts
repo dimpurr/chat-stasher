@@ -13,7 +13,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
-import { runBackfill } from '../lib/backfill/engine';
+import { loadState, runBackfill } from '../lib/backfill/engine';
+import type { BackfillState } from '../lib/backfill/types';
 import { memoryStore } from '../lib/backfill/store';
 import { DEFAULT_DETAIL_PACE, type Clock } from '../lib/backfill/pace';
 import { handleBackfillMessage } from '../lib/backfill/tab-port';
@@ -123,7 +124,10 @@ describe('C19 task 3 · BUG-3: the body-fetch minimum interval must take effect 
     expect(r3.paceTrace.detail).toEqual([DEFAULT_DETAIL_PACE.minIntervalMs]);
 
     // All three debts were cleared: 3 body fetches in total, 20 seconds apart.
-    expect(store.data['cs_backfill_v1:chatgpt:acct-fixture-1']).toMatchObject({
+    // 🔴 W18 · Read through the production load path, not out of one storage key:
+    //    the header is at `stateKey(...)` and the ids are in the debt store, so a
+    //    raw `store.data[key]` is now the header alone.
+    expect(await loadState(store, 'chatgpt', 'acct-fixture-1')).toMatchObject({
       archived: IDS,
       pending: [],
     });
@@ -178,6 +182,19 @@ describe('C19 task 3 · BUG-3: the body-fetch minimum interval must take effect 
 // ===========================================================================
 
 const store: Record<string, unknown> = {};
+
+/**
+ * 🔴 W18 · The debt set as the engine reads it back: the header at `stateKey(...)`
+ *    plus the conversation ids from the debt store (lib/backfill/ledger.ts). It
+ *    used to be a property read of one `storage.local` key, and it cannot be that
+ *    any more — the ids are not in that key.
+ */
+async function stateOf(): Promise<BackfillState> {
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  const st = browserLocalStore();
+  if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
+  return await loadState(st, 'chatgpt', 'acct-fixture-1');
+}
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];
 let host: SyntheticHost;
@@ -404,7 +421,7 @@ describe('C19 task 2 · the http port: really injected in production code', () =
     // One page enumerated + one body fetched, all through the content script's same-origin fetch.
     expect(contentFetches.some((u) => u.includes('/backend-api/conversations'))).toBe(true);
     expect(contentFetches.filter((u) => u.includes('/backend-api/conversation/')).length).toBe(1);
-    const s: any = store['cs_backfill_v1:chatgpt:acct-fixture-1'];
+    const s = await stateOf();
     expect(s.archived.length).toBe(1);
     expect(s.pending.length).toBe(IDS.length - 1);
   });
@@ -419,7 +436,7 @@ describe('C19 task 2 · the http port: really injected in production code', () =
     // Target registration: left by one real capture (the minimum premise of "the user used it at least once").
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 7);
     await mod.backfillTickSettled();
-    const before = (store['cs_backfill_v1:chatgpt:acct-fixture-1'] as any).archived.length;
+    const before = (await stateOf()).archived.length;
 
     // Now send no capture at all, and only let the alarm fire.
     contentFetches.length = 0;
@@ -429,7 +446,7 @@ describe('C19 task 2 · the http port: really injected in production code', () =
     alarmListeners[0]!({ name: BACKFILL_ALARM_NAME });
     await mod.backfillTickSettled();
 
-    const after = (store['cs_backfill_v1:chatgpt:acct-fixture-1'] as any).archived.length;
+    const after = (await stateOf()).archived.length;
     console.log('[C19-2] one alarm wake:', { reason: mod.lastBackfillTick()?.reason, before, after });
     console.log('[C19-2] URLs this alarm tick sent on our behalf:', contentFetches);
     expect(mod.lastBackfillTick()?.reason).toBe('ran');

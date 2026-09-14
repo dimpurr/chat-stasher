@@ -28,6 +28,7 @@ import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import type { BackfillState } from '../lib/backfill/types';
 
 // ---------------------------------------------------------------------------
 // A fake browser (isomorphic to c17 / c20). W2: the write-down channel = a synthetic native host,
@@ -112,8 +113,18 @@ async function bootAndDispatch(payload: CapturedFetch): Promise<any> {
   return mod;
 }
 
-const STATE_KEY = 'cs_backfill_v1:chatgpt:acct-fixture-1';
-const stateOf = (): any => store[STATE_KEY] ?? null;
+/**
+ * 🔴 W18 · The debt set as the engine reads it back: the header at `stateKey(...)`
+ *    plus the ids from the debt store (lib/backfill/ledger.ts). A property read of
+ *    one `storage.local` key cannot do this any more — the ids are not in it.
+ */
+async function stateOf(): Promise<BackfillState> {
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  const { loadState } = await import('../lib/backfill/engine');
+  const st = browserLocalStore();
+  if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
+  return await loadState(st, 'chatgpt', 'acct-fixture-1');
+}
 
 /** The name that really landed on the host (§6.2's name). */
 const finalFiles = (): string[] => host.names();
@@ -153,7 +164,7 @@ describe('C21-1 · two different conversation ids must end up with different on-
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     // Look only at the files these two debts wrote (the live leg's own is separate; see case 3).
     const debtFiles = finalFiles().filter((f) => f.includes('aaaaaaaa-bbbb'));
     console.log('[C21-1] the two debt keys:', [idA, idB]);
@@ -194,17 +205,17 @@ describe('C21-2 · a file-name-unsafe id ⇒ nothing written, it goes into the f
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     // 🔴 The live leg's own (LIVE_SID) does not count — this looks only at what these two debt keys wrote.
     const debtFiles = finalFiles().filter((f) => !f.includes(LIVE_SID));
     console.log('[C21-2] the two debt keys:', [idA, idB]);
     console.log('[C21-2] files written:', debtFiles);
-    console.log('[C21-2] failure list:', JSON.stringify(s.failures, null, 2));
+    console.log('[C21-2] failure list:', JSON.stringify(s.failures ?? [], null, 2));
 
     expect(debtFiles).toEqual([]);        // not one byte written ⇒ collapsing is impossible
     expect(s.archived).toEqual([]);       // and not one of them passes itself off as a success
-    expect(s.failures).toHaveLength(2);
-    expect(s.failures.every((f: any) => f.reason === 'not-saved')).toBe(true);
+    expect(s.failures ?? []).toHaveLength(2);
+    expect((s.failures ?? []).every((f) => f.reason === 'not-saved')).toBe(true);
   });
 });
 

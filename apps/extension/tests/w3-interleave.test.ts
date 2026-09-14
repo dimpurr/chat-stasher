@@ -29,9 +29,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { loadState, runBackfill, type HttpResponse } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
-import { formatProgress, computeProgress } from '../lib/backfill/progress';
+import { formatProgress, computeProgress, countsOf } from '../lib/backfill/progress';
 import { backfillPlanFor, canBackfillDetail } from '../lib/backfill/enumerate';
 import { DEFAULT_PACE, type Clock } from '../lib/backfill/pace';
 import type { BackfillState } from '../lib/backfill/types';
@@ -211,7 +211,7 @@ describe('W10-2 · consecutive ticks converge, with no id enqueued twice and no 
       if (report.stopped === 'queue-empty') break;
     }
 
-    const state = (await store.load('cs_backfill_v1:chatgpt:acct-w10-converge')) as BackfillState;
+    const state = (await loadState(store, 'chatgpt', 'acct-w10-converge'));
     console.log('[W10-2] list offsets per tick =', listOffsetsPerTick);
     console.log('[W10-2] page offsets requested, in order =', be.listOffsets());
     console.log('[W10-2] new debts per tick =', newDebtsPerTick);
@@ -275,7 +275,7 @@ describe('W10-2 · consecutive ticks converge, with no id enqueued twice and no 
       if (report.stopped === 'queue-empty' && report.state.enumCursor.complete) break;
     }
 
-    const state = (await store.load('cs_backfill_v1:chatgpt:acct-w10-dupe')) as BackfillState;
+    const state = (await loadState(store, 'chatgpt', 'acct-w10-dupe'));
     console.log('[W10-2] duplicate row · blocked rows per tick =', blockedPerTick);
     console.log('[W10-2] duplicate row · archived =', state.archived.length,
       'unique =', new Set(state.archived).size);
@@ -320,11 +320,11 @@ describe('W10-3 · an API total smaller than reality neither truncates the listi
       if (last.stopped === 'queue-empty' && last.state.enumCursor.complete) break;
     }
 
-    const state = (await store.load('cs_backfill_v1:chatgpt:acct-w10-total')) as BackfillState;
+    const state = (await loadState(store, 'chatgpt', 'acct-w10-total'));
     console.log('[W10-3] page offsets requested, in order =', be.listOffsets());
     console.log('[W10-3] enumCursor =', state.enumCursor, '| totalKnown =', state.totalKnown,
       '| totalSource =', state.totalSource);
-    console.log('[W10-3] progress line =', formatProgress(state));
+    console.log('[W10-3] progress line =', formatProgress(countsOf(state)));
 
     // 🔴 It did not stop at the number the API printed: rows 3..9 were fetched too.
     //    (The engine advances the cursor by the rows it was handed — 3+3+3+1 — and
@@ -338,11 +338,11 @@ describe('W10-3 · an API total smaller than reality neither truncates the listi
     expect(state.totalKnown).toBe(3);                    // what the API said (kept as the record)
     expect(state.totalSource).toBe('contradicted');
 
-    const view = computeProgress(state);
+    const view = computeProgress(countsOf(state));
     expect(view.percent).toBeNull();
     expect(view.totalContradicted).toBe(true);
     expect(view.listed).toBe(10);                        // the measured row count, not the API's claim
-    const line = formatProgress(state);
+    const line = formatProgress(countsOf(state));
     expect(line).not.toContain('%');
     expect(line).toContain('at least 10 listed');
     // The wording must say what is known, not claim the total was never given.
@@ -363,11 +363,11 @@ describe('W10-3 · an API total smaller than reality neither truncates the listi
       if (last.stopped === 'queue-empty' && last.state.enumCursor.complete) break;
     }
 
-    const state = (await store.load('cs_backfill_v1:chatgpt:acct-w10-oktotal')) as BackfillState;
-    console.log('[W10-3] control · progress line =', formatProgress(state));
+    const state = (await loadState(store, 'chatgpt', 'acct-w10-oktotal'));
+    console.log('[W10-3] control · progress line =', formatProgress(countsOf(state)));
     expect(state.totalSource).toBe('response-total');
-    expect(computeProgress(state).percent).toBe(100);
-    expect(formatProgress(state)).toContain('100%');
+    expect(computeProgress(countsOf(state)).percent).toBe(100);
+    expect(formatProgress(countsOf(state))).toContain('100%');
   });
 
   it('the contradiction is sticky: a later page claiming a bigger total does not put the denominator back', async () => {
@@ -377,14 +377,16 @@ describe('W10-3 · an API total smaller than reality neither truncates the listi
     const store = memoryStore();
     const clock = fakeClock();
     const scope = 'acct-w10-sticky';
-    const key = 'cs_backfill_v1:chatgpt:acct-w10-sticky';
+    // 🔴 W18 · The debt ids live in the debt store now, so "what is on disk" is read
+    //    through the production load path rather than out of one storage key. The
+    //    read itself still happens after the two ticks below, at the same point.
     const first = backend({ ids: ids(10), total: 3, pageSize: 3 });
 
     // Two pages are enough to disprove total=3 (offset 6 after page 2), and the
     // list is deliberately left unfinished so the next tick reads another page.
     await tick({ store, http: first.http, clock, scope, maxDetails: 1 });
     await tick({ store, http: first.http, clock, scope, maxDetails: 1 });
-    const disproved = (await store.load(key)) as BackfillState;
+    const disproved = await loadState(store, 'chatgpt', 'acct-w10-sticky');
     expect(disproved.totalSource).toBe('contradicted');
     expect(disproved.enumCursor.complete).toBe(false);
 

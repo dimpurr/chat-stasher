@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { loadState, runBackfill, type HttpResponse } from '../lib/backfill/engine';
 import { CHATGPT_LIST_PATH, CHATGPT_PLAN, type BackfillEnumPlan } from '../lib/backfill/enumerate';
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillState } from '../lib/backfill/types';
@@ -63,7 +63,9 @@ async function run(
     plans: (platform) => platform === 'chatgpt' ? planFor(outcome) : null,
     sink: () => ({ saved: true, sessionId: ID }),
   });
-  const persisted = await store.load(stateKey('chatgpt', scope)) as BackfillState;
+  // 🔴 W18 · The ids are in the debt store now, so the persisted ledger is read
+  //    through the production load path (`stateKey(...)` alone holds the header).
+  const persisted = await loadState(store, 'chatgpt', scope);
   return { report, persisted };
 }
 

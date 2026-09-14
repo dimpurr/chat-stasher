@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { runBackfill, loadState, notWiredHttp, type HttpResponse } from '../lib/backfill/engine';
+import { saveHeader } from '../lib/backfill/ledger';
 import { memoryStore } from '../lib/backfill/store';
-import { formatProgress, computeProgress } from '../lib/backfill/progress';
+import { formatProgress, computeProgress, countsOf } from '../lib/backfill/progress';
 import { enqueueDebts, settleDebt } from '../lib/backfill/debts';
 import { initialState, stateKey } from '../lib/backfill/types';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
@@ -152,7 +153,10 @@ describe('C11 criterion 2 · fetch nothing twice', () => {
     // Simulate "a day later, enumerate again": reset the enumeration cursor and re-enumerate the same ids.
     const st = await loadState(store, 'chatgpt', 'acct-fixture');
     st.enumCursor = { offset: 0, complete: false };
-    await store.save(stateKey('chatgpt', 'acct-fixture'), st);
+    // 🔴 W18 · `saveHeader`, not `store.save(stateKey(...), st)`: the state key now
+    //    holds the header alone, and writing a whole state there would produce a
+    //    record the loader refuses to read (and correctly so).
+    await saveHeader(store, st);
 
     const run2 = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'acct-fixture', store,
@@ -203,7 +207,7 @@ describe('C11 criterion 3 · never show a percentage when the denominator is unk
     console.log('[C11-3] progress text with an unknown denominator =>', run.progress);
     expect(run.state.totalSource).toBe('unknown');
     expect(run.state.totalKnown).toBeNull();
-    expect(computeProgress(run.state).percent).toBeNull();
+    expect(computeProgress(countsOf(run.state)).percent).toBeNull();
     expect(run.progress).not.toContain('%');
     expect(run.progress).toContain('total unknown');
   });
@@ -234,21 +238,21 @@ describe('C11 criterion 3 · never show a percentage when the denominator is unk
     const a = initialState('chatgpt', 'x');
     a.totalKnown = 100; // there is a number, but it did not come from the API
     a.totalSource = 'unknown';
-    expect(computeProgress(a).percent).toBeNull();
-    expect(formatProgress(a)).not.toContain('%');
+    expect(computeProgress(countsOf(a)).percent).toBeNull();
+    expect(formatProgress(countsOf(a))).not.toContain('%');
 
     const b = initialState('chatgpt', 'x');
     b.totalSource = 'response-total';
     b.totalKnown = 0;
-    expect(computeProgress(b).percent).toBeNull();
-    expect(formatProgress(b)).not.toContain('%');
+    expect(computeProgress(countsOf(b)).percent).toBeNull();
+    expect(formatProgress(countsOf(b))).not.toContain('%');
 
     const c = initialState('chatgpt', 'x');
     c.totalSource = 'response-total';
     c.totalKnown = 2;
     c.archived = ['a', 'b', 'c'];
-    expect(computeProgress(c).percent).toBeNull();
-    expect(formatProgress(c)).not.toContain('%');
+    expect(computeProgress(countsOf(c)).percent).toBeNull();
+    expect(formatProgress(countsOf(c))).not.toContain('%');
   });
 
   it('a percentage is allowed only when the denominator really came from the API', () => {
@@ -257,9 +261,9 @@ describe('C11 criterion 3 · never show a percentage when the denominator is unk
     st.totalKnown = 1000;
     st.archived = ids(120);
     st.pending = ids(10, 900);
-    console.log('[C11-3] progress text with a trustworthy denominator =>', formatProgress(st));
-    expect(computeProgress(st).percent).toBe(12);
-    expect(formatProgress(st)).toContain('12%');
+    console.log('[C11-3] progress text with a trustworthy denominator =>', formatProgress(countsOf(st)));
+    expect(computeProgress(countsOf(st)).percent).toBe(12);
+    expect(formatProgress(countsOf(st))).toContain('12%');
   });
 });
 

@@ -103,12 +103,24 @@ export function shortIdOf(id: string): string {
   return id.slice(0, SHORT_ID_LEN);
 }
 
-/** The list read back. Older state objects without these fields ⇒ empty, byte-identical to C19 behaviour. */
-export function failuresOf(state: BackfillState): FailureEntry[] {
+/**
+ * The list read back. Older state objects without these fields ⇒ empty,
+ * byte-identical to C19 behaviour.
+ *
+ * 🔴 W18 · The parameter is the *failure-carrying* part of the state, not a whole
+ *    `BackfillState`: the popup reaches this through the persisted header
+ *    (`BackfillHeader`), which has no debt ids. Both types carry `failures` and
+ *    `failuresDropped`, and naming exactly that here is what lets one function
+ *    serve both without either side pretending to be the other.
+ */
+/** The failure list's two fields, wherever they live: the in-memory state or the persisted header. */
+export type FailureCarrier = Pick<BackfillState, 'failures' | 'failuresDropped'>;
+
+export function failuresOf(state: FailureCarrier): FailureEntry[] {
   return Array.isArray(state.failures) ? state.failures : [];
 }
 
-export function droppedOf(state: BackfillState): number {
+export function droppedOf(state: FailureCarrier): number {
   return typeof state.failuresDropped === 'number' && state.failuresDropped > 0
     ? state.failuresDropped
     : 0;
@@ -153,7 +165,7 @@ export function recordFailure(
 }
 
 /** The user's "acknowledge / clear". `dropped` is zeroed too — acknowledged is acknowledged. */
-export function clearFailures(state: BackfillState): void {
+export function clearFailures(state: FailureCarrier): void {
   state.failures = [];
   state.failuresDropped = 0;
 }

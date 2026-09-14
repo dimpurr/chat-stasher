@@ -32,7 +32,7 @@
  */
 
 import { t } from '../i18n';
-import { haltClassOf, type BackfillState, type HaltRecord } from './types';
+import { haltClassOf, type BackfillHeader, type BackfillState, type HaltRecord } from './types';
 
 /**
  * 🔴 W13 · How long until a transient stop retries, in whole minutes, rounded up
@@ -78,9 +78,53 @@ export interface ProgressView {
   halted: BackfillState['halted'];
 }
 
-export function computeProgress(state: BackfillState): ProgressView {
-  const archived = state.archived.length;
-  const pending = state.pending.length;
+/**
+ * Everything a progress line reads, with the debt set reduced to two counts.
+ *
+ * 🔴 W18 · It used to take a whole `BackfillState` and read `pending.length` /
+ *    `archived.length` itself. After the state split there are two things that can
+ *    answer "how much is owed": the in-memory set (`BackfillState`) and the
+ *    persisted header (`BackfillHeader`, which knows only the counts). Requiring
+ *    both to hand over the same two numbers — instead of teaching this file about
+ *    both shapes — keeps exactly one piece of arithmetic here, and makes the
+ *    "which one did you read" question a compile error if anyone forgets.
+ */
+export interface ProgressInput {
+  totalKnown: number | null;
+  totalSource: BackfillState['totalSource'];
+  enumCursor: { offset: number };
+  pending: number;
+  archived: number;
+  halted: BackfillState['halted'];
+}
+
+/** The in-memory state's counting face. */
+export function countsOf(state: BackfillState): ProgressInput {
+  return {
+    totalKnown: state.totalKnown,
+    totalSource: state.totalSource,
+    enumCursor: state.enumCursor,
+    pending: state.pending.length,
+    archived: state.archived.length,
+    halted: state.halted,
+  };
+}
+
+/** The persisted header's counting face — W18's counterpart of `countsOf`, for the popup's path. */
+export function progressOfHeader(header: BackfillHeader): ProgressInput {
+  return {
+    totalKnown: header.totalKnown,
+    totalSource: header.totalSource,
+    enumCursor: header.enumCursor,
+    pending: header.pendingCount,
+    archived: header.archivedCount,
+    halted: header.halted,
+  };
+}
+
+export function computeProgress(state: ProgressInput): ProgressView {
+  const archived = state.archived;
+  const pending = state.pending;
   const listed = state.enumCursor.offset;
 
   let percent: number | null = null;
@@ -128,7 +172,7 @@ export function computeProgress(state: BackfillState): ProgressView {
  * is still owed, and why there is no denominator. What it does not do is
  * produce a percentage.
  */
-export function formatProgress(state: BackfillState, now: number = Date.now()): string {
+export function formatProgress(state: ProgressInput, now: number = Date.now()): string {
   const view = computeProgress(state);
   // 🔴 W13 · The prefix has to distinguish the two classes, because "[stopped: …]" is
   //    now false for a transient one: that leg has not stopped, it is waiting out a

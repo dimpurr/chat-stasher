@@ -20,7 +20,30 @@
 //    of its own — this only pulls in a pure function and the production draw.
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 
-export const BACKFILL_STATE_VERSION = 1;
+/**
+ * 🔴 W18 · The **persisted layout** version, not the shape of the in-memory state.
+ *
+ * It went 1 → 2 because the state stopped being one record. A v1 record is a whole
+ * `BackfillState` (debt ids included) at one `storage.local` key; a v2 record is a
+ * small header at `cs_backfill_v2:<platform>:<scope>` plus the debt ids in
+ * IndexedDB (`lib/backfill/debt-store.ts`). This constant drives `stateKey()`, so
+ * the storage key moved with it and the popup's `STATE_KEY_PREFIX` — which is
+ * computed from the same constant — followed without a second edit.
+ *
+ * The old key has a name of its own (`legacyStateKey`) and is read, once, by the
+ * migration in `lib/backfill/ledger.ts`.
+ */
+export const BACKFILL_STATE_VERSION = 2;
+
+/**
+ * The layout version this repository wrote before W18 — one record holding
+ * everything, at `cs_backfill_v1:<platform>:<scope>`.
+ *
+ * 🔴 It is a literal and not `BACKFILL_STATE_VERSION - 1`: it names a specific
+ *    layout that existed, and the migration has to keep recognising exactly that
+ *    one however many times the current version is bumped.
+ */
+export const LEGACY_STATE_VERSION = 1;
 
 /**
  * Why it stopped and left a trace. Any one of these means "this leg is no longer
@@ -79,7 +102,23 @@ export type HaltReason =
    * pending nor enters archived, and persists a DetailOutcomeRecord with
    * complete=false.
    */
-  | 'detail-empty-unverified';
+  | 'detail-empty-unverified'
+  /**
+   * 🔴 W18 · **A state record is there, and it is not something we can read.**
+   *
+   * This is a different fact from 'storage-unavailable' and must not borrow its
+   * wording: there the store is missing, here the store answered and what came
+   * back does not parse as either layout.
+   *
+   * The leg then writes **nothing at all** — not a debt record, not the header —
+   * and leaves the unreadable record exactly where it found it. Turning "we could
+   * not read your progress" into "you have no progress" is the single mistake this
+   * project exists to avoid (CLAUDE.md invariant 1), and it is one `?? []` away.
+   *
+   * Permanent: no amount of waiting makes a malformed record parse; a human has to
+   * look at it.
+   */
+  | 'state-unreadable';
 
 /**
  * 🔴 C28 · The two observable outcomes of an "empty" body.
@@ -525,9 +564,147 @@ export function initialState(platform: string, scope: string): BackfillState {
   };
 }
 
-/** The storage key. Same cs_* prefix family as the badge; no new permission. */
+/**
+ * 🔴 W18 · **The header: the state without the debt ids.**
+ *
+ * It is the whole of what `storage.local` holds now, and it is written exactly as
+ * often as the old whole state was — the point of the split is not to write less
+ * often, it is to stop writing the 7,391 ids that did not change.
+ *
+ * `pendingCount` / `archivedCount` are named `…Count` rather than `pending` /
+ * `archived` deliberately: in `BackfillState` those two names are *lists of ids*
+ * and here they would be *numbers*, and a field whose unit depends on which type
+ * you happen to be holding is exactly the silent confusion this repository's
+ * invariants are about. The type checker cannot help you if the name lies.
+ *
+ * 🔴 The counts are **not** the authority. The debt store is, and `loadState`
+ *    re-derives both counts from it on every load (see `lib/backfill/ledger.ts`).
+ *    They are here so the popup can render one line of progress from a plain
+ *    `storage.local` snapshot without opening IndexedDB.
+ *
+ * Optional fields carry the same meaning and the same compatibility rules as the
+ * identical fields on `BackfillState`; they are spelled out here rather than
+ * inherited so that a change to one is forced to be a change to the other.
+ */
+export interface BackfillHeader {
+  v: typeof BACKFILL_STATE_VERSION;
+  platform: string;
+  scope: string;
+  totalKnown: number | null;
+  totalSource: TotalSource;
+  enumCursor: { offset: number; complete: boolean; cursor?: number | null; truncated?: EnumTruncation };
+  /** How many debts were still owed when this header was written. */
+  pendingCount: number;
+  /** How many conversations had been settled when this header was written. */
+  archivedCount: number;
+  detailOutcomes?: DetailOutcomeRecord[];
+  detailToday: DailyCounter;
+  lastFetchAt?: { enumerate: number | null; detail: number | null };
+  failures?: import('./failures').FailureEntry[];
+  failuresDropped?: number;
+  halted: HaltRecord | null;
+}
+
+/** The storage key of the header. Same cs_* prefix family as the badge; no new permission. */
 export function stateKey(platform: string, scope: string): string {
   return `cs_backfill_v${BACKFILL_STATE_VERSION}:${platform}:${scope}`;
+}
+
+/**
+ * The key the pre-W18 layout used. Read once per scope by the migration; never
+ * written by anything else.
+ */
+export function legacyStateKey(platform: string, scope: string): string {
+  return `cs_backfill_v${LEGACY_STATE_VERSION}:${platform}:${scope}`;
+}
+
+/** Split the in-memory state into the header that gets persisted and the id sets that do not. */
+export function headerOf(state: BackfillState): BackfillHeader {
+  return {
+    v: BACKFILL_STATE_VERSION,
+    platform: state.platform,
+    scope: state.scope,
+    totalKnown: state.totalKnown,
+    totalSource: state.totalSource,
+    enumCursor: state.enumCursor,
+    pendingCount: state.pending.length,
+    archivedCount: state.archived.length,
+    detailOutcomes: state.detailOutcomes,
+    detailToday: state.detailToday,
+    lastFetchAt: state.lastFetchAt,
+    failures: state.failures,
+    failuresDropped: state.failuresDropped,
+    halted: state.halted,
+  };
+}
+
+/**
+ * Put a header back together with the id sets that were read from the debt store.
+ * The counts are **assigned from the sets**, never taken from the header: a header
+ * whose counts disagree with the debt store is a header written before a crash,
+ * and the store is the one that knows.
+ */
+export function stateFrom(header: BackfillHeader, pending: string[], archived: string[]): BackfillState {
+  return {
+    v: BACKFILL_STATE_VERSION,
+    platform: header.platform,
+    scope: header.scope,
+    totalKnown: header.totalKnown,
+    totalSource: header.totalSource,
+    enumCursor: header.enumCursor,
+    pending,
+    archived,
+    detailOutcomes: header.detailOutcomes ?? [],
+    detailToday: header.detailToday,
+    lastFetchAt: header.lastFetchAt,
+    failures: header.failures,
+    failuresDropped: header.failuresDropped,
+    halted: header.halted,
+  };
+}
+
+export function isHeader(value: unknown): value is BackfillHeader {
+  if (!value || typeof value !== 'object') return false;
+  // `pending`/`archived` are read off the raw record on purpose: the whole point
+  // of the last two checks is to refuse a record that carries id arrays, and a
+  // typed view of a header has no such properties to look at.
+  const h = value as Partial<BackfillHeader> & Record<string, unknown>;
+  return (
+    h.v === BACKFILL_STATE_VERSION
+    && typeof h.platform === 'string'
+    && typeof h.scope === 'string'
+    && typeof h.pendingCount === 'number'
+    && typeof h.archivedCount === 'number'
+    && !Array.isArray(h.pending)
+    && !Array.isArray(h.archived)
+    && typeof h.enumCursor === 'object'
+    && h.enumCursor !== null
+  );
+}
+
+/**
+ * Is this the layout W18 replaced?
+ *
+ * 🔴 Everything here is required, including the two arrays: a record that merely
+ *    has a `v` of 1 is not a v1 state, and the difference matters — this predicate
+ *    is what decides whether the migration may write the debt store, and a false
+ *    positive would mean replacing real ids with ones read out of a shape we
+ *    guessed at.
+ */
+export type LegacyBackfillState = Omit<BackfillState, 'v'> & { v: typeof LEGACY_STATE_VERSION };
+
+export function isLegacyState(value: unknown): value is LegacyBackfillState {
+  if (!value || typeof value !== 'object') return false;
+  const s = value as Partial<LegacyBackfillState>;
+  return (
+    s.v === LEGACY_STATE_VERSION
+    && typeof s.platform === 'string'
+    && typeof s.scope === 'string'
+    && Array.isArray(s.pending)
+    && Array.isArray(s.archived)
+    && typeof s.enumCursor === 'object'
+    && s.enumCursor !== null
+  );
 }
 
 export function dayKeyOf(nowMs: number): string {

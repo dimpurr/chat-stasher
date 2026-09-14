@@ -39,6 +39,7 @@ import {
   type TabSend,
 } from '../lib/backfill/tab-port';
 import type { CapturedFetch } from '../lib/contract';
+import type { BackfillState } from '../lib/backfill/types';
 
 const ORIGIN = 'https://chatgpt.com';
 const LIST_PATH = '/backend-api/conversations';
@@ -267,11 +268,24 @@ async function enableBackfill(): Promise<void> {
   await setBackfillEnabled(browserLocalStore(), true);
 }
 
-/** The one `cs_backfill_v1:*` state record this round wrote, whatever the scope key turned out to be. */
-function backfillState(): any {
-  const key = Object.keys(store).find((k) => k.startsWith('cs_backfill_v1:chatgpt:'));
+/**
+ * The debt set this round wrote, for whichever scope key it turned out to use.
+ *
+ * 🔴 W18 · Read through the production load path (header at `stateKey(...)` plus the
+ *    ids from the debt store), because a single `storage.local` record no longer
+ *    holds the ids. It still finds the scope the same way — by looking for the
+ *    header the round wrote — so "which scope key was used" stays the test's
+ *    question rather than something this helper decides.
+ */
+async function backfillState(): Promise<BackfillState> {
+  const key = Object.keys(store).find((k) => k.startsWith('cs_backfill_v'));
   expect(key, 'the round must have written a backfill state record').toBeDefined();
-  return store[key!];
+  const scope = key!.split(':').slice(2).join(':');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  const { loadState } = await import('../lib/backfill/engine');
+  const st = browserLocalStore();
+  if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
+  return await loadState(st, 'chatgpt', scope);
 }
 
 beforeEach(async () => {
@@ -306,7 +320,7 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
       stopped: first.report?.stopped,
       halt: first.report?.halted,
       detailAttempts: detailAttempts.length,
-      pending: backfillState().pending.length,
+      pending: (await backfillState()).pending.length,
     });
 
     // It really ran a round (this is the round that used to never finish).
@@ -326,8 +340,8 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     // 🔴 The debt is still owed: the body was never delivered, so nothing may be
     //    archived and nothing may leave `pending`.
     expect(detailAttempts.length).toBe(1);
-    expect(backfillState().archived).toEqual([]);
-    expect(backfillState().pending).toEqual(IDS);
+    expect((await backfillState()).archived).toEqual([]);
+    expect((await backfillState()).pending).toEqual(IDS);
 
     // ---- round 2: immediately after, with no waiting at all ----
     //
@@ -354,8 +368,8 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     expect(detailAttempts.length, 'a waiting round must not touch the platform').toBe(1);
 
     // Nothing was silently struck off across either round.
-    expect(backfillState().archived).toEqual([]);
-    expect(backfillState().pending).toEqual(IDS);
+    expect((await backfillState()).archived).toEqual([]);
+    expect((await backfillState()).pending).toEqual(IDS);
   });
 
   it('🔴 a later round really runs again after the halt is cleared (the lock is not merely idle)', async () => {
@@ -368,10 +382,17 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     expect(mod.lastBackfillTick()!.report.halted).toMatchObject({ reason: 'transport-error' });
 
     // A human looked at the trace and cleared it; this time the page answers.
-    const state = backfillState();
+    // 🔴 W18 · "Cleared by hand" means rewriting the header, which is the only part of
+    //    the ledger that carries `halted` — `saveHeader` is the production function
+    //    for exactly that, and writing a whole state at the key would now produce a
+    //    record the loader refuses to read.
+    const state = await backfillState();
     state.halted = null;
-    const key = Object.keys(store).find((k) => k.startsWith('cs_backfill_v1:chatgpt:'))!;
-    store[key] = state;
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { saveHeader } = await import('../lib/backfill/ledger');
+    const st = browserLocalStore();
+    if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
+    await saveHeader(st, state);
     detailAttempts.length = 0;
     mod.configureBackfillTransport(tabHttpPort(1, async (_id, msg) => {
       const m = msg as { url: string };

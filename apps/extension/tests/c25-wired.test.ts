@@ -66,6 +66,20 @@ const fakeBrowser: any = {
         }
         for (const listener of storageChangeListeners) listener(changes, 'local');
       },
+      // 🔴 W18 · `remove` is part of the `browser.storage.local` contract, and
+      //    lib/backfill/store.ts now requires it before it will hand out a store at
+      //    all (the legacy-state migration's last step deletes a key). A fake that
+      //    models only get/set would make every tick report 'no-store' — a test
+      //    failing on an incomplete fake rather than on the code.
+      async remove(keys: string | string[]) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        const changes: Record<string, { newValue?: unknown }> = {};
+        for (const key of list) {
+          delete stored[key];
+          changes[key] = { newValue: undefined };
+        }
+        for (const listener of storageChangeListeners) listener(changes, 'local');
+      },
     },
   },
   alarms: {

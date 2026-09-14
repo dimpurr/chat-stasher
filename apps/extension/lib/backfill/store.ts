@@ -18,11 +18,19 @@
 export interface BackfillStore {
   load(key: string): Promise<unknown>;
   save(key: string, value: unknown): Promise<void>;
+  /**
+   * 🔴 W18 · Remove a key outright. Required, not optional: the one caller is the
+   * legacy-state migration's last step, and a port that quietly did not implement
+   * it would leave the pre-W18 record on disk forever while every test stayed
+   * green. An optional method would make "the old key was removed" unfalsifiable.
+   */
+  remove(key: string): Promise<void>;
 }
 
 type LocalArea = {
   get: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
   set: (values: Record<string, unknown>) => Promise<void>;
+  remove: (keys: string | string[]) => Promise<void>;
 };
 
 type ExtApi = { runtime?: { id?: string }; storage?: { local?: unknown } };
@@ -56,7 +64,15 @@ function extensionApi(): ExtApi | null {
 
 function localArea(): LocalArea | null {
   const area = extensionApi()?.storage?.local as LocalArea | undefined;
-  if (!area || typeof area.get !== 'function' || typeof area.set !== 'function') return null;
+  if (
+    !area
+    || typeof area.get !== 'function'
+    || typeof area.set !== 'function'
+    // W18: `remove` is part of the contract too — see BackfillStore.remove. A store
+    // that cannot remove a key is not one the migration may run against, and it
+    // must be refused here rather than discovered half way through the migration.
+    || typeof area.remove !== 'function'
+  ) return null;
   return area;
 }
 
@@ -71,6 +87,9 @@ export function browserLocalStore(): BackfillStore | null {
     },
     async save(key: string, value: unknown): Promise<void> {
       await area.set({ [key]: value });
+    },
+    async remove(key: string): Promise<void> {
+      await area.remove(key);
     },
   };
 }
@@ -107,6 +126,10 @@ export function memoryStore(seed: Record<string, unknown> = {}): BackfillStore &
     },
     async save(key: string, value: unknown): Promise<void> {
       data[key] = JSON.parse(JSON.stringify(value));
+      this.writes += 1;
+    },
+    async remove(key: string): Promise<void> {
+      delete data[key];
       this.writes += 1;
     },
   };

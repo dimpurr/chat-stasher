@@ -16,6 +16,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
+import { stateKey, type BackfillState } from '../lib/backfill/types';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 // ---------------------------------------------------------------------------
@@ -134,10 +135,28 @@ async function bootAndDispatch(payload: CapturedFetch): Promise<{ mod: any; resp
   return { mod, responded };
 }
 
-const STATE_KEY = 'cs_backfill_v1:chatgpt:acct-fixture-1';
+/**
+ * 🔴 W18 · The debt ids no longer live in the one `storage.local` record, so this
+ *    accessor can no longer be a property read: it goes through the **same load
+ *    path the engine uses** (header at `stateKey`, ids from the debt store —
+ *    lib/backfill/ledger.ts) and hands back the assembled state. The assertions
+ *    below are unchanged, which is the point: the ledger's content did not move,
+ *    only where it is kept.
+ *
+ * It is async for that reason, and the scope is a parameter rather than a raw
+ * storage key, because a storage key is no longer the thing that names a debt set.
+ */
+async function stateOf(scope = 'acct-fixture-1'): Promise<BackfillState> {
+  const { loadState } = await import('../lib/backfill/engine');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  const st = browserLocalStore();
+  if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
+  return await loadState(st, 'chatgpt', scope);
+}
 
-function stateOf(key = STATE_KEY): any {
-  return store[key] ?? null;
+/** The storage keys that name a debt set, whatever the layout version — used for "nothing was created at all". */
+function stateKeys(): string[] {
+  return Object.keys(store).filter((k) => k.startsWith('cs_backfill_v'));
 }
 
 function detailCalls(calls: string[]): string[] {
@@ -211,9 +230,9 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     //    is unchanged; what changed is how many pages one tick may read.
     expect(listUrls.length).toBe(1);            // 1 page × pageSize 2 = 2 rows named so far
 
-    const s1 = stateOf();
+    const s1 = await stateOf();
     console.log('[C17-1] evidence B — the debt set (read back out of storage):', {
-      key: STATE_KEY, pending: s1.pending, archived: s1.archived,
+      key: stateKey('chatgpt', 'acct-fixture-1'), pending: s1.pending, archived: s1.archived,
       totalKnown: s1.totalKnown, totalSource: s1.totalSource, enumCursor: s1.enumCursor,
     });
     // 🔴 W10 · `complete: true` used to be reached here, via `offset >= total`.
@@ -236,7 +255,7 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     const trail: Array<{ tick: number; pending: number; archived: number; progress: string }> = [];
     for (let i = 2; i <= 4; i += 1) {
       await bootAndDispatch(liveCapture());
-      const s = stateOf();
+      const s = await stateOf();
       trail.push({
         tick: i, pending: s.pending.length, archived: s.archived.length,
         progress: mod.lastBackfillTick()!.report!.progress,
@@ -252,7 +271,7 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     //    and the moment the list was finished the ticks stopped asking for pages
     //    at all — tick 4 reads no page (which is why `complete` is checked on the
     //    state after tick 3, and again below after tick 4).
-    expect(stateOf().enumCursor.complete).toBe(true);
+    expect((await stateOf()).enumCursor.complete).toBe(true);
     const allListUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
     // 3 in total, over 4 ticks: offset=0, offset=2, the confirming empty page at
     // offset=4, and nothing at all on tick 4.
@@ -283,7 +302,7 @@ describe('C17 task 2 · counter-case 1: a "browser restart" mid-way (in-memory s
     mod.configureBackfillTransport(server1.port);
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
-    const before = stateOf();
+    const before = await stateOf();
     console.log('[C17-2.1] before the restart:', { archived: before.archived, pending: before.pending });
     expect(before.archived.length).toBe(2);
 
@@ -299,7 +318,7 @@ describe('C17 task 2 · counter-case 1: a "browser restart" mid-way (in-memory s
     mod.configureBackfillTransport(server2.port);
 
     await bootAndDispatch(liveCapture());
-    const after = stateOf();
+    const after = await stateOf();
     console.log('[C17-2.1] the bodies the first tick after the restart fetched:', detailCalls(server2.calls));
     console.log('[C17-2.1] after the restart:', { archived: after.archived, pending: after.pending });
 
@@ -326,7 +345,7 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
     await bootAndDispatch(liveCapture());
-    const beforeTrip = stateOf();
+    const beforeTrip = await stateOf();
     expect(beforeTrip.archived.length).toBe(1);
 
     // 🔴 W2 · Really create this pause: the host goes entirely offline and the next debt cannot be delivered.
@@ -335,11 +354,29 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     hostDown = true;
     await bootAndDispatch(liveCapture());
     console.log('[C17-2.2] tick reason while the host is absent =', mod.lastBackfillTick()?.reason);
-    const paused = stateOf();
+    const paused = await stateOf();
     console.log('[C17-2.2] debts after the pause:', { archived: paused.archived.length, pending: paused.pending.length });
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
     expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
-    expect(paused.pending).toEqual(beforeTrip.pending);              // the debts are untouched
+    /**
+     * 🔴 W18 · These two used to be `toEqual` against `beforeTrip`, and **both were
+     *    vacuous**. `stateOf()` handed back the live object the fake store held,
+     *    the engine mutated that same array in place, and so
+     *    `beforeTrip.pending === paused.pending` was literally true — the assertion
+     *    compared an array with itself and could not fail. (Verified on the
+     *    pre-W18 code before changing anything: printing
+     *    `beforeTrip.pending === paused.pending` there says `true`.)
+     *
+     *    It went red as soon as the accessor began returning a fresh snapshot,
+     *    which is what an assertion is meant to compare. So the **premise** was
+     *    wrong, not the engine: a tick legitimately reads one more list page while
+     *    the host is down, and those newly named conversations are owed. What the
+     *    criterion actually claims is asserted now, and only that:
+     *      · not one debt that was owed stopped being owed;
+     *      · nothing passed itself off as archived;
+     *      · and none was judged dead.
+     */
+    expect(paused.pending).toEqual(expect.arrayContaining(beforeTrip.pending));
     expect(paused.archived).toEqual(beforeTrip.archived);            // not one passed itself off as a success
     expect(paused.failures ?? []).toEqual([]);                       // and none was judged dead
 
@@ -357,7 +394,7 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     // The host comes back ⇒ the next heartbeat says hello first and only resumes on success; then it carries on from the breakpoint.
     hostDown = false;
     await bootAndDispatch(liveCapture());
-    const resumed = stateOf();
+    const resumed = await stateOf();
     console.log('[C17-2.2] after resuming:', { reason: mod.lastBackfillTick()?.reason, archived: resumed.archived });
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
     expect(store[HOST_PAUSE_KEY]).toBeNull();                        // the pause was cleared
@@ -386,7 +423,7 @@ describe('C17 task 2 · counter-case 3: enumeration gives no total', () => {
     expect(no).not.toContain('%');
     expect(no).toContain('total unknown');
 
-    const s = stateOf('cs_backfill_v1:chatgpt:acct-no-total');
+    const s = await stateOf('acct-no-total');
     console.log('[C17-2.3] the state with no total:', { totalKnown: s.totalKnown, totalSource: s.totalSource });
     expect(s.totalSource).toBe('unknown');
   });
@@ -423,7 +460,7 @@ describe('C17 task 2 · counter-case 4: the same conversation enumerated twice',
     mod.configureBackfillTransport(server.port);
     for (let i = 0; i < 4; i += 1) await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     console.log('[C17-2.4] the state when enumeration carries a duplicate:', { pending: s.pending, archived: s.archived });
     const dupFiles = finalWrites().filter((f) => f.includes(UUIDS[0]!));
     console.log('[C17-2.4] the final files for UUIDS[0]:', dupFiles);
@@ -450,7 +487,7 @@ describe('C17 task 3 · seam A: are the debt key and the on-disk file name the s
     mod.configureBackfillTransport(server.port);
     await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     const files = finalWrites().filter((f) => f.includes('shortid'));
     console.log('[C17-3.A] detail requests:', detailCalls(server.calls));
     console.log('[C17-3.A] the files written down related to shortid:', files);
@@ -488,7 +525,7 @@ describe('C17 task 3 · seam A: are the debt key and the on-disk file name the s
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     const files = finalWrites().filter((f) => f.includes('deadbeef01'));
     console.log('[C17-3.A2] archived:', s.archived);
     console.log('[C17-3.A2] failure list:', s.failures);
@@ -585,7 +622,7 @@ describe('C17 task 3 · seam C: the progress denominator comes from enumeration 
 
     // First let enumeration finish and clear 1 debt (normal)
     await bootAndDispatch(liveCapture());
-    const ok = stateOf();
+    const ok = await stateOf();
     expect(ok.archived.length).toBe(1);
 
     // Now the host goes offline ⇒ the next one cannot be delivered.
@@ -596,7 +633,7 @@ describe('C17 task 3 · seam C: the progress denominator comes from enumeration 
     hostDown = true;
     await bootAndDispatch(liveCapture());
 
-    const after = stateOf();
+    const after = await stateOf();
     console.log('[C17-3.C] when the host is unreachable:', {
       archived: after.archived.length, pending: after.pending.length,
       halted: after.halted, lastTickReason: mod.lastBackfillTick()?.reason,
@@ -625,6 +662,6 @@ describe('C17 task 4 · the runtime', () => {
     await bootAndDispatch(liveCapture());
     console.log('[C17-4] the tick with no transport injected:', mod.lastBackfillTick());
     expect(mod.lastBackfillTick()?.reason).toBe('no-http-port');
-    expect(stateOf()).toBeNull();                 // the debt set was never created at all
+    expect(stateKeys()).toEqual([]);              // the debt set was never created at all
   });
 });

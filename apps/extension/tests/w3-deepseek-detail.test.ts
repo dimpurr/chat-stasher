@@ -27,7 +27,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
+import { loadState, runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey } from '../lib/backfill/types';
 import { extractSessionId, getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../lib/contract';
@@ -273,9 +273,9 @@ describe('W8-3 · a listed conversation really is carried through to the sink no
     expect(report.state.pending).toEqual([]);
     expect(report.failedThisRun).toEqual([]);
     // And the ledger on disk says the same thing, so a restart cannot re-fetch it.
-    const persisted = await store.load(stateKey('deepseek', SCOPES.round)) as {
-      pending: string[]; archived: string[];
-    };
+    // 🔴 W18 · Through the production load path: `stateKey(...)` holds the header
+    //    alone now, and the ids are in the debt store.
+    const persisted = await loadState(store, 'deepseek', SCOPES.round);
     expect(persisted.archived).toEqual([ID]);
     expect(persisted.pending).toEqual([]);
   });
@@ -341,9 +341,8 @@ describe('W8-4 · "we could not read it" may never be recorded as "we read it"',
     expect(report.halted?.reason).toBe('shape-changed');
     // The trace names the platform whose shape changed, and it is persisted rather than only logged.
     expect(report.halted?.detail).toContain('deepseek');
-    const persisted = await store.load(stateKey('deepseek', SCOPES.shape)) as {
-      halted?: { reason: string }; pending: string[]; archived: string[];
-    };
+    // 🔴 W18 · Production load path (header + debt store), as above.
+    const persisted = await loadState(store, 'deepseek', SCOPES.shape);
     expect(persisted.halted?.reason).toBe('shape-changed');
 
     // 🔴 The three things that must NOT have happened: nothing delivered, nothing archived, nothing cleared.

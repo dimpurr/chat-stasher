@@ -33,17 +33,16 @@ import {
   DEFAULT_LIST_LIMIT,
   type BackfillRequestInit,
 } from './enumerate';
-import { formatProgress } from './progress';
+import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, type RandomFn } from './random';
 import type { BackfillStore } from './store';
+import { openLedger, type Ledger } from './ledger';
 import {
-  BACKFILL_STATE_VERSION,
   dayKeyOf,
   haltClassOf,
   initialState,
   isTransientReason,
-  stateKey,
   transientRetryDelayMs,
   type BackfillState,
   type DetailOutcomeRecord,
@@ -259,34 +258,32 @@ export interface RunReport {
   state: BackfillState;
 }
 
-function isBackfillState(value: unknown): value is BackfillState {
-  if (!value || typeof value !== 'object') return false;
-  const s = value as Partial<BackfillState>;
-  return (
-    s.v === BACKFILL_STATE_VERSION &&
-    Array.isArray(s.pending) &&
-    Array.isArray(s.archived) &&
-    typeof s.enumCursor === 'object'
-  );
-}
-
+/**
+ * Read one scope's state, migrating the pre-W18 record if that is what is there.
+ *
+ * 🔴 W18 · This used to be "read the one key, or start from empty if it did not
+ *    parse". It is now three outcomes that must not be collapsed (CLAUDE.md
+ *    invariant 1): nothing recorded (⇒ an empty set, which is a measurement), a
+ *    readable record (⇒ its content), and **a record we cannot read** (⇒ a refusal
+ *    that writes nothing and touches nothing — never an empty set).
+ *
+ * The debt ids no longer live at this key; `lib/backfill/ledger.ts` owns the split
+ * and the migration. This function is the read-only convenience wrapper the tests
+ * and the caller use when they want the assembled state and nothing else.
+ */
 export async function loadState(
   store: BackfillStore,
   platform: string,
   scope: string,
 ): Promise<BackfillState> {
-  const raw = await store.load(stateKey(platform, scope));
-  // A version mismatch starts a fresh empty set rather than forcing the old structure to fit.
-  if (!isBackfillState(raw)) return initialState(platform, scope);
-  // C28: v1 states have no such column; reading one back fills in an empty array, so
-  // every later write-back keeps the empty-body outcomes together with pending.
-  // The `optional` is only to accommodate old states' TypeScript shape.
-  raw.detailOutcomes ??= [];
-  return raw;
-}
-
-async function persist(store: BackfillStore, state: BackfillState): Promise<void> {
-  await store.save(stateKey(state.platform, state.scope), state);
+  const opened = await openLedger(store, platform, scope);
+  if (opened.ok) return opened.state;
+  // Refused: hand back a carrier that carries the refusal and **no** debt ids. The
+  // caller decides what to do; it is never silently an empty debt set, because
+  // nothing here is written and no empty set is handed out under the real key.
+  const carrier = initialState(platform, scope);
+  carrier.halted = { reason: opened.refusal.reason, at: Date.now(), detail: opened.refusal.detail };
+  return carrier;
 }
 
 /** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
@@ -327,7 +324,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       skippedAlreadyArchived: 0,
       skippedAlreadyPending: 0,
       detailOutcomes: state.detailOutcomes ?? [],
-      progress: formatProgress(state),
+      progress: formatProgress(countsOf(state)),
       halted: state.halted,
       enumTruncated: null,
       paceTrace: emptyTrace,
@@ -336,7 +333,42 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   }
 
   const store = opts.store;
-  const state = await loadState(store, opts.platform, opts.scope);
+
+  // 🔴 W18 · Open the ledger **before anything else**. A state record that cannot be
+  //    read is a refusal to run, not an empty debt set: running against an empty
+  //    set would re-enumerate the whole account and re-fetch bodies that are
+  //    already archived, and — worse — would write that empty set back over the
+  //    record it could not read. Nothing is written on this path.
+  const opened = await openLedger(store, opts.platform, opts.scope);
+  if (!opened.ok) {
+    const refused = initialState(opts.platform, opts.scope);
+    refused.halted = {
+      reason: opened.refusal.reason,
+      at: clock.now(),
+      detail: opened.refusal.detail,
+    };
+    console.warn(`[chat-stasher] backfill halted: ${opened.refusal.reason} — ${opened.refusal.detail}`);
+    return {
+      stopped: 'halted',
+      enumeratedPages: 0,
+      newDebts: 0,
+      archivedThisRun: [],
+      failedThisRun: [],
+      skippedAlreadyArchived: 0,
+      skippedAlreadyPending: 0,
+      detailOutcomes: refused.detailOutcomes ?? [],
+      progress: formatProgress(countsOf(refused), clock.now()),
+      halted: refused.halted,
+      enumTruncated: null,
+      paceTrace: emptyTrace,
+      state: refused,
+    };
+  }
+  const { state, ledger } = opened;
+  /** Persist the header, plus only the debt ids that actually moved (lib/backfill/ledger.ts). */
+  const persist = async (s: BackfillState): Promise<void> => {
+    await ledger.save(s);
+  };
 
   // 🔴 C19 · BUG-3: seed both pacers with the persisted "moment of the last fetch",
   // so the interval takes effect across ticks.
@@ -428,7 +460,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     } else {
       state.halted = { reason, at, detail };
     }
-    await persist(store, state);
+    await persist(state);
     // Only the technical detail is logged, never a conversation body.
     console.warn(
       `[chat-stasher] backfill halted: ${reason} — ${detail}`
@@ -453,7 +485,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     detailOutcomes,
     // 🔴 W13: the engine's own clock, so a waiting round's "about M minutes" is
     //    measured from the same instant the backoff itself was decided on.
-    progress: formatProgress(state, clock.now()),
+    progress: formatProgress(countsOf(state), clock.now()),
     halted: state.halted,
     enumTruncated,
     paceTrace: { enumerate: enumPacer.waits, detail: detailPacer.waits },
@@ -489,7 +521,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // Due: the streak continues across the resume, so the ladder does not restart.
     transientStreak = state.halted.attempts ?? 1;
     state.halted = null;
-    await persist(store, state);
+    await persist(state);
     console.warn(
       `[chat-stasher] backfill resuming after a transient stop`
       + ` (attempt ${transientStreak}; the debts were never touched)`,
@@ -732,7 +764,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * "the list is finished" is never said on the strength of a number this
      * endpoint has already printed wrongly.
      */
-    await persist(store, state);
+    await persist(state);
   }
 
   // 🔴 C26 · **Before issuing any body request**, ask: have we actually written this
@@ -792,7 +824,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     //    stored day would stay yesterday's, and the next run would roll again —
     //    i.e. a restart loop could keep re-rolling upward until it hit 200. One
     //    write per platform-scope per local day buys the "drawn once, kept" rule.
-    await persist(store, state);
+    await persist(state);
   }
   const planCap = pace.detail.maxPerDay;
   const dailyCap = planCap === null
@@ -816,7 +848,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // The cost is one extra storage.local write per debt (about every 20 seconds),
     // which is negligible.
     anchor('detail', detailPacer.lastAt);
-    await persist(store, state);
+    await persist(state);
     const url = detailUrlOf(opts.origin, id);
     const init = detailRequestInit(plan, opts.origin, id);
     let res: HttpResponse;
@@ -868,7 +900,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       settleDebt(state, id);
       archivedThisRun.push(id);
       state.detailToday.count += 1;
-      await persist(store, state);
+      await persist(state);
       continue;
     }
 
@@ -914,7 +946,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       //    (the count += 1 below), and then this leg stops at once — the next
       //    heartbeat asks the host whether it is there first.
       state.detailToday.count += 1;
-      await persist(store, state);
+      await persist(state);
       console.warn(`[chat-stasher] backfill paused: ${verdict.reason} — ${verdict.detail}`);
       return report('host-unavailable');
     }
@@ -937,7 +969,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // for failures.
     state.detailToday.count += 1;
     // Persist immediately after clearing a debt (or recording a failure) — the whole secret of stop-and-resume is this one line.
-    await persist(store, state);
+    await persist(state);
   }
 
   return report('queue-empty');

@@ -18,6 +18,7 @@ import {
   parsePerplexityListPage,
 } from '../lib/backfill/enumerate';
 import type { Clock } from '../lib/backfill/pace';
+import { stateKey } from '../lib/backfill/types';
 
 const ORIGIN = 'https://www.perplexity.ai';
 const LIMIT = 2;
@@ -119,7 +120,7 @@ describe('C27-2 · with no termination field, an empty page and a short page mus
     expect(report.enumTruncated).toBe('empty-page-inferred');
     expect(report.state.enumCursor.truncated).toBe('empty-page-inferred');
     expect(report.state.enumCursor.complete).toBe(false);
-    const persisted = await store.load('cs_backfill_v1:perplexity:acct-empty-page') as {
+    const persisted = await store.load(stateKey('perplexity', 'acct-empty-page')) as {
       enumCursor: { complete: boolean; truncated?: string };
     };
     expect(persisted.enumCursor).toEqual({
@@ -157,7 +158,7 @@ describe('C27-3 · shape drift and "no conversations" must be distinguishable', 
     expect(report.state.enumCursor.complete).toBe(false);
     expect(report.state.pending).toEqual([]);
     expect(report.stopped).not.toBe('queue-empty');
-    expect((await store.load('cs_backfill_v1:perplexity:acct-shape') as any).halted.reason)
+    expect((await store.load(stateKey('perplexity', 'acct-shape')) as any).halted.reason)
       .toBe('shape-changed');
   });
 

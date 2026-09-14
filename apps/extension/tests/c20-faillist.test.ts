@@ -22,6 +22,7 @@ import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { headerOf, type BackfillState } from '../lib/backfill/types';
 
 // ---------------------------------------------------------------------------
 // A fake browser (isomorphic to c17). Storage survives resetModules = the model of a "browser restart".
@@ -108,8 +109,18 @@ async function bootAndDispatch(payload: CapturedFetch): Promise<any> {
   return mod;
 }
 
-const STATE_KEY = 'cs_backfill_v1:chatgpt:acct-fixture-1';
-const stateOf = (): any => store[STATE_KEY] ?? null;
+/**
+ * 🔴 W18 · The debt set as the engine reads it back: the header at `stateKey(...)`
+ *    plus the ids from the debt store (lib/backfill/ledger.ts). It cannot be a
+ *    property read of one `storage.local` key any more — the ids are not in it.
+ */
+async function stateOf(): Promise<BackfillState> {
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  const { loadState } = await import('../lib/backfill/engine');
+  const st = browserLocalStore();
+  if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
+  return await loadState(st, 'chatgpt', 'acct-fixture-1');
+}
 
 /** Render once down the popup's real chain (no second renderer is written). */
 async function popupNow(): Promise<{ view: any; text: string }> {
@@ -169,7 +180,7 @@ describe('C20-1 · the sink succeeds ⇒ the debt is cleared and the failure lis
 
     await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     const files = deliveredFiles();
     console.log('[C20-1] the final files written down:', files.filter((f) => f.includes('b1111111')));
     console.log('[C20-1] debt ledger:', { pending: s.pending, archived: s.archived, failures: s.failures });
@@ -178,7 +189,7 @@ describe('C20-1 · the sink succeeds ⇒ the debt is cleared and the failure lis
     expect(files.some((f) => f.includes(id))).toBe(true);   // it really was written out
     expect(s.archived).toEqual([id]);                        // the debt was cleared
     expect(s.pending).toEqual([]);
-    expect(s.failures).toEqual([]);                          // 🔴 the failure list is empty
+    expect(s.failures).toEqual([]);                          // 🔴 the failure list is empty — and it really is `[]`, not absent
     expect(s.failuresDropped).toBe(0);
     expect(mod.lastBackfillTick()!.report!.failedThisRun).toEqual([]);
 
@@ -204,12 +215,12 @@ describe('C20-2 · the sink fails ⇒ the debt is not cleared, it enters the fai
 
     await bootAndDispatch(liveCapture());
 
-    const s = stateOf();
+    const s = await stateOf();
     const files = deliveredFiles();
     console.log('[C20-2] detail requests:', server.calls.filter((u) => u.includes('/conversation/')));
     console.log('[C20-2] files written down related to shortid:', files.filter((f) => f.includes('shortid')));
     console.log('[C20-2] debt ledger:', { pending: s.pending, archived: s.archived });
-    console.log('[C20-2] 🔴 a real sample failure-list entry:', JSON.stringify(s.failures, null, 2));
+    console.log('[C20-2] 🔴 a real sample failure-list entry:', JSON.stringify(s.failures ?? [], null, 2));
     console.log('[C20-2] progress text:', mod.lastBackfillTick()!.report!.progress);
 
     // (a) the body really was fetched, but not one byte was written down
@@ -222,14 +233,18 @@ describe('C20-2 · the sink fails ⇒ the debt is not cleared, it enters the fai
     expect(mod.lastBackfillTick()!.report!.progress).not.toContain('100%');
 
     // (c) 🔴 it enters the failure list
-    expect(s.failures).toHaveLength(1);
-    expect(s.failures[0].shortId).toBe('shortid');
-    expect(s.failures[0].reason).toBe('not-saved');
-    expect(s.failures[0].platform).toBe('chatgpt');
-    expect(typeof s.failures[0].at).toBe('number');
+    // 🔴 W18 · `failures` is optional on the state type (older records have none), so
+    //    the reads below name the list once, as `[]` when there is none — the same
+    //    "absent means empty" rule `failuresOf` implements for the popup.
+    const failureList = s.failures ?? [];
+    expect(failureList).toHaveLength(1);
+    expect(failureList[0]!.shortId).toBe('shortid');
+    expect(failureList[0]!.reason).toBe('not-saved');
+    expect(failureList[0]!.platform).toBe('chatgpt');
+    expect(typeof failureList[0]!.at).toBe('number');
     // 🔴 Self-evidently storing nothing sensitive: the entry has only these four fields, no body, no URL.
-    expect(Object.keys(s.failures[0]).sort()).toEqual(['at', 'platform', 'reason', 'shortId']);
-    const blob = JSON.stringify(s.failures);
+    expect(Object.keys(failureList[0]!).sort()).toEqual(['at', 'platform', 'reason', 'shortId']);
+    const blob = JSON.stringify(failureList);
     expect(blob).not.toContain('synthetic body');        // no conversation body
     expect(blob).not.toContain('http');                  // no URL at all
     expect(blob).not.toContain('chatgpt.com');
@@ -238,13 +253,13 @@ describe('C20-2 · the sink fails ⇒ the debt is not cleared, it enters the fai
     expect(s.pending).toEqual([]);
     const detailsBefore = server.calls.filter((u) => u.includes('/conversation/')).length;
     await bootAndDispatch(liveCapture());
-    const s2 = stateOf();
+    const s2 = await stateOf();
     console.log('[C20-2] after one more kick:', {
       detailCalls: server.calls.filter((u) => u.includes('/conversation/')).length,
-      failures: s2.failures.length, archived: s2.archived,
+      failures: (s2.failures ?? []).length, archived: s2.archived,
     });
     expect(server.calls.filter((u) => u.includes('/conversation/')).length).toBe(detailsBefore);
-    expect(s2.failures).toHaveLength(1);                 // no retry, and no double entry
+    expect(s2.failures ?? []).toHaveLength(1);           // no retry, and no double entry
 
     // (e) 🔴 the popup wording changes — it may not be shown as all fine
     const { view, text } = await popupNow();
@@ -282,6 +297,7 @@ describe('C20-3 · the failure list hitting its cap ⇒ drop the oldest and reco
   it('55 failures: the list keeps the newest 50, dropped = 5, and the wording says so', async () => {
     const { runBackfill } = await import('../lib/backfill/engine');
     const { memoryStore } = await import('../lib/backfill/store');
+    const { loadState } = await import('../lib/backfill/engine');
     const { MAX_FAILURES } = await import('../lib/backfill/failures');
     const { renderPopup, popupText, NO_FAILURES } = await import('../lib/popup-view');
 
@@ -307,26 +323,33 @@ describe('C20-3 · the failure list hitting its cap ⇒ drop the oldest and reco
       sink: async () => ({ saved: false, reason: 'synthetic failure' }),
     });
 
-    const state: any = st.data['cs_backfill_v1:chatgpt:cap-fixture'];
+    // 🔴 W18 · Through the production load path: the ids are in the debt store now.
+    const state = await loadState(st, 'chatgpt', 'cap-fixture');
+    // `failures` is optional on the state type (a record written before C20 has none);
+    // the ledger's list is `[]` in that case, which is the same rule `failuresOf` uses.
+    const failureList = state.failures ?? [];
     console.log('[C20-3] cap:', MAX_FAILURES, '· fed in:', n);
-    console.log('[C20-3] list length:', state.failures.length, '· dropped:', state.failuresDropped);
-    console.log('[C20-3] the first two entries:', state.failures.slice(0, 2));
-    console.log('[C20-3] the last two entries:', state.failures.slice(-2));
+    console.log('[C20-3] list length:', failureList.length, '· dropped:', state.failuresDropped);
+    console.log('[C20-3] the first two entries:', failureList.slice(0, 2));
+    console.log('[C20-3] the last two entries:', failureList.slice(-2));
 
     expect(report.stopped).toBe('queue-empty');
     expect(state.archived).toEqual([]);                        // not one passed itself off as a success
     expect(state.pending).toEqual([]);                         // and none was left behind for a retry
-    expect(state.failures).toHaveLength(MAX_FAILURES);
+    expect(failureList).toHaveLength(MAX_FAILURES);
     expect(state.failuresDropped).toBe(5);
     // 🔴 The oldest are dropped: what remains is fail-005 .. fail-054 (the newest 50).
-    expect(state.failures[0].shortId).toBe('fail-005');
-    expect(state.failures[MAX_FAILURES - 1].shortId).toBe('fail-054');
+    expect(failureList[0]!.shortId).toBe('fail-005');
+    expect(failureList[MAX_FAILURES - 1]!.shortId).toBe('fail-054');
 
     // 🔴 Never a silent truncation: the wording must say "5 older one(s) are no longer on it".
+    // 🔴 W18 · The popup renders what storage holds, which is the header — `headerOf`
+    //    is the production function that produces exactly that record, so the view is
+    //    built from the same shape the popup will really be handed.
     const view = renderPopup({
-      enabled: true, block: null, state,
+      enabled: true, block: null, state: headerOf(state),
       target: { platform: 'chatgpt', scope: 'cap-fixture' },
-      failures: { entries: state.failures, dropped: state.failuresDropped },
+      failures: { entries: failureList, dropped: state.failuresDropped ?? 0 },
     });
     console.log('[C20-3] the popup failure line:', view.failures);
     expect(view.failures).toContain(`at most ${MAX_FAILURES}`);
@@ -335,7 +358,7 @@ describe('C20-3 · the failure list hitting its cap ⇒ drop the oldest and reco
 
     // The instrument proves itself: the same renderer **does not show** this line with an empty list.
     expect(renderPopup({
-      enabled: true, block: null, state,
+      enabled: true, block: null, state: headerOf(state),
       target: { platform: 'chatgpt', scope: 'cap-fixture' }, failures: NO_FAILURES,
     }).failures).toBeNull();
   });

@@ -22,7 +22,7 @@
  */
 
 import { currentUiLocale, t, type UiLocale } from './i18n';
-import { formatProgress, retryMinutesLeft } from './backfill/progress';
+import { formatProgress, progressOfHeader, retryMinutesLeft } from './backfill/progress';
 import {
   describeFailureReason,
   droppedOf,
@@ -43,7 +43,13 @@ import {
 } from './backfill/enumerate';
 import { DAILY_CAP_MAX, DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
-import { haltClassOf, stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
+import {
+  BACKFILL_STATE_VERSION,
+  haltClassOf,
+  isHeader,
+  stateKey,
+  type BackfillHeader,
+} from './backfill/types';
 import type { HostPauseRecord, HostStatusRecord } from './host-status';
 import type { LastExport, OutboxEntry } from './outbox';
 import { OUTBOX_CAPACITY_BYTES } from './outbox';
@@ -113,7 +119,7 @@ export interface PopupModel {
    */
   block: TickBlockReason | null;
   /** The debt set. null means storage has no such set yet (it has never run). */
-  state: BackfillState | null;
+  state: BackfillHeader | null;
   /** Which platform / which account this progress belongs to. null when it cannot be told. */
   target: { platform: string; scope: string } | null;
   /**
@@ -622,7 +628,7 @@ function progressLine(model: PopupModel): string {
   // 🔴 W13: `now` is passed through so the transient-retry prefix's "about M
   //    minutes" and the note below can never disagree — both are computed from the
   //    same instant, and both are assertable in tests.
-  return t('popup.progress.line', { progress: formatProgress(model.state, model.now ?? Date.now()) });
+  return t('popup.progress.line', { progress: formatProgress(progressOfHeader(model.state), model.now ?? Date.now()) });
 }
 
 /**
@@ -709,7 +715,7 @@ function notesFor(model: PopupModel): string[] {
       //    Stopping half way and never starting are two different things to a user.
       notes.push(t('popup.notes.halted.detailUnsupported', {
         platform: model.state.platform,
-        pending: model.state.pending.length,
+        pending: model.state.pendingCount,
         detail: model.state.halted.detail,
       }));
     } else {
@@ -758,26 +764,36 @@ export function popupText(view: PopupView): string {
 
 const STATE_KEY_PREFIX = `cs_backfill_v${BACKFILL_STATE_VERSION}:`;
 
-function looksLikeState(value: unknown): value is BackfillState {
-  if (!value || typeof value !== 'object') return false;
-  const s = value as Partial<BackfillState>;
-  return s.v === BACKFILL_STATE_VERSION
-    && typeof s.platform === 'string'
-    && typeof s.scope === 'string'
-    && Array.isArray(s.pending)
-    && Array.isArray(s.archived);
+/**
+ * 🔴 W18 · What the popup picks out of the snapshot is now the **header**, not the
+ *    whole state: the debt ids moved to IndexedDB (lib/backfill/debt-store.ts) and
+ *    `storage.local` holds the cursor, the counters and the halt record.
+ *
+ * The recognition test changed with it, in the strict direction: `pending` and
+ * `archived` used to have to be *arrays*, now `pendingCount` and `archivedCount`
+ * have to be *numbers*, and an array at either name is an explicit rejection. A
+ * v1 record (a whole state, array ids and all) is therefore **not** accepted here
+ * — it is the migration's input, and showing its stale numbers as live progress
+ * would be exactly the "recording an unknown as known" mistake at the UI layer.
+ */
+function looksLikeState(value: unknown): value is BackfillHeader {
+  if (!isHeader(value)) return false;
+  // `isHeader` already refuses a record carrying id arrays; this adds the one
+  // thing the popup needs on top of it, which is that the counts are usable
+  // numbers rather than NaN/Infinity that would render as "owed NaN".
+  return Number.isFinite(value.pendingCount) && Number.isFinite(value.archivedCount);
 }
 
-export function pickBackfillState(snapshot: Record<string, unknown> | null): BackfillState | null {
+export function pickBackfillState(snapshot: Record<string, unknown> | null): BackfillHeader | null {
   if (!snapshot) return null;
-  let best: BackfillState | null = null;
+  let best: BackfillHeader | null = null;
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
     if (!looksLikeState(value)) continue;
     // The key carries platform/scope and so does the value; only accept the two
     // agreeing, so a mismatched progress set can never be displayed.
     if (stateKey(value.platform, value.scope) !== key) continue;
-    if (!best || value.archived.length > best.archived.length) best = value;
+    if (!best || value.archivedCount > best.archivedCount) best = value;
   }
   return best;
 }
@@ -785,9 +801,9 @@ export function pickBackfillState(snapshot: Record<string, unknown> | null): Bac
 /** Every valid debt set in the snapshot (those whose key and value agree). Failure aggregation and clearing walk it. */
 export function backfillStateEntries(
   snapshot: Record<string, unknown> | null,
-): Array<{ key: string; state: BackfillState }> {
+): Array<{ key: string; state: BackfillHeader }> {
   if (!snapshot) return [];
-  const out: Array<{ key: string; state: BackfillState }> = [];
+  const out: Array<{ key: string; state: BackfillHeader }> = [];
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
     if (!looksLikeState(value)) continue;
@@ -796,6 +812,7 @@ export function backfillStateEntries(
   }
   return out;
 }
+
 
 /**
  * 🔴 C20 · Aggregate the failure lists of **every** platform/account into one.

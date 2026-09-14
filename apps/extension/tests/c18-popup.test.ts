@@ -14,7 +14,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
-import type { BackfillState } from '../lib/backfill/types';
+import type { BackfillHeader } from '../lib/backfill/types';
 import { stateKey } from '../lib/backfill/types';
 
 // ---------------------------------------------------------------------------
@@ -46,17 +46,27 @@ beforeEach(() => {
   vi.stubGlobal('chrome', fakeBrowser);
 });
 
-/** A debt set that "has run a little, but the API gave no total" — exactly the kind that may not show a percentage. */
-function seedState(platform = 'chatgpt', scope = 'acct-1'): BackfillState {
-  const state: BackfillState = {
-    v: 1,
+/**
+ * A debt set that "has run a little, but the API gave no total" — exactly the kind
+ * that may not show a percentage.
+ *
+ * 🔴 W18 · What goes into `storage.local` at `stateKey(...)` is now the **header**
+ *    (the cursor, the counters, the halt record) and no longer the ids: those live
+ *    in IndexedDB (`lib/backfill/debt-store.ts`). The three owed and two archived
+ *    conversations are still the fixture's facts — they are just carried as the
+ *    two numbers the header holds, which is what the popup has always been able to
+ *    see without opening the debt store.
+ */
+function seedState(platform = 'chatgpt', scope = 'acct-1'): BackfillHeader {
+  const state: BackfillHeader = {
+    v: 2,
     platform,
     scope,
     totalKnown: null,
     totalSource: 'unknown',
     enumCursor: { offset: 40, complete: false },
-    pending: ['d1', 'd2', 'd3'],
-    archived: ['a1', 'a2'],
+    pendingCount: 3,
+    archivedCount: 2,
     detailToday: { day: '2026-08-17', count: 2 },
     halted: null,
   };
@@ -249,29 +259,29 @@ describe('C18-3 · the host-paused state', () => {
 describe('C18-4 · the progress wording obeys C11\'s rules', () => {
   it('a percentage appears only with a trustworthy denominator, and it matches formatProgress byte for byte', async () => {
     const { renderPopup, NO_FAILURES } = await import('../lib/popup-view');
-    const { formatProgress } = await import('../lib/backfill/progress');
-    const trusted: BackfillState = {
-      v: 1, platform: 'chatgpt', scope: 'acct-1',
+    const { formatProgress, progressOfHeader } = await import('../lib/backfill/progress');
+    const trusted: BackfillHeader = {
+      v: 2, platform: 'chatgpt', scope: 'acct-1',
       totalKnown: 10, totalSource: 'response-total',
       enumCursor: { offset: 10, complete: true },
-      pending: ['d1'], archived: ['a1', 'a2', 'a3'],
+      pendingCount: 1, archivedCount: 3,
       detailToday: { day: '2026-08-17', count: 3 }, halted: null,
     };
     const view = renderPopup({
       enabled: true, block: 'no-http-port', state: trusted,
       target: { platform: 'chatgpt', scope: 'acct-1' }, failures: NO_FAILURES,
     });
-    expect(view.progress).toBe(`Progress: ${formatProgress(trusted)}`);
+    expect(view.progress).toBe(`Progress: ${formatProgress(progressOfHeader(trusted))}`);
     expect(view.progress).toContain('30%');
   });
 
   it('with an untrustworthy denominator the progress line contains no percent sign', async () => {
     const { renderPopup, NO_FAILURES } = await import('../lib/popup-view');
-    const untrusted: BackfillState = {
-      v: 1, platform: 'chatgpt', scope: 'acct-1',
+    const untrusted: BackfillHeader = {
+      v: 2, platform: 'chatgpt', scope: 'acct-1',
       totalKnown: null, totalSource: 'unknown',
       enumCursor: { offset: 0, complete: false },
-      pending: ['d1'], archived: [],
+      pendingCount: 1, archivedCount: 0,
       detailToday: { day: '', count: 0 }, halted: null,
     };
     const view = renderPopup({
@@ -285,7 +295,19 @@ describe('C18-4 · the progress wording obeys C11\'s rules', () => {
   it('pickBackfillState accepts only sets whose key and value agree', async () => {
     const { pickBackfillState } = await import('../lib/popup-view');
     const good = seedState('chatgpt', 'acct-1');
-    expect(pickBackfillState({ ...store, 'cs_backfill_v1:bogus:x': { v: 1 } })).toEqual(good);
+    // A record under a key that names a different platform/scope than the record
+    // itself does is never displayed...
+    expect(pickBackfillState({ ...store, 'cs_backfill_v2:bogus:x': good })).toEqual(good);
+    // ...and neither is a pre-W18 record (a whole state, ids and all) that happens
+    // to sit under a v2 key: showing its stale numbers as live progress is the
+    // "unknown recorded as known" mistake at the UI layer.
+    expect(pickBackfillState({
+      'cs_backfill_v2:chatgpt:acct-1': {
+        v: 1, platform: 'chatgpt', scope: 'acct-1', totalKnown: null, totalSource: 'unknown',
+        enumCursor: { offset: 0, complete: false }, pending: ['d1'], archived: [],
+        detailToday: { day: '', count: 0 }, halted: null,
+      },
+    })).toBeNull();
     expect(pickBackfillState({ cs_count: 3 })).toBeNull();
     expect(pickBackfillState(null)).toBeNull();
   });

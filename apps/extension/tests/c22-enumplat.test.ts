@@ -28,6 +28,7 @@ import {
 import { isAllowedBackfillUrl } from '../lib/backfill/tab-port';
 import { renderPopup, popupText, coverageLine, NO_FAILURES } from '../lib/popup-view';
 import type { Clock } from '../lib/backfill/pace';
+import { stateKey } from '../lib/backfill/types';
 
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
@@ -141,7 +142,7 @@ describe('C22-2 · a shape mismatch must leave a trace', () => {
     expect(report.halted?.reason).toBe('shape-changed');
     expect(report.halted?.detail).toContain('items');
     // 🔴 The opposite of silence: the trace must be **persisted** and still be there after a restart.
-    const persisted = await store.load('cs_backfill_v1:chatgpt:acct-drift');
+    const persisted = await store.load(stateKey('chatgpt', 'acct-drift'));
     expect((persisted as { halted?: { reason: string } }).halted?.reason).toBe('shape-changed');
     // 🔴 It must never be taken as "0 rows enumerated": not one debt was enqueued, but the ledger says why.
     expect(report.newDebts).toBe(0);
@@ -307,8 +308,10 @@ describe('C22-5 · the popup\'s honest explanation', () => {
       enabled: true,
       block: null,
       state: {
-        v: 1, platform: 'deepseek', scope: 'acct-ds', totalKnown: null, totalSource: 'unknown',
-        enumCursor: { offset: 0, complete: false }, pending: [], archived: [],
+        // 🔴 W18 · A header, not a whole state: the debt ids moved to IndexedDB,
+        //    so what the popup picks out of storage carries counts.
+        v: 2, platform: 'deepseek', scope: 'acct-ds', totalKnown: null, totalSource: 'unknown',
+        enumCursor: { offset: 0, complete: false }, pendingCount: 0, archivedCount: 0,
         detailToday: { day: '', count: 0 },
         halted: { reason: 'unsupported-platform', at: 0, detail: 'missing: listUrl' },
       },

@@ -27,7 +27,8 @@ import {
   haltClassOf,
   initialState,
   transientRetryDelayMs,
-  stateKey,
+  legacyStateKey,
+  type LegacyBackfillState,
   TRANSIENT_RETRY_BASE_MS,
   TRANSIENT_RETRY_MAX_MS,
   type HaltReason,
@@ -347,8 +348,14 @@ describe('W13-4 · the record already sitting in a real user storage', () => {
    * The shape actually found on disk: a transient reason, and a detail that starts
    * `list offset=`. It has **no** `retryAt`, because it predates this change.
    */
-  function legacyState(scope: string, reason: HaltReason) {
-    const state = initialState('chatgpt', scope);
+  function legacyState(scope: string, reason: HaltReason): LegacyBackfillState {
+    // 🔴 W18 · `v: 1` on purpose. This fixture is documented as "the shape actually
+    //    found on disk" on a real user's machine, and as of W18 the record that is
+    //    really there is the pre-W18 one: a whole state, ids included, under the
+    //    `cs_backfill_v1:*` key. Seeding it there means the case runs through the
+    //    migration exactly as a real upgrade will, instead of through a shortcut
+    //    that no user's storage has.
+    const state = { ...initialState('chatgpt', scope), v: 1 } as LegacyBackfillState;
     state.enumCursor = { offset: 3, complete: true };
     state.pending = ids(2);
     state.archived = [];
@@ -372,7 +379,7 @@ describe('W13-4 · the record already sitting in a real user storage', () => {
     // The fixture must really have the shape of the measured record.
     expect(legacy.halted!.detail.startsWith('list offset=')).toBe(true);
     expect(legacy.halted!.retryAt).toBeUndefined();
-    await store.save(stateKey('chatgpt', 'w13-legacy'), legacy);
+    await store.save(legacyStateKey('chatgpt', 'w13-legacy'), legacy);
 
     const run = await runBackfill({ ...opts(store, backend.http, clock), scope: 'w13-legacy', maxDetails: 1 });
 
@@ -388,7 +395,7 @@ describe('W13-4 · the record already sitting in a real user storage', () => {
   it('a legacy permanent record stays stopped, exactly as before', async () => {
     const store = memoryStore();
     const clock = stepClock(T0);
-    await store.save(stateKey('chatgpt', 'w13-legacy-shape'), legacyState('w13-legacy-shape', 'shape-changed'));
+    await store.save(legacyStateKey('chatgpt', 'w13-legacy-shape'), legacyState('w13-legacy-shape', 'shape-changed'));
 
     const run = await runBackfill({
       ...opts(store, async () => {
@@ -405,7 +412,7 @@ describe('W13-4 · the record already sitting in a real user storage', () => {
     const all = ids(1);
     const backend = flakyBackend(all);
     const clock = stepClock(T0);
-    await store.save(stateKey('chatgpt', 'w13-persist'), legacyState('w13-persist', 'transport-error'));
+    await store.save(legacyStateKey('chatgpt', 'w13-persist'), legacyState('w13-persist', 'transport-error'));
 
     // Round 1 resumes and then fails again transiently (the body still throws).
     const r1 = await runBackfill({ ...opts(store, backend.http, clock), scope: 'w13-persist', maxDetails: 1 });

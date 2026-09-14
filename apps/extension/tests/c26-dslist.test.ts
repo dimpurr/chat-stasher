@@ -43,6 +43,7 @@ import {
 } from '../lib/backfill/enumerate';
 import { isAllowedBackfillUrl } from '../lib/backfill/tab-port';
 import type { Clock } from '../lib/backfill/pace';
+import { stateKey } from '../lib/backfill/types';
 
 const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
 const LIMIT = 100;
@@ -241,7 +242,7 @@ describe('C26-2 · an unknown must not be treated as empty', () => {
     expect(report.halted?.reason).toBe('shape-changed');
     expect(report.halted?.detail).toContain('chat_sessions');
     // 🔴 The trace must be persisted and still be there after a restart — the opposite of silence.
-    const persisted = await store.load('cs_backfill_v1:deepseek:acct-drift');
+    const persisted = await store.load(stateKey('deepseek', 'acct-drift'));
     expect((persisted as { halted?: { reason: string } }).halted?.reason).toBe('shape-changed');
 
     // 🔴🔴 This assertion is the bullseye of this change: it is **not the same** as the "empty list" path.
@@ -303,7 +304,7 @@ describe('C26-3 · if it cannot page, it says it cannot page', () => {
     //    complete=true here means "stopped here", and truncated is exactly what distinguishes the two.
     expect(report.enumTruncated).toBe('cursor-missing');
     expect(report.state.enumCursor.truncated).toBe('cursor-missing');
-    const persisted = await store.load('cs_backfill_v1:deepseek:acct-no-seq') as {
+    const persisted = await store.load(stateKey('deepseek', 'acct-no-seq')) as {
       enumCursor: { complete: boolean; truncated?: string };
     };
     expect(persisted.enumCursor.truncated).toBe('cursor-missing');
