@@ -12,7 +12,7 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "node scripts/check-test-inventory.mjs",
     "e2e": "pnpm run build && playwright test -c e2e/playwright.config.ts",
     "postinstall": "wxt prepare"
   },

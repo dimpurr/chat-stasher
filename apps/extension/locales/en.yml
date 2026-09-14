@@ -401,7 +401,3 @@ platformNote:
       Perplexity: past conversation bodies cannot be backfilled yet. Your past
       conversations can already be listed, but we do not fetch the content of
       each one yet, so for now not a single one will be stored.
-  gemini:
-    unsupported: >-
-      Gemini: history cannot be backfilled yet. We did not find a reliable
-      source for a “list past conversations” endpoint, and we will not guess one.
