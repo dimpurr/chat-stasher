@@ -125,12 +125,179 @@ export type EnumTruncation =
   /** Perplexity returned a short page; the API has no explicit termination field, so this is a client-inferred stopping point. */
   | 'short-page-inferred';
 
+/**
+ * 🔴 W13 · **Which kind of stop this is** — the distinction that did not exist, and
+ * whose absence froze a real account's backfill for over an hour.
+ *
+ * Before this, every `HaltReason` meant the same thing to the engine: write
+ * `state.halted` and refuse to run until a human clears it. Measured on a real
+ * Chrome profile: one round at 09:14 ended in `transport-error` because a page
+ * reload tore the extension's message channel; every round after it returned
+ * `halted` immediately, and 7,391 debts stayed untouched for more than an hour
+ * with nothing wrong with the account, the login, or the network.
+ *
+ * So the question a stored halt has to answer is not only "why did it stop" but
+ * **"is there anything to wait for"**:
+ *   · 'transient'  — the platform/transport said "not right now". The same
+ *                    request is the right thing to send again, later. The leg
+ *                    resumes **on its own** once the backoff expires.
+ *   · 'permanent'  — no amount of waiting changes the answer: the response shape
+ *                    is not one we know, or the code cannot do this platform yet.
+ *                    A human has to look, and this is the old semantics verbatim.
+ *
+ * 🔴 This is the "unknown must never be recorded as empty" invariant applied to
+ *    time: "we do not know yet, and we will ask again at T" is a different fact
+ *    from "we will not get this without a human", and collapsing them into one
+ *    `halted` is what made a one-second glitch permanent.
+ */
+export type HaltClass = 'transient' | 'permanent';
+
+/**
+ * Classify one reason. Pure, no I/O, so engine / progress / popup-view all ask the
+ * same function instead of each keeping its own list — the failure mode being
+ * avoided is two lists that disagree about `rate-limited`.
+ *
+ * transient:
+ *  · 'transport-error' — the transport threw, so nothing about the account was
+ *    observed; the same request is exactly right to send again, and the case that
+ *    really happened (a reload tearing the message channel) heals in seconds.
+ *  · 'rate-limited'    — 429/403/5xx is the platform saying "not now". Echoes
+ *    treats this one as retryable *and differently from other errors* (longer
+ *    base, hard ceiling) — see the retry notes below.
+ *
+ * permanent:
+ *  · 'shape-changed'          — the bytes are not a shape we recognise; sending
+ *    the identical request returns the identical unrecognised bytes. Waiting is
+ *    not a remedy; a human reads the shape.
+ *  · 'unsupported-platform' / 'detail-unsupported' — the code cannot do this yet.
+ *    Both fire *before any request goes out*, and both reasons' own doc comments
+ *    above say they mean "wait for a fix".
+ *  · 'storage-unavailable'    — not a platform condition, and structurally
+ *    un-retryable: with no store there is nowhere to persist a retry moment, so
+ *    an automatic retry would re-decide the same thing on every tick forever.
+ *  · 'detail-empty-unverified' — C28. The body endpoint answered and the shape was
+ *    fine, but this conversation came back empty and that must **not** be turned
+ *    into "it really is empty". Retrying it automatically would convert C28's "we
+ *    do not know" into an endless request loop against one conversation (nothing
+ *    behind it can progress while it re-fails), and a body that suddenly parses to
+ *    nothing is most likely a contract change — the human-look class. The C28
+ *    receipt stays the trace.
+ */
+export function haltClassOf(reason: HaltReason): HaltClass {
+  return reason === 'transport-error' || reason === 'rate-limited' ? 'transient' : 'permanent';
+}
+
+/**
+ * How long to wait before the next attempt, per reason.
+ *
+ * 🔴 Shape borrowed from Echoes, numbers re-based on our clock.
+ *    `.private/docs/25-EXTENSION-COMPETITORS.md` §3 (Echoes row): retries are
+ *    `baseDelay * multiplier^n`, clamped by `maxDelay`; the defaults are
+ *    `baseDelay: 1000 ms, multiplier: 2`, and **once a 429 is seen the ladder is
+ *    switched to `baseDelay: 60000 ms, multiplier: 2, maxDelay: 300000 ms`**.
+ *    That structure — geometric growth with a ceiling, and a longer ladder for
+ *    rate-limiting than for transport errors — is what these numbers keep.
+ *
+ * What is re-based: Echoes' retries happen *inside one session's request loop*,
+ * so 1 s is a natural unit there. Ours happens once per alarm tick, and the tick
+ * is `BACKFILL_ALARM_PERIOD_MINUTES = 5` (lib/backfill/alarm.ts). Any delay at or
+ * below the tick period therefore degenerates to "the next tick retries" — a
+ * perfectly reasonable outcome, but not a backoff, and shipping it with a tuned
+ * looking number would be a lie about what has been tuned. So the unit here is
+ * one tick, and the ladders are expressed in ticks:
+ *
+ *   reason            base     cap      in ticks        why these
+ *   ---------------   ------   ------   -------------   -------------------------
+ *   transport-error    5 min   30 min   1 → 2 → 4 → 6   one skipped tick is the
+ *                                                       gentlest thing that is
+ *                                                       still a backoff, and the
+ *                                                       failure being fixed (a
+ *                                                       torn channel from a page
+ *                                                       reload) is gone by then.
+ *                                                       30 min caps a genuinely
+ *                                                       dead channel at 2
+ *                                                       requests/hour, not 12.
+ *   rate-limited      15 min   60 min   3 → 6 → 12      a rate limit is not one
+ *                                                       bad tick, so it starts a
+ *                                                       whole ladder higher; the
+ *                                                       60 min ceiling is one
+ *                                                       request/hour while
+ *                                                       limited — a 12x reduction
+ *                                                       from the normal rate.
+ *
+ * 🔴 Echoes' ratios are 60x (base) / 5x (cap) on the 429 ladder; ours are 3x / 4x.
+ *    Deliberately milder, for one reason: Echoes' ladder **gives up** after 2
+ *    retries, so it can afford to be aggressive. This leg never writes a debt off
+ *    (only a real delivery settles one), so a persistent 429 has to land on a
+ *    sustainable steady state rather than a deadline. Re-basing Echoes' 300 s cap
+ *    literally would be 5 min = exactly one tick = no backoff at all.
+ *
+ * Monotonic, then flat: `attempts` only ever spaces requests further apart, so
+ * this change can never issue *more* requests than the old code — for a permanent
+ * halt it issues exactly as many (zero), and for a transient one strictly fewer
+ * than a naive "just clear `halted`" fix, which would re-fire on the next tick.
+ */
+export const TRANSIENT_RETRY_BASE_MS: Record<'transport-error' | 'rate-limited', number> = {
+  'transport-error': 5 * 60_000,
+  'rate-limited': 15 * 60_000,
+};
+
+/** The ceiling of each ladder. Never exceeded, however long the streak runs. */
+export const TRANSIENT_RETRY_MAX_MS: Record<'transport-error' | 'rate-limited', number> = {
+  'transport-error': 30 * 60_000,
+  'rate-limited': 60 * 60_000,
+};
+
+/** The transient reasons this ladder is defined for. A permanent reason has no delay at all. */
+export type TransientHaltReason = keyof typeof TRANSIENT_RETRY_BASE_MS;
+
+export function isTransientReason(reason: HaltReason): reason is TransientHaltReason {
+  return reason === 'transport-error' || reason === 'rate-limited';
+}
+
+/**
+ * `base * 2^(attempts-1)`, clamped to the cap. `attempts` is the consecutive-failure
+ * count **including this one**, so attempt 1 waits exactly `base`.
+ * The exponent is bounded before the multiply: a long-running streak must not
+ * produce `Infinity` on its way to a cap that is 30 minutes.
+ */
+export function transientRetryDelayMs(reason: TransientHaltReason, attempts: number): number {
+  const base = TRANSIENT_RETRY_BASE_MS[reason];
+  const max = TRANSIENT_RETRY_MAX_MS[reason];
+  const step = Math.max(1, Math.floor(attempts)) - 1;
+  // 2^40 is already far past both caps; clamping the exponent keeps the product finite.
+  const factor = 2 ** Math.min(step, 40);
+  return Math.min(base * factor, max);
+}
+
 export interface HaltRecord {
   reason: HaltReason;
   /** When it happened (clock.now(), milliseconds) */
   at: number;
   /** Technical detail only: URL path, status code, which field is missing. Never a conversation body. */
   detail: string;
+  /**
+   * 🔴 W13 · **Transient records only**: the earliest moment a new run may try this
+   * platform again (`clock.now()` ms). `undefined` on a permanent record — and on a
+   * record written before W13, where it is read as "no delay was ever decided", i.e.
+   * **due now** (see the resume path in engine.ts).
+   *
+   * Why it lives inside the halt record rather than in a storage key of its own:
+   * the popup's question is "why is this leg stopped", and a retry moment in a
+   * parallel key could disagree with `halted` about whether the leg is stopped at
+   * all. One record, one answer — and it is what makes the legacy case decidable
+   * with no new key: a stored record without `retryAt` is either permanent (stop)
+   * or transient-and-due (retry).
+   */
+  retryAt?: number;
+  /**
+   * 🔴 W13 · Transient records only: how many **consecutive** transient failures led
+   * to this record (>= 1). It is the exponent of the backoff ladder and the number
+   * the popup shows as "attempt N", so it has to survive restarts: the only carrier
+   * is this record, and a run that ends without a transient halt resets the streak
+   * simply by not writing one.
+   */
+  attempts?: number;
 }
 
 /** Why one run ended. Everything other than `halted` is a normal "gentle pause". */
@@ -151,6 +318,22 @@ export type StopReason =
    * in engine.ts.
    */
   | 'host-unavailable'
+  /**
+   * 🔴 W13 · This leg hit a **transient** condition (transport error / rate limit)
+   * and is now waiting out its backoff. It will carry on by itself, from the same
+   * cursor and the same debt set, once `halted.retryAt` passes.
+   *
+   * Why it must be a value of its own rather than reusing either neighbour:
+   *   · not `halted` — `halted` means "a human has to look", and that is precisely
+   *     the reading that turned one torn channel into an hour of a frozen leg;
+   *   · not `queue-empty` — nothing is finished, 7,391 debts were still owed in the
+   *     measured case, and this reason must never be mistaken for "nothing left";
+   *   · not `ran` — no request went out during a waiting round.
+   * Its difference from 'host-unavailable': that one is the *delivery exit* being
+   * absent while this leg itself is healthy (and it retries on `hello`); this one is
+   * the *platform* having just refused or dropped a request.
+   */
+  | 'waiting-retry'
   | 'halted';
 
 /**

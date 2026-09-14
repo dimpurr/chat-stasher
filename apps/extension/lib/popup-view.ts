@@ -22,7 +22,7 @@
  */
 
 import { currentUiLocale, t, type UiLocale } from './i18n';
-import { formatProgress } from './backfill/progress';
+import { formatProgress, retryMinutesLeft } from './backfill/progress';
 import {
   describeFailureReason,
   droppedOf,
@@ -42,7 +42,7 @@ import {
 } from './backfill/enumerate';
 import { DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
-import { stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
+import { haltClassOf, stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
 import type { HostPauseRecord, HostStatusRecord } from './host-status';
 import type { LastExport, OutboxEntry } from './outbox';
 import { OUTBOX_CAPACITY_BYTES } from './outbox';
@@ -161,6 +161,14 @@ export interface PopupModel {
   hostPause?: HostPauseRecord | null;
   /** 🔴 W2 · The most recent export (read from storage.local); null = never exported. */
   lastExport?: LastExport | null;
+  /**
+   * 🔴 W13 · The moment the wording is computed for (`Date.now()` ms), so that
+   * "about M minutes" in a transient-retry line is a number that can be asserted.
+   * Omitted ⇒ the real clock — the same optional-field pattern as the fields above,
+   * so no existing call site changes a character. It is never used to decide
+   * *whether* to retry; that decision belongs to the engine's clock alone.
+   */
+  now?: number;
 }
 
 /** How the outbox is presented: only the numbers the UI needs, never the payload. */
@@ -604,7 +612,10 @@ export function describeTickReason(reason: string): string {
 function progressLine(model: PopupModel): string {
   // 🔴 The single source of progress wording. This file does no percentage arithmetic.
   if (!model.state) return t('popup.progress.notStarted');
-  return t('popup.progress.line', { progress: formatProgress(model.state) });
+  // 🔴 W13: `now` is passed through so the transient-retry prefix's "about M
+  //    minutes" and the note below can never disagree — both are computed from the
+  //    same instant, and both are assertable in tests.
+  return t('popup.progress.line', { progress: formatProgress(model.state, model.now ?? Date.now()) });
 }
 
 /**
@@ -668,6 +679,20 @@ function notesFor(model: PopupModel): string[] {
     if (model.state.halted.reason === 'unsupported-platform') {
       notes.push(t('popup.notes.halted.unsupportedPlatform', {
         platform: model.state.platform,
+        detail: model.state.halted.detail,
+      }));
+    } else if (haltClassOf(model.state.halted.reason) === 'transient') {
+      // 🔴 W13 · This is the sentence that did not exist, and its absence is why a
+      //    real account sat at 0 archived for over an hour. A transient stop must
+      //    NOT read like the `other` fallback below ("this leg has stopped"): it has
+      //    not stopped. It is waiting out a backoff, it will come back by itself,
+      //    and not one debt was written off while it waited. So the note says all
+      //    four of those things, plus the one number the user actually wants —
+      //    when the next attempt is.
+      notes.push(t('popup.notes.halted.waitingRetry', {
+        reason: model.state.halted.reason,
+        attempts: model.state.halted.attempts ?? 1,
+        minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
         detail: model.state.halted.detail,
       }));
     } else if (model.state.halted.reason === 'detail-unsupported') {

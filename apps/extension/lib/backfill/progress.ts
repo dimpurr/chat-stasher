@@ -32,7 +32,21 @@
  */
 
 import { t } from '../i18n';
-import type { BackfillState } from './types';
+import { haltClassOf, type BackfillState, type HaltRecord } from './types';
+
+/**
+ * 🔴 W13 · How long until a transient stop retries, in whole minutes, rounded up
+ * (and never negative). Exported because the popup's note and the progress prefix
+ * must never give two different numbers for the same moment.
+ *
+ * A record with no `retryAt` — one written before W13 — is **due now**, so the
+ * answer is 0 rather than "unknown": the legacy record is not "we forgot when",
+ * it is "no delay was ever decided", and 0 is what the engine will do with it.
+ */
+export function retryMinutesLeft(halt: HaltRecord, now: number): number {
+  if (halt.retryAt === undefined) return 0;
+  return Math.max(0, Math.ceil((halt.retryAt - now) / 60_000));
+}
 
 export interface ProgressView {
   archived: number;
@@ -114,9 +128,22 @@ export function computeProgress(state: BackfillState): ProgressView {
  * is still owed, and why there is no denominator. What it does not do is
  * produce a percentage.
  */
-export function formatProgress(state: BackfillState): string {
+export function formatProgress(state: BackfillState, now: number = Date.now()): string {
   const view = computeProgress(state);
-  const head = view.halted ? t('progress.haltedPrefix', { reason: view.halted.reason }) : '';
+  // 🔴 W13 · The prefix has to distinguish the two classes, because "[stopped: …]" is
+  //    now false for a transient one: that leg has not stopped, it is waiting out a
+  //    backoff and will continue by itself. Saying "stopped" there is exactly the
+  //    "unknown recorded as settled" mistake one level up — and it is what made a
+  //    torn message channel read as a broken account.
+  const head = view.halted
+    ? haltClassOf(view.halted.reason) === 'transient'
+      ? t('progress.retryPrefix', {
+        reason: view.halted.reason,
+        attempts: view.halted.attempts ?? 1,
+        minutes: retryMinutesLeft(view.halted, now),
+      })
+      : t('progress.haltedPrefix', { reason: view.halted.reason })
+    : '';
   const body =
     view.totalContradicted
       // 🔴 W10 · The disproved-total line is its own sentence, not the

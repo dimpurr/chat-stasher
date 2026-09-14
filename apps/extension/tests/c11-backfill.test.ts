@@ -216,7 +216,17 @@ describe('C11 criterion 3 · never show a percentage when the denominator is unk
       clock: fakeClock(),
     });
     console.log('[C11-3] progress text while enumeration is rate-limited =>', run.progress);
-    expect(run.stopped).toBe('halted');
+    // 🔴 W13 · changed semantics, stated rather than quietly relaxed.
+    //    before: `expect(run.stopped).toBe('halted')` — every stop was permanent.
+    //    after:  a 429 is transient, so the leg is *waiting out its backoff*, and
+    //            'waiting-retry' is the value that says so. The reason it must not
+    //            keep saying 'halted' is the whole point of W13: a 429 is the
+    //            platform saying "not now", and reporting it as "a human must look"
+    //            is what let one torn channel freeze a real account for an hour.
+    //    The assertions this test exists for — an unknown denominator produces no
+    //    percentage — are untouched and still checked below.
+    expect(run.stopped).toBe('waiting-retry');
+    expect(run.halted?.reason).toBe('rate-limited');
     expect(run.progress).not.toContain('%');
   });
 
@@ -310,7 +320,11 @@ describe('C11 criterion 4 · throttling takes effect (enumeration and body-fetch
 });
 
 describe('C11 · a rate limit / a shape change must stop with a trace', () => {
-  it('a 429 while fetching a body => halt(rate-limited) persisted, and the next run refuses to continue', async () => {
+  // 🔴 W13 · the title was "…halt(rate-limited) persisted, and the next run refuses
+  //    to continue". The trace is still persisted and the next run still refuses to
+  //    touch the platform; what changed is that the refusal now has an end — see the
+  //    inline before/after notes on each changed line.
+  it('a 429 while fetching a body => the rate-limited trace is persisted, and the next run waits it out instead of continuing', async () => {
     const store = memoryStore();
     const all = ids(5);
     let detailHits = 0;
@@ -327,18 +341,39 @@ describe('C11 · a rate limit / a shape change must stop with a trace', () => {
     });
     console.log('[C11-halt] halt record =', JSON.stringify(run.halted));
     console.log('[C11-halt] progress text after the halt =>', run.progress);
-    expect(run.stopped).toBe('halted');
+    // 🔴 W13 · changed semantics, stated rather than quietly relaxed.
+    //    before: `expect(run.stopped).toBe('halted')` and the progress text had to
+    //            contain 'stopped'.
+    //    after:  a 429 is a transient condition, so this is 'waiting-retry' and the
+    //            progress line says exactly that. The assertion is not weaker — it is
+    //            now the *opposite* claim plus the same one: the line must say
+    //            "waiting to retry" AND must not say "stopped", because "stopped" is
+    //            the sentence that made one 429 look like a dead account.
+    //            The record, its reason and its persistence are all still asserted.
+    expect(run.stopped).toBe('waiting-retry');
     expect(run.halted?.reason).toBe('rate-limited');
-    expect(run.progress).toContain('stopped');
+    expect(run.progress).toContain('waiting to retry');
+    expect(run.progress).not.toContain('[stopped:');
+    // 🔴 W13: and the record must carry the two things that make the retry possible —
+    //    a moment to try again, and how deep the streak is. Without them 'waiting'
+    //    would be an unbounded wait, which is what the old code did in practice.
+    expect(run.halted?.attempts).toBe(1);
+    expect(run.halted?.retryAt).toBeGreaterThan(run.halted!.at);
 
-    // The trace must be persistent: after a restart it does not retry against the platform on its own
+    // The trace must be persistent: after a restart it does not retry against the
+    // platform on its own — and 🔴 W13 adds: not until the backoff has expired.
+    // The clock is unchanged between the two runs, so this run is inside the
+    // window and must not touch the network.
     const again = await runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'limited', store,
       http: async () => { throw new Error('MUST NOT be called after halt'); },
       clock: fakeClock(),
     });
-    expect(again.stopped).toBe('halted');
+    expect(again.stopped).toBe('waiting-retry');
     expect(again.halted?.reason).toBe('rate-limited');
+    // 🔴 W13: the streak survives the restart, so the ladder does not restart at 1.
+    expect(again.halted?.attempts).toBe(1);
+    expect(again.state.pending).toHaveLength(run.state.pending.length);
     console.log('[C11-halt] after restart =', again.stopped, '(no endpoint was hit again)');
   });
 

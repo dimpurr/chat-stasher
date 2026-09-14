@@ -96,10 +96,44 @@ export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
 /** How many rows the registry keeps. Enough to cover "a few platforms open at once", without growing without bound. */
 export const MAX_TAB_ENTRIES = 12;
 
+/**
+ * 🔴 W13 · **How many consecutive unanswered pings it takes to strike a tab off.**
+ *
+ * Why this constant exists at all: `pickLiveTab` used to forget a tab after **one**
+ * failed ping, and the only thing that ever puts a tab back is the content script's
+ * hello on page load. So a page whose renderer was busy for a few seconds — the
+ * normal case, not a fault — vanished from the registry, and the backfill then had
+ * no fetch channel at all until the user reloaded the page. Measured on a real
+ * profile: the registry was left as an empty `[]`.
+ *
+ * Why 2, and not 3 or more:
+ *  · the alarm pings once per 5 minutes (`BACKFILL_ALARM_PERIOD_MINUTES`), so two
+ *    consecutive misses already means the tab has been silent across a whole tick —
+ *    far longer than any renderer stall;
+ *  · the cost of being wrong in each direction is not symmetric. Forgetting a live
+ *    tab costs the entire fetch channel (the failure this fixes); keeping a dead one
+ *    costs exactly one extra cheap `runtime.sendMessage` per tick, and the browser
+ *    answers a dead tab id's ping with a rejection immediately.
+ * So the threshold sits at the lowest value that clears a full tick.
+ *
+ * 🔴 Why a **consecutive-miss counter** and not an age/expiry rule: a tab that is
+ *    answering must never expire. Time tells us nothing about liveness here — only
+ *    evidence of two silences does, and a successful ping resets the count to zero.
+ */
+export const TAB_PING_MISSES_BEFORE_FORGET = 2;
+
 export interface TabEntry {
   tabId: number;
   origin: string;
   at: number;
+  /**
+   * 🔴 W13 · How many consecutive pings this tab has failed to answer. Absent ⇒ 0,
+   * which is what every entry written before W13 reads back as (and what the content
+   * script's hello still writes) — so `entrypoints/background.ts` is untouched.
+   * Cleared to 0 by a successful ping; the entry is struck off at
+   * `TAB_PING_MISSES_BEFORE_FORGET`.
+   */
+  misses?: number;
 }
 
 export type BackfillFetchReply =
@@ -552,6 +586,13 @@ export function tabHttpPort(
 // needed), and background records it in storage.local. When the alarm wakes it pings
 // down this list; a ping that fails (the tab is closed) counts as no port — the
 // list converges on its own.
+//
+// 🔴 W13 · "Converges on its own" was true, and too eager. Forgetting a tab on the
+// *first* failed ping cannot tell a closed tab from a busy renderer, so a page that
+// was merely slow dropped out of the registry — and since only a page load puts one
+// back, the backfill lost its fetch channel until the user reloaded. The rule now
+// needs `TAB_PING_MISSES_BEFORE_FORGET` consecutive misses, which still converges
+// within one tick for a genuinely dead tab.
 // ---------------------------------------------------------------------------
 
 function isTabEntry(v: unknown): v is TabEntry {
@@ -584,8 +625,31 @@ export async function forgetTab(store: BackfillStore | null, tabId: number): Pro
 }
 
 /**
- * Pick one tab that is really still alive. A `ping` that does not go through gets
- * it struck off the list along the way.
+ * 🔴 W13 · Write one entry's consecutive-miss count **in place**.
+ *
+ * Deliberately not `rememberTab`: that one dedups by tabId and moves the entry to
+ * the front, because its caller is a fresh hello. Reusing it here would reorder the
+ * registry every time a ping failed, so which tab gets tried first would drift with
+ * the failure pattern — a change in behaviour with nothing to do with liveness.
+ * The order of the registry is the user's tab order; a miss is not news about it.
+ */
+async function setTabMisses(store: BackfillStore | null, tabId: number, misses: number): Promise<void> {
+  if (!store) return;
+  const tabs = await loadTabs(store);
+  const next = tabs.map((t) => (t.tabId === tabId ? { ...t, misses } : t));
+  await store.save(BACKFILL_TABS_KEY, next);
+}
+
+/**
+ * Pick one tab that is really still alive.
+ *
+ * 🔴 W13 · A ping that does not go through **no longer strikes the tab off on the
+ * first try** — that is the second half of the defect this task exists for. See
+ * `TAB_PING_MISSES_BEFORE_FORGET`: the entry is forgotten on the 2nd consecutive
+ * miss and its counter is reset to 0 by any successful ping, so a renderer that is
+ * merely busy for a few seconds keeps its place, while a closed tab still converges
+ * out of the list within one tick.
+ *
  * origin = null means "any platform will do" (used when the popup asks for
  * transportWired).
  */
@@ -594,15 +658,27 @@ export async function pickLiveTab(
   origin: string | null,
   ping: (tabId: number) => Promise<unknown>,
 ): Promise<TabEntry | null> {
+  // Loaded once, so a write inside the loop cannot change what this pass iterates.
   for (const entry of await loadTabs(store)) {
     if (origin !== null && entry.origin !== origin) continue;
+    let alive = false;
     try {
       const reply = await ping(entry.tabId);
-      if (isRecord(reply) && reply.ok === true) return entry;
+      alive = isRecord(reply) && reply.ok === true;
     } catch {
       // The tab is closed / the content script is not there: not an error, the normal case.
+      alive = false;
     }
-    await forgetTab(store, entry.tabId);
+    if (alive) {
+      // 🔴 A live tab clears its own record. Only written when there is something to
+      //    clear, so the normal path (a healthy tab that was never missed) does not
+      //    pay a storage write per tick.
+      if ((entry.misses ?? 0) !== 0) await setTabMisses(store, entry.tabId, 0);
+      return entry;
+    }
+    const misses = (entry.misses ?? 0) + 1;
+    if (misses >= TAB_PING_MISSES_BEFORE_FORGET) await forgetTab(store, entry.tabId);
+    else await setTabMisses(store, entry.tabId, misses);
   }
   return null;
 }

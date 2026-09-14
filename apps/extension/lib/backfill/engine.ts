@@ -39,8 +39,11 @@ import type { BackfillStore } from './store';
 import {
   BACKFILL_STATE_VERSION,
   dayKeyOf,
+  haltClassOf,
   initialState,
+  isTransientReason,
   stateKey,
+  transientRetryDelayMs,
   type BackfillState,
   type DetailOutcomeRecord,
   type EnumTruncation,
@@ -379,12 +382,47 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     );
   };
 
+  /**
+   * 🔴 W13 · **The consecutive-transient-failure streak carried across a resume.**
+   *
+   * It has to be a variable local to this run rather than a field read straight off
+   * the state, because the state's halt record is cleared a few lines below when the
+   * backoff has expired — and the whole point is that the *next* failure continues
+   * the ladder rather than restarting at 1 (otherwise the backoff is not a backoff:
+   * a platform failing every 20 minutes would be retried every 20 minutes forever).
+   * A run that ends with no transient halt simply never re-writes it ⇒ reset.
+   */
+  let transientStreak = 0;
+
   const halt = async (reason: HaltReason, detail: string): Promise<RunReport> => {
-    state.halted = { reason, at: clock.now(), detail };
+    const at = clock.now();
+    // 🔴 W13 · A transient reason gets a "when may we try again" and a streak count;
+    //    a permanent one is written exactly as before (no `retryAt`, no `attempts`),
+    //    which is what keeps the permanent semantics byte-identical.
+    if (haltClassOf(reason) === 'transient' && isTransientReason(reason)) {
+      transientStreak += 1;
+      state.halted = {
+        reason,
+        at,
+        detail,
+        attempts: transientStreak,
+        retryAt: at + transientRetryDelayMs(reason, transientStreak),
+      };
+    } else {
+      state.halted = { reason, at, detail };
+    }
     await persist(store, state);
     // Only the technical detail is logged, never a conversation body.
-    console.warn(`[chat-stasher] backfill halted: ${reason} — ${detail}`);
-    return report('halted');
+    console.warn(
+      `[chat-stasher] backfill halted: ${reason} — ${detail}`
+      + (state.halted.retryAt === undefined
+        ? ''
+        : ` (attempt ${state.halted.attempts}; retrying on its own after ${state.halted.retryAt - at} ms)`),
+    );
+    // 🔴 The two classes report different stop reasons: 'halted' says a human has to
+    //    look, 'waiting-retry' says the leg will come back by itself. Collapsing them
+    //    is what made a one-second glitch permanent.
+    return report(haltClassOf(reason) === 'transient' ? 'waiting-retry' : 'halted');
   };
 
   const report = (stopped: StopReason): RunReport => ({
@@ -396,15 +434,50 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     skippedAlreadyArchived,
     skippedAlreadyPending,
     detailOutcomes,
-    progress: formatProgress(state),
+    // 🔴 W13: the engine's own clock, so a waiting round's "about M minutes" is
+    //    measured from the same instant the backoff itself was decided on.
+    progress: formatProgress(state, clock.now()),
     halted: state.halted,
     enumTruncated,
     paceTrace: { enumerate: enumPacer.waits, detail: detailPacer.waits },
     state,
   });
 
-  // The last run already stopped and left a trace: it takes a human looking and clearing `halted` to continue; it never retries against the platform on its own.
-  if (state.halted) return report('halted');
+  // 🔴 W13 · A persisted halt is now **two different things**, and this is the line
+  //    that had them as one. Before: any recorded stop refused every later run until
+  //    a human cleared `halted` by hand — and nothing in the product ever cleared it,
+  //    so one `transport-error` (a page reload tearing the message channel, measured
+  //    on a real account) froze that platform's backfill permanently. 7,391 debts,
+  //    0 archived, for over an hour, with nothing wrong with the account.
+  //
+  //    · permanent ⇒ exactly the old behaviour, and it still needs a human.
+  //    · transient ⇒ wait out the backoff, then clear the record and **carry on from
+  //      the same cursor and the same debt set**. Nothing is written off: `pending`
+  //      and `archived` are not touched on any path through this branch.
+  if (state.halted) {
+    if (haltClassOf(state.halted.reason) === 'permanent') return report('halted');
+
+    // 🔴 A record written before W13 has no `retryAt` and is read as **due now** —
+    //    "no delay was ever decided" is not "wait forever". That is precisely the
+    //    state the real account was stuck in (reason 'transport-error', detail
+    //    starting `list offset=`), and it has to come back on its own.
+    const retryAt = state.halted.retryAt;
+    if (retryAt !== undefined && clock.now() < retryAt) {
+      // 🔴 No request, and no write either: a waiting round must be free. Returning
+      //    the persisted record lets the popup say which attempt this is and when
+      //    the next one comes — 'waiting-retry' is neither 'ran' nor 'halted'.
+      return report('waiting-retry');
+    }
+
+    // Due: the streak continues across the resume, so the ladder does not restart.
+    transientStreak = state.halted.attempts ?? 1;
+    state.halted = null;
+    await persist(store, state);
+    console.warn(
+      `[chat-stasher] backfill resuming after a transient stop`
+      + ` (attempt ${transientStreak}; the debts were never touched)`,
+    );
+  }
 
   const platformRow = getPlatformByOrigin(opts.origin);
   if (!platformRow) {

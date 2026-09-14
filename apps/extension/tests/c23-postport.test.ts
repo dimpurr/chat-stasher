@@ -275,7 +275,7 @@ describe('C23-3 · a method or url outside the allowlist ⇒ refused, with a tra
     warn.mockRestore();
   });
 
-  it('🔴 a refusal takes the same path as a failed fetch: {ok:false} → tabHttpPort throws → the engine halts and persists', async () => {
+  it('🔴 a refusal takes the same path as a failed fetch: {ok:false} → tabHttpPort throws → the engine stops and persists', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // A malformed combination where "the plan says GET but the engine sends POST": the content
     // script has to stop it, and the engine has to take its existing transport-error halt path
@@ -290,9 +290,21 @@ describe('C23-3 · a method or url outside the allowlist ⇒ refused, with a tra
     });
     console.log('[C23-3] halt record:', JSON.stringify(report.halted));
     console.log('[C23-3] stopped:', report.stopped);
-    expect(report.stopped).toBe('halted');
+    // 🔴 W13 · changed semantics, stated rather than quietly relaxed.
+    //    before: `expect(report.stopped).toBe('halted')`.
+    //    after:  'waiting-retry'. A refused/errored transport is a transient stop, so
+    //            the leg has not "stopped needing a human", it is waiting out a
+    //            backoff. What this test is *for* — that a POST refusal takes the
+    //            same line as a GET failure, and leaves a persisted trace — is
+    //            asserted below and is unchanged.
+    expect(report.stopped).toBe('waiting-retry');
     expect(report.halted?.reason).toBe('transport-error');
     expect(report.halted?.detail).toContain('must be GET, got POST');
+    // 🔴 W13: and the record now carries the two fields that make the self-healing
+    //    possible — this is the difference between "a trace you can read" and "a leg
+    //    that comes back", which is what the real account needed.
+    expect(report.halted?.attempts).toBe(1);
+    expect(report.halted?.retryAt).toBe(report.halted!.at + 5 * 60_000);
     // 🔴 The trace was persisted — it is still visible after a restart, not only in memory.
     const persisted = await store.load(stateKey('chatgpt', 'acct-halt')) as { halted?: unknown } | null;
     console.log('[C23-3] the persisted halted:', JSON.stringify(persisted?.halted));

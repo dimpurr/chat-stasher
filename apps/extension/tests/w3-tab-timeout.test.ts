@@ -313,7 +313,13 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     expect(first.reason).not.toBe('already-running');
     expect(first.reason).toBe('ran');
     // 🔴 And it stopped as a **transport error** with a trace — not as "nothing to do".
-    expect(first.report.stopped).toBe('halted');
+    // 🔴 W13 · changed semantics, stated rather than quietly relaxed.
+    //    before: `expect(first.report.stopped).toBe('halted')`.
+    //    after:  'waiting-retry'. The timeout is a transient transport condition, so
+    //            the leg is now in a state that heals itself; 'halted' is reserved for
+    //            the ones a human has to clear. The reason and the detail — the two
+    //            things this test is really about — are asserted unchanged below.
+    expect(first.report.stopped).toBe('waiting-retry');
     expect(first.report.halted).toMatchObject({ reason: 'transport-error' });
     expect(first.report.halted.detail).toContain('did not answer the backfill fetch');
 
@@ -334,10 +340,18 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
 
     console.log('[W7-c] round 2:', { reason: second.reason, stopped: second.report?.stopped });
     expect(second.reason).not.toBe('already-running');
-    // It went back in and found the persisted halt: the stop is still sayable, and
+    // It went back in and found the persisted stop: the stop is still sayable, and
     // it is still the same transport error rather than a fresh "all done".
-    expect(second.report.stopped).toBe('halted');
+    // 🔴 W13 · changed semantics, stated rather than quietly relaxed.
+    //    before: `expect(second.report.stopped).toBe('halted')`.
+    //    after:  'waiting-retry', because the round is inside the backoff the first
+    //            round wrote. 🔴 And this round is now asserted to be *free*: not one
+    //            request may go out while waiting. That is a strictly stronger claim
+    //            than the old assertion made, and it is the property that keeps a
+    //            backoff from becoming a busy-loop.
+    expect(second.report.stopped).toBe('waiting-retry');
     expect(second.report.halted).toMatchObject({ reason: 'transport-error' });
+    expect(detailAttempts.length, 'a waiting round must not touch the platform').toBe(1);
 
     // Nothing was silently struck off across either round.
     expect(backfillState().archived).toEqual([]);

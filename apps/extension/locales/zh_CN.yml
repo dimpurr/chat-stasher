@@ -182,6 +182,12 @@ popup:
         但取每条对话正文的那一步还没有实现，所以这条腿在取第一条正文之前就停住
         了，目前一条也没有存下来。这不是平台改版，也不是被限流；列出来的这些会
         一直留着，等那一步补上就接着往下清。技术细节：{detail}
+      waitingRetry: >-
+        这条腿【没有停下】，也没有销掉任何一笔账：平台拒绝或掐断了这次请求
+        （{reason}），所以它在等自己的退避时间过去，之后会自己接着往下走 ——
+        还是从原来那个位置，大约 {minutes} 分钟后。这是这一串连续失败的第
+        {attempts} 次；如果这个数字一直往上涨，那就说明平台是真的不高兴，而不是
+        一时够不着。技术细节：{detail}
       other: "这条腿已经停下并留痕：{reason} —— {detail}"
 
 tick:
@@ -197,6 +203,7 @@ tick:
 
 progress:
   haltedPrefix: "[已停止：{reason}] "
+  retryPrefix: "[等待重试：{reason}（第 {attempts} 次，约 {minutes} 分钟后）] "
   unknownTotal: "已归档 {archived} 条，欠账 {pending} 条，总数未知（{reason}）"
   withTotal: "已归档 {archived} / 共 {total} 条（{percent}%），欠账 {pending} 条"
   withContradictedTotal: >-

@@ -242,6 +242,13 @@ popup:
         body and nothing has been stored so far. This is not a platform change
         and not rate-limiting; the listed ones stay put and are worked through
         once that step lands. Technical detail: {detail}
+      waitingRetry: >-
+        This leg is NOT stopped and nothing has been written off: the platform
+        refused or dropped a request ({reason}), so it is waiting out its backoff
+        and will carry on by itself, from exactly the same place, in about
+        {minutes} minute(s). That is attempt {attempts} of this streak — if the
+        number keeps climbing, the platform is genuinely unhappy rather than
+        briefly unreachable. Technical detail: {detail}
       other: "This leg has stopped and left a record: {reason} — {detail}"
 
 # ---------------------------------------------------------------------------
@@ -263,6 +270,10 @@ tick:
 # ---------------------------------------------------------------------------
 progress:
   haltedPrefix: "[stopped: {reason}] "
+  # 🔴 W13 · The other half of that sentence. A transient stop has NOT stopped the
+  # leg, so it must not borrow `haltedPrefix`: this one says it is waiting, how many
+  # attempts deep the streak is, and when it tries again. Nothing has been written off.
+  retryPrefix: "[waiting to retry: {reason} (attempt {attempts}, about {minutes} min)] "
   unknownTotal: "Archived {archived}, still owed {pending}, total unknown ({reason})"
   withTotal: "Archived {archived} of {total} ({percent}%), still owed {pending}"
   # 🔴 W10 · The total was not missing, it was **wrong**: more rows came back
