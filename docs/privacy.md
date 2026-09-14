@@ -260,7 +260,7 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:200`; `apps/extension/lib/backfill/tab-port.ts:161` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:200`; `apps/extension/lib/backfill/tab-port.ts:162` |
 | `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts`), so settling one conversation does not rewrite the whole list. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. | `apps/extension/lib/backfill/types.ts:655-677`; `apps/extension/lib/backfill/debt-store.ts:37-39` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
@@ -301,7 +301,7 @@ Two things in that table deserve to be called out rather than buried:
   start button for that platform, and on a wake-up whose recorded scope is not an
   organization yet. A page that is simply open and idle is asked nothing
   (`apps/extension/lib/backfill/claude-page.ts:62-136`;
-  `apps/extension/lib/backfill/tab-port.ts:1042-1059`). An account belonging to
+  `apps/extension/lib/backfill/tab-port.ts:1043-1060`). An account belonging to
   several organizations, with neither of the first two sources naming one, stops
   the leg instead of choosing: the value is never guessed and the organizations
   are never probed one by one, and once that has been recorded the page is not

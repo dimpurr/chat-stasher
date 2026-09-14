@@ -295,7 +295,5 @@ platformNote:
     partial: >-
       Perplexity：还不能回溯历史正文。已经能列出你的历史会话了，但还不会去取每条
       会话的内容，所以暂时一条也不会存下来。
-  claude:
-    unsupported: Claude：还不能回溯历史。列表接口的地址里有一段组织编号，我们没有可靠办法拿到它。
   gemini:
     unsupported: Gemini：还不能回溯历史。我们没有找到可靠的「列出历史对话」接口出处，不会去猜一个。
