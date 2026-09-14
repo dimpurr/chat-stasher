@@ -141,7 +141,7 @@ taking our word for it:
   `chrome://extensions` (or `about:addons`) and look at what Chat Stasher asks
   for. It requests exactly four permissions — `nativeMessaging`, `storage`,
   `alarms`, `unlimitedStorage` — and **no host permissions at all**
-  (`apps/extension/wxt.config.ts:63`). An
+  (`apps/extension/wxt.config.ts:87`). An
   extension with no host permissions cannot make requests to a server of ours;
   the only network the code can touch is inside the pages it is already injected
   into. There is no origin belonging to this project anywhere in the extension.
@@ -160,7 +160,7 @@ taking our word for it:
   `apps/extension/entrypoints`, and `crates/chat-stasher/src`. There is no
   analytics SDK to configure, disable, or trust.
 - **Check the Firefox data-collection declaration.** The add-on declares
-  Mozilla's data-collection field as `none` (`apps/extension/wxt.config.ts:86`).
+  Mozilla's data-collection field as `none` (`apps/extension/wxt.config.ts:110`).
   The extension is not listed on addons.mozilla.org yet, so today you read that
   declaration in the source or in the manifest of a build you made yourself.
   Once it is listed, AMO publishes the declaration alongside the add-on and it
@@ -346,20 +346,20 @@ are never read either — the hook only warns that one was used (`:271-283`).
 ## 6. What each permission is for
 
 The extension declares exactly four permissions and no host permissions
-(`apps/extension/wxt.config.ts:63`):
+(`apps/extension/wxt.config.ts:87`):
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
 | `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:64-77`, `:301-345`, `:1150-1184`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-28`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:65-77`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
-| `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the chat tab open; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:41-45`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
-| `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:53`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:53-58`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
+| `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the chat tab open; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:65`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
+| `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:53`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:77`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
 
 **No permission here shows an install-time warning.** `downloads` — which did
 show "Manage your downloads" — is no longer requested at all
-(`apps/extension/wxt.config.ts:27-31`), and none of these four raises one
+(`apps/extension/wxt.config.ts:51`), and none of these four raises one
 (`apps/extension/lib/backfill/alarm.ts:16-18`,
-`apps/extension/wxt.config.ts:35-39`). The one thing Chrome does tell you at
+`apps/extension/wxt.config.ts:63`). The one thing Chrome does tell you at
 install time is that this extension can *"communicate with cooperating native
 applications"*, which is what `nativeMessaging` means and is disclosed here
 rather than left for you to discover.
@@ -376,7 +376,7 @@ opt-out setting — because there is nothing to opt out of. A search of
 `apps/extension/lib`, `apps/extension/entrypoints`, and `crates/chat-stasher/src`
 for `analytics`, `telemetry`, `sentry`, `gtag`, `mixpanel`, `posthog`, and
 `amplitude` returns no matches, and the extension holds no host permission that
-would let it reach a collection endpoint (`apps/extension/wxt.config.ts:63`).
+would let it reach a collection endpoint (`apps/extension/wxt.config.ts:87`).
 A network capture on the extension's background page is the check that does not
 require trusting us at all.
 

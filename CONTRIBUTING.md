@@ -95,6 +95,40 @@ This command intentionally corrupts a temporary staging shard. Its expected
 result is `GATE: FAIL` with a non-zero exit status; that is a successful
 self-test, not a successful release gate.
 
+## Reloading the extension during development
+
+Chrome only re-reads a manifest when the version changes — its "Update" button
+and the reload arrow do not re-inject content scripts. To exercise a build in a
+real browser you therefore need to bump the version, and the whole cycle is
+easy to botch by hand. `scripts/dev/reload-extension.sh` automates it:
+
+```sh
+bash scripts/dev/reload-extension.sh --load-dir /path/to/unpacked-load-dir
+```
+
+It builds the extension from a throwaway worktree of `HEAD` (so uncommitted
+edits never leak into the build), appends the next build number as the 4th
+version component, and swaps the result into `--load-dir` atomically via a
+sibling temp directory, keeping the previous build as
+`<load-dir>.prev`. The one step it cannot take for you — the browser offers no
+supported API for it — it prints: toggle the extension off and on in
+chrome://extensions, then reload the platform tabs.
+
+The build number comes from `--build-number`, else from the previous load
+dir's 4th version component plus one, or 1. A load dir that does not look like
+a previous build is refused unless you pass `--init` (e.g. the first time).
+`--dry-run` prints the plan and changes nothing. `--ref <ref>` builds a ref
+other than `HEAD`. A plain manifest build can be given a build number too:
+`CS_BUILD_NUMBER=<n> pnpm -s build` in `apps/extension` appends it as the 4th
+component and sets `version_name` to `<semver>+build.<n>`; without it the
+manifest is byte-identical to a release build.
+
+The mechanics are covered by a bash test you can run anywhere:
+
+```sh
+bash scripts/dev/test-reload-extension.sh
+```
+
 ## What counts as acceptable
 
 A change is acceptable when it preserves the documented data-safety contract,

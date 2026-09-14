@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'wxt';
+
+import { buildVersion, parseBuildNumber } from './lib/build-version';
 
 export default defineConfig({
   // `@wxt-dev/i18n` (module source: node_modules/@wxt-dev/i18n/dist/module.mjs:10-93)
@@ -9,11 +12,32 @@ export default defineConfig({
   // unless `manifest.default_locale` is set (module.mjs:18-21), which is why the
   // two lines below are a pair.
   modules: ['@wxt-dev/i18n/module'],
-  manifest: {
-    // The catalog is keyed by locale code, and `en` is both the file we generate
-    // the compile-time types from (module.mjs:51-58) and the language we fall
-    // back to when the browser asks for something we have not translated.
-    default_locale: 'en',
+  // `manifest` is a function so the version can reflect `CS_BUILD_NUMBER`
+  // (see lib/build-version.ts). Without that variable the produced manifest is
+  // byte-identical to one built with `version` left to WXT's package.json
+  // default and no `version_name`. With it, the 4th version component is the
+  // build number and `version_name` becomes `<semver>+build.<n>` — the signal
+  // a dev reload cycle needs Chrome to notice a new version and re-inject
+  // content scripts.
+  manifest: () => {
+    // The base version is the package.json `version` WXT would otherwise use.
+    // Reading it here keeps the two sources from drifting.
+    const baseVersion = JSON.parse(
+      readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+    ).version;
+    const { version, versionName } = buildVersion(
+      baseVersion,
+      parseBuildNumber(process.env.CS_BUILD_NUMBER),
+    );
+    return {
+      // `version_name` only appears on builds that carry a build number, so an
+      // unversioned build ships an unadorned manifest.
+      version,
+      ...(versionName !== undefined ? { version_name: versionName } : {}),
+      // The catalog is keyed by locale code, and `en` is both the file we generate
+      // the compile-time types from (module.mjs:51-58) and the language we fall
+      // back to when the browser asks for something we have not translated.
+      default_locale: 'en',
     // 🔴 `__MSG_*__` is Chrome's manifest localization form — the browser
     // substitutes it from `_locales/<resolved locale>/messages.json` before the
     // extension ever sees the manifest. WXT ships the compiled catalog as a
@@ -86,5 +110,6 @@ export default defineConfig({
         data_collection_permissions: { required: ['none'] },
       },
     },
+    };
   },
 });
