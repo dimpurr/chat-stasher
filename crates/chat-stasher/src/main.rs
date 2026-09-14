@@ -369,8 +369,9 @@ enum Command {
     },
     /// Search one destination's archive by session metadata.
     ///
-    /// Metadata tier only: this walks snapshot/index/tree objects and never
-    /// fetches or decrypts a data blob, which is why it is cheap. On a local
+    /// Metadata tier only: this walks snapshot/index/tree objects plus each
+    /// machine's small activity index, and never fetches or decrypts a
+    /// session's conversation shard, which is why it is cheap. On a local
     /// three-session fixture the metadata walk read 11,761 bytes against
     /// 1,206,285 bytes of data packs — two orders of magnitude apart. Use
     /// `--cost` to see what a full-text pass over the current hits *would*
