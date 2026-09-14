@@ -209,8 +209,71 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # fetch-depth: 0 is load-bearing HERE and only here. The commit-message gate
+      # below compares a RANGE of commits, and a depth-1 checkout has no base
+      # commit to compare against - with the default depth the range would
+      # degrade to "check the tip", which is a smaller check than this job
+      # claims to run. The other jobs need no history and keep the default.
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # First step in the job because it is the cheapest thing anyone can run and
+      # the failure it reports is usually a five-second fix by the author.
+      #
+      # A push checks only the commits it adds: the rule is "no new Chinese", not
+      # "rewrite the past". This repository's log genuinely contains commits from
+      # before the rule existed, and re-litigating those is history rewriting,
+      # not CI's job. A push with no usable base - a new branch, a tag, or a
+      # force-push whose old tip is no longer reachable - checks the one commit
+      # that is certainly being introduced and says so, rather than reporting a
+      # range it did not check.
+      #
+      # pull_request is handled for the day this workflow is triggered by one.
+      # It is not today (see the `on:` block), so a pull request's commits are
+      # checked when they reach main.
+      - name: Commit messages are English
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          case "$EVENT_NAME" in
+            pull_request)
+              if [ -z "$PR_BASE_SHA" ] || [ -z "$PR_HEAD_SHA" ]; then
+                echo "the pull_request event carried no base/head sha" >&2
+                exit 2
+              fi
+              range="$PR_BASE_SHA..$PR_HEAD_SHA"
+              ;;
+            push)
+              if [ -n "$EVENT_BEFORE" ] && [ "$EVENT_BEFORE" != "$zero" ] \
+                 && git cat-file -e "${EVENT_BEFORE}^{commit}" 2>/dev/null; then
+                range="$EVENT_BEFORE..$HEAD_SHA"
+              else
+                echo "no usable base commit (before=${EVENT_BEFORE:-unset}); checking $HEAD_SHA alone"
+                range="$HEAD_SHA"
+              fi
+              ;;
+            *)
+              echo "$EVENT_NAME has no base commit; checking $HEAD_SHA alone"
+              range="$HEAD_SHA"
+              ;;
+          esac
+          python3 scripts/check-commit-messages.py --range "$range"
+
+      # Same reason the terminology lint's self-test runs here: a gate that cannot
+      # prove it still catches anything is worth nothing, and this one is listed
+      # in CONTRIBUTING.md as a local check, so CI has to be able to run it too.
+      # It needs no history - it builds its own fixtures in a temp repository.
+      - name: Commit-message gate self-test
+        run: python3 scripts/check-commit-messages.py --selftest
 
       - name: Semantic defaults (unknown must not become a value)
         run: python3 scripts/check-semantic-defaults.py

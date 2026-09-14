@@ -36,6 +36,15 @@ not a tradeoff to be argued; it is out of scope.
    what was already archived, and the archive must not quietly become a mirror
    of the current machine state.
 
+## Language
+
+The public surface is English: commit messages, pull request titles and bodies,
+issues, and the source, comments and docs that ship with the tool. The one
+exception is `apps/extension/locales/zh_CN.yml` — the same exception
+`check-terminology.py`'s T5 rule encodes, and no new Chinese belongs anywhere
+else either. `scripts/hooks/commit-msg` stops a violation before the commit
+exists and `scripts/check-commit-messages.py` in CI catches it after.
+
 ## Do not
 
 Each of these has happened here, and each looked harmless in review.

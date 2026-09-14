@@ -19,6 +19,25 @@ safe to reproduce without access to anyone's private conversations.
   for behavior changes. Documentation-only changes should still state what a
   new user can verify locally.
 
+## Commit messages
+
+Commit messages are English, like the rest of the public surface: an imperative
+subject line, and a body that explains why the change is worth making. The diff
+already says what it does; the message is the only place the reason survives.
+
+This is checked by one script, `scripts/check-commit-messages.py`, in two places:
+CI checks every commit a push adds, and a `commit-msg` hook can check yours before
+the commit exists. To enable the hook, once per clone:
+
+```sh
+git config core.hooksPath scripts/hooks
+```
+
+Git does not read hooks out of a checkout by itself, and nothing in this
+repository runs that command for you, so a fresh clone is unfiltered until you
+do. The Chinese in `apps/extension/locales/zh_CN.yml` is the single exception,
+and it is the same one `check-terminology.py` encodes as T5.
+
 ## Local checks
 
 From the repository root, run:
@@ -32,6 +51,7 @@ python3 scripts/check-semantic-defaults.py
 python3 scripts/check-terminology.py
 python3 scripts/check-citation-drift.py
 python3 scripts/output-inventory.py --check
+python3 scripts/check-commit-messages.py --selftest
 bash scripts/release-gate.sh
 ```
 

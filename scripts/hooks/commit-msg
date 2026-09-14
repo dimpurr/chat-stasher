@@ -1,0 +1,43 @@
+#!/bin/sh
+# commit-msg -- the commit message must be English.
+#
+# Enable it once per clone:
+#
+#     git config core.hooksPath scripts/hooks
+#
+# Git does not pick up hooks from a checkout on its own: core.hooksPath is a local
+# setting, and nothing in this repository sets it for you. Until you run that
+# command the rule is still enforced, but only after the fact, by CI.
+#
+# The rule and its one exception (Chinese lives in
+# apps/extension/locales/zh_CN.yml) are stated in CLAUDE.md and implemented once,
+# in scripts/check-commit-messages.py. This hook is a thin wrapper around that
+# script so the hook and CI cannot disagree about what a violation is.
+set -u
+
+if [ "$#" -lt 1 ]; then
+  echo "commit-msg: expected the path to the commit message file" >&2
+  echo "commit-msg: nothing was checked" >&2
+  exit 2
+fi
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "commit-msg: not inside a git working tree; nothing was checked" >&2
+  exit 3
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "commit-msg: python3 is not on PATH, so the message was NOT checked." >&2
+  echo "commit-msg: install python3, or commit with --no-verify if you accept that." >&2
+  exit 3
+fi
+
+# Git runs hooks from the root of the working tree, so a relative path from it is
+# already correct; an absolute one is passed through untouched.
+msg_file=$1
+case "$msg_file" in
+  /*) ;;
+  *) msg_file="$root/$msg_file" ;;
+esac
+
+exec python3 "$root/scripts/check-commit-messages.py" --file "$msg_file"
