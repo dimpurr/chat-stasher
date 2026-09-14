@@ -33,7 +33,7 @@ describe('popup copy: no leftover download channel', () => {
     for (const file of ['locales/en.yml', 'locales/zh_CN.yml']) {
       const text = readFileSync(resolve(root, file), 'utf8');
       // The Chinese phrase ("download directory") is escaped: CJK text belongs in zh_CN.yml only.
-      expect(text, file).not.toMatch(/download directory|下载目录/);
+      expect(text, file).not.toMatch(/download directory|\u4e0b\u8f7d\u76ee\u5f55/);
     }
   });
 });
