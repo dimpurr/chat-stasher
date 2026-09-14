@@ -174,7 +174,7 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:290`, `:314`, `:338-355`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:626-664`, `:958-980`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:290`, `:314`, `:338-355`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:626-664`, `:956-978`). |
 
 **Caveat, stated honestly:** on every platform except ChatGPT the passive hook
 adds no traffic, so there is nothing distinctive for the platform to observe
@@ -195,7 +195,7 @@ By the same argument that applies on ChatGPT, this adds no party who could not
 already see it — any script on that origin, and the page's own requests, carry
 that same token. **Backfill is
 different** — it walks conversation lists and detail endpoints
-(`apps/extension/lib/backfill/engine.ts:626-664`, `:958-980`), which produces a
+(`apps/extension/lib/backfill/engine.ts:626-664`, `:956-978`), which produces a
 request pattern the platform can see and which does not look like a human
 reading their history. **We have not investigated** whether any platform's terms
 of service prohibit this, nor whether any platform rate-limits or flags such a
@@ -208,8 +208,8 @@ it bounds what you may safely assume is archived:
 
 | Platform | Requests the platform sees | What lands in your archive |
 |---|---|---|
-| **ChatGPT**, **DeepSeek**, **Grok**, **Kimi** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek and Kimi, **two** on Grok (a skeleton call, then a content call) | The conversation text (`apps/extension/lib/backfill/enumerate.ts:1969-1975`). On all four this is **implemented but not yet observed completing in a real browser**; on DeepSeek, Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:1287-1300`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:1542-1603`; `apps/extension/lib/backfill/engine.ts:694-736`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:203-235`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1088-1123`) |
-| **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:1983-1989`) |
+| **ChatGPT**, **DeepSeek**, **Grok**, **Kimi** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek and Kimi, **two** on Grok (a skeleton call, then a content call) | The conversation text (`apps/extension/lib/backfill/enumerate.ts:1968-1974`). On all four this is **implemented but not yet observed completing in a real browser**; on DeepSeek, Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:1287-1300`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:1542-1603`; `apps/extension/lib/backfill/engine.ts:694-736`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:203-235`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1086-1121`) |
+| **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:1982-1988`) |
 | **Gemini**, **Claude** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:1804`) |
 
 🔴 The middle row is the dangerous one to misread. On Perplexity the extension
@@ -453,7 +453,7 @@ a real limitation of the current code.
    recovers text on four of them, and one tier of it looks like coverage
    without being coverage.** Backfill recovers past conversation *text* on
    **ChatGPT**, **DeepSeek**, **Grok** and **Kimi**
-   (`apps/extension/lib/backfill/enumerate.ts:1969-1975`), but on none of them
+   (`apps/extension/lib/backfill/enumerate.ts:1968-1974`), but on none of them
    has a complete backfill been observed in a real browser, and on DeepSeek,
    Grok and Kimi we have **not verified** whether a long conversation comes back
    whole rather than truncated
@@ -465,9 +465,9 @@ a real limitation of the current code.
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:203-235`); a body
    response that admits it is incomplete is refused and listed as a failure
-   rather than archived (`apps/extension/lib/backfill/engine.ts:1088-1123`). On
+   rather than archived (`apps/extension/lib/backfill/engine.ts:1086-1121`). On
    **Perplexity** it enumerates your conversations and archives
-   **none of them** (`apps/extension/lib/backfill/enumerate.ts:1983-1989`); on
+   **none of them** (`apps/extension/lib/backfill/enumerate.ts:1982-1988`); on
    **Gemini** and **Claude** it does nothing
    (`apps/extension/lib/backfill/enumerate.ts:1804`). The user-visible symptom of
    the middle tier is *activity* — a growing pending count — with an empty

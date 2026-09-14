@@ -287,7 +287,7 @@ archives one; passive capture is a different leg and sends no request of its
 own, it reads the response the page fetches for the conversation you have
 open). On **Gemini** and **Claude** backfill issues no
 requests at all.
-(`apps/extension/lib/backfill/enumerate.ts:1969-1975`, `:1983-1989`, `:1804`.) The
+(`apps/extension/lib/backfill/enumerate.ts:1968-1974`, `:1982-1988`, `:1804`.) The
 practical reading for you: enabling backfill on Perplexity produces list traffic
 the platform can see, and produces **no backup whatsoever** on your side. On
 DeepSeek it produces list traffic *and* one body request per conversation, and on
@@ -338,8 +338,8 @@ tier of that list is easy to misread:
 
 | Platform | What backfill does when you enable it |
 |---|---|
-| **ChatGPT**, **DeepSeek**, **Grok**, **Kimi** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:1969-1975`). All four are **implemented, not yet observed completing a backfill in a real browser**. For DeepSeek, Grok and Kimi we have **not verified** whether a long conversation comes back complete, because the extension does not page those endpoints (`apps/extension/lib/backfill/enumerate.ts:1287-1300`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:203-235`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1088-1123`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:1542-1603`). |
-| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:1983-1989`). |
+| **ChatGPT**, **DeepSeek**, **Grok**, **Kimi** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:1968-1974`). All four are **implemented, not yet observed completing a backfill in a real browser**. For DeepSeek, Grok and Kimi we have **not verified** whether a long conversation comes back complete, because the extension does not page those endpoints (`apps/extension/lib/backfill/enumerate.ts:1287-1300`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:203-235`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1086-1121`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:1542-1603`). |
+| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:1982-1988`). |
 | **Gemini**, **Claude** | Nothing; the leg stops before issuing any request (`apps/extension/lib/backfill/enumerate.ts:1804`). |
 
 We state this in a privacy policy because the failure mode is a privacy
@@ -352,7 +352,7 @@ have not checked a genuinely long conversation against any of them. Kimi is the
 one where that case is at least refused out loud: a body response that says it
 holds only part of a conversation is not archived and is listed as a failure,
 so a long Kimi conversation is missing from your archive rather than silently
-half-there (`apps/extension/lib/backfill/engine.ts:1088-1123`). Grok
+half-there (`apps/extension/lib/backfill/engine.ts:1086-1121`). Grok
 carries a second caveat of its own: where the sources for its list cursor
 disagree, the extension does **not** pick one — a page that repeats what was
 already listed stops the leg and says the response shape changed, rather than

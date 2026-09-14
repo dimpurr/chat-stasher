@@ -55,9 +55,9 @@ apps/extension/lib/backfill/engine.ts:626-664  330d748b2898  lines=39
   <- docs/threat-model.md:177, docs/threat-model.md:198  :: const listWhere = (): string =>
 apps/extension/lib/backfill/engine.ts:694-736  1057aeaa5f1d  lines=43
   <- README.md:121, docs/install.md:669, docs/privacy.md:360, docs/threat-model.md:211  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
-apps/extension/lib/backfill/engine.ts:958-980  277a46b875d2  lines=23
+apps/extension/lib/backfill/engine.ts:956-978  277a46b875d2  lines=23
   <- docs/threat-model.md:177, docs/threat-model.md:198  :: while (state.pending.length > 0) {
-apps/extension/lib/backfill/engine.ts:1088-1123  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:1086-1121  2cb492e06a56  lines=36
   <- README.md:122, docs/install.md:88, docs/install.md:672, docs/privacy.md:341, docs/privacy.md:355, docs/threat-model.md:211, docs/threat-model.md:468  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
 apps/extension/lib/backfill/enumerate.ts:1271-1285  30e272d8bf3f  lines=15
   <- README.md:120, docs/install.md:108, docs/install.md:671  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
@@ -65,7 +65,7 @@ apps/extension/lib/backfill/enumerate.ts:1287-1300  7ce980289073  lines=14
   <- README.md:120, docs/install.md:103, docs/install.md:671, docs/privacy.md:341, docs/threat-model.md:211, docs/threat-model.md:460  :: *  · 🔴 **Not verified: whether this endpoint pages or trunc…
 apps/extension/lib/backfill/enumerate.ts:1334-1337  cd978611dbc5  lines=4
   <- README.md:120, docs/install.md:88  :: detailPath: DEEPSEEK_DETAIL_PATH,
-apps/extension/lib/backfill/enumerate.ts:1338-1359  e36cdb1026ac  lines=22
+apps/extension/lib/backfill/enumerate.ts:1338-1359  bdf83a97c946  lines=22
   <- docs/install.md:668  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:1424-1433  e191d04a5861  lines=10
   <- README.md:123, docs/install.md:127  :: detailPath: null,
@@ -81,9 +81,9 @@ apps/extension/lib/backfill/enumerate.ts:1627-1689  584fb75ba557  lines=63
   <- README.md:122, docs/install.md:88, docs/install.md:672, docs/privacy.md:299  :: * 🔴 W22 · Kimi's conversation list **and** its conversation…
 apps/extension/lib/backfill/enumerate.ts:1804  ed62fe4313f7  lines=1
   <- README.md:124, docs/install.md:84, docs/install.md:582, docs/privacy.md:290, docs/privacy.md:343, docs/threat-model.md:213, docs/threat-model.md:472  :: export const BACKFILL_UNSUPPORTED: readonly UnsupportedBack…
-apps/extension/lib/backfill/enumerate.ts:1969-1975  b0b623ad6b49  lines=7
+apps/extension/lib/backfill/enumerate.ts:1968-1974  b0b623ad6b49  lines=7
   <- README.md:120, docs/install.md:84, docs/install.md:582, docs/privacy.md:290, docs/privacy.md:341, docs/threat-model.md:211, docs/threat-model.md:456  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
-apps/extension/lib/backfill/enumerate.ts:1983-1989  be15b15a0991  lines=7
+apps/extension/lib/backfill/enumerate.ts:1982-1988  be15b15a0991  lines=7
   <- README.md:123, docs/install.md:84, docs/install.md:582, docs/privacy.md:290, docs/privacy.md:342, docs/threat-model.md:212, docs/threat-model.md:470  :: export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/pace.ts:92-103  9e56eb8452f2  lines=12
   <- docs/install.md:552  :: export const DEFAULT_DETAIL_PACE: PacePlan = {
