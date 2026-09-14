@@ -11,6 +11,7 @@ import {
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
 import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
+import { contentFingerprint, isUnchangedSinceDelivery, rememberDelivered } from '../lib/recapture';
 import {
   drainOutbox,
   enqueue,
@@ -68,10 +69,14 @@ import { initUiLocale } from '../lib/i18n';
  *    success nor a failure — and the badge counts it as "waiting".
  */
 export interface HandledResult {
-  /** 🔴 true if and only if this payload received a matching `ack` (§1). */
+  /**
+   * 🔴 true if and only if this payload received a matching `ack` (§1), or — with
+   * status 'unchanged' — an identical copy (volatile fields aside, lib/recapture.ts)
+   * already did, so it was not sent again.
+   */
   saved: boolean;
-  /** Four mutually exclusive outcomes, every one of which has to be sayable. */
-  status: 'delivered' | 'queued' | 'rejected' | 'refused';
+  /** Five mutually exclusive outcomes, every one of which has to be sayable. */
+  status: 'delivered' | 'unchanged' | 'queued' | 'rejected' | 'refused';
   reason?: string;
   /** The `nack` kind when it was rejected (§6.3). */
   kind?: string;
@@ -157,6 +162,23 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   }
   const { name, payload, bytes, sessionId } = prepared;
 
+  // Unchanged since its last acknowledged delivery ⇒ do not append another
+  // identical copy (lib/recapture.ts). Only platforms with known volatile fields
+  // get a fingerprint; everything else is always delivered.
+  const recaptureStore = browserLocalStore();
+  const platformId = findPlatformForUrl(captured.url)?.id ?? null;
+  const fingerprint = platformId ? await contentFingerprint(platformId, captured.text) : null;
+  if (fingerprint && await isUnchangedSinceDelivery(recaptureStore, name, fingerprint)) {
+    return {
+      saved: true,
+      status: 'unchanged',
+      finalName: name,
+      bytes,
+      sessionId,
+      channel: 'native-messaging',
+    };
+  }
+
   // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox first, and only
   //    then attempt any delivery. If the SW is killed between these two lines,
   //    the conversation is still waiting on disk and the next drain sends it.
@@ -199,6 +221,23 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   }
   if (lookup.entry === null) {
     // 🔴 Only a matching ack deletes an entry (§1), so "not found" = this one really was stored.
+    // 🔴 And only now may the fingerprint be written down (lib/recapture.ts): a copy
+    //    that was merely queued proves nothing, and skipping it next time on that
+    //    basis would lose a conversation that was never stored. Failing to record
+    //    it is not a delivery failure — the cost of a missing record is one extra
+    //    copy, so the ack's outcome must not be touched by it.
+    if (fingerprint) {
+      try {
+        await rememberDelivered(recaptureStore, name, fingerprint);
+      } catch (err) {
+        // Metadata only (platform + fingerprint prefix): never a URL, id or body.
+        console.warn(
+          '[chat-stasher] could not record the delivered fingerprint for'
+          + ` ${platformId}/${fingerprint.slice(0, 12)}`,
+          (err as Error).message,
+        );
+      }
+    }
     return {
       saved: true,
       status: 'delivered',
@@ -856,7 +895,15 @@ export default defineBackground(() => {
             return null;
           });
           // Privacy rule: never the conversation content — ids/bytes only.
-          if (result.saved) {
+          if (result.status === 'unchanged') {
+            // 🔴 saved:true, but **nothing was acknowledged just now**: this exact
+            //    content was acked earlier, so it was not sent again. Saying
+            //    "acknowledged" here would report an ack that did not happen.
+            console.log(
+              `[chat-stasher] unchanged since its last delivery, not sent again`
+              + ` — ${result.bytes ?? 0} bytes as ${result.finalName}`,
+            );
+          } else if (result.saved) {
             console.log(`[chat-stasher] acknowledged ${result.bytes} bytes as ${result.finalName}`);
           } else {
             console.log(

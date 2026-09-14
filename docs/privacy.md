@@ -95,7 +95,7 @@ the sentence.
    `:309-377`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:160-177`).
+   (`apps/extension/entrypoints/background.ts:182-199`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -174,7 +174,7 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:104-132`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:109-137`;
 `apps/extension/lib/outbox.ts:64-80`, `:309-377`). The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
@@ -211,15 +211,15 @@ Two things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:571-590` — the identity itself is
+  (`apps/extension/entrypoints/background.ts:610-629` — the identity itself is
   read by `apps/extension/lib/contract.ts:649-665`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:589`). It is used to
+  the `||` at `apps/extension/entrypoints/background.ts:628`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
   pressing the popup button records `default` deliberately, because the channel
   that starts it carries no account information
-  (`apps/extension/entrypoints/background.ts:529-560`).
+  (`apps/extension/entrypoints/background.ts:568-599`).
 
 **c. Your archive destination.** Whatever you configured: a directory on your
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you

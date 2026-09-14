@@ -19,19 +19,19 @@ SECURITY.md:9  381d717079a5  lines=1
   <- docs/privacy.md:475  :: **Contact: `work@team.iopho.com`.** Mail that address direc…
 SECURITY.md:29-35  02cf2eee45d3  lines=7
   <- docs/privacy.md:483  :: This is a personal project with a single maintainer. **We d…
-apps/extension/entrypoints/background.ts:104-132  30c84e84ef5b  lines=29
+apps/extension/entrypoints/background.ts:109-137  30c84e84ef5b  lines=29
   <- docs/privacy.md:177, docs/threat-model.md:109  :: function buildBundle(captured: CapturedFetch): InboxBundle {
-apps/extension/entrypoints/background.ts:119-121  36c85931504a  lines=3
+apps/extension/entrypoints/background.ts:124-126  36c85931504a  lines=3
   <- docs/threat-model.md:208  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
-apps/extension/entrypoints/background.ts:160-177  41d87a302a6d  lines=18
+apps/extension/entrypoints/background.ts:182-199  41d87a302a6d  lines=18
   <- README.md:158, docs/privacy.md:98, docs/threat-model.md:32  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
-apps/extension/entrypoints/background.ts:370-377  185eedd6b024  lines=8
+apps/extension/entrypoints/background.ts:409-416  185eedd6b024  lines=8
   <- docs/install.md:207  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:529-560  ba11586c9ffe  lines=32
+apps/extension/entrypoints/background.ts:568-599  ba11586c9ffe  lines=32
   <- docs/privacy.md:222  :: * 🔴 What about scope (the account identifier): **it records…
-apps/extension/entrypoints/background.ts:571-590  b0901302e63f  lines=20
+apps/extension/entrypoints/background.ts:610-629  b0901302e63f  lines=20
   <- docs/privacy.md:214  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:589  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:628  6539997ed831  lines=1
   <- docs/privacy.md:216  :: return { platform: row.id, origin, scope: identity.value ||…
 apps/extension/entrypoints/dw-bridge.content.ts:193-219  119bab292d93  lines=27
   <- docs/privacy.md:85, docs/threat-model.md:173  :: const seenGate = createSeenGate(15_000);

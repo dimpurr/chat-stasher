@@ -356,12 +356,22 @@ describe('C17 task 2 · counter-case 4: the same conversation enumerated twice',
     await enableBackfill();
     // (a) The instrument proves itself: when the same conversation is really sent twice (the name identical byte for byte),
     //     finalWrites() **does see** two records with the same name.
-    //     🔴 W2: payloads are deduplicated by content (sha256 is the primary key), so the **bytes** have to differ here
-    //     — changing capturedAt is enough, and the name does not change a character.
+    //     🔴 W2: payloads are deduplicated by content (sha256 is the primary key), so the **bytes** have to differ here.
+    //     🔴 W6: and since W3 they have to differ **in the response body**, not merely in
+    //     `capturedAt`. Two views of one conversation are now deliberately recognized as the
+    //     same delivery (lib/recapture.ts) — which is exactly this test's claim in (b) — so a
+    //     bumped timestamp no longer produces a second record. An edit to the body still does,
+    //     and the name still does not change a character: it comes from the URL's session id.
     const mod: any = await import('../entrypoints/background');
     const dup = liveCapture();
     await bootAndDispatch(dup);
-    await mod.handleCaptured({ ...dup, capturedAt: dup.capturedAt + 1_000 });
+    const editedBody = JSON.parse(dup.text);
+    editedBody.current_node = 'n1';   // a real content change; the session id, and so the name, is untouched
+    await mod.handleCaptured({
+      ...dup,
+      capturedAt: dup.capturedAt + 1_000,
+      text: JSON.stringify(editedBody),
+    });
     const liveName = finalWrites().filter((f) => f.includes('aaaaaaaa-1111'));
     console.log('[C17-2.4] instrument self-proof (two different byte strings, one name):', liveName);
     expect(liveName.length).toBe(2);

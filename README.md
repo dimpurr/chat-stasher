@@ -155,7 +155,7 @@ Three things worth knowing before reading either:
   capture is written into the extension's own IndexedDB outbox *before* any
   delivery is attempted, and is removed only when the host answers with a
   matching `ack` (`apps/extension/lib/outbox.ts:309-377`, `:379-394`;
-  `apps/extension/entrypoints/background.ts:160-177`). A delivery the host never
+  `apps/extension/entrypoints/background.ts:182-199`). A delivery the host never
   confirms stays there, and the popup's export file contains the same bodies.
 
 ## Development status
