@@ -367,6 +367,9 @@ failure:
   detailPagedUnsupported: >-
     the conversation came back incomplete — the platform holds more of it, and we
     do not fetch the rest — so nothing was stored
+  detailTooLong: >-
+    this conversation has more parts than we fetch in one go, so nothing was
+    stored
   unknownReason: "reason code {reason}"
   shortIdEmpty: (empty)
 

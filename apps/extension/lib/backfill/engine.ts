@@ -587,7 +587,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    same branch and the same guard below; only the two lines that build the
    *    request differ.
    */
-  const tokenMode = plan.listTokenUrl !== undefined || plan.listTokenPost !== undefined;
+  // 🔴 W29 · A form body token (`listTokenForm`) is the same paging mode in a
+  //    different encoding, so it reaches this branch and the guard below too.
+  const tokenMode = plan.listTokenUrl !== undefined
+    || plan.listTokenPost !== undefined
+    || plan.listTokenForm !== undefined;
   /**
    * 🔴 W10 · **How many list pages one tick may read.**
    *
@@ -668,7 +672,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     //    🔴 W22: which builder depends on which declaration put this plan in token
     //    mode — a body-cursor plan's body must be able to see the token, and an
     //    offset plan's must not be handed one at all.
-    const init = tokenMode && plan.listTokenPost
+    const init = tokenMode && (plan.listTokenPost !== undefined || plan.listTokenForm !== undefined)
       ? listTokenPostInit(plan, opts.origin, listToken, listLimit)
       : listRequestInit(plan, opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
@@ -1040,6 +1044,99 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       deliveredMethod = 'POST';
       deliveredStatus = res2.status;
       deliveredText = res2.text;
+    }
+
+    /**
+     * 🔴 W29 · **A body that is more than one request** (a plan may declare
+     * `detailPages`).
+     *
+     * The engine's part is exactly what `DetailPagesSpec` says it knows: a URL, a
+     * request built for a later page from a token this loop never reads, a wait, a
+     * cap, and an assembler. It never learns what the token is, never parses it,
+     * never compares it, and never builds a body. Two rules are worth stating:
+     *
+     * 🔴 **The whole loop is one body.** The pacer's gate fired once above and
+     *    `detailToday.count` increments once below, so a twenty-page conversation
+     *    costs one slot — the unit the product cares about is "a conversation
+     *    fetched", not "an HTTP request sent". The wait between pages is
+     *    `delayMs`, drawn per page, and it is deliberately not a Pacer.
+     * 🔴 **The cap is a refusal, not a truncation.** Reaching `maxPages` with a
+     *    token still in hand means this conversation is longer than this leg will
+     *    fetch: the pages collected so far are real content and still not the
+     *    conversation, so nothing is stored, the debt leaves pending, and the
+     *    failure list carries `detail-too-long`. The alternative — storing what
+     *    was collected and calling it complete — is the one outcome this whole
+     *    design exists to prevent.
+     * 🔴 **A page whose turns are all already seen is the cursor not advancing**
+     *    (a platform that ignored the token would hand page 1 back forever, and
+     *    the ledger would say the conversation was progressing). Same rule and
+     *    same halt as the list segment's repeat-page guard. Partial overlap is
+     *    tolerated: the probe measured disjoint pages, the sources expect
+     *    overlap, and only "nothing new at all" is decidable without knowing
+     *    which of the two is right.
+     */
+    if (!step2 && plan.detailPages) {
+      const pages = plan.detailPages;
+      const rawPages: string[] = [res.text];
+      const seenResponseIds = new Set<string>();
+      let step = pages.nextPage(res.text, id);
+      let tooLong = false;
+      for (;;) {
+        if (step.kind === 'unreadable') {
+          return halt('shape-changed', `detail page: ${step.reason}`);
+        }
+        if (step.kind !== 'more') break;
+        if (
+          step.responseIds.length > 0
+          && step.responseIds.every((responseId) => seenResponseIds.has(responseId))
+        ) {
+          return halt(
+            'shape-changed',
+            'detail page: a page carried only turns this conversation has already returned;'
+            + ' the page cursor did not advance',
+          );
+        }
+        for (const responseId of step.responseIds) seenResponseIds.add(responseId);
+        if (rawPages.length >= pages.maxPages) {
+          tooLong = true;
+          break;
+        }
+        if (opts.shouldAbort?.()) return report('aborted');
+        await clock.sleep(uniformBetween(random, pages.delayMs.min, pages.delayMs.max));
+        const pageUrl = pages.url(opts.origin, id);
+        const pageInit = pages.nextInit(opts.origin, id, step.token);
+        let next: HttpResponse;
+        try {
+          next = await sendVia(http, pageUrl, pageInit);
+        } catch (err) {
+          return halt('transport-error', `detail page: ${(err as Error).message}`);
+        }
+        if (next.status < 200 || next.status > 299) {
+          return halt(haltReasonForStatus(next.status), `detail page returned HTTP ${next.status}`);
+        }
+        if (!matchesResponseShape(platformRow, next.text)) {
+          return halt('shape-changed', `detail page does not match the ${platformRow.id} response shape`);
+        }
+        rawPages.push(next.text);
+        step = pages.nextPage(next.text, id);
+      }
+      if (tooLong) {
+        dropDebt(state, id);
+        failedThisRun.push(
+          recordFailure(state, { id, reason: 'detail-too-long', at: clock.now() }),
+        );
+        state.detailToday.count += 1;
+        await persist(state);
+        console.warn(
+          '[chat-stasher] backfill: this conversation needs more pages than this leg fetches'
+          + ' in one body; nothing was stored and the failure list names it',
+        );
+        continue;
+      }
+      // The delivered document is the assembled bundle; the recorded request is
+      // the **first** page's, i.e. the one the page itself also makes. Every raw
+      // page is inside the bundle, so the archive holds the whole exchange.
+      deliveredText = pages.assemble(id, rawPages);
     }
 
     // The same shape checker the live leg uses: if the API changes, this is the first to know.

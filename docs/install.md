@@ -29,7 +29,7 @@ read-only (`crates/chat-stasher/src/main.rs:653`).
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`), Grok (`grok.com`)
-(`apps/extension/lib/contract.ts:69,117,185,201,217,283,405`).
+(`apps/extension/lib/contract.ts:177,245,261,302,360,487,574`).
 It requests four permissions — `nativeMessaging`, `storage`, `alarms` and
 `unlimitedStorage` — and **no host permissions at all**
 (`apps/extension/wxt.config.ts:87`). There is no `downloads` permission and no
@@ -59,18 +59,18 @@ that platform."** The extension has two legs; please read them separately:
 - **Passive capture** (on by default): the conversation you are currently
   viewing is saved as a side effect when the page fetches its own data. Each
   platform registers in that table which route, method, and response shape
-  count (`apps/extension/lib/contract.ts:66-487`).
+  count (`apps/extension/lib/contract.ts:130-576`).
   🔴 **Perplexity used to be the exception here; read where it stands now:**
   its row registers the **conversation-content** route — path hint
   `/rest/thread/`, method `GET`, response shape requiring `entries`
-  (`apps/extension/lib/contract.ts:116-182`) — and it recognizes the session id
+  (`apps/extension/lib/contract.ts:180-246`) — and it recognizes the session id
   from the page URL, the `/search/<slug>` the thread is open at
-  (`apps/extension/lib/contract.ts:169-172`). The **conversation-list** route is
+  (`apps/extension/lib/contract.ts:233-236`). The **conversation-list** route is
   deliberately outside the row: a list is a summary of conversations, not one of
   them, so it is skipped silently rather than captured.
   So, reading the code, passive capture on Perplexity **does name the
   conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:720-748`) — but this is still a conclusion
+  (`apps/extension/lib/contract.ts:809-837`) — but this is still a conclusion
   drawn from reading the code, and the route itself was read out of public
   source rather than measured: **we have not tested it on a real perplexity.ai
   page.**
@@ -81,13 +81,13 @@ that platform."** The extension has two legs; please read them separately:
 ### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
 
 The list below comes directly from the two tables in the code, not from
-marketing (`apps/extension/lib/backfill/enumerate.ts:1968-1974`, `:1982-1988`, `:1804`):
+marketing (`apps/extension/lib/backfill/enumerate.ts:2640-2650`, `:2654-2660`, `:2662-2667`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
-| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Grok**, **Kimi** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the four. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:1334-1337`). 🔴 Grok is the least verified of the four: its routes came from reading public open-source implementations, not from a logged-in grok.com session, and it fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:1460-1462`, `:1542-1603`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:1627-1689`; `apps/extension/lib/platform-auth.ts:203-235`; `apps/extension/lib/backfill/engine.ts:1086-1121`). |
+| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the five. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:1505-1508`). 🔴 Grok is the least verified of the four: its routes came from reading public open-source implementations, not from a logged-in grok.com session, and it fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:1631-1633`, `:1713-1774`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:1798-1860`; `apps/extension/lib/platform-auth.ts:214-246`; `apps/extension/lib/backfill/engine.ts:1183-1218`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:2237-2367`; `apps/extension/lib/backfill/engine.ts:1079-1131`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:355-417`). |
 | **🔴 Can only list conversations, saves none of their content** | **Perplexity** | The extension can list which historical conversations you have, but **will not fetch each conversation's content**, so **not one of them is delivered or queued**. Your Perplexity history is **not backed up**. |
-| **Not implemented** | **Gemini**, **Claude** | The backfill leg stops before issuing any request. Nothing happens. |
+| **Not implemented** | **Claude** | The backfill leg stops before issuing any request. Nothing happens. |
 
 🔴 **The middle tier is the easiest to misunderstand, so say it again**:
 Perplexity, with backfill enabled, the extension **does act** (it lists
@@ -100,12 +100,12 @@ holds only their ids, not their content.
 fetches bodies, but we have **not verified** whether its body endpoint pages or
 truncates a long conversation. The extension does no paging, and nothing in the
 response envelope it reads tells a truncated body apart from a complete one
-(`apps/extension/lib/backfill/enumerate.ts:1287-1300`). So a very long DeepSeek
+(`apps/extension/lib/backfill/enumerate.ts:1458-1471`). So a very long DeepSeek
 conversation may be archived as only its first part while the extension reports
 success. The evidence for the endpoint itself is solid — it is the route
 DeepSeek's own page calls over XHR when a user opens a past conversation in a
 real logged-in session, and several mutually independent open-source exporters
-request the same route (`apps/extension/lib/backfill/enumerate.ts:1271-1285`) — but
+request the same route (`apps/extension/lib/backfill/enumerate.ts:1442-1456`) — but
 the completeness question is open, and it is not written here as answered.
 
 🔴 **Perplexity gets one more sentence, and its two legs now point in opposite
@@ -118,13 +118,13 @@ table row above as being about **backfill**, which is what it is about.
 The reason is written in the code, not because we are lazy: Perplexity's
 **conversation-list endpoint** has multiple independent open-source
 implementations that cross-check one another
-(`apps/extension/lib/backfill/enumerate.ts:1436-1450`), but this plan's
+(`apps/extension/lib/backfill/enumerate.ts:1607-1621`), but this plan's
 **single-conversation segment is left unfilled** — and it is left unfilled on
 purpose, not for want of a route. The content route itself is known
-(`apps/extension/lib/contract.ts:134-149`), but the parameters the sources give
+(`apps/extension/lib/contract.ts:198-213`), but the parameters the sources give
 for it disagree with one another and nothing establishes whether one response
 holds a whole long conversation, so `detailPath` stays `null`
-(`apps/extension/lib/backfill/enumerate.ts:1424-1433`, `:1436-1450`). We will not guess a
+(`apps/extension/lib/backfill/enumerate.ts:1595-1604`, `:1607-1621`). We will not guess a
 content-endpoint profile — a wrong guess would not error; it would save only the
 first few turns of every conversation while you believed you had it all.
 
@@ -133,7 +133,7 @@ The popup shows these three tiers in the same terms as the table above
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
-`apps/extension/lib/contract.ts:66-487`, a separate matter from backfill.)
+`apps/extension/lib/contract.ts:130-576`, a separate matter from backfill.)
 
 ---
 
@@ -567,19 +567,23 @@ confirmed in the code, not a temporary disclaimer.
   changed.
 
 - **🔴 Turning on backfill still does not mean every platform's history will
-  be recovered.** ChatGPT, DeepSeek, Grok and Kimi list conversations **and**
-  fetch their content — implemented on all four, not yet observed completing in a
-  real browser, and on DeepSeek, Grok and Kimi the completeness of a long
-  conversation is unverified. Grok is the least verified of the four (its routes
-  come from reading public open-source implementations, and one conversation costs
-  two requests), and where its sources disagree about the list cursor it stops
-  rather than picking one. Kimi's routes were measured in a logged-in session, and
-  its requests carry your page's own login token (read from the page, memory only);
-  a body response that admits it is incomplete is refused and listed as a failure
-  rather than archived. Perplexity **only lists conversations, saving none of their
-  content**; Gemini and Claude are entirely unsupported. See section 1.1 for
+  be recovered.** ChatGPT, DeepSeek, Gemini, Grok and Kimi list conversations
+  **and** fetch their content — implemented on all five, not yet observed
+  completing in a real browser, and on DeepSeek, Gemini, Grok and Kimi the
+  completeness of a long conversation is unverified (Gemini is the one that pages;
+  the other two do not, and say so). Grok is the least verified of the five (its
+  routes come from reading public open-source implementations, and one conversation
+  costs two requests), and where its sources disagree about the list cursor it
+  stops rather than picking one. Kimi's routes were measured in a logged-in
+  session, and its requests carry your page's own login token (read from the page,
+  memory only); a body response that admits it is incomplete is refused and listed
+  as a failure rather than archived. Gemini's routes were measured too, its requests
+  carry three values out of the page's own bootstrap blob (read at request time,
+  memory only), and a conversation longer than 20 pages is refused rather than
+  archived in part. Perplexity **only lists conversations, saving none of their
+  content**; Claude is entirely unsupported. See section 1.1 for
   the list and the detailed explanation (list from
-  `apps/extension/lib/backfill/enumerate.ts:1968-1974`, `:1982-1988`, `:1804`). The
+  `apps/extension/lib/backfill/enumerate.ts:2640-2650`, `:2654-2660`, `:2662-2667`). The
   middle tier is the one most likely to make you think "I've backed it up", so it
   gets its own bullet here.
 
@@ -665,12 +669,12 @@ Collected in one place, so you know which spots to double-check yourself:
 | The concrete installation steps for a launchd / systemd timer | **Unverified** (`schedule` only renders templates, does not install) |
 | How `known_hosts_strategy` behaves against a real server | **Partly verified** (the three values and their `StrictHostKeyChecking` equivalents were read from the pinned dependency's source — opendal-service-sftp 0.57.0 `src/backend.rs` lines 148-165 and the `openssh` crate it maps onto — but we have not exercised `add` or `accept` against a live host. Section 4.4 describes what each one gives up.) |
 | Whether passive capture on Perplexity delivers the conversation it names | **Unverified** (reading the code, the conclusion is now "it recognizes the id and delivers"; see section 1. The route itself was read out of public source, not measured, and we have not tried it on a real page.) |
-| Whether the DeepSeek / Perplexity / Grok conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:1338-1359`, `:1436-1450`, `:1542-1603`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
-| Which Grok list cursor the real backend honours — an opaque `pageToken` or an integer `page` | **Unverified** (the sources disagree; `apps/extension/lib/backfill/enumerate.ts:1542-1603`. The extension does not choose: it hands back exactly what it was given, and a page that repeats what was already listed stops the leg and says the response shape changed, rather than being read as "no more conversations"; `apps/extension/lib/backfill/engine.ts:694-736`.) |
-| Whether a **long** Grok conversation comes back complete from the backfill content endpoint | **Unverified** (its two-step route — a skeleton call then a content call — was cross-checked across implementations, but none of them pages the content call and this extension adds no paging, so a long conversation may be stored as only its first part; `apps/extension/lib/backfill/enumerate.ts:1542-1603`.) |
-| Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Unverified** (the endpoint itself is well evidenced — it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:1271-1285`. But none of the reviewed implementations pages it and this extension adds no paging, so a long conversation may be stored as only its first part. Nothing the extension reads from the response envelope distinguishes a truncated body from a complete one; `apps/extension/lib/backfill/enumerate.ts:1287-1300`.) |
-| Whether a **long** Kimi conversation comes back complete from the backfill body endpoint | **Unverified, and handled rather than guessed** (a logged-in session measured the route and five **short** conversations, none of which carried a page-token field; nothing here pages that endpoint. If a response ever does say it holds more of the conversation, that conversation is not archived at all — it is recorded as a failure with its own reason code and the leg moves on, because a truncated conversation stored as a complete one would be silent loss; `apps/extension/lib/backfill/enumerate.ts:1627-1689`; `apps/extension/lib/backfill/engine.ts:1086-1121`.) |
-| Whether the Kimi gateway requires the two extra request headers the page sends, or whether they are merely what the page happens to send | **Unverified** (the page's requests were observed carrying `x-msh-platform` and `x-language` alongside the bearer token, so the backfill requests send them too — that they are *required* has not been tested; `apps/extension/lib/platform-auth.ts:203-235`.) |
+| Whether the DeepSeek / Perplexity / Grok conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:1509-1530`, `:1607-1621`, `:1713-1774`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress.) |
+| Which Grok list cursor the real backend honours — an opaque `pageToken` or an integer `page` | **Unverified** (the sources disagree; `apps/extension/lib/backfill/enumerate.ts:1713-1774`. The extension does not choose: it hands back exactly what it was given, and a page that repeats what was already listed stops the leg and says the response shape changed, rather than being read as "no more conversations"; `apps/extension/lib/backfill/engine.ts:698-740`.) |
+| Whether a **long** Grok conversation comes back complete from the backfill content endpoint | **Unverified** (its two-step route — a skeleton call then a content call — was cross-checked across implementations, but none of them pages the content call and this extension adds no paging, so a long conversation may be stored as only its first part; `apps/extension/lib/backfill/enumerate.ts:1713-1774`.) |
+| Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Unverified** (the endpoint itself is well evidenced — it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:1442-1456`. But none of the reviewed implementations pages it and this extension adds no paging, so a long conversation may be stored as only its first part. Nothing the extension reads from the response envelope distinguishes a truncated body from a complete one; `apps/extension/lib/backfill/enumerate.ts:1458-1471`.) |
+| Whether a **long** Kimi conversation comes back complete from the backfill body endpoint | **Unverified, and handled rather than guessed** (a logged-in session measured the route and five **short** conversations, none of which carried a page-token field; nothing here pages that endpoint. If a response ever does say it holds more of the conversation, that conversation is not archived at all — it is recorded as a failure with its own reason code and the leg moves on, because a truncated conversation stored as a complete one would be silent loss; `apps/extension/lib/backfill/enumerate.ts:1798-1860`; `apps/extension/lib/backfill/engine.ts:1183-1218`.) |
+| Whether the Kimi gateway requires the two extra request headers the page sends, or whether they are merely what the page happens to send | **Unverified** (the page's requests were observed carrying `x-msh-platform` and `x-language` alongside the bearer token, so the backfill requests send them too — that they are *required* has not been tested; `apps/extension/lib/platform-auth.ts:214-246`.) |
 | Whether a Kimi backfill run has ever completed end to end in a real browser | **Unverified** (implemented and wired to the host, like the other three; no complete run observed. See section 1.1.) |
 | Whether a ChatGPT or DeepSeek backfill run has ever completed end to end in a real browser | **Unverified** (both legs are implemented and wired to the host, but no complete run has been observed in a real browser. See section 1.1.) |
 

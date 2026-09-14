@@ -52,8 +52,15 @@
  *    evidence**: DeepSeek's body segment in W8, Grok's list and two-step body in
  *    W21, and Kimi's list and body in W22 (the last from a logged-in probe, and
  *    the first plan whose paging cursor travels inside a POST body —
- *    `listTokenPost`). Gemini's row is the one still standing there, and it says
- *    exactly what it is missing.
+ *    `listTokenPost`).
+ *    🔴 W29 filled Gemini's in as well, and it is the first whose **body is not
+ *    JSON at all** (`listTokenForm` / `detailForm`, `FormPostSpec`): the RPC id
+ *    and its arguments travel in one URL-encoded field, so the segment's freedom
+ *    is closed down by a pinned query, a closed field set with the credential
+ *    field left blank, and a structural check of the batch — not by the JSON
+ *    rules, which that body cannot satisfy. Nothing was left in the `missing`
+ *    list by that change: with gemini's cell filled in, the table below holds one
+ *    entry, and it is claude's.
  *
  * ## Facts and review status (marked honestly, same standard as the rest of the file)
  *  · ChatGPT's conversation list is GET /backend-api/conversations?offset=&limit=
@@ -128,6 +135,15 @@
  */
 
 import { PLATFORMS } from '../contract';
+import {
+  GEMINI_RPC_DETAIL,
+  GEMINI_RPC_LIST,
+  assembleDetailBundle,
+  buildBatchExecuteBody,
+  readDetailBundle,
+  readDetailResponse,
+  readListResponse,
+} from '../gemini-rpc';
 import type { DetailOutcome } from './types';
 
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
@@ -213,8 +229,22 @@ export type ParseResult =
 export const ALLOWED_BACKFILL_METHODS = ['GET', 'POST'] as const;
 export type BackfillMethod = (typeof ALLOWED_BACKFILL_METHODS)[number];
 
-/** 🔴 The permitted request Content-Types. A **closed set** of exactly one. */
-export const ALLOWED_BACKFILL_CONTENT_TYPES = ['application/json'] as const;
+/**
+ * 🔴 The permitted request Content-Types. A **closed set** — and, since W29, of
+ * two: JSON, and the form encoding Gemini's `batchexecute` request uses.
+ *
+ * 🔴 The set grew **by evidence, not by convenience**: the form entry arrived
+ *    with the plan that needs it (GEMINI_PLAN), and the W20 research recorded
+ *    the request as `application/x-www-form-urlencoded;charset=UTF-8` for every
+ *    source that builds one. Widening `ALLOWED_BACKFILL_CONTENT_TYPES` does not
+ *    let a plan send anything: a segment's Content-Type must still equal the one
+ *    its own spec declares, exactly, and a form body is checked by the rules on
+ *    `FormPostSpec`, not by the JSON ones.
+ */
+export const ALLOWED_BACKFILL_CONTENT_TYPES = [
+  'application/json',
+  'application/x-www-form-urlencoded',
+] as const;
 export type BackfillContentType = (typeof ALLOWED_BACKFILL_CONTENT_TYPES)[number];
 
 /**
@@ -354,6 +384,120 @@ export interface PostKeySpec {
 }
 
 /**
+ * 🔴 W29 · **A POST segment whose body is a form, not JSON.**
+ *
+ * Why this had to exist rather than "widen the JSON path": Gemini's
+ * `batchexecute` request is `application/x-www-form-urlencoded` with the RPC id
+ * and its arguments packed into one field as a **JSON string inside a JSON
+ * array** (`f.req`), plus a second field carrying the page's XSRF token. Under
+ * the JSON rule that body is not even parseable as an object, and under the
+ * scalar-value rule its one meaningful field would be an opaque string of
+ * arbitrary structure — i.e. the closed-set check would be checking nothing.
+ *
+ * So the freedom is squeezed the same way it is for JSON, one level down:
+ *  · **the query is pinned, key by key and value by value** (`query` below) to
+ *    exactly what the plan's own URL builder emits. The page-context wrapper
+ *    adds the page's own tokens (`bl`, `f.sid`, `hl`, `_reqid`) *after* this
+ *    check, never before it;
+ *  · **the field names are a closed set** and every field other than the batch
+ *    must be **empty**. That is what makes "the message may not carry a
+ *    credential" checkable: the token field is present because the page's own
+ *    request has it, and it is blank because only the page-context wrapper may
+ *    fill it;
+ *  · **the batch's structure is fixed**: one batch, one call, the four declared
+ *    positions, and an rpcid from a closed set;
+ *  · **the args are checked by the plan's own `checkArgs`**, which pins every
+ *    element except the two opaque values the platform itself produced (a
+ *    conversation id, a page cursor). Those two are handed over **unread**, the
+ *    same rule the list and detail cursors already follow.
+ */
+export interface FormPostSpec {
+  /** The literal that says this spec is a form. A `PostKeySpec` has no such field. */
+  encoding: 'form';
+  contentType: BackfillContentType;
+  /** The form field names this body may carry. **A closed set.** */
+  bodyKeys: readonly string[];
+  /** The one field that carries the RPC batch. Every other field must be empty. */
+  batchKey: string;
+  /** The RPC ids the batch may name. **A closed set** (today: exactly one). */
+  rpcids: readonly string[];
+  /** The batch call's fixed fourth element (the envelope kind the platform marks it with). */
+  batchKind: string;
+  /**
+   * The query the plan's own builder emits for this segment: an exact
+   * key → value set, each exactly once. Anything else in the query is refused.
+   */
+  query: readonly { readonly key: string; readonly value: string }[];
+  /** Structural check of the decoded args. Returns a sentence when refused, null when acceptable. */
+  checkArgs(rpcid: string, args: unknown): string | null;
+  /** The function that builds the body **ourselves**. The only body producer for this segment. */
+  body(...args: unknown[]): string;
+}
+
+/** Is this spec the form kind? The one place the discriminant is read. */
+export function isFormPostSpec(spec: PostKeySpec | FormPostSpec | null): spec is FormPostSpec {
+  return spec !== null && (spec as FormPostSpec).encoding === 'form';
+}
+
+/**
+ * 🔴 W29 · **One conversation's body can be more than one request, and how many
+ * is not known before the first one** (Gemini's detail RPC pages with a
+ * continuation token).
+ *
+ * Why this is a declaration of its own rather than a fourth step of
+ * `detailStep2`: W21's second step is a *fixed* pair — step 1 names the ids,
+ * step 2 fetches the content, two requests, always. This is a **loop whose
+ * length the platform decides**, and the two differ in every property that
+ * matters here: how many requests go out, when to stop, and what is delivered
+ * (one response vs. every page).
+ *
+ * The engine knows only: there is a URL, there is a request built for a later
+ * page from a token the plan produced, there is a way to read one page's raw
+ * text, there is a wait between pages, there is a cap, and there is an assembler.
+ * It never sees the token's value, never parses it, and never builds a body.
+ *
+ * 🔴 Pacing and the daily cap count the whole loop as **one body**: the detail
+ *    pacer's gate fired once before the first page and `detailToday.count`
+ *    increments once after the last. The wait between pages is `delayMs`, drawn
+ *    per page from the run's injected randomness — an intra-body gap, not an
+ *    inter-request rate, exactly as `detailStep2.delayMs` is.
+ * 🔴 `maxPages` is a **cap, not a target**: reaching it with a token still in
+ *    hand means this conversation is longer than this leg will fetch, and the
+ *    engine records the named failure `detail-too-long` and stores nothing —
+ *    never "the first N pages, called complete".
+ */
+export interface DetailPagesSpec {
+  /** The URL every page of this conversation is sent to (the same one page 1 used). */
+  url(origin: string, conversationId: string): string;
+  /** The request for a later page. The plan's own builder, the only place such a body is produced. */
+  nextInit(origin: string, conversationId: string, token: string): BackfillRequestInit;
+  /**
+   * One page's raw text → what to do next. The token travels back **unread**:
+   * no trim, no parse, no comparison.
+   */
+  nextPage(text: string, conversationId: string): DetailPageStep;
+  delayMs: { min: number; max: number };
+  /** How many pages one conversation may cost before it is declared too long. */
+  maxPages: number;
+  /** Builds the delivered document from the pages, in order. */
+  assemble(conversationId: string, pages: readonly string[]): string;
+}
+
+/**
+ * What one page of a paged body says about the next one.
+ *  · 'last'       the platform said there is no more (a null/absent token);
+ *  · 'more'       there is a token — and the ids this page carried, so the
+ *                 engine can tell a cursor that moved from one that did not;
+ *  · 'unreadable' the page could not be read as this conversation's page at all.
+ *                 A named reason, never "no more pages": a page that changed
+ *                 shape must not look like the end of a conversation.
+ */
+export type DetailPageStep =
+  | { kind: 'last' }
+  | { kind: 'more'; token: string; responseIds: string[] }
+  | { kind: 'unreadable'; reason: string };
+
+/**
  * 🔴 W21 · How many strings one declared array key may hold.
  *
  * The same reasoning as MAX_REQUEST_BODY_BYTES, expressed in items: a step-2 body
@@ -473,6 +617,22 @@ export interface BackfillEnumPlan {
    * and it is written down in the plan's own provenance.
    */
   listTokenPost?: ListTokenPostSpec;
+  /**
+   * 🔴 W29 · **Opaque-token paging, with the token in a form body** (Gemini).
+   *
+   * The same paging mode as `listTokenPost` — declaring either puts the engine
+   * in token mode and both reach the same repeat-page guard — for a plan whose
+   * list request is a URL-encoded form rather than a JSON document. It is a
+   * separate field rather than a widened `listTokenPost` for the reason
+   * `FormPostSpec` gives: a form body's freedom has to be closed down by rules
+   * that do not apply to a JSON body (a pinned query, an empty credential field,
+   * a structural check of the batch), and folding the two into one declaration
+   * would mean the JSON check silently accepting a body it cannot read.
+   *
+   * `token === null` is the first page; what the body carries then is the plan's
+   * own decision, written out at its builder.
+   */
+  listTokenForm?: FormPostSpec;
   /** 3 · The shape test for the list response. Unrecognised ⇒ {ok:false}, and the engine halts with a trace. */
   parseListPage(text: string): ParseResult;
   /**
@@ -525,6 +685,17 @@ export interface BackfillEnumPlan {
   detailQueryKey?: string;
   /** 5b · 🔴 New in C23 (optional). Declaring it means the body segment is sent as a POST. */
   detailPost?: DetailPostSpec;
+  /**
+   * 🔴 W29 · The body segment as a **form POST** (Gemini). Lives and dies with
+   * detailPath/detailUrl like `detailPost`, and the same rule applies: a plan
+   * declares at most one of the two, and `postSpecFor` reads them in one order.
+   */
+  detailForm?: FormPostSpec;
+  /**
+   * 🔴 W29 · The body segment is **paged**, and this is how (Gemini). See
+   * `DetailPagesSpec`; a plan may declare this or `detailStep2`, never both.
+   */
+  detailPages?: DetailPagesSpec;
   /**
    * 🔴 W21 · **The optional second step of one conversation's body** (optional).
    *
@@ -1767,6 +1938,432 @@ export const KIMI_PLAN: BackfillEnumPlan = {
     + 'session run by the main session, not by this change.',
 };
 
+export const GEMINI_BATCHEXECUTE_PATH = '/_/BardChatUi/data/batchexecute';
+/** The query key naming the RPC. Also how the two segments are told apart — they share one path. */
+export const GEMINI_QUERY_RPCIDS = 'rpcids';
+export const GEMINI_QUERY_SOURCE_PATH = 'source-path';
+export const GEMINI_QUERY_RT = 'rt';
+/** The path the page reports as its source. The page sends its own current path; this plan sends one fixed value. */
+export const GEMINI_SOURCE_PATH_VALUE = '/app';
+export const GEMINI_RT_VALUE = 'c';
+/** The two form fields. The batch holds the RPC; the second is filled by the page-context wrapper, never here. */
+export const GEMINI_FORM_FIELD_BATCH = 'f.req';
+export const GEMINI_FORM_FIELD_AT = 'at';
+/**
+ * 🔴 W29 · The four query keys the **page's own** batchexecute request carries
+ * that this plan deliberately does not build, because their values exist only in
+ * the page (`WIZ_global_data`) or in the page's own state: the two bootstrap
+ * tokens `bl` and `f.sid`, the UI language `hl`, and the page's request counter
+ * `_reqid`.
+ *
+ * They are added by the page-context wrapper (lib/platform-auth.ts,
+ * `createGeminiAuthorizedFetch`) **after** the allowlist has looked at the URL,
+ * which is why the allowlist can pin the rest of the query byte for byte. Named
+ * here so that "which keys may appear on this request" is one closed list read
+ * by one file and its test, not a fact scattered across two.
+ */
+export const GEMINI_QUERY_KEY_BL = 'bl';
+export const GEMINI_QUERY_KEY_F_SID = 'f.sid';
+export const GEMINI_QUERY_KEY_HL = 'hl';
+export const GEMINI_QUERY_KEY_REQID = '_reqid';
+export const GEMINI_PAGE_QUERY_KEYS: readonly string[] = [
+  GEMINI_QUERY_KEY_BL,
+  GEMINI_QUERY_KEY_F_SID,
+  GEMINI_QUERY_KEY_HL,
+  GEMINI_QUERY_KEY_REQID,
+];
+/**
+ * 🔴 W29 · **The list page size: 20, because that is the value the page itself
+ * was measured sending.** The 2026-09-14 probe requested 20 and got 20 items
+ * back. The parameter's usable maximum is still not known — no source states one
+ * and the probe did not push it — so the measured value is what is sent, and the
+ * token (not the page length) is what ends this list.
+ */
+export const GEMINI_LIST_PAGE_SIZE = 20;
+/**
+ * 🔴 W29 · **The detail page size: 10, the only value measured live.** The probe
+ * asked for 10 per page and a 23-turn conversation needed a second page.
+ * One source uses 100 instead, but that value was never observed against the
+ * real server by this repository, and a page size the server silently caps is a
+ * page size whose failures would look like a wire change. The loop below is what
+ * makes a small page size cost very little: paging is expected, not exceptional.
+ */
+export const GEMINI_DETAIL_PAGE_SIZE = 10;
+/**
+ * 🔴 W29 · The wait between two pages of **one** conversation, drawn per page in
+ * `[1000, 3000]` ms — the band this task's brief specifies.
+ *
+ * Both requests are of the kind the page itself makes while the user scrolls a
+ * long conversation, so this is not a rate limit being respected; it is the same
+ * "do not look like a script" reasoning `detailStep2.delayMs` carries, applied
+ * inside one body. It stays an intra-body gap and never becomes a Pacer: the
+ * body counts once against the detail pacer and once against the daily cap.
+ */
+export const GEMINI_DETAIL_PAGE_DELAY_MS = { min: 1_000, max: 3_000 } as const;
+/**
+ * 🔴 W29 · **How many pages one conversation may cost before it is refused.**
+ *
+ * The cap exists because the alternative is unbounded: the continuation token is
+ * opaque and this leg may not reason about it, so "how long is this conversation"
+ * is not a question anything here can answer in advance. 20 pages at the page
+ * size above is 200 turns of one conversation, far beyond any conversation the
+ * probe measured and still a bounded amount of work for one body.
+ *
+ * Reaching the cap **with a token still in hand** is the refusal, not the
+ * truncation: the engine records `detail-too-long` and stores nothing (see
+ * DetailPagesSpec.maxPages).
+ */
+export const GEMINI_MAX_DETAIL_PAGES = 20;
+/** The one element of the batch the page marks as its generic envelope. */
+export const GEMINI_BATCH_TAIL = 'generic';
+
+/**
+ * 🔴 W29 · The list RPC's arguments: `[pageSize, pageToken | null, [0, null, 1]]`.
+ *
+ * Evidence: **one source** for the exact three-element form (`adapter-gemini`'s
+ * client builds `[20, pageToken, [0,null,1]]`), corroborated by the probe's own
+ * measurement that a page size of 20 is honoured and that `payload[1]` is handed
+ * back as the next token. The measured part is the behaviour; the literal tail is
+ * the one-source part, and it is exactly why `checkGeminiListArgs` pins the tail:
+ * if it is wrong in the world, the server's error is what the leg sees, and no
+ * path in this repository invents a second shape.
+ */
+export function geminiListArgs(pageSize: number, token: string | null): unknown[] {
+  return [pageSize, token, [0, null, 1]];
+}
+
+/**
+ * 🔴 W29 · The detail RPC's arguments:
+ * `[conversationId, pageSize, pageToken | null, 1, [0], [4], null, 1]`.
+ *
+ * Evidence: **one source** for the eight-element form. The probe measured the
+ * **response** side of this call (turns at `payload[0]`, the continuation token
+ * at `payload[1]`, and that feeding the token back advances the window), and it
+ * measured the conversation id in the `c_`-prefixed canonical form — but the
+ * request arguments themselves were not read off the wire, so this is the one
+ * part of the plan that rests on a single witness. It is written down here
+ * rather than buried: a wrong shape here does not archive anything wrong, it
+ * makes the RPC fail, and a failed RPC is an HTTP status or an entry this
+ * parser refuses — a traced halt, never a stored conversation.
+ */
+export function geminiDetailArgs(
+  conversationId: string,
+  pageSize: number,
+  token: string | null,
+): unknown[] {
+  return [conversationId, pageSize, token, 1, [0], [4], null, 1];
+}
+
+/** Exact structural equality for the small literal tails above. */
+function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Structural check of the list RPC's decoded arguments. See geminiListArgs. */
+export function checkGeminiListArgs(rpcid: string, args: unknown): string | null {
+  if (rpcid !== GEMINI_RPC_LIST) return 'the batch names an rpcid this segment does not declare';
+  if (!Array.isArray(args) || args.length !== 3) {
+    return 'the list arguments are not the declared three-element array';
+  }
+  if (typeof args[0] !== 'number' || !Number.isFinite(args[0]) || args[0] <= 0) {
+    return 'the list arguments carry no positive page size';
+  }
+  if (!(args[1] === null || typeof args[1] === 'string')) {
+    return 'the list arguments carry a page token that is neither a string nor null';
+  }
+  if (!sameJson(args[2], [0, null, 1])) {
+    return 'the list arguments carry a tail this plan does not build';
+  }
+  return null;
+}
+
+/** Structural check of the detail RPC's decoded arguments. See geminiDetailArgs. */
+export function checkGeminiDetailArgs(rpcid: string, args: unknown): string | null {
+  if (rpcid !== GEMINI_RPC_DETAIL) return 'the batch names an rpcid this segment does not declare';
+  if (!Array.isArray(args) || args.length !== 8) {
+    return 'the detail arguments are not the declared eight-element array';
+  }
+  if (typeof args[0] !== 'string' || args[0].length === 0) {
+    return 'the detail arguments carry no conversation id';
+  }
+  if (typeof args[1] !== 'number' || !Number.isFinite(args[1]) || args[1] <= 0) {
+    return 'the detail arguments carry no positive page size';
+  }
+  if (!(args[2] === null || typeof args[2] === 'string')) {
+    return 'the detail arguments carry a page token that is neither a string nor null';
+  }
+  if (!sameJson(args.slice(3), [1, [0], [4], null, 1])) {
+    return 'the detail arguments carry a tail this plan does not build';
+  }
+  return null;
+}
+
+/** The query each segment's URL carries — the plan's own, character for character. */
+function geminiSegmentQuery(rpcid: string): readonly { readonly key: string; readonly value: string }[] {
+  return [
+    { key: GEMINI_QUERY_RPCIDS, value: rpcid },
+    { key: GEMINI_QUERY_SOURCE_PATH, value: GEMINI_SOURCE_PATH_VALUE },
+    { key: GEMINI_QUERY_RT, value: GEMINI_RT_VALUE },
+  ];
+}
+
+/** The batchexecute URL for one RPC. The only place either segment's URL is built. */
+function geminiRpcUrl(origin: string, rpcid: string): string {
+  const params = new URLSearchParams();
+  for (const { key, value } of geminiSegmentQuery(rpcid)) params.set(key, value);
+  return `${origin}${GEMINI_BATCHEXECUTE_PATH}?${params.toString()}`;
+}
+
+/**
+ * 🔴 W29 · One `MaZiqc` page.
+ *
+ * The end of the list is the token (absent/null) or an empty page — the two
+ * signals the sources stop on and the probe confirmed (`payload[1]` was a string
+ * on page 1 and the second page carried none). `total` is **null**: this endpoint
+ * prints no total, and the same call every other plan makes is "no made-up
+ * denominator" (a total we invented would become a progress percentage).
+ */
+export function parseGeminiListPage(text: string): ParseResult {
+  const read = readListResponse(text);
+  if (!read.ok) return { ok: false, detail: `gemini list response could not be read: ${read.reason}` };
+  return { ok: true, page: { ids: read.ids, total: null, nextToken: read.nextPageToken } };
+}
+
+/**
+ * 🔴 W29 · The detail segment's C28 hook.
+ *
+ * What it is handed is **not** one response — it is the bundle the paging loop
+ * assembled (see DetailPagesSpec / `assembleDetailBundle`), so this parser's job
+ * is the completeness claim: every page reads, every page is this conversation's,
+ * and no page still carries a token. A bundle that fails any of those is a
+ * partial conversation wearing a complete one's name, and it is refused here
+ * rather than archived.
+ *
+ * 🔴 An empty-but-tokenless page stays 'non-empty': from one response, "this
+ *    conversation has no turns" and "this response is a window with nothing in
+ *    it" cannot be told apart, and the loop's token rule is what covers the
+ *    window case. Same trade-off, same wording, as parseKimiDetailPage.
+ */
+export function parseGeminiDetailPage(text: string): DetailParseResult {
+  const read = readDetailBundle(text);
+  if (!read.ok) return { ok: false, detail: `gemini detail bundle could not be read: ${read.reason}` };
+  return { ok: true, outcome: 'non-empty' };
+}
+
+/**
+ * 🔴 W29 · One page of a **paged** conversation body: what the next one is.
+ *
+ * Three outcomes, and the middle one is why this is not "read the token":
+ *  · `nextPageToken === null` ⇒ the platform says this is the last page;
+ *  · a token ⇒ `more`, with this page's response ids so the engine can tell a
+ *    cursor that moved from one that did not;
+ *  · a token on a page that carried **no turns** is `unreadable`: that page says
+ *    "there is more" while showing nothing, and following it would spin. It is
+ *    named, not silently treated as the end.
+ *
+ * `conversationId` is not a hint: `readDetailResponse` refuses a page that names
+ * a different conversation, so a stale token or a redirect cannot be
+ * concatenated into this conversation's bundle.
+ */
+export function geminiDetailNextPage(text: string, conversationId: string): DetailPageStep {
+  const read = readDetailResponse(text, conversationId);
+  if (!read.ok) return { kind: 'unreadable', reason: read.reason };
+  if (read.nextPageToken === null) return { kind: 'last' };
+  if (read.pageIsEmpty) {
+    return { kind: 'unreadable', reason: 'the page carried a continuation token and no turns' };
+  }
+  return { kind: 'more', token: read.nextPageToken, responseIds: read.responseIds };
+}
+
+/**
+ * 🔴 W29 · Gemini's conversation list **and** its paged conversation body.
+ *
+ * ## How this cell was filled in
+ * From the 2026-09-14 probe run by the main session in a logged-in Chrome
+ * (names, positions and counts only) plus the research recorded at W20/W26. The
+ * route, the envelope, the two rpcids and the positional paths of both payloads
+ * were already in this repository (lib/gemini-rpc.ts, written against those
+ * sources); what the probe added is the part no source had: that a real logged-in
+ * page really fires `MaZiqc` on `/app`, what a real page size does, that the
+ * detail RPC's pages are **disjoint** rather than overlapping, and that the
+ * page's own tokens come from `WIZ_global_data`.
+ *
+ *   list endpoint     POST /_/BardChatUi/data/batchexecute?rpcids=MaZiqc…      · measured
+ *   list args         [pageSize, pageToken | null, [0,null,1]]                  · 1 source
+ *   list page size    20 (the probe requested it and got 20 items)              · measured
+ *   list response     payload[1] = token, payload[2] = items (item[0] = c_…)     · measured
+ *   list paging       page 2 had **0 overlap** with page 1                      · measured
+ *   detail endpoint   POST /_/BardChatUi/data/batchexecute?rpcids=hNvQHb…      · measured
+ *   detail args       [c_<id>, pageSize, pageToken | null, 1, [0], [4], null, 1] · 1 source
+ *   detail page size  10 (a 23-turn conversation then needed a second page)      · measured
+ *   detail response   payload[0] = turns, payload[1] = token | null              · measured
+ *   detail paging     consecutive pages were **disjoint** (0 shared ids)         · measured
+ *   envelope          `)]}'` guard, length-prefixed frames, lengths **+2**        · measured
+ *   auth              cookies + `at` from WIZ_global_data; **without `at` the    · measured
+ *                     server answers HTTP 400** — a refusal, never an empty page
+ *   page tokens       SNlM0e → at, cfb2h → bl, FdrFJe → f.sid                     · measured
+ *   id form           list `item[0]` and `turn[0][0]` are both `c_`-prefixed     · measured
+ *
+ * ## 🔴 The one decision worth reading before changing anything here
+ * **The canonical conversation id is the `c_`-prefixed form**, and it is used in
+ * both legs. The list endpoint returns ids in exactly that form, so a debt key
+ * *is* one; the page URL (`/app/<bare id>`) is the one place the prefix is
+ * absent, and it is therefore deliberately **not** what a live capture names a
+ * conversation by — the live leg reads the id out of the response it just saw
+ * (`turn[0][0]`) and carries it down as the authoritative identity. Two names for
+ * one conversation would file it twice, which is the failure this file's
+ * `detailQueryKey` note and the platform table's sessionIdPatterns note both
+ * describe from their own side.
+ *
+ * ## 🔴 What is NOT verified, and what is done about it
+ *  1. **The request arguments** (both segments) rest on **one source**; the
+ *     response shapes are measured. A wrong argument shape fails the RPC, and
+ *     every failure path here is a traced halt — the leg never invents a second
+ *     argument shape, and `checkArgs` pins the tail it does not understand so a
+ *     stuffed message cannot either.
+ *  2. **The page's own tokens are read at request time, in the page**, by the
+ *     page-context wrapper. Nothing here needs them, and no plan-built URL or
+ *     body carries one.
+ *  3. **Whether a conversation can be longer than the cap**: `maxPages` is a
+ *     refusal, not a truncation, and the reason code is `detail-too-long`.
+ *  4. **Whether one page may overlap the previous one.** The probe measured
+ *     disjoint pages; the sources expect overlap. So the loop tolerates partial
+ *     overlap (the ids are deduped by the reader, never by this file) and refuses
+ *     only a page whose turns are **all** already seen — the same "the cursor did
+ *     not advance" rule the list segment already carries.
+ *  5. **Whether `source-path` must be `/app`.** The page sends its own current
+ *     path; this plan sends one fixed value. Recorded, not proven.
+ */
+export const GEMINI_PLAN: BackfillEnumPlan = {
+  platform: 'gemini',
+  listPath: GEMINI_BATCHEXECUTE_PATH,
+  // Offset semantics do not hold here: the cursor travels in the form body and
+  // the page size lives there too. A listUrl is still required by the interface;
+  // it builds the route and the fixed query, i.e. the first page's request, so a
+  // future misuse gets the safe thing rather than an invented offset parameter.
+  // The engine takes the token branch (declaring listTokenForm ⇒ token mode).
+  listUrl: (origin) => geminiRpcUrl(origin, GEMINI_RPC_LIST),
+  /**
+   * 🔴 The body, and the two things about it that are decisions rather than
+   * measurements:
+   *
+   *  · **the first page's token is `null`**, not `''` — the measured list
+   *    response's first page simply had a token, and both W20's recorded argument
+   *    list and the JSON form of the call spell "no token yet" as `null`. (Kimi's
+   *    JSON body writes `''` instead, for the protobuf reason recorded there; the
+   *    two are different platforms and each follows its own evidence.)
+   *  · **the `at` field is built empty**, because only the page-context wrapper
+   *    may fill it (see GEMINI_PAGE_QUERY_KEYS and createGeminiAuthorizedFetch).
+   *    A body that carried a token from here would be a credential travelling in
+   *    a message.
+   *
+   * 🔴 The token itself is placed verbatim: no trim, no parse, no comparison. The
+   *    only special case is `null`, which means "the first page".
+   */
+  listTokenForm: {
+    encoding: 'form',
+    contentType: 'application/x-www-form-urlencoded',
+    bodyKeys: [GEMINI_FORM_FIELD_BATCH, GEMINI_FORM_FIELD_AT],
+    batchKey: GEMINI_FORM_FIELD_BATCH,
+    rpcids: [GEMINI_RPC_LIST],
+    batchKind: GEMINI_BATCH_TAIL,
+    query: geminiSegmentQuery(GEMINI_RPC_LIST),
+    checkArgs: checkGeminiListArgs,
+    // 🔴 The page size is **this plan's own measured value**, not the engine's
+    //    `listLimit` (whose cross-platform default is 100): 20 is the only value
+    //    ever observed against the real server, and nothing observed says a larger
+    //    one is honoured. A silent server-side cap would come back as a shorter
+    //    page — which this endpoint's token, not the page length, would still
+    //    terminate correctly — but sending a number no measurement supports is a
+    //    guess this repository does not make. If a larger page size is ever
+    //    measured, this is the line to change.
+    body: (_origin, token) =>
+      buildBatchExecuteBody(
+        GEMINI_RPC_LIST,
+        geminiListArgs(
+          GEMINI_LIST_PAGE_SIZE,
+          typeof token === 'string' ? token : null,
+        ),
+        '',
+      ),
+  },
+  parseListPage: parseGeminiListPage,
+  // 🔴 The two segments share one path, which is why `formSegmentFor` exists; the
+  //    rpcid in each segment's pinned query is what tells them apart.
+  detailPath: GEMINI_BATCHEXECUTE_PATH,
+  detailUrl: (origin) => geminiRpcUrl(origin, GEMINI_RPC_DETAIL),
+  detailForm: {
+    encoding: 'form',
+    contentType: 'application/x-www-form-urlencoded',
+    bodyKeys: [GEMINI_FORM_FIELD_BATCH, GEMINI_FORM_FIELD_AT],
+    batchKey: GEMINI_FORM_FIELD_BATCH,
+    rpcids: [GEMINI_RPC_DETAIL],
+    batchKind: GEMINI_BATCH_TAIL,
+    query: geminiSegmentQuery(GEMINI_RPC_DETAIL),
+    checkArgs: checkGeminiDetailArgs,
+    // 🔴 The third argument is the continuation token and is `null` for the first
+    //    page — see detailRequestInit. The id goes in **verbatim**, the same way
+    //    every other plan's builder treats it: whatever the list endpoint handed
+    //    us is the legal value, and re-encoding it would make the request and the
+    //    ledger disagree about which conversation it was.
+    body: (_origin, conversationId, token) =>
+      buildBatchExecuteBody(
+        GEMINI_RPC_DETAIL,
+        geminiDetailArgs(
+          typeof conversationId === 'string' ? conversationId : '',
+          GEMINI_DETAIL_PAGE_SIZE,
+          typeof token === 'string' ? token : null,
+        ),
+        '',
+      ),
+  },
+  /**
+   * 🔴 The loop. Every page is the same URL and the same body shape; what changes
+   * is the token inside `f.req`. Nothing here decides how many pages there are —
+   * that is `geminiDetailNextPage` reading `payload[1]` of each response.
+   */
+  detailPages: {
+    url: (origin) => geminiRpcUrl(origin, GEMINI_RPC_DETAIL),
+    nextInit: (origin, conversationId, token) => ({
+      method: 'POST',
+      body: buildBatchExecuteBody(
+        GEMINI_RPC_DETAIL,
+        geminiDetailArgs(conversationId, GEMINI_DETAIL_PAGE_SIZE, token),
+        '',
+      ),
+      contentType: 'application/x-www-form-urlencoded',
+    }),
+    nextPage: geminiDetailNextPage,
+    delayMs: { min: GEMINI_DETAIL_PAGE_DELAY_MS.min, max: GEMINI_DETAIL_PAGE_DELAY_MS.max },
+    maxPages: GEMINI_MAX_DETAIL_PAGES,
+    assemble: assembleDetailBundle,
+  },
+  parseDetailPage: parseGeminiDetailPage,
+  provenance:
+    'observed in a logged-in Chrome session on 2026-09-14 (this task\'s probe, run by the main '
+    + 'session; names, positions and counts only) plus the envelope and rpcid evidence already '
+    + 'recorded at W20/W26 · '
+    + 'POST /_/BardChatUi/data/batchexecute?rpcids=MaZiqc|hNvQHb&source-path=&rt=c, form body '
+    + 'f.req=<the batch>&at=; the batch is [[[rpcid, "<args as a JSON string>", null, "generic"]]]. '
+    + 'List: payload[1] = next-page token (absent/null at the end), payload[2] = 20 items with '
+    + 'item[0] = the c_-prefixed conversation id; page 2 had no overlap with page 1. '
+    + 'Detail: payload[0] = turns, payload[1] = continuation token (a string when more remain, '
+    + 'null when exhausted); with a page size of 10 a 23-turn conversation needed a second page, '
+    + 'and consecutive pages shared no response ids. '
+    + 'Auth: cookies plus the page\'s own at/bl/f.sid from WIZ_global_data, read at request time '
+    + 'in the page; without at the server answers HTTP 400 with a structured error entry — a real '
+    + 'refusal, which is why a 400/401 here halts instead of being read as "no conversations". '
+    + 'The canonical conversation id is the c_-prefixed form, in both legs. '
+    + '🔴 Unverified and handled, not guessed: the request ARGUMENTS of both RPCs rest on ONE '
+    + 'source (the response shapes are measured) — if the argument shape is wrong the RPC fails '
+    + 'and the leg halts with a trace; a conversation needing more than 20 pages is refused with '
+    + 'detail-too-long rather than archived truncated; partial page overlap is tolerated and only '
+    + 'a page whose turns are all already seen is refused (the cursor did not advance); and '
+    + 'whether source-path must be /app is not established. '
+    + 'This change issued no request to gemini.google.com; the 2026-09-14 observation was a real '
+    + 'browser session run by the main session, not by this change.',
+};
+
 /**
  * The plans, in one place. A platform is backfillable when it has an entry here;
  * the two tables below cover the rest, and tests/c22-enumplat.test.ts asserts
@@ -1776,6 +2373,7 @@ const PLANS: readonly BackfillEnumPlan[] = [
   DEEPSEEK_PLAN,
   PERPLEXITY_PLAN,
   CHATGPT_PLAN,
+  GEMINI_PLAN,
   GROK_PLAN,
   KIMI_PLAN,
 ];
@@ -1828,22 +2426,25 @@ export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
   //    holds: every row of the platform table lands on exactly one of "has a plan"
   //    / "registered as temporarily impossible", and tests/c22-enumplat.test.ts
   //    still watches it.
-  {
-    platform: 'gemini',
-    known: [],
-    missing: [
-      'listPath: ❌ not found. Search scope = all of this repository\'s code and comments (the gemini row of lib/contract.ts has only /_/BardChatUi/data/batchexecute, one RPC endpoint, and no record of any "conversation list"); no online search was done (forbidden by this change)',
-      // 🔴 C23: the POST half of the wall came down (see listPost), but
-      //    batchexecute still has the other two halves:
-      //    ① the RPC id has no source; ② the response is chunked text with a
-      //    ")]}'" prefix, not JSON, so parseListPage needs a parser of its own —
-      //    and writing that needs a source too.
-      'listUrl / parseListPage: batchexecute packs the RPC id and parameters into the body, and the response is chunked ")]}\'"-prefixed text rather than JSON — the channel can send a POST since C23, but the RPC id and the chunked response format still have no source',
-      'listPost.contentType: no source was found for batchexecute\'s request Content-Type (nothing recorded in this repository, and online search is forbidden by this change). This channel\'s Content-Type closed set currently holds only application/json (ALLOWED_BACKFILL_CONTENT_TYPES) — if it is not json, that closed set has to be widened **with a source** first',
-      'detailUrl: same as above',
-    ],
-    userNoteKey: 'platformNote.gemini.unsupported',
-  },
+  //
+  // 🔴 W29 · The **gemini row was moved out** for the third time and the same
+  //    reason: three of its four recorded gaps were closed by evidence, not by
+  //    relaxing a standard.
+  //      · "listPath: not found" — closed by the 2026-09-14 probe: the rpcid is
+  //        `MaZiqc` and the page really fires it on /app;
+  //      · "the RPC id and the chunked response format have no source" — both
+  //        have one: the rpcids are measured, and the chunked envelope was
+  //        already parsed by lib/gemini-rpc.ts (W26) from sources that agree;
+  //      · "listPost.contentType: no source, and the closed set holds only
+  //        application/json" — the content type was recorded by the W20 research
+  //        (`application/x-www-form-urlencoded`), and the closed set was widened
+  //        **by that evidence**, with the form rules on `FormPostSpec` replacing
+  //        the JSON ones for that segment. That last item is the one place this
+  //        change touched a declaration the other plans share, and it is called
+  //        out here rather than left to be discovered in a diff.
+  //    What the plan still cannot say is written at GEMINI_PLAN: the request
+  //    arguments rest on one source, and a conversation longer than the page cap
+  //    is refused rather than truncated.
 ];
 
 // ---------------------------------------------------------------------------
@@ -1864,15 +2465,18 @@ export function backfillPlanFor(platform: string): BackfillEnumPlan | null {
 export function postSpecFor(
   plan: BackfillEnumPlan,
   segment: BackfillSegment,
-): PostKeySpec | null {
+): PostKeySpec | FormPostSpec | null {
   // 🔴 W22 · A list segment that pages by an opaque cursor travelling in the body
   //    (`listTokenPost`) is a POST declaration in its own right — the same rule
   //    `detailStep2` follows below. A plan declares one or the other, never both;
   //    the token form is read first so that this function answers with the body
   //    the engine would actually send, which is the only thing an allowlist may
   //    be derived from.
-  if (segment === 'list') return plan.listTokenPost ?? plan.listPost ?? null;
-  if (segment === 'detail') return plan.detailPost ?? null;
+  // 🔴 W29 · Same rule for a body token in a **form** (`listTokenForm`), and for
+  //    a detail segment declared as a form (`detailForm`). The order below is the
+  //    order of precedence, not a set of alternatives a plan is expected to mix.
+  if (segment === 'list') return plan.listTokenPost ?? plan.listPost ?? plan.listTokenForm ?? null;
+  if (segment === 'detail') return plan.detailPost ?? plan.detailForm ?? null;
   // 🔴 W21 · The second detail step is always a POST: its whole reason to exist is
   //    that it carries a body built from step 1. Declaring `detailStep2` *is* the
   //    POST declaration for that segment — there is no second switch for it.
@@ -1905,7 +2509,10 @@ export function listRequestInit(
 ): BackfillRequestInit {
   const spec = plan.listPost;
   if (!spec) {
-    const tokenSpec = plan.listTokenPost;
+    // 🔴 W29 · Both body-token declarations take the same `(origin, token, limit)`
+    //    triple, so the "someone called it without a cursor" landing point is one
+    //    branch for both transports — JSON body and form body alike.
+    const tokenSpec = plan.listTokenPost ?? plan.listTokenForm;
     if (!tokenSpec) return { method: 'GET' };
     return { method: 'POST', body: tokenSpec.body(origin, null, limit), contentType: tokenSpec.contentType };
   }
@@ -1928,20 +2535,85 @@ export function listTokenPostInit(
   token: string | null,
   limit: number,
 ): BackfillRequestInit {
-  const spec = plan.listTokenPost;
+  // 🔴 W29 · The form variant is the same declaration in a different encoding, so
+  //    the only builder that may see a token serves both.
+  const spec = plan.listTokenPost ?? plan.listTokenForm;
   if (!spec) return { method: 'GET' };
   return { method: 'POST', body: spec.body(origin, token, limit), contentType: spec.contentType };
 }
 
-/** The full request parameters for the body segment. No detailPost ⇒ `{method:'GET'}`, byte-identical to C22. */
+/**
+ * The full request parameters for the body segment. No detailPost / detailForm ⇒
+ * `{method:'GET'}`, byte-identical to C22.
+ *
+ * 🔴 W29 · A paged body's **first** page is built here, with the token explicitly
+ *    `null` — the same "open with the first page" landing point `listRequestInit`
+ *    has. Later pages come from `DetailPagesSpec.nextInit`, which is the only
+ *    builder that may see a continuation token.
+ */
 export function detailRequestInit(
   plan: BackfillEnumPlan,
   origin: string,
   conversationId: string,
 ): BackfillRequestInit {
+  const form = plan.detailForm;
+  if (form) {
+    return { method: 'POST', body: form.body(origin, conversationId, null), contentType: form.contentType };
+  }
   const spec = plan.detailPost;
   if (!spec) return { method: 'GET' };
   return { method: 'POST', body: spec.body(origin, conversationId), contentType: spec.contentType };
+}
+
+/**
+ * 🔴 W29 · **Which segment a form request is, when both segments share one path.**
+ *
+ * Every plan before this one had a list path and a detail path that differ, so
+ * `checkBackfillRequest` could classify a request by its pathname. Gemini's two
+ * RPCs are the *same* path — `/_/BardChatUi/data/batchexecute` — and what
+ * separates them is the **rpcid**, which travels in the query. Path-only
+ * dispatch would therefore classify every detail request as a list request and
+ * refuse it, and worse, it would have refused it with a sentence about the list.
+ *
+ * So the decision is: a form-declaring plan classifies by matching the URL's
+ * query against each segment's **own pinned query**. Both segments declare a
+ * different rpcid value there, so the match is unambiguous, and a URL matching
+ * neither is left to the ordinary path dispatch — which then refuses it, because
+ * every other check on that path fails too.
+ */
+export function formSegmentFor(
+  plan: BackfillEnumPlan,
+  url: URL,
+): BackfillSegment | null {
+  const declared: readonly (readonly [BackfillSegment, FormPostSpec | undefined])[] = [
+    ['list', plan.listTokenForm],
+    ['detail', plan.detailForm],
+  ];
+  for (const [segment, spec] of declared) {
+    if (!spec) continue;
+    if (formQueryMatches(spec, url)) return segment;
+  }
+  return null;
+}
+
+/**
+ * Does this URL's query equal the spec's declared query, exactly?
+ *
+ * Every declared key exactly once with the declared value, and no other key.
+ * Order is not compared (a query's key order carries no meaning here); the
+ * *set* is, which is the whole point — this is what pins `rpcids` to the RPC the
+ * segment is allowed to call.
+ */
+export function formQueryMatches(spec: FormPostSpec, url: URL): boolean {
+  const declared = spec.query;
+  const names = new Set<string>();
+  for (const name of url.searchParams.keys()) names.add(name);
+  if (names.size !== declared.length) return false;
+  for (const { key, value } of declared) {
+    const values = url.searchParams.getAll(key);
+    if (values.length !== 1 || values[0] !== value) return false;
+  }
+  return true;
 }
 
 /** The record explicitly registered as "cannot be backfilled for now"; null when it is not on the list. */

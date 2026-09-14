@@ -214,6 +214,9 @@ describe('C27-4 · the Perplexity backfill allowlist', () => {
     //    · kimi joins it too, from a logged-in probe rather than from sources. Perplexity is still the
     //    only half-declared plan, which is what this test is about; the roster grew by a platform each
     //    time, the criterion did not move.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'kimi', 'grok']);
+    // 🔴 W29 (2026-09-14) · gemini joins it as well, from a measured probe rather than from
+    //    sources. Perplexity is *still* the only half-declared plan, which is what this test is
+    //    about — the roster grew, the criterion did not move.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'kimi', 'grok']);
   });
 });

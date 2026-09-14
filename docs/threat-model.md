@@ -23,8 +23,8 @@ trust the code and treat the sentence as unverified.
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:40-65`, `:490-492`;
-   `apps/extension/lib/page-hook.ts:290`, `:314`, `:355`).
+   the raw response text (`apps/extension/lib/contract.ts:104-129`, `:579-581`;
+   `apps/extension/lib/page-hook.ts:331`, `:396`, `:396`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
@@ -57,7 +57,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:85-88`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:336-375`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:87`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:85-88`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:357-396`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:87`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -217,28 +217,45 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:290`, `:314`, `:338-355`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:626-664`, `:956-978`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:331`, `:396`, `:379-396`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:630-668`, `:960-982`). |
 
-**Caveat, stated honestly:** on every platform except ChatGPT the passive hook
-adds no traffic, so there is nothing distinctive for the platform to observe
-from it. **On ChatGPT it does add traffic:** when you move between conversations
+**Caveat, stated honestly:** on every platform except ChatGPT and Gemini the
+passive hook adds no traffic, so there is nothing distinctive for the platform to
+observe from it. **On Gemini it does add traffic:** when a conversation is
+opened, the extension fetches it from its first page and follows the paging token
+to the end, through the same allowlisted channel the backfill leg uses
+(`apps/extension/lib/gemini-capture.ts:150-234`). That is one request for the
+first page — a repeat of the one the page just made — plus one per remaining
+page, spaced 1-3 seconds apart. The repeat is deliberate: the response the page
+produced may be any page of the conversation, because the page asks for older
+turns as you scroll, and a copy anchored anywhere but page 1 could look complete
+while holding only the oldest turns. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:401-406`;
-`apps/extension/entrypoints/dw-bridge.content.ts:196-222`;
-`apps/extension/lib/platform-auth.ts:88-107`). That is one extra request per
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:442-447`;
+`apps/extension/entrypoints/dw-bridge.content.ts:296-322`;
+`apps/extension/lib/platform-auth.ts:99-118`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
-read the same token, so this adds no new party who can see it. **Kimi is the
-other platform where the extension sends a token rather than only cookies**
-(backfill requests, not capture): it reads the page origin's own
-`localStorage.access_token` at request time, sends it to Kimi's two backfill
-paths and nothing else, and holds no copy (`apps/extension/lib/platform-auth.ts:203-235`).
-By the same argument that applies on ChatGPT, this adds no party who could not
-already see it — any script on that origin, and the page's own requests, carry
-that same token. **Backfill is
+read the same token, so this adds no new party who can see it. **Two other
+platforms are places where the extension sends a credential rather than only
+cookies** (backfill requests, and on Gemini the live leg too): Kimi reads the page
+origin's own `localStorage.access_token` at request time, sends it to Kimi's two
+backfill paths and nothing else, and holds no copy (`apps/extension/lib/platform-auth.ts:214-246`);
+Gemini reads three values out of the page's own `WIZ_global_data` — the XSRF token
+that goes in the request body, and two identifiers that go in the query — through
+a page-world pull, per request, holding no copy, and attaches them to its two RPCs
+and nothing else (`apps/extension/lib/platform-auth.ts:355-417`;
+`apps/extension/lib/contract.ts:19-80`). By the same argument that applies on
+ChatGPT, neither adds a party who could not already see it — any script on those
+origins, and the pages' own requests, carry those same values. Gemini's borrow
+one more property worth naming: the extension *asks the page* for them, and the
+page's answer travels over `window.postMessage`, which any script on the page can
+also read. That is the same set of values such a script can read directly out of
+`window.WIZ_global_data`, which is why the channel is acceptable here — it
+discloses nothing new — rather than an accident nobody looked at. **Backfill is
 different** — it walks conversation lists and detail endpoints
-(`apps/extension/lib/backfill/engine.ts:626-664`, `:956-978`), which produces a
+(`apps/extension/lib/backfill/engine.ts:630-668`, `:960-982`), which produces a
 request pattern the platform can see and which does not look like a human
 reading their history. **We have not investigated** whether any platform's terms
 of service prohibit this, nor whether any platform rate-limits or flags such a
@@ -251,9 +268,9 @@ it bounds what you may safely assume is archived:
 
 | Platform | Requests the platform sees | What lands in your archive |
 |---|---|---|
-| **ChatGPT**, **DeepSeek**, **Grok**, **Kimi** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek and Kimi, **two** on Grok (a skeleton call, then a content call) | The conversation text (`apps/extension/lib/backfill/enumerate.ts:1968-1974`). On all four this is **implemented but not yet observed completing in a real browser**; on DeepSeek, Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:1287-1300`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:1542-1603`; `apps/extension/lib/backfill/engine.ts:694-736`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:203-235`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1086-1121`) |
-| **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:1982-1988`) |
-| **Gemini**, **Claude** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:1804`) |
+| **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek and Kimi, **one per page** on Gemini (a long conversation is several requests), **two** on Grok (a skeleton call, then a content call) | The conversation text (`apps/extension/lib/backfill/enumerate.ts:2640-2650`). On all five this is **implemented but not yet observed completing in a real browser**; on DeepSeek, Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:1458-1471`). Gemini **is** paged, to the end of the continuation token, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/engine.ts:1079-1131`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:1713-1774`; `apps/extension/lib/backfill/engine.ts:698-740`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:214-246`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1183-1218`) |
+| **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:2654-2660`) |
+| **Claude** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:2402-2405`, `:2662-2667`) |
 
 🔴 The middle row is the dangerous one to misread. On Perplexity the extension
 *does* work — it enumerates your conversations and reports a pending count —
@@ -263,7 +280,7 @@ leg leaves that conversation-content segment unfilled precisely because a wrong
 guess fails silently: it would archive a truncated version of every chat and
 still look like success. The route itself is no longer the unknown — the
 extension's live-capture row reads the response the page fetches when you open a
-conversation (`apps/extension/lib/contract.ts:134-149`) — but the sources
+conversation (`apps/extension/lib/contract.ts:198-213`) — but the sources
 disagree about that route's parameters, and nothing establishes whether one
 response holds a whole long conversation. Reading a response the page already
 fetched is also not the same as issuing that request yourself, and backfill
@@ -274,7 +291,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:663-676`, `:822-838`). That value is written
+(`apps/extension/lib/contract.ts:752-765`, `:911-927`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:128-130`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -292,7 +309,7 @@ questions we did **not** answer, and which a reader should not assume are safe:
 - Whether an extension with broad host permissions on a chat origin can observe
   our MAIN-world hook, the `window.postMessage` traffic between the page hook
   and the bridge (`apps/extension/lib/contract.ts:6-16`), or the page-world
-  markers we set (`apps/extension/lib/contract.ts:18-20`).
+  markers we set (`apps/extension/lib/contract.ts:82-84`).
 - Whether a second extension can reach another extension's IndexedDB — which is
   where the outbox, and therefore the undelivered conversations, live
   (`apps/extension/lib/outbox.ts:34-37`).
@@ -300,8 +317,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on the hook's ready message
-(`apps/extension/lib/contract.ts:646-656`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:611-644`). Those
+(`apps/extension/lib/contract.ts:735-745`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:700-733`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.
@@ -513,24 +530,30 @@ a real limitation of the current code.
 7. **Browser-side history backfill is implemented on five platforms and
    recovers text on four of them, and one tier of it looks like coverage
    without being coverage.** Backfill recovers past conversation *text* on
-   **ChatGPT**, **DeepSeek**, **Grok** and **Kimi**
-   (`apps/extension/lib/backfill/enumerate.ts:1968-1974`), but on none of them
+   **ChatGPT**, **DeepSeek**, **Gemini**, **Grok** and **Kimi**
+   (`apps/extension/lib/backfill/enumerate.ts:2640-2650`), but on none of them
    has a complete backfill been observed in a real browser, and on DeepSeek,
-   Grok and Kimi we have **not verified** whether a long conversation comes back
-   whole rather than truncated
-   (`apps/extension/lib/backfill/enumerate.ts:1287-1300`,
-   `:1542-1603`). Grok is the least
+   Gemini, Grok and Kimi we have **not verified** whether a long conversation
+   comes back whole rather than truncated
+   (`apps/extension/lib/backfill/enumerate.ts:1458-1471`,
+   `:1713-1774`). Grok is the least
    verified: its routes come from reading public open-source implementations,
    not from a logged-in grok.com session, and one conversation costs two
    requests. Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
-   held in memory only (`apps/extension/lib/platform-auth.ts:203-235`); a body
+   held in memory only (`apps/extension/lib/platform-auth.ts:214-246`); a body
    response that admits it is incomplete is refused and listed as a failure
-   rather than archived (`apps/extension/lib/backfill/engine.ts:1086-1121`). On
+   rather than archived (`apps/extension/lib/backfill/engine.ts:1183-1218`).
+   Gemini's routes were measured in a logged-in session as well, its requests
+   carry three values read out of the page's own bootstrap blob at request time
+   and held in memory only, and its body is paged: more than 20 pages and the
+   conversation is refused and listed as a failure rather than archived in part
+   (`apps/extension/lib/platform-auth.ts:355-417`;
+   `apps/extension/lib/backfill/engine.ts:1079-1131`). On
    **Perplexity** it enumerates your conversations and archives
-   **none of them** (`apps/extension/lib/backfill/enumerate.ts:1982-1988`); on
-   **Gemini** and **Claude** it does nothing
-   (`apps/extension/lib/backfill/enumerate.ts:1804`). The user-visible symptom of
+   **none of them** (`apps/extension/lib/backfill/enumerate.ts:2654-2660`); on
+   **Claude** it does nothing
+   (`apps/extension/lib/backfill/enumerate.ts:2402-2405`, `:2662-2667`). The user-visible symptom of
    the middle tier is *activity* — a growing pending count — with an empty
    result, so "the extension is clearly doing something" is not evidence your
    history is safe. See the platform table above.

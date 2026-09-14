@@ -266,9 +266,15 @@ describe('C22-4 · every platform must have a definite conclusion', () => {
     //    segments — the note is here so the next reader knows which change moved it, and why the
     //    order is not the platform table's order (kimi sits before grok here because that is where
     //    the table puts it).
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'kimi', 'grok']);
+    // 🔴 W29 (2026-09-14) moved gemini across the same way and for the same reason: the
+    //    2026-09-14 probe measured both rpcids and both response payloads, the W20 research
+    //    recorded the request's content type, and the one declaration that was missing —
+    //    "the channel's Content-Type closed set holds only application/json" — was widened with
+    //    that evidence rather than by relaxing anything. What remains unsupported is claude
+    //    alone, and the array below is where that shows.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'kimi', 'grok']);
     expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([
-      'perplexity', 'gemini', 'claude',
+      'perplexity', 'claude',
     ]);
   });
 
@@ -310,7 +316,12 @@ describe('C22-5 · the popup\'s honest explanation', () => {
     //    note is checked on Perplexity, which is where that state now lives. The criterion — a
     //    half-leg platform's sticking point must be readable by the user — is unchanged.
     expect(out).toContain('Perplexity: past conversation bodies cannot be backfilled yet');
-    expect(out).toContain('Gemini: history cannot be backfilled yet');
+    // 🔴 W29 changed this assertion's **protagonist** for the second time, and the same way W8
+    //    changed it: gemini is no longer an unsupported platform (its plan was filled in from the
+    //    2026-09-14 probe and the W20 research), so the note that has to be readable is claude's —
+    //    the last platform with no plan at all. The criterion is unchanged: a platform whose
+    //    history cannot be backfilled yet has to say so where the user can read it.
+    expect(out).toContain('Claude: history cannot be backfilled yet');
   });
 
   it('with halted=unsupported-platform it says "not implemented yet", not "the platform changed"', () => {

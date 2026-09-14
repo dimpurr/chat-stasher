@@ -1,5 +1,12 @@
 import {
   CAPTURE_MESSAGE,
+  GEMINI_AT_KEY,
+  GEMINI_BL_KEY,
+  GEMINI_ORIGIN,
+  GEMINI_SESSION_ID_KEY,
+  GEMINI_TOKENS_REPLY_MESSAGE,
+  GEMINI_TOKENS_REQUEST_MESSAGE,
+  GEMINI_WIZ_GLOBAL_DATA_KEY,
   MAX_RAW_BYTES,
   MAIN_PROBE_MESSAGE,
   MAIN_READY_MESSAGE,
@@ -43,6 +50,26 @@ export interface PageHookOptions {
   conversationSeenMessage: string;
   /** RegExp source (serialisable) for ChatGPT's paged detail path; group 1 = id. */
   chatgptPagedDetailPattern: string;
+  /**
+   * 🔴 W29 · The Gemini bootstrap-token pull (see GEMINI_TOKENS_*_MESSAGE in
+   * lib/contract.ts). Every value here is a **name**, not a secret: the hook reads
+   * the tokens out of the page's own blob at the moment it is asked, and holds
+   * them for the length of one synchronous reply.
+   */
+  geminiTokensRequestMessage: string;
+  geminiTokensReplyMessage: string;
+  /**
+   * The page's bootstrap blob and the three values inside it. `origin` is the one
+   * page this hook will answer for — the platform row that needs these, written
+   * down as data rather than re-derived.
+   */
+  geminiBootstrap: {
+    globalKey: string;
+    atKey: string;
+    blKey: string;
+    fSidKey: string;
+    origin: string;
+  };
 }
 
 export const PAGE_HOOK_OPTIONS: PageHookOptions = {
@@ -71,6 +98,20 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
   maxRawBytes: MAX_RAW_BYTES,
   conversationSeenMessage: CONVERSATION_SEEN_MESSAGE,
   chatgptPagedDetailPattern: CHATGPT_PAGED_DETAIL_PATTERN.source,
+  geminiTokensRequestMessage: GEMINI_TOKENS_REQUEST_MESSAGE,
+  geminiTokensReplyMessage: GEMINI_TOKENS_REPLY_MESSAGE,
+  // 🔴 The blob's key names and the three slots this hook may read out of it are
+  //    page facts, kept beside the message names rather than inside the function
+  //    body: the fallback path serialises this object, so anything the hook needs
+  //    at runtime has to travel in it. The origin is the closed set of one — the
+  //    only page whose globals this hook will read.
+  geminiBootstrap: {
+    globalKey: GEMINI_WIZ_GLOBAL_DATA_KEY,
+    atKey: GEMINI_AT_KEY,
+    blKey: GEMINI_BL_KEY,
+    fSidKey: GEMINI_SESSION_ID_KEY,
+    origin: GEMINI_ORIGIN,
+  },
 };
 
 /**
@@ -465,6 +506,51 @@ export function installPageFetchHook(options: PageHookOptions): void {
     if (record.type !== options.probeMessage || typeof record.token !== 'string') return;
     if (record.token.length < 8) return;
     post({ type: options.readyMessage, version: options.version, token: record.token });
+  });
+
+  /**
+   * 🔴 W29 · **The Gemini bootstrap-token pull** (see lib/contract.ts).
+   *
+   * A content script cannot see a page global, so this hook is the only part of
+   * this extension that can read `WIZ_global_data` — and it reads it **when
+   * asked**, not at install time, so a page that rotates the value between two
+   * requests is followed rather than remembered. Nothing is cached here: the
+   * values exist as locals for the length of one synchronous reply.
+   *
+   * 🔴 Answering is limited to the one origin whose own row needs these values,
+   *    and the reply carries exactly the three slots named in the options — no
+   *    wider read of the blob, and nothing that is not one of those three keys.
+   *    What the page itself can already read is unchanged by this; the argument
+   *    for the channel is written out in lib/contract.ts beside the message
+   *    names, and it is the reason there is no secret to protect here.
+   */
+  const bootstrap = options.geminiBootstrap;
+  const readBootstrapTokens = (): Record<string, string | null> => {
+    const empty = { at: null, bl: null, fSid: null };
+    try {
+      const blob = pageWindow[bootstrap.globalKey];
+      if (!blob || typeof blob !== 'object') return empty;
+      const read = (key: string): string | null => {
+        const value = (blob as Record<string, unknown>)[key];
+        return typeof value === 'string' && value.length > 0 ? value : null;
+      };
+      return { at: read(bootstrap.atKey), bl: read(bootstrap.blKey), fSid: read(bootstrap.fSidKey) };
+    } catch {
+      // A frozen or unreadable global is "no token", never an exception into the
+      // page: the request then goes out without one and the platform's own
+      // refusal is what the caller sees.
+      return empty;
+    }
+  };
+
+  window.addEventListener('message', (event: MessageEvent<unknown>) => {
+    if (event.source !== window || event.origin !== pageOrigin) return;
+    if (pageOrigin !== bootstrap.origin) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object') return;
+    const record = data as Record<string, unknown>;
+    if (record.type !== options.geminiTokensRequestMessage) return;
+    post({ type: options.geminiTokensReplyMessage, ...readBootstrapTokens() });
   });
 
   pageWindow[options.stateKey] = options.version;
