@@ -25,6 +25,7 @@ import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '.
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import {
+  applyScope,
   backfillPlanFor,
   canBackfillDetail,
   detailRequestInit,
@@ -38,7 +39,7 @@ import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
-import { openLedger, type Ledger } from './ledger';
+import { openLedger, saveHeader, type Ledger } from './ledger';
 import {
   dayKeyOf,
   haltClassOf,
@@ -290,6 +291,72 @@ export async function loadState(
   return carrier;
 }
 
+/**
+ * 🔴 W31c · **Write down a named stop that happened before the leg made a single
+ * request**, so the popup can say why instead of showing silence.
+ *
+ * ## Why this is not "just run the leg and let it halt"
+ *
+ * For claude.ai the organization is resolved *outside* the run: the background
+ * asks the page (lib/backfill/tab-port.ts's `askTabForClaudeOrg`), because only
+ * the page has the cookie and the same-origin `fetch`. So the refusal is reached
+ * by code that never entered `runBackfill` — and without this function its only
+ * outcome would be "no target registered", which the user reads as *nothing
+ * happened*. The four reasons are facts about the account and each has a
+ * different remedy; dropping them on the floor would be the same class of mistake
+ * as recording an empty result for an unknown one.
+ *
+ * ## What it writes, and what it deliberately does not
+ *  · **the header only** (`saveHeader`): no debt id moves, no counter moves, no
+ *    cursor moves. This is a note about why the leg is not running, not progress;
+ *  · **nothing at all** when the record cannot be read (`openLedger` refuses) —
+ *    the same rule `runBackfill` follows, because writing over a record we could
+ *    not read is the failure W18 exists to prevent;
+ *  · **false** when there is no store: the caller is told the note was not
+ *    written, rather than being told it was.
+ *
+ * 🔴 The streak rule is `runBackfill`'s, read from the **persisted** record rather
+ *    than from a run-local counter, and that difference is forced by where this
+ *    runs: a resolver failure is one tick's whole event, so "consecutive" can only
+ *    mean "the record that was already there says the same reason". A transient
+ *    record therefore keeps counting up across ticks (5 → 15 → 30 → 60 minutes,
+ *    `transientRetryDelayMs`), and a run that stops for another reason resets it
+ *    simply by writing its own record over this one.
+ */
+export async function recordBackfillHalt(
+  store: BackfillStore | null,
+  opts: {
+    platform: string;
+    scope: string;
+    reason: HaltReason;
+    detail: string;
+    /** Test seams, in the same family as runBackfill's: omitted ⇒ the real clock and Math.random. */
+    clock?: Clock;
+    random?: RandomFn;
+  },
+): Promise<boolean> {
+  if (!store) return false;
+  const opened = await openLedger(store, opts.platform, opts.scope);
+  if (!opened.ok) return false;
+  const at = (opts.clock ?? systemClock).now();
+  const state = opened.state;
+  if (haltClassOf(opts.reason) === 'transient' && isTransientReason(opts.reason)) {
+    const previous = state.halted;
+    const streak = (previous?.reason === opts.reason ? (previous.attempts ?? 0) : 0) + 1;
+    state.halted = {
+      reason: opts.reason,
+      at,
+      detail: opts.detail,
+      attempts: streak,
+      retryAt: at + transientRetryDelayMs(opts.reason, streak, opts.random ?? systemRandom),
+    };
+  } else {
+    state.halted = { reason: opts.reason, at, detail: opts.detail };
+  }
+  await saveHeader(store, state);
+  return true;
+}
+
 /** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
 function haltReasonForStatus(status: number): HaltReason {
   if (status === 429 || status === 403 || status >= 500) return 'rate-limited';
@@ -300,7 +367,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const clock = opts.clock ?? systemClock;
   const pace = opts.pace ?? DEFAULT_PACE;
   const http = opts.http ?? notWiredHttp;
-  const listLimit = opts.listLimit ?? DEFAULT_LIST_LIMIT;
   // 🔴 W16 · One draw source for the whole run, so "which number came from
   //    where" is answerable and a test can swap all of it with one function.
   const random = opts.random ?? systemRandom;
@@ -557,6 +623,64 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt('unsupported-platform', detail);
   }
 
+  /**
+   * 🔴 W31 · **The page size, with the plan's own value in the middle of the chain.**
+   *
+   * Before this, one number was both the `limit=` a plan asked for and the value a
+   * "short page" was measured against, so a plan whose sources name a different
+   * page size (claude.ai: 50) could only ever get one of the two right — it would
+   * ask for 50 and call 50 rows "short", ending the listing a page early. An
+   * explicit `opts.listLimit` still wins: it is a caller's own choice, and the
+   * tests that use it are asserting about the engine, not about a platform.
+   */
+  const listLimit = opts.listLimit ?? plan.listPageSize ?? DEFAULT_LIST_LIMIT;
+
+  /**
+   * 🔴 W31 · **A scoped plan with no scope is a named stop, not a request.**
+   *
+   * The plan's URLs carry `{org}` and `applyScope` refuses to build one without a
+   * value, so without this the leg would send a request against a literal
+   * `{org}` path. The reason is the resolver's own ('org-unresolved': no
+   * organization could be named), it holds **before any request goes out**, and it
+   * is emphatically not "you have no conversations" — nothing was enumerated and
+   * nothing was written off.
+   */
+  if (plan.scopeInPath && (typeof opts.scope !== 'string' || opts.scope.length === 0)) {
+    return halt(
+      'org-unresolved',
+      `platform ${plan.platform} addresses conversations by account scope, and this run has none`,
+    );
+  }
+  /**
+   * 🔴 W31 · **'default' is not an organization.**
+   *
+   * `'default'` is this repository's existing spelling for "the account identifier
+   * cannot be told" (entrypoints/background.ts's `identity.value || 'default'`, and
+   * the C33 registration that writes it deliberately). For a platform whose *path*
+   * carries the scope that word is not a placeholder — it is a string that would be
+   * substituted into `/api/organizations/<scope>/chat_conversations` and sent
+   * straight at the server. That is the first invariant broken in the most literal
+   * way available: an unknown written into a request as if it were a value.
+   *
+   * So a scoped plan refuses it, with the same reason as "no scope at all", and
+   * **before any request**. The cost is written down rather than hidden: a target
+   * whose scope has not been resolved yet is stored with this sentinel
+   * (entrypoints/background.ts's `UNRESOLVED_SCOPE`), so it ticks, says by name
+   * why it cannot proceed, and issues nothing. W31c is what makes that a *passing*
+   * state rather than a permanent one: the organization is asked for in the page
+   * (lib/backfill/claude-page.ts), at the popup's start button and on a wake-up
+   * whose recorded scope is still this word, and a resolved organization replaces
+   * the sentinel row. The alternative — substituting the sentinel — would fire a
+   * request against an organization that does not exist.
+   */
+  if (plan.scopeInPath && opts.scope === 'default') {
+    return halt(
+      'org-unresolved',
+      `platform ${plan.platform} addresses conversations by account scope, and 'default'`
+      + ' means the identifier could not be told — it is not an organization',
+    );
+  }
+
   // ---- Segment one: enumeration (cheap; one page per tick when bodies follow) ----
   //
   // 🔴 W10 · This segment and segment two are now **interleaved per tick**; see
@@ -659,13 +783,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     //    builder or the body builder verbatim and is never inspected. `null` here
     //    means the first page and nothing else.
     const listToken = state.enumCursor.token ?? null;
-    const url = tokenMode
+    const builtListUrl = tokenMode
       ? plan.listTokenUrl
         ? plan.listTokenUrl(opts.origin, listToken, listLimit)
         : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit)
       : cursorMode
         ? plan.listCursorUrl!(opts.origin, state.enumCursor.cursor ?? null, listLimit)
         : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
+    /**
+     * 🔴 W31 · **The one place a scope reaches a request URL.** A plan that
+     * declares no `scopeInPath` gets its URL back byte-identical; a scoped plan
+     * with no resolvable scope was already stopped above this loop, so a null here
+     * would be a bug rather than a state — and it is still turned into a named
+     * stop instead of a request against a literal `{org}` path.
+     */
+    const url = applyScope(plan, builtListUrl, opts.scope);
+    if (url === null) {
+      return halt('org-unresolved', `${listWhere()}: this plan's URL carries an account scope and none was resolved`);
+    }
     // 🔴 C23: the body can only come from the plan's own builder
     //    (listRequestInit / listTokenPostInit → spec.body). No path lets the page
     //    side or the message side decide what is sent here.
@@ -722,8 +857,20 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * 🔴 The guard runs **before** `enqueueDebts` below, so a repeated page adds
      *    nothing: its ids are already in pending/archived by construction (that is
      *    the premise of the check), so nothing can be lost by stopping here.
+     *
+     * 🔴 W31 · **The same question, asked of an offset-paged plan**
+     *    (`listOffsetInferred`: claude.ai). There is no token to hold; the
+     *    parameter that must move is the `offset` this plan's own URL builder
+     *    emits, and "a non-first page carried only ids we have already seen" means
+     *    exactly the same thing it does above — the parameter was ignored, and the
+     *    next tick would read this page again. The condition is `offset > 0`
+     *    rather than "we hold a token", and everything else, including the halt
+     *    and its reasoning, is shared: one guard, two ways of knowing a page is
+     *    not the first.
      */
-    if (tokenMode && parsed.page.ids.length > 0 && state.enumCursor.token) {
+    const notFirstPage = tokenMode ? !!state.enumCursor.token : state.enumCursor.offset > 0;
+    const guardApplies = tokenMode || plan.listOffsetInferred === true;
+    if (guardApplies && notFirstPage && parsed.page.ids.length > 0) {
       const known = new Set<string>([
         ...state.archived,
         ...state.pending,
@@ -733,11 +880,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         return halt(
           'shape-changed',
           `${listWhere()}: the page carried only conversations this enumeration has already seen;`
-          + ' the page cursor did not advance (the platform may not honour the cursor parameter)',
+          + (tokenMode
+            ? ' the page cursor did not advance (the platform may not honour the cursor parameter)'
+            : ' the page offset did not advance (the platform may not honour the offset parameter)'),
         );
       }
     }
-    if (tokenMode) for (const id of parsed.page.ids) seenThisEnumeration.add(id);
+    if (guardApplies) for (const id of parsed.page.ids) seenThisEnumeration.add(id);
 
     // 🔴 W10 · The total the API gave is recorded, but it is **not** trusted as
     //    the denominator forever: it is a number this endpoint prints, not a
@@ -858,13 +1007,23 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       } else {
         state.enumCursor.cursor = parsed.page.nextCursor;
       }
-    } else if (plan.platform === 'perplexity' && parsed.page.ids.length < listLimit) {
+    } else if (
+      parsed.page.ids.length < listLimit
+      && (plan.platform === 'perplexity' || plan.listOffsetInferred === true)
+    ) {
       // 🔴 C27 · This is the only "a short page means stop" branch. It is a client
       // inference all three sources share, not a termination signal supplied by the
       // API, so complete must not be set to true.
       // If it is ever confirmed that Perplexity returns a termination field, change
       // this branch: read that field, and set complete=true only when it is
       // explicitly false.
+      //
+      // 🔴 W31 · claude.ai joins this branch by declaration (`listOffsetInferred`),
+      //    and the reason is the same one: its list response is a bare array with no
+      //    has_more, no next_cursor and no next-page token — a short page is an
+      //    inference, so it is recorded as one and `complete` stays false. The
+      //    comparison uses `listLimit`, which for that plan is its own page size
+      //    (50, from the plan) rather than the cross-platform default.
       stopEnumerating('short-page-inferred', { complete: false });
     }
 
@@ -974,7 +1133,18 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     // which is negligible.
     anchor('detail', detailPacer.lastAt);
     await persist(state);
-    const url = detailUrlOf(opts.origin, id);
+    /**
+     * 🔴 W31 · The scope reaches the body URL exactly as it reaches the list URL:
+     * through `applyScope`, in one place, so a scoped plan's two segments cannot
+     * end up addressing different organizations. The named stop below is the same
+     * one the list loop has — a scoped plan with no scope never reaches this loop
+     * in production, and if it ever did it must not send a literal `{org}` path.
+     */
+    const scopedDetailUrl = applyScope(plan, detailUrlOf(opts.origin, id), opts.scope);
+    if (scopedDetailUrl === null) {
+      return halt('org-unresolved', 'detail: this plan\'s URL carries an account scope and none was resolved');
+    }
+    const url = scopedDetailUrl;
     const init = detailRequestInit(plan, opts.origin, id);
     let res: HttpResponse;
     try {
@@ -1212,6 +1382,37 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       console.warn(
         '[chat-stasher] backfill: this conversation\'s body says it is incomplete'
         + ' (the platform offers more than one response holds, and this leg does not page it);'
+        + ' nothing was stored and the failure list names it',
+      );
+      continue;
+    }
+    /**
+     * 🔴 W31 · **A recognised body whose own parent links do not reach a root.**
+     *
+     * claude.ai's body is a tree: the active branch is the chain that starts at
+     * `current_leaf_message_uuid` and follows parent links upward, and a chain that
+     * hits a parent the response does not carry is **not the whole conversation**.
+     *
+     * This is the same shape of decision as the branch above — a per-conversation
+     * fact, a named receipt, nothing archived, and the run carries on — and it is
+     * deliberately the *same path* rather than a second mechanism with its own
+     * rules: the debt leaves pending (no retry), `detail-tree-incomplete` goes on
+     * the failure list with the conversation's short id, the request that really
+     * went out counts against the day's quota, and the leg moves to the next
+     * conversation. Archiving it instead would put a partial answer to "what did I
+     * say" in the archive with nothing marking it partial — the one outcome the
+     * whole design exists to prevent.
+     */
+    if (detailParsed?.ok === true && detailParsed.outcome === 'detail-tree-incomplete') {
+      dropDebt(state, id);
+      failedThisRun.push(
+        recordFailure(state, { id, reason: 'detail-tree-incomplete', at: clock.now() }),
+      );
+      state.detailToday.count += 1;
+      await persist(state);
+      console.warn(
+        '[chat-stasher] backfill: this conversation\'s body does not hold the whole branch'
+        + ' (walking back from the current leaf reached a message the response does not carry);'
         + ' nothing was stored and the failure list names it',
       );
       continue;

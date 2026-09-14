@@ -237,6 +237,35 @@ export async function rememberTarget(
   return next;
 }
 
+/**
+ * 🔴 W31c · Remove one target, by the same key `rememberTarget` dedups on.
+ *
+ * Why this exists at all, and why it is not `rememberTarget` with an empty scope:
+ * a target registered before its scope was known carries the `'default'` sentinel
+ * (see entrypoints/background.ts's scoped-platform registration). Once the scope
+ * **is** known, that row is not a target any more — it names no account, and the
+ * alarm would keep waking for it, halting on a scope that cannot be looked up,
+ * every tick, forever. `rememberTarget` cannot express that: it dedups by
+ * platform+scope, so writing the real scope leaves the sentinel row exactly where
+ * it was. Same shape as `forgetTab` in lib/backfill/tab-port.ts, for the same
+ * reason ("the registry converges on its own" needs a way to converge).
+ *
+ * 🔴 It never touches the target's **state**: the halt record written under the
+ *    sentinel scope stays where it is, because this removes a registration, not a
+ *    fact. Nothing about the archive, the debt set or the ledger moves here.
+ */
+export async function forgetTarget(
+  store: BackfillStore | null,
+  platform: string,
+  scope: string,
+): Promise<void> {
+  if (!store) return;
+  const next = (await loadTargets(store)).filter(
+    (t) => !(t.platform === platform && t.scope === scope),
+  );
+  await store.save(BACKFILL_TARGETS_KEY, next);
+}
+
 // ---------------------------------------------------------------------------
 // C30 · The **trace** of the alarm's tick
 //

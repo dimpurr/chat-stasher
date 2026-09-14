@@ -89,6 +89,13 @@
  *     The JSON rules (key set, scalar-only values, JSON object) do **not** apply
  *     to it, and rule 8's query check does not either — a form body is not JSON,
  *     so being checked by the JSON rules would mean being checked by nothing.
+ *  --- 🔴 W31c added no request dimension at all, and that is the point of it:
+ *  --- the channel gained a **question** (`CLAUDE_ORG_REQUEST_MESSAGE`), whose
+ *  --- answer is a decision rather than a document. The only request it can lead
+ *  --- to is the resolution-only path W31 already declared on the plan, and it
+ *  --- goes through the checks above exactly like any other fetch on this channel
+ *  --- — the question itself carries no URL, no method, no body and no scope, so
+ *  --- there is nothing on it to smuggle.
  * Failing any one of these refuses the request with an error; never send it anyway.
  *
  * ## 🔴 Why this is still not a "general-purpose proxy"
@@ -100,6 +107,7 @@
  */
 
 import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
+import type { OrgResolution } from './claude-org';
 import {
   backfillPlanFor,
   detailPathMatches,
@@ -107,7 +115,9 @@ import {
   formQueryMatches,
   formSegmentFor,
   isFormPostSpec,
+  pinnedQueryMatches,
   postSpecFor,
+  scopePathMatches,
   ALLOWED_BACKFILL_CONTENT_TYPES,
   ALLOWED_BACKFILL_METHODS,
   MAX_BODY_ARRAY_ITEMS,
@@ -127,6 +137,25 @@ export const BACKFILL_FETCH_MESSAGE = 'cs-backfill-fetch';
 export const BACKFILL_PING_MESSAGE = 'cs-backfill-ping';
 /** content script → background: I am alive on a platform page; the tab id comes with the sender. */
 export const BACKFILL_TAB_HELLO_MESSAGE = 'cs-backfill-tab-hello';
+/**
+ * 🔴 W31c · background → content script: **which organization is this page using?**
+ *
+ * This is not a fetch and not a ping: it is a *question the page side is the only
+ * one able to answer*. claude.ai needs an organization id in every request path
+ * and the id is in no page URL; two of the three sources for it (the
+ * `lastActiveOrg` cookie and a same-origin `GET /api/organizations`) are
+ * reachable only from inside the page. So the background asks over this channel
+ * instead of guessing, and the answer is a decision (an organization, or a named
+ * halt) rather than a document.
+ *
+ * 🔴 It is a message and not a "let the background fetch it": see the header of
+ *    this file — the service worker has no host permission, so the request must
+ *    be made by the content script that is already on the page. The one request
+ *    this question may cost goes through the same allowlist as every other
+ *    request on this channel (lib/backfill/claude-org.ts decides when it is
+ *    spent).
+ */
+export const CLAUDE_ORG_REQUEST_MESSAGE = 'cs-backfill-claude-org';
 
 /** The registry of live platform tabs. Same cs_* prefix family; no new permission. */
 export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
@@ -212,6 +241,10 @@ export function isTabHello(v: unknown): v is { type: string; origin: string } {
   return isRecord(v) && v.type === BACKFILL_TAB_HELLO_MESSAGE && typeof v.origin === 'string';
 }
 
+export function isClaudeOrgRequest(v: unknown): v is { type: string } {
+  return isRecord(v) && v.type === CLAUDE_ORG_REQUEST_MESSAGE;
+}
+
 /** The complete description of one sent-on-behalf request. Omitted method ⇒ 'GET' (byte-compatible with C22's message shape). */
 export interface BackfillRequestSpec {
   url: string;
@@ -278,8 +311,22 @@ function isScalar(v: unknown): boolean {
 function checkDetailQuery(
   plan: BackfillEnumPlan,
   u: URL,
-  segment: 'detail' | 'detail2',
+  segment: BackfillSegment,
 ): string | null {
+  /**
+   * 🔴 W31 · **A pinned query** (claude.ai's tree request). Its parameters are
+   * constants of the endpoint rather than a value this plan carries, so there is
+   * no `detailQueryKey` to compare a value against — the whole set is the
+   * declaration, and `pinnedQueryMatches` is the same rule a form segment's
+   * pinned query already follows. Checked **instead of**, never in addition to,
+   * the one-key rule: a plan declares one or the other.
+   */
+  if (segment === 'detail' && plan.detailQueryPinned) {
+    if (!pinnedQueryMatches(plan.detailQueryPinned, u)) {
+      return 'body url carries a query the plan did not declare';
+    }
+    return u.hash === '' ? null : 'body url carries a fragment the plan did not declare';
+  }
   // 🔴 W21 · The second step's URL is always query-free, and its own declaration
   //    carries no query key at all (see DetailStep2Spec): everything variable about
   //    step 2 travels in its POST body, which is validated below. So the rule for
@@ -358,6 +405,15 @@ export function checkBackfillRequest(
   spec: BackfillRequestSpec,
   pageOrigin: string,
   lookup: PlanLookup = backfillPlanFor,
+  /**
+   * 🔴 W31 · **The scope this page side resolved**, for a plan whose paths carry it
+   * (claude.ai's organization). It is a parameter rather than something read out
+   * of the URL on purpose: a check that reads the value it is checking is not a
+   * check. `null` means "no scope was resolved", and for a scoped plan that
+   * refuses every list/body URL — a request naming an organization this page did
+   * not resolve is exactly the request that must not go out.
+   */
+  scope: string | null = null,
 ): RequestVerdict {
   let u: URL;
   try {
@@ -381,7 +437,25 @@ export function checkBackfillRequest(
   //    this line — formSegmentFor returns null for it.
   let segment: BackfillSegment;
   const viaForm = formSegmentFor(plan, u);
-  if (viaForm !== null) segment = viaForm;
+  /**
+   * 🔴 W31 · **A plan whose paths carry the scope** is dispatched by
+   * `scopePathMatches` against the plan's own templates, segment by segment, with
+   * the scope the page side resolved. Two consequences worth stating:
+   *  · the resolution-only path is answered **first**, so a URL that is exactly
+   *    `/api/organizations` can never be read as the list path. The list template
+   *    has two more segments, so the two cannot collide by construction — but the
+   *    order makes that a property of this code rather than of the templates;
+   *  · the `{org}` segment is compared with `scope`, so a request naming another
+   *    organization is refused here rather than forwarded.
+   *
+   * A plan that declares no `scopeInPath` is untouched: this is one `if` in front
+   * of the dispatch every existing plan already used.
+   */
+  const scopePaths = plan.scopeInPath;
+  if (scopePaths && u.pathname === scopePaths.resolvePath) segment = 'resolve';
+  else if (scopePaths && scopePathMatches(scopePaths.listPath, u.pathname, scope)) segment = 'list';
+  else if (scopePaths && scopePathMatches(scopePaths.detailPath, u.pathname, scope)) segment = 'detail';
+  else if (viaForm !== null) segment = viaForm;
   else if (u.pathname === plan.listPath) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
   //    is not — Perplexity). null ⇒ this platform has **no** permitted body URL. The
@@ -393,6 +467,36 @@ export function checkBackfillRequest(
   //    exactly the same set of URLs it permitted before this change.
   else if (plan.detailStep2 && detailPathMatches(plan.detailStep2.path, u.pathname)) segment = 'detail2';
   else return refuseUrl('path is not a backfill endpoint');
+
+  /**
+   * 🔴 W31 · **The resolution-only path** (claude.ai's `GET /api/organizations`).
+   *
+   * It carries no conversation data and no parameter of any kind: what it answers
+   * is "which organization is this account using", and its answer is read once,
+   * page-side, by the resolver. So it is admitted under exactly one shape — GET,
+   * no query, no fragment, no body, no Content-Type — and every other shape is
+   * refused with a sentence of its own rather than being pushed through the
+   * list/body rules.
+   *
+   * 🔴 It is **not** a relaxation: this path is admitted only because this plan
+   *    declared it (`scopeInPath.resolvePath`), and a plan that declares nothing
+   *    permits exactly the URLs it permitted before. Both the method and the
+   *    bodylessness are also enforced by the ordinary branch below
+   *    (`postSpecFor` answers null for this segment), so this block adds the two
+   *    URL rules that the list/body rules would have worded as if this were a
+   *    conversation request.
+   */
+  if (segment === 'resolve') {
+    if (u.search !== '') return refuseUrl('the resolution-only path carries a query the plan did not declare');
+    if (u.hash !== '') return refuseUrl('the resolution-only path carries a fragment the plan did not declare');
+    if ((spec.method ?? 'GET') !== 'GET') {
+      return refuseRequest('refused: the resolution-only path is a GET');
+    }
+    if (spec.body !== undefined || spec.contentType !== undefined) {
+      return refuseRequest('refused: the resolution-only path carries a body or a content-type');
+    }
+    return { ok: true, url: spec.url, method: 'GET' };
+  }
 
   const post = postSpecFor(plan, segment);
 
@@ -630,8 +734,12 @@ function sanitiseMethod(method: string): string {
  * allowlist" and the "method/body allowlist" cannot tell different stories — there
  * is only one decision.
  */
-export function isAllowedBackfillUrl(url: string, pageOrigin: string): boolean {
-  return checkBackfillRequest({ url }, pageOrigin).ok;
+export function isAllowedBackfillUrl(
+  url: string,
+  pageOrigin: string,
+  scope: string | null = null,
+): boolean {
+  return checkBackfillRequest({ url }, pageOrigin, backfillPlanFor, scope).ok;
 }
 
 export type FetchLike = (
@@ -651,10 +759,11 @@ export async function serveBackfillFetch(
   pageOrigin: string,
   fetchImpl: FetchLike,
   lookup: PlanLookup = backfillPlanFor,
+  scope: string | null = null,
 ): Promise<BackfillFetchReply> {
   // The string form is C22's calling convention, kept: equivalent to "this URL, with its segment's default method".
   const spec: BackfillRequestSpec = typeof request === 'string' ? { url: request } : request;
-  const verdict = checkBackfillRequest(spec, pageOrigin, lookup);
+  const verdict = checkBackfillRequest(spec, pageOrigin, lookup, scope);
   if (!verdict.ok) {
     // 🔴 A trace: a refusal has to be sayable too, and it goes through the same
     //    error channel as a failed fetch ({ok:false} → tabHttpPort throw → the
@@ -691,10 +800,16 @@ export function handleBackfillMessage(
   pageOrigin: string,
   fetchImpl: FetchLike,
   lookup: PlanLookup = backfillPlanFor,
+  /**
+   * 🔴 W31 · The scope this page side resolved, for a plan whose paths carry it.
+   * It is the same value the content script hands to `fetch`'s URL builder, so
+   * "the URL we validated" and "the URL we send" carry one organization, not two.
+   */
+  scope: string | null = null,
 ): Promise<BackfillFetchReply | { ok: true; origin: string }> | null {
   if (isBackfillPing(message)) return Promise.resolve({ ok: true as const, origin: pageOrigin });
   if (isBackfillFetchRequest(message)) {
-    return serveBackfillFetch(specFromMessage(message), pageOrigin, fetchImpl, lookup);
+    return serveBackfillFetch(specFromMessage(message), pageOrigin, fetchImpl, lookup, scope);
   }
   return null;
 }
@@ -846,6 +961,101 @@ export function tabHttpPort(
     }
     return { status: reply.status, text: reply.text };
   };
+}
+
+/**
+ * 🔴 W31c · How long the background waits for **"which organization is this page
+ * using"** before it declares the question unanswered.
+ *
+ * **Why it needs a budget of its own**, and why it is neither of the two numbers
+ * above:
+ *  · the 90 s fetch budget covers one 16 MiB conversation body plus its transfer,
+ *    and this question carries no conversation and no id in either direction;
+ *  · the 10 s ping budget covers a message whose answer is a constant, and this
+ *    one may cost **one same-origin `GET /api/organizations`** on the page side
+ *    (lib/backfill/claude-org.ts spends it only when the page and the cookie both
+ *    said nothing).
+ *  · So the bound has to clear one small JSON request plus the page's own
+ *    scheduling on top of that request — twice the ping budget does, with room to
+ *    spare on a renderer that is busy rather than dead.
+ *  · And it has to stay far below the shortest alarm gap (5 minutes,
+ *    `BACKFILL_TICK_DELAY_MIN_MINUTES`), because an alarm tick may ask this
+ *    question: a tick must be able to answer it and still finish inside the gap
+ *    the alarm drew. 20 s versus 300 s leaves the tick's whole work in that gap.
+ *
+ * 🔴 A timeout is **not** "this account has no organizations" and not "it has
+ *    several": it is "we did not get an answer in time", and it comes back as the
+ *    resolver's own transient `transport-error` — retried on a later tick, with
+ *    nothing written off (see `askTabForClaudeOrg`).
+ */
+export const CLAUDE_ORG_REPLY_TIMEOUT_MS = 20_000;
+
+/**
+ * 🔴 W31c · **Read one answer to `CLAUDE_ORG_REQUEST_MESSAGE`.**
+ *
+ * The reply crosses the same message channel as every other backfill message, so
+ * it is checked rather than trusted: an unrecognised shape is **not** read as "no
+ * organization" (that would turn a broken channel into a fact about the account),
+ * it is the transient `transport-error` the resolver uses for "the request did not
+ * complete".
+ *
+ * Only the closed set of fields is read, and nothing is echoed back: the refusal
+ * sentences the resolver writes name neither an organization id nor a count of
+ * anything but organizations.
+ */
+export function readClaudeOrgReply(reply: unknown, tabId: number): OrgResolution {
+  if (!isRecord(reply)) {
+    return { ok: false, halt: 'transport-error', detail: `tab ${tabId} gave no reply for the organization question` };
+  }
+  if (reply.ok === true) {
+    const org = reply.org;
+    if (typeof org !== 'string' || org.length === 0) {
+      return { ok: false, halt: 'transport-error', detail: `tab ${tabId} named no organization` };
+    }
+    const source = reply.source;
+    if (source !== 'page' && source !== 'cookie' && source !== 'endpoint') {
+      return { ok: false, halt: 'transport-error', detail: `tab ${tabId} named an organization from an unknown source` };
+    }
+    return { ok: true, org, source };
+  }
+  const halt = reply.halt;
+  if (halt !== 'org-ambiguous' && halt !== 'org-unresolved' && halt !== 'transport-error') {
+    return { ok: false, halt: 'transport-error', detail: `tab ${tabId} refused the organization question unrecognisably` };
+  }
+  return { ok: false, halt, detail: typeof reply.detail === 'string' ? reply.detail : '' };
+}
+
+/**
+ * 🔴 W31c · **Ask one live tab which organization its page is using.**
+ *
+ * Every way this can fail — no tab, a dead content script, a wedged renderer, a
+ * reply whose shape is unrecognised — comes back as the resolver's
+ * `transport-error`: a **transient** halt that the next tick tries again, never
+ * "this account has no conversations". That is the same rule `tabHttpPort` above
+ * follows for a failed fetch, and the same rule the resolver's own endpoint
+ * failure follows (`OrgEndpointReading`), so "we could not ask" has exactly one
+ * meaning on every path.
+ *
+ * `timeoutMs` is injectable **for tests only** — production callers pass no third
+ * argument and get `CLAUDE_ORG_REPLY_TIMEOUT_MS`.
+ */
+export async function askTabForClaudeOrg(
+  tabId: number,
+  send: TabSend,
+  timeoutMs: number = CLAUDE_ORG_REPLY_TIMEOUT_MS,
+): Promise<OrgResolution> {
+  let reply: unknown;
+  try {
+    reply = await withReplyTimeout(
+      send(tabId, { type: CLAUDE_ORG_REQUEST_MESSAGE }),
+      tabId,
+      timeoutMs,
+      'the organization question',
+    );
+  } catch (err) {
+    return { ok: false, halt: 'transport-error', detail: (err as Error).message };
+  }
+  return readClaudeOrgReply(reply, tabId);
 }
 
 // ---------------------------------------------------------------------------

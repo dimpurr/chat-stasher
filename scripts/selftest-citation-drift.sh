@@ -32,6 +32,7 @@ FAILED=0
 restore() {
   [ -f "$TMP/threat-model.md" ] && cp "$TMP/threat-model.md" "$REPO/docs/threat-model.md"
   [ -f "$TMP/engine.ts" ] && cp "$TMP/engine.ts" "$REPO/apps/extension/lib/backfill/engine.ts"
+  [ -f "$TMP/store.rs" ] && cp "$TMP/store.rs" "$REPO/crates/chat-stasher/src/store.rs"
   [ -f "$TMP/nativehost-protocol.md" ] && cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
 }
 trap 'restore; rm -rf "$TMP"' EXIT
@@ -72,25 +73,35 @@ echo
 echo "=============================================================="
 echo "Probe 2: leave the document alone and edit a line *inside* a cited"
 echo "  range."
-echo "  Target: apps/extension/lib/backfill/engine.ts:715, inside the cited"
-echo "  range 694-736 (43 lines). It sits in the middle, not on the first line:"
-echo "  the snippet a human reads in the lockfile is the range's first non-empty"
-echo "  line, and that line does not change."
+# Re-pointed after the Claude merge moved engine.ts: the probe must edit a line
+# that sits inside a range the lockfile actually holds, so it now looks the
+# range up first and fails loudly (void selftest) if the range is gone,
+# instead of editing an uncited line and "passing" while testing nothing.
+PROBE2_RANGE='crates/chat-stasher/src/store.rs:261-296'
+PROBE2_FILE='crates/chat-stasher/src/store.rs'
+PROBE2_LINE=281
+echo "  Target: ${PROBE2_FILE}:${PROBE2_LINE}, inside the cited range 261-296."
+echo "  It sits in the middle, not on the first line: the snippet a human reads"
+echo "  in the lockfile is the range's first non-empty line, and that line does"
+echo "  not change."
 echo "  (This is the most common drift in the wild: code is edited, the line"
 echo "   numbers survive, the content moves on. Only hashing the whole range"
 echo "   catches it — comparing the snippet would not.)"
 echo "=============================================================="
-cp "$REPO/apps/extension/lib/backfill/engine.ts" "$TMP/engine.ts"
-sed -i '' '715s/.*/     * PROBE2: content changed inside the cited range/' \
-  "$REPO/apps/extension/lib/backfill/engine.ts"
-if ! sed -n '715p' "$REPO/apps/extension/lib/backfill/engine.ts" | grep -q PROBE2; then
+if ! grep -q "^${PROBE2_RANGE} " "$REPO/docs/citations.lock"; then
+  echo "  ✘ probe 2's range ${PROBE2_RANGE} is no longer in the lockfile; the selftest itself is void"
+  FAILED=1
+fi
+cp "$REPO/$PROBE2_FILE" "$TMP/store.rs"
+sed -i '' "${PROBE2_LINE}s/.*/        \/\/ PROBE2: content changed inside the cited range/" "$REPO/$PROBE2_FILE"
+if ! sed -n "${PROBE2_LINE}p" "$REPO/$PROBE2_FILE" | grep -q PROBE2; then
   echo "  ✘ probe 2 could not modify the code; the selftest itself is void"
   FAILED=1
 fi
 $CHECK
 rc=$?
 expect 1 "$rc" "content inside the cited range changed, must be red"
-cp "$TMP/engine.ts" "$REPO/apps/extension/lib/backfill/engine.ts"
+cp "$TMP/store.rs" "$REPO/$PROBE2_FILE"
 echo
 
 echo "=============================================================="

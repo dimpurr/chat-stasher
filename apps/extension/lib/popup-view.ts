@@ -995,6 +995,15 @@ function notesFor(model: PopupModel): string[] {
         minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
         detail: model.state.halted.detail,
       }));
+    } else if (model.state.halted.reason === 'org-ambiguous' || model.state.halted.reason === 'org-unresolved') {
+      // 🔴 W31c · The two organization halts. Each gets its own sentence, and
+      //    neither may fall through to `other`: `other` prints the reason code and
+      //    the technical detail, which is a description of the state rather than
+      //    the one thing a user can do about it. Both of these have exactly one
+      //    action, and it is a human action — which is why the leg stopped.
+      notes.push(t(model.state.halted.reason === 'org-ambiguous'
+        ? 'popup.notes.halted.orgAmbiguous'
+        : 'popup.notes.halted.orgUnresolved'));
     } else if (model.state.halted.reason === 'detail-unsupported') {
       // 🔴 C26 · This one must **not** say "stopped before issuing any request" —
       //    the list request really went out and conversations really were listed.

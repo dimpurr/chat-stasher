@@ -421,7 +421,11 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
     // 🔴 W29 (2026-09-14) grew it by one more row in the same way: gemini's list and paged
     //    body were filled in from the 2026-09-14 probe plus the W20 research, so it sits on the
     //    supported side between chatgpt and kimi — which is where the platform table puts it.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'kimi', 'grok']);
+    // 🔴 W31 (2026-09-14) grew it once more, and by evidence rather than by a decision: claude's
+    //    three recorded gaps were closed by the W20 research (the organization resolver, the
+    //    limit/offset paging, and the list response's array of `uuid` summaries), so it now has
+    //    both segments and sits where the platform table puts it — between gemini and kimi.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
     // 🔴 DeepSeek no longer declares a missing half; the field's absence is what "both segments work" means.
     expect(DEEPSEEK_PLAN.partial).toBeUndefined();
     // The wording that said DeepSeek cannot fetch bodies is gone from the catalog with it.

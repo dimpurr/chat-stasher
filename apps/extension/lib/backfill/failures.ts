@@ -125,7 +125,27 @@ export type FailureReason =
    * **still not the conversation**, so nothing is stored and the debt leaves
    * pending with this receipt — never "the first N pages, called complete".
    */
-  | 'detail-too-long';
+  | 'detail-too-long'
+  /**
+   * 🔴 W31 · The body was fetched, HTTP succeeded, the shape was recognised — and
+   * **the response's own parent links do not reach a root** (claude.ai: the chain
+   * from `current_leaf_message_uuid` upward hits a message the response does not
+   * carry).
+   *
+   * A fact we observed, phrased as one: it says "walking back from the leaf left
+   * the messages this response holds". It is deliberately **not** phrased as "the
+   * platform truncated your conversation" — that is a guess about *why* a parent
+   * is absent, and the open question the research records is exactly whether a
+   * long conversation is capped server-side. It is also not 'shape-changed': the
+   * shape is precisely what the platform row describes.
+   *
+   * 🔴 Why an incomplete tree is a failure and not a stored conversation: this is
+   *    the same reasoning as 'detail-paged-unsupported' above. The archive would
+   *    hold a partial conversation with nothing marking it partial — and the
+   *    specific loss here is the *middle* of the branch, which no reader could
+   *    even notice.
+   */
+  | 'detail-tree-incomplete';
 
 export interface FailureEntry {
   /** The first 8 characters of the session id. 🔴 Not the full id. */
@@ -224,6 +244,8 @@ export function describeFailureReason(reason: string): string {
       return t('failure.detailPagedUnsupported');
     case 'detail-too-long':
       return t('failure.detailTooLong');
+    case 'detail-tree-incomplete':
+      return t('failure.detailTreeIncomplete');
     default:
       return t('failure.unknownReason', { reason });
   }
