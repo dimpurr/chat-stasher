@@ -549,7 +549,7 @@ a real limitation of the current code.
    an organization yet; it costs at most one `GET /api/organizations` request,
    sent only when the page's own requests and the cookie both named none, and a
    recorded "several organizations, no signal" is not asked again
-   (`apps/extension/lib/backfill/claude-page.ts:66-140`;
+   (`apps/extension/lib/backfill/claude-page.ts:62-136`;
    `apps/extension/entrypoints/background.ts:681-696`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:214-246`); a body

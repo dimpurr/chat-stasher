@@ -35,11 +35,7 @@
 import { getPlatformByOrigin } from '../contract';
 import { backfillPlanFor } from './enumerate';
 import { orgFromRequestUrl, resolveClaudeOrgOnPage, type OrgResolution } from './claude-org';
-import {
-  CLAUDE_ORG_REQUEST_MESSAGE,
-  serveBackfillFetch,
-  type FetchLike,
-} from './tab-port';
+import { isClaudeOrgRequest, serveBackfillFetch, type FetchLike } from './tab-port';
 
 export interface ClaudePageScopeDeps {
   /** The page's own origin, and the origin every request below is checked against. */
@@ -111,7 +107,7 @@ export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScop
     },
 
     handleMessage(message: unknown): Promise<OrgResolution> | null {
-      if (!isClaudeOrgQuestion(message)) return null;
+      if (!isClaudeOrgRequest(message)) return null;
       // 🔴 Only claude.ai has an organization to resolve. A question arriving on
       //    another platform's page is refused by name rather than answered with a
       //    cookie that happens to be there.
@@ -137,10 +133,4 @@ export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScop
       });
     },
   };
-}
-
-/** The channel's own guard, so this module cannot disagree with `tab-port.ts` about the wire value. */
-function isClaudeOrgQuestion(message: unknown): boolean {
-  return !!message && typeof message === 'object'
-    && (message as { type?: unknown }).type === CLAUDE_ORG_REQUEST_MESSAGE;
 }

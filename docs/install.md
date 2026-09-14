@@ -595,7 +595,7 @@ confirmed in the code, not a temporary disclaimer.
   when the page's own requests and the cookie both named none — and an account
   belonging to several organizations stops with a sentence telling you to open a
   conversation in the one you want archived, rather than picking one
-  (`apps/extension/lib/backfill/claude-page.ts:66-140`). 🔴 **A Claude backfill
+  (`apps/extension/lib/backfill/claude-page.ts:62-136`). 🔴 **A Claude backfill
   keeps the organization it was started with:** switching organizations on
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two

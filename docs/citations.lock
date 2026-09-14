@@ -53,9 +53,9 @@ apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs/privacy.md:291  :: * ## Why this module exists at all
 apps/extension/lib/backfill/claude-org.ts:170-224  1734daecb296  lines=55
   <- README.md:138, docs/privacy.md:309, docs/threat-model.md:273, docs/threat-model.md:545  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
-apps/extension/lib/backfill/claude-page.ts:66-140  f4da5a2be6cc  lines=75
+apps/extension/lib/backfill/claude-page.ts:62-136  434dcd589586  lines=75
   <- README.md:138, docs/install.md:598, docs/privacy.md:303, docs/threat-model.md:552  :: export function createClaudePageScope(deps: ClaudePageScope…
-apps/extension/lib/backfill/claude-page.ts:88-96  b8faf8b2d241  lines=9
+apps/extension/lib/backfill/claude-page.ts:84-92  b8faf8b2d241  lines=9
   <- docs/privacy.md:298  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/debt-store.ts:37-39  fa04eecd9ada  lines=3
   <- docs/privacy.md:264  :: export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
