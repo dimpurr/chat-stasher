@@ -56,11 +56,36 @@ bash scripts/release-gate.sh
 ```
 
 The browser extension is a second project with its own toolchain. Its checks are
-the same three CI runs for it, and they must exit 0 too:
+the same CI runs for it, and they must exit 0 too:
 
 ```sh
 cd apps/extension && pnpm -s compile && pnpm -s test && pnpm -s build
 ```
+
+Its end-to-end suite is the fourth of those runs. It needs a browser download
+that the three above do not, so it is a separate command rather than part of
+that line:
+
+```sh
+cd apps/extension && npx playwright install chromium   # once per machine
+cd apps/extension && pnpm e2e                          # builds first, then runs e2e/
+```
+
+Two properties of that suite are worth knowing before changing it, because both
+are easy to break while making it pass:
+
+- **Nothing leaves the machine.** The specs intercept the platform's own origins
+  and serve a fake page and a hand-written response there; every request that is
+  not served by a fixture is aborted and counted, and each spec asserts that
+  count is 0. There is no test account, no credential, and no live site — so a
+  contribution that needs a logged-in session to reproduce is not a contribution
+  to this suite.
+- **It runs headless.** Playwright's default headless build
+  (`chromium-headless-shell`, what `headless: true` without a channel selects)
+  loads no extensions at all. The suite passes `channel: 'chromium'`, which
+  selects the full browser with the new headless mode, and that is why CI needs
+  no `xvfb`. Removing that channel makes the whole suite fail at launch rather
+  than silently test nothing.
 
 Every one of these must exit 0. They are the same checks CI runs, listed here
 so that a green local run means a green pull request; if this list and CI ever

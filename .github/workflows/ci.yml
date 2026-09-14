@@ -341,3 +341,64 @@ jobs:
 
       - name: Build (firefox)
         run: pnpm build -b firefox
+
+  # ---------------------------------------------------------------------------
+  # W25 · The capture path, in a real browser.
+  #
+  # Separate from `extension` on purpose. `pnpm test` runs vitest in Node with a
+  # stubbed `browser`; these specs load the built extension into a real Chromium,
+  # serve a fake platform on the real origins, and read the outbox back out of
+  # the service worker's IndexedDB. The two answer different questions, and one
+  # job would report a failure in either as a failure in both.
+  #
+  # Headless, and deliberately no `xvfb`: Playwright's default headless build
+  # (`chromium-headless-shell`, which is what `headless: true` with no channel
+  # selects) does NOT load extensions at all — measured on this change, the
+  # service-worker list came back empty. `channel: 'chromium'` selects the full
+  # Chromium build with the new headless mode, where the extension loads and its
+  # MV3 worker starts. That pin lives in e2e/playwright.config.ts and
+  # e2e/harness.ts, not here.
+  #
+  # The specs abort every request that is not served by their own fixtures and
+  # assert that the aborted list is empty, so this job talks to no remote host.
+  e2e:
+    name: extension e2e (ubuntu-latest, real Chromium)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: apps/extension
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Same two pins as the `extension` job above, and for the same reason:
+      # apps/extension/package.json declares neither `engines` nor
+      # `packageManager`, so there is no version to inherit.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23.10.0
+          cache: pnpm
+          cache-dependency-path: apps/extension/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `--with-deps` installs the shared libraries Chromium needs on a bare
+      # runner. The browser build has to match the @playwright/test version the
+      # lockfile resolves, so both come from the same install.
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      # `pnpm e2e` builds the unpacked extension (`wxt build`) and only then
+      # runs the Playwright config in e2e/. A green run here means the capture
+      # path worked in a browser, end to end, from a real page load.
+      - name: Capture path end to end
+        run: pnpm e2e

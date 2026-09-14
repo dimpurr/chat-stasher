@@ -1,0 +1,31 @@
+{
+  "code": 0,
+  "msg": "",
+  "data": {
+    "biz_code": 0,
+    "biz_msg": "",
+    "biz_data": {
+      "chat_session": {
+        "id": "9f8e7d6c-5b4a-4938-8271-0a1b2c3d4e5f",
+        "title": "synthetic session",
+        "updated_at": 1789000000
+      },
+      "chat_messages": [
+        {
+          "message_id": 1,
+          "role": "USER",
+          "content": "synthetic question",
+          "status": "FINISHED"
+        },
+        {
+          "message_id": 2,
+          "role": "ASSISTANT",
+          "content": "synthetic answer",
+          "status": "FINISHED"
+        }
+      ],
+      "cache_control": "no-cache",
+      "cache_reset_at": 0
+    }
+  }
+}

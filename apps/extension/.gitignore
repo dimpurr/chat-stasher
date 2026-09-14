@@ -9,6 +9,10 @@ lerna-debug.log*
 
 node_modules
 .output
+# Playwright (e2e/): build output of the run, never a source of truth
+e2e/.results
+test-results
+playwright-report
 stats.html
 stats-*.json
 .wxt
