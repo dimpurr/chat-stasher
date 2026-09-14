@@ -646,8 +646,8 @@ export interface UnsupportedBackfill {
  *
  *    One field is deliberately **not** read here, though the response carries it:
  *    `has_missing_conversations`. Its semantics have no source — the only public
- *    declaration found is pionxzh's `chatgpt-exporter/src/api.ts:330-339`, where
- *    the author annotates it with his own "// what is this for?" — so acting on
+ *    declaration found is one reference implementation's API client, where
+ *    the author annotates it with their own "// what is this for?" — so acting on
  *    it would be inventing a meaning. Recorded here so that the omission is
  *    visibly a decision rather than an oversight.
  */
@@ -1248,7 +1248,7 @@ export const DEEPSEEK_DETAIL_QUERY_KEY = 'chat_session_id';
  *   record · cursor seq_id (numeric)                                             · 2 sources
  *
  * The route among these corroborates the from-source evidence already registered
- * at lib/contract.ts:90-96 (deepseek-pp, Apache-2.0, commit 0a02c72b…, 2026-08-14).
+ * at lib/contract.ts:90-96 (a reference implementation, read 2026-08-14).
  *
  * ## 🔴 Just as important: **nothing** that lacks a source was written in
  *  · `count`'s server-side maximum/default — not found ⇒ we only ever send our
@@ -1343,7 +1343,7 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
     + 'data.biz_data 5 sources; chat_sessions 4 sources; has_more 3 sources; id 3 sources; '
     + 'seq_id 2 sources; updated_at (numeric) 3 sources. '
     + 'The route corroborates the from-source evidence at lib/contract.ts:90-96 '
-    + '(deepseek-pp, Apache-2.0, commit 0a02c72b135bf2936e11aa78fd6136931ed65908, 2026-08-14). '
+    + '(a reference implementation, read 2026-08-14). '
     + '🔴 Not official documentation; the newest measured evidence for the paging '
     + 'parameters only goes to 2025-12, so the endpoint may have changed. '
     + 'W8 (2026-09-14) then filled in the BODY segment: '
@@ -1807,10 +1807,9 @@ export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
     known: [
       // lib/contract.ts:148-153 states the conversation-LIST route is
       // '/chat_conversations' (the one without the trailing slash), and 176-184
-      // records that claude-chat-exporter (MIT, commit
-      // 12da324dd158e9472251590d89d957fc767c0d85, 2026-08-08) requests
+      // records that a reference implementation (read 2026-08-08) requests
       // /api/organizations/<org>/chat_conversations/<uuid>.
-      'listPath is sourced: /api/organizations/<org>/chat_conversations (lib/contract.ts:148-153, 176-184, quoting claude-chat-exporter, MIT, 2026-08-08)',
+      'listPath is sourced: /api/organizations/<org>/chat_conversations (lib/contract.ts:148-153, 176-184, quoting a reference implementation read 2026-08-08)',
     ],
     missing: [
       'listUrl: where the <org> organization id in the route comes from has NO source — it is not in the page URL and has to be fetched from another endpoint first; we have no source for that endpoint, and inventing one would make the user believe history is being backfilled',

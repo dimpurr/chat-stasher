@@ -204,8 +204,8 @@ export type HaltClass = 'transient' | 'permanent';
  *  · 'transport-error' — the transport threw, so nothing about the account was
  *    observed; the same request is exactly right to send again, and the case that
  *    really happened (a reload tearing the message channel) heals in seconds.
- *  · 'rate-limited'    — 429/403/5xx is the platform saying "not now". Echoes
- *    treats this one as retryable *and differently from other errors* (longer
+ *  · 'rate-limited'    — 429/403/5xx is the platform saying "not now". A reference
+ *    implementation treats this one as retryable *and differently from other errors* (longer
  *    base, hard ceiling) — see the retry notes below.
  *
  * permanent:
@@ -233,15 +233,15 @@ export function haltClassOf(reason: HaltReason): HaltClass {
 /**
  * How long to wait before the next attempt, per reason.
  *
- * 🔴 Shape borrowed from Echoes, numbers re-based on our clock.
- *    `.private/docs/25-EXTENSION-COMPETITORS.md` §3 (Echoes row): retries are
+ * 🔴 Shape borrowed from a reference implementation, numbers re-based on our
+ *    clock. There, retries are
  *    `baseDelay * multiplier^n`, clamped by `maxDelay`; the defaults are
  *    `baseDelay: 1000 ms, multiplier: 2`, and **once a 429 is seen the ladder is
  *    switched to `baseDelay: 60000 ms, multiplier: 2, maxDelay: 300000 ms`**.
  *    That structure — geometric growth with a ceiling, and a longer ladder for
  *    rate-limiting than for transport errors — is what these numbers keep.
  *
- * What is re-based: Echoes' retries happen *inside one session's request loop*,
+ * What is re-based: the reference implementation's retries happen *inside one session's request loop*,
  * so 1 s is a natural unit there. Ours happens once per alarm tick, and the
  * shortest possible tick gap is `BACKFILL_TICK_DELAY_MIN_MINUTES = 5`
  * (lib/backfill/alarm.ts — the tick is jittered since W16, and this is its
@@ -269,11 +269,11 @@ export function haltClassOf(reason: HaltReason): HaltClass {
  *                                                       limited — a 12x reduction
  *                                                       from the normal rate.
  *
- * 🔴 Echoes' ratios are 60x (base) / 5x (cap) on the 429 ladder; ours are 3x / 4x.
- *    Deliberately milder, for one reason: Echoes' ladder **gives up** after 2
+ * 🔴 The reference implementation's ratios are 60x (base) / 5x (cap) on the 429 ladder; ours are 3x / 4x.
+ *    Deliberately milder, for one reason: its ladder **gives up** after 2
  *    retries, so it can afford to be aggressive. This leg never writes a debt off
  *    (only a real delivery settles one), so a persistent 429 has to land on a
- *    sustainable steady state rather than a deadline. Re-basing Echoes' 300 s cap
+ *    sustainable steady state rather than a deadline. Re-basing its 300 s cap
  *    literally would be 5 min = exactly one tick = no backoff at all.
  *
  * Monotonic, then flat: `attempts` only ever spaces requests further apart, so

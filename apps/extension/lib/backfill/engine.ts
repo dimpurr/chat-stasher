@@ -783,7 +783,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    many rows the list has handed us". Nothing is inferred from a field
      *    whose meaning is unknown; in particular the list response's
      *    `has_missing_conversations` is **not** read (its semantics have no
-     *    source — the only public declaration of it, pionxzh's src/api.ts:330-339,
+     *    source — the only public declaration of it, in a reference implementation,
      *    annotates it with the author's own "// what is this for?").
      */
     if (state.totalSource !== 'contradicted'
@@ -878,9 +878,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * What terminates enumeration for offset paging now is the **empty page**
      * (`parsed.page.ids.length === 0`, the `else` branch above) — one real
      * observation ("this request came back with no rows"), the only stopping
-     * signal all three reviewed implementations share
-     * (pionxzh src/api.ts:610, pinguarmy src/contents/chatgpt-parser.ts:380-383,
-     * wanda1416 packages/adapter-chatgpt/src/parse.ts:253).
+     * signal all three reviewed reference implementations share.
      *
      * The price, written down rather than hidden: a full enumeration now costs
      * **one extra request** (the empty page at the end). What it buys is that
