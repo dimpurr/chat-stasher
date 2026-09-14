@@ -140,6 +140,18 @@ single-user desktop this is the normal situation and the exposure is
 proportionate; on a shared machine, or a machine running untrusted software as
 your user, it is the dominant risk in this document.
 
+### The local dashboard (`chat-stasher ui`)
+
+| | |
+|---|---|
+| **Can see** | Any program running as you can connect to the dashboard's port, because it listens on `127.0.0.1` (`crates/chat-stasher/src/view.rs:173`). Loopback is not a security boundary. |
+| **Cannot see** | Anything, without the random token printed in the URL at launch. Every route checks it with a constant-time comparison before doing anything else, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:256`, `:180`). |
+
+Two things worth stating plainly:
+
+- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui.rs:550`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs.
+- **Whether the macOS application firewall prompts for a server bound only to `127.0.0.1` is documented, not verified.** Apple's firewall documentation describes protection against connections from other computers and does not mention loopback either way; third-party documentation states that the application firewall does not filter loopback. We have not observed the behaviour on a machine with the firewall turned on.
+
 ### Someone with physical access to your machine, or your stolen disk
 
 | | |
