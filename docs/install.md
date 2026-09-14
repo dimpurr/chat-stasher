@@ -120,7 +120,7 @@ save only the first few turns of every conversation while you believed you had
 it all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:610-623`).
+(`apps/extension/lib/popup-view.ts:621-634`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the six platforms above are each registered in the table at

@@ -41,13 +41,13 @@ apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
   <- docs/privacy.md:344  :: * In Chrome's permission-warning list, `alarms` — like `sto…
 apps/extension/lib/backfill/alarm.ts:106  b9377ab9524d  lines=1
   <- docs/privacy.md:204  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
-apps/extension/lib/backfill/engine.ts:81-84  5cfeee9f2531  lines=4
+apps/extension/lib/backfill/engine.ts:84-87  5cfeee9f2531  lines=4
   <- docs/privacy.md:257, docs/threat-model.md:60  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
-apps/extension/lib/backfill/engine.ts:281  4e88764df1da  lines=1
+apps/extension/lib/backfill/engine.ts:284  4e88764df1da  lines=1
   <- docs/privacy.md:251  :: export async function runBackfill(opts: BackfillOptions): P…
-apps/extension/lib/backfill/engine.ts:481-510  f32f29d95713  lines=30
+apps/extension/lib/backfill/engine.ts:554-583  f32f29d95713  lines=30
   <- docs/threat-model.md:165, docs/threat-model.md:179  :: ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (…
-apps/extension/lib/backfill/engine.ts:688-710  949bb172b815  lines=23
+apps/extension/lib/backfill/engine.ts:761-783  949bb172b815  lines=23
   <- docs/threat-model.md:165, docs/threat-model.md:179  :: while (state.pending.length > 0) {
 apps/extension/lib/backfill/enumerate.ts:685-699  30e272d8bf3f  lines=15
   <- README.md:117, docs/install.md:102, docs/install.md:615  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
@@ -81,11 +81,11 @@ apps/extension/lib/backfill/store.ts:57-61  2e0aa0f7380f  lines=5
   <- docs/privacy.md:337  :: function localArea(): LocalArea | null {
 apps/extension/lib/backfill/tab-port.ts:95  118cc6173392  lines=1
   <- docs/privacy.md:204  :: export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
-apps/extension/lib/backfill/tab-port.ts:280-318  c37e312cb80a  lines=39
+apps/extension/lib/backfill/tab-port.ts:314-352  c37e312cb80a  lines=39
   <- docs/threat-model.md:60  :: export function checkBackfillRequest(
-apps/extension/lib/backfill/types.ts:191-220  b379d801d379  lines=30
+apps/extension/lib/backfill/types.ts:374-403  b379d801d379  lines=30
   <- docs/privacy.md:205  :: export interface BackfillState {
-apps/extension/lib/backfill/types.ts:268-289  bb4a6e5ffd1d  lines=22
+apps/extension/lib/backfill/types.ts:451-472  bb4a6e5ffd1d  lines=22
   <- docs/privacy.md:205  :: export function initialState(platform: string, scope: strin…
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:227  :: export function badgeFor(state: OutboxSummary | null): Badg…
@@ -211,7 +211,7 @@ apps/extension/lib/platform-auth.ts:34-44  5e4adeb00a65  lines=11
   <- docs/privacy.md:93  :: export function needsChatgptBearer(url: string, pageOrigin:…
 apps/extension/lib/platform-auth.ts:74-93  f67f01d9e4a4  lines=20
   <- docs/privacy.md:93, docs/threat-model.md:174  :: export function createAuthorizedFetch(pageOrigin: string, r…
-apps/extension/lib/popup-view.ts:610-623  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:621-634  00dceceff078  lines=14
   <- README.md:120, docs/install.md:123  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:225  :: export function fixCommand(stage: string | null | undefined…
