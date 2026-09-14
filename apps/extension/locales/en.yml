@@ -310,6 +310,21 @@ popup:
         body and nothing has been stored so far. This is not a platform change
         and not rate-limiting; the listed ones stay put and are worked through
         once that step lands. Technical detail: {detail}
+      # 🔴 W31c · The two organization halts, in plain words and in their own
+      # sentences. They are NOT the `other` fallback: that one would print the
+      # reason code and the technical detail at a user whose actual question is
+      # "what do I do now", and both of these have exactly one answer.
+      # They carry no `{detail}` on purpose — the detail stays on the record and in
+      # the log, and what is shown here is the action that resolves it.
+      orgAmbiguous: >-
+        This Claude account belongs to several organizations, and nothing on the
+        page says which one to back up — so this leg stopped before requesting
+        anything. Open a conversation in the organization you want archived, and
+        it will pick up that one.
+      orgUnresolved: >-
+        This leg stopped before requesting anything because it could not tell
+        which Claude organization this account is using. Open a Claude
+        conversation once, and it will find your organization.
       waitingRetry: >-
         This leg is NOT stopped and nothing has been written off: the platform
         refused or dropped a request ({reason}), so it is waiting out its backoff

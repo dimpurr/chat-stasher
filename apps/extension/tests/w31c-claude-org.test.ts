@@ -352,6 +352,32 @@ describe('W31c-1 · starting a Claude backfill resolves the organization through
     expect(conversationRequests()).toEqual([]);
   });
 
+  it('🔴 an empty organization list says "open a conversation once", not "you have no conversations"', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    const { t } = await import('../lib/i18n');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([]);
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    expect(reply?.ok).toBe(false);
+    expect(reply.reason).toBe('org-unresolved');
+    const header = await headerFor('default');
+    expect(header?.halted?.reason).toBe('org-unresolved');
+
+    // 🔴 The second of the two dedicated sentences, and the same rule as
+    //    `org-ambiguous`: its own plain wording, not the `other` fallback (which
+    //    would print the reason code and the technical detail), and it names the
+    //    one action that resolves it.
+    const shown = await popupText();
+    expect(shown.text).toContain(t('popup.notes.halted.orgUnresolved'));
+    expect(shown.text).not.toContain(
+      t('popup.notes.halted.other', { reason: 'org-unresolved', detail: header.halted.detail }),
+    );
+    expect(conversationRequests()).toEqual([]);
+  });
+
   it('🔴 a readable cookie answers, and the organizations endpoint is never asked', async () => {
     const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
     await enableBackfill();

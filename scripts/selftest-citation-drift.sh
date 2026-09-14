@@ -37,15 +37,23 @@ expect() { # expect <期望退出码> <实际退出码> <说明>
 
 echo "=============================================================="
 echo "探针 1: 把一条引用改到存在且非空、但内容不相干的行号"
-echo "  位置: docs/threat-model.md:252 的 \`:3213-3260\` -> \`:397\`"
-echo "  (选它是因为这是【省略文件名的续写引用】, 靠上一条引用推断出 main.rs;"
+# 🔴 W31c · The protagonists below were re-pointed, because the old ones had
+# stopped existing: `docs/threat-model.md:252` is prose now, and `:3213-3260` is
+# in no document, so the probe **could not touch the document at all** and the
+# self-test failed on a clean `main` — proving nothing, which is the exact
+# failure mode this file exists to catch. Only the line and the citation changed;
+# the property (a citation re-pointed at an existing, non-empty, irrelevant line
+# must go red) is the one it always asserted.
+PROBE1_DOC_LINE=220
+echo "  位置: docs/threat-model.md:${PROBE1_DOC_LINE} 的 \`:1119-1141\` -> \`:1\`"
+echo "  (选它是因为这是【省略文件名的续写引用】, 靠上一条引用推断出 engine.ts;"
 echo "   实现时我脑子里想的是带完整路径的那种写法, 这条走的是另一条解析分支。"
-echo "   main.rs:397 是 'options: Vec<String>', 存在、非空、与该段断言无关 ——"
+echo "   engine.ts:1 是 '/**', 存在、非空、与该段断言无关 ——"
 echo "   正是上一版检查器放过去的那种情形。)"
 echo "=============================================================="
 cp "$REPO/docs/threat-model.md" "$TMP/threat-model.md"
-sed -i '' '252s/`:3213-3260`/`:397`/' "$REPO/docs/threat-model.md"
-if ! grep -q '`:397`' "$REPO/docs/threat-model.md"; then
+sed -i '' "${PROBE1_DOC_LINE}s/\`:1119-1141\`/\`:1\`/" "$REPO/docs/threat-model.md"
+if ! sed -n "${PROBE1_DOC_LINE}p" "$REPO/docs/threat-model.md" | grep -q '\`:1\`'; then
   echo "  ✘ 探针 1 没能改动文档, 自测本身失效"
   FAILED=1
 fi
@@ -57,15 +65,26 @@ echo
 
 echo "=============================================================="
 echo "探针 2: 文档一个字不改, 改被引代码那一行的内容"
-echo "  位置: crates/chat-stasher/src/store.rs:948 —— 它落在被引范围 917-983 的"
+# 🔴 W31c · Re-pointed for the same reason as probe 1, **and** given the guard it
+# was missing: the old line (948) sat inside no cited range at all, so editing it
+# changed nothing the checker looks at, and the probe passed while testing
+# nothing. The range below is looked up in the lockfile before the probe runs, so
+# "this line is inside a range somebody cites" is checked rather than assumed.
+PROBE2_RANGE='crates/chat-stasher/src/store.rs:261-296'
+PROBE2_LINE=281
+echo "  位置: crates/chat-stasher/src/store.rs:${PROBE2_LINE} —— 它落在被引范围 261-296 的"
 echo "  【中间】, 不是首行。lockfile 里人眼看到的摘要是首行, 首行不变;"
 echo "  所以这条只有靠整段的哈希才抓得到, 靠摘要抓不到。"
 echo "  (这是真实世界最常见的漂移: 代码被编辑, 行号还在, 内容变了。)"
 echo "=============================================================="
+if ! grep -q "^${PROBE2_RANGE}  " "$REPO/docs/citations.lock"; then
+  echo "  ✘ 探针 2 的目标范围 ${PROBE2_RANGE} 已不在 lockfile 里, 自测本身失效"
+  FAILED=1
+fi
 cp "$REPO/crates/chat-stasher/src/store.rs" "$TMP/store.rs"
-sed -i '' '948s/.*/    let tmp = parent.join(format!(".{}.PROBE2", name.to_string_lossy()));/' \
+sed -i '' "${PROBE2_LINE}s/.*/    let tmp = parent.join(format!(".{}.PROBE2", name.to_string_lossy()));/" \
   "$REPO/crates/chat-stasher/src/store.rs"
-if ! sed -n '948p' "$REPO/crates/chat-stasher/src/store.rs" | grep -q PROBE2; then
+if ! sed -n "${PROBE2_LINE}p" "$REPO/crates/chat-stasher/src/store.rs" | grep -q PROBE2; then
   echo "  ✘ 探针 2 没能改动代码, 自测本身失效"
   FAILED=1
 fi

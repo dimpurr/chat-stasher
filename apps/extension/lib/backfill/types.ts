@@ -128,7 +128,10 @@ export type HaltReason =
    * resolver (lib/backfill/claude-org.ts) reads the id from the page's own
    * requests first and from the `lastActiveOrg` cookie second; this reason is what
    * it produces when neither answered and `GET /api/organizations` listed more
-   * than one.
+   * than one. Since W31c the resolver runs in the page itself
+   * (lib/backfill/claude-page.ts), reached over the backfill tab channel, and
+   * **this is the reason the popup shows for it** — its own plain sentence, not
+   * the `other` fallback.
    *
    * 🔴 What it is **not**: an error, a rate limit, or "you have no conversations".
    *    It holds **before any list request is issued** — zero conversations were
@@ -137,9 +140,13 @@ export type HaltReason =
    *    looking at, and iterating them until one answers is the same mistake with
    *    more requests; so the leg stops, named, and waits for a human.
    *
-   * Permanent by construction (`haltClassOf`'s default): the next tick would ask
-   * the same three sources and reach the same answer. It clears when the resolver
-   * has an answer — the page showing its own organization, or a person acting.
+   * Permanent by construction (`haltClassOf`'s default), and **not re-asked**: the
+   * recorded reason is already the answer a second question would reach, so the
+   * wake-up does not spend one (`entrypoints/background.ts`'s `scopeRetryDue`).
+   * It clears when the resolver has an answer — which arrives by itself the moment
+   * the page shows its own organization, i.e. when the user opens a conversation
+   * in the organization they meant, and that is exactly what the popup's sentence
+   * for this reason tells them to do.
    */
   | 'org-ambiguous'
   /**
@@ -151,6 +158,13 @@ export type HaltReason =
    * about the account: there, several candidates and no way to choose; here, not
    * one candidate. Both hold before any request for conversation data, and neither
    * may be recorded as "no conversations".
+   *
+   * 🔴 The engine also produces it for a run whose scope is missing or is the
+   *    `'default'` sentinel — a target registered before the organization was
+   *    known — so this is the reason a scoped platform shows whenever the
+   *    resolution has not produced an organization yet, whichever way it got
+   *    there. Its popup sentence names the action that fixes both cases: open a
+   *    conversation on the platform once.
    */
   | 'org-unresolved';
 

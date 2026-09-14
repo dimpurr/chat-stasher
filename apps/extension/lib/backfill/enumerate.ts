@@ -2624,14 +2624,25 @@ export const CLAUDE_RESOLVE_PATH = '/api/organizations';
 /**
  * 🔴 W31 · How many rows one list page asks for.
  *
- * The sources use 100 in one implementation and 50 in another, and the page-size
- * value is a **request parameter this plan builds**, so either is a legal request
- * to the endpoint. 50 is chosen rather than 100 for the reason the whole list leg
- * exists in its current shape: one conversation is one more request, the debt set
- * is persisted per page, and a smaller page keeps the first body a shorter
- * distance behind the listing (W10). Nothing here is a measurement of the
- * server's cap — the end of the listing is still the API's own short or empty
- * page, not "we asked for 50 and got 50".
+ * **What the sources say.** Two, and they disagree: one implementation's list
+ * request uses `limit=100` and another's uses `limit=50`. The value is a
+ * **request parameter this plan builds**, so both are legal requests to the
+ * endpoint, and nothing in the research says which one the server prefers — it is
+ * not a cap, not a default, and not a measured maximum.
+ *
+ * **Why this plan sends 50 anyway.** Two reasons, and the second is the one that
+ * decides it:
+ *  · the whole list leg exists in the shape it does because of W10's measurement
+ *    (7,391 conversations, the first body waiting on the entire listing), so a
+ *    smaller page keeps this tick's first body a shorter distance behind the
+ *    listing and persists the debt set in smaller steps;
+ *  · a **page larger than the server's own cap would be indistinguishable from the
+ *    end of the listing**, if a cap existed and this code compared the returned
+ *    length against what it asked for. It does not compare them for that reason
+ *    (see `listOffsetInferred`): the end of the listing is the API's own short or
+ *    empty page, never "we asked for 50 and got 50". So the number below is a
+ *    request size and never a threshold — and the smaller of the two sourced
+ *    values costs a plan that is still unverified nothing it cannot afford.
  */
 export const CLAUDE_LIST_LIMIT = 50;
 
@@ -2707,8 +2718,7 @@ export function claudeParentKeyIn(text: string): string | null {
  * `current_leaf_message_uuid` names the newest message of the branch the user was
  * looking at. So the branch is exactly the chain that starts at that leaf and
  * follows parent links upward. If every step of that chain resolves to a message
- * present in `chat_messages` and it ends at a root, the chain is complete — and
- * what is delivered is that chain, top-down.
+ * present in `chat_messages` and it ends at a root, the chain is complete.
  *
  * If a parent is **missing** from the response, the tree this response carries
  * does not hold the whole branch: the wire is truncated (a long conversation
@@ -2721,10 +2731,16 @@ export function claudeParentKeyIn(text: string): string | null {
  *    a shape this code cannot read — so it is reported as incomplete rather than
  *    as a root.
  *
- * 🔴 Requested order and delivered order are different things. The delivered
- *    document is the chain **from the root down to the leaf**, because that is
- *    the conversation as a person reads it; the walk starts at the leaf because
- *    that is the only end the response names.
+ * 🔴 **This function's job is completeness. It does not reorder anything that is
+ *    delivered.** What gets archived is the response body, byte for byte, exactly
+ *    as every other body parser in this file leaves it (`parseClaudeDetailPage`
+ *    reads the walk's `ok` and nothing else); a tree is not rewritten on its way
+ *    into the archive, and no ordering decision here can change what a reader of
+ *    the shard sees. The `ordered` field is the branch **root-first** for a caller
+ *    that wants the chain itself — the walk computes it in the other direction
+ *    because the leaf is the only end the response names — and it is returned
+ *    rather than dropped so that "which messages did this walk consider" stays
+ *    inspectable without re-deriving it.
  */
 export function parseClaudeDetailTree(
   text: string,
@@ -2788,7 +2804,9 @@ export function parseClaudeDetailTree(
     // No non-empty parent link ⇒ this is the root of the branch, and the chain is whole.
     current = parentKey === null ? null : (message[parentKey] as string);
   }
-  // Root first: the conversation as it was read, not as it was walked.
+  // Root first, i.e. not in the order the walk visited it. Nothing archives this
+  // list (see the note above): it is the walk's own output, for a caller that
+  // wants the branch rather than only the verdict.
   return { ok: true, ordered: chain.reverse() };
 }
 
