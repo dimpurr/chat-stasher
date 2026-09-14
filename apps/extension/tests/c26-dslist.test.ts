@@ -413,11 +413,12 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
   it('the platform lists give this intermediate state its own place rather than rounding it to either side', () => {
     // 🔴 W8: DeepSeek moved off this list; Perplexity stays, so the intermediate state still has a home.
     expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['perplexity']);
-    // 🔴 "can backfill history" now holds three: being able to list conversations is still not enough
+    // 🔴 "can backfill history" now holds four: being able to list conversations is still not enough
     //    on its own, and DeepSeek is here because its body segment was filled in — not because the test
     //    was broadened. 🔴 W21 added grok to the platform table with both segments declared (its body
-    //    is a two-step pair), so the list grows by one row; the criterion is unchanged.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'grok']);
+    //    is a two-step pair), and 🔴 W22 filled kimi's two segments in from a logged-in probe, so the
+    //    list grows by one row each time; the criterion is unchanged.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'kimi', 'grok']);
     // 🔴 DeepSeek no longer declares a missing half; the field's absence is what "both segments work" means.
     expect(DEEPSEEK_PLAN.partial).toBeUndefined();
     // The wording that said DeepSeek cannot fetch bodies is gone from the catalog with it.

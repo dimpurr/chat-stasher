@@ -43,11 +43,17 @@
  *    C23 widened HttpPort to `(url, init?: BackfillRequestInit)`, so a plan can
  *    now declare `listPost` / `detailPost` — "this segment is POST, the body
  *    looks like this, and its top-level keys are only these".
- *    🔴 **But this change fills that declaration in for no platform at all** —
- *    kimi / gemini still have "no source found / only half" list shapes, and
- *    filling one in would be inventing it. So in the `missing` lists below, the
- *    "structural blocker" entry is rewritten as "the channel can send it now, but
- *    the parameters still have no source".
+ *    🔴 **But C23 itself filled that declaration in for no platform at all** —
+ *    kimi and gemini still had "no source found / only half" list shapes at that
+ *    point, and filling one in would have been inventing it. So in the `missing`
+ *    lists below, the "structural blocker" entry is rewritten as "the channel can
+ *    send it now, but the parameters still have no source".
+ *    🔴 Later changes filled the channel in **for a platform at a time, by
+ *    evidence**: DeepSeek's body segment in W8, Grok's list and two-step body in
+ *    W21, and Kimi's list and body in W22 (the last from a logged-in probe, and
+ *    the first plan whose paging cursor travels inside a POST body —
+ *    `listTokenPost`). Gemini's row is the one still standing there, and it says
+ *    exactly what it is missing.
  *
  * ## Facts and review status (marked honestly, same standard as the rest of the file)
  *  · ChatGPT's conversation list is GET /backend-api/conversations?offset=&limit=
@@ -144,18 +150,23 @@ export interface EnumPage {
    */
   nextCursor?: number | null;
   /**
-   * 🔴 W21 · For **opaque-token** paging (Grok): the cursor of the next page,
-   * exactly as the API handed it over.
+   * 🔴 W21 · For **opaque-token** paging (Grok, Kimi): the cursor of the next
+   * page, exactly as the API handed it over.
    *
    * `undefined`  = this platform does not page by token at all (DeepSeek,
    *                ChatGPT, Perplexity), and the engine does not look at it.
    * `null`       = the API answered and there is **no** next page — the last
    *                page. On these platforms that is the API's own termination
-   *                signal and not an inference; see parseGrokListPage.
+   *                signal and not an inference; see parseGrokListPage and
+   *                parseKimiListPage.
    * a string     = hand it back **unread**. This field exists so that the engine
    *                never has to interpret a cursor: it is never parsed as a
    *                number, never compared, never sorted, never trimmed into a
    *                "better" form. Whatever came back is what goes out again.
+   *
+   * 🔴 W22 · Where the token travels is the plan's declaration, not this field's:
+   *    Grok puts it in the query (`listTokenUrl`), Kimi in the POST body
+   *    (`listTokenPost`). The field above is only the value.
    *
    * Why this is separate from `nextCursor` rather than a widened type: the two
    * carry different *promises*. A numeric cursor can be min/max-ed and reasoned
@@ -246,6 +257,24 @@ export interface BackfillPostSpec<Args extends unknown[]> {
 export type ListPostSpec = BackfillPostSpec<[origin: string, offset: number, limit: number]>;
 /** The shape of the detail segment's POST declaration. */
 export type DetailPostSpec = BackfillPostSpec<[origin: string, conversationId: string]>;
+
+/**
+ * 🔴 W22 · The shape of a list POST declaration whose body carries the **opaque
+ * cursor** — `[origin, token, limit]`, with `token === null` on the first page.
+ *
+ * Why a separate type rather than a fourth argument on ListPostSpec: the two
+ * describe different requests. A `ListPostSpec` is "page by offset, whatever that
+ * means for this platform" (Perplexity: `offset` counts up by `limit`); this one
+ * is "page by a cursor the API produced, handed back unread" (Kimi:
+ * `{ page_size, page_token }`). Widening the first would have made every existing
+ * builder's `offset` parameter mean two different things on one signature, and
+ * would have let an offset-paging plan *receive* a token it must never interpret.
+ *
+ * 🔴 The token arrives here as `string | null` and is put into the body verbatim:
+ *    no trim, no parse, no comparison, no re-encoding. The same rule the URL form
+ *    (`listTokenUrl`) follows, expressed for a body.
+ */
+export type ListTokenPostSpec = BackfillPostSpec<[origin: string, token: string | null, limit: number]>;
 
 /**
  * 🔴 W21 · The placeholder a path may carry where the conversation id goes, for a
@@ -339,13 +368,37 @@ export const MAX_BODY_ARRAY_ITEMS = 5000;
 export type BackfillSegment = 'list' | 'detail' | 'detail2';
 
 /**
+ * 🔴 W22 · What a body parser may say about a body whose **shape is recognised**.
+ *
+ *  · 'non-empty' — carry on into the existing sink. The ordinary case.
+ *  · DetailOutcome (the two `detail-empty-*` values) — C28's empty-body receipts.
+ *  · 'detail-paged-unsupported' — the response is real content, but it says there
+ *    is **more of this conversation than it holds** (a non-empty next-page
+ *    token) and this leg has no way to fetch the rest. It must not be archived as
+ *    a complete conversation and its debt must not be settled; the engine records
+ *    a failure under exactly this reason code and leaves the conversation
+ *    un-archived (see the body loop in engine.ts, and lib/backfill/failures.ts,
+ *    where the reason is on the closed set).
+ *
+ * 🔴 Why it is a third outcome rather than "shape-changed": the shape is not
+ *    what changed — the response is exactly what this platform's row describes,
+ *    and every field the row names is there. What changed is the *completeness*
+ *    of what that one response holds, and for a long conversation that is a
+ *    per-conversation fact, not a wire change. Reporting it as 'shape-changed'
+ *    would halt the whole leg on a conversation that is merely long, and would
+ *    say "the platform changed" about a platform that did not.
+ */
+export type DetailParseOutcome = 'non-empty' | DetailOutcome | 'detail-paged-unsupported';
+
+/**
  * The result of a body parser. 'non-empty' is not an outcome to persist, it just
- * means carrying on into the existing sink; the two detail-empty-* values are
- * the named, observable, persistable ones C28 requires.
+ * means carrying on into the existing sink; the detail-empty-* values are the
+ * named, observable, persistable ones C28 requires, and
+ * 'detail-paged-unsupported' is the W22 outcome for a body that is real but
+ * explicitly incomplete. `{ok:false}` is "this is not a shape this plan knows".
  */
 export type DetailParseResult =
-  | { ok: true; outcome: 'non-empty' }
-  | { ok: true; outcome: DetailOutcome }
+  | { ok: true; outcome: DetailParseOutcome }
   | { ok: false; detail: string };
 
 /**
@@ -401,6 +454,25 @@ export interface BackfillEnumPlan {
    *    one plan; the engine reads token mode first if a plan ever declares both.
    */
   listTokenUrl?(origin: string, token: string | null, limit: number): string;
+  /**
+   * 🔴 W22 · **Opaque-token paging, with the token in the POST body.**
+   *
+   * The same paging mode as `listTokenUrl`, for a platform whose list request is
+   * a POST with a JSON body and whose cursor travels *inside that body* rather
+   * than in the query (measured on Kimi: `POST .../FeedService/ListFeeds` with
+   * `{ page_size, page_token }`).
+   *
+   * Declaring either one puts the engine in token mode — the two are the same
+   * promise with a different transport for one parameter — and a plan may declare
+   * at most one of them. This field is simultaneously the list segment's POST
+   * declaration: there is no second switch, exactly as `detailStep2` is itself
+   * the POST declaration for the second detail step.
+   *
+   * `token === null` is the first page. What goes in the body then is the plan's
+   * decision, not the engine's — the engine hands over `null` and nothing else —
+   * and it is written down in the plan's own provenance.
+   */
+  listTokenPost?: ListTokenPostSpec;
   /** 3 · The shape test for the list response. Unrecognised ⇒ {ok:false}, and the engine halts with a trace. */
   parseListPage(text: string): ParseResult;
   /**
@@ -486,13 +558,17 @@ export interface BackfillEnumPlan {
    * 🔴 C28 · An optional hook deciding whether a body's content is real; not
    * declared keeps the existing behaviour.
    *
-   * This is not a body-URL or allowlist declaration, and no production plan
-   * connects one yet. When some platform's body segment really has a source, this
-   * is where (ultimately called by the body loop in engine.ts) to distinguish:
+   * This is not a body-URL or allowlist declaration. It is where a platform's
+   * body segment, once it really has a source, distinguishes:
    *   · HTTP succeeded but the content is empty ⇒ detail-empty-unverified, stop
    *     and leave pending untouched;
    *   · reliable evidence that an empty conversation is legitimate ⇒
    *     detail-empty-confirmed, only then may it be treated as complete.
+   *   · 🔴 W22 · the response is real content but explicitly incomplete (a
+   *     non-empty next-page token) ⇒ 'detail-paged-unsupported': a per-conversation
+   *     failure, never an archived conversation. See DetailParseOutcome above.
+   * Two production plans declare one today: grok (W21, the empty case) and kimi
+   * (W22, the incomplete case).
    *
    * 🔴 One source is known to have observed DeepSeek "returning empty on a second
    * visit to the same conversation", but two sources disagree on how that field
@@ -910,6 +986,203 @@ export function parseGrokDetailPage(text: string): DetailParseResult {
     : { ok: true, outcome: 'non-empty' };
 }
 
+/**
+ * 🔴 W22 · The two field names a **next page of a conversation** could arrive
+ * under on Kimi's detail response, and the rule for reading them.
+ *
+ * Measured 2026-09-14: five short conversations' detail responses carried **no**
+ * page-token field of either spelling, and `messages` was the only top-level key.
+ * Whether a long conversation pages is therefore **unverified**, and this is the
+ * code that has to behave honestly in the case where it does.
+ *
+ * The rule, stated once so the parser and the tests cannot disagree:
+ *  · absent, `null`, or `''`  ⇒ no signal. The body is what the platform has.
+ *  · a non-empty string       ⇒ the platform is telling us there is MORE than
+ *                               this response holds.
+ *  · present but not a string ⇒ `null` here, i.e. "not readable by this code".
+ *    The caller turns that into an unreadable shape, **not** into "no more
+ *    pages": a token that changed type is not an absence of a token, which is
+ *    the same rule parseKimiListPage applies to the list cursor.
+ *
+ * 🔴 Only the TOP LEVEL is read, and only these two spellings — deliberately. A
+ *    scan of the whole tree for anything named like a cursor would fire on a
+ *    message's own fields and mark complete conversations as truncated; and a
+ *    third spelling would be a guess. The cost of that narrowness is named
+ *    rather than hidden: if the real field is nested, or spelled differently,
+ *    this code will read the body as complete. That is the same exposure the
+ *    empty-body guard has, and the answer to both is a raw long-conversation
+ *    payload, not a wider guess.
+ */
+export function kimiDetailNextToken(text: string): { kind: 'none' } | { kind: 'more' } | { kind: 'unreadable' } {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { kind: 'unreadable' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { kind: 'unreadable' };
+  const record = body as Record<string, unknown>;
+  for (const key of KIMI_DETAIL_TOKEN_KEYS) {
+    // `in`, not `!== undefined`: a key present with the value `undefined` is
+    // still the platform naming that field, and it must land on 'unreadable'
+    // rather than being skipped as though it were absent. (A JSON body cannot
+    // carry `undefined`, so this only matters for a hand-written caller — which
+    // is exactly where a silent skip would be hardest to notice.)
+    if (!(key in record)) continue;
+    const value = record[key];
+    if (value === null || value === '') continue;
+    if (typeof value === 'string') return { kind: 'more' };
+    return { kind: 'unreadable' };
+  }
+  return { kind: 'none' };
+}
+
+/**
+ * 🔴 W22 · Kimi's detail response: a recognized body, and the one thing that can
+ * make it **not** the whole conversation.
+ *
+ * Measured 2026-09-14: the response is `{ messages: [...] }`, and each message
+ * carries `id, parentId, role, status, blocks, scenario, createTime, isGoal`.
+ * Those keys are **not** required here: the row's own shape gate already asked
+ * for `messages`, and re-asking would make a message-level change read as a
+ * dropped conversation. What is required is that `messages` is an array, because
+ * this function is the one that decides whether the body may be archived.
+ *
+ * What it returns, and why each one is a different fact to the user:
+ *  · `{ok:false}` — no `messages` array. Shape drift ⇒ halt('shape-changed'),
+ *    nothing stored, debt untouched.
+ *  · 'detail-paged-unsupported' — the response says there is more of this
+ *    conversation than it holds. The engine records a failure under that exact
+ *    reason code and does **not** archive the body: storing a truncated
+ *    conversation as a complete one is the mistake this outcome exists to
+ *    prevent, and the failure list is where "this one is missing, and here is
+ *    why" belongs (lib/backfill/failures.ts).
+ *  · 'non-empty' — a body with no such field. It is delivered whole and its raw
+ *    text stays authoritative: nothing here trims, reorders or re-serialises it.
+ *
+ * 🔴 An **empty** `messages` array is deliberately 'non-empty' here, not
+ *    'detail-empty-unverified'. From this response alone, "this conversation has
+ *    no messages" and "this response is a window with nothing in it" are not
+ *    distinguishable — but the two mistakes are not equal in size: refusing to
+ *    settle a conversation that really is empty leaves a debt pending and visible,
+ *    while settling one that was merely windowed archives an empty file as a
+ *    fact. The second is what this repository exists to avoid, so an empty array
+ *    is handed on exactly like any other body, and the empty-*window* case is
+ *    covered by the page-token rule above instead. Kimi is the platform where
+ *    this trade-off is written down; grok's plan makes the opposite call for its
+ *    own two-step route, where an empty answer after naming N ids really is a
+ *    contradiction (parseGrokDetailPage).
+ */
+export function parseKimiDetailPage(text: string): DetailParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'kimi detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'kimi detail response is not a JSON object' };
+  }
+  if (!Array.isArray((body as Record<string, unknown>).messages)) {
+    return { ok: false, detail: 'kimi detail response has no `messages` array (shape changed?)' };
+  }
+  const token = kimiDetailNextToken(text);
+  if (token.kind === 'unreadable') {
+    return {
+      ok: false,
+      detail: 'kimi detail response carries a page-token field this code cannot read (wire shape changed?)',
+    };
+  }
+  return token.kind === 'more' ? { ok: true, outcome: 'detail-paged-unsupported' } : { ok: true, outcome: 'non-empty' };
+}
+
+/**
+ * Parse one page of a Kimi conversation list (`FeedService/ListFeeds`).
+ *
+ * ## What is read, and what is deliberately not
+ * Measured 2026-09-14: the response is `{ items, nextPageToken }`, and each item
+ * is `{ type, chat: { id, name, messageContent, createTime, updateTime } }`. This
+ * parser reads `items[].type`, `items[].chat.id` and `nextPageToken`, and nothing
+ * else: `name` / `messageContent` / the two timestamps belong to the feed's
+ * preview, not to the conversation this leg archives, and no source shows a total
+ * on this endpoint ⇒ `total` is **null** (the same call parseDeepSeekListPage and
+ * parseGrokListPage make; a made-up denominator is worse than none).
+ *
+ * ## 🔴 The item filter: a non-chat item is skipped, an unclassifiable one is not
+ * The feed carries more than conversations, so `type` is read and only
+ * `FEED_TYPE_CHAT` items contribute an id. That skip is a decision, and its two
+ * halves are different:
+ *  · an item whose `type` is a string other than `FEED_TYPE_CHAT` is **skipped**
+ *    silently (counted in this parser's doc and the plan's provenance, never
+ *    treated as an error): the feed legitimately holds other kinds of entry, and
+ *    halting on one would stop the leg for a user who has, say, a starred
+ *    document in their feed.
+ *  · an item with **no usable `type`**, or a chat item with **no usable
+ *    `chat.id`**, is `{ok:false}` — halt('shape-changed'). It is not skipped. An
+ *    item this code cannot classify might be a conversation, and dropping it
+ *    would silently lose that conversation from the archive while the leg
+ *    reported success. "We could not read this row" and "this row is not a
+ *    conversation" must not be the same outcome.
+ *
+ * ## 🔴 `nextPageToken`: absent/empty is the API's own "last page"
+ * Measured: page 1 returned 3 items and a non-empty token; page 2 returned 2
+ * items with the token **absent**, and the two pages did not overlap. So
+ * `nextToken: null` here means "the API said there is no next page" — the
+ * documented end of the list — and the engine sets `complete` on it, exactly as
+ * on Grok. A `nextPageToken` that is present but **not a string** is the drift
+ * case and returns `{ok:false}` rather than being rounded into `null` ("we
+ * reached the end"), which would turn a wire change into a silently truncated
+ * account.
+ */
+export function parseKimiListPage(text: string): ParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'kimi list response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'kimi list response is not a JSON object' };
+  }
+  const record = body as Record<string, unknown>;
+  const items = record.items;
+  if (!Array.isArray(items)) {
+    // 🔴 The line that guards "do not record an unknown as empty": no `items`
+    //    array means the shape changed, **never** "this account has no
+    //    conversations".
+    return { ok: false, detail: 'kimi list response has no `items` array (shape changed?)' };
+  }
+
+  const ids: string[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, detail: 'kimi feed item is not an object' };
+    }
+    const itemRecord = item as Record<string, unknown>;
+    const type = itemRecord.type;
+    if (typeof type !== 'string' || type.length === 0) {
+      return { ok: false, detail: 'kimi feed item has no string `type` (shape changed?)' };
+    }
+    if (type !== KIMI_CHAT_FEED_TYPE) continue;
+    const chat = itemRecord.chat;
+    if (!chat || typeof chat !== 'object' || Array.isArray(chat)) {
+      return { ok: false, detail: 'kimi chat feed item has no `chat` object (shape changed?)' };
+    }
+    const id = (chat as Record<string, unknown>).id;
+    if (typeof id !== 'string' || id.length === 0) {
+      return { ok: false, detail: 'kimi chat feed item has no string `chat.id`' };
+    }
+    ids.push(id);
+  }
+
+  const rawToken = record.nextPageToken;
+  if (rawToken !== undefined && rawToken !== null && typeof rawToken !== 'string') {
+    return { ok: false, detail: 'kimi list response has a non-string `nextPageToken` (wire shape changed?)' };
+  }
+  const nextToken = typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : null;
+  return { ok: true, page: { ids, total: null, nextToken } };
+}
+
 // ---------------------------------------------------------------------------
 // Platforms that can be backfilled
 // ---------------------------------------------------------------------------
@@ -1311,7 +1584,183 @@ export const GROK_PLAN: BackfillEnumPlan = {
     + 'This change issued no request to grok.com and had no logged-in session.',
 };
 
-const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, PERPLEXITY_PLAN, CHATGPT_PLAN, GROK_PLAN];
+export const KIMI_LIST_PATH = '/apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds';
+/**
+ * 🔴 W22 · The body of one conversation. No trailing '/': this names one endpoint,
+ * not a directory, so the content script compares it in full. The conversation id
+ * is **not** in this URL (it travels in the POST body), which is also why the
+ * content script's query rule applies to it as "no query at all".
+ */
+export const KIMI_DETAIL_PATH = '/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages';
+/** The two body keys the list request carries — a closed set, measured. */
+export const KIMI_LIST_PAGE_SIZE_KEY = 'page_size';
+export const KIMI_LIST_PAGE_TOKEN_KEY = 'page_token';
+/** The one body key the detail request carries — a closed set, measured. */
+export const KIMI_DETAIL_CHAT_ID_KEY = 'chat_id';
+/** The one `items[].type` value that means "this feed entry is a conversation". */
+export const KIMI_CHAT_FEED_TYPE = 'FEED_TYPE_CHAT';
+/**
+ * 🔴 W22 · The two spellings a *detail* response's next-page token could arrive
+ * under. See kimiDetailNextToken: only these, and only at the top level.
+ */
+export const KIMI_DETAIL_TOKEN_KEYS: readonly string[] = ['nextPageToken', 'next_page_token'];
+
+/**
+ * 🔴 W22 · Kimi's conversation list **and** its conversation body.
+ *
+ * ## How this cell was filled in
+ * Not from third-party sources: the endpoints, the request bodies, the response
+ * field names and the auth behaviour below were **observed in a logged-in
+ * Chrome session on 2026-09-14** (the probe attached to this task's brief — list
+ * plus short-chat detail; counts and field names only). The row that carries the
+ * same evidence for the capture leg is lib/contract.ts's kimi row; this plan and
+ * that row describe the same two measured routes, which is the point of putting
+ * them side by side.
+ *
+ *   list endpoint     POST /apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds      · measured
+ *   list body         { page_size, page_token }                                   · measured
+ *   list response     { items, nextPageToken }; items[].type / items[].chat.id     · measured
+ *   item filter       only `type == "FEED_TYPE_CHAT"` carries a conversation       · measured
+ *   page size used    3 in the probe; this plan sends DEFAULT_LIST_LIMIT (100)     · this
+ *                     🔴 the probe measured page_size=3, NOT the value below. The
+ *                        parameter's name is measured; its usable maximum is not.
+ *   end of list       `nextPageToken` absent ⇒ last page (page 2 returned 2 items
+ *                     and no token, with no overlap against page 1)               · measured
+ *   detail endpoint   POST /apiv2/kimi.gateway.chat.v1.ChatService/ListMessages   · measured
+ *   detail body       { chat_id }                                                 · measured
+ *   detail response   { messages: [{ id, parentId, role, status, blocks, scenario,
+ *                     createTime, isGoal }] }, top level `messages` only           · measured
+ *   auth              `authorization: Bearer <token>` (the JWT this origin keeps in
+ *                     localStorage under `access_token`), `x-msh-platform: web`,
+ *                     `x-language: <locale>`, `content-type: application/json`;
+ *                     cookie-only ⇒ HTTP 401 with a real refusal body (`code`,
+ *                     `details`)                                                 · measured
+ *   session url       https://www.kimi.com/chat/<id>                              · measured
+ *
+ * ## 🔴 What is NOT verified, and what is done about it
+ *  1. **Whether a long conversation's detail response pages.** Five sampled
+ *     conversations were short (2–3 messages) and carried no page-token field.
+ *     The endpoint takes no paging parameter in anything measured, so nothing here
+ *     pages it — and if a response ever says there is more (a non-empty
+ *     `nextPageToken` / `next_page_token`), the plan **refuses the body** rather
+ *     than archiving it: `parseKimiDetailPage` returns
+ *     'detail-paged-unsupported', the engine records a failure under that reason
+ *     code and does not settle the debt. A truncated conversation is never stored
+ *     as a complete one, and the user is told which conversation it was.
+ *  2. **Whether the list cursor is really this opaque token.** Measured on one
+ *     account: page 2 came back with 2 items, no overlap and no token, which is
+ *     exactly the shape of "the token worked, and then there was no more". The
+ *     token is nevertheless carried **opaquely** (`listTokenPost`, `nextToken`),
+ *     never parsed or compared, and the engine's **repeat-page guard** is what
+ *     catches the opposite outcome — a backend that ignores the parameter and
+ *     returns page 1 again halts as 'shape-changed' instead of being read as
+ *     "nothing left".
+ *  3. **How many conversations fit in one feed page.** `page_size` is measured as
+ *     a parameter name; only 3 was observed. This plan sends DEFAULT_LIST_LIMIT
+ *     because it is the same value the other plans send and the probe shows the
+ *     server honours a page size below the client's own request. If the server
+ *     caps it below 100, the pages simply come back smaller — the token, not the
+ *     page length, is what ends this list.
+ *  4. **The first page's `page_token`.** The measured body has both keys; what the
+ *     probe sent for the token on page 1 was not recorded. This plan sends
+ *     `page_token: ""`, and the reasoning is written out at the builder below.
+ *  5. **The request headers' effect.** The two extra headers are what the page
+ *     sends; whether the gateway requires them is not known. They are sent so the
+ *     request looks like the page's own (see lib/platform-auth.ts), and the honest
+ *     statement is that their necessity is unverified.
+ */
+export const KIMI_PLAN: BackfillEnumPlan = {
+  platform: 'kimi',
+  listPath: KIMI_LIST_PATH,
+  // Offset semantics do not hold on Kimi (no offset/limit parameter was observed).
+  // A listUrl is still required by the interface; it builds the **route only** —
+  // the paging parameters live in the POST body — so a future misuse gets the
+  // first page rather than an invented query parameter. The engine takes the
+  // token branch (declaring listTokenPost ⇒ token mode) and never calls this.
+  listUrl: (origin) => `${origin}${KIMI_LIST_PATH}`,
+  /**
+   * 🔴 The body, and the one thing about it that is a decision rather than a
+   * measurement: **the first page carries `page_token: ""`**.
+   *
+   * The measured body has both keys, and the probe's first request was described
+   * with both of them; what it sent for the token before it had one was not
+   * recorded. So the choice here is between an empty string and omitting the key,
+   * and the empty string is the one taken, for a reason that does not depend on
+   * guessing: this is a protobuf service (`kimi.gateway.feed.v1.FeedService`) over
+   * a JSON gateway, and in protobuf's JSON mapping an absent string field and an
+   * empty string are **the same message** — the field's default value. Sending the
+   * key explicitly therefore says nothing the server cannot already conclude, and
+   * it keeps the request byte-shaped like the one that was measured.
+   *
+   * 🔴 The token itself is placed verbatim: no trim, no parse, no comparison, no
+   *    re-encoding. `token === null` is the only special case, and it means "the
+   *    first page" — never "the server gave us an empty token", which would be an
+   *    absent `nextPageToken` and ends the list instead (parseKimiListPage).
+   */
+  listTokenPost: {
+    contentType: 'application/json',
+    bodyKeys: [KIMI_LIST_PAGE_SIZE_KEY, KIMI_LIST_PAGE_TOKEN_KEY],
+    body: (_origin, token, limit) => JSON.stringify({
+      [KIMI_LIST_PAGE_SIZE_KEY]: limit,
+      [KIMI_LIST_PAGE_TOKEN_KEY]: token ?? '',
+    }),
+  },
+  parseListPage: parseKimiListPage,
+  // No trailing '/': one endpoint, compared in full by the content script. The id
+  // is in the body, so this URL carries no query and none is permitted.
+  detailPath: KIMI_DETAIL_PATH,
+  detailUrl: (origin) => `${origin}${KIMI_DETAIL_PATH}`,
+  detailPost: {
+    contentType: 'application/json',
+    bodyKeys: [KIMI_DETAIL_CHAT_ID_KEY],
+    // 🔴 The id goes in **verbatim**, the same way every other plan's builder
+    //    treats it: whatever the list endpoint handed us is the legal value (see
+    //    BackfillEnumPlan.detailQueryKey), and re-encoding it here would make the
+    //    request and the ledger disagree about which conversation it was.
+    body: (_origin, conversationId) => JSON.stringify({ [KIMI_DETAIL_CHAT_ID_KEY]: conversationId }),
+  },
+  // 🔴 W22 · The C28 hook, used for its second purpose: a body that is real
+  //    content AND explicitly incomplete must not be archived as a whole
+  //    conversation. See DetailParseOutcome and parseKimiDetailPage.
+  parseDetailPage: parseKimiDetailPage,
+  provenance:
+    'observed in a logged-in Chrome session on 2026-09-14 (this task\'s probe; list + short-chat '
+    + 'detail; counts and field names only) · '
+    + 'POST /apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds with { page_size, page_token }; '
+    + 'response { items, nextPageToken } with items[].{ type, chat.{ id, name, messageContent, '
+    + 'createTime, updateTime } }; page_size 3 returned 3 items and a non-empty token, the next '
+    + 'page returned 2 items with the token ABSENT and no overlap against page 1. '
+    + 'POST /apiv2/kimi.gateway.chat.v1.ChatService/ListMessages with { chat_id }; response '
+    + '{ messages: [{ id, parentId, role, status, blocks, scenario, createTime, isGoal }] }, '
+    + 'five short conversations sampled. '
+    + 'Auth: page sends authorization: Bearer <the localStorage access_token of this origin>, '
+    + 'x-msh-platform: web, x-language: <locale>; cookie-only answers HTTP 401 with a refusal '
+    + 'body ({ code, details }), which is why a 401 here is never read as "no conversations". '
+    + 'Feed items whose type is not FEED_TYPE_CHAT are skipped, not treated as an error (the feed '
+    + 'legitimately carries other entry kinds); an item whose type or chat.id cannot be read is a '
+    + 'shape halt, never a silent skip. '
+    + '🔴 Unverified and handled, not guessed: whether a LONG conversation\'s detail response '
+    + 'pages — no paging parameter was observed and none is sent, so a response carrying a '
+    + 'non-empty next-page token is refused and recorded as a failure '
+    + '(detail-paged-unsupported) instead of being archived as a complete conversation. '
+    + '🔴 Unverified and stated: the usable maximum of page_size (only 3 was observed), and '
+    + 'whether the two extra request headers are required at all. '
+    + 'This change issued no request to kimi.com; the 2026-09-14 observation was a real browser '
+    + 'session run by the main session, not by this change.',
+};
+
+/**
+ * The plans, in one place. A platform is backfillable when it has an entry here;
+ * the two tables below cover the rest, and tests/c22-enumplat.test.ts asserts
+ * that every row of the platform table lands on exactly one side.
+ */
+const PLANS: readonly BackfillEnumPlan[] = [
+  DEEPSEEK_PLAN,
+  PERPLEXITY_PLAN,
+  CHATGPT_PLAN,
+  GROK_PLAN,
+  KIMI_PLAN,
+];
 
 // ---------------------------------------------------------------------------
 // 🔴 Platforms that cannot be filled in, or only half filled in — each says what
@@ -1352,27 +1801,16 @@ export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
     ],
     userNoteKey: 'platformNote.claude.unsupported',
   },
-  {
-    platform: 'kimi',
-    known: [
-      // lib/contract.ts:220-224 states the conversation-INDEX route is
-      // '.../ListChats', and that the whole ChatService is a Connect-style unary
-      // RPC: POST + JSON body.
-      'listPath is sourced: .../ChatService/ListChats (lib/contract.ts:220-224)',
-      'the request shape is sourced: Connect-style unary RPC = POST + JSON body (lib/contract.ts:226-229)',
-    ],
-    missing: [
-      // 🔴 Before C23 this said "structural blocker: HttpPort only has a url, so
-      //    even knowing the parameters we could not send it". The channel has been
-      //    widened (listPost + BackfillRequestInit) and that wall is gone.
-      //    But **the remaining two lost not one character** — the parameters still
-      //    have no source, so it still cannot be filled in.
-      'listPost.body: the paging cursor is in the body and its field name is unknown (the channel can send a POST now, but we do not know what to send; inventing one would make the user believe history is being backfilled)',
-      'listPost.bodyKeys: same — the closed set of top-level keys must come from a source, it cannot be guessed',
-      'parseListPage: the conversation array / total field names of the list response are unknown',
-    ],
-    userNoteKey: 'platformNote.kimi.unsupported',
-  },
+  // 🔴 W22 · The **kimi row was moved out**, not deleted and forgotten: the
+  //    2026-09-14 logged-in probe measured both routes, both request bodies and
+  //    both response envelopes (see KIMI_PLAN's head), so kimi now has a plan on
+  //    the supported side. What used to sit here said "the paging cursor's field
+  //    name is unknown, and the list response's field names are unknown" — those
+  //    are exactly the facts the probe supplied, so the entry is removed by
+  //    evidence, not by a decision to relax the standard. The rule C22 set still
+  //    holds: every row of the platform table lands on exactly one of "has a plan"
+  //    / "registered as temporarily impossible", and tests/c22-enumplat.test.ts
+  //    still watches it.
   {
     platform: 'gemini',
     known: [],
@@ -1410,7 +1848,13 @@ export function postSpecFor(
   plan: BackfillEnumPlan,
   segment: BackfillSegment,
 ): PostKeySpec | null {
-  if (segment === 'list') return plan.listPost ?? null;
+  // 🔴 W22 · A list segment that pages by an opaque cursor travelling in the body
+  //    (`listTokenPost`) is a POST declaration in its own right — the same rule
+  //    `detailStep2` follows below. A plan declares one or the other, never both;
+  //    the token form is read first so that this function answers with the body
+  //    the engine would actually send, which is the only thing an allowlist may
+  //    be derived from.
+  if (segment === 'list') return plan.listTokenPost ?? plan.listPost ?? null;
   if (segment === 'detail') return plan.detailPost ?? null;
   // 🔴 W21 · The second detail step is always a POST: its whole reason to exist is
   //    that it carries a body built from step 1. Declaring `detailStep2` *is* the
@@ -1423,7 +1867,19 @@ export function expectedMethodFor(plan: BackfillEnumPlan, segment: BackfillSegme
   return postSpecFor(plan, segment) ? 'POST' : 'GET';
 }
 
-/** The full request parameters for the list segment. No listPost ⇒ `{method:'GET'}`, byte-identical to C22. */
+/**
+ * The full request parameters for the list segment. No listPost ⇒ `{method:'GET'}`,
+ * byte-identical to C22.
+ *
+ * 🔴 W22 · A plan whose list segment pages by a **body cursor** (`listTokenPost`,
+ *    Kimi) declares no `listPost`, but its segment is still a POST — that is what
+ *    `postSpecFor`/`expectedMethodFor` answer, and this function must not answer
+ *    differently. So it builds the **first page's** request from that spec (token
+ *    `null`) rather than a GET the allowlist would refuse. A caller wanting a
+ *    later page uses `listTokenPostInit`, which is the only builder that may see a
+ *    token; this one is the "someone called it without a cursor" landing point, and
+ *    what it produces is the same first-page request the engine opens with.
+ */
 export function listRequestInit(
   plan: BackfillEnumPlan,
   origin: string,
@@ -1431,8 +1887,33 @@ export function listRequestInit(
   limit: number,
 ): BackfillRequestInit {
   const spec = plan.listPost;
-  if (!spec) return { method: 'GET' };
+  if (!spec) {
+    const tokenSpec = plan.listTokenPost;
+    if (!tokenSpec) return { method: 'GET' };
+    return { method: 'POST', body: tokenSpec.body(origin, null, limit), contentType: tokenSpec.contentType };
+  }
   return { method: 'POST', body: spec.body(origin, offset, limit), contentType: spec.contentType };
+}
+
+/**
+ * 🔴 W22 · The full request parameters for a list segment whose **cursor travels
+ * in the POST body** (a plan declaring `listTokenPost`).
+ *
+ * The same rule as every other POST here: the body can only come from the plan's
+ * own builder (`spec.body`), and this function is the only place the engine gets
+ * one. A plan that declares no `listTokenPost` gets `{method:'GET'}` — which no
+ * caller on the token branch will ever ask for, since declaring the field *is*
+ * what puts the plan on that branch.
+ */
+export function listTokenPostInit(
+  plan: BackfillEnumPlan,
+  origin: string,
+  token: string | null,
+  limit: number,
+): BackfillRequestInit {
+  const spec = plan.listTokenPost;
+  if (!spec) return { method: 'GET' };
+  return { method: 'POST', body: spec.body(origin, token, limit), contentType: spec.contentType };
 }
 
 /** The full request parameters for the body segment. No detailPost ⇒ `{method:'GET'}`, byte-identical to C22. */

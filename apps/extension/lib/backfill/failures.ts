@@ -85,7 +85,26 @@ export type FailureReason =
    *    and the later write would overwrite the earlier one (C17 BUG-2). Now a
    *    mismatch leaves the debt open.
    */
-  | 'identity-mismatch';
+  | 'identity-mismatch'
+  /**
+   * 🔴 W22 · The body was fetched, HTTP succeeded, the shape was recognised — and
+   * the response itself says it is **not the whole conversation** (Kimi's detail
+   * response carried a non-empty next-page token, and this leg does not page that
+   * endpoint).
+   *
+   * A fact we observed, not a diagnosis: it says "this response declared more
+   * content than it held". Deliberately **not** phrased as "the platform changed
+   * its API" (that is a guess) and not as an error (there was no error) — and it
+   * is deliberately not 'not-saved', which would say the write failed when the
+   * truth is that there was nothing whole to write.
+   *
+   * 🔴 Why a truncated body is a failure and not a stored conversation: archiving
+   *    it would put a partial answer in the archive with nothing marking it as
+   *    partial, and settle a debt for a conversation that was never captured. The
+   *    failure list is exactly the place built for "this one is missing, and here
+   *    is why" (see the file header).
+   */
+  | 'detail-paged-unsupported';
 
 export interface FailureEntry {
   /** The first 8 characters of the session id. 🔴 Not the full id. */
@@ -180,6 +199,8 @@ export function describeFailureReason(reason: string): string {
       return t('failure.notSaved');
     case 'identity-mismatch':
       return t('failure.identityMismatch');
+    case 'detail-paged-unsupported':
+      return t('failure.detailPagedUnsupported');
     default:
       return t('failure.unknownReason', { reason });
   }

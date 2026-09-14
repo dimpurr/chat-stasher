@@ -16,8 +16,10 @@ import {
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
+  createKimiAuthorizedFetch,
   createSeenGate,
   isConversationSeenMessage,
+  KIMI_ACCESS_TOKEN_STORAGE_KEY,
 } from '../lib/platform-auth';
 import { createFallbackWarningGate } from '../lib/fallback-verification';
 
@@ -132,10 +134,39 @@ export default defineContentScript({
       }, MAIN_FALLBACK_TIMEOUT_MS);
     }
 
+    /**
+     * 🔴 W22 · The page origin's own Kimi token, read at the moment a request is
+     * about to be made and returned to exactly one caller. It is never stored on
+     * this side, never logged, and never put into a message.
+     *
+     * 🔴 `null` covers both "the key is not there" and "the storage is
+     *    unreadable" (a partitioned or blocked origin throws on access). Those are
+     *    two different facts, but **not to this function**: it is not the place
+     *    that reports them. What matters downstream is that neither is turned into
+     *    an empty result — the request goes out without the token and the
+     *    platform's own 401 is what the leg sees (lib/platform-auth.ts).
+     */
+    function readKimiAccessToken(): string | null {
+      try {
+        return window.localStorage.getItem(KIMI_ACCESS_TOKEN_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    }
+
     // The one fetch both legs use. ChatGPT body requests get the session's
     // bearer token (in memory only; lib/platform-auth.ts); every other request
     // is sent exactly as before.
-    const authorizedFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init));
+    const chatgptFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init));
+    // 🔴 W22 · Kimi's two backfill paths need the page origin's own
+    //    `access_token` as a bearer token. The wrapper reads it from localStorage
+    //    **at request time**, keeps it in no variable of its own, attaches it only
+    //    to those two paths, and passes every other request — ChatGPT's included —
+    //    straight through to the wrapper above. Nothing about it is decided here.
+    const authorizedFetch = createKimiAuthorizedFetch(pageOrigin, chatgptFetch, {
+      readToken: readKimiAccessToken,
+      language: typeof navigator === 'undefined' ? null : navigator.language,
+    });
     const pageFetch: FetchLike = async (url, init) => {
       // 🔴 C23: by the time execution reaches here, method / body /
       //    Content-Type have already passed checkBackfillRequest's closed-set

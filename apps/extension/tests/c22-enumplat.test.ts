@@ -253,15 +253,22 @@ describe('C22-4 · every platform must have a definite conclusion', () => {
     }
     expect(BACKFILL_SUPPORTED_PLATFORMS.length + BACKFILL_UNSUPPORTED_PLATFORMS.length)
       .toBe(PLATFORMS.length);
-    // Today's real state, written into the test: 7 platforms, and 3 can backfill history.
+    // Today's real state, written into the test: 7 platforms, and 4 can backfill history.
     // 🔴 W8 moved deepseek from the unsupported side to the supported one (its body segment was
     //    filled in). The criterion above is untouched; only the row's side changed.
     // 🔴 W21 (2026-09-14) added the grok row to the platform table with a complete plan (list +
     //    a two-step body), so it joins the supported side. Again: the row's side changed, not the
     //    criterion — the first assertion in this test is what makes a half-declared platform red.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'grok']);
+    // 🔴 W22 (2026-09-14) moved kimi across for the same kind of reason as W8: the previously
+    //    unknown list parameters and response fields were measured in a logged-in session, so its
+    //    entry in BACKFILL_UNSUPPORTED was removed **by evidence**. Nothing about the criterion
+    //    above moved, and the platform is on the supported side only because it now has both
+    //    segments — the note is here so the next reader knows which change moved it, and why the
+    //    order is not the platform table's order (kimi sits before grok here because that is where
+    //    the table puts it).
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'kimi', 'grok']);
     expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([
-      'perplexity', 'gemini', 'claude', 'kimi',
+      'perplexity', 'gemini', 'claude',
     ]);
   });
 

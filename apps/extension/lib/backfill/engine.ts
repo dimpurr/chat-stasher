@@ -29,6 +29,7 @@ import {
   canBackfillDetail,
   detailRequestInit,
   listRequestInit,
+  listTokenPostInit,
   unsupportedBackfillFor,
   DEFAULT_LIST_LIMIT,
   type BackfillRequestInit,
@@ -190,9 +191,12 @@ export interface BackfillOptions {
    * (kickBackfill / runAlarmTick) has this field, so on the wire it is always
    * backfillPlanFor and the permitted set has not grown at all.
    * It exists for exactly one reason: C23 has to prove "the channel can send a
-   * POST", and the production table **deliberately** still has no POST platform
-   * (kimi/gemini's parameters still have no source, and filling them in would be
-   * inventing them).
+   * POST", and at that point the production table **deliberately** had no POST
+   * platform (filling one in would have been inventing it). 🔴 Later changes added
+   * real POST plans by evidence — Perplexity's list, Grok's second detail step,
+   * and W22's Kimi, whose list cursor and conversation id both travel in request
+   * bodies — so today this seam is a way to reach a plan shape the table does not
+   * ship, not a way to reach POST at all.
    */
   plans?: (platform: string) => import('./enumerate').BackfillEnumPlan | null;
   clock?: Clock;
@@ -576,8 +580,14 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    nothing more). It is never parsed, compared, sorted, trimmed or logged.
    *    A plan declares one mode or the other; token mode is read first if a plan
    *    ever declared both.
+   *
+   * 🔴 W22 · The declaration says **where the token goes**, and the engine does
+   *    not care: `listTokenUrl` puts it in the query (Grok), `listTokenPost` in
+   *    the request body (Kimi). Both are the same paging mode, so both reach the
+   *    same branch and the same guard below; only the two lines that build the
+   *    request differ.
    */
-  const tokenMode = plan.listTokenUrl !== undefined;
+  const tokenMode = plan.listTokenUrl !== undefined || plan.listTokenPost !== undefined;
   /**
    * 🔴 W10 · **How many list pages one tick may read.**
    *
@@ -641,15 +651,26 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (opts.shouldAbort?.()) return report('aborted');
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
+    // 🔴 W22 · The token, in one place, for both transports: it reaches the URL
+    //    builder or the body builder verbatim and is never inspected. `null` here
+    //    means the first page and nothing else.
+    const listToken = state.enumCursor.token ?? null;
     const url = tokenMode
-      ? plan.listTokenUrl!(opts.origin, state.enumCursor.token ?? null, listLimit)
+      ? plan.listTokenUrl
+        ? plan.listTokenUrl(opts.origin, listToken, listLimit)
+        : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit)
       : cursorMode
         ? plan.listCursorUrl!(opts.origin, state.enumCursor.cursor ?? null, listLimit)
         : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
     // 🔴 C23: the body can only come from the plan's own builder
-    //    (listRequestInit → spec.body). No path lets the page side or the message
-    //    side decide what is sent here.
-    const init = listRequestInit(plan, opts.origin, state.enumCursor.offset, listLimit);
+    //    (listRequestInit / listTokenPostInit → spec.body). No path lets the page
+    //    side or the message side decide what is sent here.
+    //    🔴 W22: which builder depends on which declaration put this plan in token
+    //    mode — a body-cursor plan's body must be able to see the token, and an
+    //    offset plan's must not be handed one at all.
+    const init = tokenMode && plan.listTokenPost
+      ? listTokenPostInit(plan, opts.origin, listToken, listLimit)
+      : listRequestInit(plan, opts.origin, state.enumCursor.offset, listLimit);
     let res: HttpResponse;
     try {
       res = await sendVia(http, url, init);
@@ -1047,6 +1068,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * sinkVerdict/settleDebt below pass it off as success. Only when a parser
      * explicitly returns detail-empty-confirmed may a legitimately empty
      * conversation be completed as this body item.
+     * 🔴 W22 added a third answer, handled in its own branch just below:
+     *    'detail-paged-unsupported' — real content that the plan knows is
+     *    incomplete — which must neither be archived nor halt the leg.
      */
     const detailParsed = plan.parseDetailPage?.(deliveredText);
     if (detailParsed?.ok === false) {
@@ -1060,6 +1084,44 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         + ` recorded ${entry.outcome} with complete=false`,
       );
     }
+    /**
+     * 🔴 W22 · **A real body that is explicitly incomplete.**
+     *
+     * The plan recognised the response and it says there is more of this
+     * conversation than it carries (Kimi: a non-empty next-page token). This leg
+     * does not page that endpoint and will not invent paging, so the one thing
+     * that must not happen is what the shape gate would otherwise allow: the body
+     * is stored and the debt settled, i.e. a **truncated conversation archived as
+     * a complete one** — the archive would then hold a partial answer to "what did
+     * I say" and nothing would say so.
+     *
+     * So it takes the failure path, exactly as C20 defined it for a body that
+     * could not be stored: the debt leaves pending (no retry — a product decision,
+     * see lib/backfill/failures.ts), a person-readable receipt with this reason
+     * code and the conversation's short id goes on the failure list, and the leg
+     * carries on with the next conversation. Nothing enters `archived`.
+     *
+     * 🔴 Why the loop continues instead of halting: this is a **per-conversation**
+     *    fact, not a wire change. A long conversation is long; the short ones
+     *    beside it are complete and must still be archived in this same run. The
+     *    count below is deliberate too — the request really did go out, so it
+     *    counts against the day's quota, the same as a failed store does.
+     */
+    if (detailParsed?.ok === true && detailParsed.outcome === 'detail-paged-unsupported') {
+      dropDebt(state, id);
+      failedThisRun.push(
+        recordFailure(state, { id, reason: 'detail-paged-unsupported', at: clock.now() }),
+      );
+      state.detailToday.count += 1;
+      await persist(state);
+      console.warn(
+        '[chat-stasher] backfill: this conversation\'s body says it is incomplete'
+        + ' (the platform offers more than one response holds, and this leg does not page it);'
+        + ' nothing was stored and the failure list names it',
+      );
+      continue;
+    }
+
     if (detailParsed?.ok === true && detailParsed.outcome === 'detail-empty-confirmed') {
       recordDetailOutcome(id, detailParsed.outcome, clock.now());
       // A legitimately empty conversation is not a loss: it may be settled, but its
