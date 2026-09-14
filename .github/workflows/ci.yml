@@ -292,6 +292,16 @@ jobs:
       - name: Output inventory is up to date
         run: python3 scripts/output-inventory.py --check
 
+      # CONTRIBUTING.md lists this as a local check, so CI has to run it too, and
+      # it belongs in this job rather than the extension one: it exercises the
+      # reload script against a temp repository and a stub build command, so it
+      # needs neither the extension toolchain nor a browser. The stub is what
+      # makes the reload mechanics (atomic swap, .prev, build-number increment,
+      # a failed build leaving the load dir alone) checkable without building
+      # anything for real.
+      - name: Extension reload script behaves
+        run: bash scripts/dev/test-reload-extension.sh
+
   extension:
     # COVERAGE HOLE (deliberate): the extension is built and tested on Linux
     # only. WXT/vitest on macOS and Windows runners are NOT covered by CI.

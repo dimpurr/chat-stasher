@@ -32,7 +32,7 @@ DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`apps/extension/lib/contract.ts:69,120,138,154,170,240,370`).
 It requests four permissions — `nativeMessaging`, `storage`, `alarms` and
 `unlimitedStorage` — and **no host permissions at all**
-(`apps/extension/wxt.config.ts:63`). There is no `downloads` permission and no
+(`apps/extension/wxt.config.ts:87`). There is no `downloads` permission and no
 automatic download anywhere.
 
 **How the two sides connect:** the extension sends each captured conversation to
@@ -209,7 +209,7 @@ remove any browser prompt, but it changes which one you see. The extension
 declares `nativeMessaging`, so Chrome shows *"communicate with cooperating
 native applications"* on its details page. It no longer declares `downloads`, so
 the *"Manage your downloads"* warning is gone
-(`apps/extension/wxt.config.ts:63`).
+(`apps/extension/wxt.config.ts:87`).
 
 ### 3.2 Confirm the popup says "connected"
 
@@ -647,9 +647,9 @@ Collected in one place, so you know which spots to double-check yourself:
 
 | Item | Status |
 | --- | --- |
-| Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:63`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
+| Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:87`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
 | Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:200-289`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
-| Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:16`; we did not test every browser's locale resolution) |
+| Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:40`; we did not test every browser's locale resolution) |
 | Each browser's menu path for "Load unpacked extension" | **Unverified** |
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |
 | The minimum Node / pnpm version to build the extension | **Unverified** (the repository does not declare it) |

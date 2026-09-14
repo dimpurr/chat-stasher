@@ -251,23 +251,21 @@ apps/extension/package.json:10-13  a1f981eadaba  lines=4
   <- docs/install.md:581  :: "build": "wxt build",
 apps/extension/package.json:15  7da79dd35521  lines=1
   <- docs/install.md:179  :: "test": "vitest run",
-apps/extension/wxt.config.ts:16  8973cb78d41e  lines=1
+apps/extension/wxt.config.ts:40  8973cb78d41e  lines=1
   <- docs/install.md:652  :: default_locale: 'en',
-apps/extension/wxt.config.ts:27-31  86935f133e5a  lines=5
+apps/extension/wxt.config.ts:51  c5961dc1034c  lines=1
   <- docs/privacy.md:384  :: // 🔴 W2 removed 'downloads'. The extension no longer downlo…
-apps/extension/wxt.config.ts:33-39  411bd7614c9a  lines=7
+apps/extension/wxt.config.ts:57-63  411bd7614c9a  lines=7
   <- docs/threat-model.md:513  :: // Why 'storage': the debt set, the backfill switch, the ba…
-apps/extension/wxt.config.ts:35-39  6bc6a183b01f  lines=5
-  <- docs/privacy.md:386  :: // live in browser.storage.local, and Chrome requires this …
-apps/extension/wxt.config.ts:41-45  7507f52466ca  lines=5
+apps/extension/wxt.config.ts:65  e98492ea0a6a  lines=1
   <- docs/privacy.md:379  :: // Why 'alarms' (C19): the backfill leg must have a heartbe…
-apps/extension/wxt.config.ts:53-58  2d93d95ecca4  lines=6
+apps/extension/wxt.config.ts:77  e8b57cf64548  lines=1
   <- docs/privacy.md:380  :: // Why 'unlimitedStorage' (W2): the outbox is an IndexedDB …
-apps/extension/wxt.config.ts:63  bdb2678d0ca3  lines=1
-  <- docs/install.md:35, docs/install.md:212, docs/install.md:650, docs/privacy.md:160, docs/privacy.md:373, docs/privacy.md:403, docs/threat-model.md:60  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
-apps/extension/wxt.config.ts:64-71  6ed6f7239019  lines=8
+apps/extension/wxt.config.ts:87  bdb2678d0ca3  lines=1
+  <- docs/install.md:35, docs/install.md:212, docs/install.md:650, docs/privacy.md:160, docs/privacy.md:373, docs/privacy.md:386, docs/privacy.md:403, docs/threat-model.md:60  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
+apps/extension/wxt.config.ts:88-94  2a2b23999f5f  lines=7
   <- docs/threat-model.md:283  :: // 🔴 ADR-014: this pins the Chrome extension ID to
-apps/extension/wxt.config.ts:86  84787b717b3c  lines=1
+apps/extension/wxt.config.ts:110  84787b717b3c  lines=1
   <- docs/privacy.md:179  :: data_collection_permissions: { required: ['none'] },
 crates/chat-stasher/Cargo.toml:1-6  67c6d5782580  lines=6
   <- docs/install.md:145  :: [package]

@@ -52,8 +52,14 @@ python3 scripts/check-terminology.py
 python3 scripts/check-citation-drift.py
 python3 scripts/output-inventory.py --check
 python3 scripts/check-commit-messages.py --selftest
+bash scripts/dev/test-reload-extension.sh
 bash scripts/release-gate.sh
 ```
+
+`test-reload-extension.sh` drives `reload-extension.sh` against a throwaway temp
+repository and a stub build command, so it needs no extension toolchain, no
+network and no browser. It is the guard for the reload script's mechanics, which
+is why it sits here rather than only in the section below that describes them.
 
 The browser extension is a second project with its own toolchain. Its checks are
 the same CI runs for it, and they must exit 0 too:
@@ -119,6 +125,50 @@ bash scripts/release-gate.sh --selftest
 This command intentionally corrupts a temporary staging shard. Its expected
 result is `GATE: FAIL` with a non-zero exit status; that is a successful
 self-test, not a successful release gate.
+
+## Reloading the extension during development
+
+Chrome only re-reads a manifest when the version changes — its "Update" button
+and the reload arrow do not re-inject content scripts. To exercise a build in a
+real browser you therefore need to bump the version, and the whole cycle is
+easy to botch by hand. `scripts/dev/reload-extension.sh` automates it:
+
+```sh
+bash scripts/dev/reload-extension.sh --load-dir /path/to/unpacked-load-dir
+```
+
+It builds the extension from a throwaway worktree of `HEAD` (so uncommitted
+edits never leak into the build), appends the next build number as the 4th
+version component, and swaps the result into `--load-dir`, keeping the previous
+build as `<load-dir>.prev`. The swap is two renames, not one atomic step: the
+build is staged in a sibling temp directory, the previous build is renamed aside
+to `<load-dir>.prev`, and then the staged directory is renamed into place. Each
+rename is atomic, so a half-copied build is never visible under `--load-dir`;
+the pair is not, so for the instant between the two renames the load dir does
+not exist. That window is not left for you to find — if the second rename fails
+the script renames `.prev` back and exits non-zero, and if a run is interrupted
+inside the window the next run refuses to touch the load dir and asks for
+`--recover`, which moves `.prev` back. The one step it cannot take for you — the
+browser offers no supported API for it — it prints: toggle the extension off and
+on in chrome://extensions, then reload the platform tabs.
+
+The build number comes from `--build-number`, else from the previous load
+dir's 4th version component plus one, or 1. A load dir that does not look like
+a previous build is refused; `--init` allows one that is absent or empty, so a
+first build can seed an empty directory you created for it, but a non-empty
+directory is never renamed aside — `--init` cannot be pointed at a projects or
+home directory. `--dry-run` prints the plan and changes nothing. `--ref <ref>`
+builds a ref other than `HEAD`. A plain manifest build can be given a build
+number too:
+`CS_BUILD_NUMBER=<n> pnpm -s build` in `apps/extension` appends it as the 4th
+component and sets `version_name` to `<semver>+build.<n>`; without it the
+manifest is byte-identical to a release build.
+
+The mechanics are covered by a bash test you can run anywhere:
+
+```sh
+bash scripts/dev/test-reload-extension.sh
+```
 
 ## What counts as acceptable
 
