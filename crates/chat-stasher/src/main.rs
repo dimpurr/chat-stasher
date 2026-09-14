@@ -38,6 +38,48 @@ struct Cli {
     command: Command,
 }
 
+/// Arguments of the ephemeral dashboard server, shared by `ui` and by `view`
+/// while it remains an alias.
+///
+/// The filters are the **shared** [`chat_stasher::selector::SelectorArgs`], not
+/// a second set of flags: the drill-down links on the page are resolved through
+/// the same type, so a dashboard opened with `--day X` and a link carrying
+/// `day=X` cannot mean different things.
+#[derive(Debug, Clone, clap::Args)]
+struct UiArgs {
+    /// Destination to open. Required unless an explicit `--repo` is given:
+    /// there is no default destination and no cross-destination merge.
+    #[arg(long)]
+    destination: Option<String>,
+    /// Filters applied when the dashboard opens. Omit them to see the whole
+    /// archive; every filter is also reachable as a link on the page.
+    #[command(flatten)]
+    filters: chat_stasher::selector::SelectorArgs,
+    /// Do NOT launch a browser; just print the URL. Correct on headless or
+    /// remote machines, where opening a browser is meaningless or wrong.
+    #[arg(long)]
+    no_open: bool,
+    /// Exit after this many seconds with no request (0 = never idle out,
+    /// still exits on Ctrl+C).
+    #[arg(long, default_value_t = chat_stasher::view::DEFAULT_IDLE_SECS)]
+    idle_timeout: u64,
+    /// Repository path override.
+    #[arg(long)]
+    repo: Option<String>,
+    /// Masterkey file override.
+    #[arg(long)]
+    key_file: Option<String>,
+    /// Concurrency cap override.
+    #[arg(long)]
+    connections: Option<usize>,
+    /// Backend option `key=value`, repeatable.
+    #[arg(long = "option")]
+    options: Vec<String>,
+    /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
+    #[arg(long)]
+    keep_ssh_masters: bool,
+}
+
 /// The five subcommands. `push`/`read` are backed by the BackupStore
 /// (rustic_core); `doctor` answers one question — is a harness silently
 /// deleting your history?
@@ -429,7 +471,8 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
-    /// Open an ephemeral local web view of one destination's session list.
+    /// Open the archive dashboard in a browser: totals, the machine × source
+    /// matrix, a weekly activity heatmap, and drill-down into any cell.
     ///
     /// Binds a short-lived HTTP server on `127.0.0.1` with an OS-assigned port
     /// (never `0.0.0.0`, never a fixed port), prints the URL, optionally opens
@@ -444,47 +487,16 @@ enum Command {
     /// refused (403), and any method other than GET is refused (405). Treat the
     /// URL as a secret for the lifetime of the process.
     ///
-    /// Metadata tier only, same as `search`: machine, first 8 chars of the
-    /// session id, shard count, byte length, archive time. Conversation text is
-    /// NOT loaded and there is no full-text search; the page says so and prints
-    /// what loading it would cost. Exit codes match `search`: 0 listed
-    /// something, 1 read it all and there was nothing, 3 could not finish
-    /// reading (or no key), 2 usage error.
-    View {
-        /// Destination to view. Required unless an explicit `--repo` is given:
-        /// there is no default destination and no cross-destination merge.
-        #[arg(long)]
-        destination: Option<String>,
-        /// Restrict the listing to one machine partition.
-        #[arg(long)]
-        machine: Option<String>,
-        /// Restrict the listing to session ids with this prefix.
-        #[arg(long)]
-        session: Option<String>,
-        /// Do NOT launch a browser; just print the URL. Correct on headless or
-        /// remote machines, where opening a browser is meaningless or wrong.
-        #[arg(long)]
-        no_open: bool,
-        /// Exit after this many seconds with no request (0 = never idle out,
-        /// still exits on Ctrl+C).
-        #[arg(long, default_value_t = chat_stasher::view::DEFAULT_IDLE_SECS)]
-        idle_timeout: u64,
-        /// Repository path override.
-        #[arg(long)]
-        repo: Option<String>,
-        /// Masterkey file override.
-        #[arg(long)]
-        key_file: Option<String>,
-        /// Concurrency cap override.
-        #[arg(long)]
-        connections: Option<usize>,
-        /// Backend option `key=value`, repeatable.
-        #[arg(long = "option")]
-        options: Vec<String>,
-        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
-        #[arg(long)]
-        keep_ssh_masters: bool,
-    },
+    /// Metadata tier: the dashboard and every list are rendered from one read of
+    /// snapshot + index + tree metadata plus the activity sidecar. Conversation
+    /// text is fetched and decrypted only when you click a session and then
+    /// click "load", and the byte cost is printed before you do. Exit codes
+    /// match `search`: 0 served the dashboard, 1 read it all and there was
+    /// nothing, 3 could not finish reading (or no key), 2 usage error.
+    Ui(UiArgs),
+    /// Deprecated alias for `ui`; prints a one-line notice on stderr and behaves
+    /// identically. Kept for one release.
+    View(UiArgs),
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -1127,28 +1139,13 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
-        Command::View {
-            destination,
-            machine,
-            session,
-            no_open,
-            idle_timeout,
-            repo,
-            key_file,
-            connections,
-            options,
-            keep_ssh_masters,
-        } => cmd_view(
-            destination,
-            machine,
-            session,
-            no_open,
-            idle_timeout,
-            repo,
-            key_file,
-            connections,
-            &options,
-            keep_ssh_masters,
+        Command::Ui(args) => cmd_ui(args, None),
+        Command::View(args) => cmd_ui(
+            args,
+            Some(
+                "view: `chat-stasher view` is deprecated and will be removed in the next release; \
+                 it is now an alias for `chat-stasher ui`.",
+            ),
         ),
         Command::Seal {
             harness,
@@ -2592,27 +2589,55 @@ fn describe_span(first_unix: Option<i64>, last_unix: Option<i64>, why: Option<&s
 /// text — the token is the only thing gating access, and it lives only in the
 /// printed URL.
 #[allow(clippy::too_many_arguments)]
-fn cmd_view(
-    destination: Option<String>,
-    machine: Option<String>,
-    session: Option<String>,
-    no_open: bool,
-    idle_timeout: u64,
-    repo: Option<String>,
-    key_file: Option<String>,
-    connections: Option<usize>,
-    options: &[String],
-    keep_ssh_masters: bool,
-) -> ExitCode {
+/// `ui` — the overview dashboard, served from one metadata-tier read.
+///
+/// The read is deliberately **unfiltered** ([`chat_stasher::selector::Selector::default`]),
+/// even when the command line carries filters. Every filter — the launch one and
+/// the one a drill-down link carries — is applied in memory to that one
+/// inventory by the shared selector. That is what makes `/sessions?machine=…`
+/// and `search --machine …` the same query: `search` applies the same decision
+/// function to the same rows. A repository read narrowed at the command line
+/// could not answer a drill-down for anything it had already discarded, and it
+/// would report `not_matched`/`unplaced` against a set the page never saw.
+fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
+    if let Some(notice) = deprecated_alias {
+        eprintln!("{notice}");
+    }
+    let UiArgs {
+        destination,
+        filters,
+        no_open,
+        idle_timeout,
+        repo,
+        key_file,
+        connections,
+        options,
+        keep_ssh_masters,
+    } = args;
+
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
         eprintln!(
-            "view: name the destination to view (`--destination <name>`, or an explicit `--repo`)"
+            "ui: name the destination to open (`--destination <name>`, or an explicit `--repo`)"
         );
         eprintln!(
-            "view: there is no default destination and no cross-destination merge — archives are not required to agree"
+            "ui: there is no default destination and no cross-destination merge — archives are not required to agree"
         );
         return ExitCode::from(2);
+    }
+    let resolved = match filters.resolve() {
+        Ok(r) => r,
+        Err(e) => {
+            // Same rule as `search`: a filter that cannot be resolved is a
+            // usage error, never an empty result.
+            eprintln!("ui: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for warning in &resolved.warnings {
+        // The notice says "search:"; it is the same shared selector telling the
+        // same story, so it is passed through rather than reworded.
+        eprintln!("{warning}");
     }
     let label = destination
         .clone()
@@ -2623,14 +2648,14 @@ fn cmd_view(
         repo,
         key_file,
         connections,
-        options,
+        &options,
     );
     let store = BackupStore::for_metadata_query(cfg.clone());
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
-            eprintln!("view: {e}");
-            eprintln!("view: without the key nothing was read — this is not an empty result");
+            eprintln!("ui: {e}");
+            eprintln!("ui: without the key nothing was read — this is not an empty result");
             reap_remote(&cfg, keep_ssh_masters);
             // 3, not 1: the archive was never consulted. Same reasoning as
             // `search` — a lost key must not be indistinguishable from an
@@ -2639,27 +2664,24 @@ fn cmd_view(
         }
     };
 
-    // `view` has no time flags, so its selector carries only the two identity
-    // constraints — but it is the same type and the same decision function, so
-    // the listing and the search cannot drift apart.
-    let mut selector = chat_stasher::selector::Selector::default();
-    if let Some(m) = machine {
-        selector = selector.machine(m);
-    }
-    if let Some(p) = session {
-        selector = selector.session_id_prefix(p);
-    }
-    let report = match chat_stasher::search::search_sessions(&store, &mk, &selector) {
+    let report = match chat_stasher::search::search_sessions(
+        &store,
+        &mk,
+        &chat_stasher::selector::Selector::default(),
+    ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("view: cannot read `{}`: {e}", cfg.repo_root);
-            eprintln!("view: this is not an empty destination — the archive was not read");
+            eprintln!("ui: cannot read `{}`: {e}", cfg.repo_root);
+            eprintln!("ui: this is not an empty destination — the archive was not read");
             reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         }
     };
     // ssh masters are reaped before the server starts, not after: the serve loop
-    // can sit idle for minutes, and there is nothing left to read by then.
+    // can sit idle for minutes, and there is nothing left to read by then. The
+    // one exception is `/content`, which reopens the repository on demand — it
+    // does so with whatever the backend needs, and opens no master of its own
+    // beyond what `BackupStore` already configures.
     reap_remote(&cfg, keep_ssh_masters);
 
     for path in &report.unreadable {
@@ -2667,7 +2689,7 @@ fn cmd_view(
     }
     if report.hits.is_empty() {
         println!("{}", report.no_hit_line());
-        println!("view: nothing to show, so no server was started");
+        println!("ui: nothing to show, so no server was started");
         return if report.complete() {
             ExitCode::from(1)
         } else {
@@ -2675,28 +2697,31 @@ fn cmd_view(
         };
     }
 
-    let data = chat_stasher::view::ViewData::from_report(&report, label);
+    let now_unix = now_unix();
+    let data = chat_stasher::ui::UiData::from_report(&report, label, resolved.selector, now_unix);
+    let in_view = chat_stasher::ui::select(&data.sessions, &data.launch);
+    let listed = in_view.matched.len() + in_view.unplaced.len();
     let token = match chat_stasher::view::new_token() {
         Ok(t) => t,
         Err(e) => {
             // No weaker fallback on purpose: a guessable token on a socket every
             // local program can reach is worse than refusing to serve.
-            eprintln!("view: cannot read OS randomness for the access token: {e}");
-            eprintln!("view: refusing to serve without a strong token");
+            eprintln!("ui: cannot read OS randomness for the access token: {e}");
+            eprintln!("ui: refusing to serve without a strong token");
             return ExitCode::from(3);
         }
     };
     let listener = match chat_stasher::view::bind_ephemeral() {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("view: cannot bind 127.0.0.1:0 — {e}");
+            eprintln!("ui: cannot bind 127.0.0.1:0 — {e}");
             return ExitCode::from(3);
         }
     };
     let addr = match listener.local_addr() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("view: bound but cannot read local address — {e}");
+            eprintln!("ui: bound but cannot read local address — {e}");
             return ExitCode::from(3);
         }
     };
@@ -2707,59 +2732,99 @@ fn cmd_view(
         Duration::from_secs(idle_timeout)
     };
     let url = format!("http://{addr}/?token={token}");
-    println!("[view] destination  : {}", data.destination_label);
+    println!("[ui] destination  : {}", data.destination_label);
     println!(
-        "[view] snapshots    : {} scanned / {} in repo",
+        "[ui] snapshots    : {} scanned / {} in repo",
         data.snapshots_scanned, data.snapshots_in_repo
     );
     println!(
-        "[view] sessions     : {} listed / {} seen",
-        data.sessions.len(),
-        data.sessions_seen
+        "[ui] sessions     : {listed} in view / {} in the archive",
+        data.sessions.len()
     );
-    println!("[view] data blobs read: {}", data.data_blobs_read);
-    println!("[view] bound        : {addr} (loopback only, OS-assigned port)");
+    if let Some(text) = chat_stasher::ui::describe_selector(&data.launch) {
+        println!("[ui] filter       : {text}");
+    }
     println!(
-        "[view] idle timeout : {}",
+        "[ui] machines     : {} · sources {}",
+        data.machine_keys().len(),
+        chat_stasher::ui::select(&data.sessions, &data.launch)
+            .in_view()
+            .iter()
+            .map(|s| s.source_label())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    );
+    println!("[ui] data blobs read: {}", data.data_blobs_read);
+    println!("[ui] bound        : {addr} (loopback only, OS-assigned port)");
+    println!(
+        "[ui] idle timeout : {}",
         if idle_timeout == 0 {
             "none (Ctrl+C to exit)".to_string()
         } else {
             format!("{idle_timeout}s")
         }
     );
-    println!("[view] payload      : NOT loaded — metadata tier only, no full-text search");
-    println!("[view] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it.");
+    println!(
+        "[ui] payload      : NOT loaded — session content is fetched only when you click it, and its cost is shown first"
+    );
+    println!("[ui] warning      : any program on this machine can reach 127.0.0.1; the token in the URL below is the only gate. Do not share it.");
     println!("{url}");
 
     if no_open {
-        println!("[view] browser      : not opened (--no-open)");
+        println!("[ui] browser      : not opened (--no-open)");
     } else if let Err(e) = chat_stasher::view::open_in_browser(&url) {
-        eprintln!("[view] browser      : could not open ({e}) — use the URL above, or --no-open");
+        eprintln!("[ui] browser      : could not open ({e}) — use the URL above, or --no-open");
     } else {
-        println!("[view] browser      : opened");
+        println!("[ui] browser      : opened");
     }
 
-    let stats = match chat_stasher::view::serve(&listener, &token, &data, idle) {
+    let content = RepoContent {
+        store: &store,
+        mk: &mk,
+    };
+    let stats = match chat_stasher::view::serve(&listener, &token, &data, idle, &content) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("view: serve loop failed: {e}");
+            eprintln!("ui: serve loop failed: {e}");
             return ExitCode::from(3);
         }
     };
     println!(
-        "[view] exiting      : idle for {}s · requests served={} rejected={}",
+        "[ui] exiting      : idle for {}s · requests served={} rejected={}",
         idle_timeout, stats.served, stats.rejected
     );
 
     if !report.complete() {
         println!(
-            "view: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more",
+            "ui: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more",
             data.destination_label,
             report.unreadable.len()
         );
         return ExitCode::from(3);
     }
     ExitCode::SUCCESS
+}
+
+/// The one implementation of the payload tier: the `/content` route asks this
+/// for one session's shards, and nothing else does.
+struct RepoContent<'a> {
+    store: &'a BackupStore,
+    mk: &'a MasterKey,
+}
+
+impl chat_stasher::ui::ContentSource for RepoContent<'_> {
+    fn fetch(&self, machine: &str, session_id: &str) -> Result<chat_stasher::ui::Content, String> {
+        let (bytes, shards) = self
+            .store
+            .read_session_concat(machine, session_id, self.mk)
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(chat_stasher::ui::Content {
+            concat_sha256: sha256_hex(&bytes),
+            bytes: bytes.len(),
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+            shards,
+        })
+    }
 }
 
 fn cmd_doctor(json: bool) -> ExitCode {

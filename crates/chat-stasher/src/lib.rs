@@ -33,5 +33,6 @@ pub mod sidecar;
 pub mod sqlite_probe;
 pub mod stagereclaim;
 pub mod store;
+pub mod ui;
 pub mod verify;
 pub mod view;

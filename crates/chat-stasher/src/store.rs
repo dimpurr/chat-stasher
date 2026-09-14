@@ -551,6 +551,89 @@ impl BackupStore {
         }
         Ok((concat, hashes))
     }
+
+    /// Read one session's sealed shards back out of **the newest snapshot for
+    /// `machine`**, in global sequence order, as `(concat, [(name, sha256)])`.
+    ///
+    /// Unlike [`Self::read_session_readback`] this needs no local stage root:
+    /// the dashboard addresses a session by `(machine, session id)`, which is
+    /// exactly the partition the archive path already carries
+    /// ([`crate::readback::bucket_shard_path`]). Reconstructing an absolute
+    /// stage prefix just to strip it again would add a way to be wrong — the
+    /// archived prefix is the source machine's, not this one's.
+    ///
+    /// Payload tier: this is the one call that fetches and decrypts conversation
+    /// bytes. A session the newest snapshot does not hold is an `Err`, never an
+    /// empty result.
+    pub fn read_session_concat(
+        &self,
+        machine: &str,
+        session_id: &str,
+        mk: &MasterKey,
+    ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+        let backends = self.backends()?;
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
+            .open(&Credentials::Masterkey(mk.clone()))
+            .context("open repository for session content")?
+            .to_indexed()
+            .context("index repository for session content")?;
+        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let Some(snap) = crate::readback::newest_snapshot_per_host(snaps)
+            .into_iter()
+            .find(|s| s.hostname == machine)
+        else {
+            return Err(anyhow!(
+                "no snapshot for machine `{machine}` in this repository"
+            ));
+        };
+        let root = repo
+            .node_from_snapshot_and_path(&snap, "")
+            .context("read snapshot root for session content")?;
+        let entries = repo
+            .ls(&root, &LsOptions::default())
+            .context("ls snapshot root for session content")?
+            .collect::<rustic_core::RusticResult<Vec<_>>>()
+            .context("collect snapshot entries for session content")?;
+
+        // (sort key, entry index, the shard's real file name)
+        let mut shards: Vec<(u64, usize, String)> = Vec::new();
+        for (i, (path, node)) in entries.iter().enumerate() {
+            if node.node_type != NodeType::File {
+                continue;
+            }
+            let Some((found_machine, session, shard)) = crate::readback::bucket_shard_path(path)
+            else {
+                continue;
+            };
+            if found_machine != machine || session != session_id {
+                continue;
+            }
+            // reason: a non-numeric shard name sorts last rather than being
+            // dropped — the same rule `readback` uses, so the two readers cannot
+            // disagree about which shards a session has. Its *name* is reported
+            // as it is on disk, never re-derived from the sort key.
+            shards.push((parse_shard_seq(&shard).unwrap_or(u64::MAX), i, shard));
+        }
+        if shards.is_empty() {
+            return Err(anyhow!(
+                "session `{}` is not in the newest snapshot for machine `{machine}` — \
+                 this is not an empty session",
+                crate::id::short_session_id(session_id)
+            ));
+        }
+        shards.sort_by_key(|(seq, idx, _)| (*seq, *idx));
+
+        let mut concat = Vec::new();
+        let mut hashes = Vec::new();
+        for (_, idx, name) in shards {
+            let mut buf = Vec::new();
+            repo.dump(&entries[idx].1, &mut buf)
+                .context("dump shard for session content")?;
+            concat.extend_from_slice(&buf);
+            hashes.push((name, hex_digest(&Sha256::digest(&buf))));
+        }
+        Ok((concat, hashes))
+    }
 }
 
 /// sha256 of concatenated source shards on disk (the expected value).

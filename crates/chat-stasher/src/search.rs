@@ -111,6 +111,17 @@ pub struct SessionHit {
     /// This is what a full-text pass would have to fetch — it is *counted*
     /// here, never fetched.
     pub data_blobs: usize,
+    /// Non-blank lines the activity index counted for this session. Zero when
+    /// the index has no row for it, which is why it is never rendered alone —
+    /// see `time_source`.
+    pub line_count: u64,
+    /// How the activity index attested this session's conversation time.
+    ///
+    /// Carried rather than re-derived from the two `Option` bounds so that a
+    /// consumer which needs the tri-state (the `ui` dashboard feeds the very
+    /// same [`crate::overview::OverviewRow`]s `overview` renders) reads the
+    /// index's own answer instead of inventing a second rule for "known".
+    pub time_source: ActivityTimeSource,
 }
 
 impl SessionHit {
@@ -148,6 +159,12 @@ pub struct UnplacedSession {
     pub dimension: UnplacedBy,
     /// The filter that could not be evaluated, and why. User-facing.
     pub why: String,
+    /// Same as [`SessionHit::line_count`].
+    pub line_count: u64,
+    /// Same as [`SessionHit::time_source`]. Kept here too, because a session can
+    /// be unplaced for its *harness* while its conversation time is perfectly
+    /// known — reading this off `why` would collapse the two.
+    pub time_source: ActivityTimeSource,
 }
 
 impl UnplacedSession {
@@ -155,6 +172,31 @@ impl UnplacedSession {
     pub fn short_id(&self) -> String {
         crate::id::short_session_id(&self.session_id)
     }
+}
+
+/// One hostname whose newest snapshot was walked.
+///
+/// This is the archive's machine list, and it is deliberately *not* derived
+/// from the sessions that were found: a machine that has pushed a snapshot but
+/// holds no conversations yet must appear here with zero sessions, rather than
+/// be absent (which would read as "that machine does not exist") or be shown as
+/// "no sessions" without saying how we know.
+#[derive(Debug, Clone)]
+pub struct HostSnapshot {
+    /// Snapshot `hostname` — the archive's machine key, and the partition name
+    /// under `sessions/`.
+    pub hostname: String,
+    /// Full hex id of that snapshot.
+    pub snapshot_id: String,
+    /// When the snapshot was taken, unix seconds — the **archive's** clock
+    /// (the backup run), not any conversation's.
+    pub archive_time_unix: i64,
+    /// Whether `meta/<hostname>/activity-v1.jsonl` is in that snapshot's tree.
+    pub has_activity_index: bool,
+    /// Whether that index was read successfully. `has == true` with
+    /// `index_read_ok == false` is a third state — the file is there and could
+    /// not be read — and must not be reported as "no index" or as "fine".
+    pub index_read_ok: bool,
 }
 
 /// What a payload-tier (full-text) pass over the hits would cost, derived from
@@ -198,6 +240,10 @@ pub struct SearchReport {
     /// beside them. Named explicitly: a machine missing from the index must
     /// never look like a machine with no sessions.
     pub machines_without_index: Vec<String>,
+    /// Every hostname whose newest snapshot was walked, with that snapshot's id
+    /// and time and whether its activity index was present and readable. The
+    /// archive's machine list — see [`HostSnapshot`].
+    pub hosts: Vec<HostSnapshot>,
     /// Non-empty == the scan could not read part of the destination. When this
     /// is non-empty, "no hits" means UNKNOWN, never "not there".
     pub unreadable: Vec<String>,
@@ -380,37 +426,49 @@ struct IndexedTime {
     last_unix: Option<i64>,
     /// `Some` == the time is unknown and this is why.
     why: Option<String>,
+    line_count: u64,
+    /// The index's own tri-state, passed through unchanged.
+    source: ActivityTimeSource,
 }
 
 /// Turn one index row into the tri-state this module actually needs.
 ///
 /// A row whose `time_source` says `Exact`/`Inferred` but which carries no
 /// bounds is self-contradictory. It is kept as *unknown*, with the
-/// contradiction written down, rather than being read as "starts at 0".
+/// contradiction written down, rather than being read as "starts at 0" — which
+/// is why the carried `source` is corrected to `Unknown` there rather than
+/// passed through.
 fn indexed_time(row: &ActivityRow) -> IndexedTime {
+    const NO_BOUND: &str = "the activity index row carries no conversation-time bound and records \
+                            no reason for that, so the time is unknown rather than zero";
     let why = match &row.time_source {
         ActivityTimeSource::Unknown { why } => Some(why.clone()),
         _ => None,
     };
+    let line_count = row.line_count;
     match (row.first_unix, row.last_unix, why) {
         (Some(first), Some(last), _) => IndexedTime {
             first_unix: Some(first),
             last_unix: Some(last),
             why: None,
+            line_count,
+            source: row.time_source.clone(),
         },
         (first, last, Some(why)) => IndexedTime {
             first_unix: first,
             last_unix: last,
-            why: Some(why),
+            why: Some(why.clone()),
+            line_count,
+            source: ActivityTimeSource::Unknown { why },
         },
         (first, last, None) => IndexedTime {
             first_unix: first,
             last_unix: last,
-            why: Some(
-                "the activity index row carries no conversation-time bound and records no reason \
-                 for that, so the time is unknown rather than zero"
-                    .to_string(),
-            ),
+            why: Some(NO_BOUND.to_string()),
+            line_count,
+            source: ActivityTimeSource::Unknown {
+                why: NO_BOUND.to_string(),
+            },
         },
     }
 }
@@ -459,6 +517,7 @@ pub fn search_sessions(
         unplaced: Vec::new(),
         not_matched: 0,
         machines_without_index: Vec::new(),
+        hosts: Vec::new(),
         unreadable: Vec::new(),
         data_blobs_read: 0,
         index_files_read: 0,
@@ -469,6 +528,19 @@ pub fn search_sessions(
         let snapshot_id = snap.id.to_hex().as_str().to_string();
         let archive_time_unix = snap.time.timestamp().as_second();
         let host = snap.hostname.clone();
+
+        // The host is listed before anything can fail, so a machine whose tree
+        // could not be walked still appears — with `index_read_ok == false` and
+        // the failure recorded in `unreadable`. Dropping it here would turn
+        // "we could not look" into "this machine is not in the archive".
+        report.hosts.push(HostSnapshot {
+            hostname: host.clone(),
+            snapshot_id: snapshot_id.clone(),
+            archive_time_unix,
+            has_activity_index: false,
+            index_read_ok: false,
+        });
+        let host_entry = report.hosts.len() - 1;
 
         let root = match repo.node_from_snapshot_and_path(&snap, "") {
             Ok(node) => node,
@@ -574,16 +646,27 @@ pub fn search_sessions(
             }
         }
 
+        // The host's index state, now that both halves are known: the file's
+        // presence comes from the tree walk, readability from the dump. The two
+        // are separate fields because "no index", "index unreadable" and "index
+        // read" are three different answers.
+        report.hosts[host_entry].has_activity_index = index_nodes.contains_key(&host);
+        report.hosts[host_entry].index_read_ok = machines_with_index.contains(&host);
+
         for ((machine, session_id), (shard_count, bytes, data_blobs)) in sessions {
             report.sessions_seen += 1;
             let harness = infer_harness(&session_id);
             let indexed = times.get(&(machine.clone(), session_id.clone()));
-            let (first_unix, last_unix, time_why) = match indexed {
-                Some(t) => (t.first_unix, t.last_unix, t.why.clone()),
-                None => (
-                    None,
-                    None,
-                    Some(if machines_with_index.contains(&machine) {
+            let (first_unix, last_unix, time_why, line_count, time_source) = match indexed {
+                Some(t) => (
+                    t.first_unix,
+                    t.last_unix,
+                    t.why.clone(),
+                    t.line_count,
+                    t.source.clone(),
+                ),
+                None => {
+                    let why = if machines_with_index.contains(&machine) {
                         format!(
                             "machine `{machine}`'s activity index in this snapshot has no row for this session"
                         )
@@ -591,8 +674,19 @@ pub fn search_sessions(
                         format!(
                             "machine `{machine}` has no activity index (`meta/{machine}/activity-v1.jsonl`) in this snapshot, so its conversation time was never recorded"
                         )
-                    }),
-                ),
+                    };
+                    // The line count is NOT read from the shards here (this tier
+                    // does not decrypt payload), so 0 would be a claim we did not
+                    // measure. `Unknown` carries that, and the why distinguishes
+                    // "no index at all" from "an index with no row".
+                    (
+                        None,
+                        None,
+                        Some(why.clone()),
+                        0,
+                        ActivityTimeSource::Unknown { why },
+                    )
+                }
             };
             let meta = SessionMeta {
                 machine: &machine,
@@ -615,6 +709,8 @@ pub fn search_sessions(
                     last_unix,
                     time_why,
                     data_blobs,
+                    line_count,
+                    time_source,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
                 Verdict::Unevaluated { dimension, why } => report.unplaced.push(UnplacedSession {
@@ -627,6 +723,8 @@ pub fn search_sessions(
                     archive_time_unix,
                     dimension,
                     why,
+                    line_count,
+                    time_source,
                 }),
             }
         }
@@ -659,6 +757,10 @@ mod tests {
             last_unix: None,
             time_why: Some("test fixture records no conversation time".into()),
             data_blobs: 2,
+            line_count: 0,
+            time_source: ActivityTimeSource::Unknown {
+                why: "test fixture records no conversation time".into(),
+            },
         }
     }
 
@@ -674,6 +776,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 0,
@@ -696,6 +799,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 7,
             machines_without_index: Vec::new(),
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 0,
@@ -730,6 +834,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 4,
             machines_without_index: vec!["m-1".into()],
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 0,
@@ -747,6 +852,10 @@ mod tests {
             archive_time_unix: 1,
             dimension: UnplacedBy::Time,
             why: "no activity index".into(),
+            line_count: 0,
+            time_source: ActivityTimeSource::Unknown {
+                why: "no activity index".into(),
+            },
         });
         assert!(report.complete(), "still read in full…");
         assert!(!report.answer_complete(), "…but the question is unanswered");
@@ -766,6 +875,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 0,
@@ -839,6 +949,10 @@ mod tests {
             archive_time_unix: 1,
             dimension: UnplacedBy::Time,
             why: "no index".into(),
+            line_count: 0,
+            time_source: ActivityTimeSource::Unknown {
+                why: "no index".into(),
+            },
         };
         assert_eq!(u.short_id(), hit("m-1", &u.session_id, 1).short_id());
         assert!(!u.short_id().contains("eacbacc09765"));
@@ -874,6 +988,8 @@ mod tests {
                 last_unix: Some(150),
                 time_why: None,
                 data_blobs: 2,
+                line_count: 3,
+                time_source: ActivityTimeSource::Exact,
             }],
             unplaced: vec![UnplacedSession {
                 machine: "m-2".into(),
@@ -885,9 +1001,14 @@ mod tests {
                 archive_time_unix: 6,
                 dimension: UnplacedBy::Time,
                 why: "no activity index".into(),
+                line_count: 0,
+                time_source: ActivityTimeSource::Unknown {
+                    why: "no activity index".into(),
+                },
             }],
             not_matched: 1,
             machines_without_index: vec!["m-2".into()],
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 1,
@@ -939,10 +1060,15 @@ mod tests {
                 last_unix: None,
                 time_why: Some("no timestamp field found".into()),
                 data_blobs: 1,
+                line_count: 1,
+                time_source: ActivityTimeSource::Unknown {
+                    why: "no timestamp field found".into(),
+                },
             }],
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 0,
@@ -974,6 +1100,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
             index_files_read: 0,

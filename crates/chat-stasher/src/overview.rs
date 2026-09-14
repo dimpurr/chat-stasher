@@ -44,6 +44,28 @@ pub enum TimeSource {
     Unknown { why: String },
 }
 
+impl From<&crate::activity::TimeSource> for TimeSource {
+    /// The activity index's tri-state, as this module's copy of it.
+    ///
+    /// The two enums exist separately because `overview` is pure and was
+    /// written before `activity` existed; both serialise to the same tagged
+    /// shape, and this is the **single** conversion between them. Anything that
+    /// needs to feed index rows to [`OverviewRow`] must go through here rather
+    /// than match on the variants itself — a second copy of this mapping is how
+    /// the two would drift apart on the one field whose tri-state is a contract.
+    fn from(value: &crate::activity::TimeSource) -> Self {
+        match value {
+            crate::activity::TimeSource::Exact => TimeSource::Exact,
+            crate::activity::TimeSource::Inferred { how } => {
+                TimeSource::Inferred { how: how.clone() }
+            }
+            crate::activity::TimeSource::Unknown { why } => {
+                TimeSource::Unknown { why: why.clone() }
+            }
+        }
+    }
+}
+
 /// One session summary line, as handed to us by the collector worker.
 #[derive(Debug, Clone)]
 pub struct OverviewRow {
@@ -411,40 +433,122 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
     out
 }
 
-/// The width-adaptive character heatmap. Vertical axis is `axis`, horizontal
-/// axis is time buckets (day or week, chosen to fit `width`). Each row's
-/// trailing `?` marks time-unknown sessions; `EMPTY` marks an empty bucket —
-/// the legend states both.
-pub fn render_heatmap(rows: &[OverviewRow], width: usize, axis: HeatmapAxis) -> String {
-    render_heatmap_gran(rows, width, axis, None)
+/// One column of the heatmap: a day or a week, with the instants it covers.
+///
+/// `start_unix..=end_unix` is the bucket's own half-open day range in **UTC**
+/// days — the same arithmetic [`render_heatmap_gran`] buckets with. Carried as
+/// data so a second renderer (the `ui` dashboard) can turn a column into a time
+/// filter without re-deriving the calendar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeatmapBucket {
+    /// `YYYY-MM-DD`, the bucket's first day. Also the key in
+    /// [`HeatmapRow::counts`].
+    pub label: String,
+    /// `YYYY-MM-DD`, the bucket's last day — equal to `label` for a day bucket,
+    /// and six days later for a week bucket.
+    pub last_day: String,
+    /// Inclusive lower bound, unix seconds.
+    pub start_unix: i64,
+    /// Inclusive upper bound, unix seconds.
+    pub end_unix: i64,
 }
 
-/// Same as [`render_heatmap`] but lets a caller force the bucket granularity
-/// (used by tests for determinism).
-pub fn render_heatmap_gran(
+/// One row of the heatmap: a label, its per-bucket session counts, and its
+/// time-unknown tally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeatmapRow {
+    pub label: String,
+    /// Session count per bucket label. A bucket absent from the map is a true
+    /// empty bucket for this row — zero, not "unknown".
+    pub counts: BTreeMap<String, usize>,
+    /// Sessions of this row whose conversation time is unknown. Counted here
+    /// and never folded into a time bucket.
+    pub unknown: usize,
+}
+
+/// The heatmap as **data**, before any character is chosen for it.
+///
+/// Split out of [`render_heatmap_gran`] so there is exactly one place that
+/// decides which bucket a session falls in. The terminal rendering below is one
+/// consumer of this value; the `ui` dashboard, which draws the same columns as
+/// clickable cells, is another. A second implementation of the bucketing is
+/// what this type exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeatmapData {
+    /// Empty `buckets` means no session on this axis has a known time, so there
+    /// is no time axis at all — deliberately distinguishable from a real,
+    /// fully-empty range (which has buckets and zero counts).
+    pub buckets: Vec<HeatmapBucket>,
+    pub rows: Vec<HeatmapRow>,
+    pub granularity: Granularity,
+    /// `false` when every session on this axis has an unknown time.
+    pub has_time_axis: bool,
+    /// Largest per-bucket session count in this value — the denominator
+    /// [`density_char`] maps each cell against. Zero only when there is no time
+    /// axis.
+    pub max_count: usize,
+}
+
+/// The characters a heatmap cell can take, lowest density first, and the two
+/// markers that mean "nothing here" and "time unknown".
+///
+/// Public because the dashboard draws the same ramp: a second definition of it
+/// would let the terminal and the page disagree about which machine looks busy.
+pub fn heatmap_ramp() -> (char, char) {
+    (DENSITY[0], DENSITY[DENSITY.len() - 1])
+}
+
+/// The character for one heatmap cell. The single mapping from a session count
+/// to a glyph — [`render_heatmap_gran`] and the dashboard both call this.
+pub fn heatmap_cell_char(count: usize, max_count: usize) -> char {
+    density_char(count, max_count)
+}
+
+/// The marker for a bucket with nothing in it.
+pub fn heatmap_empty_char() -> char {
+    EMPTY
+}
+
+/// The marker for a row that carries time-unknown sessions.
+pub fn heatmap_unknown_char() -> char {
+    UNKNOWN
+}
+
+/// Aggregate `rows` into heatmap data. `force` pins the bucket granularity
+/// (tests, and the dashboard's weekly view); `None` picks day or week by width.
+pub fn heatmap_data(
     rows: &[OverviewRow],
     width: usize,
     axis: HeatmapAxis,
     force: Option<Granularity>,
-) -> String {
-    let labels = match axis {
-        HeatmapAxis::Machine => distinct_labels(rows, |r| &r.machine),
-        HeatmapAxis::Harness => distinct_labels(rows, |r| &r.harness),
-    };
+) -> HeatmapData {
+    let labels = distinct_labels(rows, |r| match axis {
+        HeatmapAxis::Machine => &r.machine,
+        HeatmapAxis::Harness => &r.harness,
+    });
     if labels.is_empty() {
-        return "(no sessions)\n".to_string();
+        return HeatmapData {
+            buckets: Vec::new(),
+            rows: Vec::new(),
+            granularity: force.unwrap_or(Granularity::Day),
+            has_time_axis: false,
+            max_count: 0,
+        };
     }
-
-    let axis_name = match axis {
-        HeatmapAxis::Machine => "machine",
-        HeatmapAxis::Harness => "harness",
-    };
+    let label_w = labels
+        .iter()
+        .map(|l| l.len())
+        .max()
+        // reason: `labels.is_empty()` returned above, so this iterator is
+        // non-empty and max() is Some; 0 is an unreachable default.
+        .unwrap_or(0)
+        .clamp(1, 20);
 
     // Per-axis known-time bucket counts and unknown counts.
     let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
-    // Horizontal axis covers the full activity span: earliest start to
-    // latest end across all known-time sessions.
+    // Horizontal axis covers the full activity span: earliest start to latest
+    // end across all known-time sessions.
     let mut lo: Option<i64> = None;
     let mut hi: Option<i64> = None;
     for r in rows {
@@ -464,35 +568,28 @@ pub fn render_heatmap_gran(
         }
     }
 
-    let label_w = labels
-        .iter()
-        .map(|l| l.len())
-        .max()
-        // reason: `labels.is_empty()` returned "(no sessions)" above, so this
-        // iterator is non-empty and max() is Some; 0 is an unreachable default.
-        .unwrap_or(0)
-        .clamp(1, 20);
-
-    // No known time at all → no horizontal axis; still show the unknown rows.
+    // No known time at all → no horizontal axis.
     let (Some(lo), Some(hi)) = (lo, hi) else {
-        let mut out = String::new();
-        out.push_str(&format!("heatmap · y-axis={axis_name} · no known times\n"));
-        for l in &labels {
-            // reason: `unknown` is tallied only for labels that had time-unknown
-            // sessions; a label absent from it has zero, and 0 is that true zero.
-            let uk = unknown.get(l).copied().unwrap_or(0);
-            out.push_str(&format!(
-                "{:<label_w$} {} {}\n",
-                truncate(l, label_w),
-                "",
-                if uk > 0 { UNKNOWN } else { EMPTY }
-            ));
-        }
-        out.push_str(&format!(
-            "legend: '{}'=empty bucket '{}'=time unknown (see the \"time unknown\" section above)\n",
-            EMPTY, UNKNOWN
-        ));
-        return out;
+        return HeatmapData {
+            buckets: Vec::new(),
+            rows: labels
+                .into_iter()
+                .map(|label| {
+                    // reason: `unknown` is an accumulator written only for labels
+                    // that had time-unknown sessions; a label absent from it has
+                    // zero such sessions, and 0 is that true zero.
+                    let unknown = unknown.get(&label).copied().unwrap_or(0);
+                    HeatmapRow {
+                        label,
+                        counts: BTreeMap::new(),
+                        unknown,
+                    }
+                })
+                .collect(),
+            granularity: force.unwrap_or(Granularity::Day),
+            has_time_axis: false,
+            max_count: 0,
+        };
     };
 
     let available = width.saturating_sub(label_w + 4).max(1) as i64;
@@ -503,14 +600,14 @@ pub fn render_heatmap_gran(
         Granularity::Week
     });
 
-    // Ordered bucket labels from lo..=hi.
-    let mut bucket_labels: Vec<String> = Vec::new();
+    // Ordered buckets from lo..=hi.
+    let mut buckets: Vec<HeatmapBucket> = Vec::new();
     match gran {
         Granularity::Day => {
             let mut d = days_from_epoch(lo);
             let end = days_from_epoch(hi);
             while d <= end {
-                bucket_labels.push(fmt_ymd(civil_from_days(d)));
+                buckets.push(bucket_of_day(d, Granularity::Day));
                 d += 1;
             }
         }
@@ -518,14 +615,13 @@ pub fn render_heatmap_gran(
             let mut monday = monday_of(lo);
             let last_monday = monday_of(hi);
             while monday <= last_monday {
-                bucket_labels.push(fmt_ymd(civil_from_days(monday)));
+                buckets.push(bucket_of_day(monday, Granularity::Week));
                 monday += 7;
             }
         }
     }
 
     // Fill counts into buckets.
-    let mut max_count = 0usize;
     for r in rows {
         if !r.has_known_time() {
             continue;
@@ -539,51 +635,166 @@ pub fn render_heatmap_gran(
             Granularity::Day => fmt_ymd(civil_from_days(days_from_epoch(a))),
             Granularity::Week => fmt_ymd(civil_from_days(monday_of(a))),
         };
-        let e = counts
+        *counts
             .entry(l.clone())
             .or_default()
             .entry(bucket)
-            .or_insert(0);
-        *e += 1;
-        if *e > max_count {
-            max_count = *e;
-        }
+            .or_insert(0) += 1;
     }
 
+    let max_count = counts
+        .values()
+        .flat_map(|m| m.values().copied())
+        .max()
+        // reason: this branch is reached only when `has_time_axis` is true, i.e.
+        // at least one session with a known time was bucketed above, so `counts`
+        // is non-empty and every value is >= 1; 0 is an unreachable default.
+        .unwrap_or(0);
+    let rows = labels
+        .into_iter()
+        .map(|label| {
+            // reason: same accumulator as the no-known-times branch above — a
+            // label absent from it has zero time-unknown sessions, and 0 is that
+            // true zero.
+            let unknown = unknown.get(&label).copied().unwrap_or(0);
+            // reason: `counts` is filled only for (label, bucket) pairs that had
+            // a session, so a label with no entry has no bucketed sessions at
+            // all; the empty map is that true zero, not a missing measurement.
+            let counts = counts.remove(&label).unwrap_or_default();
+            HeatmapRow {
+                label,
+                counts,
+                unknown,
+            }
+        })
+        .collect();
+    HeatmapData {
+        rows,
+        buckets,
+        granularity: gran,
+        has_time_axis: true,
+        max_count,
+    }
+}
+
+/// The bucket starting at UTC day `d`, for the given granularity.
+fn bucket_of_day(d: i64, gran: Granularity) -> HeatmapBucket {
+    let span = match gran {
+        Granularity::Day => 1,
+        Granularity::Week => 7,
+    };
+    let start_unix = d * 86_400;
+    HeatmapBucket {
+        label: fmt_ymd(civil_from_days(d)),
+        last_day: fmt_ymd(civil_from_days(d + span - 1)),
+        start_unix,
+        end_unix: start_unix + span * 86_400 - 1,
+    }
+}
+
+impl HeatmapAxis {
+    fn name(self) -> &'static str {
+        match self {
+            HeatmapAxis::Machine => "machine",
+            HeatmapAxis::Harness => "harness",
+        }
+    }
+}
+
+/// The width-adaptive character heatmap. Vertical axis is `axis`, horizontal
+/// axis is time buckets (day or week, chosen to fit `width`). Each row's
+/// trailing `?` marks time-unknown sessions; `EMPTY` marks an empty bucket —
+/// the legend states both.
+pub fn render_heatmap(rows: &[OverviewRow], width: usize, axis: HeatmapAxis) -> String {
+    render_heatmap_gran(rows, width, axis, None)
+}
+
+/// Same as [`render_heatmap`] but lets a caller force the bucket granularity
+/// (used by tests for determinism, and by the `ui` dashboard's weekly view).
+///
+/// Renders exactly what [`heatmap_data`] aggregated — this function decides
+/// nothing about which session lands in which bucket.
+pub fn render_heatmap_gran(
+    rows: &[OverviewRow],
+    width: usize,
+    axis: HeatmapAxis,
+    force: Option<Granularity>,
+) -> String {
+    let data = heatmap_data(rows, width, axis, force);
+    let axis_name = axis.name();
+    if data.rows.is_empty() {
+        return "(no sessions)\n".to_string();
+    }
+
+    let label_w = data
+        .rows
+        .iter()
+        .map(|r| r.label.len())
+        .max()
+        // reason: `rows.is_empty()` returned "(no sessions)" above, so this
+        // iterator is non-empty and max() is Some; 0 is an unreachable default.
+        .unwrap_or(0)
+        .clamp(1, 20);
+
+    // No known time at all → no horizontal axis; still show the unknown rows.
+    if !data.has_time_axis {
+        let mut out = String::new();
+        out.push_str(&format!("heatmap · y-axis={axis_name} · no known times\n"));
+        for r in &data.rows {
+            let uk_char = if r.unknown > 0 { UNKNOWN } else { EMPTY };
+            out.push_str(&format!(
+                "{:<label_w$} {} {}\n",
+                truncate(&r.label, label_w),
+                "",
+                uk_char
+            ));
+        }
+        out.push_str(&format!(
+            "legend: '{}'=empty bucket '{}'=time unknown (see the \"time unknown\" section above)\n",
+            EMPTY, UNKNOWN
+        ));
+        return out;
+    }
+
+    let bucket_labels: Vec<&str> = data.buckets.iter().map(|b| b.label.as_str()).collect();
+    let max_count = data
+        .rows
+        .iter()
+        .flat_map(|r| r.counts.values().copied())
+        .max()
+        // reason: a session with a known time was bucketed above, so at least
+        // one count exists and is >= 1; 0 is an unreachable default.
+        .unwrap_or(0);
+
     let n_buckets = bucket_labels.len();
-    let gran_name = match gran {
+    let gran_name = match data.granularity {
         Granularity::Day => "by day",
         Granularity::Week => "by week",
     };
     let mut out = String::new();
-    // reason: `(lo, hi)` was already destructured as `Some` above, so the day or
-    // week bucket list always has ≥1 label; the empty-string default only
+    // reason: `has_time_axis` is true only when a known-time session produced a
+    // bucket, so the bucket list is non-empty; the empty-string default only
     // satisfies the type checker.
-    let x_lo = bucket_labels.first().cloned().unwrap_or_default();
-    // reason: same provable non-emptiness as x_lo — the last label exists
-    // whenever lo/hi are Some, which the destructure above guarantees.
-    let x_hi = bucket_labels.last().cloned().unwrap_or_default();
+    let x_lo = bucket_labels.first().copied().unwrap_or_default();
+    // reason: same provable non-emptiness as x_lo.
+    let x_hi = bucket_labels.last().copied().unwrap_or_default();
     out.push_str(&format!(
         "heatmap · y-axis={axis_name} · {gran_name} · x-axis {}..{} ({} buckets)\n",
         x_lo, x_hi, n_buckets
     ));
 
-    for l in &labels {
-        let row_counts = counts.get(l);
+    for r in &data.rows {
         let mut chars = String::with_capacity(n_buckets);
         for b in &bucket_labels {
             // reason: the heatmap's horizontal axis spans the full time range, so
             // a bucket with no sessions for this label is a true empty bucket (0).
-            let c = row_counts.and_then(|m| m.get(b)).copied().unwrap_or(0);
+            let c = r.counts.get(*b).copied().unwrap_or(0);
             chars.push(density_char(c, max_count));
         }
-        // reason: same accumulator as the no-known-times branch — a label absent
-        // from `unknown` has zero time-unknown sessions; 0 is the true zero.
-        let uk = unknown.get(l).copied().unwrap_or(0);
-        let uk_char = if uk > 0 { UNKNOWN } else { EMPTY };
+        let uk_char = if r.unknown > 0 { UNKNOWN } else { EMPTY };
         out.push_str(&format!(
             "{:<label_w$}{:<n_buckets$} {}\n",
-            truncate(l, label_w),
+            truncate(&r.label, label_w),
             chars,
             uk_char
         ));
