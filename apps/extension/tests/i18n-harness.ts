@@ -20,7 +20,7 @@
  * yml files, so the harness cannot drift from what ships.
  */
 
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import {
   generateChromeMessages,
   parseMessagesFile,
@@ -38,7 +38,14 @@ export type TestCatalog = Record<string, ChromeMessage>;
 async function loadCatalogs(): Promise<Record<TestLocale, TestCatalog>> {
   const catalogs = {} as Record<TestLocale, TestCatalog>;
   for (const locale of TEST_LOCALES) {
-    const file = fileURLToPath(new URL(`../locales/${locale}.yml`, import.meta.url));
+    // 🔴 Resolved from `__dirname`, not `import.meta.url`. Inside `setupFiles`, a
+    // suite that asks for a DOM environment gets an `import.meta.url` on the
+    // document's origin (measured under both jsdom and happy-dom:
+    // `http://localhost:3000/`), so a URL built from it points at a path that
+    // does not exist and the whole file fails before its first test. `__dirname`
+    // is the file's own directory in every environment vitest runs, so this
+    // reads the same two catalog files either way.
+    const file = resolve(__dirname, '..', 'locales', `${locale}.yml`);
     catalogs[locale] = generateChromeMessages(await parseMessagesFile(file));
   }
   return catalogs;
