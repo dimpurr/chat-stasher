@@ -2,6 +2,42 @@
 
 `chat-stasher` continuously archives conversation history from AI coding harnesses—Claude Code, Codex CLI, Gemini CLI, opencode, and other registered sources—to storage that you control. It is an append-only archive. (Project description and append-only design: `crates/chat-stasher/src/main.rs:34`.)
 
+## Support at a glance
+
+Status as of **2026-09**. **Verified** means real sessions were archived end to end on a maintainer's machine; the version is the one installed there at that time. Anything else is stated as what it is.
+
+**Local AI coding tools** (the `chat-stasher` CLI)
+
+| Tool | Status | Verified version |
+|---|---|---|
+| Claude Code | ✅ Verified | 2.1.270 (2026-09) |
+| OpenAI Codex CLI | ✅ Verified | 0.146.0 (2026-09) |
+| opencode | ✅ Verified | 1.18.4 (2026-09) |
+| Gemini CLI | ✅ Verified | 0.36.0 (2026-09) |
+| Cursor | ✅ Verified | not recorded |
+| Grok CLI | 🟡 Registered; installed, but no sessions archived yet | — |
+| GitHub Copilot CLI · aider · crush · Zed · Continue | 🟡 Registered, not verified | — |
+| Kimi Code | 📋 Planned | — |
+
+**Web AI chats** (the browser extension)
+
+| Platform | Live capture (conversations you open) | Backfill (past conversations) |
+|---|---|---|
+| ChatGPT | 🔄 In progress — verified on page load (2026-09) | 🔄 In progress |
+| DeepSeek | ✅ Verified (2026-09) | 🟡 Lists conversations only; saves no content |
+| Perplexity | 🟡 Coded; cannot recognise a session id, so delivers nothing | 🟡 Lists conversations only; saves no content |
+| Gemini · Claude · Kimi | 🟡 Coded, not verified | ❌ Not available |
+| Grok | 📋 Planned | 📋 Planned |
+
+**Where the archive can go** (encrypted with `rustic`)
+
+| Destination | Status |
+|---|---|
+| SFTP (e.g. Hetzner Storage Box) | ✅ Verified — in daily use on three machines (2026-09) |
+| Local folder / disk | ✅ Supported |
+| rustic REST server (`rest:`) | 🟡 Accepted by the config, not verified |
+| S3 · Google Drive · others | 📋 Planned |
+
 
 ## Why this exists
 

@@ -328,8 +328,16 @@ export function getPlatformByOrigin(origin: string): ChatPlatform | undefined {
   return PLATFORMS.find((platform) => platform.origins.includes(origin));
 }
 
-/** Sizes above this are streamed media, not session JSON — skip. */
-export const MAX_RAW_BYTES = 4 * 1024 * 1024;
+/**
+ * Largest response body carried as a conversation. Was 4 MiB ("larger is
+ * streamed media"), until a real ChatGPT conversation measured 8.45 MB
+ * (2026-09-14) — long conversations are the ones most worth keeping.
+ * 16 MiB because the body travels as a string inside a bundle inside the Native
+ * Messaging request: double JSON escaping can at worst quadruple a quote-heavy
+ * body, and 4 × 16 MiB is the host's 64 MiB request cap. Anything larger is
+ * skipped with a visible warning, never silently.
+ */
+export const MAX_RAW_BYTES = 16 * 1024 * 1024;
 
 export const INBOX_PREFIX = 'chat-stasher/inbox';
 

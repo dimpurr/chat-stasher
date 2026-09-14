@@ -24,7 +24,7 @@ Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
    the raw response text (`apps/extension/lib/contract.ts:41-66`, `:318-320`;
-   `apps/extension/lib/page-hook.ts:283`, `:307`, `:348`).
+   `apps/extension/lib/page-hook.ts:295`, `:319`, `:360`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
@@ -162,10 +162,19 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:283`, `:307`, `:331-348`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:295`, `:319`, `:343-360`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`). |
 
-**Caveat, stated honestly:** the passive hook adds no traffic, so there is
-nothing distinctive for the platform to observe from it. **Backfill is
+**Caveat, stated honestly:** on every platform except ChatGPT the passive hook
+adds no traffic, so there is nothing distinctive for the platform to observe
+from it. **On ChatGPT it does add traffic:** when you move between conversations
+in the page, ChatGPT loads only a recent slice, and the extension requests the
+full conversation itself, with the access token it reads from the same origin's
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:406-411`;
+`apps/extension/entrypoints/dw-bridge.content.ts:193-219`;
+`apps/extension/lib/platform-auth.ts:74-93`). That is one extra request per
+conversation you open, at most once per 15 seconds per conversation. The token
+stays in the content script's memory; a script on the page itself could already
+read the same token, so this adds no new party who can see it. **Backfill is
 different** — it walks conversation lists and detail endpoints
 (`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`), which produces a
 request pattern the platform can see and which does not look like a human
@@ -194,7 +203,7 @@ truncated version of every chat and still look like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:482-495`, `:641-657`). That value is written
+(`apps/extension/lib/contract.ts:490-503`, `:649-665`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:119-121`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -220,8 +229,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on ready/verify messages
-(`apps/extension/lib/contract.ts:452-475`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:417-450`). Those
+(`apps/extension/lib/contract.ts:460-483`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:425-458`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.

@@ -10,6 +10,7 @@ import {
   WS_OBSERVED_MESSAGE,
   type ChatPlatform,
 } from './contract';
+import { CHATGPT_PAGED_DETAIL_PATTERN, CONVERSATION_SEEN_MESSAGE } from './platform-auth';
 
 /** Fixed, metadata-only signal for a supported-origin transport we do not capture. */
 export const UNSUPPORTED_TRANSPORT_WARNING =
@@ -38,6 +39,10 @@ export interface PageHookOptions {
   /** Platform table; the hook matches against the CURRENT page's own origin. */
   platforms: ChatPlatform[];
   maxRawBytes: number;
+  /** Page message carrying only a conversation id whose paged window the page loaded. */
+  conversationSeenMessage: string;
+  /** RegExp source (serialisable) for ChatGPT's paged detail path; group 1 = id. */
+  chatgptPagedDetailPattern: string;
 }
 
 export const PAGE_HOOK_OPTIONS: PageHookOptions = {
@@ -64,6 +69,8 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
     },
   })),
   maxRawBytes: MAX_RAW_BYTES,
+  conversationSeenMessage: CONVERSATION_SEEN_MESSAGE,
+  chatgptPagedDetailPattern: CHATGPT_PAGED_DETAIL_PATTERN.source,
 };
 
 /**
@@ -192,7 +199,12 @@ export function installPageFetchHook(options: PageHookOptions): void {
       ) return;
 
       const bytes = new TextEncoder().encode(text).byteLength;
-      if (bytes > options.maxRawBytes) return;
+      if (bytes > options.maxRawBytes) {
+        // A conversation too large to carry is still a conversation: say so.
+        // Metadata only — never the URL, body, or identifiers.
+        console.warn('[chat-stasher] capture skipped: response exceeds the size cap');
+        return;
+      }
       if (!matchesShape(platform, text)) {
         // Keep the signal metadata-only: never print URL, body, or identifiers.
         console.warn('[chat-stasher] capture skipped: response shape mismatch');
@@ -386,6 +398,20 @@ export function installPageFetchHook(options: PageHookOptions): void {
       const parsed = new URL(url, baseUrl);
       const platform = getPlatform(parsed.href);
       const normalizedMethod = method.toUpperCase();
+
+      // ChatGPT's in-page navigation loads only a paged window of the
+      // conversation (no `mapping`). Archiving that window would store a
+      // partial conversation, so it is never captured; instead the id alone is
+      // handed to the isolated side, which fetches the full conversation.
+      const paged = platform && platform.id === 'chatgpt' && parsed.origin === pageOrigin
+        && normalizedMethod === 'GET' && response.status >= 200 && response.status <= 299
+        ? new RegExp(options.chatgptPagedDetailPattern).exec(parsed.pathname)
+        : null;
+      if (paged) {
+        post({ type: options.conversationSeenMessage, platform: 'chatgpt', id: paged[1] });
+        return;
+      }
+
       if (
         !platform ||
         parsed.origin !== pageOrigin ||

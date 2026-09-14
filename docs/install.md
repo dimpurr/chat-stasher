@@ -65,7 +65,7 @@ that platform."** The extension has two legs; please read them separately:
   session id from a URL (`apps/extension/lib/contract.ts:120-135`; the empty
   list is `apps/extension/lib/contract.ts:132`). Reading the
   code, passive capture on Perplexity **cannot recognize a session id and
-  therefore delivers nothing** (`apps/extension/lib/contract.ts:539-567`) — this
+  therefore delivers nothing** (`apps/extension/lib/contract.ts:547-575`) — this
   is a conclusion drawn from reading the code; **we have not tested it on a
   real perplexity.ai page**.
 - **History backfill** (off by default; see section 6): digs up your **past**

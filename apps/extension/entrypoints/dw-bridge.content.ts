@@ -14,7 +14,15 @@ import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 import {
   BACKFILL_TAB_HELLO_MESSAGE,
   handleBackfillMessage,
+  serveBackfillFetch,
+  type FetchLike,
 } from '../lib/backfill/tab-port';
+import {
+  chatgptDetailUrlFor,
+  createAuthorizedFetch,
+  createSeenGate,
+  isConversationSeenMessage,
+} from '../lib/platform-auth';
 import {
   warnIfFallbackHookUnverified,
   FALLBACK_HOOK_VERIFICATION_WARNING,
@@ -87,6 +95,13 @@ export default defineContentScript({
         return;
       }
 
+      if (isConversationSeenMessage(event.data)) {
+        const id = event.data.id;
+        if (!seenGate(id)) return;
+        void refetchFullConversation(id);
+        return;
+      }
+
       if (!isCaptureMessage(event.data)) return;
       browser.runtime
         .sendMessage({ type: 'chat-captured', payload: event.data.payload })
@@ -146,6 +161,63 @@ export default defineContentScript({
       }, MAIN_FALLBACK_TIMEOUT_MS);
     }
 
+    // The one fetch both legs use. ChatGPT body requests get the session's
+    // bearer token (in memory only; lib/platform-auth.ts); every other request
+    // is sent exactly as before.
+    const authorizedFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init));
+    const pageFetch: FetchLike = async (url, init) => {
+      // 🔴 C23: by the time execution reaches here, method / body /
+      //    Content-Type have already passed checkBackfillRequest's closed-set
+      //    checks (serveBackfillFetch). Nothing is decided here, and nothing
+      //    **may** be — the decision lives in exactly one place, that allowlist.
+      const res = init && init.method === 'POST'
+        ? await authorizedFetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              accept: 'application/json',
+              ...(init.contentType ? { 'content-type': init.contentType } : {}),
+            },
+            body: init.body,
+          })
+        : await authorizedFetch(url, {
+            credentials: 'same-origin',
+            headers: { accept: 'application/json' },
+          });
+      return { status: res.status, text: () => res.text() };
+    };
+
+    // Live leg for ChatGPT's paged navigation: fetch the full conversation
+    // through the same allowlist the backfill leg uses, then hand it to
+    // background exactly like a passive capture (same shape checks, outbox, ack).
+    const seenGate = createSeenGate(15_000);
+    async function refetchFullConversation(id: string): Promise<void> {
+      const url = chatgptDetailUrlFor(pageOrigin, id);
+      const reply = await serveBackfillFetch(url, pageOrigin, pageFetch);
+      if (!reply.ok || reply.status < 200 || reply.status > 299) {
+        // Metadata only: the HTTP status or the technical refusal reason —
+        // never the URL, id, token, or body.
+        const why = reply.ok ? `HTTP ${reply.status}` : reply.error;
+        console.warn(`[chat-stasher] full-conversation refetch failed (${why}); this navigation was not captured`);
+        return;
+      }
+      browser.runtime
+        .sendMessage({
+          type: 'chat-captured',
+          payload: {
+            url,
+            method: 'GET',
+            status: reply.status,
+            text: reply.text,
+            pageUrl: window.location.href,
+            capturedAt: Date.now(),
+          },
+        })
+        .catch(() => {
+          // A failed extension channel must never disturb the page.
+        });
+    }
+
     // -----------------------------------------------------------------------
     // 🔴 C19 · This is where the backfill leg's fetch channel lands.
     //
@@ -165,30 +237,7 @@ export default defineContentScript({
     // -----------------------------------------------------------------------
     browser.runtime.onMessage.addListener(
       (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
-        const pending = handleBackfillMessage(message, pageOrigin, async (url, init) => {
-          // 🔴 C23: by the time execution reaches here, method / body /
-          //    Content-Type have already passed checkBackfillRequest's closed-set
-          //    checks (handleBackfillMessage → serveBackfillFetch).
-          //    Nothing is decided here, and nothing **may** be — the decision lives
-          //    in exactly one place, that allowlist.
-          //    init omitted (a GET segment) ⇒ the fetch below takes byte-identical
-          //    arguments to C19/C22.
-          const res = init && init.method === 'POST'
-            ? await fetch(url, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                  accept: 'application/json',
-                  ...(init.contentType ? { 'content-type': init.contentType } : {}),
-                },
-                body: init.body,
-              })
-            : await fetch(url, {
-                credentials: 'same-origin',
-                headers: { accept: 'application/json' },
-              });
-          return { status: res.status, text: () => res.text() };
-        });
+        const pending = handleBackfillMessage(message, pageOrigin, pageFetch);
         if (!pending) return;   // not a message for me; leave it to the other listeners
         pending
           .then(sendResponse)

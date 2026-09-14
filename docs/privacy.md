@@ -74,9 +74,21 @@ the sentence.
 1. **Capture.** A content script, injected only on a fixed list of chat origins,
    wraps `fetch` in the page and keeps a **clone** of the response text of
    requests **the page itself already made** in your already-logged-in session
-   (`apps/extension/lib/page-hook.ts:374`, `:399`, `:406-423`). Only responses
+   (`apps/extension/lib/page-hook.ts:386`, `:425`, `:432-449`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:67-313`, `:417-445`).
+   (`apps/extension/lib/contract.ts:67-313`, `:425-453`).
+   **One exception, on ChatGPT.** When you move between conversations inside
+   the page, ChatGPT now loads only the most recent part of a conversation.
+   Keeping that part would store an incomplete conversation, so it is never
+   kept; the extension instead requests the full conversation itself, from your
+   page, on the same origin (`apps/extension/lib/page-hook.ts:406-411`;
+   `apps/extension/entrypoints/dw-bridge.content.ts:193-219`). That request —
+   and every backfill request to ChatGPT's conversation list or a conversation
+   body — carries your session's access token, which the extension reads from
+   ChatGPT's own `/api/auth/session` on the same origin. The token is held only
+   in the page's content-script memory: it is never written to storage, never
+   logged, never sent to the `chat-stasher` host, and never attached to any
+   other request (`apps/extension/lib/platform-auth.ts:34-44`, `:74-93`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,
@@ -129,9 +141,12 @@ taking our word for it:
   the only network the code can touch is inside the pages it is already injected
   into. There is no origin belonging to this project anywhere in the extension.
 - **Check the network tab.** Open your browser's developer tools on a chat page
-  and watch the requests. Capture is passive: the hook reads a clone of a
-  response the page already fetched, and adds no request of its own
-  (`apps/extension/lib/page-hook.ts:399`, `:406-423`). The one feature that does
+  and watch the requests. On every platform except ChatGPT, capture is
+  passive: the hook reads a clone of a response the page already fetched, and
+  adds no request of its own. On ChatGPT it adds one same-origin request for
+  the full conversation when you move between conversations in the page, plus
+  one to `/api/auth/session` for the token (see step 1 of section 1)
+  (`apps/extension/lib/page-hook.ts:425`, `:432-449`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
   [section 4](#4-who-your-data-is-shared-with).
 - **Check the code for a tracker.** Searching the extension and CLI sources for
@@ -197,7 +212,7 @@ Two things in that table deserve to be called out rather than buried:
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
   (`apps/extension/entrypoints/background.ts:571-590` — the identity itself is
-  read by `apps/extension/lib/contract.ts:641-657`; the `default` fallback is on
+  read by `apps/extension/lib/contract.ts:649-665`; the `default` fallback is on
   the `||` at `apps/extension/entrypoints/background.ts:589`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
@@ -222,7 +237,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi) | Your conversations — they host them; they always could. The passive capture adds no traffic of its own. | `apps/extension/lib/page-hook.ts:399`, `:406-423` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on ChatGPT, where it requests the full conversation you just opened (same origin, your own session). | `apps/extension/lib/page-hook.ts:425`, `:432-449` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:261-296`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:465-475` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -273,8 +288,9 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:396-415`, `:521-529`), and bodies over 4 MB are
-skipped as streamed media (`apps/extension/lib/contract.ts:332`). No shipped
+(`apps/extension/lib/contract.ts:404-423`, `:529-537`). A body over 16 MiB is not
+captured, and the page console says so rather than dropping it silently
+(`apps/extension/lib/contract.ts:340`; `apps/extension/lib/page-hook.ts:205`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
 explicitly (`apps/extension/lib/contract.ts:117`, `:135`, `:151`, `:167`, `:229`,
 `:313`).
@@ -298,11 +314,11 @@ archive it: only a conversation you open or continue in the tab, after the
 extension is installed, is captured.
 
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
-the same capture decision above (`apps/extension/lib/page-hook.ts:180-215`).
+the same capture decision above (`apps/extension/lib/page-hook.ts:187-227`).
 An XHR body is read only when the page itself reads it as text or JSON
-(`:249-254`); a binary XHR body (arraybuffer, blob, document) is never read and
-only prints a console warning (`:255-258`, `:118-125`). `EventSource` streams
-are never read either — the hook only warns that one was used (`:269-281`).
+(`:261-266`); a binary XHR body (arraybuffer, blob, document) is never read and
+only prints a console warning (`:267-270`, `:125-132`). `EventSource` streams
+are never read either — the hook only warns that one was used (`:281-293`).
 
 ## 6. What each permission is for
 
