@@ -225,10 +225,12 @@ apps/extension/lib/page-hook.ts:317-329  b3ff4b9bcb73  lines=13
   <- docs/privacy.md:422  :: const eventSourceConstructor = pageWindow.EventSource;
 apps/extension/lib/page-hook.ts:331  e911da669725  lines=1
   <- docs/threat-model.md:27, docs/threat-model.md:220  :: // ---- WebSocket -----------------------------------------…
+apps/extension/lib/page-hook.ts:355  6e0bd9b9eb6b  lines=1
+  <- docs/threat-model.md:27, docs/threat-model.md:220  :: // Binary frames are not decoded here: guessing an encoding…
 apps/extension/lib/page-hook.ts:379-396  fdea4ee11e0d  lines=18
   <- docs/threat-model.md:220  :: if (
 apps/extension/lib/page-hook.ts:396  693aa83597c0  lines=1
-  <- docs/threat-model.md:27, docs/threat-model.md:27, docs/threat-model.md:220  :: warnUnsupportedTransport('websocket', url);
+  <- docs/threat-model.md:27  :: warnUnsupportedTransport('websocket', url);
 apps/extension/lib/page-hook.ts:422  b8838019dc2f  lines=1
   <- docs/privacy.md:88  :: const originalFetch = window.fetch.bind(window);
 apps/extension/lib/page-hook.ts:442-447  179b81cc05cf  lines=6

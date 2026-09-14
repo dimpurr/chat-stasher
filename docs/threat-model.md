@@ -24,7 +24,7 @@ Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
    the raw response text (`apps/extension/lib/contract.ts:104-129`, `:579-581`;
-   `apps/extension/lib/page-hook.ts:331`, `:396`, `:396`).
+   `apps/extension/lib/page-hook.ts:331`, `:355`, `:396`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
@@ -217,7 +217,7 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:331`, `:396`, `:379-396`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:630-668`, `:960-982`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:331`, `:355`, `:379-396`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:630-668`, `:960-982`). |
 
 **Caveat, stated honestly:** on every platform except ChatGPT and Gemini the
 passive hook adds no traffic, so there is nothing distinctive for the platform to
