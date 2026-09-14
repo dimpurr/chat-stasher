@@ -58,6 +58,21 @@
 //! from an archived id that has been checked to be a single path segment — a
 //! session id containing a separator is recorded as a failure, never followed.
 //!
+//! Nothing below `--out` is written through a symlink either, because
+//! [`std::fs::create_dir_all`] and [`std::fs::write`] both follow one: a
+//! pre-existing `<out>/<machine>` — or a deeper directory, or the target file
+//! itself — pointing outside `--out` would put archived conversation content
+//! somewhere the user did not name. `--out` itself may be a symlink; naming it
+//! *is* the choice of where to write, and that choice is honoured. A symlink
+//! anywhere below it makes that session a recorded failure ([`write_refusal`]),
+//! so the run is a `3` and never a quiet success; one planted at the manifest's
+//! own path is refused too, as the write failure it is.
+//!
+//! Known gap, the same one the rest of the codebase has: Windows reserved
+//! device names (`CON`, `NUL`, …) and components ending in a dot or a space are
+//! not handled here. They are refused or mangled by the platform, not by this
+//! module, and nothing below `--out` is written differently because of them.
+//!
 //! Privacy line: the manifest carries ids, counts, byte lengths, digests and
 //! timestamps. It never carries conversation text, and this module never prints
 //! any.
@@ -784,6 +799,18 @@ pub fn export_sessions(
             continue;
         }
         let path = opts.out.join(&relative);
+        if let Some(why) = write_refusal(&opts.out, &path) {
+            out.failed.push(FailedSession {
+                machine: hit.machine.clone(),
+                session_id: hit.session_id.clone(),
+                harness: hit.harness.clone(),
+                why: format!(
+                    "refusing to write `{}`: {why} — this command never writes outside `--out`",
+                    path.display()
+                ),
+            });
+            continue;
+        }
         if let Err(e) = write_file(&path, &filtered.bytes) {
             out.failed.push(FailedSession {
                 machine: hit.machine.clone(),
@@ -815,6 +842,19 @@ pub fn export_sessions(
     }
 
     let manifest = opts.out.join(MANIFEST_NAME);
+    // The manifest is a write below `--out` too, and the same rule holds: a
+    // symlink planted at `<out>/manifest.json` would put it outside. Refused
+    // here rather than recorded, because there is no manifest left to record it
+    // in — this is the same "read everything, then failed to write" state as an
+    // unwritable manifest, so it is the same error and the same exit `1`.
+    if let Some(why) = write_refusal(&opts.out, &manifest) {
+        return Err(anyhow::Error::new(OutputWriteError(format!(
+            "refusing to write the manifest `{}`: {why} — the session files above are on disk, \
+             but without the manifest nothing records which sessions they are or that the run \
+             finished",
+            manifest.display()
+        ))));
+    }
     if let Err(e) = std::fs::write(&manifest, out.manifest_json())
         .with_context(|| format!("write manifest `{}`", manifest.display()))
     {
@@ -851,6 +891,67 @@ fn time_state(unix: Option<i64>, why: Option<&str>) -> TimeState {
             why.unwrap_or("no conversation time was recorded for this session")
                 .to_string(),
         ),
+    }
+}
+
+/// Why `path`, whose destination is below `out`, must not be written — or
+/// `None` when it may be.
+///
+/// `out` itself is not inspected: naming a symlink as `--out` is the user's
+/// explicit choice of destination, and honouring it is the whole point of that
+/// choice. Everything *below* `out` must be ordinary, because
+/// [`std::fs::create_dir_all`] and [`std::fs::write`] both follow a symlink: a
+/// pre-existing `<out>/<machine>` (or a deeper directory, or the target file
+/// itself) pointing outside `out` would put archived conversation content
+/// outside the directory the user named.
+///
+/// Every component below `out` that already exists is inspected with
+/// [`std::fs::symlink_metadata`], which sees a symlink as a symlink rather than
+/// as whatever it points at. A component that is absent is fine — it will be
+/// created, and a thing that is not there cannot be a link. A component that
+/// exists but cannot be inspected is *not* fine: "unreadable" is not "absent",
+/// and writing through something whose nature is unknown is the state this
+/// refuses. The target itself, when it is already there, must be a regular
+/// file: a directory or a device would make the write fail or do something the
+/// user did not ask for.
+///
+/// This inspects before the write, it is not an atomic open: it closes the case
+/// of a symlink that is already there. A concurrent process that swaps a
+/// component in between this check and the write is beyond what it can see.
+fn write_refusal(out: &Path, path: &Path) -> Option<String> {
+    let Ok(relative) = path.strip_prefix(out) else {
+        return Some(format!(
+            "`{}` is not below `--out {}`",
+            path.display(),
+            out.display()
+        ));
+    };
+    let mut current = out.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Some(format!("`{}` is a symlink", current.display()));
+            }
+            // An ordinary component. Whether it is a directory is not this
+            // check's business: `create_dir_all` below says so, in its own
+            // words, if it is not.
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Some(format!(
+                    "`{}` exists but could not be inspected: {e}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => Some(format!(
+            "`{}` exists and is not a regular file",
+            path.display()
+        )),
+        _ => None,
     }
 }
 
@@ -1196,6 +1297,62 @@ mod tests {
         assert!(!is_safe_component("a/b"));
         assert!(!is_safe_component("a\\b"));
         assert!(!is_safe_component("../escape"));
+    }
+
+    /// A symlink anywhere below `--out` is refused — the directory on the way
+    /// down, the file itself, and a target that is not a regular file — while
+    /// `--out` itself may be a symlink, because naming it *is* the choice of
+    /// where to write.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_below_out_is_refused_but_out_itself_may_be_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let out = root.join("out");
+        std::fs::create_dir_all(out.join("m-alpha/claude-code")).unwrap();
+
+        // A path that does not exist yet, and one that holds a regular file
+        // from an earlier run: both are ordinary.
+        let file = out.join("m-alpha/claude-code/s.jsonl");
+        assert_eq!(write_refusal(&out, &file), None, "an absent path is fine");
+        std::fs::write(&file, b"previous run").unwrap();
+        assert_eq!(
+            write_refusal(&out, &file),
+            None,
+            "overwriting a regular file is what --force is for"
+        );
+
+        // A symlinked directory on the way down.
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::rename(out.join("m-alpha"), root.join("real-alpha")).unwrap();
+        std::os::unix::fs::symlink(&outside, out.join("m-alpha")).unwrap();
+        let why = write_refusal(&out, &out.join("m-alpha/claude-code/s.jsonl"))
+            .expect("a symlinked directory must be refused");
+        assert!(why.contains("symlink"), "{why}");
+
+        // The target file itself, a link to a file outside `out`.
+        std::fs::write(root.join("victim.jsonl"), b"do not touch").unwrap();
+        std::fs::create_dir_all(out.join("m-beta/codex")).unwrap();
+        let link = out.join("m-beta/codex/linked.jsonl");
+        std::os::unix::fs::symlink(root.join("victim.jsonl"), &link).unwrap();
+        let why = write_refusal(&out, &link).expect("a symlinked file must be refused");
+        assert!(why.contains("symlink"), "{why}");
+
+        // A target that is not a file at all.
+        std::fs::create_dir_all(out.join("m-beta/codex/a-directory")).unwrap();
+        let why = write_refusal(&out, &out.join("m-beta/codex/a-directory"))
+            .expect("a directory is not a file to overwrite");
+        assert!(why.contains("not a regular file"), "{why}");
+
+        // `--out` itself as a symlink: the user named it, so it is honoured.
+        let linked_out = root.join("linked-out");
+        std::os::unix::fs::symlink(&out, &linked_out).unwrap();
+        assert_eq!(
+            write_refusal(&linked_out, &linked_out.join("m-beta/codex/s.jsonl")),
+            None,
+            "the destination the user named may itself be a symlink"
+        );
     }
 
     // ------------------------------------------------------------ the refusal

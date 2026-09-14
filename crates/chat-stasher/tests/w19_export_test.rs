@@ -1012,6 +1012,227 @@ fn exit_codes_are_zero_one_three_and_two() {
     assert_eq!(output.status.code(), Some(2));
 }
 
+// ------------------------------------------------------------------ test 7
+
+/// A symlink below `--out` is not a destination. With `<out>/<machine>` pointing
+/// at a directory outside `--out`, `create_dir_all` and `fs::write` would follow
+/// it and put archived conversation content outside the directory the user
+/// named — so the session is refused and recorded, and the run is a `3`.
+///
+/// Unix-only, and the platform is the subject rather than an accommodation: the
+/// symlink is what this test is about, and unix is where the fixture can create
+/// one.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_machine_directory_cannot_be_written_through() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    let root = sandbox.path();
+    let (repo, key, _mk) = build_fixture_at(root);
+
+    let outside = root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let out = root.join("out-symlink-dir");
+    fs::create_dir_all(&out).unwrap();
+    std::os::unix::fs::symlink(&outside, out.join("m-alpha")).unwrap();
+
+    let output = run_export(root, &repo, &key, &out, &["--force"]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a session that could not be written leaves the run unfinished\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Nothing was created through the link — the refusal is the point.
+    assert_eq!(
+        fs::read_dir(&outside).unwrap().count(),
+        0,
+        "no byte of the export may land outside --out"
+    );
+    assert!(
+        out.join("m-alpha").is_symlink(),
+        "the refusal deletes nothing: the symlink is still there"
+    );
+
+    // The refusal is recorded per session, with a reason, in the manifest — the
+    // absent files are not left to be misread as "there was nothing".
+    let m = manifest(&out);
+    let failed = m["sessions_failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 2, "both claude-code sessions are refused");
+    for entry in failed {
+        let why = entry["why"].as_str().unwrap();
+        assert!(
+            why.contains("symlink"),
+            "the manifest must name the reason: {why}"
+        );
+        assert_eq!(entry["machine"], "m-alpha");
+    }
+    assert_eq!(m["exit_status"], 3);
+
+    // The machine that was not symlinked is still written: the rest of the
+    // export is still worth having.
+    assert!(
+        out.join("m-beta/codex")
+            .join(format!("{CODEX}.jsonl"))
+            .exists(),
+        "the sessions below a sound path are still exported"
+    );
+    assert_eq!(m["written"], 1);
+}
+
+/// The manifest is a write below `--out` like any other, so a symlink planted at
+/// its own path is refused as well. There is no manifest left to record that in,
+/// so the run ends the way an unwritable manifest already ends it: exit `1`,
+/// "read everything, then failed to write" — never a `0` with the manifest
+/// somewhere the user did not name.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_manifest_is_not_written_through() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    let root = sandbox.path();
+    let (repo, key, _mk) = build_fixture_at(root);
+
+    let victim = root.join("victim.json");
+    let before_bytes = b"{\"not\":\"a manifest\"}".to_vec();
+    fs::write(&victim, &before_bytes).unwrap();
+
+    let out = root.join("out-symlink-manifest");
+    fs::create_dir_all(&out).unwrap();
+    std::os::unix::fs::symlink(&victim, out.join("manifest.json")).unwrap();
+
+    let output = run_export(root, &repo, &key, &out, &["--force"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the archive was read and the write then failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        before_bytes,
+        "the file the manifest link points at must be untouched"
+    );
+    assert!(
+        out.join("manifest.json").is_symlink(),
+        "the refusal deletes nothing: the link is still there"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("symlink"),
+        "the refusal must say why: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The same rule one level down: the target `.jsonl` itself is a symlink to a
+/// file outside `--out`. The file it points at must be exactly as it was —
+/// `fs::write` would have followed the link and overwritten it.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_target_file_is_not_overwritten() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    let root = sandbox.path();
+    let (repo, key, _mk) = build_fixture_at(root);
+
+    let victim = root.join("victim.jsonl");
+    let before_bytes = b"this is not an export of anything".to_vec();
+    fs::write(&victim, &before_bytes).unwrap();
+
+    let out = root.join("out-symlink-file");
+    let target = out
+        .join("m-alpha/claude-code")
+        .join(format!("{CC_ONE}.jsonl"));
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&victim, &target).unwrap();
+
+    let output = run_export(root, &repo, &key, &out, &["--force"]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the session whose target is a link could not be written\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        before_bytes,
+        "the file the link points at must be untouched"
+    );
+    assert!(
+        target.is_symlink(),
+        "the refusal deletes nothing: the link is still there"
+    );
+
+    let m = manifest(&out);
+    let failed = m["sessions_failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1, "only the linked session is refused");
+    assert_eq!(failed[0]["session_id"], CC_ONE);
+    assert!(
+        failed[0]["why"].as_str().unwrap().contains("symlink"),
+        "the manifest must name the reason: {}",
+        failed[0]["why"]
+    );
+    // The two sessions under sound paths are still written.
+    assert_eq!(m["written"], 2);
+    assert!(out
+        .join("m-beta/codex")
+        .join(format!("{CODEX}.jsonl"))
+        .exists());
+}
+
+/// `--force` over a previous export of the same selection: the files are the
+/// ones this run wrote, the bytes are the same, and nothing about the second
+/// run's own output (an existing `manifest.json`, existing directories) makes it
+/// fail. A guard against a symlink check that refuses ordinary re-runs.
+#[test]
+fn a_force_rerun_over_a_previous_export_succeeds() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    let root = sandbox.path();
+    let (repo, key, _mk) = build_fixture_at(root);
+    let out = root.join("out-rerun");
+
+    let first = run_export(root, &repo, &key, &out, &[]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let paths = written_paths(&out);
+    let before: Vec<(String, Vec<u8>)> = paths
+        .iter()
+        .map(|p| (p.clone(), fs::read(out.join(p)).unwrap()))
+        .collect();
+
+    let second = run_export(root, &repo, &key, &out, &["--force"]);
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "a --force re-run over a previous export must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        written_paths(&out),
+        paths,
+        "the re-run writes the same set at the same paths"
+    );
+    for (path, bytes) in &before {
+        assert_eq!(
+            &fs::read(out.join(path)).unwrap(),
+            bytes,
+            "`{path}` is the same export as before"
+        );
+    }
+    let m = manifest(&out);
+    assert_eq!(m["exit_status"], 0);
+    assert_eq!(m["written"], 3);
+    assert!(m["sessions_failed"].as_array().unwrap().is_empty());
+}
+
 /// Run the CLI with an isolated HOME and XDG tree — the same isolation
 /// `b73_readexit_test.rs` uses, so no real config, cache or stage is read.
 fn run_export(sandbox: &Path, repo: &Path, key: &Path, out: &Path, extra: &[&str]) -> Output {

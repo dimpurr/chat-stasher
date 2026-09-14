@@ -163,7 +163,7 @@ eprintln     crates/chat-stasher/src/doctor.rs:2521  "  [registry] no probes —
 eprintln     crates/chat-stasher/src/doctor.rs:2528  "  [registry] driven table — platform={platform} · {hit}/{n} harnesses hit / scanned successfully"
 eprintln     crates/chat-stasher/src/doctor.rs:2593  "    {mark} {:<16} {conf:<26} sessions={:<4}{bytes:<0} {root}{extra}"
 eprintln     crates/chat-stasher/src/doctor.rs:2604  "    low-confidence (community claims only, scanned but cannot be treated as verified): {flagged}"
-with_context crates/chat-stasher/src/export.rs:819  "write manifest `{}`"
+with_context crates/chat-stasher/src/export.rs:859  "write manifest `{}`"
 bail         crates/chat-stasher/src/identity.rs:54  "machine identity must be exactly 32 hex characters, got {hex:?}"
 with_context crates/chat-stasher/src/identity.rs:89  "open /dev/urandom for a machine identity"
 with_context crates/chat-stasher/src/identity.rs:91  "read random bytes for a machine identity"
