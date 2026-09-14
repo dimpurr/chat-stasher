@@ -20,6 +20,7 @@
     "@playwright/test": "1.63.0",
     "@wxt-dev/i18n": "0.2.7",
     "fake-indexeddb": "^6.2.5",
+    "jsdom": "^30.0.1",
     "typescript": "^5.9.3",
     "vite": "^8.1.5",
     "vitest": "^4.1.10",

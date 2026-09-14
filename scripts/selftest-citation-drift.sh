@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# scripts/check-citation-drift.py 的自测: 证明它真的能检出漂移。
+# The selftest for scripts/check-citation-drift.py: proof that it still catches
+# drift. Five probes. Each one edits a real file in place and restores it from a
+# backup whatever the outcome; the run ends by printing `git status`.
 #
-# 上一版检查器只校验"行号没越界、那一行非空", 于是把一条引用改成 main.rs:397
-# (那行是 `options: Vec<String>`, 跟任何断言都不相干) 它照样返回 0。这里的三个
-# 探针就是冲着那个漏洞去的:
+# The first version of the checker asked only two questions — is the line number
+# in bounds, is that line non-empty. A citation moved to a line that exists and
+# is non-empty but has nothing to do with the claim returned 0. The probes are
+# aimed at that hole:
 #
-#   探针 1  把一条引用改到【存在且非空但不相干】的行号  => 必须红
-#   探针 2  不动文档, 改被引代码那一行的内容           => 必须红
-#   探针 3  什么都不动                                => 必须绿
+#   probe 1  move a citation to a line that exists, is non-empty, unrelated  => red
+#   probe 2  leave the document alone, edit a line inside a cited range      => red
+#   probe 3  change nothing                                                  => green
+#   probe 4  add a dangling citation to contracts/ (W32)                     => red
+#   probe 5  every contracts/*.md is in the scan set (W32)                    => green
 #
-# 三个探针都在原地改真文件, 无论成败都用备份恢复; 结束时自查工作区是否干净。
+# 🔴 Probes 1 and 2 name coordinates in real files, and coordinates rot when
+#    those files move. They had rotted by W32: both could no longer apply their
+#    own edit and reported the selftest itself as void. That is why every probe
+#    below checks that its edit landed *before* it judges the checker — a stale
+#    coordinate must fail loudly here, never pass quietly.
 
 set -u
 
@@ -22,7 +31,8 @@ FAILED=0
 
 restore() {
   [ -f "$TMP/threat-model.md" ] && cp "$TMP/threat-model.md" "$REPO/docs/threat-model.md"
-  [ -f "$TMP/store.rs" ] && cp "$TMP/store.rs" "$REPO/crates/chat-stasher/src/store.rs"
+  [ -f "$TMP/engine.ts" ] && cp "$TMP/engine.ts" "$REPO/apps/extension/lib/backfill/engine.ts"
+  [ -f "$TMP/nativehost-protocol.md" ] && cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
 }
 trap 'restore; rm -rf "$TMP"' EXIT
 
@@ -36,62 +46,127 @@ expect() { # expect <期望退出码> <实际退出码> <说明>
 }
 
 echo "=============================================================="
-echo "探针 1: 把一条引用改到存在且非空、但内容不相干的行号"
-echo "  位置: docs/threat-model.md:252 的 \`:3213-3260\` -> \`:397\`"
-echo "  (选它是因为这是【省略文件名的续写引用】, 靠上一条引用推断出 main.rs;"
-echo "   实现时我脑子里想的是带完整路径的那种写法, 这条走的是另一条解析分支。"
-echo "   main.rs:397 是 'options: Vec<String>', 存在、非空、与该段断言无关 ——"
-echo "   正是上一版检查器放过去的那种情形。)"
+echo "Probe 1: move a citation to a line that exists, is not empty, and"
+echo "  has nothing to do with the claim it is attached to."
+echo "  Target: docs/threat-model.md:148, \`:180\` -> \`:1\`"
+echo "  (Chosen because it is a *continuation* citation: the file name is"
+echo "   omitted and inferred from the citation before it on the same line, so"
+echo "   this exercises the other parsing branch. view.rs:1 is that module's own"
+echo "   doc comment — it exists, it is not empty, and it has nothing to do with"
+echo "   the constant-time token check the sentence cites. That is exactly what"
+echo "   the previous checker let through: bounds and non-emptiness were the"
+echo "   whole test.)"
 echo "=============================================================="
 cp "$REPO/docs/threat-model.md" "$TMP/threat-model.md"
-sed -i '' '252s/`:3213-3260`/`:397`/' "$REPO/docs/threat-model.md"
-if ! grep -q '`:397`' "$REPO/docs/threat-model.md"; then
-  echo "  ✘ 探针 1 没能改动文档, 自测本身失效"
+sed -i '' '148s/`:180`/`:1`/' "$REPO/docs/threat-model.md"
+if ! grep -q '`:1`' "$REPO/docs/threat-model.md"; then
+  echo "  ✘ probe 1 could not modify the document; the selftest itself is void"
   FAILED=1
 fi
 $CHECK
 rc=$?
-expect 1 "$rc" "引用漂到不相干的合法行, 必须红"
+expect 1 "$rc" "a citation moved to an unrelated but legal line must be red"
 cp "$TMP/threat-model.md" "$REPO/docs/threat-model.md"
 echo
 
 echo "=============================================================="
-echo "探针 2: 文档一个字不改, 改被引代码那一行的内容"
-echo "  位置: crates/chat-stasher/src/store.rs:948 —— 它落在被引范围 917-983 的"
-echo "  【中间】, 不是首行。lockfile 里人眼看到的摘要是首行, 首行不变;"
-echo "  所以这条只有靠整段的哈希才抓得到, 靠摘要抓不到。"
-echo "  (这是真实世界最常见的漂移: 代码被编辑, 行号还在, 内容变了。)"
+echo "Probe 2: leave the document alone and edit a line *inside* a cited"
+echo "  range."
+echo "  Target: apps/extension/lib/backfill/engine.ts:715, inside the cited"
+echo "  range 694-736 (43 lines). It sits in the middle, not on the first line:"
+echo "  the snippet a human reads in the lockfile is the range's first non-empty"
+echo "  line, and that line does not change."
+echo "  (This is the most common drift in the wild: code is edited, the line"
+echo "   numbers survive, the content moves on. Only hashing the whole range"
+echo "   catches it — comparing the snippet would not.)"
 echo "=============================================================="
-cp "$REPO/crates/chat-stasher/src/store.rs" "$TMP/store.rs"
-sed -i '' '948s/.*/    let tmp = parent.join(format!(".{}.PROBE2", name.to_string_lossy()));/' \
-  "$REPO/crates/chat-stasher/src/store.rs"
-if ! sed -n '948p' "$REPO/crates/chat-stasher/src/store.rs" | grep -q PROBE2; then
-  echo "  ✘ 探针 2 没能改动代码, 自测本身失效"
+cp "$REPO/apps/extension/lib/backfill/engine.ts" "$TMP/engine.ts"
+sed -i '' '715s/.*/     * PROBE2: content changed inside the cited range/' \
+  "$REPO/apps/extension/lib/backfill/engine.ts"
+if ! sed -n '715p' "$REPO/apps/extension/lib/backfill/engine.ts" | grep -q PROBE2; then
+  echo "  ✘ probe 2 could not modify the code; the selftest itself is void"
   FAILED=1
 fi
 $CHECK
 rc=$?
-expect 1 "$rc" "被引范围内容变了, 必须红"
-cp "$TMP/store.rs" "$REPO/crates/chat-stasher/src/store.rs"
+expect 1 "$rc" "content inside the cited range changed, must be red"
+cp "$TMP/engine.ts" "$REPO/apps/extension/lib/backfill/engine.ts"
 echo
 
 echo "=============================================================="
-echo "探针 3: 什么都不动"
+echo "Probe 3: change nothing"
 echo "=============================================================="
 $CHECK
 rc=$?
-expect 0 "$rc" "干净状态必须绿"
+expect 0 "$rc" "a clean tree must be green"
 echo
 
 echo "=============================================================="
-echo "收尾: 工作区应当只剩有意新增的文件"
+echo "Probe 4 (W32): a dangling citation inside contracts/"
+echo "  contracts/ was outside the scan until W32, so a citation there"
+echo "  could name a file that does not exist and every gate stayed"
+echo "  green. This probe appends exactly that to the real contract"
+echo "  document and demands a red."
+echo "  Scope: the citation is written in the syntax the checker parses"
+echo "  (a path followed by :line). A bare path with no line number is"
+echo "  outside that syntax and is NOT what this probe covers."
+echo "=============================================================="
+cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
+printf '\nW32 probe: see `crates/chat-stasher/src/w32-probe-missing.rs:1`.\n' \
+  >> "$REPO/contracts/nativehost-protocol.md"
+if ! grep -q 'w32-probe-missing.rs:1' "$REPO/contracts/nativehost-protocol.md"; then
+  echo "  ✘ probe 4 could not modify the contract document; the selftest itself is void"
+  FAILED=1
+fi
+$CHECK
+rc=$?
+expect 1 "$rc" "a citation naming a file that does not exist, in contracts/, must be red"
+cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
+echo
+
+echo "=============================================================="
+echo "Probe 5 (W32): every contracts/*.md is in the scan set"
+echo "  Probe 4 proves a red; this one proves what the red is for —"
+echo "  the scan set really is DOC_FILES plus every contract document,"
+echo "  read from the checker itself rather than from the prose here."
+echo "=============================================================="
+python3 - "$REPO" <<'PY'
+import glob, importlib.util, os, sys
+
+root = sys.argv[1]
+spec = importlib.util.spec_from_file_location(
+    "citation_drift", os.path.join(root, "scripts", "check-citation-drift.py")
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+scanned = set(module.doc_files())
+on_disk = {
+    os.path.relpath(path, root)
+    for path in glob.glob(os.path.join(root, "contracts", "*.md"))
+}
+if not on_disk:
+    print("  no contract document found at all — the probe checked nothing")
+    sys.exit(1)
+missing = sorted(on_disk - scanned)
+if missing:
+    print(f"  scan set is missing: {', '.join(missing)}")
+    sys.exit(1)
+print(f"  {len(on_disk)} contract document(s) in the scan set: {', '.join(sorted(on_disk))}")
+PY
+rc=$?
+expect 0 "$rc" "contracts/*.md must all be in the scan set"
+echo
+
+echo "=============================================================="
+echo "After: the working tree should hold only the intended new files"
 echo "=============================================================="
 git status --porcelain
 echo
 
 if [ "$FAILED" -eq 0 ]; then
-  echo "自测通过: 三个探针的退出码都符合预期。"
+  echo "SELFTEST PASS: all five probes returned the exit code they must."
   exit 0
 fi
-echo "自测失败: 有探针的退出码不符合预期。"
+echo "SELFTEST FAIL: a probe returned the wrong exit code."
 exit 1

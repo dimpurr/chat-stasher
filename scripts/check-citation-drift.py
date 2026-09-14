@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import os
 import re
@@ -40,6 +41,24 @@ DOC_FILES = [
     "docs/privacy.md",
     "docs/threat-model.md",
 ]
+
+
+def doc_files() -> list[str]:
+    """The documents in scope: DOC_FILES plus every contracts/*.md.
+
+    contracts/ is globbed rather than enumerated one path at a time, so a new
+    contract document is covered the moment it exists. contracts/ sat outside
+    the scan for exactly that reason: it was not on a hand-written list, and a
+    citation there could name a file that does not exist while every gate stayed
+    green.
+
+    🔴 A document named here that is missing is reported, not skipped: see
+    parse_docs(). "We could not look" must never read as "nothing to find".
+    """
+    return DOC_FILES + sorted(
+        os.path.relpath(p, REPO) for p in glob.glob(os.path.join(REPO, "contracts", "*.md"))
+    )
+
 
 # 解析被引文件时不进入的目录。
 SKIP_DIRS = {".git", "target", "node_modules", ".private", "dist", ".output", ".wxt"}
@@ -105,7 +124,7 @@ def parse_docs(basenames: dict[str, list[str]]) -> tuple[list[Citation], list[st
     citations: list[Citation] = []
     problems: list[str] = []
 
-    for doc in DOC_FILES:
+    for doc in doc_files():
         abs_doc = os.path.join(REPO, doc)
         if not os.path.exists(abs_doc):
             problems.append(f"{doc}: 文档不存在")
