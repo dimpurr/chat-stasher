@@ -124,6 +124,12 @@ function makeFakePage(hook: {
       expect(tag).toBe('script');
       return { textContent: '', remove() { /* detached again by the bridge */ } };
     },
+    // 🔴 W27 · Every real page's `document` has these two, and the bridge now
+    //    listens for the tab becoming visible (lib/backfill/tab-hello.ts). This
+    //    fake is a page, so it has them too; neither is ever fired here, because
+    //    this file is about the MAIN-world handshake and not about that listener.
+    visibilityState: 'visible' as const,
+    addEventListener() { /* the visibility listener is not what this file tests */ },
   });
   vi.stubGlobal('window', win);
   return page;
