@@ -230,8 +230,16 @@ or `{"kind": "unknown", "why": "..."}`, and `last_push` is either
 that could not be read is `unknown` with a reason; a measured zero is
 `{"kind": "known", "count": 0}`. `complete` is `true` exactly when every count
 and `last_push` is `known` — it is the same statement as "no `unknown` appears
-anywhere in this response", and the two are asserted equal by
-`tests/w30_nativehost_summary_test.rs` rather than left to a reader.
+anywhere in this response", and the two are asserted equal by the test
+`complete_is_true_exactly_when_nothing_is_unknown` in
+`crates/chat-stasher/src/nativehost.rs` rather than left to a reader.
+
+**Cost.** `summary` lists directories and reads file metadata only; it never
+opens a shard, decrypts anything or touches the network. Its cost grows with
+the total number of sessions and shards in the stage, not with the 24-hour
+window, and it has no timeout of its own: on a very large or slow (for example
+network-mounted) stage the popup's own 3-second limit can expire first, and the
+popup then says the host did not answer.
 
 `last_push` is the `finished_at_unix` of the most recent `run-once` pass whose
 recorded outcome was `completed` (a snapshot was created). When the record is
