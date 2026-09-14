@@ -27,14 +27,17 @@ that document is the honest one.
 - **We receive nothing.** Not your conversations, not your email, not your IP
   address, not usage statistics, not crash reports, not even the fact that you
   installed this.
-- **The extension runs on six chat platforms and nowhere else** — a fixed list
+- **The extension runs on seven chat platforms and nowhere else** — a fixed list
   compiled into the code, not a wildcard. See
   [section 5](#5-where-the-extension-runs) for the exact origins.
 - **Running on a site is not the same as backing up your history there.** The
   optional backfill feature implements recovering past conversation text on
-  **ChatGPT** and **DeepSeek** — implemented, not yet observed completing in a
-  real browser, and for DeepSeek we have **not verified** whether a long
-  conversation comes back complete. On **Perplexity** it lists your
+  **ChatGPT**, **DeepSeek** and **Grok** — on none of the three has a complete
+  backfill been observed in a real browser, and for DeepSeek and Grok we have
+  **not verified** whether a long conversation comes back complete. Grok is the
+  least verified of the three: its routes come from reading public open-source
+  implementations rather than from a logged-in grok.com session, and one
+  conversation costs two requests. On **Perplexity** it lists your
   conversations and saves **none of their content**; on Gemini, Claude, and Kimi
   it does nothing at all. See
   [section 5](#5-where-the-extension-runs).
@@ -78,7 +81,7 @@ the sentence.
    requests **the page itself already made** in your already-logged-in session
    (`apps/extension/lib/page-hook.ts:376`, `:415`, `:422-439`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:66-312`, `:424-452`).
+   (`apps/extension/lib/contract.ts:66-400`, `:511-539`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
@@ -201,8 +204,8 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:200`; `apps/extension/lib/backfill/tab-port.ts:95` |
-| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts`), so settling one conversation does not rewrite the whole list. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. | `apps/extension/lib/backfill/types.ts:589-611`; `apps/extension/lib/backfill/debt-store.ts:37-39` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:200`; `apps/extension/lib/backfill/tab-port.ts:105` |
+| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts`), so settling one conversation does not rewrite the whole list. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. | `apps/extension/lib/backfill/types.ts:607-629`; `apps/extension/lib/backfill/debt-store.ts:37-39` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
 
@@ -214,7 +217,7 @@ Two things in that table deserve to be called out rather than buried:
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
   (`apps/extension/entrypoints/background.ts:631-650` — the identity itself is
-  read by `apps/extension/lib/contract.ts:635-651`; the `default` fallback is on
+  read by `apps/extension/lib/contract.ts:722-738`; the `default` fallback is on
   the `||` at `apps/extension/entrypoints/background.ts:649`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
@@ -239,7 +242,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on ChatGPT, where it requests the full conversation you just opened (same origin, your own session). | `apps/extension/lib/page-hook.ts:415`, `:422-439` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on ChatGPT, where it requests the full conversation you just opened (same origin, your own session). | `apps/extension/lib/page-hook.ts:415`, `:422-439` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:261-296`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:465-475` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -258,15 +261,20 @@ code refuses to fetch at all rather than defaulting to a live one
 
 Which platforms actually see those extra requests, stated exactly:
 **ChatGPT** and **DeepSeek** (conversation list *and* each conversation's
-content — on DeepSeek that is one body request per conversation), and
-**Perplexity** (**conversation list only** — the extension never requests the
-content of a Perplexity conversation, and therefore never archives one). On
-**Gemini**, **Claude**, and **Kimi** backfill issues no requests at all.
-(`apps/extension/lib/backfill/enumerate.ts:1000-1006`, `:1014-1020`, `:872`.) The
+content — on DeepSeek that is one body request per conversation), **Grok**
+(conversation list *and* **two** body requests per conversation: a skeleton call
+and a content call), and **Perplexity** (**conversation list only** — the
+extension never requests the content of a Perplexity conversation, and therefore
+never archives one). On **Gemini**, **Claude**, and **Kimi** backfill issues no
+requests at all.
+(`apps/extension/lib/backfill/enumerate.ts:1470-1476`, `:1484-1490`, `:1337`.) The
 practical reading for you: enabling backfill on Perplexity produces list traffic
 the platform can see, and produces **no backup whatsoever** on your side. On
-DeepSeek it produces list traffic *and* one body request per conversation, which
-is a request pattern the platform is more likely to notice.
+DeepSeek it produces list traffic *and* one body request per conversation, and on
+Grok two, which is a request pattern the platform is more likely to notice —
+both of those requests are the same two calls grok.com's own page makes when you
+open a conversation, separated by a 2-5 second pause
+(`apps/extension/lib/backfill/enumerate.ts:1188`).
 
 ## 5. Where the extension runs
 
@@ -279,9 +287,10 @@ origins** compiled into the code — never `<all_urls>`, never a wildcard:
 - `https://gemini.google.com` (`apps/extension/lib/contract.ts:154`)
 - `https://claude.ai` (`apps/extension/lib/contract.ts:170`)
 - `https://www.kimi.com` (`apps/extension/lib/contract.ts:240`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:319`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:317-319`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:404-406`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -292,12 +301,12 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:403-422`, `:515-523`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:490-509`, `:602-610`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:339`; `apps/extension/lib/page-hook.ts:195`). No shipped
+(`apps/extension/lib/contract.ts:426`; `apps/extension/lib/page-hook.ts:195`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
 explicitly (`apps/extension/lib/contract.ts:116`, `:134`, `:150`, `:166`, `:228`,
-`:312`).
+`:312`, `:399`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
@@ -307,17 +316,25 @@ tier of that list is easy to misread:
 
 | Platform | What backfill does when you enable it |
 |---|---|
-| **ChatGPT**, **DeepSeek** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:1000-1006`). Both are **implemented, not yet observed completing a backfill in a real browser**; and for DeepSeek we have **not verified** whether a long conversation comes back complete, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:701-714`). |
-| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:1014-1020`). |
-| **Gemini**, **Claude**, **Kimi** | Nothing; the leg stops before issuing any request (`apps/extension/lib/backfill/enumerate.ts:872`). |
+| **ChatGPT**, **DeepSeek**, **Grok** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:1470-1476`). All three are **implemented, not yet observed completing a backfill in a real browser**. For DeepSeek and Grok we have **not verified** whether a long conversation comes back complete, because the extension does not page those endpoints (`apps/extension/lib/backfill/enumerate.ts:1014-1027`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:1251-1312`). |
+| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:1484-1490`). |
+| **Gemini**, **Claude**, **Kimi** | Nothing; the leg stops before issuing any request (`apps/extension/lib/backfill/enumerate.ts:1337`). |
 
 We state this in a privacy policy because the failure mode is a privacy
 expectation, not just a feature gap: a user who believes their Perplexity
 history is archived may delete it upstream. Backfill does not archive it: only a
 conversation you open or continue in the tab, after the extension is installed,
-is captured. A weaker version of the same caution applies to DeepSeek: what
-backfill stores is only as complete as the body endpoint returns, and we have not
-checked a genuinely long conversation against it.
+is captured. A weaker version of the same caution applies to DeepSeek and Grok:
+what backfill stores is only as complete as the body endpoint returns, and we
+have not checked a genuinely long conversation against either of them. Grok
+carries a second caveat of its own: where the sources for its list cursor
+disagree, the extension does **not** pick one — a page that repeats what was
+already listed stops the leg and says the response shape changed, rather than
+being read as "you have no more conversations"
+(`apps/extension/lib/backfill/engine.ts:673-715`). And because no source says
+whether Grok returns a conversation's responses in a stable order, re-opening an
+unchanged Grok conversation is more likely than on other platforms to deliver
+another copy of it: an extra copy in your archive, never a lost one.
 
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
 the same capture decision above (`apps/extension/lib/page-hook.ts:177-217`).

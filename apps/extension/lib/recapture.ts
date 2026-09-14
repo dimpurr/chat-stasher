@@ -20,7 +20,28 @@ export const LAST_DELIVERED_KEY = 'cs_last_delivered_v1';
 /** How many conversations to remember; the oldest are forgotten first. */
 export const MAX_REMEMBERED = 2000;
 
-/** Per platform: top-level response fields that change on every request. */
+/**
+ * Per platform: top-level response fields that change on every request.
+ *
+ * 🔴 W21 · **No entry for grok, and that is a decision with a reason.** The
+ *    content response (`{ responses: [...] }`) carries responseId, message,
+ *    sender, createTime, parentResponseId, model and the web-search/file
+ *    metadata, and **no source shows a field of the kind this table exists for**
+ *    — no signed URL, no URL that expires, no "fetched at" stamp on the envelope
+ *    (the same sources do show a signed URL in another platform's file metadata,
+ *    which is why the absence here was looked for rather than assumed).
+ *    Registering a key with no evidence would be worse than registering none: a
+ *    wrong key is not neutral, it **deletes that field before comparing**, so a
+ *    real change inside it would be skipped and the archive would keep the old
+ *    copy while the user was told nothing had changed.
+ *
+ *    What is therefore left in place for grok, stated rather than hidden: the
+ *    sources note that `responses` is **not guaranteed to be in request order**,
+ *    so two views of one unchanged conversation can serialise differently and
+ *    re-deliver. This table cannot express "order an array" (it deletes fields,
+ *    never normalises), and the safe direction of that error is an extra copy —
+ *    never a change that went unnoticed.
+ */
 const VOLATILE_KEYS: Readonly<Record<string, readonly string[]>> = {
   chatgpt: ['safe_urls'],
 };

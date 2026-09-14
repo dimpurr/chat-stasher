@@ -493,7 +493,25 @@ export interface BackfillState {
    *              a definite completion.
    *              Without this field the two outcomes would look identical in the ledger.
    */
-  enumCursor: { offset: number; complete: boolean; cursor?: number | null; truncated?: EnumTruncation };
+  enumCursor: {
+    offset: number;
+    complete: boolean;
+    cursor?: number | null;
+    /**
+     * 🔴 W21 · **The opaque page token**, for a platform whose cursor is not a
+     * number (Grok's `nextPageToken`, which the sources describe as an echo of
+     * the last conversation id on the page).
+     *
+     * A field of its own rather than a widened `cursor`: the two are different
+     * kinds of thing (one may be min/max-ed and reasoned about, the other may only
+     * be handed back unread), and a union type would invite arithmetic on a value
+     * that has no arithmetic. `null`/absent = no token yet = request the first
+     * page, which is how every state written before W21 reads back — no version
+     * bump, no progress lost. A platform is one mode or the other, never both.
+     */
+    token?: string | null;
+    truncated?: EnumTruncation;
+  };
   /** Debts: conversation ids that were enumerated but whose body has not been fetched. */
   pending: string[];
   /** Settled: conversation ids already archived, never enqueued again. */
@@ -592,7 +610,7 @@ export interface BackfillHeader {
   scope: string;
   totalKnown: number | null;
   totalSource: TotalSource;
-  enumCursor: { offset: number; complete: boolean; cursor?: number | null; truncated?: EnumTruncation };
+  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation };
   /** How many debts were still owed when this header was written. */
   pendingCount: number;
   /** How many conversations had been settled when this header was written. */

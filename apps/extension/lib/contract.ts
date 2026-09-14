@@ -311,6 +311,93 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
   },
+  {
+    id: 'grok',
+    // 🔴 DOMAIN: exactly one origin, and it is the one the sources use. No
+    // wildcard, no *.grok.com, no xi.grok.com or any other subdomain — nothing
+    // in the reviewed scope serves this route from another host.
+    origins: ['https://grok.com'],
+    // 🔴 Deliberately NOT '/rest/' or '/app-chat/'. Three endpoints live under
+    // this prefix — the conversation list (GET), the message-tree skeleton
+    // (GET .../response-node) and the message content (POST .../load-responses)
+    // — and only the third one is the data this leg claims to back up. A
+    // broader hint would make the list and the skeleton "candidates" whose
+    // bodies then fail the shape gate below, turning the shape-mismatch warning
+    // into noise for three requests per conversation opening. The narrow hint
+    // is also why the skeleton GET is not in `methods`: it carries no content.
+    pathHints: ['/load-responses'],
+    methods: ['POST'],
+    status: { min: 200, max: 299 },
+    responseShape: {
+      encoding: 'json',
+      // Exactly the one field the content-bearing response is keyed by in every
+      // source: { responses: [{ responseId, message, sender, createTime,
+      // parentResponseId, model, ... }] }. Required (not "any of"): on this route
+      // a body without `responses` is the drift case, so it must fail the shape
+      // gate and get warned about rather than pass through as an empty-looking
+      // capture. An EMPTY array passes — `[]` is a measurement, not a missing
+      // field, and that is the difference this row has to keep.
+      requiredPaths: ['responses'],
+    },
+    // The conversation id is a path segment of the API URL, so the API URL alone
+    // is enough; the page URL (/c/<id>) is the fallback the other rows use, and
+    // it is here because the content response also arrives while the user is on
+    // that page. Both patterns are anchored on a path segment, never on a query.
+    sessionIdPatterns: [
+      '/rest/app-chat/conversations/([^/]+)/load-responses',
+      '/c/([A-Za-z0-9_-]{8,})',
+    ],
+    // 🔴 The route shape below is SOURCE-BACKED but NOT live-verified: it comes
+    // from reading public open-source projects and one closed-source store build,
+    // NOT from a logged-in grok.com session. Nobody on this change ever opened
+    // grok.com, so this row is 'from-source', never 'verified'. If the real route
+    // or envelope differs, the generic gate above rejects it and page-hook.ts
+    // warns — it never guesses.
+    //
+    // External source evidence checked 2026-09-14 (source code, not README):
+    //  · One reference implementation (MIT) builds the base URL
+    //    https://grok.com/rest/, GETs app-chat/conversations?pageSize=<n>[&pageToken=<t>]
+    //    for the list, GETs app-chat/conversations/<id>/response-node for the tree
+    //    skeleton, and POSTs { responseIds: [...] } to
+    //    app-chat/conversations/<id>/load-responses for the content. Its own
+    //    type declarations carry the exact response field names used here:
+    //    { conversations: [{ conversationId, title, starred, createTime,
+    //    modifyTime }], nextPageToken, textSearchMatches } for the list,
+    //    { responseNodes: [{ responseId, sender, parentResponseId }] } for the
+    //    skeleton, and { responses: [{ responseId, message, sender, createTime,
+    //    parentResponseId, model, webSearchResults, citedWebSearchResults,
+    //    fileAttachmentAssetMetadata }] } for the content. Its recorded note is
+    //    that all three were verified in a logged-in browser session in 2026-07
+    //    and then dogfooded against a real account. That is somebody else's
+    //    verification, not this repository's.
+    //  · A second reference implementation (MIT) independently uses
+    //    https://grok.com/rest/app-chat with the same response-node →
+    //    load-responses pair and the same { responseIds } POST body, and reads
+    //    `conversations[].conversationId` / `responses[].responseId` /
+    //    `responses[].message` / `responses[].sender` / `responses[].createTime`.
+    //    It disagrees with the first on the LIST cursor (an integer `page` query
+    //    instead of `pageToken`) — see GROK_PLAN's provenance; the content
+    //    endpoint is the same in both.
+    //  · A closed-source unpacked store build was read for architecture only. It
+    //    corroborates the pair (.../response-node then a POST to
+    //    .../load-responses whose body is exactly { responseIds } built from the
+    //    skeleton's ids), and its own URL allow-list names the same two path
+    //    shapes. It also shows that the page posts to the same
+    //    `/app-chat/conversations` prefix for unrelated operations (title edit,
+    //    delete), which is part of why the hint above is the content path itself.
+    // No project name, licence identifier or URL is recorded here on purpose: the
+    // public surface of this repository does not name third-party exporters.
+    credibility: 'from-source',
+    // No shipped row observes WebSocket frames. Stated explicitly, not left to
+    // the default, so that "did anyone turn this on?" is one grep away.
+    // 🔴 Grok is a case where this default was checked rather than assumed: the
+    //    content arrives over plain REST (GET skeleton, then POST content), and
+    //    the live *streaming* of a reply is a separate transport that no source
+    //    in the reviewed scope captures or documents. Recording that as "not
+    //    found" is the honest state; turning this switch on would claim we know
+    //    how to read those frames, which we do not.
+    webSocketCapture: false,
+  },
 ];
 
 /** Content-script matches derived from the table — a closed set. */

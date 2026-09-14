@@ -58,6 +58,14 @@
  *  8. a body URL's **query** is checked against the plan's declaration, and against
  *     the plan's own URL builder: see checkDetailQuery. A plan that declares no
  *     query key permits no query at all.
+ *  --- 🔴 W21 added two more, for a plan that declares a second detail step
+ *  9. a plan may name a **third** path (the second detail step). It is admitted
+ *     only when the plan declares it, it is compared with the same
+ *     prefix/exact/template rule as the first, and it is always a POST whose
+ *     method is not even a parameter the request can choose.
+ * 10. one key of a POST body may be declared as an **array of non-empty strings**
+ *     (`bodyArrayKeys`), bounded by MAX_BODY_ARRAY_ITEMS and refused for anything
+ *     nested, empty, non-string or on an undeclared key.
  * Failing any one of these refuses the request with an error; never send it anyway.
  *
  * ## 🔴 Why this is still not a "general-purpose proxy"
@@ -71,10 +79,12 @@
 import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
 import {
   backfillPlanFor,
+  detailPathMatches,
   expectedMethodFor,
   postSpecFor,
   ALLOWED_BACKFILL_CONTENT_TYPES,
   ALLOWED_BACKFILL_METHODS,
+  MAX_BODY_ARRAY_ITEMS,
   MAX_REQUEST_BODY_BYTES,
   type BackfillEnumPlan,
   type BackfillMethod,
@@ -217,24 +227,6 @@ function isScalar(v: unknown): boolean {
 }
 
 /**
- * 🔴 W8 · Does this pathname name the body endpoint itself?
- *
- * A detailPath ending in '/' names a **directory** that the conversation id gets
- * appended to (ChatGPT: '/backend-api/conversation/' + <id>), so a prefix match is
- * what that declaration means. A detailPath with no trailing '/' names **one
- * endpoint**, and is therefore compared in full.
- *
- * 🔴 Why the second rule had to exist before a query could: DeepSeek's route is a
- *    single fixed path with the id in the query, so a prefix match on
- *    '/api/v0/chat/history_messages' would have permitted every lookalike path that
- *    merely starts with it. The plan writes one endpoint down; one endpoint is what
- *    is permitted.
- */
-function detailPathMatches(detailPath: string, pathname: string): boolean {
-  return detailPath.endsWith('/') ? pathname.startsWith(detailPath) : pathname === detailPath;
-}
-
-/**
  * 🔴 W8 · The body URL's **query** dimension. Returns a detail sentence when the
  * URL must be refused, or null when it may go.
  *
@@ -256,10 +248,34 @@ function detailPathMatches(detailPath: string, pathname: string): boolean {
  *    see REFUSED_URL_REASON), and deliberately name neither the query key nor its
  *    value — a key name is not echoed back, the same call the POST body check makes.
  */
-function checkDetailQuery(plan: BackfillEnumPlan, u: URL): string | null {
-  const key = plan.detailQueryKey;
+function checkDetailQuery(
+  plan: BackfillEnumPlan,
+  u: URL,
+  segment: 'detail' | 'detail2',
+): string | null {
+  // 🔴 W21 · The second step's URL is always query-free, and its own declaration
+  //    carries no query key at all (see DetailStep2Spec): everything variable about
+  //    step 2 travels in its POST body, which is validated below. So the rule for
+  //    it is the "no query at all" rule, and it must not consult
+  //    `plan.detailQueryKey` — that field belongs to step 1's URL, and borrowing it
+  //    here would let step 1's query key ride in on step 2's request.
+  const key = segment === 'detail2' ? undefined : plan.detailQueryKey;
   if (key === undefined) {
-    return u.search === '' ? null : 'body url carries a query the plan did not declare';
+    if (u.search !== '') return 'body url carries a query the plan did not declare';
+    /**
+     * 🔴 W21 · A **fragment** is refused here too, and this is the one place the rule
+     * had to be spelled out rather than inherited.
+     *
+     * The rule this whole function exists for is "what was checked is what is sent".
+     * A plan that declares a query key gets that for free — its URL is compared
+     * against the plan's own builder with `toString()`, which carries the fragment,
+     * so a '#...' already fails there. A plan that declares no query key had only the
+     * `search` test, and `new URL('.../x#y').search` is empty: the URL the check
+     * approved and the URL handed to `fetch` were not necessarily the same string.
+     * Nothing in this code builds a fragment, so no plan's own request is affected;
+     * what this closes is a difference between the allowed set and the intended set.
+     */
+    return u.hash === '' ? null : 'body url carries a fragment the plan did not declare';
   }
   for (const found of u.searchParams.keys()) {
     if (found !== key) return 'body url carries a query key outside the declared allow-list';
@@ -330,7 +346,7 @@ export function checkBackfillRequest(
   const plan = lookup(row.id);                          // 3 · this platform really can be backfilled
   if (!plan) return refuseUrl(`platform ${row.id} has no backfill plan`);
 
-  // 4 · Only its own two paths — which also settles which segment this is (deciding the permitted method/body).
+  // 4 · Only its own paths — which also settles which segment this is (deciding the permitted method/body).
   let segment: BackfillSegment;
   if (u.pathname === plan.listPath) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
@@ -338,13 +354,18 @@ export function checkBackfillRequest(
   //    allowlist is not loosened and does no prefix wildcarding: what is permitted
   //    is still only the path the plan itself wrote down, character for character.
   else if (plan.detailPath !== null && detailPathMatches(plan.detailPath, u.pathname)) segment = 'detail';
+  // 🔴 W21 · The second step, when the plan declares one. It is a **third** named
+  //    path, not a wildcard over the first: a plan with no `detailStep2` permits
+  //    exactly the same set of URLs it permitted before this change.
+  else if (plan.detailStep2 && detailPathMatches(plan.detailStep2.path, u.pathname)) segment = 'detail2';
   else return refuseUrl('path is not a backfill endpoint');
 
   // 4b · 🔴 W8 · The body URL's query, which C26 never had to look at because no
   //      plan put its id there. W8 declared one (DeepSeek), so the query dimension
-  //      is now checked too — see checkDetailQuery.
-  if (segment === 'detail') {
-    const refused = checkDetailQuery(plan, u);
+  //      is now checked too — see checkDetailQuery. W21 applies it to both detail
+  //      segments.
+  if (segment !== 'list') {
+    const refused = checkDetailQuery(plan, u, segment);
     if (refused !== null) return refuseUrl(refused);
   }
 
@@ -390,10 +411,42 @@ export function checkBackfillRequest(
     return refuseRequest('refused: request body is not a JSON object');
   }
   const allowedKeys = new Set(post.bodyKeys);
+  const arrayKeys = new Set(post.bodyArrayKeys ?? []);
   for (const [key, value] of Object.entries(parsed)) {
     if (!allowedKeys.has(key)) {
       // 🔴 Return only "a key is outside the closed set", never the key name itself: a key name could be stuffed in as a smuggling vector.
       return refuseRequest('refused: request body has a key outside the declared allow-list');
+    }
+    /**
+     * 🔴 W21 · **A declared array-of-strings key.**
+     *
+     * The second detail step's body is "the message ids the skeleton just named",
+     * so one key has to hold a list. Keeping the scalar-only rule and letting this
+     * one through unchecked would be the worst of both: a value of arbitrary
+     * length, of arbitrary element type, of arbitrary nesting. So the array is
+     * admitted only under four conditions, all of which have to hold: the key was
+     * declared as an array key by the plan, the value really is an array, it holds
+     * at most MAX_BODY_ARRAY_ITEMS items, and every item is a non-empty string.
+     *
+     * 🔴 Deliberately no nesting: an element that is itself an array or an object
+     *    is refused, so the value's shape is one level deep and fixed — the same
+     *    reason the scalar rule exists. Combined with the byte ceiling above, the
+     *    only thing a stuffed message could change is which strings appear in a
+     *    list of strings inside one fixed key of one fixed request.
+     */
+    if (arrayKeys.has(key)) {
+      if (!Array.isArray(value)) {
+        return refuseRequest('refused: request body value is not the declared array');
+      }
+      if (value.length > MAX_BODY_ARRAY_ITEMS) {
+        return refuseRequest('refused: request body array exceeds MAX_BODY_ARRAY_ITEMS');
+      }
+      for (const item of value) {
+        if (typeof item !== 'string' || item.length === 0) {
+          return refuseRequest('refused: request body array holds a value that is not a non-empty string');
+        }
+      }
+      continue;
     }
     if (!isScalar(value)) {
       return refuseRequest('refused: request body value is not a scalar');

@@ -35,7 +35,7 @@ import {
 } from './enumerate';
 import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
-import { systemRandom, type RandomFn } from './random';
+import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
 import { openLedger, type Ledger } from './ledger';
 import {
@@ -567,6 +567,18 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   //   · listCursorUrl not declared ⇒ offset paging (ChatGPT, byte-identical to C22).
   const cursorMode = plan.listCursorUrl !== undefined;
   /**
+   * 🔴 W21 · **Opaque-token paging** (Grok): the next page needs a cursor the API
+   * produced and this code may not interpret. See listTokenUrl in enumerate.ts.
+   *
+   * 🔴 The engine treats the token as a blob of bytes with one property worth
+   *    knowing — whether we have one yet, which is what separates the first page
+   *    from every later page (the repeat-page guard below reads exactly that and
+   *    nothing more). It is never parsed, compared, sorted, trimmed or logged.
+   *    A plan declares one mode or the other; token mode is read first if a plan
+   *    ever declared both.
+   */
+  const tokenMode = plan.listTokenUrl !== undefined;
+  /**
    * 🔴 W10 · **How many list pages one tick may read.**
    *
    * The defect this answers, as measured on a real account: 7,391 distinct
@@ -598,10 +610,26 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // **number enumerated so far**, not a request parameter, so the two modes must be
   // worded differently — a trace that reads correctly but points at the wrong thing
   // is worse than none.
+  // 🔴 The token's VALUE never reaches a trace: it is an opaque identifier the API
+  //    produced, and the log rule here is that identifiers do not go in. Only
+  //    "do we have one yet" is printable.
   const listWhere = (): string =>
-    cursorMode
-      ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
-      : `list offset=${state.enumCursor.offset}`;
+    tokenMode
+      ? `list token=${state.enumCursor.token ? 'set' : 'first-page'} (enumerated ${state.enumCursor.offset})`
+      : cursorMode
+        ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
+        : `list offset=${state.enumCursor.offset}`;
+  /**
+   * 🔴 W21 · **Every id this enumeration has handed us**, for the repeat-page guard.
+   *
+   * Why a run-local set on top of `state.pending` / `state.archived`, which
+   * already hold the ids earlier pages produced: those two are the *persisted*
+   * record, and an id can leave them without being settled (`dropDebt` on a
+   * failed delivery removes it from pending and does not archive it). This set
+   * makes "already seen in this enumeration" true for the whole run regardless of
+   * what later happened to the debt, which is the narrower and safer reading.
+   */
+  const seenThisEnumeration = new Set<string>();
   while (
     !state.enumCursor.complete
     && state.enumCursor.truncated === undefined
@@ -613,9 +641,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (opts.shouldAbort?.()) return report('aborted');
     await enumPacer.gate();
     anchor('enumerate', enumPacer.lastAt);
-    const url = cursorMode
-      ? plan.listCursorUrl!(opts.origin, state.enumCursor.cursor ?? null, listLimit)
-      : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
+    const url = tokenMode
+      ? plan.listTokenUrl!(opts.origin, state.enumCursor.token ?? null, listLimit)
+      : cursorMode
+        ? plan.listCursorUrl!(opts.origin, state.enumCursor.cursor ?? null, listLimit)
+        : plan.listUrl(opts.origin, state.enumCursor.offset, listLimit);
     // 🔴 C23: the body can only come from the plan's own builder
     //    (listRequestInit → spec.body). No path lets the page side or the message
     //    side decide what is sent here.
@@ -638,6 +668,51 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     enumeratedPages += 1;
     listPagesFetched += 1;
+
+    /**
+     * 🔴 W21 · **The repeat-page guard** (opaque-token paging only).
+     *
+     * The open question this answers, and why it cannot be answered statically:
+     * the sources disagree about Grok's list cursor — two hand back a `pageToken`
+     * and one sends an integer `page` — so one of the two shapes is
+     * non-functional against the real backend. If the backend ignores the
+     * parameter we send, the "second" page is the first page again, and a leg
+     * that treated "a page came back" as progress would re-enumerate the same
+     * conversations on every tick forever while the ledger said it was advancing.
+     *
+     * The symptom is decidable without knowing which shape is right: **on a
+     * non-first page, a page whose ids this enumeration has already seen means the
+     * cursor did not move.**
+     *
+     * 🔴 It is halt('shape-changed') — a permanent, traced stop — and deliberately
+     *    neither of the two things it resembles:
+     *     · not `complete = true`: "the cursor did not move" is not "we listed
+     *       everything", and writing it as an ending would silently truncate the
+     *       account to one page;
+     *     · not a silent `break`: the user would be told the backfill finished.
+     *    The one thing it does share with a genuine ending is that it stops
+     *    hammering the platform — the halt record holds the leg until a human
+     *    looks, which is the correct outcome for a wire shape we cannot drive.
+     *
+     * 🔴 The guard runs **before** `enqueueDebts` below, so a repeated page adds
+     *    nothing: its ids are already in pending/archived by construction (that is
+     *    the premise of the check), so nothing can be lost by stopping here.
+     */
+    if (tokenMode && parsed.page.ids.length > 0 && state.enumCursor.token) {
+      const known = new Set<string>([
+        ...state.archived,
+        ...state.pending,
+        ...seenThisEnumeration,
+      ]);
+      if (parsed.page.ids.every((id) => known.has(id))) {
+        return halt(
+          'shape-changed',
+          `${listWhere()}: the page carried only conversations this enumeration has already seen;`
+          + ' the page cursor did not advance (the platform may not honour the cursor parameter)',
+        );
+      }
+    }
+    if (tokenMode) for (const id of parsed.page.ids) seenThisEnumeration.add(id);
 
     // 🔴 W10 · The total the API gave is recorded, but it is **not** trusted as
     //    the denominator forever: it is a number this endpoint prints, not a
@@ -711,6 +786,33 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         stopEnumerating('empty-page-inferred', { complete: false });
       } else {
         state.enumCursor.complete = true;
+      }
+    } else if (tokenMode) {
+      /**
+       * 🔴 W21 · Termination for opaque-token paging.
+       *
+       * **The token's absence is the API's own end-of-list signal**, and that is
+       * not an inference: every source treats a missing/empty `nextPageToken` as
+       * the last page, and one of them measured a second page with no overlap
+       * before saying so. So this is allowed to set `complete = true`, unlike
+       * Perplexity's short/empty-page inference above — there is a field saying
+       * it, and the field is what is read.
+       *
+       * The other ending (an empty page) is handled by the branch above, which
+       * already sets `complete = true` for every non-Perplexity platform.
+       *
+       * 🔴 A token that is present but unusable never reaches here as "absent":
+       *    parseGrokListPage returns `{ok:false}` for a non-string
+       *    `nextPageToken` (⇒ halt('shape-changed')) and `null` only when the
+       *    field is genuinely missing or an empty string. "The field changed
+       *    type" and "the API said there is no next page" must not be the same
+       *    outcome, or a wire change would read as a finished account.
+       */
+      const token = parsed.page.nextToken;
+      if (token === null || token === undefined) {
+        state.enumCursor.complete = true;
+      } else {
+        state.enumCursor.token = token;
       }
     } else if (cursorMode) {
       // 🔴 Cursor paging's termination test **recognises has_more only**.
@@ -863,8 +965,70 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (res.status < 200 || res.status > 299) {
       return halt(haltReasonForStatus(res.status), `detail returned HTTP ${res.status}`);
     }
+
+    /**
+     * 🔴 W21 · **The optional second step** (a plan may declare `detailStep2`).
+     *
+     * Some platforms split one conversation across two same-origin calls: a
+     * skeleton call that names the message ids, then a content call that takes
+     * those ids in its request body. Everything below is generic on purpose — the
+     * engine knows "there is a second URL and a body built from step 1's own
+     * response", and nothing else. It never sees the ids, never learns what an id
+     * is, and never builds a body: `step2.body()` is the plan's own builder, the
+     * same rule the first step's POST body already follows.
+     *
+     * 🔴 What is **delivered** is step 2's response and only step 2's. Step 1's
+     *    body is not archived anywhere: it is structure, not conversation, and
+     *    storing it would put a second, contentless copy of every conversation in
+     *    the archive.
+     * 🔴 Pacing and the daily cap count the **pair as one body**: the detail
+     *    pacer's gate already fired once above, and `detailToday.count` increments
+     *    once below. The wait inside the pair is `delayMs`, drawn per conversation
+     *    from the run's injected randomness — an intra-pair gap, not an
+     *    inter-request rate, so it is deliberately not a Pacer.
+     * 🔴 `body()` returning null means step 1 could not be read (or named nothing
+     *    to fetch). Nothing is sent, nothing is settled, and it halts as
+     *    'shape-changed': "the skeleton did not give us a request we can build" is
+     *    a wire-shape fact, and the alternative — sending `{ ids: [] }` and
+     *    calling the empty answer a conversation — is the exact confusion this
+     *    repository's first invariant forbids.
+     */
+    const step2 = plan.detailStep2;
+    let deliveredUrl = url;
+    let deliveredMethod: string = init.method;
+    let deliveredStatus = res.status;
+    let deliveredText = res.text;
+    if (step2) {
+      const body = step2.body(id, res.text);
+      if (body === null) {
+        return halt(
+          'shape-changed',
+          'detail step 1 named no message ids this plan can read; nothing was sent for step 2',
+        );
+      }
+      await clock.sleep(uniformBetween(random, step2.delayMs.min, step2.delayMs.max));
+      const step2Url = step2.url(opts.origin, id);
+      let res2: HttpResponse;
+      try {
+        res2 = await sendVia(http, step2Url, { method: 'POST', body, contentType: step2.contentType });
+      } catch (err) {
+        return halt('transport-error', `detail step 2: ${(err as Error).message}`);
+      }
+      if (res2.status < 200 || res2.status > 299) {
+        return halt(haltReasonForStatus(res2.status), `detail step 2 returned HTTP ${res2.status}`);
+      }
+      deliveredUrl = step2Url;
+      deliveredMethod = 'POST';
+      deliveredStatus = res2.status;
+      deliveredText = res2.text;
+    }
+
     // The same shape checker the live leg uses: if the API changes, this is the first to know.
-    if (!matchesResponseShape(platformRow, res.text)) {
+    // 🔴 W21: on a two-step plan this is applied to the DELIVERED body (step 2),
+    //    which is the one the platform row describes. Step 1 has no shape gate of
+    //    its own because it is not the artefact — an unreadable step 1 already
+    //    halted above, through the plan's own body builder.
+    if (!matchesResponseShape(platformRow, deliveredText)) {
       return halt('shape-changed', `detail body does not match the ${platformRow.id} response shape`);
     }
 
@@ -872,16 +1036,19 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * 🔴 C28 · This is the single guardrail landing point for a future body parser:
      * after the shape is good and before the sink.
      *
-     * No production plan has a parseDetailPage today, so this branch changes no
-     * existing platform's behaviour and certainly does not guess body fields for
-     * DeepSeek. Once the raw payload is available, the plan's parser implementation
-     * should return "succeeded but empty" as detail-empty-unverified; this branch
-     * then writes the receipt at once and halts, never letting the
+     * 🔴 W21 changed one thing here: the parser is handed the **delivered** body
+     *    (`deliveredText`), which on a two-step plan is step 2's response. On a
+     *    one-step plan this is byte-for-byte the old `res.text`, so no existing
+     *    platform's behaviour moves. Grok is the first production plan to declare
+     *    one, and it exists for exactly the case this hook describes.
+     * Otherwise unchanged: once the raw payload is available, the plan's parser
+     * implementation returns "succeeded but empty" as detail-empty-unverified; this
+     * branch then writes the receipt at once and halts, never letting the
      * sinkVerdict/settleDebt below pass it off as success. Only when a parser
      * explicitly returns detail-empty-confirmed may a legitimately empty
      * conversation be completed as this body item.
      */
-    const detailParsed = plan.parseDetailPage?.(res.text);
+    const detailParsed = plan.parseDetailPage?.(deliveredText);
     if (detailParsed?.ok === false) {
       return halt('shape-changed', `detail body: ${detailParsed.detail}`);
     }
@@ -889,7 +1056,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       const entry = recordDetailOutcome(id, detailParsed.outcome, clock.now());
       return halt(
         'detail-empty-unverified',
-        `detail returned HTTP ${res.status} with empty content for a pending conversation;`
+        `detail returned HTTP ${deliveredStatus} with empty content for a pending conversation;`
         + ` recorded ${entry.outcome} with complete=false`,
       );
     }
@@ -905,12 +1072,16 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
 
     const captured: CapturedFetch = {
-      url,
+      // 🔴 W21: the URL and method of the request that actually produced this
+      //    body. On a one-step plan that is step 1's, byte-for-byte as before; on
+      //    a two-step plan it is step 2's, which is the one that carries the
+      //    content and therefore the honest record of where it came from.
+      url: deliveredUrl,
       // 🔴 C23: write the method actually sent, faithfully. A GET segment is still
       // byte-for-byte 'GET' (init.method defaults to it).
-      method: init.method,
-      status: res.status,
-      text: res.text,
+      method: deliveredMethod,
+      status: deliveredStatus,
+      text: deliveredText,
       pageUrl: `${opts.origin}/c/${id}`,
       capturedAt: clock.now(),
       // 🔴 C21 · The root-cause fix's landing point: **the identity is expressed

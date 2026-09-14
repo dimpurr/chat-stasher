@@ -18,6 +18,10 @@ describe('data-driven platform contracts', () => {
       'https://gemini.google.com/*',
       'https://claude.ai/*',
       'https://www.kimi.com/*',
+      // 🔴 W21 · Grok's row adds exactly one origin and no wildcard. This list is
+      //    the closed content-script match set; it is asserted, not derived, so
+      //    that a new origin has to be seen here rather than appear by itself.
+      'https://grok.com/*',
     ]);
     expect(CONTENT_MATCHES).not.toContain('<all_urls>');
   });

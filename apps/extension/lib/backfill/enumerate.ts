@@ -144,6 +144,27 @@ export interface EnumPage {
    */
   nextCursor?: number | null;
   /**
+   * 🔴 W21 · For **opaque-token** paging (Grok): the cursor of the next page,
+   * exactly as the API handed it over.
+   *
+   * `undefined`  = this platform does not page by token at all (DeepSeek,
+   *                ChatGPT, Perplexity), and the engine does not look at it.
+   * `null`       = the API answered and there is **no** next page — the last
+   *                page. On these platforms that is the API's own termination
+   *                signal and not an inference; see parseGrokListPage.
+   * a string     = hand it back **unread**. This field exists so that the engine
+   *                never has to interpret a cursor: it is never parsed as a
+   *                number, never compared, never sorted, never trimmed into a
+   *                "better" form. Whatever came back is what goes out again.
+   *
+   * Why this is separate from `nextCursor` rather than a widened type: the two
+   * carry different *promises*. A numeric cursor can be min/max-ed and reasoned
+   * about (DeepSeek's is the smallest seq_id on a page); an opaque token cannot
+   * be reasoned about at all, and mixing them into one field invites exactly the
+   * arithmetic that is meaningless on one of them.
+   */
+  nextToken?: string | null;
+  /**
    * 🔴 C26 · Whether the API itself says there is another page.
    * `undefined` = the response carries no such signal ⇒ the engine **must not**
    * treat it as false; it can only stop and record 'has-more-missing'.
@@ -226,7 +247,96 @@ export type ListPostSpec = BackfillPostSpec<[origin: string, offset: number, lim
 /** The shape of the detail segment's POST declaration. */
 export type DetailPostSpec = BackfillPostSpec<[origin: string, conversationId: string]>;
 
-export type BackfillSegment = 'list' | 'detail';
+/**
+ * 🔴 W21 · The placeholder a path may carry where the conversation id goes, for a
+ * route whose id is a MIDDLE segment (`/a/{id}/b`). See detailPath's doc.
+ */
+export const DETAIL_ID_TOKEN = '{id}';
+
+/**
+ * Does a declared path template name exactly this pathname?
+ *
+ * Two forms are permitted, and nothing else:
+ *  · no token ⇒ the W8 rules (a trailing '/' means "a directory the id is
+ *    appended to", anything else means "exactly this one path");
+ *  · one token ⇒ a fixed prefix + a fixed suffix with **one** non-empty segment
+ *    between them, containing no '/'. `/a/{id}/b` matches `/a/X/b` and refuses
+ *    `/a/b`, `/a//b`, `/a/X/Y/b` and `/a/X/b/extra`.
+ *
+ * Exported because the content script's allowlist has to make the same decision
+ * as the plan describes — one rule, two callers, the same as postSpecFor.
+ */
+export function detailPathMatches(detailPath: string, pathname: string): boolean {
+  const tokenAt = detailPath.indexOf(DETAIL_ID_TOKEN);
+  if (tokenAt < 0) {
+    return detailPath.endsWith('/') ? pathname.startsWith(detailPath) : pathname === detailPath;
+  }
+  const prefix = detailPath.slice(0, tokenAt);
+  const suffix = detailPath.slice(tokenAt + DETAIL_ID_TOKEN.length);
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return false;
+  const between = pathname.slice(prefix.length, pathname.length - suffix.length);
+  return between.length > 0 && !between.includes('/');
+}
+
+/**
+ * 🔴 W21 · The **second step** of one conversation's body.
+ *
+ * The facts a plan has to state, and nothing more:
+ *  · `path`  — the path template (same `{id}` token as detailPath), which is what
+ *    the content script compares against. A URL built for the second step is
+ *    only sent when its pathname matches this exactly.
+ *  · `url`   — the builder for that URL.
+ *  · `body`  — **the only place a step-2 body is ever produced**, from the
+ *    conversation id and step 1's raw response text. Returning null means "the
+ *    first response is not something I can read" ⇒ the engine halts with
+ *    'shape-changed' rather than sending an empty or guessed request.
+ *  · `bodyKeys` / `bodyArrayKeys` — the closed set of top-level keys, with the
+ *    keys whose value is an ARRAY OF STRINGS named separately. A key is one or
+ *    the other, never both; an undeclared key, a nested object, an array on a
+ *    scalar key and a scalar on an array key are all refused by the content
+ *    script (see `MAX_BODY_ARRAY_ITEMS` and checkBackfillRequest).
+ *  · `delayMs` — the wait between the two steps, drawn uniformly from
+ *    `[min, max]` per conversation.
+ */
+export interface DetailStep2Spec {
+  path: string;
+  url(origin: string, conversationId: string): string;
+  contentType: BackfillContentType;
+  bodyKeys: readonly string[];
+  bodyArrayKeys?: readonly string[];
+  body(conversationId: string, firstResponseText: string): string | null;
+  delayMs: { min: number; max: number };
+}
+
+/**
+ * 🔴 W21 · The part of a POST declaration the content script's allowlist needs —
+ * the Content-Type and the closed key sets — with `body()` left out.
+ *
+ * `postSpecFor` returns this rather than `ListPostSpec | DetailPostSpec` so that
+ * the second detail step (which has its own `body` shape, and takes step 1's
+ * response as an argument) can be described by the same allowlist check without
+ * pretending to be a first-step declaration. The two existing spec types are
+ * structurally assignable to it, so no existing caller changes.
+ */
+export interface PostKeySpec {
+  contentType: BackfillContentType;
+  bodyKeys: readonly string[];
+  bodyArrayKeys?: readonly string[];
+}
+
+/**
+ * 🔴 W21 · How many strings one declared array key may hold.
+ *
+ * The same reasoning as MAX_REQUEST_BODY_BYTES, expressed in items: a step-2 body
+ * is "the ids this conversation's skeleton just named", so its length is a
+ * property of the conversation, not of the request. The ceiling is far above any
+ * plausible conversation and far below "use this channel to ship a payload out":
+ * a Grok conversation would need 5000 message nodes to reach it. The count is
+ * checked in addition to the byte ceiling, never instead of it.
+ */
+export const MAX_BODY_ARRAY_ITEMS = 5000;
+
+export type BackfillSegment = 'list' | 'detail' | 'detail2';
 
 /**
  * The result of a body parser. 'non-empty' is not an outcome to persist, it just
@@ -273,6 +383,24 @@ export interface BackfillEnumPlan {
    * cursor === null ⇒ the first page (no cursor yet).
    */
   listCursorUrl?(origin: string, cursor: number | null, limit: number): string;
+  /**
+   * 🔴 W21 · **Opaque-token paging.**
+   *
+   * Declaring it means this platform does **not** page by an offset and does not
+   * page by a number this code can interpret: the next page needs a cursor the
+   * API itself produced (Grok's `nextPageToken`, which the sources describe as an
+   * echo of the last `conversationId` on the page) and which we hand back
+   * **unread** — `token` is exactly what the previous page returned, or null for
+   * the first page.
+   *
+   * 🔴 Deliberately not folded into `listCursorUrl`: that one takes a `number`,
+   *    and its callers may reason about the value (DeepSeek's is a minimum of
+   *    `seq_id`s). Nothing here may reason about this one — a plan that declares
+   *    `listTokenUrl` must not parse, compare, sort or reformat the token, and
+   *    the engine never does either. The two modes are also mutually exclusive in
+   *    one plan; the engine reads token mode first if a plan ever declares both.
+   */
+  listTokenUrl?(origin: string, token: string | null, limit: number): string;
   /** 3 · The shape test for the list response. Unrecognised ⇒ {ok:false}, and the engine halts with a trace. */
   parseListPage(text: string): ParseResult;
   /**
@@ -288,6 +416,15 @@ export interface BackfillEnumPlan {
    *    no trailing '/' names **one endpoint** and is compared in full. That is what
    *    lets DeepSeek put its id in the query without turning
    *    `/api/v0/chat/history_messages` into a wildcard over every lookalike path.
+   * 🔴 W21: a third form exists — a path carrying the literal token `{id}`
+   *    (`DETAIL_ID_TOKEN`), for a route whose conversation id sits in the MIDDLE
+   *    of the path rather than at its end or in its query (Grok:
+   *    `/rest/app-chat/conversations/{id}/response-node`). It matches a fixed
+   *    prefix + a fixed suffix with exactly one non-empty segment between them
+   *    that may not itself contain a '/'. It is still a closed set: the prefix
+   *    and the suffix are written down, and no wildcard is introduced. The same
+   *    token is used by `detailStep2.path`, so both steps declare their shape the
+   *    same way.
    */
   detailPath: string | null;
   /** 5 · conversation id → body URL. 🔴 C26: lives and dies with detailPath — either both or neither. */
@@ -316,6 +453,35 @@ export interface BackfillEnumPlan {
   detailQueryKey?: string;
   /** 5b · 🔴 New in C23 (optional). Declaring it means the body segment is sent as a POST. */
   detailPost?: DetailPostSpec;
+  /**
+   * 🔴 W21 · **The optional second step of one conversation's body** (optional).
+   *
+   * Declaring it means: one conversation's body is not one request but two, both
+   * on the platform's own origin and both inside this plan's declaration —
+   * step 1 is `detailPath`/`detailUrl`/`detailPost` exactly as before, and step 2
+   * is this. Declaring it changes nothing whatsoever for a plan that does not:
+   * the second step only exists between step 1's shape gate and the sink.
+   *
+   * Why it is generic rather than Grok-shaped: the thing that varies is "the API
+   * splits one conversation across two calls" (a skeleton call that names the
+   * message ids, then a content call that takes those ids in the request body).
+   * The engine therefore knows only the three facts it needs — there is a second
+   * URL, there is a body built from step 1's own response, and there is a wait
+   * between them. It never sees `responseIds`, never learns what an id is, and
+   * never builds a step-2 body itself: `body()` is the plan's, the same rule the
+   * POST body already follows (see `BackfillPostSpec.body`).
+   *
+   * 🔴 What is delivered is **step 2's** response, and only step 2's shape is
+   *    checked against the platform row's `responseShape`. Step 1 has no shape
+   *    gate of its own because it is not the artefact: if step 1 cannot be read,
+   *    `body()` returns null and the leg halts with 'shape-changed'.
+   * 🔴 Pacing and the daily cap count the **pair as one body**: the detail pacer's
+   *    gate fires once (before step 1) and `detailToday.count` increments once.
+   *    The wait between the two steps is `delayMs`, drawn per conversation from
+   *    the run's injected randomness, and it is deliberately not a Pacer: it is
+   *    an intra-pair gap, not an inter-request rate.
+   */
+  detailStep2?: DetailStep2Spec;
   /**
    * 🔴 C28 · An optional hook deciding whether a body's content is real; not
    * declared keeps the existing behaviour.
@@ -597,6 +763,153 @@ export function parsePerplexityListPage(text: string): ParseResult {
   return { ok: true, page: { ids, total: null } };
 }
 
+/**
+ * Parse one page of a Grok conversation list.
+ *
+ * ## What is read, and what is deliberately not
+ * Recognised: a top-level `conversations` array, and `conversationId` on each
+ * element — the two things every source agrees on. `total` is **null**: no source
+ * shows a total field on this endpoint, and inventing one would be inventing a
+ * denominator (the same call parseDeepSeekListPage makes). `title`, `starred`,
+ * `createTime` and `modifyTime` are present in the sources but are not read here:
+ * the engine's enumeration needs ids, and this leg does not rewrite titles.
+ *
+ * ## 🔴 `nextPageToken`: absent/empty is the API's own "last page"
+ * Unlike Perplexity, this endpoint's termination signal **is** in the response,
+ * and every source treats it the same way: the token is carried forward while it
+ * is a non-empty string, and the loop ends when it is missing or empty. So
+ * `nextToken: null` here means "the API said there is no next page" — the
+ * documented end of the list — and the engine sets `complete` on it. That is a
+ * different claim from Perplexity's client-side inference, and the two must not
+ * be worded the same way in the ledger.
+ *
+ * 🔴 A `nextPageToken` that is **present but not a string** (a number, an object)
+ * is the drift case: the field exists and is no longer the thing we know how to
+ * carry back. It returns `{ok:false}` — halt('shape-changed') — rather than
+ * being rounded into `null` ("we reached the end"), which would turn a wire
+ * change into a silently truncated account.
+ */
+export function parseGrokListPage(text: string): ParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'grok list response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'grok list response is not a JSON object' };
+  }
+  const record = body as Record<string, unknown>;
+  const conversations = record.conversations;
+  if (!Array.isArray(conversations)) {
+    // 🔴 The line that guards "do not record an unknown as empty": no such array
+    //    means the shape changed, **never** "this account has no conversations".
+    return { ok: false, detail: 'grok list response has no `conversations` array (shape changed?)' };
+  }
+
+  const ids: string[] = [];
+  for (const item of conversations) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, detail: 'grok conversation item is not an object' };
+    }
+    const id = (item as Record<string, unknown>).conversationId;
+    if (typeof id !== 'string' || id.length === 0) {
+      return { ok: false, detail: 'grok conversation item has no string `conversationId`' };
+    }
+    ids.push(id);
+  }
+
+  const rawToken = record.nextPageToken;
+  if (rawToken !== undefined && rawToken !== null && typeof rawToken !== 'string') {
+    return { ok: false, detail: 'grok list response has a non-string `nextPageToken` (wire shape changed?)' };
+  }
+  const nextToken = typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : null;
+  return { ok: true, page: { ids, total: null, nextToken } };
+}
+
+/**
+ * 🔴 W21 · The message ids a conversation's skeleton named, or null when the
+ * skeleton is **not something this code can read**.
+ *
+ * This is the only place step 1's response is interpreted, and it is called from
+ * the plan's own `detailStep2.body` — never from the engine. It returns null
+ * (⇒ halt('shape-changed'), nothing sent, nothing settled) in three cases that
+ * must not be conflated with "this conversation has no messages":
+ *  · the body is not a JSON object, or has no `responseNodes` array;
+ *  · a node is not an object, or carries no non-empty string `responseId`;
+ *  · the array is **empty** — an empty skeleton is not evidence that the
+ *    conversation is empty. Sending `{ responseIds: [] }` would come back as
+ *    `{ responses: [] }`, pass the shape gate, be delivered as an empty
+ *    conversation and settle its debt. That is this repository's least
+ *    acceptable outcome (an unknown recorded as empty), so it is refused here
+ *    rather than handed to the engine to interpret.
+ *
+ * The ids are returned **in the order the skeleton gave them**, duplicates
+ * included: the request says "these are the ids you named", and de-duplicating
+ * or reordering here would be this code making a claim about the tree that the
+ * skeleton did not make.
+ */
+export function grokResponseIds(text: string): string[] | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const nodes = (body as Record<string, unknown>).responseNodes;
+  if (!Array.isArray(nodes) || nodes.length === 0) return null;
+  const ids: string[] = [];
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return null;
+    const id = (node as Record<string, unknown>).responseId;
+    if (typeof id !== 'string' || id.length === 0) return null;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * 🔴 W21 · **Is this delivered body an empty answer, or a conversation with
+ * nothing in it?** Only the first is knowable here, and it must not be settled.
+ *
+ * This is the C28 hook, and grok is the first production plan to declare one. The
+ * situation it exists for is specific: step 2 is only ever sent when step 1 named
+ * at least one message id, so a `responses` array that comes back **empty** is
+ * "you named N ids and I returned no content for them" — not "this conversation
+ * was always empty". Settling it would write a momentary empty reading into the
+ * ledger as a fact.
+ *
+ * 🔴 Deliberately narrow: the only case that returns 'detail-empty-unverified' is
+ *    the empty array. It does **not** try to judge whether individual responses
+ *    "look empty" (no `message`, whitespace only) — a turn can legitimately carry
+ *    no text (an attachment-only or non-text answer), and firing on that would
+ *    stall the leg on real conversations. Everything else is 'non-empty' and is
+ *    delivered whole; the raw body is authoritative and is never trimmed here.
+ *
+ * A body that is not an object, or has no `responses` array, is `{ok:false}` ⇒
+ * halt('shape-changed'). The row's own shape gate normally catches that first;
+ * this is the same decision made once more where the outcome is named.
+ */
+export function parseGrokDetailPage(text: string): DetailParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'grok detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'grok detail response is not a JSON object' };
+  }
+  const responses = (body as Record<string, unknown>).responses;
+  if (!Array.isArray(responses)) {
+    return { ok: false, detail: 'grok detail response has no `responses` array (shape changed?)' };
+  }
+  return responses.length === 0
+    ? { ok: true, outcome: 'detail-empty-unverified' }
+    : { ok: true, outcome: 'non-empty' };
+}
+
 // ---------------------------------------------------------------------------
 // Platforms that can be backfilled
 // ---------------------------------------------------------------------------
@@ -846,7 +1159,159 @@ export const PERPLEXITY_PLAN: BackfillEnumPlan = {
     + 'used; the single-body segment has no source, so detailPath/detailUrl stay null.',
 };
 
-const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, PERPLEXITY_PLAN, CHATGPT_PLAN];
+export const GROK_LIST_PATH = '/rest/app-chat/conversations';
+/**
+ * 🔴 W21 · The conversation **skeleton**: the ordered message tree (ids, sender,
+ * parent links) with no content in it. `{id}` is the conversation id as a path
+ * segment in the middle of the route, which is why this is written as a template
+ * rather than as a prefix (see detailPath's doc).
+ */
+export const GROK_DETAIL_PATH = '/rest/app-chat/conversations/{id}/response-node';
+/** 🔴 W21 · The conversation **content**: the second and final step of one body. */
+export const GROK_DETAIL2_PATH = '/rest/app-chat/conversations/{id}/load-responses';
+/** The one body key the second step carries, and the only thing that varies in it. */
+export const GROK_STEP2_BODY_KEY = 'responseIds';
+export const GROK_LIST_PAGE_SIZE_PARAM = 'pageSize';
+export const GROK_LIST_TOKEN_PARAM = 'pageToken';
+/**
+ * 🔴 W21 · The wait between the skeleton and the content call, drawn per
+ * conversation in `[2000, 5000]` ms.
+ *
+ * Both calls are the page's own calls — a real browser makes them back to back
+ * when the user opens a conversation — so this is not a rate limit being
+ * respected; it is the same "do not look like a script" reasoning the pacers use
+ * (`lib/backfill/pace.ts`), applied inside one body. The floor is 2 s because
+ * below that the pair is one burst; the ceiling is 5 s because the pair is still
+ * **one** body against a 20 s+ inter-body interval, and a wider band would make a
+ * single body's cost unbounded for no gain.
+ */
+export const GROK_DETAIL_STEP_DELAY_MS = { min: 2_000, max: 5_000 } as const;
+
+const grokDetailUrl = (origin: string, id: string): string =>
+  `${origin}/rest/app-chat/conversations/${encodeURIComponent(id)}/response-node`;
+const grokDetail2Url = (origin: string, id: string): string =>
+  `${origin}/rest/app-chat/conversations/${encodeURIComponent(id)}/load-responses`;
+
+/**
+ * 🔴 W21 · Grok's conversation list **and** its two-step conversation body.
+ *
+ * ## How this cell was filled in
+ * Research ticket W20 (2026-09-14) reviewed the reference implementations and
+ * recorded the endpoints; W21 re-opened those files and read the exact request
+ * shapes, response field names and the live-verification note attached to them.
+ * Every fact below has a source, and the source count is stated per fact:
+ *
+ *   list endpoint     GET /rest/app-chat/conversations            · 2 sources (+1 closed build)
+ *   page size         query `pageSize`                            · 2 sources
+ *   page cursor       query `pageToken` = the previous response's `nextPageToken` · 2 sources
+ *                     🔴 the sources **disagree**: a third uses an integer `page`
+ *   end of list       `nextPageToken` absent/empty, or an empty page · 3 sources
+ *   list fields       conversations[].conversationId              · 3 sources (+ a title/createTime/modifyTime set)
+ *   skeleton          GET  .../conversations/{id}/response-node   · 3 sources
+ *   skeleton fields   responseNodes[].responseId                  · 3 sources
+ *   content           POST .../conversations/{id}/load-responses  · 3 sources
+ *   content body      { responseIds: [...] }                      · 3 sources
+ *   content fields    responses[].{responseId,message,sender,createTime,parentResponseId,model} · 2-3 sources
+ *   auth              session cookie only; no bearer, no CSRF, no custom header · 2 sources
+ *   session url       https://grok.com/c/<id>                     · 2 sources
+ *
+ * The sources are public open-source exporters plus one closed-source store
+ * build; they are not named here (this repository's public surface does not name
+ * third-party exporters) and their exact files, lines and licences are in the
+ * change report. One of them records a logged-in browser verification of these
+ * three endpoints in 2026-07 followed by a real-account dogfood; that is
+ * somebody else's measurement, **not** this repository's.
+ *
+ * ## 🔴 What is NOT verified, and what is done about it
+ *  1. **The list cursor's shape.** Two sources pass `pageToken` back and one
+ *     sends an integer `page` with a short-page stop; one of the two shapes is
+ *     non-functional against the real backend and only a live session could say
+ *     which. So the cursor is treated as **opaque** (`listTokenUrl`, `nextToken`)
+ *     — never parsed, never compared — and the engine carries a **repeat-page
+ *     guard**: a non-first page made up entirely of ids this enumeration has
+ *     already seen is halt('shape-changed'), never "the end" (engine.ts).
+ *  2. **Whether one `load-responses` call returns a whole long conversation.**
+ *     The endpoint takes an array and has no page/cursor parameter in any
+ *     source, so nothing here pages it; one source sends every id in one batch,
+ *     another splits at 100 ids per request. This plan takes the **one batch**
+ *     shape (the single-request form, and the one the live leg itself sees), so
+ *     the pair is at most two same-origin requests per conversation. If the real
+ *     server caps the array, a long conversation comes back partially and this
+ *     plan has no signal that could tell — the same honest caveat DeepSeek's body
+ *     segment carries. It is stated in the change report and in docs/privacy.md.
+ *  3. **The skeleton's own query.** One source appends `?includeThreads=true` to
+ *     the skeleton call and two do not. No query is sent here: the two-source
+ *     form is the one that was verified end to end, and adding a third source's
+ *     query on the strength of one witness would be guessing. Recorded, not
+ *     adopted.
+ *  4. **A workspace parameter.** The closed build's list call carries a
+ *     `workspaceId` in some code paths. Neither plain-list source sends one, so
+ *     none is sent here. Recorded, not adopted.
+ */
+export const GROK_PLAN: BackfillEnumPlan = {
+  platform: 'grok',
+  listPath: GROK_LIST_PATH,
+  // 🔴 Offset semantics do not hold on Grok (no source uses offset/limit). A
+  //    listUrl is still required by the interface; it produces the **first**
+  //    page, so a future misuse gets the safe thing rather than an invented
+  //    offset parameter. The engine takes the listTokenUrl branch.
+  listUrl: (origin, _offset, limit) =>
+    `${origin}${GROK_LIST_PATH}?${GROK_LIST_PAGE_SIZE_PARAM}=${limit}`,
+  // 🔴 The token goes back **byte for byte** as it arrived: no trim, no parse,
+  //    no comparison, no re-encoding beyond what URLSearchParams does to any
+  //    query value. `token === null` is the first page and the parameter is
+  //    omitted entirely (an empty `pageToken=` would be a second, different
+  //    request, and no source shows the server treating it as "no cursor").
+  listTokenUrl: (origin, token, limit) => {
+    const params = new URLSearchParams({ [GROK_LIST_PAGE_SIZE_PARAM]: String(limit) });
+    if (token !== null) params.set(GROK_LIST_TOKEN_PARAM, token);
+    return `${origin}${GROK_LIST_PATH}?${params.toString()}`;
+  },
+  parseListPage: parseGrokListPage,
+  detailPath: GROK_DETAIL_PATH,
+  detailUrl: grokDetailUrl,
+  detailStep2: {
+    path: GROK_DETAIL2_PATH,
+    url: grokDetail2Url,
+    contentType: 'application/json',
+    bodyKeys: [GROK_STEP2_BODY_KEY],
+    bodyArrayKeys: [GROK_STEP2_BODY_KEY],
+    body: (_conversationId, firstResponseText) => {
+      const ids = grokResponseIds(firstResponseText);
+      return ids === null ? null : JSON.stringify({ [GROK_STEP2_BODY_KEY]: ids });
+    },
+    delayMs: { min: GROK_DETAIL_STEP_DELAY_MS.min, max: GROK_DETAIL_STEP_DELAY_MS.max },
+  },
+  // 🔴 W21 · The C28 hook, and the first production plan to declare one. Step 2 is
+  //    only sent when step 1 named at least one id, so an empty `responses` array
+  //    means "no content for the ids you just named" — which is not evidence that
+  //    the conversation is empty, and must not be settled as one.
+  parseDetailPage: parseGrokDetailPage,
+  provenance:
+    'cross-source reverse-engineering (W20 research 2026-09-14; W21 re-opened the same files) · '
+    + 'three implementations agree on the route family and on the two-step body '
+    + '(GET .../conversations/{id}/response-node → POST .../conversations/{id}/load-responses '
+    + 'with { responseIds: [...] }), and on the response envelopes '
+    + '({ conversations: [{ conversationId }], nextPageToken } / '
+    + '{ responseNodes: [{ responseId }] } / '
+    + '{ responses: [{ responseId, message, sender, createTime, parentResponseId, model }] }). '
+    + 'Cookie-only auth (no bearer, no CSRF, no custom header): 2 sources. '
+    + '🔴 The LIST cursor disagrees between sources: two pass `pageToken` back '
+    + '(echoing the previous response\'s nextPageToken) and one sends an integer `page` '
+    + 'with a short-page stop. The cursor is therefore treated as an opaque token and the '
+    + 'engine carries a repeat-page guard; which shape the real backend honours is NOT '
+    + 'verified and needs a logged-in session. '
+    + '🔴 Also NOT verified: whether one load-responses call returns a whole long '
+    + 'conversation (no source shows any paging parameter on it, and one source splits the '
+    + 'id list into batches of 100 while this plan sends one batch). A server-side cap would '
+    + 'be indistinguishable here from a complete conversation. '
+    + '🔴 Not adopted, recorded instead: one source appends `?includeThreads=true` to the '
+    + 'skeleton call (the other two do not), and a closed-source build puts a `workspaceId` '
+    + 'in some list calls (no plain-list source does). Neither is sent. '
+    + 'This change issued no request to grok.com and had no logged-in session.',
+};
+
+const PLANS: readonly BackfillEnumPlan[] = [DEEPSEEK_PLAN, PERPLEXITY_PLAN, CHATGPT_PLAN, GROK_PLAN];
 
 // ---------------------------------------------------------------------------
 // 🔴 Platforms that cannot be filled in, or only half filled in — each says what
@@ -944,8 +1409,13 @@ export function backfillPlanFor(platform: string): BackfillEnumPlan | null {
 export function postSpecFor(
   plan: BackfillEnumPlan,
   segment: BackfillSegment,
-): ListPostSpec | DetailPostSpec | null {
-  return (segment === 'list' ? plan.listPost : plan.detailPost) ?? null;
+): PostKeySpec | null {
+  if (segment === 'list') return plan.listPost ?? null;
+  if (segment === 'detail') return plan.detailPost ?? null;
+  // 🔴 W21 · The second detail step is always a POST: its whole reason to exist is
+  //    that it carries a body built from step 1. Declaring `detailStep2` *is* the
+  //    POST declaration for that segment — there is no second switch for it.
+  return plan.detailStep2 ?? null;
 }
 
 /** 🔴 The **only permitted** method for a segment. The plan decides, the request does not. */
