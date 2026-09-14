@@ -186,7 +186,15 @@ describe('C23-2 · a POST can go out with a body, with body and method constrain
 
   it('all three closed sets — method / contentType / bodyKeys — are in the code, and a body may only hold scalar values under closed-set keys', () => {
     expect(ALLOWED_BACKFILL_METHODS).toEqual(['GET', 'POST']);
-    expect(ALLOWED_BACKFILL_CONTENT_TYPES).toEqual(['application/json']);
+    // 🔴 W29 (2026-09-14): the Content-Type closed set holds **two** now, and the assertion is
+    //    updated rather than loosened — gemini's request body is a URL-encoded form (the W20
+    //    research recorded `application/x-www-form-urlencoded` for it), so a plan could not
+    //    declare its own segment without this entry. The property this test guards is unchanged:
+    //    the set is closed, small, and every value in it is one a plan had to ask for by name.
+    expect(ALLOWED_BACKFILL_CONTENT_TYPES).toEqual([
+      'application/json',
+      'application/x-www-form-urlencoded',
+    ]);
 
     const url = `${ORIGIN}${CHATGPT_PLAN.listPath}`;
     const ct = 'application/json';

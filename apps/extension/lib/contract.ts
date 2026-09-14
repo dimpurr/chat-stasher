@@ -14,6 +14,70 @@ export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
  */
 export const WS_OBSERVED_MESSAGE = '__chat_stasher_ws_observed__';
 
+/**
+ * 🔴 W29 · **Gemini's bootstrap tokens, pulled from the page world when a request
+ * needs them.**
+ *
+ * Why a pull message instead of reading them ourselves: the tokens live in the
+ * page's `WIZ_global_data`, and a content script runs in its own JS context where
+ * a page global is not visible at all. The MAIN-world hook is the only code we
+ * run that can see it, so it is the code that answers this.
+ *
+ * 🔴 What crosses, and what that costs, stated plainly: the reply carries the
+ *    same values that sit in `window.WIZ_global_data`, and **every script on that
+ *    page can already read them directly**. So this channel discloses nothing to
+ *    the page that the page does not already hold — that is the whole argument for
+ *    it existing, and it is why it is a channel and not a hole.
+ * 🔴 Neither message is a capture: nothing from them is stored, logged, or sent to
+ *    the native host, the request is answered only on the origin whose own row
+ *    needs it, and the values are attached to one request each
+ *    (lib/platform-auth.ts, `createGeminiAuthorizedFetch`).
+ */
+export const GEMINI_TOKENS_REQUEST_MESSAGE = '__chat_stasher_gemini_tokens_request__';
+export const GEMINI_TOKENS_REPLY_MESSAGE = '__chat_stasher_gemini_tokens_reply__';
+
+/**
+ * The page's bootstrap blob and the three values read out of it.
+ *
+ * 🔴 Names, not values: nothing from those slots is ever written into source,
+ *    storage, a log or a message to the native host.
+ */
+export const GEMINI_WIZ_GLOBAL_DATA_KEY = 'WIZ_global_data';
+export const GEMINI_AT_KEY = 'SNlM0e';
+export const GEMINI_BL_KEY = 'cfb2h';
+export const GEMINI_SESSION_ID_KEY = 'FdrFJe';
+
+/** The one origin whose page the token pull above is answered on. Same closed set as the platform row. */
+export const GEMINI_ORIGIN = 'https://gemini.google.com';
+
+/**
+ * The three values, named exactly as the page's own blob names them so that
+ * "where did this come from" is answerable without a second lookup.
+ *
+ * Every one of them may be null: absent, or present with a type this code will
+ * not use. `null` is not "empty" — it means the request goes out without that
+ * value and the platform's own answer is what the caller sees.
+ */
+export interface GeminiBootstrapTokens {
+  /** `WIZ_global_data.SNlM0e` — the XSRF token the request's `at` field carries. */
+  at: string | null;
+  /** `WIZ_global_data.cfb2h` — the backend release label the `bl` query parameter carries. */
+  bl: string | null;
+  /** `WIZ_global_data.FdrFJe` — the front-end session id the `f.sid` query parameter carries. */
+  fSid: string | null;
+}
+
+/** The reply as the ISOLATED side reads it: a recognisable shape, or nothing usable. */
+export function isGeminiTokensReply(value: unknown): value is { type: string } & GeminiBootstrapTokens {
+  if (!isRecord(value)) return false;
+  if (value.type !== GEMINI_TOKENS_REPLY_MESSAGE) return false;
+  for (const key of ['at', 'bl', 'fSid']) {
+    const field = value[key];
+    if (field !== null && typeof field !== 'string') return false;
+  }
+  return true;
+}
+
 /** Shared page-world marker: both injection paths consult the same state. */
 export const PAGE_HOOK_VERSION = 'v1';
 export const PAGE_HOOK_STATE_KEY = '__chat_stasher_fetch_hook_state__';
@@ -206,7 +270,32 @@ export const PLATFORMS: readonly ChatPlatform[] = [
       encoding: 'text',
       requiredTextIncludes: ['wrb.fr', 'hNvQHb'],
     },
+    // 🔴 W29 · **Where a capture's identity comes from here, and why this pattern
+    //    is not it.** The list endpoint returns conversation ids in the
+    //    `c_`-prefixed form (measured 2026-09-14), so a backfill debt key is one,
+    //    and a live capture is filed under the same value — read out of the
+    //    response's own turns and carried down as the authoritative identity
+    //    (lib/gemini-capture.ts). The pattern below reads the **bare** id out of
+    //    the page URL (`/app/<id>`), which is the one place the prefix is absent,
+    //    so it would name the same conversation differently. It is kept as the
+    //    last-resort fallback every row has and is deliberately **not** what a
+    //    capture is filed under: a conversation filed twice under two names is the
+    //    failure the canonical form exists to prevent. If a future path ever
+    //    reaches it, that is the bug to fix, not the pattern to widen.
     sessionIdPatterns: ['/app/([A-Za-z0-9_-]{8,})'],
+    // The measured route, and the only method that carries it: the page POSTs a
+    // URL-encoded form to this one path for **two** RPC ids (list and detail),
+    // which is why the backfill plan tells its segments apart by the rpcid in the
+    // query rather than by path (lib/backfill/enumerate.ts's formSegmentFor).
+    // 🔴 W29 · The request also carries three values out of the page's own
+    //    `WIZ_global_data` — an XSRF token in the body's `at` field and two
+    //    identifiers in the query. They are read through the page-world hook at
+    //    request time and attached by lib/platform-auth.ts's
+    //    `createGeminiAuthorizedFetch`; no plan-built URL or body carries one, and
+    //    the allowlist refuses a message that arrives with one. Without the XSRF
+    //    token the server answers HTTP 400 with a structured error entry — a real
+    //    refusal, which is why a 400 here is never read as "you have no
+    //    conversations".
     credibility: 'from-source',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.

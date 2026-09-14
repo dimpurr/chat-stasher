@@ -10,8 +10,15 @@
  * The envelope is the part of Gemini capture that is pure: given the response
  * text it is a total function. Nothing here fetches, reads the DOM, touches
  * storage or knows about the backfill engine, so the parsing rules can be
- * stated, tested and argued about without a browser. Wiring it into the capture
- * path is a separate decision, deliberately not taken here.
+ * stated, tested and argued about without a browser.
+ *
+ * 🔴 W29 wired it into the capture path (the backfill plan in
+ *    lib/backfill/enumerate.ts and the live leg in
+ *    entrypoints/dw-bridge.content.ts) and added the readers below — still pure:
+ *    "one RPC document out of a parsed response", "one page of a detail
+ *    conversation", and the **bundle** that holds every raw page of one
+ *    conversation in order. Nothing here decides *whether* to fetch; that
+ *    decision is the caller's.
  *
  * ## The two facts that shaped the design
  *
@@ -627,4 +634,269 @@ function arraySeconds(value: unknown, index: number): number | null {
   const at = arrayValue(value, index);
   const seconds = Array.isArray(at) ? at[0] : at;
   return typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null;
+}
+
+// --- 🔴 W29 · Reading one RPC's document out of a whole response -------------
+//
+// Everything below is what the capture and backfill legs actually call. Each
+// reader folds `parseBatchExecute` -> "the entry for this rpcid" -> that
+// payload's own positional reader, and reports a **named reason** at every step
+// instead of returning an empty-looking result. That is the property that makes
+// "we could not read this response" and "this response held nothing" different
+// facts all the way up: the callers halt on one and archive the other.
+
+/**
+ * Named reasons a response carried no readable document for one rpcid.
+ *
+ * `rpcid-absent` and `payload-unusable` are deliberately separate: the first is
+ * "this response is not the RPC we asked for", the second is "it is, and the
+ * document inside it could not be read". A caller that merged them could not
+ * tell a wrong-rpcid response from a corrupted one.
+ */
+export type GeminiRpcPayloadFailure =
+  | BatchExecuteFailureReason
+  /** No `wrb.fr` entry named this rpcid anywhere in the response. */
+  | 'rpcid-absent'
+  /** The entry is there and its inner document is null or did not parse. */
+  | 'payload-unusable';
+
+export type GeminiRpcPayloadResult =
+  | { ok: true; payload: unknown }
+  | { ok: false; reason: GeminiRpcPayloadFailure };
+
+/**
+ * The decoded document of one rpcid, or a named reason.
+ *
+ * Only entries of the kind this parser understands (`wrb.fr`) are considered: an
+ * entry of another kind carries no rpcid here (see `toEntry`), so it can neither
+ * be matched nor mistaken for a document.
+ */
+export function selectRpcPayload(
+  result: BatchExecuteParseResult,
+  rpcid: string,
+): GeminiRpcPayloadResult {
+  if (!result.ok) return { ok: false, reason: result.reason };
+  for (const entry of result.entries) {
+    if (!entry.recognized || entry.rpcid !== rpcid) continue;
+    if (entry.error !== undefined) return { ok: false, reason: 'payload-unusable' };
+    return { ok: true, payload: entry.payload };
+  }
+  return { ok: false, reason: 'rpcid-absent' };
+}
+
+/** One `MaZiqc` page, as the capture and backfill legs consume it. */
+export interface GeminiListRead {
+  /** `item[0]` of every item, **in the order the page gave them**, `c_` prefix included. */
+  ids: string[];
+  /** `payload[1]`, or null when the response carried none. */
+  nextPageToken: string | null;
+  /** True when the page carried zero items. A measurement, not a fallback. */
+  pageIsEmpty: boolean;
+}
+
+export type GeminiListReadResult =
+  | ({ ok: true } & GeminiListRead)
+  | { ok: false; reason: GeminiRpcPayloadFailure | GeminiShapeError | 'item-id-missing' };
+
+/** Reads one `MaZiqc` response body: envelope, then this rpcid's document, then one page of it. */
+export function readListResponse(text: string): GeminiListReadResult {
+  const selected = selectRpcPayload(parseBatchExecute(text), GEMINI_RPC_LIST);
+  if (!selected.ok) return selected;
+  const page = extractListPage(selected.payload);
+  if (!page.ok) return page;
+  const ids: string[] = [];
+  for (const conversation of page.conversations) {
+    // 🔴 An item whose id is not a readable string is a **shape error**, not a
+    //    skip: this page listed a conversation this code cannot address, and
+    //    passing the rest on would lose it while the leg reported success. Same
+    //    rule as parseKimiListPage's unclassifiable feed item. (An id that is
+    //    present and empty lands here too — an empty string is not an
+    //    addressable conversation id.)
+    if (conversation.id === null || conversation.id.length === 0) {
+      return { ok: false, reason: 'item-id-missing' };
+    }
+    ids.push(conversation.id);
+  }
+  return {
+    ok: true,
+    ids,
+    nextPageToken: page.nextPageToken,
+    pageIsEmpty: page.pageIsEmpty,
+  };
+}
+
+/** One `hNvQHb` page, as the capture and backfill legs consume it. */
+export interface GeminiDetailRead {
+  /**
+   * The conversation id the page's turns name, or null when no turn named one.
+   * Taken from `turn[0][0]` — the canonical (`c_`-prefixed) form, the same value
+   * the list endpoint returns, which is what makes a live capture and a backfill
+   * debt land on one identity.
+   */
+  conversationId: string | null;
+  /**
+   * `turn[0][1]` of every turn, in the order given — the dedupe key across
+   * pages, and the evidence that a later page really is a later page.
+   */
+  responseIds: string[];
+  /** True when the page carried zero turns. */
+  pageIsEmpty: boolean;
+  /** `payload[1]`, or null when the response carried none — the end of the conversation. */
+  nextPageToken: string | null;
+}
+
+export type GeminiDetailReadFailure =
+  | GeminiRpcPayloadFailure
+  | GeminiShapeError
+  /** A turn on this page named a different conversation than the caller asked for. */
+  | 'conversation-id-mismatch';
+
+export type GeminiDetailReadResult =
+  | ({ ok: true } & GeminiDetailRead)
+  | { ok: false; reason: GeminiDetailReadFailure };
+
+/**
+ * Reads one `hNvQHb` response body.
+ *
+ * `expectedConversationId` is checked, not assumed: every turn whose
+ * `turn[0][0]` is readable must name it. That is the one integrity property the
+ * multi-page loop depends on — without it, a page belonging to another
+ * conversation (a stale token, a redirect) would be concatenated into this
+ * conversation's bundle and nothing would say so.
+ */
+export function readDetailResponse(
+  text: string,
+  expectedConversationId?: string,
+): GeminiDetailReadResult {
+  const selected = selectRpcPayload(parseBatchExecute(text), GEMINI_RPC_DETAIL);
+  if (!selected.ok) return selected;
+  const page = extractDetailPage(selected.payload);
+  if (!page.ok) return page;
+
+  const responseIds: string[] = [];
+  let conversationId: string | null = null;
+  for (const turn of page.turns) {
+    if (turn.conversationId !== null) {
+      if (expectedConversationId !== undefined && turn.conversationId !== expectedConversationId) {
+        return { ok: false, reason: 'conversation-id-mismatch' };
+      }
+      conversationId ??= turn.conversationId;
+    }
+    if (turn.responseId !== null) responseIds.push(turn.responseId);
+  }
+
+  return {
+    ok: true,
+    conversationId,
+    responseIds,
+    pageIsEmpty: page.pageIsEmpty,
+    nextPageToken: page.nextPageToken,
+  };
+}
+
+// --- 🔴 W29 · The bundle: every raw page of one conversation, in order -------
+
+/**
+ * The JSON document the archive holds for one Gemini conversation.
+ *
+ * ## Why the archive holds a wrapper here and a raw body everywhere else
+ * Every other platform's body is **one** response, so its raw text is the whole
+ * artefact and is stored verbatim. A Gemini conversation is not one response: it
+ * is a first page plus every page the continuation token led to, and no single
+ * response is the conversation. Storing only the first page would archive a
+ * partial conversation as a complete one — the failure this repository's first
+ * invariant exists to prevent — so the archived artefact is the **sequence of
+ * raw pages**, verbatim and in order, with the two facts needed to read them
+ * back (which RPC produced them, and which conversation they are).
+ *
+ * 🔴 Nothing inside `pages` is trimmed, reordered, re-serialised or deduplicated.
+ *    Pages measured on 2026-09-14 were disjoint, but overlap is what the sources
+ *    expect and dedupe is a consumer's business, not this function's: a raw body
+ *    that has been through a normaliser is no longer raw.
+ */
+export interface GeminiDetailBundle {
+  /** The rpcid every page in `pages` answered. Always `GEMINI_RPC_DETAIL` today. */
+  rpcid: string;
+  /** `c_`-prefixed conversation id — the canonical form, and the identity the file name comes from. */
+  conversationId: string;
+  /** Every raw page body, exactly as the server sent it, oldest page first. */
+  pages: string[];
+}
+
+/** Builds the bundle document. The only place this wrapper's shape is written. */
+export function assembleDetailBundle(conversationId: string, pages: readonly string[]): string {
+  const bundle: GeminiDetailBundle = {
+    rpcid: GEMINI_RPC_DETAIL,
+    conversationId,
+    pages: [...pages],
+  };
+  return JSON.stringify(bundle);
+}
+
+export type GeminiBundleReadResult =
+  | { ok: true; bundle: GeminiDetailBundle }
+  | { ok: false; reason: string };
+
+/**
+ * Reads a bundle back and re-establishes the property it claims: **this is a
+ * whole conversation**.
+ *
+ * Three checks, and each one is a different way the claim could be false:
+ *  · the wrapper itself (`rpcid`, a non-empty `conversationId`, a non-empty
+ *    array of strings);
+ *  · every page parses as this platform's detail response **for this same
+ *    conversation** — a page naming another conversation is refused;
+ *  · **the token is where it should be and nowhere else.** Every page except the
+ *    last must carry a continuation token — a page in the middle that says
+ *    "no more" means these pages do not belong together — and the **last** page
+ *    must carry none. A bundle whose last page still has a token is a truncated
+ *    conversation wearing a complete one's name, which is the one thing this
+ *    format exists to make impossible, and it is reported rather than read as
+ *    fine.
+ *
+ * An empty-but-tokenless last page is accepted: from one response, "this
+ * conversation has no turns" and "this response is a window with nothing in it"
+ * are not distinguishable, and refusing it would leave a debt pending forever.
+ * (The window case is what the last-page token check above is for — see
+ * parseKimiDetailPage for the same trade-off written out.)
+ */
+export function readDetailBundle(text: string): GeminiBundleReadResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: 'bundle is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, reason: 'bundle is not a JSON object' };
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record.rpcid !== 'string' || record.rpcid.length === 0) {
+    return { ok: false, reason: 'bundle has no rpcid' };
+  }
+  if (typeof record.conversationId !== 'string' || record.conversationId.length === 0) {
+    return { ok: false, reason: 'bundle has no conversationId' };
+  }
+  const pages = record.pages;
+  if (!Array.isArray(pages) || pages.length === 0) {
+    return { ok: false, reason: 'bundle carries no pages' };
+  }
+  for (const [index, page] of pages.entries()) {
+    if (typeof page !== 'string' || page.length === 0) {
+      return { ok: false, reason: 'bundle holds a page that is not a non-empty string' };
+    }
+    const read = readDetailResponse(page, record.conversationId);
+    if (!read.ok) return { ok: false, reason: `bundle page could not be read: ${read.reason}` };
+    const isLast = index === pages.length - 1;
+    if (isLast && read.nextPageToken !== null) {
+      return { ok: false, reason: 'the bundle’s last page carries a continuation token, so the bundle is incomplete' };
+    }
+    if (!isLast && read.nextPageToken === null) {
+      return { ok: false, reason: 'a page before the last one carries no continuation token' };
+    }
+  }
+  return {
+    ok: true,
+    bundle: { rpcid: record.rpcid, conversationId: record.conversationId, pages: pages as string[] },
+  };
 }

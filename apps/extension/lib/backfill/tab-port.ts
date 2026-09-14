@@ -72,6 +72,23 @@
  *  --- Content-Type rule. What a stuffed message could change there is the same
  *  --- thing it could change before ("spell the cursor as a different string"), and
  *  --- nothing wider.
+ *  --- 🔴 W29 added one dimension, and it is a **narrowing**, not a widening:
+ *  --- rule 11, below.
+ * 11. a **form** segment (Gemini) is admitted by `checkFormRequest`:
+ *     · the URL's query must be exactly the plan's pinned key→value set, with no
+ *       fragment — this is also how the segment is told apart, because this
+ *       plan's two segments share one path (see `formSegmentFor`);
+ *     · the form's field names are a closed set, each present exactly once;
+ *     · every field other than the batch must be **empty** — the credential
+ *       field exists because the page's own request has it and is blank because
+ *       only the page-context wrapper may fill it;
+ *     · the batch is one four-element call naming an rpcid from the closed set,
+ *       with an envelope kind the plan declares, and arguments the plan's own
+ *       `checkArgs` accepts. The freedom left is the same as a JSON body's: the
+ *       scalar value of a key, i.e. one conversation id and one opaque cursor.
+ *     The JSON rules (key set, scalar-only values, JSON object) do **not** apply
+ *     to it, and rule 8's query check does not either — a form body is not JSON,
+ *     so being checked by the JSON rules would mean being checked by nothing.
  * Failing any one of these refuses the request with an error; never send it anyway.
  *
  * ## 🔴 Why this is still not a "general-purpose proxy"
@@ -87,6 +104,9 @@ import {
   backfillPlanFor,
   detailPathMatches,
   expectedMethodFor,
+  formQueryMatches,
+  formSegmentFor,
+  isFormPostSpec,
   postSpecFor,
   ALLOWED_BACKFILL_CONTENT_TYPES,
   ALLOWED_BACKFILL_METHODS,
@@ -96,6 +116,7 @@ import {
   type BackfillMethod,
   type BackfillRequestInit,
   type BackfillSegment,
+  type FormPostSpec,
 } from './enumerate';
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
@@ -353,8 +374,15 @@ export function checkBackfillRequest(
   if (!plan) return refuseUrl(`platform ${row.id} has no backfill plan`);
 
   // 4 · Only its own paths — which also settles which segment this is (deciding the permitted method/body).
+  // 🔴 W29 · A plan whose two segments share **one path** (batchexecute) is asked
+  //    first, because pathname alone cannot tell its segments apart: it matches a
+  //    segment by the query the plan itself pinned, and that query names the RPC.
+  //    See formSegmentFor. A plan that declares no form segment is untouched by
+  //    this line — formSegmentFor returns null for it.
   let segment: BackfillSegment;
-  if (u.pathname === plan.listPath) segment = 'list';
+  const viaForm = formSegmentFor(plan, u);
+  if (viaForm !== null) segment = viaForm;
+  else if (u.pathname === plan.listPath) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
   //    is not — Perplexity). null ⇒ this platform has **no** permitted body URL. The
   //    allowlist is not loosened and does no prefix wildcarding: what is permitted
@@ -366,11 +394,17 @@ export function checkBackfillRequest(
   else if (plan.detailStep2 && detailPathMatches(plan.detailStep2.path, u.pathname)) segment = 'detail2';
   else return refuseUrl('path is not a backfill endpoint');
 
+  const post = postSpecFor(plan, segment);
+
   // 4b · 🔴 W8 · The body URL's query, which C26 never had to look at because no
   //      plan put its id there. W8 declared one (DeepSeek), so the query dimension
   //      is now checked too — see checkDetailQuery. W21 applies it to both detail
   //      segments.
-  if (segment !== 'list') {
+  //      🔴 W29: **not** applied to a form segment. There the whole query is a
+  //      pinned set of constants rather than one key carrying a value, so it is
+  //      checked by `formQueryMatches` in the form branch below; running both
+  //      would compare the same URL against two different declarations.
+  if (segment !== 'list' && !isFormPostSpec(post)) {
     const refused = checkDetailQuery(plan, u, segment);
     if (refused !== null) return refuseUrl(refused);
   }
@@ -385,7 +419,6 @@ export function checkBackfillRequest(
     return refuseRequest(`refused: ${row.id} ${segment} segment must be ${expected}, got ${sanitiseMethod(method)}`);
   }
 
-  const post = postSpecFor(plan, segment);
   if (!post) {
     // 6 · A GET segment: no body or Content-Type at all.
     if (spec.body !== undefined) return refuseRequest('refused: GET request must not carry a body');
@@ -393,6 +426,15 @@ export function checkBackfillRequest(
       return refuseRequest('refused: GET request must not carry a content-type');
     }
     return { ok: true, url: spec.url, method: 'GET' };
+  }
+
+  // 7a · 🔴 W29 · A **form** segment. Its own rules, in their own block: a JSON
+  //      body cannot even be parsed as this one, so sharing a branch would mean
+  //      one of the two being checked by rules written for the other.
+  if (isFormPostSpec(post)) {
+    const refusal = checkFormRequest(post, spec, u);
+    if (refusal !== null) return refusal;
+    return { ok: true, url: spec.url, method: 'POST', body: spec.body, contentType: spec.contentType };
   }
 
   // 7 · The closed-set validation of a POST segment's body.
@@ -459,6 +501,121 @@ export function checkBackfillRequest(
     }
   }
   return { ok: true, url: spec.url, method: 'POST', body: spec.body, contentType: spec.contentType };
+}
+
+/**
+ * 🔴 W29 · **A form segment's admission check.** Returns a refusal, or null when
+ * the request may go.
+ *
+ * The four things it decides, and what each one is for:
+ *  1. **the URL's query** — it must be exactly the plan's pinned key→value set
+ *     (`formQueryMatches`), and carry no fragment. This is where the RPC is
+ *     pinned: the query names it, and a request naming another RPC is not this
+ *     segment's request at any other level either.
+ *  2. **the field names** — a closed set, each exactly once.
+ *  3. **every field except the batch must be empty.** This is the rule that keeps
+ *     a credential out of the message channel: the page's token field is present
+ *     because the page's own request carries it, and it is blank because only the
+ *     page-context wrapper may fill it (lib/platform-auth.ts). A message that
+ *     arrived with a token in it is therefore refused rather than forwarded.
+ *  4. **the batch** — one call, the declared four positions, an rpcid from the
+ *     closed set, and arguments the plan's own `checkArgs` accepts. The two
+ *     opaque values inside those arguments (a conversation id, a page cursor) are
+ *     the *only* things a stuffed message could vary, exactly as with a JSON
+ *     body: everything else is a literal this plan wrote down.
+ */
+function checkFormRequest(
+  post: FormPostSpec,
+  spec: BackfillRequestSpec,
+  u: URL,
+): { ok: false; reason: string; detail: string } | null {
+  if (u.hash !== '') return refuseUrl('body url carries a fragment the plan did not declare');
+  if (!formQueryMatches(post, u)) return refuseUrl('body url carries a query the plan did not declare');
+
+  if (typeof spec.body !== 'string') return refuseRequest('refused: POST request has no string body');
+  if (new TextEncoder().encode(spec.body).byteLength > MAX_REQUEST_BODY_BYTES) {
+    return refuseRequest('refused: request body exceeds MAX_REQUEST_BODY_BYTES');
+  }
+  if (spec.contentType !== post.contentType) {
+    return refuseRequest('refused: content-type is not the one declared by the plan');
+  }
+  if (!(ALLOWED_BACKFILL_CONTENT_TYPES as readonly string[]).includes(spec.contentType)) {
+    return refuseRequest('refused: content-type is not in the allowed set');
+  }
+
+  const fields = new URLSearchParams(spec.body);
+  const names = new Set<string>();
+  for (const name of fields.keys()) names.add(name);
+  if (names.size !== post.bodyKeys.length) {
+    return refuseRequest('refused: request body has a field outside the declared allow-list');
+  }
+  for (const key of post.bodyKeys) {
+    const values = fields.getAll(key);
+    if (values.length !== 1) {
+      return refuseRequest('refused: request body must carry exactly one of each declared field');
+    }
+    if (key === post.batchKey) continue;
+    // 🔴 Not echoed back: what the field is called and what it held are both
+    //    facts about a request we refused, and one of them can be a credential.
+    if (values[0] !== '') {
+      return refuseRequest('refused: a form field this plan builds empty arrived with a value');
+    }
+  }
+
+  return checkFormBatch(post, fields.get(post.batchKey) ?? '');
+}
+
+/**
+ * The batch, structurally: `[[[rpcid, "<args as a JSON string>", null, "<kind>"]]]`.
+ *
+ * The nesting is written out rather than assembled from pieces, for the same
+ * reason `buildBatchExecuteBody` writes it out: getting it wrong is the classic
+ * way this call 400s, and a check that shares the builder's shape by
+ * construction is the only kind that stays true when the builder moves.
+ */
+function checkFormBatch(
+  post: FormPostSpec,
+  value: string,
+): { ok: false; reason: string; detail: string } | null {
+  let batch: unknown;
+  try {
+    batch = JSON.parse(value);
+  } catch {
+    return refuseRequest('refused: batch field is not JSON');
+  }
+  // 🔴 Three levels, and each one is checked: the batch holds one group, the
+  //    group holds one call, and the call is the four positions below. Collapsing
+  //    any two of them would accept a body the plan's own builder never emits.
+  if (!Array.isArray(batch) || batch.length !== 1) {
+    return refuseRequest('refused: batch does not hold exactly one group');
+  }
+  const group = batch[0];
+  if (!Array.isArray(group) || group.length !== 1) {
+    return refuseRequest('refused: batch group does not hold exactly one call');
+  }
+  const call = group[0];
+  if (!Array.isArray(call) || call.length !== 4) {
+    return refuseRequest('refused: batch call is not the declared four-element form');
+  }
+  if (typeof call[0] !== 'string' || !post.rpcids.includes(call[0])) {
+    // 🔴 The rpcid is not echoed back: a name that is not on the allow-list is an
+    //    identifier from outside this plan, and refusals do not carry those.
+    return refuseRequest('refused: batch names an rpcid outside the declared set');
+  }
+  if (call[2] !== null || call[3] !== post.batchKind) {
+    return refuseRequest('refused: batch call carries an envelope this plan does not build');
+  }
+  if (typeof call[1] !== 'string') {
+    return refuseRequest('refused: batch call carries no argument string');
+  }
+  let args: unknown;
+  try {
+    args = JSON.parse(call[1]);
+  } catch {
+    return refuseRequest('refused: batch arguments are not JSON');
+  }
+  const refused = post.checkArgs(call[0], args);
+  return refused === null ? null : refuseRequest(`refused: ${refused}`);
 }
 
 /** Truncate the method before echoing it in a refusal reason, so an over-long string is not carried into the log verbatim. */

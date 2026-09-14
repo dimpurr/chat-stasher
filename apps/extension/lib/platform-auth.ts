@@ -26,9 +26,20 @@
 import {
   CHATGPT_DETAIL_PATH,
   CHATGPT_LIST_PATH,
+  GEMINI_BATCHEXECUTE_PATH,
+  GEMINI_FORM_FIELD_AT,
+  GEMINI_FORM_FIELD_BATCH,
+  GEMINI_PAGE_QUERY_KEYS,
+  GEMINI_QUERY_KEY_BL,
+  GEMINI_QUERY_KEY_F_SID,
+  GEMINI_QUERY_KEY_HL,
+  GEMINI_QUERY_KEY_REQID,
+  GEMINI_QUERY_RPCIDS,
   KIMI_DETAIL_PATH,
   KIMI_LIST_PATH,
 } from './backfill/enumerate';
+import { GEMINI_ORIGIN, GEMINI_TOKENS_REQUEST_MESSAGE, type GeminiBootstrapTokens } from './contract';
+import { GEMINI_RPC_DETAIL, GEMINI_RPC_LIST } from './gemini-rpc';
 import { PLATFORMS } from './contract';
 
 export const CHATGPT_SESSION_PATH = '/api/auth/session';
@@ -243,6 +254,165 @@ export function createKimiAuthorizedFetch(
      */
     if (first.status !== 401 || token === null) return first;
     return send(url, init, usableHeaderToken(options.readToken()));
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Gemini: the tokens are the page's own globals, and they travel in the request
+// itself — one in the URL, one in the body.
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 W29 · **Gemini's `batchexecute` calls need three values that exist only in
+ * the page.**
+ *
+ * Measured in a logged-in Chrome (2026-09-14): the page posts to
+ * `/_/BardChatUi/data/batchexecute?rpcids=…&source-path=…&bl=…&f.sid=…&hl=…&_reqid=…&rt=c`
+ * with a form body `f.req=…&at=…`, where `at`, `bl` and `f.sid` come from the
+ * page's own `WIZ_global_data` blob. **Without `at` the server answers HTTP 400**
+ * with a structured error entry — a real refusal, never data, never an empty
+ * page. That is the whole reason this wrapper exists rather than "just try
+ * cookies and see": if the leg ever rounded a refusal into a result, "we are not
+ * logged in" would be written down as "you have no conversations".
+ *
+ * The three rules are ChatGPT's and Kimi's, applied to tokens that come from a
+ * page global instead of an endpoint or a storage key:
+ *  · the values are **read at request time** through the MAIN-world hook (a
+ *    content script cannot see a page global at all — see
+ *    `GEMINI_TOKENS_REQUEST_MESSAGE` in lib/contract.ts), are never cached here,
+ *    never written to storage, never logged, and never sent to the native host;
+ *  · they are attached **only** to the two `batchexecute` rpcids on a Gemini
+ *    origin, and to nothing else — every other request, including every other
+ *    path on gemini.google.com, is sent exactly as it would have been;
+ *  · a **400 or 401** re-reads them once and retries once. 400 is the measured
+ *    shape of "the token was missing or stale" on this platform, 401 is the
+ *    family's; a token the page rotated between two requests is the normal case
+ *    this covers, and anything else is the platform's answer, passed through
+ *    rather than interpreted.
+ *
+ * 🔴 When no token is readable the request is sent **with an empty `at`**. That is
+ *    deliberate and it is the same call Kimi's wrapper makes: the platform's own
+ *    400 is then what the leg sees, and a 400 halts with a trace instead of being
+ *    mistaken for an empty account. Inventing a failure here ("we could not find
+ *    your token") would hide which of the two happened.
+ *
+ * 🔴 The query and the body are **rebuilt**, not patched: the four page keys are
+ *    removed and set from what was just read, and `f.req=<batch>&at=<token>` is
+ *    written from the batch the plan built (which the allowlist has already
+ *    checked) plus the token. So this wrapper cannot widen a request — it can
+ *    only fill in the three values it exists for, and it is the only code that
+ *    ever puts a credential into one.
+ */
+export const GEMINI_FORM_CONTENT_TYPE = 'application/x-www-form-urlencoded';
+
+const GEMINI_ORIGINS: readonly string[] =
+  PLATFORMS.find((platform) => platform.id === 'gemini')?.origins ?? [GEMINI_ORIGIN];
+
+/** True only for the two `batchexecute` rpcids this leg's plans declare, on the page's own origin. */
+export function needsGeminiTokens(url: string, pageOrigin: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== pageOrigin || !GEMINI_ORIGINS.includes(parsed.origin)) return false;
+    if (parsed.pathname !== GEMINI_BATCHEXECUTE_PATH) return false;
+    const rpcid = parsed.searchParams.get(GEMINI_QUERY_RPCIDS);
+    return rpcid === GEMINI_RPC_LIST || rpcid === GEMINI_RPC_DETAIL;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 🔴 How long the page-world pull may take before the request goes out without
+ * tokens.
+ *
+ * The pull is one `postMessage` in and one back, answered by a listener in the
+ * same tab — microseconds. The budget is not a performance figure: it exists so
+ * that a page where the MAIN-world hook never installed (a CSP refusal, a frozen
+ * global) costs **one bounded wait per request** instead of stalling the leg. On
+ * that path there is no reply at all, the request goes out with an empty `at`,
+ * and the server's 400 is what the user's trace says — which is the honest
+ * outcome, not a hang.
+ */
+export const GEMINI_TOKEN_PULL_TIMEOUT_MS = 200;
+
+export interface GeminiAuthOptions {
+  /**
+   * Reads the page's bootstrap tokens through the page-world pull. Called per
+   * request, never cached — and **asynchronous**, because the values live in
+   * another JS context and have to be asked for (see
+   * `GEMINI_TOKENS_REQUEST_MESSAGE`). It resolves to null when the page world
+   * did not answer inside `GEMINI_TOKEN_PULL_TIMEOUT_MS`.
+   */
+  readTokens: () => Promise<GeminiBootstrapTokens | null>;
+  /** The value for `hl` (the page's `navigator.language`); null/empty ⇒ the parameter is not sent. */
+  language: string | null;
+}
+
+/**
+ * A fetch that fills Gemini's three page tokens into `batchexecute` requests and
+ * leaves every other request untouched. One instance per content script.
+ */
+export function createGeminiAuthorizedFetch(
+  pageOrigin: string,
+  rawFetch: RawFetch,
+  options: GeminiAuthOptions,
+) {
+  /**
+   * The page's own request counter. 🔴 Its value carries **no meaning this code
+   * relies on** — the page increments one per request and the server has not been
+   * asked what it makes of it — so it is a plain local counter, not a clock, not
+   * an identifier, and it is not derived from anything about the user.
+   */
+  let requestCounter = 0;
+
+  const send = (url: string, init: RequestInit, tokens: GeminiBootstrapTokens | null): Promise<MinimalResponse> => {
+    const parsed = new URL(url);
+    // 🔴 Removed first, then set from what was just read. A key this wrapper does
+    //    not have a value for is therefore absent rather than stale — and the
+    //    allowlist has already refused anything the plan did not declare, so this
+    //    is normalisation, not a check.
+    for (const key of GEMINI_PAGE_QUERY_KEYS) parsed.searchParams.delete(key);
+    const bl = usableHeaderToken(tokens?.bl ?? null);
+    if (bl !== null) parsed.searchParams.set(GEMINI_QUERY_KEY_BL, bl);
+    const fSid = usableHeaderToken(tokens?.fSid ?? null);
+    if (fSid !== null) parsed.searchParams.set(GEMINI_QUERY_KEY_F_SID, fSid);
+    const language = usableHeaderToken(options.language);
+    if (language !== null) parsed.searchParams.set(GEMINI_QUERY_KEY_HL, language);
+    parsed.searchParams.set(GEMINI_QUERY_KEY_REQID, String(requestCounter++));
+
+    // 🔴 The batch is taken **out of the body the plan built** and re-emitted with
+    //    the token; it is never re-encoded from anything else, and the token field
+    //    is blank when there is no token (see this section's header).
+    const fields = new URLSearchParams(typeof init.body === 'string' ? init.body : '');
+    const batch = fields.get(GEMINI_FORM_FIELD_BATCH) ?? '';
+    const at = usableHeaderToken(tokens?.at ?? null) ?? '';
+    const body = `${GEMINI_FORM_FIELD_BATCH}=${encodeURIComponent(batch)}`
+      + `&${GEMINI_FORM_FIELD_AT}=${encodeURIComponent(at)}`;
+
+    return rawFetch(parsed.toString(), {
+      ...init,
+      method: 'POST',
+      headers: { 'content-type': GEMINI_FORM_CONTENT_TYPE },
+      body,
+    });
+  };
+
+  return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
+    if (!needsGeminiTokens(url, pageOrigin)) return rawFetch(url, init);
+    const tokens = await options.readTokens();
+    const first = await send(url, init, tokens);
+    /**
+     * 🔴 Retried **once**, and only when the first attempt carried a token: a
+     *    refusal of a request that *had* one is the case a re-read can change (the
+     *    page may have rotated the value). With no token there is nothing to
+     *    re-read and nothing to refresh, so the retry would be byte-identical
+     *    except for the request counter — sending it would double this leg's
+     *    request count for a user who is simply logged out, to reach the same 400.
+     */
+    if ((first.status !== 400 && first.status !== 401) || usableHeaderToken(tokens?.at ?? null) === null) {
+      return first;
+    }
+    return send(url, init, await options.readTokens());
   };
 }
 

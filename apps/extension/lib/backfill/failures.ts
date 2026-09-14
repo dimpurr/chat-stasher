@@ -104,7 +104,28 @@ export type FailureReason =
    *    failure list is exactly the place built for "this one is missing, and here
    *    is why" (see the file header).
    */
-  | 'detail-paged-unsupported';
+  | 'detail-paged-unsupported'
+  /**
+   * 🔴 W29 · The body was fetched, HTTP succeeded, the shape was recognised — and
+   * the conversation needs **more pages than this leg will fetch** (Gemini: the
+   * detail RPC pages with a continuation token, and the cap is
+   * `DetailPagesSpec.maxPages`).
+   *
+   * 🔴 Why this is a *different* fact from 'detail-paged-unsupported', and why the
+   *    two must not be merged: that one says "the platform offers more of this
+   *    conversation and this leg does not know how to ask for it"; this one says
+   *    "this leg does know how, did ask, and stopped itself at its own cap". The
+   *    first is a gap in what we implemented — it applies to every long
+   *    conversation on that platform. The second is a property of **this one
+   *    conversation**: every shorter conversation beside it is archived in the
+   *    same run. Merging them would either halt a leg that is working or describe
+   *    a per-conversation limit as a missing capability.
+   *
+   * The refusal is the point: the pages fetched so far are real content and
+   * **still not the conversation**, so nothing is stored and the debt leaves
+   * pending with this receipt — never "the first N pages, called complete".
+   */
+  | 'detail-too-long';
 
 export interface FailureEntry {
   /** The first 8 characters of the session id. 🔴 Not the full id. */
@@ -201,6 +222,8 @@ export function describeFailureReason(reason: string): string {
       return t('failure.identityMismatch');
     case 'detail-paged-unsupported':
       return t('failure.detailPagedUnsupported');
+    case 'detail-too-long':
+      return t('failure.detailTooLong');
     default:
       return t('failure.unknownReason', { reason });
   }

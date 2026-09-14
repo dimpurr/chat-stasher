@@ -3,8 +3,13 @@ import {
   PLATFORMS,
   MAIN_FALLBACK_TIMEOUT_MS,
   MAIN_PROBE_MESSAGE,
+  GEMINI_TOKENS_REQUEST_MESSAGE,
+  findPlatformForUrl,
   isCaptureMessage,
+  isGeminiTokensReply,
   isMainReadyMessage,
+  type CapturedFetch,
+  type GeminiBootstrapTokens,
 } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 import {
@@ -17,11 +22,14 @@ import { installTabHello } from '../lib/backfill/tab-hello';
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
+  createGeminiAuthorizedFetch,
   createKimiAuthorizedFetch,
   createSeenGate,
   isConversationSeenMessage,
   KIMI_ACCESS_TOKEN_STORAGE_KEY,
+  GEMINI_TOKEN_PULL_TIMEOUT_MS,
 } from '../lib/platform-auth';
+import { completeGeminiLiveCapture, isGeminiDetailRequest } from '../lib/gemini-capture';
 import { createFallbackWarningGate } from '../lib/fallback-verification';
 
 /**
@@ -83,12 +91,54 @@ export default defineContentScript({
       }
 
       if (!isCaptureMessage(event.data)) return;
+      void deliverCapture(event.data.payload);
+    };
+
+    /**
+     * 🔴 W29 · **The one place a capture can be completed before it is archived.**
+     *
+     * For Gemini, a page load is **not** the conversation: its body RPC is paged,
+     * and the response the hook saw may be any page of it (the page asks for older
+     * turns as the user scrolls). So the conversation is fetched from its first
+     * page here — through `serveBackfillFetch`, i.e. the very same allowlist the
+     * backfill leg goes through — and what is delivered is the assembled bundle.
+     * lib/gemini-capture.ts states the reasoning, including why the observed
+     * response is used for its identity and not as the bundle's first page. Every
+     * other payload is delivered exactly as it arrived, byte for byte.
+     *
+     * 🔴 A conversation that cannot be completed is **not delivered at all**. The
+     *    pages in hand are real content and still not the conversation, so storing
+     *    them would be archiving a partial answer as a whole one; the backfill leg
+     *    will try that conversation again. The warning carries the reason and
+     *    nothing else — never the response, never an id.
+     */
+    async function deliverCapture(payload: CapturedFetch): Promise<void> {
+      let outgoing = payload;
+      if (findPlatformForUrl(payload.url)?.id === 'gemini' && isGeminiDetailRequest(payload.url)) {
+        const completed = await completeGeminiLiveCapture(payload, {
+          pageOrigin,
+          fetchPage: (url, init) => serveBackfillFetch(
+            { url, method: init.method, body: init.body, contentType: init.contentType },
+            pageOrigin,
+            pageFetch,
+          ),
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          random: Math.random,
+        });
+        if (!completed.ok) {
+          console.warn(
+            `[chat-stasher] gemini conversation not captured: ${completed.reason}`,
+          );
+          return;
+        }
+        outgoing = completed.payload;
+      }
       browser.runtime
-        .sendMessage({ type: 'chat-captured', payload: event.data.payload })
+        .sendMessage({ type: 'chat-captured', payload: outgoing })
         .catch(() => {
           // A failed extension channel must never disturb the page.
         });
-    };
+    }
 
     function injectPageScript(source: string): boolean {
       if (typeof document === 'undefined') return false;
@@ -155,6 +205,46 @@ export default defineContentScript({
       }
     }
 
+    /**
+     * 🔴 W29 · **Gemini's bootstrap tokens, asked for through the page world.**
+     *
+     * The values live in the page's `WIZ_global_data`, which a content script
+     * cannot see, so the MAIN-world hook is asked (lib/page-hook.ts) and answers
+     * with exactly the three slots the platform row names. One `postMessage` in
+     * and one back; nothing is cached here, nothing is stored, nothing is logged,
+     * and no value is ever put into a message to background or to the host.
+     *
+     * 🔴 What crosses is what the page already holds — every script on this page
+     *    can read `window.WIZ_global_data` directly — so this pull discloses
+     *    nothing to the page. It is also why no nonce guards the reply: there is
+     *    no secret to protect, and the only thing a forged reply could do is make
+     *    the next request fail against the same origin it was already going to.
+     *
+     * `null` covers "the hook did not answer" and "the page has no such blob"
+     * alike, and both mean the same thing downstream: the request goes out
+     * without the values and the platform's own 400 is what the leg records.
+     */
+    function pullGeminiTokens(): Promise<GeminiBootstrapTokens | null> {
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (value: GeminiBootstrapTokens | null): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          window.removeEventListener('message', onReply);
+          resolve(value);
+        };
+        const onReply = (event: MessageEvent<unknown>): void => {
+          if (event.source !== window || event.origin !== pageOrigin) return;
+          if (!isGeminiTokensReply(event.data)) return;
+          finish({ at: event.data.at, bl: event.data.bl, fSid: event.data.fSid });
+        };
+        const timer = setTimeout(() => finish(null), GEMINI_TOKEN_PULL_TIMEOUT_MS);
+        window.addEventListener('message', onReply);
+        window.postMessage({ type: GEMINI_TOKENS_REQUEST_MESSAGE }, pageOrigin);
+      });
+    }
+
     // The one fetch both legs use. ChatGPT body requests get the session's
     // bearer token (in memory only; lib/platform-auth.ts); every other request
     // is sent exactly as before.
@@ -164,8 +254,18 @@ export default defineContentScript({
     //    **at request time**, keeps it in no variable of its own, attaches it only
     //    to those two paths, and passes every other request — ChatGPT's included —
     //    straight through to the wrapper above. Nothing about it is decided here.
-    const authorizedFetch = createKimiAuthorizedFetch(pageOrigin, chatgptFetch, {
+    const kimiFetch = createKimiAuthorizedFetch(pageOrigin, chatgptFetch, {
       readToken: readKimiAccessToken,
+      language: typeof navigator === 'undefined' ? null : navigator.language,
+    });
+    // 🔴 W29 · Gemini's `batchexecute` requests carry three of the page's own
+    //    values: `at` in the body, `bl` and `f.sid` (plus the page's language and
+    //    its request counter) in the query. The wrapper reads them per request
+    //    through the pull above, rebuilds the query and the body from what it
+    //    just read, attaches them only to those two rpcids, and passes every
+    //    other request — ChatGPT's and Kimi's included — straight through.
+    const authorizedFetch = createGeminiAuthorizedFetch(pageOrigin, kimiFetch, {
+      readTokens: pullGeminiTokens,
       language: typeof navigator === 'undefined' ? null : navigator.language,
     });
     const pageFetch: FetchLike = async (url, init) => {
