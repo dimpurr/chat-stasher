@@ -421,6 +421,27 @@ pub fn serve(
                     stats.rejected += 1;
                     continue;
                 }
+                // The non-blocking mode above is the *listener's*. On macOS and
+                // the BSDs `accept()` hands it down to the connection; Linux
+                // does not (POSIX says it must not, and Linux's man page calls
+                // the BSD behaviour out as the difference). This socket must be
+                // blocking: `read_head` bounds its read with `SO_RCVTIMEO`,
+                // which a non-blocking socket ignores, so a read with nothing
+                // to read yet returns `WouldBlock` at once and the request is
+                // misread as malformed — the connection is then dropped with no
+                // reply at all. A client is entitled to connect and compose its
+                // request after that; the handshake finishes in the listen
+                // backlog, so the gap is real and was measured: `w15_ui_test`
+                // failed 2 runs in 30 on an empty, zero-byte response.
+                //
+                // `write_all` needs it too: a page larger than the send buffer
+                // would otherwise stop at `WouldBlock` and be silently cut
+                // short by the best-effort write below.
+                if let Err(e) = stream.set_nonblocking(false) {
+                    stats.rejected += 1;
+                    eprintln!("ui: accepted a connection but cannot set it blocking: {e}");
+                    continue;
+                }
                 let resp = match read_head(&mut stream) {
                     Ok(Some(h)) => {
                         route(&h.method, &h.target, &h.hosts, token, port, data, content)
@@ -761,5 +782,69 @@ mod tests {
         assert!(!ct_eq("abc", "abd"));
         assert!(!ct_eq("abc", "ab"));
         assert!(ct_eq("", ""));
+    }
+
+    /// **A connection is not a request.** `accept()` can hand back a client
+    /// before one byte of its request has arrived: the handshake completes into
+    /// the listen backlog, so the client's `connect()` returns first, and the
+    /// server can accept in the gap between that and the client's `write`.
+    ///
+    /// Nothing in the accept loop may treat "no bytes yet" as "no request".
+    /// This test widens that gap deliberately — the request is written 500 ms
+    /// after `connect` returns, while the loop accepts every 50 ms, so the
+    /// accept lands ten polls before the write — which makes the window
+    /// certain rather than occasional. The same window, unfixed, is what made
+    /// `w15_ui_test` fail 2 runs in 30, both times as
+    /// `tests/w15_ui_test.rs:210`, "a complete response head", on a response
+    /// that was zero bytes long.
+    #[test]
+    fn a_connection_is_answered_even_if_its_request_has_not_arrived_yet() {
+        let listener = bind_ephemeral().expect("bind loopback");
+        let port = listener.local_addr().unwrap().port();
+        let data = fixture::data();
+        let server = std::thread::spawn(move || {
+            serve(
+                &listener,
+                "token",
+                &data,
+                Duration::from_secs(2),
+                &NoContent,
+            )
+        });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
+        // The server accepts this connection during this sleep, with an empty
+        // receive buffer and no request in it.
+        std::thread::sleep(Duration::from_millis(500));
+        write!(
+            stream,
+            "GET /?token=token HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write request");
+
+        let mut raw = Vec::new();
+        let read = stream.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "a client is entitled to a reply however the connect/write pair \
+             interleaves with accept(); got {} bytes ({read:?})",
+            raw.len()
+        );
+        assert!(
+            text.contains("\r\n\r\n"),
+            "the reply must carry a complete head: {text:?}"
+        );
+        assert!(text.contains("text/html"), "the overview page: {text:?}");
+
+        // Let the loop time out and stop rather than leaving a listener behind.
+        let stats = server
+            .join()
+            .expect("the serve loop must not panic")
+            .expect("the serve loop must exit cleanly");
+        assert_eq!(
+            stats.served, 1,
+            "the one request above must have been served"
+        );
     }
 }
