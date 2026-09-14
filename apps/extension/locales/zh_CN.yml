@@ -211,10 +211,6 @@ failure:
   shortIdEmpty: "（空）"
 
 platformNote:
-  deepseek:
-    partial: >-
-      DeepSeek：还不能回溯历史正文。已经能列出你的历史会话了，但还不会去取每条
-      会话的内容，所以暂时一条也不会存下来。
   perplexity:
     partial: >-
       Perplexity：还不能回溯历史正文。已经能列出你的历史会话了，但还不会去取每条

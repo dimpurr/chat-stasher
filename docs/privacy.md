@@ -31,8 +31,10 @@ that document is the honest one.
   compiled into the code, not a wildcard. See
   [section 5](#5-where-the-extension-runs) for the exact origins.
 - **Running on a site is not the same as backing up your history there.** The
-  optional backfill feature can actually recover past conversation text on
-  **ChatGPT only**. On **DeepSeek** and **Perplexity** it lists your
+  optional backfill feature implements recovering past conversation text on
+  **ChatGPT** and **DeepSeek** — implemented, not yet observed completing in a
+  real browser, and for DeepSeek we have **not verified** whether a long
+  conversation comes back complete. On **Perplexity** it lists your
   conversations and saves **none of their content**; on Gemini, Claude, and Kimi
   it does nothing at all. See
   [section 5](#5-where-the-extension-runs).
@@ -199,7 +201,7 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:106`; `apps/extension/lib/backfill/tab-port.ts:88` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:106`; `apps/extension/lib/backfill/tab-port.ts:95` |
 | `cs_backfill_v1:<platform>:<scope>` | The backfill progress set: **conversation/session ids** already archived and still pending, plus counters | `apps/extension/lib/backfill/types.ts:171-200`, `:248-269` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
@@ -255,14 +257,16 @@ code refuses to fetch at all rather than defaulting to a live one
 (`apps/extension/lib/backfill/engine.ts:75-78`).
 
 Which platforms actually see those extra requests, stated exactly:
-**ChatGPT** (conversation list *and* each conversation's content), and
-**DeepSeek** and **Perplexity** (**conversation list only** — the extension
-never requests the content of a DeepSeek or Perplexity conversation, and
-therefore never archives one). On **Gemini**, **Claude**, and **Kimi** backfill
-issues no requests at all. (`apps/extension/lib/backfill/enumerate.ts:880-886`,
-`:894-900`, `:752`.) The practical reading for you: enabling backfill on DeepSeek
-or Perplexity produces list traffic the platform can see, and produces **no
-backup whatsoever** on your side.
+**ChatGPT** and **DeepSeek** (conversation list *and* each conversation's
+content — on DeepSeek that is one body request per conversation), and
+**Perplexity** (**conversation list only** — the extension never requests the
+content of a Perplexity conversation, and therefore never archives one). On
+**Gemini**, **Claude**, and **Kimi** backfill issues no requests at all.
+(`apps/extension/lib/backfill/enumerate.ts:985-991`, `:999-1005`, `:857`.) The
+practical reading for you: enabling backfill on Perplexity produces list traffic
+the platform can see, and produces **no backup whatsoever** on your side. On
+DeepSeek it produces list traffic *and* one body request per conversation, which
+is a request pattern the platform is more likely to notice.
 
 ## 5. Where the extension runs
 
@@ -303,15 +307,17 @@ tier of that list is easy to misread:
 
 | Platform | What backfill does when you enable it |
 |---|---|
-| **ChatGPT** | Lists your conversations **and saves their content** (`apps/extension/lib/backfill/enumerate.ts:880-886`). |
-| **DeepSeek**, **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:894-900`, `:545-556`, `:630-640`). |
-| **Gemini**, **Claude**, **Kimi** | Nothing; the leg stops before issuing any request (`apps/extension/lib/backfill/enumerate.ts:752`). |
+| **ChatGPT**, **DeepSeek** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:985-991`). Both are **implemented, not yet observed completing a backfill in a real browser**; and for DeepSeek we have **not verified** whether a long conversation comes back complete, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:686-699`). |
+| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:999-1005`). |
+| **Gemini**, **Claude**, **Kimi** | Nothing; the leg stops before issuing any request (`apps/extension/lib/backfill/enumerate.ts:857`). |
 
 We state this in a privacy policy because the failure mode is a privacy
-expectation, not just a feature gap: a user who believes their DeepSeek or
-Perplexity history is archived may delete it upstream. Backfill does not
-archive it: only a conversation you open or continue in the tab, after the
-extension is installed, is captured.
+expectation, not just a feature gap: a user who believes their Perplexity
+history is archived may delete it upstream. Backfill does not archive it: only a
+conversation you open or continue in the tab, after the extension is installed,
+is captured. A weaker version of the same caution applies to DeepSeek: what
+backfill stores is only as complete as the body endpoint returns, and we have not
+checked a genuinely long conversation against it.
 
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
 the same capture decision above (`apps/extension/lib/page-hook.ts:187-227`).

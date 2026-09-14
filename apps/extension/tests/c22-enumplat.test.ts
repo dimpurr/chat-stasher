@@ -158,7 +158,8 @@ describe('C22-3 · "we cannot read your history yet" and "you have no history" m
   //    so it is no longer "a platform not supported yet" and using it as the protagonist would no longer exercise this criterion.
   //    claude still stands at "the organization number in the list endpoint's address cannot be obtained", which makes it the right protagonist now.
   //    DeepSeek's own new outcome (the list can be listed, the body segment has no source ⇒ halt('detail-unsupported'))
-  //    is watched separately in tests/c26-dslist.test.ts.
+  //    is watched separately in tests/c27-pplx.test.ts — 🔴 W8 moved that outcome's protagonist from
+  //    deepseek to perplexity, for the same reason C26 moved this one, and the criterion is unchanged.
   it('a platform not supported yet ⇒ halt(unsupported-platform), and not one request was sent', async () => {
     const store = memoryStore();
     const be = backend([]);
@@ -218,9 +219,19 @@ describe('C22-3 · "we cannot read your history yet" and "you have no history" m
     //    loosening into a prefix wildcard —
     //    the two counter-examples below are the evidence for that sentence.
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page`, DEEPSEEK_ORIGIN)).toBe(true);
-    // 🔴 But DeepSeek's **body** segment still has no source (DEEPSEEK_PLAN.detailPath === null),
-    //    so not one body URL is allowed through — half a leg is half a leg, and it is not loosened on the way past.
-    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages?chat_session_id=x`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 W8 · **This line went from false to true, and the fact is what changed, not the criterion.**
+    //    Under C26 DeepSeek's body segment was null (no source for a single conversation's route), so
+    //    checkBackfillRequest's path rule let no body URL through. W8 filled that segment in from two
+    //    independent kinds of evidence (a real logged-in browser session on 2026-09-13, plus several
+    //    independent implementations), so `chat/history_messages` is now a path the plan **wrote down
+    //    itself** — which is the only thing this check has ever asked for. The mechanism is unchanged:
+    //    same origin + in the platform table + has a plan + the plan's own path + (W8) the plan's own
+    //    query. The two counter-examples below still pin that it did not become a prefix wildcard.
+    //    🔴 The half-leg case this line used to demonstrate now belongs to Perplexity — tests/c27-pplx.test.ts.
+    expect(isAllowedBackfillUrl(
+      `${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages?chat_session_id=x`, DEEPSEEK_ORIGIN)).toBe(true);
+    // 🔴 And the tightening W8 added, in the same breath: that path with no declared query is refused.
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages`, DEEPSEEK_ORIGIN)).toBe(false);
     // A path that looks like a prefix but is not equal byte for byte is still refused (proving it did not become a prefix wildcard).
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page/extra`, DEEPSEEK_ORIGIN)).toBe(false);
   });
@@ -241,10 +252,12 @@ describe('C22-4 · every platform must have a definite conclusion', () => {
     }
     expect(BACKFILL_SUPPORTED_PLATFORMS.length + BACKFILL_UNSUPPORTED_PLATFORMS.length)
       .toBe(PLATFORMS.length);
-    // Today's real state, written into the test: 6 platforms, and only 1 can backfill history.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
+    // Today's real state, written into the test: 6 platforms, and 2 can backfill history.
+    // 🔴 W8 moved deepseek from the unsupported side to the supported one (its body segment was
+    //    filled in). The criterion above is untouched; only the row's side changed.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt']);
     expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([
-      'deepseek', 'perplexity', 'gemini', 'claude', 'kimi',
+      'perplexity', 'gemini', 'claude', 'kimi',
     ]);
   });
 
@@ -281,7 +294,11 @@ describe('C22-5 · the popup\'s honest explanation', () => {
     expect(out).toContain(coverageLine());
     expect(out).not.toContain('%');
     // The per-platform sticking point has to be visible too (in the notes).
-    expect(out).toContain('DeepSeek: past conversation bodies cannot be backfilled yet');
+    // 🔴 W8 changed this assertion's **protagonist**: the "can list conversations, cannot fetch
+    //    bodies yet" sentence no longer describes DeepSeek (its body segment was filled in), so the
+    //    note is checked on Perplexity, which is where that state now lives. The criterion — a
+    //    half-leg platform's sticking point must be readable by the user — is unchanged.
+    expect(out).toContain('Perplexity: past conversation bodies cannot be backfilled yet');
     expect(out).toContain('Gemini: history cannot be backfilled yet');
   });
 

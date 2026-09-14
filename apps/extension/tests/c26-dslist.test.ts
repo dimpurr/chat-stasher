@@ -15,7 +15,16 @@
  *      **and that must be a distinguishable path from "this user has no conversations"** (this file pins that sentence with a control);
  *   3. no seq_id in a record ⇒ only the first page is fetched, reported by name as 'cursor-missing', never pretending the whole thing was captured;
  *   4. updated_at is handled as a **number** (not an ISO string, and never new Date(string));
- *   5. the body segment has no source ⇒ halt('detail-unsupported') before the first body is fetched, with the debts untouched.
+ *   5. ~~the body segment has no source ⇒ halt('detail-unsupported') before the first body is fetched, with the
+ *      debts untouched.~~ 🔴 **Superseded by W8 (2026-09-14), and the fact is deliberately changed, not the
+ *      assertion weakened.** DeepSeek's body segment is no longer null, so this file's 5th section now records
+ *      that DeepSeek **leaves** the half-leg branch instead of entering it. The half-leg mechanism itself is
+ *      unchanged and is still watched — by tests/c27-pplx.test.ts, where Perplexity now sits in that state.
+ *      DeepSeek's body segment has its own file: tests/w3-deepseek-detail.test.ts.
+ *
+ * 🔴 Scope note (W8): this file is about DeepSeek's **list** segment. Its shared `run()` helper stops before the
+ *    body segment (`maxDetails: 0`), and the fixture below still throws on any non-list path — so "be.calls holds
+ *    only list URLs" keeps proving exactly what it always proved: this leg issued no body request *in this test*.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -25,6 +34,8 @@ import { memoryStore } from '../lib/backfill/store';
 import {
   BACKFILL_LIST_ONLY_PLATFORMS,
   BACKFILL_SUPPORTED_PLATFORMS,
+  DEEPSEEK_DETAIL_PATH,
+  DEEPSEEK_DETAIL_QUERY_KEY,
   DEEPSEEK_LIST_PATH,
   DEEPSEEK_PLAN,
   backfillPlanFor,
@@ -67,16 +78,49 @@ function session(n: number, over: Partial<FixtureSession> = {}): FixtureSession 
 }
 
 /**
+ * 🔴 W8 · One **synthetic** single-conversation body, in the envelope the logged-in browser session
+ * measured on 2026-09-13: { code, msg, data: { biz_code, biz_msg, biz_data: { chat_session: { id },
+ * chat_messages: [...] } } }. Written by hand from the key names — no real conversation, no capture.
+ * It carries both of lib/contract.ts's DeepSeek `requiredAnyPaths`, which is what the engine's
+ * shape check reads.
+ */
+function deepSeekBody(id: string): string {
+  return JSON.stringify({
+    code: 0,
+    msg: 'ok',
+    data: {
+      biz_code: 0,
+      biz_msg: 'ok',
+      biz_data: {
+        chat_session: { id, title: 'synthetic-fixture' },
+        chat_messages: [
+          { message_id: 1, role: 'USER', content: 'synthetic-turn-1' },
+          { message_id: 2, role: 'ASSISTANT', content: 'synthetic-turn-2' },
+        ],
+      },
+    },
+  });
+}
+
+/**
  * A synthetic backend: it decides which page to return from the before_seq_id in the URL.
  * `calls` records every requested URL — "the second page really carried a cursor" and "not one body was sent" are both proven with it.
+ *
+ * 🔴 W8: `opts.body` is **absent by default**, and that default is the strict one — any
+ *    non-list path throws. That is what makes "be.calls contains list URLs only" a real
+ *    assertion rather than a description. A test that means to exercise the body segment
+ *    passes `opts.body` explicitly (see section 5), so the two intents cannot be confused.
  */
-function backend(pages: string[]) {
+function backend(pages: string[], opts: { body?: string } = {}) {
   const calls: string[] = [];
   const http = async (url: string): Promise<HttpResponse> => {
     calls.push(url);
     const u = new URL(url);
     if (u.pathname !== DEEPSEEK_LIST_PATH) {
-      // 🔴 On DeepSeek the backfill leg **may only** hit this one list path. Hitting anywhere else is when the test should go red.
+      if (u.pathname === DEEPSEEK_DETAIL_PATH && opts.body !== undefined) {
+        return { status: 200, text: opts.body };
+      }
+      // 🔴 On DeepSeek the backfill leg **may only** hit its two declared paths. Hitting anywhere else is when the test should go red.
       throw new Error(`unexpected path ${u.pathname}`);
     }
     const index = Math.min(calls.length - 1, pages.length - 1);
@@ -85,7 +129,19 @@ function backend(pages: string[]) {
   return { http, calls };
 }
 
-async function run(store: ReturnType<typeof memoryStore>, http: (url: string) => Promise<HttpResponse>, scope: string) {
+/**
+ * 🔴 W8: `maxDetails: 0` — these tests are about the list segment, and DeepSeek now **has**
+ *    a body segment, so "stop before the first body" has to be said out loud instead of
+ *    happening by itself (it used to happen because detailPath was null). The engine takes
+ *    the budget branch before issuing any body request, so `be.calls` stays list-only and
+ *    the assertion keeps its original meaning.
+ */
+async function run(
+  store: ReturnType<typeof memoryStore>,
+  http: (url: string) => Promise<HttpResponse>,
+  scope: string,
+  opts: { maxDetails?: number } = {},
+) {
   return runBackfill({
     platform: 'deepseek',
     origin: DEEPSEEK_ORIGIN,
@@ -94,6 +150,7 @@ async function run(store: ReturnType<typeof memoryStore>, http: (url: string) =>
     http,
     clock: fakeClock(),
     listLimit: LIMIT,
+    maxDetails: opts.maxDetails ?? 0,
   });
 }
 
@@ -314,36 +371,46 @@ describe('C26-4 · updated_at is handled as a number', () => {
 
 // ---------------------------------------------------------------------------
 // 5 · 🔴 Half a leg: the list can be listed, the body segment has no source
+//
+// 🔴 W8 (2026-09-14) · **This section's premise is deliberately changed, not its assertions weakened.**
+//    It used to prove "DeepSeek lists conversations but cannot fetch a single body". DeepSeek's body
+//    segment now has evidence, so that sentence is false and the section now records the move:
+//    DeepSeek **leaves** the half-leg branch. The mechanism it used to demonstrate is untouched and is
+//    still watched by tests/c27-pplx.test.ts:144 (Perplexity is in that state). DeepSeek's new body
+//    segment has its own file, tests/w3-deepseek-detail.test.ts.
 // ---------------------------------------------------------------------------
 describe('C26-5 · being able to list conversations ≠ being able to backfill history', () => {
-  it('after enumerating it halts with detail-unsupported, not one body request was sent, and the debts are untouched', async () => {
+  it('🔴 changed fact: it no longer halts with detail-unsupported — the body segment really is reached now', async () => {
     const store = memoryStore();
-    const be = backend([pageBody([session(1), session(2)], false)]);
+    const be = backend([pageBody([session(1), session(2)], false)], { body: deepSeekBody('ds-0001-aaaaaaaa') });
 
-    const report = await run(store, be.http, 'acct-half');
+    // Not `run()`: that helper stops before the body segment on purpose, and this test is about it.
+    const report = await run(store, be.http, 'acct-half', { maxDetails: 1 });
 
-    expect(report.stopped).toBe('halted');
-    expect(report.halted?.reason).toBe('detail-unsupported');
-    // 🔴 Its difference from 'unsupported-platform' is this line: the list request really was sent.
-    expect(be.calls.length).toBe(1);
-    // 🔴 The debts stay; not one was cleared, and none was passed off as archived.
-    expect(report.state.pending.length).toBe(2);
-    expect(report.state.archived).toEqual([]);
-    expect(report.archivedThisRun).toEqual([]);
-    // The trace has to name what is missing, not just say "not supported".
-    expect(report.halted?.detail).toContain('missing:');
-    expect(report.halted?.detail).toContain('detailPath');
+    // 🔴 Before W8 this was 'detail-unsupported'. The halt is gone because the missing half was filled in,
+    //    not because the branch was loosened — `partial` is still what expresses it, and Perplexity still has one.
+    expect(report.halted?.reason).not.toBe('detail-unsupported');
+    // 🔴 Its difference from 'unsupported-platform' is still this line: the list request really was sent, and so was a body request.
+    expect(be.calls.length).toBe(2);
+    expect(be.calls[1]).toBe(
+      `${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=ds-0001-aaaaaaaa`,
+    );
+    expect(report.state.archived).toEqual(['ds-0001-aaaaaaaa']);
   });
 
   it('the platform lists give this intermediate state its own place rather than rounding it to either side', () => {
-    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['deepseek', 'perplexity']);
-    // 🔴 "can backfill history" still holds chatgpt alone — being able to list conversations does not count as backfilling history.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
-    expect(DEEPSEEK_PLAN.partial?.missing.length ?? 0).toBeGreaterThan(0);
-    expect(t(DEEPSEEK_PLAN.partial!.userNoteKey)).not.toMatch(/backfilling now|is backfilling|in progress/);
+    // 🔴 W8: DeepSeek moved off this list; Perplexity stays, so the intermediate state still has a home.
+    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['perplexity']);
+    // 🔴 "can backfill history" now holds two: being able to list conversations is still not enough on its own,
+    //    and DeepSeek is here because its body segment was filled in — not because the test was broadened.
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt']);
+    // 🔴 DeepSeek no longer declares a missing half; the field's absence is what "both segments work" means.
+    expect(DEEPSEEK_PLAN.partial).toBeUndefined();
+    // The wording that said DeepSeek cannot fetch bodies is gone from the catalog with it.
+    expect(t('platformNote.perplexity.partial')).not.toMatch(/backfilling now|is backfilling|in progress/);
   });
 
-  it('the plan\'s declarations and provenance: the list segment is complete and the body segment is null (not filled in with anything)', () => {
+  it('the plan\'s declarations and provenance: both segments are complete, and the unverified part is written down', () => {
     const plan = backfillPlanFor('deepseek');
     expect(plan).not.toBeNull();
     expect(plan!.listPath).toBe('/api/v0/chat_session/fetch_page');
@@ -352,14 +419,34 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
       .toBe(`${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}?count=30`);
     expect(plan!.listCursorUrl!(DEEPSEEK_ORIGIN, 42, 30))
       .toBe(`${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}?count=30&before_seq_id=42`);
-    expect(plan!.detailPath).toBeNull();
-    expect(plan!.detailUrl).toBeNull();
+    // 🔴 W8: previously asserted toBeNull(). Changed because the fact changed — the body segment now has
+    //    evidence (a real logged-in browser session on 2026-09-13 + several independent implementations).
+    expect(plan!.detailPath).toBe(DEEPSEEK_DETAIL_PATH);
+    expect(plan!.detailUrl).not.toBeNull();
+    expect(plan!.detailUrl!(DEEPSEEK_ORIGIN, 'ds-0001-aaaaaaaa')).toBe(
+      `${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=ds-0001-aaaaaaaa`,
+    );
+    // The id is URL-encoded, so an id with a reserved character cannot break out of the query value.
+    expect(plan!.detailUrl!(DEEPSEEK_ORIGIN, 'a&b/c d')).toBe(
+      `${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=a%26b%2Fc%20d`,
+    );
+    expect(plan!.detailQueryKey).toBe(DEEPSEEK_DETAIL_QUERY_KEY);
     // Provenance is **mandatory**, and it must say "multi-source cross-check, not official documentation, at risk of staleness" — the conclusion alone is not enough.
     expect(plan!.provenance).toContain('before_seq_id');
     expect(plan!.provenance).toContain('2025-12');
+    // 🔴 W8: which body route, on what evidence, and — just as load-bearing — **what was not verified**.
+    //    An unknown may not be dropped from the provenance to make the plan read as finished.
+    expect(plan!.provenance).toContain('chat/history_messages');
+    expect(plan!.provenance).toContain('2026-09-13');
+    expect(plan!.provenance).toMatch(/unverified|Unverified/i);
+    expect(plan!.provenance).toMatch(/paging|page|truncat/i);
     // 🔴 A parameter name that appeared in none of the five sources may not enter the URL.
     for (const banned of ['offset=', 'page=', 'page_size=', 'limit=', 'cursor=']) {
       expect(plan!.listCursorUrl!(DEEPSEEK_ORIGIN, 42, 30)).not.toContain(banned);
+    }
+    // 🔴 And the body URL may not quietly grow one either: W8 added no paging parameter.
+    for (const banned of ['offset=', 'page=', 'page_size=', 'limit=', 'cursor=', 'count=']) {
+      expect(plan!.detailUrl!(DEEPSEEK_ORIGIN, 'ds-0001-aaaaaaaa')).not.toContain(banned);
     }
   });
 });
@@ -368,12 +455,10 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
 // 6 · The allowlist: it goes through the existing mechanism, and only the path the plan wrote down itself is permitted
 // ---------------------------------------------------------------------------
 describe('C26-6 · the content script\'s allowlist', () => {
-  it('the list path is allowed; a body path, an adjacent path and cross-origin are all refused', () => {
+  it('the list path is allowed; an adjacent path and cross-origin are refused', () => {
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}?count=100`, DEEPSEEK_ORIGIN)).toBe(true);
     expect(isAllowedBackfillUrl(
       `${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}?count=100&before_seq_id=997`, DEEPSEEK_ORIGIN)).toBe(true);
-    // 🔴 The body segment has no source ⇒ not one body URL is allowed through.
-    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages`, DEEPSEEK_ORIGIN)).toBe(false);
     // 🔴 It did not become a prefix wildcard: a lookalike that is not equal byte for byte is still refused.
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/fetch_page2`, DEEPSEEK_ORIGIN)).toBe(false);
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/api/v0/chat_session/`, DEEPSEEK_ORIGIN)).toBe(false);
@@ -381,5 +466,36 @@ describe('C26-6 · the content script\'s allowlist', () => {
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_LIST_PATH}`, 'https://chatgpt.com')).toBe(false);
     // 🔴 ChatGPT's path is not allowed on DeepSeek just because DeepSeek now has a plan.
     expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}/backend-api/conversations`, DEEPSEEK_ORIGIN)).toBe(false);
+  });
+
+  it('🔴 W8 · the body URL is allowed only with its one declared query key, and only as this plan builds it', () => {
+    const built = `${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=ds-0001-aaaaaaaa`;
+    // 🔴 Changed fact, same criterion as the line above it: this URL used to be refused because the
+    //    body segment had no source. It is allowed now because the plan wrote the path down itself.
+    expect(isAllowedBackfillUrl(built, DEEPSEEK_ORIGIN)).toBe(true);
+    // 🔴 The bare path is **still** refused: it carries no id, so it is not the URL this plan builds.
+    //    (Under C26 this was refused for the other reason — the body segment was null. Same verdict,
+    //    different mechanism, and the mechanism is what this test is about.)
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 The path is **not** a prefix: a lookalike endpoint riding on it is refused.
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}_export?${DEEPSEEK_DETAIL_QUERY_KEY}=x`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 A query key nobody declared is refused, even alongside the declared one.
+    expect(isAllowedBackfillUrl(`${built}&cache_version=0`, DEEPSEEK_ORIGIN)).toBe(false);
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?other=x`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 An empty id is refused: an absent id is not a smaller request, it is a different one.
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 Repeated key ⇒ which one is the id is ambiguous, so it is refused rather than resolved by picking one.
+    expect(isAllowedBackfillUrl(`${built}&${DEEPSEEK_DETAIL_QUERY_KEY}=ds-0002-aaaaaaaa`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 The value must be exactly what the plan's own builder produces for it, so the **encoding**
+    //    is checked too: '%20' is what encodeURIComponent writes for a space, and '+' is the same
+    //    value spelled a way this plan would never have written, so it is refused.
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=a%20b`, DEEPSEEK_ORIGIN)).toBe(true);
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=a+b`, DEEPSEEK_ORIGIN)).toBe(false);
+    // A literal '+' inside an id is a legal id character and survives the round trip.
+    expect(isAllowedBackfillUrl(`${DEEPSEEK_ORIGIN}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=a%2Bb`, DEEPSEEK_ORIGIN)).toBe(true);
+    // 🔴 A fragment is not part of any URL this plan builds.
+    expect(isAllowedBackfillUrl(`${built}#x`, DEEPSEEK_ORIGIN)).toBe(false);
+    // 🔴 And it is still a GET: the id travels in the query, not in a body.
+    expect(isAllowedBackfillUrl(built, 'https://chatgpt.com')).toBe(false);
   });
 });

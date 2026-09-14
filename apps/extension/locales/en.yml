@@ -284,11 +284,6 @@ failure:
 # none of them may hint that the platform is being backfilled right now.
 # ---------------------------------------------------------------------------
 platformNote:
-  deepseek:
-    partial: >-
-      DeepSeek: past conversation bodies cannot be backfilled yet. Your past
-      conversations can already be listed, but we do not fetch the content of
-      each one yet, so for now not a single one will be stored.
   perplexity:
     partial: >-
       Perplexity: past conversation bodies cannot be backfilled yet. Your past

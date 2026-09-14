@@ -540,9 +540,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // 🔴 C26 · **Before issuing any body request**, ask: have we actually written this
   // platform's body segment at all?
   //
-  // DeepSeek is in exactly this intermediate state: the list segment has a
-  // four-source provenance (conversations have been listed, debts are on disk), and
-  // the body segment has none. At that point:
+  // Perplexity is in exactly this intermediate state: the list segment has a
+  // three-source provenance (conversations have been listed, debts are on disk), and
+  // the body segment has none. (DeepSeek was in it until W8 filled its body segment
+  // in; the branch, the halt reason and the wording below are unchanged — what moved
+  // is which platform sits in it.) At that point:
   //  · it must not keep going — plan.detailUrl is null, and forcing it would mean
   //    inventing a body route on the spot;
   //  · and it must not quietly return 'queue-empty' either — that would amount to

@@ -203,8 +203,12 @@ describe('C27-4 · the Perplexity backfill allowlist', () => {
     }, ORIGIN).ok).toBe(false);
   });
 
-  it('the platform lists: Perplexity can only list conversations, and supported still holds ChatGPT alone', () => {
-    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['deepseek', 'perplexity']);
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['chatgpt']);
+  it('the platform lists: Perplexity can only list conversations, and supported holds the platforms with both segments', () => {
+    // 🔴 W8 (2026-09-14) · The fact changed, not the criterion: DeepSeek's body segment was filled in,
+    //    so it left this list and joined the supported side. Perplexity is now the only platform in the
+    //    "lists conversations, cannot fetch bodies" state — which is why this file also owns that state's
+    //    engine test at line ~144 above.
+    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['perplexity']);
+    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt']);
   });
 });

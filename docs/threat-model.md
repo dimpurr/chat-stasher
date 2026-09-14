@@ -57,7 +57,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:75-78`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's two exact paths, or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:212-250`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:63`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:20-21`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:75-78`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's two exact paths, or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:280-318`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:63`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -162,7 +162,7 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:295`, `:319`, `:343-360`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:295`, `:319`, `:343-360`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:441-463`, `:580-602`). |
 
 **Caveat, stated honestly:** on every platform except ChatGPT the passive hook
 adds no traffic, so there is nothing distinctive for the platform to observe
@@ -176,7 +176,7 @@ conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
 read the same token, so this adds no new party who can see it. **Backfill is
 different** — it walks conversation lists and detail endpoints
-(`apps/extension/lib/backfill/engine.ts:441-463`, `:577-599`), which produces a
+(`apps/extension/lib/backfill/engine.ts:441-463`, `:580-602`), which produces a
 request pattern the platform can see and which does not look like a human
 reading their history. **We have not investigated** whether any platform's terms
 of service prohibit this, nor whether any platform rate-limits or flags such a
@@ -189,17 +189,20 @@ it bounds what you may safely assume is archived:
 
 | Platform | Requests the platform sees | What lands in your archive |
 |---|---|---|
-| **ChatGPT** | Conversation-list requests **and** one request per conversation | The conversation text (`apps/extension/lib/backfill/enumerate.ts:880-886`) |
-| **DeepSeek**, **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:894-900`, `:545-556`, `:630-640`) |
-| **Gemini**, **Claude**, **Kimi** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:752`) |
+| **ChatGPT**, **DeepSeek** | Conversation-list requests **and** one request per conversation | The conversation text (`apps/extension/lib/backfill/enumerate.ts:985-991`). On both platforms this is **implemented but not yet observed completing in a real browser**; on DeepSeek, whether a long conversation comes back complete is **unverified**, because the extension does not page that endpoint (`apps/extension/lib/backfill/enumerate.ts:686-699`) |
+| **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:999-1005`) |
+| **Gemini**, **Claude**, **Kimi** | None; the leg halts before the first request | Nothing (`apps/extension/lib/backfill/enumerate.ts:857`) |
 
-🔴 The middle row is the dangerous one to misread. On DeepSeek and Perplexity
-the extension *does* work — it enumerates your conversations and reports a
-pending count — while archiving **zero** of them. If you rely on this tool as
-the reason it is safe to delete history upstream, that reasoning does not hold
-for those two platforms. The code declines to guess a conversation-content
-endpoint precisely because a wrong guess fails silently: it would archive a
-truncated version of every chat and still look like success.
+🔴 The middle row is the dangerous one to misread. On Perplexity the extension
+*does* work — it enumerates your conversations and reports a pending count —
+while archiving **zero** of them. If you rely on this tool as the reason it is
+safe to delete history upstream, that reasoning does not hold there. The code
+declines to guess a conversation-content endpoint precisely because a wrong guess
+fails silently: it would archive a truncated version of every chat and still look
+like success. That second failure mode is also why DeepSeek's row is marked
+unverified rather than verified — the endpoint it uses is not paged by the
+extension, so a long conversation could be stored as a truncated version while
+looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
@@ -411,14 +414,18 @@ a real limitation of the current code.
    archive can be incomplete in ways this document does not enumerate. See the
    limits section of `README.md`.
 
-7. **Browser-side history backfill covers one platform, and one tier of it
-   looks like coverage without being coverage.** Backfill recovers past
-   conversation *text* on **ChatGPT** only
-   (`apps/extension/lib/backfill/enumerate.ts:880-886`). On **DeepSeek** and
+7. **Browser-side history backfill is implemented on two platforms and covers
+   one and a half of them, and one tier of it looks like coverage without being
+   coverage.** Backfill recovers past conversation *text* on **ChatGPT** and
+   **DeepSeek**
+   (`apps/extension/lib/backfill/enumerate.ts:985-991`), but on neither has a
+   complete backfill been observed in a real browser, and on DeepSeek we have
+   **not verified** whether a long conversation comes back whole rather than
+   truncated (`apps/extension/lib/backfill/enumerate.ts:686-699`). On
    **Perplexity** it enumerates your conversations and archives **none of
-   them** (`apps/extension/lib/backfill/enumerate.ts:894-900`); on **Gemini**,
+   them** (`apps/extension/lib/backfill/enumerate.ts:999-1005`); on **Gemini**,
    **Claude**, and **Kimi** it does nothing
-   (`apps/extension/lib/backfill/enumerate.ts:752`). The user-visible symptom of
+   (`apps/extension/lib/backfill/enumerate.ts:857`). The user-visible symptom of
    the middle tier is *activity* — a growing pending count — with an empty
    result, so "the extension is clearly doing something" is not evidence your
    history is safe. See the platform table above.

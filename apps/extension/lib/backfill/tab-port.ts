@@ -53,12 +53,19 @@
  *     of the plan's declared bodyKeys, hold only string/number/boolean/null values
  *     (no nested objects or arrays), and its Content-Type must equal the plan's
  *     exactly.
+ *  --- 🔴 W8 added one more, because a plan put its conversation id in the query
+ *  --- for the first time
+ *  8. a body URL's **query** is checked against the plan's declaration, and against
+ *     the plan's own URL builder: see checkDetailQuery. A plan that declares no
+ *     query key permits no query at all.
  * Failing any one of these refuses the request with an error; never send it anyway.
  *
  * ## 🔴 Why this is still not a "general-purpose proxy"
- * See the note above checkBackfillRequest: the only thing left variable is the
- * **raw scalar value** of a key **inside one closed set**, while the URL, the
- * origin, the path, the method, the structure and the size are all pinned.
+ * See the note above checkBackfillRequest: the only things left variable are the
+ * **raw scalar value** of a key **inside one closed set** (a POST body's) and, since
+ * W8, the conversation id inside the one query key a plan declared — and that id is
+ * itself pinned to the value the plan's own URL builder round-trips. The origin, the
+ * path, the method, the structure and the size are all fixed.
  */
 
 import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
@@ -176,6 +183,67 @@ function isScalar(v: unknown): boolean {
 }
 
 /**
+ * 🔴 W8 · Does this pathname name the body endpoint itself?
+ *
+ * A detailPath ending in '/' names a **directory** that the conversation id gets
+ * appended to (ChatGPT: '/backend-api/conversation/' + <id>), so a prefix match is
+ * what that declaration means. A detailPath with no trailing '/' names **one
+ * endpoint**, and is therefore compared in full.
+ *
+ * 🔴 Why the second rule had to exist before a query could: DeepSeek's route is a
+ *    single fixed path with the id in the query, so a prefix match on
+ *    '/api/v0/chat/history_messages' would have permitted every lookalike path that
+ *    merely starts with it. The plan writes one endpoint down; one endpoint is what
+ *    is permitted.
+ */
+function detailPathMatches(detailPath: string, pathname: string): boolean {
+  return detailPath.endsWith('/') ? pathname.startsWith(detailPath) : pathname === detailPath;
+}
+
+/**
+ * 🔴 W8 · The body URL's **query** dimension. Returns a detail sentence when the
+ * URL must be refused, or null when it may go.
+ *
+ * The rule the whole function exists for: **the request may only carry a URL the
+ * plan's own builder produced.** That is the same rule the POST body already
+ * follows (`spec.body()` is the only body builder, tab-port.ts's doc above), and it
+ * is what expresses the id's "legal shape" without inventing an id alphabet —
+ * whatever the list endpoint handed us is the legal value, and nothing else is.
+ *
+ *  · No `detailQueryKey` declared ⇒ the body URL carries **no query at all**. Every
+ *    URL ChatGPT's builder produces is query-free, so this changes nothing the plan
+ *    itself sends; it only closes the door on a query nobody declared.
+ *  · Declared ⇒ the query must hold exactly that one key, once, with a non-empty
+ *    value, and the whole URL must equal `detailUrl(origin, value)` byte for byte.
+ *    A second key, a repeated key, a missing key, an empty value, a differently
+ *    encoded value and a '#fragment' all fail that comparison.
+ *
+ * 🔴 The refusal sentences go to the log only (the wire keeps C22's single sentence,
+ *    see REFUSED_URL_REASON), and deliberately name neither the query key nor its
+ *    value — a key name is not echoed back, the same call the POST body check makes.
+ */
+function checkDetailQuery(plan: BackfillEnumPlan, u: URL): string | null {
+  const key = plan.detailQueryKey;
+  if (key === undefined) {
+    return u.search === '' ? null : 'body url carries a query the plan did not declare';
+  }
+  for (const found of u.searchParams.keys()) {
+    if (found !== key) return 'body url carries a query key outside the declared allow-list';
+  }
+  const values = u.searchParams.getAll(key);
+  if (values.length !== 1) {
+    // Zero = the id is missing; more than one = which one is the id is ambiguous.
+    return 'body url must carry the declared query key exactly once';
+  }
+  if (values[0] === '') return 'body url carries an empty value for the declared query key';
+  const detailUrl = plan.detailUrl;
+  if (detailUrl && u.toString() !== detailUrl(u.origin, values[0]!)) {
+    return 'body url is not the one this plan itself builds';
+  }
+  return null;
+}
+
+/**
  * 🔴 **C23's security landing point. Whether the content script dares send this one request.**
  *
  * ## What "GET and POST are not the same thing, security-wise" actually means
@@ -232,11 +300,19 @@ export function checkBackfillRequest(
   let segment: BackfillSegment;
   if (u.pathname === plan.listPath) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
-  //    is not — DeepSeek). null ⇒ this platform has **no** permitted body URL. The
+  //    is not — Perplexity). null ⇒ this platform has **no** permitted body URL. The
   //    allowlist is not loosened and does no prefix wildcarding: what is permitted
   //    is still only the path the plan itself wrote down, character for character.
-  else if (plan.detailPath !== null && u.pathname.startsWith(plan.detailPath)) segment = 'detail';
+  else if (plan.detailPath !== null && detailPathMatches(plan.detailPath, u.pathname)) segment = 'detail';
   else return refuseUrl('path is not a backfill endpoint');
+
+  // 4b · 🔴 W8 · The body URL's query, which C26 never had to look at because no
+  //      plan put its id there. W8 declared one (DeepSeek), so the query dimension
+  //      is now checked too — see checkDetailQuery.
+  if (segment === 'detail') {
+    const refused = checkDetailQuery(plan, u);
+    if (refused !== null) return refuseUrl(refused);
+  }
 
   // 5 · method: the closed set first, then it must equal the plan's declared one for this segment exactly.
   const method = spec.method ?? 'GET';

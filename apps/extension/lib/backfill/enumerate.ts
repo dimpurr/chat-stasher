@@ -77,7 +77,8 @@
  *
  *  2. **Half a leg can now be written down** (detailPath/detailUrl may be null,
  *     plus `partial`). DeepSeek's list segment has a four-source provenance; its
- *     body segment has none. Previously that left only two options: keep calling
+ *     body segment had none. ~~(🔴 superseded by W8 below: DeepSeek's body segment
+ *     is no longer the null case — Perplexity is.)~~ Previously that left only two options: keep calling
  *     the whole platform "unsupported" (even though the list is readable), or
  *     invent a body route to fill the plan in (which is the genuinely dangerous
  *     kind of lie). There is now a third way to write it, and it corresponds to a
@@ -90,6 +91,34 @@
  *     documentation, and has not been verified end to end — the full "what we
  *     know / what we do not / how stale it might be" is at the head of
  *     DEEPSEEK_PLAN, and must not be reduced to the conclusion alone.
+ *
+ * ## W8 · DeepSeek's body segment was filled in, and the reason it was null is gone
+ *
+ * C26 wrote DeepSeek's body segment as `null` for exactly one stated reason: "the
+ * route and the parameters of a SINGLE conversation's body have no multi-source
+ * provenance". **That reason no longer holds**, on two independent kinds of
+ * evidence (both written out in full at the head of DEEPSEEK_PLAN):
+ *  1. a real logged-in browser session (2026-09-13) showed DeepSeek's own page
+ *     loading one conversation with GET /api/v0/chat/history_messages?chat_session_id=<id>
+ *     — the same request the page makes when a user opens a past conversation by
+ *     hand, which is the same footing the live leg stands on;
+ *  2. several mutually independent open-source exporters request that same route
+ *     with that same query key.
+ * So detailPath / detailUrl are now filled in, `partial` is gone, and DeepSeek
+ * moved from BACKFILL_LIST_ONLY_PLATFORMS to BACKFILL_SUPPORTED_PLATFORMS.
+ *
+ * 🔴 The half-leg **mechanism** stays, and this change did not touch it: `partial`
+ *    and 'detail-unsupported' are still how a platform with a sourced list and an
+ *    unsourced body is written down (Perplexity is in exactly that state). What
+ *    changed is one platform's facts, not the shape of the table.
+ *
+ * 🔴 **What W8 did NOT verify**, and therefore must not be written down as known:
+ *    whether that endpoint pages, or truncates a long conversation. Not one of the
+ *    reviewed implementations pages it, and this change adds no paging. So for a
+ *    very long conversation, "this response is the whole body" remains an
+ *    assumption rather than a measurement. It is stated here, in DEEPSEEK_PLAN's
+ *    provenance, and in this repository's privacy notes — never rounded into
+ *    "the body is complete".
  */
 
 import { PLATFORMS } from '../contract';
@@ -247,17 +276,44 @@ export interface BackfillEnumPlan {
   /** 3 · The shape test for the list response. Unrecognised ⇒ {ok:false}, and the engine halts with a trace. */
   parseListPage(text: string): ParseResult;
   /**
-   * 4 · The body endpoint (path prefix).
+   * 4 · The body endpoint.
    * 🔴 C26: **null is allowed** — "the list segment is sourced, the body segment
-   *    is not" is a real intermediate state (DeepSeek is in it), and it must be
+   *    is not" is a real intermediate state (Perplexity is in it), and it must be
    *    writable rather than forcing someone to invent a body route.
    *    null ⇒ the content script allows no body URL for this platform (rule 4 of
    *    tab-port.ts), and the engine halts with 'detail-unsupported' **before
    *    issuing a single body request**.
+   * 🔴 W8: a trailing '/' means "this is a **directory** the conversation id gets
+   *    appended to" (ChatGPT), so the content script prefix-matches it; a path with
+   *    no trailing '/' names **one endpoint** and is compared in full. That is what
+   *    lets DeepSeek put its id in the query without turning
+   *    `/api/v0/chat/history_messages` into a wildcard over every lookalike path.
    */
   detailPath: string | null;
   /** 5 · conversation id → body URL. 🔴 C26: lives and dies with detailPath — either both or neither. */
   detailUrl: ((origin: string, conversationId: string) => string) | null;
+  /**
+   * 🔴 W8 (optional) · The **single query key** the body id travels in, when the id
+   * is not a path segment (DeepSeek: `?chat_session_id=`).
+   *
+   * Absent ⇒ this plan's body URL carries **no query at all**, and the content
+   *   script refuses one that does. (ChatGPT appends the id to the path, so every
+   *   URL its own builder produces is query-free; this closes the hole rather than
+   *   widening it, and changes no URL the plan itself builds.)
+   * Declared ⇒ the content script additionally checks (tab-port.ts's
+   *   checkDetailQuery): the pathname equals detailPath **in full**, the URL's query
+   *   holds exactly this one key, once, with a non-empty value, and the whole URL is
+   *   byte-identical to what `detailUrl(origin, value)` builds for that value.
+   *   That last one is the same rule the POST body already follows — "the request
+   *   may only carry something the plan's own builder produced" — and it is how the
+   *   id's "legal shape" is expressed **without inventing an id alphabet**: whatever
+   *   the list endpoint handed us is the legal value.
+   *
+   * 🔴 Deliberately one key, not a list: `detailUrl` takes one conversation id, so
+   *    more than one query key is not something this declaration could describe.
+   *    A platform that needs a second parameter needs a source for it first.
+   */
+  detailQueryKey?: string;
   /** 5b · 🔴 New in C23 (optional). Declaring it means the body segment is sent as a POST. */
   detailPost?: DetailPostSpec;
   /**
@@ -558,8 +614,20 @@ export const CHATGPT_PLAN: BackfillEnumPlan = {
 export const DEEPSEEK_LIST_PATH = '/api/v0/chat_session/fetch_page';
 
 /**
- * 🔴 C26 · DeepSeek's conversation list. **The list segment only**; the body
- * segment still has no source (see `partial`).
+ * 🔴 W8 · The single-conversation body route, and the one query key its id travels in.
+ *
+ * No trailing '/': this names one endpoint, not a directory. The content script
+ * compares it in full (see BackfillEnumPlan.detailPath), so a lookalike path
+ * cannot ride in on a prefix.
+ */
+export const DEEPSEEK_DETAIL_PATH = '/api/v0/chat/history_messages';
+export const DEEPSEEK_DETAIL_QUERY_KEY = 'chat_session_id';
+
+/**
+ * 🔴 C26 + W8 · DeepSeek's conversation list **and** its single-conversation body.
+ * C26 wrote the list segment only and left the body segment null; W8 (2026-09-14)
+ * filled the body segment in — see "## W8 · the body segment" below for what
+ * evidence exists, and for the one thing that is still **not** verified.
  *
  * ## How this cell went from "unknown" to "sourced"
  * Under C22 this said "the paging parameter names and the request method are
@@ -597,6 +665,43 @@ export const DEEPSEEK_LIST_PATH = '/api/v0/chat_session/fetch_page';
  *    other two ⇒ excluded.
  *  · page / offset / cursor / limit / page_size — absent from all five sources ⇒ excluded.
  *
+ * ## W8 · the body segment: why it is no longer null, and what is still unknown
+ *
+ *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_messages?chat_session_id=<id>,
+ *    with the id URL-encoded. Two independent kinds of evidence:
+ *      ① a **real, logged-in browser session** (2026-09-13): DeepSeek's own page
+ *         loads one conversation over XHR from exactly this route, with this query
+ *         key — i.e. the request the page makes when a user opens a past
+ *         conversation by hand;
+ *      ② several mutually independent open-source exporters request the same route
+ *         with the same query key (see the provenance string below).
+ *    The live leg already matches this route through lib/contract.ts's deepseek row
+ *    (pathHints '/api/v0/chat', requiredAnyPaths data.biz_data.chat_messages /
+ *    data.biz_data.chat_session.id), so the backfill and live legs now stand on the
+ *    same measured endpoint rather than two different ones.
+ *    This is the reason C26 recorded for leaving it null — "no multi-source
+ *    provenance" — and it has been removed by evidence, not by a decision to relax
+ *    the standard.
+ *
+ *  · 🔴 **Not verified: whether this endpoint pages or truncates a long
+ *    conversation.** None of the reviewed implementations pages it (one of them
+ *    adds `&cache_version=0`; none sends a page/offset/cursor parameter), and W8
+ *    adds no paging. So a very long conversation may come back as only its first
+ *    part, and this plan has **no way to tell that response from a complete one** —
+ *    no `total`, no `has_more`, no cursor is read from the body envelope here.
+ *    Consequences, stated rather than hidden:
+ *      · a truncated body would be *stored* and its debt *settled* — the engine's
+ *        existing semantics ("shape is right, the sink saved it ⇒ done") cannot
+ *        distinguish it, and inventing a truncation signal with no source would be
+ *        exactly the kind of guess this file refuses to make;
+ *      · what bounds the risk is that the live leg captures this same endpoint
+ *        while the user browses, so the archive is not solely reliant on this leg,
+ *        and the privacy notes carry the same caveat.
+ *    If a raw payload from a genuinely long conversation ever becomes available,
+ *    the place to settle this is a `parseDetailPage` (see its doc above): if the
+ *    envelope turns out to carry a "there is more" field, read it there and report
+ *    detail-empty-unverified rather than settling.
+ *
  * ## ⚠️ Staleness and risk (written as it is, not dressed up)
  * The response shape has circumstantial evidence dated 2026-08-17; but **the
  * newest measured evidence for the paging parameters only goes to 2025-12**, and
@@ -622,22 +727,13 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
       ? `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}`
       : `${origin}${DEEPSEEK_LIST_PATH}?count=${limit}&before_seq_id=${cursor}`,
   parseListPage: parseDeepSeekListPage,
-  // 🔴 The body segment: **no source, so null** — not "fill in anything for now".
-  //    See partial.missing.
-  detailPath: null,
-  detailUrl: null,
-  partial: {
-    missing: [
-      'detailPath / detailUrl: the route and parameters for fetching a SINGLE '
-      + 'conversation body have no multi-source provenance. lib/contract.ts:90-96 '
-      + 'in this repository records the name /api/v0/chat/history_messages, but '
-      + 'which parameters it needs, and whether the body also pages (and what that '
-      + 'paging parameter is called), have no source — and the consequence of '
-      + 'guessing is not an error but every conversation storing only its first few '
-      + 'turns while the user believes it is complete.',
-    ],
-    userNoteKey: 'platformNote.deepseek.partial',
-  },
+  // 🔴 W8 · The body segment: the id is not a path segment, so the route is one
+  //    fixed endpoint (no trailing '/', ⇒ compared in full) and the id travels in
+  //    the query. Both halves are named here because both are half of one fact.
+  detailPath: DEEPSEEK_DETAIL_PATH,
+  detailUrl: (origin, conversationId) =>
+    `${origin}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=${encodeURIComponent(conversationId)}`,
+  detailQueryKey: DEEPSEEK_DETAIL_QUERY_KEY,
   provenance:
     'cross-source reverse-engineering (research ticket R25, 2026-08-17; four mutually '
     + 'independent open-source implementations agreeing) · '
@@ -649,8 +745,17 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
     + '(deepseek-pp, Apache-2.0, commit 0a02c72b135bf2936e11aa78fd6136931ed65908, 2026-08-14). '
     + '🔴 Not official documentation; the newest measured evidence for the paging '
     + 'parameters only goes to 2025-12, so the endpoint may have changed. '
-    + 'No real end-to-end verification was done by this change (network access and a '
-    + 'logged-in session are forbidden).',
+    + 'W8 (2026-09-14) then filled in the BODY segment: '
+    + 'GET /api/v0/chat/history_messages?chat_session_id=<id> · (1) a real logged-in '
+    + 'browser session on 2026-09-13, in which DeepSeek\'s own page loaded one '
+    + 'conversation over XHR from exactly this route with this query key, plus '
+    + '(2) several mutually independent open-source exporters requesting the same '
+    + 'route with the same query key. '
+    + '🔴 Unverified, stated here rather than left out: whether that endpoint pages or '
+    + 'truncates a LONG conversation. No reviewed implementation pages it and W8 added '
+    + 'no paging, so a truncated body would be indistinguishable from a complete one at '
+    + 'this layer. Not official documentation, and W8 itself sent no request to '
+    + 'deepseek.com (the 2026-09-13 observation was a real browser session, not this change).',
 };
 
 export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
@@ -863,7 +968,7 @@ export function unsupportedBackfillFor(platform: string): UnsupportedBackfill | 
 
 /**
  * 🔴 C26 · "Can this plan really get past conversation **bodies** back?"
- * A plan with only the list segment (DeepSeek) must answer false here — it can
+ * A plan with only the list segment (Perplexity) must answer false here — it can
  * list conversations but cannot fetch a single body, and to the user the history
  * still has not been backfilled.
  */
