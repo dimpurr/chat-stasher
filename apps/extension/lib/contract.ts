@@ -94,20 +94,17 @@ export const PLATFORMS: readonly ChatPlatform[] = [
       '/chat/session/([0-9a-fA-F-]{8,})',
       '[?&]chat_session_id=([^&]+)',
     ],
-    // External source evidence checked 2026-08-17 (source code, not README):
-    // deepseek-pp (Apache-2.0; commit 0a02c72b135bf2936e11aa78fd6136931ed65908,
-    // 2026-08-14) uses https://chat.deepseek.com plus
-    // /api/v0/chat/history_messages and /api/v0/chat_session/fetch_page, and
-    // requires chat_sessions/chat_messages in the decoded business data:
-    // https://github.com/zhu1090093659/deepseek-pp/blob/0a02c72b135bf2936e11aa78fd6136931ed65908/core/deepseek/conversation-export.ts#L105-L186
-    // https://github.com/zhu1090093659/deepseek-pp/blob/0a02c72b135bf2936e11aa78fd6136931ed65908/core/export/normalize.ts#L44-L73
-    // better-deepseek (MIT; commit f558441ac616a174119ba434571c1ee0a2b84ddb,
-    // 2026-08-15) independently uses /api/v0/chat/history_messages, /chat/s/<id>,
-    // role/fragments and non-empty content for export:
-    // https://github.com/EdgeTypE/better-deepseek/blob/f558441ac616a174119ba434571c1ee0a2b84ddb/src/content/tools/exporter.js#L23-L127
-    // Context Sync (MIT; commit 66a548840c1e11f4080e0f059783728173494998,
-    // 2026-04-05) independently identifies non-empty DeepSeek DOM message nodes:
-    // https://github.com/Vineetpandey0/context-sync/blob/66a548840c1e11f4080e0f059783728173494998/injectors/deepseek.js#L94-L120
+    // External source evidence checked 2026-08-17 (source code, not README), from
+    // THREE independent reference implementations. No project name, licence
+    // identifier, commit hash or URL is recorded here on purpose: the public
+    // surface of this repository does not name third-party exporters.
+    //  · The first (2026-08-14) uses https://chat.deepseek.com plus
+    //    /api/v0/chat/history_messages and /api/v0/chat_session/fetch_page, and
+    //    requires chat_sessions/chat_messages in the decoded business data.
+    //  · A second (2026-08-15) independently uses /api/v0/chat/history_messages,
+    //    /chat/s/<id>, role/fragments and non-empty content for export.
+    //  · A third (2026-04-05) independently identifies non-empty DeepSeek DOM
+    //    message nodes.
     // The external API route/shape differences may represent different entry
     // points or versions; this task changes credibility only, not match data.
     credibility: 'from-source',
@@ -182,7 +179,8 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     status: { min: 200, max: 299 },
     responseShape: {
       encoding: 'json',
-      // Exactly the check the MIT exporter performs before it will export.
+      // Exactly the check the reference implementation performs before it will
+      // export.
       // Required (not "any of"): on this route a body without chat_messages is
       // the drift case, so it must fail the shape gate and get warned about
       // rather than pass through as an empty-looking capture.
@@ -198,30 +196,25 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // live-verified. If the real route or envelope differs, the generic gate
     // above rejects it and page-hook.ts warns — it never guesses.
     //
-    // External source evidence checked 2026-08-17 (source code, not README):
-    // claude-chat-exporter (MIT; commit
-    // 12da324dd158e9472251590d89d957fc767c0d85, 2026-08-08) requests
-    // /api/organizations/<org>/chat_conversations/<uuid>?tree=true&... and
-    // validates the response with Array.isArray(data.chat_messages), treating a
-    // missing chat_messages as "the endpoint may have changed" rather than as
-    // an empty conversation:
-    // https://github.com/agarwalvishal/claude-chat-exporter/blob/12da324dd158e9472251590d89d957fc767c0d85/claude-chat-exporter.js#L66
-    // https://github.com/agarwalvishal/claude-chat-exporter/blob/12da324dd158e9472251590d89d957fc767c0d85/claude-chat-exporter.js#L449-L452
-    // Its CLAUDE.md documents the envelope as { name, model,
-    // current_leaf_message_uuid, chat_messages: [{ uuid, parent_message_uuid,
-    // index, sender, created_at, content }] }.
-    // claude-extension (Apache-2.0; commit
-    // 89a20167bd71d0d5700a3679f22b5458c32b7e58, 2026-06-10) independently hooks
-    // the same route from a MAIN-world fetch interceptor with
-    // /^https:\/\/claude\.ai\/api\/organizations\/[\w-]+\/chat_conversations\/[\w-]+\?tree=True/ :
-    // https://github.com/abhimanyu-sikarwar/claude-extension/blob/89a20167bd71d0d5700a3679f22b5458c32b7e58/src/content/inject.js#L5
-    // That one matches on URL alone and never inspects the body, so it cannot
-    // tell drift from an empty chat — which is exactly why we add the body gate
-    // instead of copying its approach.
-    // A third project (withLinda/claude-project-conversations-exporter)
-    // documents the same GET /api/organizations/[org]/chat_conversations/[conv]
-    // but ships NO LICENSE, so it was read for architecture only and no code
-    // from it was used.
+    // External source evidence checked 2026-08-17 (source code, not README), from
+    // three independent reference implementations. No project name, licence
+    // identifier, commit hash or URL is recorded here on purpose: the public
+    // surface of this repository does not name third-party exporters.
+    //  · The first (2026-08-08) requests
+    //    /api/organizations/<org>/chat_conversations/<uuid>?tree=true&... and
+    //    validates the response with Array.isArray(data.chat_messages), treating
+    //    a missing chat_messages as "the endpoint may have changed" rather than
+    //    as an empty conversation. Its own notes document the envelope as
+    //    { name, model, current_leaf_message_uuid, chat_messages: [{ uuid,
+    //    parent_message_uuid, index, sender, created_at, content }] }.
+    //  · A second (2026-06-10) independently hooks the same route from a
+    //    MAIN-world fetch interceptor, matching on the URL alone
+    //    (/api/organizations/<org>/chat_conversations/<uuid> with the tree flag)
+    //    and never inspecting the body, so it cannot tell drift from an empty
+    //    chat — which is exactly why we add the body gate instead of copying its
+    //    approach.
+    //  · A third documents the same GET route but ships NO licence, so it was
+    //    read for architecture only and no code from it was used.
     credibility: 'from-source',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
@@ -324,39 +317,31 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // The external source evidence below was what stood here BEFORE that
     // measurement. It is kept: it is the record of how the row was first
     // written, and it independently corroborates the route above (checked
-    // 2026-08-17, source code, not README):
-    // conreo/kimi-chat-exporter (MIT; commit
-    // 9e3956b17ee44bceb453fea2107b9d6263ac0cd6, 2026-06-06) POSTs JSON to
-    // https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages
-    // with { chatId }, reads `data.messages`, and treats an absent/empty list
-    // as an error rather than as an empty conversation; its own manifest
-    // matches only https://www.kimi.com/* and its page menus key off
-    // https://www.kimi.com/chat/*:
-    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/background.js#L78-L80
-    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/background.js#L117-L123
-    // https://github.com/conreo/kimi-chat-exporter/blob/9e3956b17ee44bceb453fea2107b9d6263ac0cd6/manifest.json#L42-L44
-    // AshleyOSLab/kimi-chat-exporter (MIT; commit
-    // f27ca71d58eef9012535b2c7708c8865f641946e, 2026-03-15) independently uses
-    // BASE_URL https://www.kimi.com and a ListMessages call keyed by chat id,
-    // reading `messages` (with `items` / `data.messages` as fallbacks) — note
-    // it spells the service 'kimi.chat.v1.ChatService', which is why the path
-    // hint above stops at 'ChatService/ListMessages':
-    // https://github.com/AshleyOSLab/kimi-chat-exporter/blob/f27ca71d58eef9012535b2c7708c8865f641946e/exporters/kimi_exporter.py#L103-L115
-    // springrain1/kimi-pp (Apache-2.0; commit
-    // 6edf5494532845102e174d5f22669548309f5d18, 2026-08-02) independently hooks
-    // the same '/apiv2/kimi.gateway.chat.v1.ChatService/' gateway on
-    // www.kimi.com from a MAIN-world fetch interceptor:
-    // https://github.com/springrain1/kimi-pp/blob/6edf5494532845102e174d5f22669548309f5d18/core/kimi/fetch-interceptor.ts#L6
-    // chopper1026/kimi2api (MIT; commit
-    // 7f046d8627f275432f82788a6547bc905038738c, 2026-05-14) independently
-    // hard-codes KIMI_API_BASE = https://www.kimi.com and the same
-    // '/apiv2/kimi.gateway.chat.v1.ChatService/' service prefix:
-    // https://github.com/chopper1026/kimi2api/blob/7f046d8627f275432f82788a6547bc905038738c/app/config.py#L48
-    // https://github.com/chopper1026/kimi2api/blob/7f046d8627f275432f82788a6547bc905038738c/app/kimi/protocol.py#L8
-    // xiaoY233/Kimi-Free-API is GPL-3.0, so it was read for architecture only
-    // and no code from it was used; it is cited solely for the fact that the
-    // LEGACY origin https://kimi.moonshot.cn used an unrelated '/api/chat/...'
-    // route family, which is why that origin is not in `origins`.
+    // 2026-08-17, source code, not README), from FOUR reference implementations.
+    // No project name, licence identifier, commit hash or URL is recorded here on
+    // purpose: the public surface of this repository does not name third-party
+    // exporters.
+    //  · The first (2026-06-06) POSTs JSON to
+    //    https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages
+    //    with { chatId }, reads `data.messages`, and treats an absent/empty list
+    //    as an error rather than as an empty conversation; its own manifest
+    //    matches only https://www.kimi.com/* and its page menus key off
+    //    https://www.kimi.com/chat/*.
+    //  · A second (2026-03-15) independently uses BASE_URL
+    //    https://www.kimi.com and a ListMessages call keyed by chat id, reading
+    //    `messages` (with `items` / `data.messages` as fallbacks) — note it
+    //    spells the service 'kimi.chat.v1.ChatService', which is why the path
+    //    hint above stops at 'ChatService/ListMessages'.
+    //  · A third (2026-08-02) independently hooks the same
+    //    '/apiv2/kimi.gateway.chat.v1.ChatService/' gateway on www.kimi.com from
+    //    a MAIN-world fetch interceptor.
+    //  · A fourth (2026-05-14) independently hard-codes its API base as
+    //    https://www.kimi.com and the same
+    //    '/apiv2/kimi.gateway.chat.v1.ChatService/' service prefix.
+    // One further reference implementation is GPL-3.0, so it was read for
+    // architecture only and no code from it was used; it is cited solely for the
+    // fact that the LEGACY origin https://kimi.moonshot.cn used an unrelated
+    // '/api/chat/...' route family, which is why that origin is not in `origins`.
     credibility: 'from-source',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
