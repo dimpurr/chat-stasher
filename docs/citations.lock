@@ -16,227 +16,227 @@
 Cargo.toml:1-11  8305be735fe4  lines=11
   <- docs/install.md:154  :: [workspace]
 SECURITY.md:9  381d717079a5  lines=1
-  <- docs/privacy.md:524  :: **Contact: `work@team.iopho.com`.** Mail that address direc…
+  <- docs/privacy.md:556  :: **Contact: `work@team.iopho.com`.** Mail that address direc…
 SECURITY.md:29-35  02cf2eee45d3  lines=7
-  <- docs/privacy.md:532  :: This is a personal project with a single maintainer. **We d…
+  <- docs/privacy.md:564  :: This is a personal project with a single maintainer. **We d…
 apps/extension/entrypoints/background.ts:113-141  30c84e84ef5b  lines=29
-  <- docs/privacy.md:198, docs/threat-model.md:109  :: function buildBundle(captured: CapturedFetch): InboxBundle {
+  <- docs/privacy.md:230, docs/threat-model.md:109  :: function buildBundle(captured: CapturedFetch): InboxBundle {
 apps/extension/entrypoints/background.ts:128-130  36c85931504a  lines=3
-  <- docs/threat-model.md:236  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
+  <- docs/threat-model.md:279  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
 apps/extension/entrypoints/background.ts:186-203  41d87a302a6d  lines=18
-  <- README.md:163, docs/privacy.md:119, docs/threat-model.md:32  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
+  <- README.md:175, docs/privacy.md:119, docs/threat-model.md:32  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
 apps/extension/entrypoints/background.ts:413-420  185eedd6b024  lines=8
   <- docs/install.md:229  :: export async function hostStatusForPopup(): Promise<HostSta…
 apps/extension/entrypoints/background.ts:589-620  ba11586c9ffe  lines=32
-  <- docs/privacy.md:243  :: * 🔴 What about scope (the account identifier): **it records…
+  <- docs/privacy.md:275  :: * 🔴 What about scope (the account identifier): **it records…
 apps/extension/entrypoints/background.ts:631-650  b0901302e63f  lines=20
-  <- docs/privacy.md:235  :: export function backfillTargetFor(
+  <- docs/privacy.md:267  :: export function backfillTargetFor(
 apps/extension/entrypoints/background.ts:649  6539997ed831  lines=1
-  <- docs/privacy.md:237  :: return { platform: row.id, origin, scope: identity.value ||…
+  <- docs/privacy.md:269  :: return { platform: row.id, origin, scope: identity.value ||…
 apps/extension/entrypoints/dw-bridge.content.ts:162-170  cbd84f69be4a  lines=9
   <- docs/privacy.md:112  :: // 🔴 W22 · Kimi's two backfill paths need the page origin's…
 apps/extension/entrypoints/dw-bridge.content.ts:196-222  119bab292d93  lines=27
-  <- docs/privacy.md:92, docs/threat-model.md:185  :: const seenGate = createSeenGate(15_000);
+  <- docs/privacy.md:92, docs/threat-model.md:228  :: const seenGate = createSeenGate(15_000);
 apps/extension/entrypoints/dw-fetch-main.content.ts:13-15  0a41796be631  lines=3
-  <- docs/threat-model.md:177  :: matches: CONTENT_MATCHES,
+  <- docs/threat-model.md:220  :: matches: CONTENT_MATCHES,
 apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
-  <- docs/privacy.md:387  :: * In Chrome's permission-warning list, `alarms` — like `sto…
+  <- docs/privacy.md:419  :: * In Chrome's permission-warning list, `alarms` — like `sto…
 apps/extension/lib/backfill/alarm.ts:79-80  8ec0655980dd  lines=2
   <- docs/install.md:554  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
 apps/extension/lib/backfill/alarm.ts:200  b9377ab9524d  lines=1
-  <- docs/privacy.md:223  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
+  <- docs/privacy.md:255  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
 apps/extension/lib/backfill/debt-store.ts:37-39  fa04eecd9ada  lines=3
-  <- docs/privacy.md:224  :: export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
+  <- docs/privacy.md:256  :: export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
 apps/extension/lib/backfill/engine.ts:85-88  5cfeee9f2531  lines=4
-  <- docs/privacy.md:276, docs/threat-model.md:60  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
+  <- docs/privacy.md:308, docs/threat-model.md:60  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
 apps/extension/lib/backfill/engine.ts:299  4e88764df1da  lines=1
-  <- docs/privacy.md:270  :: export async function runBackfill(opts: BackfillOptions): P…
+  <- docs/privacy.md:302  :: export async function runBackfill(opts: BackfillOptions): P…
 apps/extension/lib/backfill/engine.ts:626-664  330d748b2898  lines=39
-  <- docs/threat-model.md:177, docs/threat-model.md:198  :: const listWhere = (): string =>
+  <- docs/threat-model.md:220, docs/threat-model.md:241  :: const listWhere = (): string =>
 apps/extension/lib/backfill/engine.ts:694-736  1057aeaa5f1d  lines=43
-  <- README.md:121, docs/install.md:669, docs/privacy.md:360, docs/threat-model.md:211  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
+  <- README.md:133, docs/install.md:669, docs/privacy.md:392, docs/threat-model.md:254  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
 apps/extension/lib/backfill/engine.ts:956-978  277a46b875d2  lines=23
-  <- docs/threat-model.md:177, docs/threat-model.md:198  :: while (state.pending.length > 0) {
+  <- docs/threat-model.md:220, docs/threat-model.md:241  :: while (state.pending.length > 0) {
 apps/extension/lib/backfill/engine.ts:1086-1121  2cb492e06a56  lines=36
-  <- README.md:122, docs/install.md:88, docs/install.md:672, docs/privacy.md:341, docs/privacy.md:355, docs/threat-model.md:211, docs/threat-model.md:468  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
+  <- README.md:134, docs/install.md:88, docs/install.md:672, docs/privacy.md:373, docs/privacy.md:387, docs/threat-model.md:254, docs/threat-model.md:529  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
 apps/extension/lib/backfill/enumerate.ts:1271-1285  30e272d8bf3f  lines=15
-  <- README.md:120, docs/install.md:108, docs/install.md:671  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
+  <- README.md:132, docs/install.md:108, docs/install.md:671  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
 apps/extension/lib/backfill/enumerate.ts:1287-1300  7ce980289073  lines=14
-  <- README.md:120, docs/install.md:103, docs/install.md:671, docs/privacy.md:341, docs/threat-model.md:211, docs/threat-model.md:460  :: *  · 🔴 **Not verified: whether this endpoint pages or trunc…
+  <- README.md:132, docs/install.md:103, docs/install.md:671, docs/privacy.md:373, docs/threat-model.md:254, docs/threat-model.md:521  :: *  · 🔴 **Not verified: whether this endpoint pages or trunc…
 apps/extension/lib/backfill/enumerate.ts:1334-1337  cd978611dbc5  lines=4
-  <- README.md:120, docs/install.md:88  :: detailPath: DEEPSEEK_DETAIL_PATH,
+  <- README.md:132, docs/install.md:88  :: detailPath: DEEPSEEK_DETAIL_PATH,
 apps/extension/lib/backfill/enumerate.ts:1338-1359  bdf83a97c946  lines=22
   <- docs/install.md:668  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:1424-1433  e191d04a5861  lines=10
-  <- README.md:123, docs/install.md:127  :: detailPath: null,
+  <- README.md:135, docs/install.md:127  :: detailPath: null,
 apps/extension/lib/backfill/enumerate.ts:1436-1450  7d294fb388dd  lines=15
-  <- README.md:123, docs/install.md:121, docs/install.md:127, docs/install.md:668  :: provenance:
+  <- README.md:135, docs/install.md:121, docs/install.md:127, docs/install.md:668  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:1460-1462  b55b49acb2d3  lines=3
-  <- README.md:121, docs/install.md:88  :: export const GROK_DETAIL_PATH = '/rest/app-chat/conversatio…
+  <- README.md:133, docs/install.md:88  :: export const GROK_DETAIL_PATH = '/rest/app-chat/conversatio…
 apps/extension/lib/backfill/enumerate.ts:1479  591b2e1e82db  lines=1
-  <- docs/privacy.md:297  :: export const GROK_DETAIL_STEP_DELAY_MS = { min: 2_000, max:…
+  <- docs/privacy.md:329  :: export const GROK_DETAIL_STEP_DELAY_MS = { min: 2_000, max:…
 apps/extension/lib/backfill/enumerate.ts:1542-1603  a613cdfc4224  lines=62
-  <- README.md:121, docs/install.md:88, docs/install.md:668, docs/install.md:669, docs/install.md:670, docs/privacy.md:341, docs/threat-model.md:211, docs/threat-model.md:461  :: export const GROK_PLAN: BackfillEnumPlan = {
+  <- README.md:133, docs/install.md:88, docs/install.md:668, docs/install.md:669, docs/install.md:670, docs/privacy.md:373, docs/threat-model.md:254, docs/threat-model.md:522  :: export const GROK_PLAN: BackfillEnumPlan = {
 apps/extension/lib/backfill/enumerate.ts:1627-1689  584fb75ba557  lines=63
-  <- README.md:122, docs/install.md:88, docs/install.md:672, docs/privacy.md:299  :: * 🔴 W22 · Kimi's conversation list **and** its conversation…
+  <- README.md:134, docs/install.md:88, docs/install.md:672, docs/privacy.md:331  :: * 🔴 W22 · Kimi's conversation list **and** its conversation…
 apps/extension/lib/backfill/enumerate.ts:1804  ed62fe4313f7  lines=1
-  <- README.md:124, docs/install.md:84, docs/install.md:582, docs/privacy.md:290, docs/privacy.md:343, docs/threat-model.md:213, docs/threat-model.md:472  :: export const BACKFILL_UNSUPPORTED: readonly UnsupportedBack…
+  <- README.md:136, docs/install.md:84, docs/install.md:582, docs/privacy.md:322, docs/privacy.md:375, docs/threat-model.md:256, docs/threat-model.md:533  :: export const BACKFILL_UNSUPPORTED: readonly UnsupportedBack…
 apps/extension/lib/backfill/enumerate.ts:1968-1974  b0b623ad6b49  lines=7
-  <- README.md:120, docs/install.md:84, docs/install.md:582, docs/privacy.md:290, docs/privacy.md:341, docs/threat-model.md:211, docs/threat-model.md:456  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
+  <- README.md:132, docs/install.md:84, docs/install.md:582, docs/privacy.md:322, docs/privacy.md:373, docs/threat-model.md:254, docs/threat-model.md:517  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/enumerate.ts:1982-1988  be15b15a0991  lines=7
-  <- README.md:123, docs/install.md:84, docs/install.md:582, docs/privacy.md:290, docs/privacy.md:342, docs/threat-model.md:212, docs/threat-model.md:470  :: export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[…
+  <- README.md:135, docs/install.md:84, docs/install.md:582, docs/privacy.md:322, docs/privacy.md:374, docs/threat-model.md:255, docs/threat-model.md:531  :: export const BACKFILL_LIST_ONLY_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/pace.ts:92-103  9e56eb8452f2  lines=12
   <- docs/install.md:552  :: export const DEFAULT_DETAIL_PACE: PacePlan = {
 apps/extension/lib/backfill/pace.ts:120-121  8b36a1c2926e  lines=2
   <- docs/install.md:552  :: export const DAILY_CAP_MIN = 150;
 apps/extension/lib/backfill/schedule.ts:29  3f15d79a8fc9  lines=1
-  <- docs/privacy.md:222, docs/privacy.md:274  :: export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1…
+  <- docs/privacy.md:254, docs/privacy.md:306  :: export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1…
 apps/extension/lib/backfill/schedule.ts:40  51bde443ef97  lines=1
   <- docs/install.md:558  :: export const BACKFILL_DEFAULT_ENABLED = false;
 apps/extension/lib/backfill/store.ts:18-28  b6029f722fc6  lines=11
-  <- docs/privacy.md:380  :: export interface BackfillStore {
+  <- docs/privacy.md:412  :: export interface BackfillStore {
 apps/extension/lib/backfill/store.ts:65-77  a2af158effd2  lines=13
-  <- docs/privacy.md:380  :: function localArea(): LocalArea | null {
+  <- docs/privacy.md:412  :: function localArea(): LocalArea | null {
 apps/extension/lib/backfill/tab-port.ts:111  118cc6173392  lines=1
-  <- docs/privacy.md:223  :: export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
+  <- docs/privacy.md:255  :: export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
 apps/extension/lib/backfill/tab-port.ts:336-375  478bcd01a66f  lines=40
   <- docs/threat-model.md:60  :: export function checkBackfillRequest(
 apps/extension/lib/backfill/types.ts:607-629  248b3164e003  lines=23
-  <- docs/privacy.md:224  :: export interface BackfillHeader {
+  <- docs/privacy.md:256  :: export interface BackfillHeader {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:236  :: export function badgeFor(state: OutboxSummary | null): Badg…
 apps/extension/lib/contract.ts:6-16  a5f68b09454d  lines=11
-  <- docs/threat-model.md:251  :: /** Message names used by the page-world hook and the isola…
+  <- docs/threat-model.md:294  :: /** Message names used by the page-world hook and the isola…
 apps/extension/lib/contract.ts:18-20  212496897aef  lines=3
-  <- docs/threat-model.md:252  :: export const PAGE_HOOK_VERSION = 'v1';
+  <- docs/threat-model.md:295  :: export const PAGE_HOOK_VERSION = 'v1';
 apps/extension/lib/contract.ts:40-65  efcfd4acfdd7  lines=26
   <- SECURITY.md:62, docs/threat-model.md:26  :: export interface ChatPlatform {
 apps/extension/lib/contract.ts:66-487  8b4ee52571e9  lines=422
-  <- README.md:125, docs/install.md:62, docs/install.md:136, docs/privacy.md:86  :: export const PLATFORMS: readonly ChatPlatform[] = [
+  <- README.md:137, docs/install.md:62, docs/install.md:136, docs/privacy.md:86  :: export const PLATFORMS: readonly ChatPlatform[] = [
 apps/extension/lib/contract.ts:69  65cef6a544ee  lines=1
-  <- docs/install.md:32, docs/privacy.md:306  :: origins: ['https://chat.deepseek.com'],
+  <- docs/install.md:32, docs/privacy.md:338  :: origins: ['https://chat.deepseek.com'],
 apps/extension/lib/contract.ts:113  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:330  :: webSocketCapture: false,
+  <- docs/privacy.md:362  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:116-182  3d4367011d8a  lines=67
   <- docs/install.md:66  :: id: 'perplexity',
 apps/extension/lib/contract.ts:117  779465350317  lines=1
-  <- docs/install.md:32, docs/privacy.md:307  :: origins: ['https://www.perplexity.ai'],
+  <- docs/install.md:32, docs/privacy.md:339  :: origins: ['https://www.perplexity.ai'],
 apps/extension/lib/contract.ts:134-149  183bd14dc050  lines=16
-  <- README.md:123, docs/install.md:124, docs/threat-model.md:223  :: pathHints: ['/rest/thread/'],
+  <- README.md:135, docs/install.md:124, docs/threat-model.md:266  :: pathHints: ['/rest/thread/'],
 apps/extension/lib/contract.ts:169-172  42177b4ef64c  lines=4
   <- docs/install.md:68  :: sessionIdPatterns: [
 apps/extension/lib/contract.ts:181  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:330  :: webSocketCapture: false,
+  <- docs/privacy.md:362  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:185  4eda2e856655  lines=1
-  <- docs/install.md:32, docs/privacy.md:308  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
+  <- docs/install.md:32, docs/privacy.md:340  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
 apps/extension/lib/contract.ts:197  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:330  :: webSocketCapture: false,
+  <- docs/privacy.md:362  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:201  586fc9c878ac  lines=1
-  <- docs/install.md:32, docs/privacy.md:309  :: origins: ['https://gemini.google.com'],
+  <- docs/install.md:32, docs/privacy.md:341  :: origins: ['https://gemini.google.com'],
 apps/extension/lib/contract.ts:213  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:330  :: webSocketCapture: false,
+  <- docs/privacy.md:362  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:217  1f7678ac6786  lines=1
-  <- docs/install.md:32, docs/privacy.md:310  :: origins: ['https://claude.ai'],
+  <- docs/install.md:32, docs/privacy.md:342  :: origins: ['https://claude.ai'],
 apps/extension/lib/contract.ts:271  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:330  :: webSocketCapture: false,
+  <- docs/privacy.md:362  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:283  047cc8b8ab4e  lines=1
-  <- docs/install.md:32, docs/privacy.md:311  :: origins: ['https://www.kimi.com'],
+  <- docs/install.md:32, docs/privacy.md:343  :: origins: ['https://www.kimi.com'],
 apps/extension/lib/contract.ts:398  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:331  :: webSocketCapture: false,
+  <- docs/privacy.md:363  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:405  23c99a148fbc  lines=1
-  <- docs/install.md:32, docs/privacy.md:312  :: origins: ['https://grok.com'],
+  <- docs/install.md:32, docs/privacy.md:344  :: origins: ['https://grok.com'],
 apps/extension/lib/contract.ts:485  2e5f6f960ad0  lines=1
-  <- docs/privacy.md:331  :: webSocketCapture: false,
+  <- docs/privacy.md:363  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:490-492  748a234ceca6  lines=3
-  <- SECURITY.md:62, docs/privacy.md:315, docs/threat-model.md:26  :: export const CONTENT_MATCHES: string[] = Array.from(
+  <- SECURITY.md:62, docs/privacy.md:347, docs/threat-model.md:26  :: export const CONTENT_MATCHES: string[] = Array.from(
 apps/extension/lib/contract.ts:512  93f15da49cac  lines=1
-  <- docs/privacy.md:328  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
+  <- docs/privacy.md:360  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
 apps/extension/lib/contract.ts:590-609  9e2aaed71d47  lines=20
-  <- docs/privacy.md:326  :: export function matchesResponseShape(platform: ChatPlatform…
+  <- docs/privacy.md:358  :: export function matchesResponseShape(platform: ChatPlatform…
 apps/extension/lib/contract.ts:611-639  3366467c8a9a  lines=29
   <- docs/privacy.md:86  :: export function isCapturedFetchShape(value: unknown): value…
 apps/extension/lib/contract.ts:611-644  7a11fcf08955  lines=34
-  <- docs/threat-model.md:261  :: export function isCapturedFetchShape(value: unknown): value…
+  <- docs/threat-model.md:304  :: export function isCapturedFetchShape(value: unknown): value…
 apps/extension/lib/contract.ts:646-656  1aa0380648ba  lines=11
-  <- docs/threat-model.md:260  :: export function isMainReadyMessage(
+  <- docs/threat-model.md:303  :: export function isMainReadyMessage(
 apps/extension/lib/contract.ts:663-676  96b568123bd8  lines=14
-  <- docs/threat-model.md:234  :: * ADR-002 identity axis: the account, not the machine. Two …
+  <- docs/threat-model.md:277  :: * ADR-002 identity axis: the account, not the machine. Two …
 apps/extension/lib/contract.ts:702-710  1976cb2c56af  lines=9
-  <- docs/privacy.md:326  :: export function platformForTraffic(url: string, method: str…
+  <- docs/privacy.md:358  :: export function platformForTraffic(url: string, method: str…
 apps/extension/lib/contract.ts:720-748  6b7d59562892  lines=29
   <- docs/install.md:73  :: export function extractSessionId(url: string, text: string,…
 apps/extension/lib/contract.ts:822-838  61ac9dc62d25  lines=17
-  <- docs/privacy.md:236, docs/threat-model.md:234  :: export function extractIdentity(text: string, sessionId: st…
+  <- docs/privacy.md:268, docs/threat-model.md:277  :: export function extractIdentity(text: string, sessionId: st…
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
-  <- docs/privacy.md:225  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
+  <- docs/privacy.md:257  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
 apps/extension/lib/host-status.ts:89-113  f8682e917e91  lines=25
-  <- docs/privacy.md:225  :: export function toRecord(
+  <- docs/privacy.md:257  :: export function toRecord(
 apps/extension/lib/native-host.ts:30  9da915f38ab1  lines=1
   <- docs/privacy.md:124, docs/threat-model.md:60  :: export const NATIVE_HOST_NAME = 'com.chat_stasher.host';
-apps/extension/lib/native-host.ts:431-481  2666d8d980c9  lines=51
+apps/extension/lib/native-host.ts:755-805  2666d8d980c9  lines=51
   <- docs/privacy.md:124, docs/threat-model.md:38  :: export async function deliver(name: string, payload: string…
-apps/extension/lib/native-host.ts:451-460  d19b8c8b9924  lines=10
-  <- docs/install.md:46, docs/privacy.md:130, docs/threat-model.md:41, docs/threat-model.md:310  :: const classified = classify(outcome, (value) => {
+apps/extension/lib/native-host.ts:775-784  d19b8c8b9924  lines=10
+  <- docs/install.md:46, docs/privacy.md:130, docs/threat-model.md:41, docs/threat-model.md:353  :: const classified = classify(outcome, (value) => {
 apps/extension/lib/outbox-alarm.ts:20-46  175432e0734b  lines=27
-  <- docs/privacy.md:381  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
+  <- docs/privacy.md:413  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
 apps/extension/lib/outbox.ts:34-37  8427e3c8b640  lines=4
-  <- docs/privacy.md:115, docs/threat-model.md:255  :: export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
+  <- docs/privacy.md:115, docs/threat-model.md:298  :: export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
 apps/extension/lib/outbox.ts:53  470e33d97b7b  lines=1
-  <- docs/privacy.md:382  :: export const OUTBOX_CAPACITY_BYTES = 256 * 1024 * 1024;
+  <- docs/privacy.md:414  :: export const OUTBOX_CAPACITY_BYTES = 256 * 1024 * 1024;
 apps/extension/lib/outbox.ts:59-60  4fcc6c08ee3e  lines=2
-  <- docs/privacy.md:226  :: /** Where the last export happened. Written by the popup, r…
+  <- docs/privacy.md:258  :: /** Where the last export happened. Written by the popup, r…
 apps/extension/lib/outbox.ts:64-80  4526f8ad144c  lines=17
-  <- docs/privacy.md:199, docs/privacy.md:452, docs/threat-model.md:107  :: export interface OutboxEntry {
+  <- docs/privacy.md:231, docs/privacy.md:484, docs/threat-model.md:107  :: export interface OutboxEntry {
 apps/extension/lib/outbox.ts:309-377  c7adb6b1fdc6  lines=69
-  <- README.md:162, docs/install.md:595, docs/privacy.md:116, docs/privacy.md:199, docs/privacy.md:452, docs/threat-model.md:31, docs/threat-model.md:107, docs/threat-model.md:398  :: export async function enqueue(
+  <- README.md:174, docs/install.md:595, docs/privacy.md:116, docs/privacy.md:231, docs/privacy.md:484, docs/threat-model.md:31, docs/threat-model.md:107, docs/threat-model.md:459  :: export async function enqueue(
 apps/extension/lib/outbox.ts:379-394  abd4cf39ad63  lines=16
-  <- README.md:162, docs/install.md:49, docs/install.md:595, docs/privacy.md:131, docs/privacy.md:431, docs/threat-model.md:111, docs/threat-model.md:398  :: /** 🔴 The only deletion in this module. Callers must hold a…
+  <- README.md:174, docs/install.md:49, docs/install.md:595, docs/privacy.md:131, docs/privacy.md:463, docs/threat-model.md:111, docs/threat-model.md:459  :: /** 🔴 The only deletion in this module. Callers must hold a…
 apps/extension/lib/outbox.ts:439-475  7adf517c3771  lines=37
-  <- docs/install.md:244, docs/privacy.md:209  :: * §8 file name: `chat-stasher-export-<UTC yyyymmddThhmmssZ>…
+  <- docs/install.md:244, docs/privacy.md:241  :: * §8 file name: `chat-stasher-export-<UTC yyyymmddThhmmssZ>…
 apps/extension/lib/outbox.ts:442-446  793690884dfe  lines=5
   <- docs/threat-model.md:132  :: export function exportFilename(at: number): string {
 apps/extension/lib/outbox.ts:457-464  eaa2acf05ef9  lines=8
   <- docs/install.md:258  :: /**
 apps/extension/lib/outbox.ts:465-475  12ea3db028e8  lines=11
-  <- docs/privacy.md:263, docs/threat-model.md:116  :: export function buildExportFile(entries: readonly OutboxEnt…
+  <- docs/privacy.md:295, docs/threat-model.md:116  :: export function buildExportFile(entries: readonly OutboxEnt…
 apps/extension/lib/outbox.ts:477-501  fe9cbdf9b144  lines=25
-  <- docs/privacy.md:226  :: export interface LastExport {
+  <- docs/privacy.md:258  :: export interface LastExport {
 apps/extension/lib/page-hook.ts:125-132  ce770312c2a2  lines=8
-  <- docs/privacy.md:369  :: const warnUnsupportedTransport = (transport: string, url: s…
+  <- docs/privacy.md:401  :: const warnUnsupportedTransport = (transport: string, url: s…
 apps/extension/lib/page-hook.ts:182-222  27217164e88f  lines=41
-  <- docs/privacy.md:366  :: const captureCandidate = (rawUrl: string, method: string, s…
+  <- docs/privacy.md:398  :: const captureCandidate = (rawUrl: string, method: string, s…
 apps/extension/lib/page-hook.ts:200  89c8124c5ce8  lines=1
-  <- docs/privacy.md:328  :: console.warn('[chat-stasher] capture skipped: response exce…
+  <- docs/privacy.md:360  :: console.warn('[chat-stasher] capture skipped: response exce…
 apps/extension/lib/page-hook.ts:256-261  ca79e5302131  lines=6
-  <- docs/privacy.md:368  :: if (type === '' || type === 'text') {
+  <- docs/privacy.md:400  :: if (type === '' || type === 'text') {
 apps/extension/lib/page-hook.ts:262-265  6ae7abf10cbd  lines=4
-  <- docs/privacy.md:369  :: if (text === null) {
+  <- docs/privacy.md:401  :: if (text === null) {
 apps/extension/lib/page-hook.ts:276-288  b3ff4b9bcb73  lines=13
-  <- docs/privacy.md:370  :: const eventSourceConstructor = pageWindow.EventSource;
+  <- docs/privacy.md:402  :: const eventSourceConstructor = pageWindow.EventSource;
 apps/extension/lib/page-hook.ts:290  e911da669725  lines=1
-  <- docs/threat-model.md:27, docs/threat-model.md:177  :: // ---- WebSocket -----------------------------------------…
+  <- docs/threat-model.md:27, docs/threat-model.md:220  :: // ---- WebSocket -----------------------------------------…
 apps/extension/lib/page-hook.ts:314  6e0bd9b9eb6b  lines=1
-  <- docs/threat-model.md:27, docs/threat-model.md:177  :: // Binary frames are not decoded here: guessing an encoding…
+  <- docs/threat-model.md:27, docs/threat-model.md:220  :: // Binary frames are not decoded here: guessing an encoding…
 apps/extension/lib/page-hook.ts:338-355  fdea4ee11e0d  lines=18
-  <- docs/threat-model.md:177  :: if (
+  <- docs/threat-model.md:220  :: if (
 apps/extension/lib/page-hook.ts:355  693aa83597c0  lines=1
   <- docs/threat-model.md:27  :: warnUnsupportedTransport('websocket', url);
 apps/extension/lib/page-hook.ts:381  b8838019dc2f  lines=1
   <- docs/privacy.md:84  :: const originalFetch = window.fetch.bind(window);
 apps/extension/lib/page-hook.ts:401-406  179b81cc05cf  lines=6
-  <- docs/privacy.md:91, docs/threat-model.md:184  :: const paged = platform && platform.id === 'chatgpt' && pars…
+  <- docs/privacy.md:91, docs/threat-model.md:227  :: const paged = platform && platform.id === 'chatgpt' && pars…
 apps/extension/lib/page-hook.ts:420  c2a5f81a7761  lines=1
-  <- docs/privacy.md:84, docs/privacy.md:170, docs/privacy.md:261  :: const text = await response.clone().text();
+  <- docs/privacy.md:84, docs/privacy.md:202, docs/privacy.md:293  :: const text = await response.clone().text();
 apps/extension/lib/page-hook.ts:427-444  c97cffb00fa6  lines=18
-  <- docs/privacy.md:84, docs/privacy.md:170, docs/privacy.md:261  :: const hookedFetch: typeof window.fetch = async (input, init…
+  <- docs/privacy.md:84, docs/privacy.md:202, docs/privacy.md:293  :: const hookedFetch: typeof window.fetch = async (input, init…
 apps/extension/lib/platform-auth.ts:48-58  5e4adeb00a65  lines=11
   <- docs/privacy.md:98  :: export function needsChatgptBearer(url: string, pageOrigin:…
 apps/extension/lib/platform-auth.ts:88-107  f67f01d9e4a4  lines=20
-  <- docs/privacy.md:98, docs/threat-model.md:186  :: export function createAuthorizedFetch(pageOrigin: string, r…
+  <- docs/privacy.md:98, docs/threat-model.md:229  :: export function createAuthorizedFetch(pageOrigin: string, r…
 apps/extension/lib/platform-auth.ts:203-235  f714ed2af5c0  lines=33
-  <- README.md:122, docs/install.md:88, docs/install.md:673, docs/privacy.md:111, docs/privacy.md:341, docs/threat-model.md:193, docs/threat-model.md:211, docs/threat-model.md:466  :: export function createKimiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:634-647  00dceceff078  lines=14
-  <- README.md:125, docs/install.md:132  :: /**
+  <- README.md:134, docs/install.md:88, docs/install.md:673, docs/privacy.md:111, docs/privacy.md:373, docs/threat-model.md:236, docs/threat-model.md:254, docs/threat-model.md:527  :: export function createKimiAuthorizedFetch(
+apps/extension/lib/popup-view.ts:684-697  00dceceff078  lines=14
+  <- README.md:137, docs/install.md:132  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:234  :: export function fixCommand(stage: string | null | undefined…
 apps/extension/lib/ui-strings.ts:80-100  b83df381516c  lines=21
@@ -254,149 +254,149 @@ apps/extension/package.json:15  7da79dd35521  lines=1
 apps/extension/wxt.config.ts:40  8973cb78d41e  lines=1
   <- docs/install.md:661  :: default_locale: 'en',
 apps/extension/wxt.config.ts:51  c5961dc1034c  lines=1
-  <- docs/privacy.md:386  :: // 🔴 W2 removed 'downloads'. The extension no longer downlo…
+  <- docs/privacy.md:418  :: // 🔴 W2 removed 'downloads'. The extension no longer downlo…
 apps/extension/wxt.config.ts:57-63  411bd7614c9a  lines=7
-  <- docs/threat-model.md:519  :: // Why 'storage': the debt set, the backfill switch, the ba…
+  <- docs/threat-model.md:580  :: // Why 'storage': the debt set, the backfill switch, the ba…
 apps/extension/wxt.config.ts:65  e98492ea0a6a  lines=1
-  <- docs/privacy.md:381  :: // Why 'alarms' (C19): the backfill leg must have a heartbe…
+  <- docs/privacy.md:413  :: // Why 'alarms' (C19): the backfill leg must have a heartbe…
 apps/extension/wxt.config.ts:77  e8b57cf64548  lines=1
-  <- docs/privacy.md:382  :: // Why 'unlimitedStorage' (W2): the outbox is an IndexedDB …
+  <- docs/privacy.md:414  :: // Why 'unlimitedStorage' (W2): the outbox is an IndexedDB …
 apps/extension/wxt.config.ts:87  bdb2678d0ca3  lines=1
-  <- docs/install.md:35, docs/install.md:221, docs/install.md:659, docs/privacy.md:160, docs/privacy.md:375, docs/privacy.md:388, docs/privacy.md:405, docs/threat-model.md:60  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
+  <- docs/install.md:35, docs/install.md:221, docs/install.md:659, docs/privacy.md:192, docs/privacy.md:407, docs/privacy.md:420, docs/privacy.md:437, docs/threat-model.md:60  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
 apps/extension/wxt.config.ts:88-94  2a2b23999f5f  lines=7
-  <- docs/threat-model.md:289  :: // 🔴 ADR-014: this pins the Chrome extension ID to
+  <- docs/threat-model.md:332  :: // 🔴 ADR-014: this pins the Chrome extension ID to
 apps/extension/wxt.config.ts:110  84787b717b3c  lines=1
-  <- docs/privacy.md:179  :: data_collection_permissions: { required: ['none'] },
+  <- docs/privacy.md:211  :: data_collection_permissions: { required: ['none'] },
 crates/chat-stasher/Cargo.toml:1-6  67c6d5782580  lines=6
   <- docs/install.md:154  :: [package]
 crates/chat-stasher/Cargo.toml:3  608a3132dc6f  lines=1
   <- SECURITY.md:48  :: version = "0.2.0"
 crates/chat-stasher/Cargo.toml:5  53a903362b38  lines=1
-  <- README.md:128  :: description = "Append-only archive for every LLM conversati…
+  <- README.md:140  :: description = "Append-only archive for every LLM conversati…
 crates/chat-stasher/Cargo.toml:14-27  096bce56001a  lines=14
-  <- docs/threat-model.md:484  :: [dependencies]
+  <- docs/threat-model.md:545  :: [dependencies]
 crates/chat-stasher/Cargo.toml:20-21  4a5b59a2acb8  lines=2
-  <- docs/threat-model.md:60, docs/threat-model.md:78, docs/threat-model.md:486  :: rustic_core = { version = "=0.12.0" }
+  <- docs/threat-model.md:60, docs/threat-model.md:78, docs/threat-model.md:547  :: rustic_core = { version = "=0.12.0" }
 crates/chat-stasher/Cargo.toml:27  f6c7a40dd8b1  lines=1
-  <- docs/threat-model.md:486  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
+  <- docs/threat-model.md:547  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/data/harness-registry-v1.json:28  d9bf419bfc8b  lines=1
-  <- README.md:47, README.md:117  :: "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude…
+  <- README.md:58, README.md:129  :: "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude…
 crates/chat-stasher/data/harness-registry-v1.json:71-72  f94222ed89c0  lines=2
-  <- README.md:126  :: "seal_policy": "no-rename",
+  <- README.md:138  :: "seal_policy": "no-rename",
 crates/chat-stasher/data/harness-registry-v1.json:84-124  e6835a0b9d0c  lines=41
-  <- README.md:48  :: "id": "gemini-cli",
+  <- README.md:59  :: "id": "gemini-cli",
 crates/chat-stasher/data/harness-registry-v1.json:165-211  584dd1dcf1bf  lines=47
-  <- README.md:116  :: "id": "cursor",
+  <- README.md:128  :: "id": "cursor",
 crates/chat-stasher/data/harness-registry-v1.json:362-397  6241552cd249  lines=36
-  <- README.md:116  :: "notes": "project-level SQLite (data_directory defaults to …
+  <- README.md:128  :: "notes": "project-level SQLite (data_directory defaults to …
 crates/chat-stasher/src/config.rs:15  219b41f02316  lines=1
   <- docs/install.md:167  :: /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
 crates/chat-stasher/src/config.rs:95-100  0c4fcb3ab27a  lines=6
   <- docs/threat-model.md:60  :: pub harness_roots: BTreeMap<String, String>,
 crates/chat-stasher/src/config.rs:96  cf52ab144fd4  lines=1
-  <- docs/privacy.md:247  :: /// Local rustic repository that `push`/`read` operate on.
+  <- docs/privacy.md:279  :: /// Local rustic repository that `push`/`read` operate on.
 crates/chat-stasher/src/config.rs:146-162  ed3020d28acc  lines=17
   <- docs/threat-model.md:60, docs/threat-model.md:78  :: /// snapshot re-writes the tree of every touched session di…
 crates/chat-stasher/src/config.rs:175-176  0d8761a6b3af  lines=2
   <- docs/install.md:326  :: /// Absolute path of the stage the browser-spawned host wri…
-crates/chat-stasher/src/config.rs:491-502  96eee33c567e  lines=12
+crates/chat-stasher/src/config.rs:500-511  96eee33c567e  lines=12
   <- docs/install.md:167  :: }
 crates/chat-stasher/src/destinit.rs:57-72  9da3f5cced7a  lines=16
-  <- docs/threat-model.md:381  :: //! Skipping the ones that are not there is worse, though, …
+  <- docs/threat-model.md:442  :: //! Skipping the ones that are not there is worse, though, …
 crates/chat-stasher/src/destinit.rs:104-118  4e3ae691d5bc  lines=15
-  <- docs/threat-model.md:378  :: /// `false` — which this module then used as *evidence* tha…
+  <- docs/threat-model.md:439  :: /// `false` — which this module then used as *evidence* tha…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
-  <- docs/threat-model.md:378  :: Ok(true) => continue,
+  <- docs/threat-model.md:439  :: Ok(true) => continue,
 crates/chat-stasher/src/doctor.rs:806-835  429cdcb2ccc4  lines=30
   <- docs/install.md:489  :: /// [`run()`] entry point fills it in; the field is an `Opt…
 crates/chat-stasher/src/doctor.rs:873-911  79d40b5c0768  lines=39
   <- docs/install.md:489  :: }
 crates/chat-stasher/src/inbox.rs:56-60  e1fcd19c1369  lines=5
-  <- README.md:90  :: pub const PART_SUFFIX: &str = ".part";
+  <- README.md:101  :: pub const PART_SUFFIX: &str = ".part";
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
-  <- docs/privacy.md:213, docs/privacy.md:432  :: /// Subdirectory of the inbox where consumed files are reti…
+  <- docs/privacy.md:245, docs/privacy.md:464  :: /// Subdirectory of the inbox where consumed files are reti…
 crates/chat-stasher/src/inbox.rs:59-60  c69ecbc73d8e  lines=2
   <- docs/install.md:256  :: /// Suffix of a multi-bundle export file (`nativehost-proto…
 crates/chat-stasher/src/inbox.rs:66-68  3935abac04cb  lines=3
-  <- docs/install.md:281, docs/threat-model.md:302  :: pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
+  <- docs/install.md:281, docs/threat-model.md:345  :: pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
 crates/chat-stasher/src/inbox.rs:853-881  81d263fdddc2  lines=29
-  <- docs/install.md:281, docs/threat-model.md:302  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
+  <- docs/install.md:281, docs/threat-model.md:345  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:81  51c934204980  lines=1
   <- README.md:3, docs/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
 crates/chat-stasher/src/main.rs:130-991  5e944d4a80c5  lines=862
-  <- README.md:75, docs/install.md:539, docs/privacy.md:436, docs/threat-model.md:422  :: /// The five subcommands. `push`/`read` are backed by the B…
+  <- README.md:86, docs/install.md:539, docs/privacy.md:468, docs/threat-model.md:483  :: /// The five subcommands. `push`/`read` are backed by the B…
 crates/chat-stasher/src/main.rs:134-135  82ade6217eb6  lines=2
-  <- README.md:77  :: enum Command {
+  <- README.md:88  :: enum Command {
 crates/chat-stasher/src/main.rs:135-136  6f7da3119197  lines=2
   <- docs/install.md:165  :: /// Write a commented default config if none exists (non-de…
 crates/chat-stasher/src/main.rs:137-174  957f12533bab  lines=38
-  <- README.md:78, README.md:110, docs/install.md:419, docs/install.md:629  :: /// Collect one pass, push only when configured and changed…
+  <- README.md:89, README.md:122, docs/install.md:419, docs/install.md:629  :: /// Collect one pass, push only when configured and changed…
 crates/chat-stasher/src/main.rs:175-234  ac854a325e23  lines=60
-  <- README.md:79, docs/install.md:416, docs/threat-model.md:84  :: /// Render a launchd plist or systemd user service/timer; n…
+  <- README.md:90, docs/install.md:416, docs/threat-model.md:84  :: /// Render a launchd plist or systemd user service/timer; n…
 crates/chat-stasher/src/main.rs:175  b2a969a3e60c  lines=1
   <- docs/install.md:415, docs/install.md:604  :: /// Render a launchd plist or systemd user service/timer; n…
 crates/chat-stasher/src/main.rs:235-272  8a0a2a9dbeae  lines=38
-  <- README.md:80, README.md:106, README.md:110, docs/privacy.md:134, docs/threat-model.md:47  :: /// Move a batch of sealed session shards into the rustic r…
+  <- README.md:91, README.md:117, README.md:122, docs/privacy.md:134, docs/threat-model.md:47  :: /// Move a batch of sealed session shards into the rustic r…
 crates/chat-stasher/src/main.rs:235-239  70026e4d2709  lines=5
   <- docs/threat-model.md:128  :: /// Move a batch of sealed session shards into the rustic r…
 crates/chat-stasher/src/main.rs:251-256  5a9e458041ae  lines=6
   <- docs/install.md:309  :: destination: Option<String>,
 crates/chat-stasher/src/main.rs:272-310  263f0bf2d61c  lines=39
-  <- README.md:81, README.md:96  :: },
+  <- README.md:92, README.md:107  :: },
 crates/chat-stasher/src/main.rs:295-297  9592a2937e4b  lines=3
   <- docs/install.md:463  :: /// `--sessions` adds the per-session metadata table on top…
 crates/chat-stasher/src/main.rs:298  5fd8a1cb5337  lines=1
-  <- docs/threat-model.md:346  :: Status {
+  <- docs/threat-model.md:407  :: Status {
 crates/chat-stasher/src/main.rs:311-313  5bc93bb0a4fc  lines=3
-  <- README.md:108  :: },
+  <- README.md:120  :: },
 crates/chat-stasher/src/main.rs:312-356  108a29b160b7  lines=45
-  <- README.md:82, README.md:106, docs/install.md:541  :: /// Dump one session back from the repository (sequence-con…
+  <- README.md:93, README.md:117, docs/install.md:541  :: /// Dump one session back from the repository (sequence-con…
 crates/chat-stasher/src/main.rs:312-314  d6a7594728aa  lines=3
-  <- README.md:157, docs/threat-model.md:425  :: /// Dump one session back from the repository (sequence-con…
+  <- README.md:169, docs/threat-model.md:486  :: /// Dump one session back from the repository (sequence-con…
 crates/chat-stasher/src/main.rs:340-345  7de330febae7  lines=6
   <- docs/install.md:309  :: destination: Option<String>,
 crates/chat-stasher/src/main.rs:356-367  d45eb0e6e9ac  lines=12
-  <- README.md:83  :: },
+  <- README.md:94  :: },
 crates/chat-stasher/src/main.rs:356-357  aa3520652b36  lines=2
-  <- README.md:103  :: },
+  <- README.md:114  :: },
 crates/chat-stasher/src/main.rs:357-358  73cf6412a398  lines=2
-  <- README.md:51, README.md:69, docs/threat-model.md:346  :: /// Diagnostic: does any harness on this machine silently d…
+  <- README.md:62, README.md:80, docs/threat-model.md:407  :: /// Diagnostic: does any harness on this machine silently d…
 crates/chat-stasher/src/main.rs:357-368  b3639ab631d6  lines=12
   <- docs/install.md:482  :: /// Diagnostic: does any harness on this machine silently d…
 crates/chat-stasher/src/main.rs:369-407  4d73dbd30b3b  lines=39
-  <- README.md:84, README.md:106, docs/threat-model.md:538  :: /// Prove the archive is intact. Three independently runnab…
+  <- README.md:95, README.md:117, docs/threat-model.md:599  :: /// Prove the archive is intact. Three independently runnab…
 crates/chat-stasher/src/main.rs:391-396  7de330febae7  lines=6
   <- docs/install.md:309  :: destination: Option<String>,
 crates/chat-stasher/src/main.rs:408-458  765f80b3aba3  lines=51
-  <- README.md:85  :: /// Initialise a new destination as a *full extra copy* (AD…
+  <- README.md:96  :: /// Initialise a new destination as a *full extra copy* (AD…
 crates/chat-stasher/src/main.rs:459-520  5a6eaacbfe27  lines=62
-  <- README.md:86  :: /// Search one destination's archive by session metadata.
+  <- README.md:97  :: /// Search one destination's archive by session metadata.
 crates/chat-stasher/src/main.rs:459-489  b2d69f40650a  lines=31
-  <- docs/threat-model.md:434  :: /// Search one destination's archive by session metadata.
+  <- docs/threat-model.md:495  :: /// Search one destination's archive by session metadata.
 crates/chat-stasher/src/main.rs:485-489  1ea5d27e0f6f  lines=5
-  <- docs/threat-model.md:446  :: /// Exit codes distinguish the three answers, because two o…
+  <- docs/threat-model.md:507  :: /// Exit codes distinguish the three answers, because two o…
 crates/chat-stasher/src/main.rs:521-601  40bed16bc335  lines=81
-  <- README.md:87, docs/install.md:528  :: /// Write every session the shared selector selects to file…
+  <- README.md:98, docs/install.md:528  :: /// Write every session the shared selector selects to file…
 crates/chat-stasher/src/main.rs:602-627  7e8f4dac457d  lines=26
-  <- README.md:89  :: /// Open the archive dashboard in a browser: totals, the ma…
+  <- README.md:100  :: /// Open the archive dashboard in a browser: totals, the ma…
 crates/chat-stasher/src/main.rs:628-649  4351d2c462cf  lines=22
-  <- README.md:90, README.md:104, README.md:108, README.md:118  :: /// Consume ext inbox bundles into sealed staging shards.
+  <- README.md:101, README.md:115, README.md:120, README.md:130  :: /// Consume ext inbox bundles into sealed staging shards.
 crates/chat-stasher/src/main.rs:635-685  4273707c50b1  lines=51
   <- docs/threat-model.md:44  :: Ingest {
 crates/chat-stasher/src/main.rs:650-685  87944c7ec189  lines=36
-  <- README.md:91  :: },
+  <- README.md:102  :: },
 crates/chat-stasher/src/main.rs:653  cf775be2a229  lines=1
   <- docs/install.md:26  :: /// Harness sources are opened read-only. File-backed JSONL…
 crates/chat-stasher/src/main.rs:687-719  42a71db27ac9  lines=33
-  <- README.md:92, README.md:105, README.md:126, docs/threat-model.md:351  :: /// Seal one file already inside our stage into the next se…
+  <- README.md:103, README.md:116, README.md:138, docs/threat-model.md:412  :: /// Seal one file already inside our stage into the next se…
 crates/chat-stasher/src/main.rs:766-788  f05337c1507c  lines=23
   <- docs/install.md:212  :: /// Register this executable as the browsers' Native Messag…
 crates/chat-stasher/src/main.rs:789-831  00c9d6ccdc4b  lines=43
-  <- README.md:93, docs/install.md:41  :: InstallNativeHost {
+  <- README.md:104, docs/install.md:41  :: InstallNativeHost {
 crates/chat-stasher/src/main.rs:832-853  ebb71dce29b8  lines=22
-  <- README.md:94  :: /// The Native Messaging host process itself.
+  <- README.md:105  :: /// The Native Messaging host process itself.
 crates/chat-stasher/src/main.rs:1737-1747  91658be625f3  lines=11
-  <- README.md:94  :: /// stdout, which is exactly what the browser launch path d…
+  <- README.md:105  :: /// stdout, which is exactly what the browser launch path d…
 crates/chat-stasher/src/main.rs:3164-3177  6e297c93e74c  lines=14
   <- docs/install.md:337  :: Err(e) => {
 crates/chat-stasher/src/main.rs:3167-3175  7606cd68232e  lines=9
@@ -406,15 +406,15 @@ crates/chat-stasher/src/main.rs:3179-3188  a14261353a59  lines=10
 crates/chat-stasher/src/main.rs:3200-3224  6d97af905715  lines=25
   <- docs/install.md:341  :: /// persisted key, an unreachable backend — returns `Err`, …
 crates/chat-stasher/src/main.rs:3360-3416  d1e3f53d40dc  lines=57
-  <- docs/threat-model.md:382  :: let mut sources = Vec::new();
+  <- docs/threat-model.md:443  :: let mut sources = Vec::new();
 crates/chat-stasher/src/main.rs:4623-4630  f369ca3fd940  lines=8
-  <- docs/threat-model.md:371  :: Ok(mut options) => {
+  <- docs/threat-model.md:432  :: Ok(mut options) => {
 crates/chat-stasher/src/main.rs:4651-4744  f4b26b9e403e  lines=94
-  <- docs/threat-model.md:369  :: eprintln!("option: {e}");
+  <- docs/threat-model.md:430  :: eprintln!("option: {e}");
 crates/chat-stasher/src/main.rs:4734-4743  fae6f081f82c  lines=10
   <- SECURITY.md:67  :: keep_ssh_masters: bool,
 crates/chat-stasher/src/main.rs:4976-5094  6179727696b7  lines=119
-  <- README.md:108, README.md:157, docs/threat-model.md:425  :: fn cmd_read(
+  <- README.md:120, README.md:169, docs/threat-model.md:486  :: fn cmd_read(
 crates/chat-stasher/src/main.rs:6021-6022  a70af44131aa  lines=2
   <- docs/install.md:438  :: "a stale index must be replaced, not kept: {content}"
 crates/chat-stasher/src/main.rs:6089-6096  e726e719a9a4  lines=8
@@ -424,31 +424,31 @@ crates/chat-stasher/src/main.rs:6231-6241  962afa583ed8  lines=11
 crates/chat-stasher/src/main.rs:6240-6241  52b8c92908b4  lines=2
   <- docs/install.md:433  :: if let Ok(report) = &scan {
 crates/chat-stasher/src/main.rs:6345-6372  37bbae2ee352  lines=28
-  <- README.md:102, README.md:108  :: /// What the exit code means, in words — the piece a 20-lin…
-crates/chat-stasher/src/nativehost.rs:64-77  b160255bd493  lines=14
-  <- docs/privacy.md:379, docs/threat-model.md:288  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
-crates/chat-stasher/src/nativehost.rs:200-289  aea86e97320b  lines=90
+  <- README.md:113, README.md:120  :: /// What the exit code means, in words — the piece a 20-lin…
+crates/chat-stasher/src/nativehost.rs:74-87  b160255bd493  lines=14
+  <- docs/privacy.md:411, docs/threat-model.md:331  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
+crates/chat-stasher/src/nativehost.rs:210-299  aea86e97320b  lines=90
   <- docs/install.md:660  :: pub fn default_root(platform: Platform, home: &Path) -> Pat…
-crates/chat-stasher/src/nativehost.rs:301-345  c611ef069f1c  lines=45
-  <- docs/privacy.md:379, docs/threat-model.md:288  :: pub fn render_manifest(
-crates/chat-stasher/src/nativehost.rs:875-935  166a51c20b01  lines=61
-  <- docs/install.md:284, docs/threat-model.md:298  :: fn resolve_target() -> HostTarget {
-crates/chat-stasher/src/nativehost.rs:923-934  c1d3ca75f622  lines=12
+crates/chat-stasher/src/nativehost.rs:311-355  c611ef069f1c  lines=45
+  <- docs/privacy.md:411, docs/threat-model.md:331  :: pub fn render_manifest(
+crates/chat-stasher/src/nativehost.rs:885-945  166a51c20b01  lines=61
+  <- docs/install.md:284, docs/threat-model.md:341  :: fn resolve_target() -> HostTarget {
+crates/chat-stasher/src/nativehost.rs:933-944  c1d3ca75f622  lines=12
   <- docs/install.md:207, docs/install.md:272  :: // Read-only: existence and kind are both checked, and neit…
-crates/chat-stasher/src/nativehost.rs:940-969  0317baf37da8  lines=30
-  <- docs/install.md:297, docs/threat-model.md:298  :: /// Unlike every CLI command, the host never *creates* the …
-crates/chat-stasher/src/nativehost.rs:1066-1075  74f364fec566  lines=10
-  <- docs/threat-model.md:309  :: // Recomputed over the UTF-8 bytes of the *decoded* payload…
-crates/chat-stasher/src/nativehost.rs:1082-1088  a444120e69ed  lines=7
-  <- docs/threat-model.md:313  :: // `invalid-bundle` is the answer for a payload this channe…
-crates/chat-stasher/src/nativehost.rs:1090-1117  4ceba3a8d636  lines=28
+crates/chat-stasher/src/nativehost.rs:950-979  0317baf37da8  lines=30
+  <- docs/install.md:297, docs/threat-model.md:341  :: /// Unlike every CLI command, the host never *creates* the …
+crates/chat-stasher/src/nativehost.rs:1085-1094  74f364fec566  lines=10
+  <- docs/threat-model.md:352  :: // Recomputed over the UTF-8 bytes of the *decoded* payload…
+crates/chat-stasher/src/nativehost.rs:1101-1107  a444120e69ed  lines=7
+  <- docs/threat-model.md:356  :: // `invalid-bundle` is the answer for a payload this channe…
+crates/chat-stasher/src/nativehost.rs:1109-1136  4ceba3a8d636  lines=28
   <- docs/privacy.md:126, docs/threat-model.md:39  :: match inbox::seal_payload(
-crates/chat-stasher/src/nativehost.rs:1113-1117  4520d3869c60  lines=5
+crates/chat-stasher/src/nativehost.rs:1132-1136  4520d3869c60  lines=5
   <- docs/install.md:287  :: Err(inbox::SealError::Lock(e)) => {
-crates/chat-stasher/src/nativehost.rs:1150-1184  6e78c5dd7bec  lines=35
-  <- docs/privacy.md:379, docs/threat-model.md:293  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
+crates/chat-stasher/src/nativehost.rs:1876-1910  6e78c5dd7bec  lines=35
+  <- docs/privacy.md:411, docs/threat-model.md:159, docs/threat-model.md:336  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
-  <- docs/threat-model.md:78, docs/threat-model.md:326  :: //! Connection reaping for remote SSH backends.
+  <- docs/threat-model.md:78, docs/threat-model.md:387  :: //! Connection reaping for remote SSH backends.
 crates/chat-stasher/src/remote_err.rs:101-112  8dc19707e181  lines=12
   <- docs/install.md:384  :: // 🔴 Host key changed MUST be checked before HostUntrusted,…
 crates/chat-stasher/src/remote_err.rs:180-187  b026cffbce09  lines=8
@@ -464,41 +464,45 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs/install.md:641  :: }
 crates/chat-stasher/src/search.rs:16-34  4c5924e38beb  lines=19
-  <- docs/threat-model.md:442  :: //! * **metadata tier** (this module): snapshot files + ind…
+  <- docs/threat-model.md:503  :: //! * **metadata tier** (this module): snapshot files + ind…
 crates/chat-stasher/src/selector.rs:1-247  c9ab719fa3b6  lines=247
-  <- README.md:86  :: //! selector — the one filter vocabulary that `search` and …
+  <- README.md:97  :: //! selector — the one filter vocabulary that `search` and …
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
-  <- SECURITY.md:64, docs/threat-model.md:343  :: //! Read-only guarantee: every connection opens with `mode=…
+  <- SECURITY.md:64, docs/threat-model.md:404  :: //! Read-only guarantee: every connection opens with `mode=…
 crates/chat-stasher/src/sqlite_probe.rs:1373-1376  b250c934a6e3  lines=4
-  <- SECURITY.md:65, docs/threat-model.md:341  :: let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::S…
+  <- SECURITY.md:65, docs/threat-model.md:402  :: let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::S…
 crates/chat-stasher/src/sqlite_probe.rs:2010-2056  79eecb3f0cca  lines=47
-  <- docs/threat-model.md:344  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
+  <- docs/threat-model.md:405  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:2-3  1375b706fba2  lines=2
-  <- docs/privacy.md:511  :: //! moved into an append-only rustic repository.
+  <- docs/privacy.md:543  :: //! moved into an append-only rustic repository.
 crates/chat-stasher/src/store.rs:153-156  f2781c197162  lines=4
   <- docs/install.md:325  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
 crates/chat-stasher/src/store.rs:261-296  20d7bcff83a4  lines=36
-  <- docs/privacy.md:135, docs/privacy.md:249, docs/privacy.md:262, docs/privacy.md:418, docs/threat-model.md:78, docs/threat-model.md:160, docs/threat-model.md:326  :: }
+  <- docs/privacy.md:135, docs/privacy.md:281, docs/privacy.md:294, docs/privacy.md:450, docs/threat-model.md:78, docs/threat-model.md:203, docs/threat-model.md:387  :: }
 crates/chat-stasher/src/store.rs:271-275  96ef1c8f0cdd  lines=5
   <- docs/install.md:325  :: if self.cfg.repo_root.starts_with("opendal:") || self.cfg.r…
 crates/chat-stasher/src/store.rs:1064-1149  d1b806878c20  lines=86
-  <- docs/privacy.md:249, docs/threat-model.md:78  :: // error, so reaching here means the entry list is provably…
+  <- docs/privacy.md:281, docs/threat-model.md:78  :: // error, so reaching here means the entry list is provably…
 crates/chat-stasher/src/store.rs:1147-1151  c02ba2864b7e  lines=5
-  <- README.md:155  :: /// sequence. Existing shards are never moved when the cap …
+  <- README.md:167  :: /// sequence. Existing shards are never moved when the cap …
 crates/chat-stasher/src/store.rs:1151-1155  6b4ff2db82f4  lines=5
-  <- docs/privacy.md:473  :: machine: &str,
+  <- docs/privacy.md:505  :: machine: &str,
 crates/chat-stasher/src/store.rs:1189-1196  38aff1df8680  lines=8
-  <- README.md:155, docs/install.md:546, docs/privacy.md:473  :: machine: &str,
+  <- README.md:167, docs/install.md:546, docs/privacy.md:505  :: machine: &str,
 crates/chat-stasher/src/store.rs:1189-1191  d158bc9afb0e  lines=3
-  <- docs/install.md:314, docs/threat-model.md:411  :: machine: &str,
+  <- docs/install.md:314, docs/threat-model.md:472  :: machine: &str,
 crates/chat-stasher/src/store.rs:1231-1316  9ee679c8a89b  lines=86
-  <- docs/privacy.md:476, docs/threat-model.md:121, docs/threat-model.md:405  :: let file_type = entry.file_type()?;
+  <- docs/privacy.md:508, docs/threat-model.md:121, docs/threat-model.md:466  :: let file_type = entry.file_type()?;
 crates/chat-stasher/src/store.rs:1289-1297  2fd9234448bb  lines=9
   <- docs/install.md:316  :: }
 crates/chat-stasher/src/store.rs:1318-1322  e915d9a10309  lines=5
-  <- docs/threat-model.md:413  :: }
+  <- docs/threat-model.md:474  :: }
 crates/chat-stasher/src/ui.rs:550  ce4bc09fc5d8  lines=1
-  <- docs/threat-model.md:152  :: fn content_page(params: &Query, data: &UiData, content: &dy…
+  <- docs/threat-model.md:195  :: fn content_page(params: &Query, data: &UiData, content: &dy…
+crates/chat-stasher/src/view.rs:138-150  605bc65511cd  lines=13
+  <- docs/threat-model.md:167  :: if status == 0 {
+crates/chat-stasher/src/view.rs:158-172  042d252f1ccf  lines=15
+  <- docs/threat-model.md:167  :: /// Bind an ephemeral loopback listener.
 crates/chat-stasher/src/view.rs:173  b5e212be96e8  lines=1
   <- docs/threat-model.md:147  :: pub fn bind_ephemeral() -> std::io::Result<TcpListener> {
 crates/chat-stasher/src/view.rs:180  5ac58701d728  lines=1
@@ -506,6 +510,6 @@ crates/chat-stasher/src/view.rs:180  5ac58701d728  lines=1
 crates/chat-stasher/src/view.rs:256  7b4316e08fad  lines=1
   <- docs/threat-model.md:148  :: pub fn route(
 scripts/release-gate.sh:2-3  44aa3a8e0acf  lines=2
-  <- README.md:128  :: #
+  <- README.md:140  :: #
 scripts/release-gate.sh:3-21  d6f983c5d039  lines=19
-  <- README.md:127  :: # release-gate.sh — one command that runs the whole chat-st…
+  <- README.md:139  :: # release-gate.sh — one command that runs the whole chat-st…

@@ -160,8 +160,8 @@ pub struct Config {
 
     /// Native Messaging host settings (ADR-025, protocol v1).
     ///
-    /// The whole section is optional, and the one key inside it is optional
-    /// too: "no `[native_host] stage`" is a *fourth* state, distinct from
+    /// The whole section is optional, and every key inside it is optional too:
+    /// "no `[native_host] stage`" is a *fourth* state, distinct from
     /// "declared but the path is gone". The host answers the first with `nack`
     /// `config` and the second with `nack` `stage-unavailable`, because the fix
     /// a user has to apply is different in each case.
@@ -181,6 +181,15 @@ pub struct NativeHostConfig {
     /// a stage that appears because a host was pointed at it is a stage
     /// nothing pushes.
     pub stage: Option<String>,
+    /// Which declared destination `open_dashboard` opens (protocol §6.5).
+    ///
+    /// Hand-written, and deliberately the *only* way that message learns a
+    /// destination: ADR-013 forbids a default destination, and the extension
+    /// that triggers the launch has no business naming — or choosing between —
+    /// copies of the archive. Absent means the dashboard cannot be opened from
+    /// the popup, which the host reports as `nack` `config` rather than
+    /// falling back to "there is only one, so it must be that one".
+    pub destination: Option<String>,
 }
 
 /// One named destination. Fields left unset fall back to the same defaults the

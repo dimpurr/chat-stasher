@@ -41,6 +41,7 @@ import {
 import {
   backfillStateEntries,
   collectFailures,
+  openDashboardTab,
   pickBackfillState,
   renderPopup,
   summarizeOutbox,
@@ -49,7 +50,9 @@ import {
   type BackfillRuntimeStatus,
   type PopupModel,
   type PopupView,
+  type SummaryState,
 } from '../../lib/popup-view';
+import { openDashboard, summary as fetchSummary } from '../../lib/native-host';
 import { clearFailures } from '../../lib/backfill/failures';
 import {
   buildExportFile,
@@ -60,7 +63,7 @@ import {
 } from '../../lib/outbox';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
 import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
-import { initUiLocale, normalizeUiLocale, setUiLocale, type UiLocale } from '../../lib/i18n';
+import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 
 /**
  * Ask background for the runtime facts. When the answer does not come (the SW
@@ -78,6 +81,32 @@ async function askBackground(): Promise<BackfillRuntimeStatus> {
     console.warn('[chat-stasher] popup status query failed', (err as Error).message);
   }
   return { transportWired: false, lastTickReason: null, liveTarget: null };
+}
+
+/**
+ * 🔴 W30 · Ask the host for §6.4's summary — **once, when the popup opens**.
+ *
+ * There is no timer and no polling anywhere in this file: the popup is a
+ * snapshot, and the summary is part of that snapshot. A failure is carried as a
+ * failure state, never as a zero-valued summary (which would read as "nothing
+ * has been archived").
+ */
+async function askSummary(): Promise<SummaryState> {
+  try {
+    const result = await fetchSummary();
+    if (result.ok) return { kind: 'answer', summary: result.summary };
+    return {
+      kind: 'failed',
+      reason: result.reason,
+      detail: result.detail ?? result.kind,
+      olderHost: result.olderHost,
+    };
+  } catch (err) {
+    // The host module does not throw for wire-level failures, so this is a bug
+    // or an environment without `runtime` at all. Either way it is not a zero.
+    console.warn('[chat-stasher] popup summary query failed', (err as Error).message);
+    return { kind: 'failed', reason: 'send-failed', detail: (err as Error).message, olderHost: false };
+  }
 }
 
 async function collect(): Promise<PopupModel> {
@@ -254,6 +283,14 @@ function setExportNote(text: string): void {
   if (el) el.textContent = text;
 }
 
+/** 🔴 W30 · Why the dashboard button is unusable, or what happened after a press. */
+function setDashboardNote(text: string): void {
+  const el = document.getElementById('dashboard-note');
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = text.length === 0;
+}
+
 function text(id: string, value: string): void {
   const el = document.getElementById(id);
   if (el) el.textContent = value;
@@ -333,6 +370,14 @@ function paint(view: PopupView): void {
   text('running', view.running);
   text('missing', view.missing ?? '');
   text('progress', view.progress);
+  // 🔴 W30: the stage summary and the dashboard button.
+  text('summary', view.summary);
+  const dashBtn = document.getElementById('open-dashboard') as HTMLButtonElement | null;
+  if (dashBtn) {
+    dashBtn.textContent = view.dashboard.label;
+    dashBtn.disabled = !view.dashboard.enabled;
+  }
+  setDashboardNote(view.dashboard.reason ?? '');
   // 🔴 C22: which platforms can have their history backfilled and which cannot. Always shown.
   text('coverage', view.coverage);
   text('toggle-label', view.toggle.label);
@@ -356,8 +401,64 @@ function paint(view: PopupView): void {
   }
 }
 
+/**
+ * The model of the paint currently on screen.
+ *
+ * 🔴 W30 · Kept so that the summary — which needs a native-host round trip —
+ * can be painted *after* the rest: `refreshSummary` merges the answer into this
+ * model and repaints. The popup must not stay blank behind a host that is slow
+ * to answer (§2's 60 s budget), and it must not poll either.
+ */
+let lastModel: PopupModel | null = null;
+
 async function refresh(): Promise<void> {
-  paint(renderPopup(await collect()));
+  // A repaint keeps the summary this popup already has: it is fetched once per
+  // popup open, never on a timer and never on a toggle.
+  const previous = lastModel?.summary;
+  const model = await collect();
+  lastModel = previous === undefined ? model : { ...model, summary: previous };
+  paint(renderPopup(lastModel));
+}
+
+/**
+ * 🔴 W30 · Paint the summary once the host has answered.
+ *
+ * Separate from [`refresh`] on purpose: the native-host probe can take seconds
+ * (it is a process launch), and everything else the popup shows is already
+ * known by then.
+ */
+async function refreshSummary(): Promise<void> {
+  const state = await askSummary();
+  if (!lastModel) return;
+  lastModel = { ...lastModel, summary: state };
+  paint(renderPopup(lastModel));
+}
+
+/**
+ * 🔴 W30 · "Open dashboard" (§6.5).
+ *
+ * The rules live in [`openDashboardTab`] (lib/popup-view.ts) — nothing is
+ * opened unless the host answered with a loopback URL — and the opener is the
+ * browser's own tab API, which needs no extra permission. The button is
+ * disabled for the whole round trip: the host waits up to 45 s for the
+ * dashboard to listen, and a second press would start a *second* dashboard
+ * (which the host cannot deduplicate — §6.5).
+ */
+async function onOpenDashboard(): Promise<void> {
+  const button = document.getElementById('open-dashboard') as HTMLButtonElement | null;
+  if (button) {
+    button.disabled = true;
+    button.textContent = t('popup.dashboard.opening');
+  }
+  setDashboardNote('');
+  const outcome = await openDashboardTab(
+    () => openDashboard(),
+    (url) => browser.tabs.create({ url }),
+  );
+  // Repaint first (it restores the button's label and disabled state from the
+  // model), then state the outcome, which outranks the standing reason.
+  if (lastModel) paint(renderPopup(lastModel));
+  setDashboardNote(outcome.message);
 }
 
 async function onToggle(on: boolean): Promise<void> {
@@ -422,6 +523,13 @@ document.getElementById('clear-failures')?.addEventListener('click', () => {
   });
 });
 
+document.getElementById('open-dashboard')?.addEventListener('click', () => {
+  void onOpenDashboard().catch((err) => {
+    console.warn('[chat-stasher] popup open-dashboard failed', (err as Error).message);
+    setDashboardNote(t('popup.dashboard.failed', { detail: (err as Error).message }));
+  });
+});
+
 // Load the stored language before the first paint, so the popup does not flash
 // the browser's language and then swap to the chosen one.
 void initUiLocale()
@@ -429,6 +537,8 @@ void initUiLocale()
     console.warn('[chat-stasher] popup locale init failed', (err as Error).message);
   })
   .then(() => refresh())
+  // 🔴 W30: the summary is asked for on open, once, after the first paint.
+  .then(() => refreshSummary())
   .catch((err) => {
     console.error('[chat-stasher] popup render failed', (err as Error).message);
   });

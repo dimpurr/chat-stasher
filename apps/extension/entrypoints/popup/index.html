@@ -48,6 +48,23 @@
          would run together and the reader could not find "the one thing I have to do". */
       #missing { margin: 6px 0; opacity: .85; white-space: pre-wrap; }
       #progress { margin: 6px 0; }
+      /* W30: the stage summary line. The same quiet box as the outbox row — it
+         is a fact, not an error, so it must not compete with the red failure
+         line above it. */
+      #summary {
+        margin: 8px 0; padding: 6px 8px; font-size: 12px;
+        border-left: 3px solid rgba(128,128,128,.55);
+      }
+      #open-dashboard {
+        display: block; margin: 8px 0; padding: 6px 12px;
+        font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      }
+      #open-dashboard:disabled { cursor: default; opacity: .6; }
+      /* W30: why the button is disabled, or what happened after a press. Never
+         hidden when it has something to say. */
+      #dashboard-note {
+        margin: 6px 0; font-size: 12px; opacity: .85; white-space: pre-wrap;
+      }
       /* C22: the backfill coverage line. Not an error, so no red box — but not so
          faint that it cannot be read either. */
       #coverage { margin: 8px 0; padding: 6px 8px; font-size: 12px;
@@ -94,6 +111,17 @@
     <div id="missing"></div>
     <button type="button" id="start-backfill" hidden></button>
     <div id="progress"></div>
+    <!-- 🔴 W30 · One summary line: what the host counts in the stage, and when
+         the last successful push was. It sits under the progress line because
+         the two answer the same question ("how much is there") from two sides,
+         and below the failure line, which must stay the first thing an eye
+         lands on when something was lost. -->
+    <div id="summary"></div>
+    <!-- 🔴 W30 · The dashboard. The button is always on screen — it is disabled,
+         with its reason printed underneath, whenever the host has not answered,
+         so an unusable control is never shown without an explanation. -->
+    <button type="button" id="open-dashboard"></button>
+    <div id="dashboard-note" hidden></div>
     <div id="coverage"></div>
     <div class="row">
       <input type="checkbox" id="toggle" />

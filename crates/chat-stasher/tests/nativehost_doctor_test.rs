@@ -62,6 +62,9 @@ fn config_with_stage(stage: Option<&Path>) -> Config {
     Config {
         native_host: Some(NativeHostConfig {
             stage: stage.map(|path| path.to_string_lossy().into_owned()),
+            // `destination` only matters to `open_dashboard`; this fixture is
+            // about the install manifests, so it stays unset.
+            destination: None,
         }),
         ..Config::default()
     }

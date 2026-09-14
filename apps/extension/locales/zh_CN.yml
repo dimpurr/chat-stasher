@@ -86,6 +86,60 @@ popup:
     auto: Auto
     english: English
     chinese: 中文
+  summary:
+    line: "{recent} · {total} · {push}"
+    recent: "最近 {hours} 小时：{count} 条会话"
+    recentNamed: "最近 {hours} 小时：{count} 条会话（{list}）"
+    recentUnknown: "最近 {hours} 小时：不详"
+    totalNamed: "stage 里共 {count} 条"
+    totalUnknown: "stage 总数不详"
+    harnessEntry: "{harness} {count}"
+    harnessMore: "{list}，另有 {rest} 个"
+    noHarness: "（没有 harness 前缀）"
+    pushAgo: "上次推送 {ago}"
+    pushUnknown: "上次推送时间不详"
+    pushFuture: >-
+      上次推送记录的时间是 {at}，这个时刻还没到 —— 说明系统时钟和记录对不上
+    agoJustNow: 刚刚
+    agoMinutes: "{count} 分钟前"
+    agoHours: "{count} 小时前"
+    agoDays: "{count} 天前"
+    unasked: 阶段汇总：这个弹窗还没有问过 host，所以没有任何可数的东西。
+    hostMissing: >-
+      阶段汇总：chat-stasher host 没有回应，这里什么都数不出来。安装命令是
+      `chat-stasher install-native-host --stage <你的 stage 路径>`，指向一个
+      真实存在的目录。
+    olderHost: >-
+      阶段汇总：浏览器里装的那个 host 比这个扩展旧，它根本不认识汇总请求。
+    olderHostNote: >-
+      host 回答的是“unknown message type”，这是旧 host 表示不认识这个请求的
+      方式。装上当前版本的二进制后重新执行 `chat-stasher install-native-host
+      --stage <你的 stage 路径>`，然后重新打开这个弹窗。
+    unavailable: "阶段汇总：host 没有回应（原因：{reason}）。"
+    failedNote: "阶段汇总：host 没有回应 —— {detail}"
+    noteTotal: "stage 总数为什么是不详 —— {why}"
+    noteRecent: "上面那个窗口的条数为什么是不详 —— {why}"
+    notePush: "上次推送时间为什么是不详 —— {why}"
+  dashboard:
+    label: 打开仪表盘
+    opening: >-
+      正在启动仪表盘… host 正在把它拉起来，在它回应之前按钮保持禁用 —— 再按一次
+      会启动第二个。
+    opened: "仪表盘已在新标签页打开。它运行期间那个 URL 就是密钥 —— 不要外传。"
+    refusedUrl: >-
+      没有打开任何标签页：host 回的地址不是 127.0.0.1 上的仪表盘 URL，所以这个
+      扩展没有打开它。
+    failed: "没有打开任何标签页：{detail}"
+    reason:
+      noAnswer: 打开仪表盘不可用：host 还没有回答过汇总请求，没有东西可以打开。
+      hostMissing: >-
+        打开仪表盘不可用：chat-stasher host 没有回应。安装命令是
+        `chat-stasher install-native-host --stage <你的 stage 路径>`。
+      olderHost: >-
+        打开仪表盘不可用：装着的 host 比这个扩展旧，不认识这个请求。装上当前
+        版本的二进制后重新执行 `chat-stasher install-native-host --stage
+        <你的 stage 路径>`。
+      failed: "打开仪表盘不可用：{detail}"
   status:
     hostPaused: 状态：开关是开的，但本机 host 够不着，回溯已自动暂停（欠账一条没动）
     on: 状态：开关是开的
