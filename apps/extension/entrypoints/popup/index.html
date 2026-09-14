@@ -7,6 +7,10 @@
     <style>
       /* All inline — no external fonts/CSS, so the popup page makes zero network requests. */
       :root { color-scheme: light dark; }
+      /* The buttons below set `display: block`, which beats the browser's own
+         `[hidden] { display: none }`. Without this line no button could ever be
+         hidden, whatever the render code decided (seen in a real Chrome, 2026-09-14). */
+      [hidden] { display: none !important; }
       body {
         margin: 0;
         padding: 14px 16px;

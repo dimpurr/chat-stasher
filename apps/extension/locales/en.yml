@@ -161,7 +161,7 @@ popup:
         have been archived once, the real account gets a record of its own.)
       body: |-
         Missing: one conversation that really has been archived once — backfill needs it to learn which platform and which account's history to fetch.
-        The one thing for you to do now: send a message on this platform, or open a conversation you already have, and let it be archived LIVE once (it is stored into your own download directory as usual). Only after that capture do we note this platform and this account, and backfill starts walking backwards from that account.
+        The one thing for you to do now: send a message on this platform, or open a conversation you already have, and let it be archived LIVE once (it is handed to the chat-stasher host on your machine as usual). Only after that capture do we note this platform and this account, and backfill starts walking backwards from that account.
         🔴 Why that one capture is unavoidable: we do not guess your account, we only use the one you actually used. This extension has no host permissions at all, and history is only fetched inside pages you have already opened and already logged into; until you have really used it once, we will neither guess an account nor walk the whole platform's conversations.
         (How long it takes depends on how much history you have and how long the page stays open — no time promise is given here, and progress is shown one item at a time below.)
     hostPaused: >-
