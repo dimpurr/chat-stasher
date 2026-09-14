@@ -376,11 +376,76 @@ export function handleBackfillMessage(
 export type TabSend = (tabId: number, message: unknown) => Promise<unknown>;
 
 /**
+ * 🔴 W7 · How long one page round-trip may take before it is declared lost.
+ *
+ * **Why exactly this number.**
+ *  · It must be **larger than the slowest legitimate round**: one request for a
+ *    16 MiB conversation body plus one token read. A smaller budget would abort a
+ *    fetch that was going to succeed, which turns a slow page into a lost one —
+ *    a worse failure than the one this bounds.
+ *  · And it must stay **below the 5-minute alarm period**
+ *    (lib/backfill/alarm.ts's BACKFILL_ALARM_PERIOD_MINUTES = 5). One stuck page
+ *    round is then declared lost within a fraction of an alarm period, instead of
+ *    still being in flight when the next alarm arrives. (This bounds one *request*;
+ *    the round as a whole is bounded separately by the engine's own detail budget.)
+ *
+ * 🔴 **What a timeout is not.** It is not "this page has no data" and not "this
+ *    conversation is already fetched". It means **we did not finish reading** —
+ *    which is why it throws rather than replying empty, so the engine halts with
+ *    'transport-error' and the debt stays owed.
+ */
+export const BACKFILL_TAB_REPLY_TIMEOUT_MS = 90_000;
+
+/**
+ * 🔴 W7 · Bound one `send` by a timeout.
+ *
+ * Why this has to exist: `browser.tabs.sendMessage` **has no timeout of its own**.
+ * When the page was reloaded, or the extension itself was reloaded, the content
+ * script's context is gone and the returned promise can simply **never settle**.
+ * The caller is a single-flight tick (schedule.ts's `inFlight`), and that lock is
+ * released by a `finally` that runs only once the awaited round settles — so one
+ * such round used to hold the lock **forever**, and every later round answered
+ * 'already-running' without fetching a single body.
+ *
+ * The timer is cleared on both outcomes, so a round that answers in time leaves no
+ * timer pending. (A `pending` that settles after the timeout is already handled by
+ * Promise.race's own subscription, so it cannot surface as an unhandled rejection.)
+ */
+async function withReplyTimeout<T>(
+  pending: Promise<T>,
+  tabId: number,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          // Only technical facts on the wire: the tab id and the budget. Never the
+          // URL, the conversation id or any body text.
+          reject(new Error(`tab ${tabId} did not answer the backfill fetch within ${timeoutMs / 1000} s`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Wrap "one live platform tab" into the HttpPort the engine understands.
  * 🔴 Every failure throws: the engine halts with 'transport-error' and leaves a
  *    trace, and never silently treats it as "fetched empty data".
+ *
+ * 🔴 W7: `timeoutMs` is injectable **for tests only** — production callers pass no
+ *    third argument and get BACKFILL_TAB_REPLY_TIMEOUT_MS.
  */
-export function tabHttpPort(tabId: number, send: TabSend): HttpPort {
+export function tabHttpPort(
+  tabId: number,
+  send: TabSend,
+  timeoutMs: number = BACKFILL_TAB_REPLY_TIMEOUT_MS,
+): HttpPort {
   return async (url: string, init?: BackfillRequestInit): Promise<HttpResponse> => {
     // 🔴 The back-compat landing point: GET with no body ⇒ the message sent is
     //    **byte for byte** still `{type, url}`, not one field more. What C22's
@@ -388,7 +453,7 @@ export function tabHttpPort(tabId: number, send: TabSend): HttpPort {
     const message = !init || (init.method === 'GET' && init.body === undefined)
       ? { type: BACKFILL_FETCH_MESSAGE, url }
       : { type: BACKFILL_FETCH_MESSAGE, url, method: init.method, body: init.body, contentType: init.contentType };
-    const reply = await send(tabId, message);
+    const reply = await withReplyTimeout(send(tabId, message), tabId, timeoutMs);
     if (!isRecord(reply)) {
       throw new Error(`tab ${tabId} gave no reply for the backfill fetch`);
     }
