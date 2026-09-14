@@ -23,7 +23,7 @@ Status as of **2026-09**. **Verified** means real sessions were archived end to 
 
 | Platform | Live capture (conversations you open) | Backfill (past conversations) |
 |---|---|---|
-| ChatGPT | 🔄 In progress — verified on page load (2026-09) | 🔄 In progress |
+| ChatGPT | ✅ Verified (2026-09), including conversations over 8 MB | 🔄 In progress |
 | DeepSeek | ✅ Verified (2026-09) | 🟡 Lists conversations only; saves no content |
 | Perplexity | 🟡 Coded; cannot recognise a session id, so delivers nothing | 🟡 Lists conversations only; saves no content |
 | Gemini · Claude · Kimi | 🟡 Coded, not verified | ❌ Not available |
