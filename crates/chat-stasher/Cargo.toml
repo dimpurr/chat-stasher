@@ -36,6 +36,17 @@ rusqlite = { version = "=0.32.1", features = ["bundled"] }
 # editor that keeps them. It is already in the lock file as `toml`'s own
 # parser, so this adds no new crate to the build graph — only a direct edge.
 toml_edit = "0.22"
+# `--day` / `--since` / `--until` are *local calendar days*, and std has no
+# timezone at all — no offset, no DST rule, nothing. Resolving "the local day
+# 2026-01-15" to a unix interval without a tz database would mean guessing the
+# offset, which is the same class of lie as recording an unknown as zero.
+#
+# `chrono` is already in this workspace's lock file (via `serde_with`), and
+# `iana-time-zone` — the crate `clock` needs to find the local zone — is in
+# there with it, so this adds no new package to the build graph. Same reasoning
+# as the `toml_edit` note above; appended for the same citation-stability
+# reason.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
 tempfile = "3"

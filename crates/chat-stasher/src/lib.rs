@@ -28,6 +28,7 @@ pub mod scanner;
 pub mod schedule;
 pub mod seal;
 pub mod search;
+pub mod selector;
 pub mod sidecar;
 pub mod sqlite_probe;
 pub mod stagereclaim;

@@ -33,7 +33,8 @@
 //! there is no real conversation, account or hostname in the output.
 
 use chat_stasher::scanner::user_cache_dirs_on;
-use chat_stasher::search::{search_sessions, SearchFilter};
+use chat_stasher::search::search_sessions;
+use chat_stasher::selector::Selector;
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
@@ -246,7 +247,7 @@ fn fixture(root: &Path) -> (BackupStore, MasterKey, PathBuf, Vec<String>) {
 fn rustic_cache_roots_finds_the_cache_rustic_actually_wrote() {
     let dir = tempfile::TempDir::new().unwrap();
     let (store, mk, _repo, pack_names) = fixture(dir.path());
-    search_sessions(&store, &mk, &SearchFilter::default()).unwrap();
+    search_sessions(&store, &mk, &Selector::default()).unwrap();
 
     let found = cache_dirs_for(&pack_names);
     println!(
@@ -278,7 +279,7 @@ fn rustic_cache_roots_finds_the_cache_rustic_actually_wrote() {
 fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
     let dir = tempfile::TempDir::new().unwrap();
     let (store, mk, repo, pack_names) = fixture(dir.path());
-    search_sessions(&store, &mk, &SearchFilter::default()).unwrap();
+    search_sessions(&store, &mk, &Selector::default()).unwrap();
 
     // Tree packs are the small ones; data packs carry the 8 KiB shards.
     let all_packs = packs(&repo);
@@ -296,7 +297,7 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
 
     // Cache still warm: the repository is unreadable, and the search cannot
     // tell, because it is not reading the repository.
-    let warm = search_sessions(&store, &mk, &SearchFilter::default()).unwrap();
+    let warm = search_sessions(&store, &mk, &Selector::default()).unwrap();
     println!(
         "windows-shape self-check: {} tree pack(s) removed, cache WARM -> hits={} complete={} unreadable={}",
         tree_packs.len(),
@@ -326,7 +327,7 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
         fs::remove_dir_all(d).unwrap();
     }
 
-    let cold = search_sessions(&store, &mk, &SearchFilter::default());
+    let cold = search_sessions(&store, &mk, &Selector::default());
     match &cold {
         Ok(report) => {
             println!(

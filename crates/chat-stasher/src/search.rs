@@ -13,11 +13,25 @@
 //!
 //! Cost tiers, which the product must keep apart:
 //!
-//! * **metadata tier** (this module): snapshot files + index + tree blobs. It
-//!   answers "which session, on which machine, when, how big, in which
-//!   snapshot". No `data` blob is ever fetched or decrypted — the only rustic
-//!   entry points that return payload bytes are `dump` / `get_blob_cached` /
-//!   `cat_blob` / `read_file_at`, and none of them appears in this file.
+//! * **metadata tier** (this module): snapshot files + index + tree blobs, plus
+//!   the per-machine activity sidecar (`meta/<machine>/activity-v1.jsonl`).
+//!   It answers "which session, on which machine, when it was active, how big,
+//!   in which snapshot". **No session shard is ever fetched or decrypted** —
+//!   the entry points that return *session payload* are `dump` on a
+//!   `sessions/…jsonl` node, `get_blob_cached`, `cat_blob` and `read_file_at`,
+//!   and none of those appears in this file.
+//!
+//!   One honest qualification, because the naive version of that claim is no
+//!   longer true: reading the activity index *does* go through `dump`, because
+//!   in a rustic repository every file's bytes are a data blob — there is no
+//!   side channel for small files. The index is metadata **by declaration**
+//!   (it lives under `meta/`, is written by `activity-index`, and carries one
+//!   timestamp per session), not conversation content. So the promise this
+//!   module keeps is narrower and exact: *a shard of conversation never gets
+//!   read*, which [`SearchReport::data_blobs_read`] counts and the tests prove
+//!   by removing every data pack. Index reads are counted separately, in
+//!   [`SearchReport::index_files_read`], so neither number hides behind the
+//!   other.
 //! * **payload tier** (NOT implemented): full-text matching inside the archived
 //!   conversations. Every candidate session's data blobs would have to be
 //!   fetched and decrypted locally. [`FulltextCost`] measures what that would
@@ -27,76 +41,72 @@
 //! Product rule this module hard-codes: **a search is always scoped to exactly
 //! one destination.** There is no implicit merge across destinations.
 //!
+//! Time rule this module hard-codes (ADR-027): the window filters each
+//! session's **conversation interval** `[first_unix, last_unix]`, read from the
+//! activity sidecar index, and matches when that interval *intersects* the
+//! window. It does not filter on the rustic snapshot time — that instant is
+//! shared by every session in a machine's snapshot, so it selects whole
+//! machines and answers a question about the backup run rather than about the
+//! conversations. The comparison itself lives in [`crate::selector`], which
+//! `export` will reuse unchanged.
+//!
 //! Honesty rule this module hard-codes (same rule `push` applies to an empty
 //! stage): **"this destination does not contain it" and "I could not finish
-//! reading this destination" are different answers.** Callers must branch on
-//! [`SearchReport::complete`] before saying "not found"; [`SearchReport::no_hit_line`]
-//! renders the two cases as two different terminal lines.
+//! reading this destination" are different answers**, and so is "this session
+//! cannot be placed in time". Callers must branch on [`SearchReport::complete`]
+//! and [`SearchReport::answer_complete`] before saying "not found";
+//! [`SearchReport::no_hit_line`] renders the cases as different terminal lines.
 //!
 //! Privacy line (same as `readback`): only ids, counts, byte lengths and
-//! timestamps leave this module. No payload byte is read, so none can leak.
+//! timestamps leave this module. No conversation byte is read, so none can leak.
 
 use anyhow::Context;
 use rustic_core::repofile::{MasterKey, NodeType};
 use rustic_core::{Credentials, LsOptions, Repository};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::activity::{ActivityRow, TimeSource as ActivityTimeSource};
 use crate::readback::{bucket_shard_path, newest_snapshot_per_host};
+use crate::selector::{Selector, SessionMeta, TimeWindow, UnplacedBy, Verdict};
+use crate::sidecar::{activity_index_machine, infer_harness};
 use crate::store::BackupStore;
 
-/// Metadata-tier filter. Every field is `None` == "no constraint".
-#[derive(Debug, Clone, Default)]
-pub struct SearchFilter {
-    /// Match sessions whose id starts with this prefix.
-    pub session_id_prefix: Option<String>,
-    /// Match one machine partition exactly (`sessions/<machine>/…`).
-    pub machine: Option<String>,
-    /// Lower bound (inclusive) on archive time, unix seconds. This is the
-    /// rustic snapshot time, not the source session's last-activity time.
-    pub since_unix: Option<i64>,
-    /// Upper bound (inclusive) on archive time, unix seconds. This is the
-    /// rustic snapshot time, not the source session's last-activity time.
-    pub until_unix: Option<i64>,
-}
-
-impl SearchFilter {
-    pub fn session_id_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.session_id_prefix = Some(prefix.into());
-        self
-    }
-    pub fn machine(mut self, machine: impl Into<String>) -> Self {
-        self.machine = Some(machine.into());
-        self
-    }
-    pub fn since_unix(mut self, unix: i64) -> Self {
-        self.since_unix = Some(unix);
-        self
-    }
-    pub fn until_unix(mut self, unix: i64) -> Self {
-        self.until_unix = Some(unix);
-        self
-    }
-}
-
-/// One matched session. Every field comes from snapshot/tree metadata.
+/// One matched session. Every field comes from snapshot/tree metadata or the
+/// activity sidecar — never from a shard.
 #[derive(Debug, Clone)]
 pub struct SessionHit {
     /// Machine partition (`sessions/<machine>/…`).
     pub machine: String,
     /// Session directory name (the native session id).
     pub session_id: String,
+    /// Harness the session belongs to, from `sidecar::infer_harness` on the
+    /// archived id. `None` when the id carries no harness prefix.
+    ///
+    /// The activity index records the same value — `activity-index` derives its
+    /// `harness` column with the very same function — but the id is used here
+    /// because it is available for sessions the index does not cover, so one
+    /// rule decides every row.
+    pub harness: Option<String>,
     /// Number of sealed shards belonging to this session in that snapshot.
     pub shard_count: usize,
     /// Sum of the shards' file sizes, from the tree nodes (NOT read back).
     pub bytes: u64,
     /// Full hex id of the snapshot the session was found in.
     pub snapshot_id: String,
-    /// Snapshot creation time, unix seconds.
-    pub snapshot_time_unix: i64,
-    /// Archive time used by the time filter, unix seconds. This is explicitly
-    /// not a source session activity timestamp: the archive metadata contains
-    /// the rustic snapshot time, while sealed shards carry no source mtime.
+    /// When that snapshot was taken, unix seconds. This is the **archive's own
+    /// clock** — the backup run — not the conversation's, and it is not what
+    /// the time filter compares. Kept because "which backup run carried this"
+    /// is a real question; `first_unix` / `last_unix` answer the other one.
     pub archive_time_unix: i64,
+    /// Earliest conversation time from the activity index, unix seconds.
+    /// `None` is *unknown*, never zero.
+    pub first_unix: Option<i64>,
+    /// Latest conversation time from the activity index, unix seconds.
+    pub last_unix: Option<i64>,
+    /// Why the conversation time is unknown. `Some` whenever either bound is
+    /// `None`, so the reason reaches the terminal instead of being reinvented
+    /// there. `None` only when both bounds are known.
+    pub time_why: Option<String>,
     /// Number of data blobs the shards are made of (from `node.content`).
     /// This is what a full-text pass would have to fetch — it is *counted*
     /// here, never fetched.
@@ -113,6 +123,37 @@ impl SessionHit {
     /// Privacy-safe short form of the snapshot id for terminal output.
     pub fn short_snapshot(&self) -> String {
         self.snapshot_id.chars().take(8).collect()
+    }
+}
+
+/// A session an **active** filter could not evaluate.
+///
+/// This list is the reason [`SearchReport::answer_complete`] exists. Such a
+/// session is neither a match nor a proven non-match: its conversation time is
+/// unknown, or its harness cannot be derived, so a question the user actually
+/// asked has no answer for it. Reporting it as "not matched" would be the
+/// "unknown recorded as empty" failure this repo forbids; dropping it silently
+/// would be worse.
+#[derive(Debug, Clone)]
+pub struct UnplacedSession {
+    pub machine: String,
+    pub session_id: String,
+    pub harness: Option<String>,
+    pub shard_count: usize,
+    pub bytes: u64,
+    /// Snapshot this session was found in, and when it was taken.
+    pub snapshot_id: String,
+    pub archive_time_unix: i64,
+    /// Which active filter had no answer for this session.
+    pub dimension: UnplacedBy,
+    /// The filter that could not be evaluated, and why. User-facing.
+    pub why: String,
+}
+
+impl UnplacedSession {
+    /// Privacy-safe short form of the session id, same rule as [`SessionHit`].
+    pub fn short_id(&self) -> String {
+        crate::id::short_session_id(&self.session_id)
     }
 }
 
@@ -141,15 +182,34 @@ pub struct SearchReport {
     pub snapshots_scanned: usize,
     /// Sessions seen at all, before the filter was applied.
     pub sessions_seen: usize,
+    /// The conversation-time window the filter compared against, if one was
+    /// asked for. Carried so the output can name it instead of leaving the
+    /// reader to guess what "matched" was measured against.
+    pub window: Option<TimeWindow>,
     /// Matched sessions.
     pub hits: Vec<SessionHit>,
+    /// Sessions an active filter could not evaluate. Non-empty means the
+    /// answer is partial *even if every object was readable*.
+    pub unplaced: Vec<UnplacedSession>,
+    /// Session-count deltas: sessions every active filter evaluated and
+    /// rejected. A measurement, not a fallback.
+    pub not_matched: usize,
+    /// Machines that have sessions in a scanned snapshot but no activity index
+    /// beside them. Named explicitly: a machine missing from the index must
+    /// never look like a machine with no sessions.
+    pub machines_without_index: Vec<String>,
     /// Non-empty == the scan could not read part of the destination. When this
     /// is non-empty, "no hits" means UNKNOWN, never "not there".
     pub unreadable: Vec<String>,
-    /// Data blobs this search fetched. Structurally always 0 for the metadata
-    /// tier; asserted by the tests so a future edit that adds a `dump` call
-    /// cannot pass silently.
+    /// Session shard data blobs this search fetched. Structurally always 0 for
+    /// the metadata tier; asserted by the tests so a future edit that adds a
+    /// `dump` call on a shard cannot pass silently.
     pub data_blobs_read: usize,
+    /// Activity-index files this search fetched. NOT zero by nature — the
+    /// index is a real file in the repository — and deliberately counted apart
+    /// from [`Self::data_blobs_read`] so the "no shard was read" claim stays
+    /// checkable.
+    pub index_files_read: usize,
 }
 
 impl SearchReport {
@@ -158,22 +218,49 @@ impl SearchReport {
         self.unreadable.is_empty()
     }
 
+    /// Whether the query was answered for **every** session seen.
+    ///
+    /// This is stricter than [`Self::complete`]: a destination can be read in
+    /// full and still not answer the question, because some session's
+    /// conversation time is unknown. When that happens, `hits.is_empty()`
+    /// proves nothing — hence the separate name, so a caller cannot pick the
+    /// weaker one by accident.
+    pub fn answer_complete(&self) -> bool {
+        self.complete() && self.unplaced.is_empty()
+    }
+
     /// The one terminal line for "your query matched nothing". The two cases
     /// are deliberately different sentences.
     pub fn no_hit_line(&self) -> String {
-        if self.complete() {
-            format!(
-                "search: not in this destination — 0 of {} sessions matched in `{}` ({} snapshots read, all readable)",
-                self.sessions_seen, self.destination, self.snapshots_scanned
-            )
-        } else {
+        if !self.complete() {
             format!(
                 "search: UNKNOWN — could not finish reading `{}` ({} of {} snapshots unreadable); 0 matched in the part I could read. This is NOT \"not there\".",
                 self.destination,
                 self.unreadable.len(),
                 self.snapshots_scanned
             )
+        } else if !self.unplaced.is_empty() {
+            format!(
+                "search: UNKNOWN — 0 of {} sessions matched in `{}`, but {} session(s) could not be placed (see the list below), so this is NOT \"not there\".",
+                self.sessions_seen,
+                self.destination,
+                self.unplaced.len()
+            )
+        } else {
+            format!(
+                "search: not in this destination — 0 of {} sessions matched in `{}` ({} snapshots read, all readable)",
+                self.sessions_seen, self.destination, self.snapshots_scanned
+            )
         }
+    }
+
+    /// How many sessions could not be placed in time specifically. Counted
+    /// from the tagged dimension, never by reading the reason text.
+    pub fn session_time_unknown(&self) -> usize {
+        self.unplaced
+            .iter()
+            .filter(|u| u.dimension == UnplacedBy::Time)
+            .count()
     }
 
     /// Cost of running a full-text pass over the current hits.
@@ -187,22 +274,167 @@ impl SearchReport {
     }
 }
 
+/// The `--json` report. Exactly one object, and the three groups are separate
+/// fields: matched (`sessions`), evaluated-and-rejected (`not_matched`), and
+/// could-not-be-evaluated (`could_not_be_placed` + `sessions_not_placed`).
+/// A consumer that reads only `sessions` still cannot mistake the third for an
+/// absence, because `answer_complete` is right there beside it.
+///
+/// The shape follows `overview --json` and `view`'s `/api/sessions`
+/// ([`crate::json_out::TimeState`]) so a consumer reads one vocabulary across
+/// commands rather than one per command. An unknown time is a tagged `unknown`
+/// with its reason — never `null`, never `0`.
+///
+/// Lives here rather than in the CLI so the shape is testable without a
+/// repository, exactly like [`crate::view::render_json`].
+pub fn report_json(report: &SearchReport, cost: bool) -> String {
+    let time_state = |unix: Option<i64>, why: Option<&str>| match unix {
+        Some(unix) => crate::json_out::TimeState::known(unix),
+        None => crate::json_out::TimeState::unknown(
+            why.unwrap_or("no conversation time was recorded for this session")
+                .to_string(),
+        ),
+    };
+    let hits: Vec<serde_json::Value> = report
+        .hits
+        .iter()
+        .map(|h| {
+            serde_json::json!({
+                "machine": h.machine,
+                "session_short_id": h.short_id(),
+                "harness": h.harness,
+                "shards": h.shard_count,
+                "bytes": h.bytes,
+                "snapshot_short_id": h.short_snapshot(),
+                "archive_time_unix": h.archive_time_unix,
+                "first_unix": time_state(h.first_unix, h.time_why.as_deref()),
+                "last_unix": time_state(h.last_unix, h.time_why.as_deref()),
+            })
+        })
+        .collect();
+    let unplaced: Vec<serde_json::Value> = report
+        .unplaced
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "machine": u.machine,
+                "session_short_id": u.short_id(),
+                "harness": u.harness,
+                "shards": u.shard_count,
+                "bytes": u.bytes,
+                "snapshot_short_id": u.snapshot_id.chars().take(8).collect::<String>(),
+                "archive_time_unix": u.archive_time_unix,
+                "dimension": match u.dimension {
+                    UnplacedBy::Time => "time",
+                    UnplacedBy::Harness => "harness",
+                },
+                "why": u.why,
+            })
+        })
+        .collect();
+    let c = report.fulltext_cost();
+    let v = serde_json::json!({
+        "destination": report.destination,
+        "tier": "metadata",
+        "payload_loaded": false,
+        "data_blobs_read": report.data_blobs_read,
+        "index_files_read": report.index_files_read,
+        "complete": report.complete(),
+        "answer_complete": report.answer_complete(),
+        "snapshots_scanned": report.snapshots_scanned,
+        "snapshots_in_repo": report.snapshots_in_repo,
+        "sessions_seen": report.sessions_seen,
+        "time_window": report.window.as_ref().map(|w| serde_json::json!({
+            "how": match w.how {
+                crate::selector::WindowHow::LocalDays => "local_days",
+                crate::selector::WindowHow::UnixSeconds => "unix_seconds",
+            },
+            "since_unix": w.since_unix,
+            "until_unix": w.until_unix,
+            "description": w.describe(),
+        })),
+        "unreadable_parts": report.unreadable,
+        "machines_without_activity_index": report.machines_without_index,
+        "matched": report.hits.len(),
+        "not_matched": report.not_matched,
+        "could_not_be_placed": report.unplaced.len(),
+        "fulltext_cost_if_loaded": {
+            "sessions": c.sessions,
+            "shards": c.shards,
+            "data_blobs": c.data_blobs,
+            "plaintext_bytes": c.plaintext_bytes,
+            "note": if cost { "not implemented, not performed" } else { "not requested" },
+        },
+        "sessions": hits,
+        "sessions_not_placed": unplaced,
+    });
+    let mut s = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into());
+    s.push('\n');
+    s
+}
+
+/// What the activity index said about one session's conversation time.
+#[derive(Debug, Clone)]
+struct IndexedTime {
+    first_unix: Option<i64>,
+    last_unix: Option<i64>,
+    /// `Some` == the time is unknown and this is why.
+    why: Option<String>,
+}
+
+/// Turn one index row into the tri-state this module actually needs.
+///
+/// A row whose `time_source` says `Exact`/`Inferred` but which carries no
+/// bounds is self-contradictory. It is kept as *unknown*, with the
+/// contradiction written down, rather than being read as "starts at 0".
+fn indexed_time(row: &ActivityRow) -> IndexedTime {
+    let why = match &row.time_source {
+        ActivityTimeSource::Unknown { why } => Some(why.clone()),
+        _ => None,
+    };
+    match (row.first_unix, row.last_unix, why) {
+        (Some(first), Some(last), _) => IndexedTime {
+            first_unix: Some(first),
+            last_unix: Some(last),
+            why: None,
+        },
+        (first, last, Some(why)) => IndexedTime {
+            first_unix: first,
+            last_unix: last,
+            why: Some(why),
+        },
+        (first, last, None) => IndexedTime {
+            first_unix: first,
+            last_unix: last,
+            why: Some(
+                "the activity index row carries no conversation-time bound and records no reason \
+                 for that, so the time is unknown rather than zero"
+                    .to_string(),
+            ),
+        },
+    }
+}
+
 /// Metadata-tier search over one destination.
 ///
 /// Reuses the read path `readback` already established: open fresh, group
 /// snapshots by hostname, take the newest per hostname, `ls` its tree and
 /// bucket shard paths with [`bucket_shard_path`]. The one difference — and it
-/// is the whole point — is that this walk never calls `repo.dump`, so no data
-/// blob is fetched or decrypted.
+/// is the whole point — is that this walk never dumps a **session shard**, so
+/// no conversation blob is fetched or decrypted. Each machine's activity
+/// sidecar is read in the same pass, because that is where the conversation
+/// times live.
 ///
 /// Errors that make the answer partial are collected into
-/// [`SearchReport::unreadable`] instead of being swallowed. A failure to open
-/// the repository at all is returned as `Err`: "I cannot read this
-/// destination" must never be rendered as "empty".
+/// [`SearchReport::unreadable`] instead of being swallowed — including an
+/// activity index that exists but cannot be read, which is emphatically not
+/// "this machine has no sessions". A failure to open the repository at all is
+/// returned as `Err`: "I cannot read this destination" must never be rendered
+/// as "empty".
 pub fn search_sessions(
     store: &BackupStore,
     mk: &MasterKey,
-    filter: &SearchFilter,
+    selector: &Selector,
 ) -> anyhow::Result<SearchReport> {
     let backends = store.backends()?;
     let repo = Repository::new(&store.cfg.repository_options(), &backends)?
@@ -222,20 +454,27 @@ pub fn search_sessions(
         snapshots_in_repo,
         snapshots_scanned: newest.len(),
         sessions_seen: 0,
+        window: selector.window.clone(),
         hits: Vec::new(),
+        unplaced: Vec::new(),
+        not_matched: 0,
+        machines_without_index: Vec::new(),
         unreadable: Vec::new(),
         data_blobs_read: 0,
+        index_files_read: 0,
     };
+    let mut index_machines: BTreeSet<String> = BTreeSet::new();
 
     for snap in newest {
         let snapshot_id = snap.id.to_hex().as_str().to_string();
-        let snapshot_time_unix = snap.time.timestamp().as_second();
+        let archive_time_unix = snap.time.timestamp().as_second();
+        let host = snap.hostname.clone();
 
         let root = match repo.node_from_snapshot_and_path(&snap, "") {
             Ok(node) => node,
             Err(e) => {
                 report.unreadable.push(format!(
-                    "snapshot {}: tree root unreadable: {e}",
+                    "host `{host}`: snapshot {} tree root unreadable: {e}",
                     &snapshot_id[..8.min(snapshot_id.len())]
                 ));
                 continue;
@@ -248,19 +487,24 @@ pub fn search_sessions(
             Ok(entries) => entries,
             Err(e) => {
                 report.unreadable.push(format!(
-                    "snapshot {}: tree walk failed: {e}",
+                    "host `{host}`: snapshot {} tree walk failed: {e}",
                     &snapshot_id[..8.min(snapshot_id.len())]
                 ));
                 continue;
             }
         };
 
-        // (machine, session) -> (shards, bytes, data blobs). The archive time
-        // is the rustic snapshot time below; a sealed shard mtime is its
-        // archive-side creation time, not source session activity.
+        // One pass over the tree collects both halves: the shard paths that
+        // say which sessions exist, and the index files that say when they
+        // were active.
         let mut sessions: BTreeMap<(String, String), (usize, u64, usize)> = BTreeMap::new();
+        let mut index_nodes: BTreeMap<String, _> = BTreeMap::new();
         for (path, node) in &entries {
             if node.node_type != NodeType::File {
+                continue;
+            }
+            if let Some(machine) = activity_index_machine(path) {
+                index_nodes.insert(machine, node);
                 continue;
             }
             let Some((machine, session, _shard)) = bucket_shard_path(path) else {
@@ -272,53 +516,130 @@ pub fn search_sessions(
             entry.2 += node.content.as_ref().map_or(0, Vec::len);
         }
 
+        // ---- the activity sidecars, read before any verdict is reached -----
+        let mut times: BTreeMap<(String, String), IndexedTime> = BTreeMap::new();
+        let mut machines_with_index: BTreeSet<String> = BTreeSet::new();
+        for (machine, node) in &index_nodes {
+            let mut buf = Vec::new();
+            match repo.dump(node, &mut buf) {
+                Ok(()) => {
+                    report.index_files_read += 1;
+                    machines_with_index.insert(machine.clone());
+                    index_machines.insert(machine.clone());
+                }
+                Err(e) => {
+                    report.unreadable.push(format!(
+                        "host `{host}` machine `{machine}`: activity index exists but could not be read: {e} — that machine's sessions cannot be placed in time, which is NOT the same as having none"
+                    ));
+                    continue;
+                }
+            }
+            let mut malformed = 0usize;
+            // Empty until a line fails; the only reader is guarded by
+            // `malformed > 0`, which is exactly when it has been filled.
+            let mut first_error = String::new();
+            for line in String::from_utf8_lossy(&buf).lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<ActivityRow>(line) {
+                    Ok(row) => {
+                        times.insert(
+                            (row.machine.clone(), row.session_id.clone()),
+                            indexed_time(&row),
+                        );
+                    }
+                    Err(e) => {
+                        malformed += 1;
+                        if malformed == 1 {
+                            first_error = e.to_string();
+                        }
+                    }
+                }
+            }
+            if malformed > 0 {
+                report.unreadable.push(format!(
+                    "host `{host}` machine `{machine}`: {malformed} malformed activity index line(s) (first: {first_error}) — the index is partial, so some sessions may be listed as time-unknown that are not"
+                ));
+            }
+        }
+
+        // Machines that have sessions here but no index beside them: named, not
+        // assumed empty.
+        for (machine, _) in sessions.keys() {
+            if !machines_with_index.contains(machine)
+                && !report.machines_without_index.contains(machine)
+            {
+                report.machines_without_index.push(machine.clone());
+            }
+        }
+
         for ((machine, session_id), (shard_count, bytes, data_blobs)) in sessions {
             report.sessions_seen += 1;
-            let archive_time_unix = snapshot_time_unix;
-            if !matches(filter, &machine, &session_id, archive_time_unix) {
-                continue;
+            let harness = infer_harness(&session_id);
+            let indexed = times.get(&(machine.clone(), session_id.clone()));
+            let (first_unix, last_unix, time_why) = match indexed {
+                Some(t) => (t.first_unix, t.last_unix, t.why.clone()),
+                None => (
+                    None,
+                    None,
+                    Some(if machines_with_index.contains(&machine) {
+                        format!(
+                            "machine `{machine}`'s activity index in this snapshot has no row for this session"
+                        )
+                    } else {
+                        format!(
+                            "machine `{machine}` has no activity index (`meta/{machine}/activity-v1.jsonl`) in this snapshot, so its conversation time was never recorded"
+                        )
+                    }),
+                ),
+            };
+            let meta = SessionMeta {
+                machine: &machine,
+                session_id: &session_id,
+                harness: harness.as_deref(),
+                first_unix,
+                last_unix,
+                time_why: time_why.as_deref(),
+            };
+            match selector.select(&meta) {
+                Verdict::Selected => report.hits.push(SessionHit {
+                    machine,
+                    session_id,
+                    harness,
+                    shard_count,
+                    bytes,
+                    snapshot_id: snapshot_id.clone(),
+                    archive_time_unix,
+                    first_unix,
+                    last_unix,
+                    time_why,
+                    data_blobs,
+                }),
+                Verdict::NotSelected => report.not_matched += 1,
+                Verdict::Unevaluated { dimension, why } => report.unplaced.push(UnplacedSession {
+                    machine,
+                    session_id,
+                    harness,
+                    shard_count,
+                    bytes,
+                    snapshot_id: snapshot_id.clone(),
+                    archive_time_unix,
+                    dimension,
+                    why,
+                }),
             }
-            report.hits.push(SessionHit {
-                machine,
-                session_id,
-                shard_count,
-                bytes,
-                snapshot_id: snapshot_id.clone(),
-                snapshot_time_unix,
-                archive_time_unix,
-                data_blobs,
-            });
         }
     }
 
+    report.machines_without_index.sort();
     report
         .hits
         .sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
+    report
+        .unplaced
+        .sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
     Ok(report)
-}
-
-fn matches(filter: &SearchFilter, machine: &str, session_id: &str, archive_time_unix: i64) -> bool {
-    if let Some(want) = &filter.machine {
-        if machine != want {
-            return false;
-        }
-    }
-    if let Some(prefix) = &filter.session_id_prefix {
-        if !session_id.starts_with(prefix.as_str()) {
-            return false;
-        }
-    }
-    if let Some(since) = filter.since_unix {
-        if archive_time_unix < since {
-            return false;
-        }
-    }
-    if let Some(until) = filter.until_unix {
-        if archive_time_unix > until {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -329,36 +650,36 @@ mod tests {
         SessionHit {
             machine: machine.into(),
             session_id: session.into(),
+            harness: infer_harness(session),
             shard_count: 2,
             bytes: 100,
             snapshot_id: "abcdef0123456789".into(),
-            snapshot_time_unix: archive_time,
             archive_time_unix: archive_time,
+            first_unix: None,
+            last_unix: None,
+            time_why: Some("test fixture records no conversation time".into()),
             data_blobs: 2,
         }
     }
 
     #[test]
-    fn filter_matches_prefix_machine_and_window() {
-        let f = SearchFilter::default()
-            .session_id_prefix("sess-a")
-            .machine("m-1")
-            .since_unix(100)
-            .until_unix(200);
-        assert!(matches(&f, "m-1", "sess-abc", 150));
-        assert!(!matches(&f, "m-2", "sess-abc", 150), "machine must match");
-        assert!(!matches(&f, "m-1", "sess-b", 150), "prefix must match");
-        assert!(!matches(&f, "m-1", "sess-abc", 99), "before window");
-        assert!(!matches(&f, "m-1", "sess-abc", 201), "after window");
-        // Inclusive bounds.
-        assert!(matches(&f, "m-1", "sess-abc", 100));
-        assert!(matches(&f, "m-1", "sess-abc", 200));
-    }
-
-    #[test]
-    fn empty_filter_matches_everything() {
-        let f = SearchFilter::default();
-        assert!(matches(&f, "anything", "anything", i64::MIN));
+    fn empty_report_structure_is_constructible() {
+        let report = SearchReport {
+            destination: "d".into(),
+            snapshots_in_repo: 0,
+            snapshots_scanned: 0,
+            sessions_seen: 0,
+            window: None,
+            hits: Vec::new(),
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 0,
+        };
+        assert!(report.complete());
+        assert!(report.answer_complete());
     }
 
     /// The honesty rule, at unit level: an incomplete scan with zero hits must
@@ -370,9 +691,14 @@ mod tests {
             snapshots_in_repo: 3,
             snapshots_scanned: 3,
             sessions_seen: 7,
+            window: None,
             hits: Vec::new(),
+            unplaced: Vec::new(),
+            not_matched: 7,
+            machines_without_index: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
+            index_files_read: 0,
         };
         let complete = report.no_hit_line();
         assert!(report.complete());
@@ -389,6 +715,45 @@ mod tests {
         assert_ne!(complete, partial);
     }
 
+    /// A destination that was read in full can still fail to answer the
+    /// question. That case gets its own sentence — reusing the "not in this
+    /// destination" line would turn "we could not tell" into "it is not here".
+    #[test]
+    fn unplaced_sessions_make_a_zero_hit_answer_unproven() {
+        let mut report = SearchReport {
+            destination: "dest-under-test".into(),
+            snapshots_in_repo: 2,
+            snapshots_scanned: 2,
+            sessions_seen: 4,
+            window: None,
+            hits: Vec::new(),
+            unplaced: Vec::new(),
+            not_matched: 4,
+            machines_without_index: vec!["m-1".into()],
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 0,
+        };
+        assert!(report.complete(), "the destination itself was read");
+        assert!(report.no_hit_line().contains("not in this destination"));
+
+        report.unplaced.push(UnplacedSession {
+            machine: "m-1".into(),
+            session_id: "claude-code.m-1.abc".into(),
+            harness: Some("claude-code".into()),
+            shard_count: 1,
+            bytes: 10,
+            snapshot_id: "deadbeefdeadbeef".into(),
+            archive_time_unix: 1,
+            dimension: UnplacedBy::Time,
+            why: "no activity index".into(),
+        });
+        assert!(report.complete(), "still read in full…");
+        assert!(!report.answer_complete(), "…but the question is unanswered");
+        assert!(report.no_hit_line().contains("UNKNOWN"));
+        assert!(!report.no_hit_line().contains("not in this destination"));
+    }
+
     #[test]
     fn fulltext_cost_sums_the_metadata_tier_counters() {
         let report = SearchReport {
@@ -396,9 +761,14 @@ mod tests {
             snapshots_in_repo: 1,
             snapshots_scanned: 1,
             sessions_seen: 2,
+            window: None,
             hits: vec![hit("m-1", "a", 10), hit("m-1", "b", 20)],
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
+            index_files_read: 0,
         };
         let cost = report.fulltext_cost();
         assert_eq!(cost.sessions, 2);
@@ -452,5 +822,228 @@ mod tests {
         );
         assert!(h.short_id().len() <= 16, "short enough for a table column");
         assert!(!h.short_id().contains("eacbacc09765"), "never the full id");
+    }
+
+    /// The unplaced list must shorten ids exactly like the hit list does — it
+    /// is the same privacy boundary, and a second implementation would be a
+    /// second chance to leak a full id.
+    #[test]
+    fn unplaced_ids_are_shortened_the_same_way_as_hits() {
+        let u = UnplacedSession {
+            machine: "m-1".into(),
+            session_id: "019bf00d-97b6-7eb2-9bf8-eacbacc09765".into(),
+            harness: Some("claude-code".into()),
+            shard_count: 1,
+            bytes: 1,
+            snapshot_id: "abcdef0123456789".into(),
+            archive_time_unix: 1,
+            dimension: UnplacedBy::Time,
+            why: "no index".into(),
+        };
+        assert_eq!(u.short_id(), hit("m-1", &u.session_id, 1).short_id());
+        assert!(!u.short_id().contains("eacbacc09765"));
+    }
+
+    /// The three groups must be three fields. A consumer that reads `sessions`
+    /// and stops must not be able to conclude "not there" from a report whose
+    /// `sessions_not_placed` is not empty, so the count and the list have to be
+    /// present and separate even when `sessions` is empty.
+    #[test]
+    fn report_json_keeps_the_three_groups_apart() {
+        let report = SearchReport {
+            destination: "dest".into(),
+            snapshots_in_repo: 2,
+            snapshots_scanned: 2,
+            sessions_seen: 3,
+            window: Some(crate::selector::TimeWindow {
+                since_unix: Some(100),
+                until_unix: Some(200),
+                how: crate::selector::WindowHow::UnixSeconds,
+                since_text: Some("100".into()),
+                until_text: Some("200".into()),
+            }),
+            hits: vec![SessionHit {
+                machine: "m-1".into(),
+                session_id: "claude-code.m-1.aaaaaaaa-0000-0000-0000-000000000001".into(),
+                harness: Some("claude-code".into()),
+                shard_count: 2,
+                bytes: 10,
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 5,
+                first_unix: Some(150),
+                last_unix: Some(150),
+                time_why: None,
+                data_blobs: 2,
+            }],
+            unplaced: vec![UnplacedSession {
+                machine: "m-2".into(),
+                session_id: "codex.m-2.bbbbbbbb-0000-0000-0000-000000000002".into(),
+                harness: Some("codex".into()),
+                shard_count: 1,
+                bytes: 5,
+                snapshot_id: "deadbeefdeadbeef".into(),
+                archive_time_unix: 6,
+                dimension: UnplacedBy::Time,
+                why: "no activity index".into(),
+            }],
+            not_matched: 1,
+            machines_without_index: vec!["m-2".into()],
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 1,
+        };
+
+        let v: serde_json::Value = serde_json::from_str(&report_json(&report, false)).unwrap();
+        assert_eq!(v["matched"], 1);
+        assert_eq!(v["not_matched"], 1);
+        assert_eq!(v["could_not_be_placed"], 1);
+        assert_eq!(v["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(v["sessions_not_placed"].as_array().unwrap().len(), 1);
+        assert_eq!(v["machines_without_activity_index"][0], "m-2");
+        assert_eq!(v["complete"], true);
+        assert_eq!(v["answer_complete"], false);
+        assert_eq!(v["tier"], "metadata");
+        assert_eq!(v["payload_loaded"], false);
+        assert_eq!(v["time_window"]["how"], "unix_seconds");
+        // The unknown is a tagged unknown, never a null and never 0.
+        assert_eq!(v["sessions_not_placed"][0]["dimension"], "time");
+        assert_eq!(v["sessions_not_placed"][0]["why"], "no activity index");
+        assert_eq!(v["sessions"][0]["first_unix"]["kind"], "known");
+        assert_eq!(v["sessions"][0]["first_unix"]["unix"], 150);
+        assert!(v["sessions"][0]["session_short_id"]
+            .as_str()
+            .unwrap()
+            .contains('~'));
+    }
+
+    /// An unknown conversation time on a *matched* session is `unknown` with
+    /// the reason — not a null a JSON reader would take for zero, and not a
+    /// missing key.
+    #[test]
+    fn report_json_encodes_an_unknown_time_as_a_reasoned_unknown() {
+        let report = SearchReport {
+            destination: "dest".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            sessions_seen: 1,
+            window: None,
+            hits: vec![SessionHit {
+                machine: "m".into(),
+                session_id: "codex.m.bbbbbbbb-0000-0000-0000-000000000002".into(),
+                harness: Some("codex".into()),
+                shard_count: 1,
+                bytes: 1,
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 1,
+                first_unix: None,
+                last_unix: None,
+                time_why: Some("no timestamp field found".into()),
+                data_blobs: 1,
+            }],
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 0,
+        };
+        let v: serde_json::Value = serde_json::from_str(&report_json(&report, false)).unwrap();
+        assert_eq!(v["sessions"][0]["first_unix"]["kind"], "unknown");
+        assert_eq!(
+            v["sessions"][0]["first_unix"]["why"],
+            "no timestamp field found"
+        );
+        assert!(v["sessions"][0]["first_unix"]["unix"].is_null());
+        assert_eq!(v["time_window"], serde_json::Value::Null);
+        assert!(v["answer_complete"].as_bool().unwrap());
+        assert_eq!(v["fulltext_cost_if_loaded"]["note"], "not requested");
+    }
+
+    /// `--cost` says what the payload pass would cost; without it the same
+    /// block is present but marked "not requested", so a consumer cannot read
+    /// a missing field as a cost of zero.
+    #[test]
+    fn report_json_marks_an_unrequested_cost_as_unrequested() {
+        let report = SearchReport {
+            destination: "d".into(),
+            snapshots_in_repo: 0,
+            snapshots_scanned: 0,
+            sessions_seen: 0,
+            window: None,
+            hits: Vec::new(),
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 0,
+        };
+        let asked: serde_json::Value = serde_json::from_str(&report_json(&report, true)).unwrap();
+        assert_eq!(
+            asked["fulltext_cost_if_loaded"]["note"],
+            "not implemented, not performed"
+        );
+    }
+
+    /// An index row that contradicts itself (`Exact` but no bounds) is unknown,
+    /// not "starts at zero". `inbox.rs`'s `modified_ns` is the precedent.
+    #[test]
+    fn a_self_contradicting_index_row_becomes_unknown_not_zero() {
+        let row = ActivityRow {
+            session_id: "claude-code.m.abc".into(),
+            machine: "m".into(),
+            harness: "claude-code".into(),
+            first_unix: None,
+            last_unix: None,
+            line_count: 3,
+            time_source: ActivityTimeSource::Exact,
+        };
+        let t = indexed_time(&row);
+        assert_eq!(t.first_unix, None);
+        assert_eq!(t.last_unix, None);
+        let why = t.why.expect("a contradiction must carry a reason");
+        assert!(why.contains("unknown rather than zero"), "{why}");
+    }
+
+    /// A row that says `Unknown` keeps the parser's own wording — that text is
+    /// the whole reason the field exists.
+    #[test]
+    fn an_unknown_index_row_keeps_its_recorded_reason() {
+        let row = ActivityRow {
+            session_id: "s".into(),
+            machine: "m".into(),
+            harness: "codex".into(),
+            first_unix: None,
+            last_unix: None,
+            line_count: 0,
+            time_source: ActivityTimeSource::Unknown {
+                why: "no timestamp field found".into(),
+            },
+        };
+        assert_eq!(
+            indexed_time(&row).why.as_deref(),
+            Some("no timestamp field found")
+        );
+    }
+
+    /// A fully-known row carries no `why` at all: a reason must mean something.
+    #[test]
+    fn a_known_index_row_carries_no_reason() {
+        let row = ActivityRow {
+            session_id: "s".into(),
+            machine: "m".into(),
+            harness: "codex".into(),
+            first_unix: Some(10),
+            last_unix: Some(20),
+            line_count: 1,
+            time_source: ActivityTimeSource::Inferred {
+                how: "numeric epoch".into(),
+            },
+        };
+        let t = indexed_time(&row);
+        assert_eq!(
+            (t.first_unix, t.last_unix, t.why),
+            (Some(10), Some(20), None)
+        );
     }
 }

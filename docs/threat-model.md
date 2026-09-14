@@ -41,7 +41,7 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:451-460`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:484-534`).
+   (`crates/chat-stasher/src/main.rs:494-544`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
    (`crates/chat-stasher/src/main.rs:146-183`).
@@ -323,7 +323,7 @@ machine:
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:536-568`).
+  the old inode (`crates/chat-stasher/src/main.rs:546-578`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -341,9 +341,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:4224-4317`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:4299-4392`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:4196-4203`).
+  (`crates/chat-stasher/src/main.rs:4271-4278`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -354,7 +354,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:2933-2989`).
+  as many words (`crates/chat-stasher/src/main.rs:3008-3064`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -394,21 +394,31 @@ a real limitation of the current code.
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `view`, `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:44-827`); **a bulk restore-to-disk command
+   (`crates/chat-stasher/src/main.rs:44-837`); **a bulk restore-to-disk command
    does not exist**. The only retrieval path is `read`, which dumps **one
    session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:223-225,4294-4325`), and note that `read` therefore
+   (`crates/chat-stasher/src/main.rs:223-225,4369-4400`), and note that `read` therefore
    *is* a payload-output command — it prints conversation content. Restoring a
    whole archive is not something you can currently do with one command. If
    getting everything back in bulk matters to you, this is not ready for you
    yet.
 
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
-   never fetches or decrypts a data blob; full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:370-385`). It also distinguishes "nothing
-   matched" from "could not finish reading", which is the same
-   unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:382-385`).
+   never fetches or decrypts a **session shard** — the conversation payload;
+   full-text matching is not implemented
+   (`crates/chat-stasher/src/main.rs:370-399`). One qualification, because the
+   looser version of that sentence is no longer true: `search` also reads each
+   machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
+   rustic repository every file's bytes are a data blob, so that read does go
+   through the blob layer. The sidecar is metadata by declaration — it lives
+   under `meta/`, is written by `activity-index`, and holds timestamps, not
+   conversation text. `search` counts the two apart (`data_blobs_read` stays 0;
+   the sidecar reads are reported separately), and
+   `crates/chat-stasher/src/search.rs:16-34` states exactly which claim holds.
+   It also distinguishes "nothing matched" from "could not finish reading"
+   **and** from "read it all but could not place every session in time", which
+   is the same unknown-is-not-empty discipline as above
+   (`crates/chat-stasher/src/main.rs:395-399`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the

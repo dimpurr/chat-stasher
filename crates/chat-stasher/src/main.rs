@@ -379,26 +379,36 @@ enum Command {
     /// One destination per run, always named: there is no automatic merge
     /// across destinations, and no default destination to search "everything".
     ///
+    /// The time window filters on the **conversation's own activity interval**,
+    /// not on when the backup ran: a session matches when `[first message,
+    /// last message]` intersects the window. Those times come from the
+    /// `activity-index` sidecar (`meta/<machine>/activity-v1.jsonl`) carried in
+    /// the archive, so `--day 2026-01-15` finds a conversation held that day
+    /// even if the machine was last pushed months later.
+    ///
+    /// A session whose conversation time is unknown is **never silently
+    /// excluded**. It is listed separately with the reason, and while a time
+    /// window is active it does not count as a match — which also means a
+    /// "0 matched" answer cannot be trusted while any remain, so the exit code
+    /// is `3` rather than `1`.
+    ///
     /// Exit codes distinguish the three answers, because two of them look the
     /// same and mean opposite things: `0` matched something, `1` read the whole
-    /// destination and nothing matched, `3` could not finish reading it — so
-    /// "nothing matched" is unproven. `2` is a usage error, as elsewhere.
+    /// destination and answered for every session and nothing matched, `3`
+    /// could not finish — either reading it, or placing every session in time —
+    /// so "nothing matched" is unproven. `2` is a usage error, as elsewhere.
     Search {
         /// Destination to search. Required unless an explicit `--repo` is given.
         #[arg(long)]
         destination: Option<String>,
-        /// Match sessions whose id starts with this prefix.
+        /// The shared filters (session / machine / harness / time window).
+        #[command(flatten)]
+        filters: chat_stasher::selector::SelectorArgs,
+        /// Emit one JSON object on stdout instead of the human report. The
+        /// three groups (matched / not matched / could not be placed) stay
+        /// separate fields, so a consumer cannot read an unknown as an absence.
         #[arg(long)]
-        session: Option<String>,
-        /// Match one machine partition exactly.
-        #[arg(long)]
-        machine: Option<String>,
-        /// Lower bound (inclusive) on archive time (rustic snapshot time), unix seconds.
-        #[arg(long)]
-        since_unix: Option<i64>,
-        /// Upper bound (inclusive) on archive time (rustic snapshot time), unix seconds.
-        #[arg(long)]
-        until_unix: Option<i64>,
+        json: bool,
         /// Also report what a full-text pass over the hits would cost.
         #[arg(long)]
         cost: bool,
@@ -1097,10 +1107,8 @@ fn run() -> ExitCode {
         ),
         Command::Search {
             destination,
-            session,
-            machine,
-            since_unix,
-            until_unix,
+            filters,
+            json,
             cost,
             repo,
             key_file,
@@ -1109,10 +1117,8 @@ fn run() -> ExitCode {
             keep_ssh_masters,
         } => cmd_search(
             destination,
-            session,
-            machine,
-            since_unix,
-            until_unix,
+            &filters,
+            json,
             cost,
             repo,
             key_file,
@@ -2374,10 +2380,8 @@ fn query_machine(config: &Config, explicit: Option<&str>) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 fn cmd_search(
     destination: Option<String>,
-    session: Option<String>,
-    machine: Option<String>,
-    since_unix: Option<i64>,
-    until_unix: Option<i64>,
+    filters: &chat_stasher::selector::SelectorArgs,
+    json: bool,
     cost: bool,
     repo: Option<String>,
     key_file: Option<String>,
@@ -2385,6 +2389,21 @@ fn cmd_search(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
+    // Resolve the filter before touching the network: a date that is not a
+    // date, or a window that cannot be satisfied, is a usage error and must
+    // cost nothing and read nothing.
+    let resolved = match filters.resolve() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("search: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for warning in &resolved.warnings {
+        eprintln!("{warning}");
+    }
+    let selector = resolved.selector;
+
     let config = Config::load();
     if destination.is_none() && repo.is_none() {
         eprintln!(
@@ -2421,21 +2440,7 @@ fn cmd_search(
         }
     };
 
-    let mut filter = chat_stasher::search::SearchFilter::default();
-    if let Some(p) = session {
-        filter = filter.session_id_prefix(p);
-    }
-    if let Some(m) = machine {
-        filter = filter.machine(m);
-    }
-    if let Some(t) = since_unix {
-        filter = filter.since_unix(t);
-    }
-    if let Some(t) = until_unix {
-        filter = filter.until_unix(t);
-    }
-
-    let report = match chat_stasher::search::search_sessions(&store, &mk, &filter) {
+    let report = match chat_stasher::search::search_sessions(&store, &mk, &selector) {
         Ok(r) => r,
         Err(e) => {
             // Could not open the repository at all. This is the case that must
@@ -2447,6 +2452,32 @@ fn cmd_search(
         }
     };
 
+    let code = if json {
+        print!("{}", chat_stasher::search::report_json(&report, cost));
+        if report.answer_complete() {
+            if report.hits.is_empty() {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        } else {
+            ExitCode::from(3)
+        }
+    } else {
+        search_human(&report, cost)
+    };
+
+    reap_remote(&cfg, keep_ssh_masters);
+    code
+}
+
+/// The human report.
+///
+/// Three groups, never merged: what matched, what an active filter could not
+/// place, and which parts of the destination could not be read. The middle one
+/// is the point — folding it into "not matched" is the failure this whole
+/// change exists to prevent.
+fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> ExitCode {
     println!("[search] destination  : {}", report.destination);
     println!(
         "[search] snapshots    : {} scanned / {} in repo",
@@ -2454,42 +2485,73 @@ fn cmd_search(
     );
     println!("[search] sessions seen: {}", report.sessions_seen);
     println!("[search] data blobs read: {}", report.data_blobs_read);
+    println!("[search] index files read: {}", report.index_files_read);
+    match &report.window {
+        Some(w) => println!("[search] time window  : {}", w.describe()),
+        None => println!("[search] time window  : none — every session matches, whatever its time"),
+    }
+    if report.session_time_unknown() > 0 {
+        println!("[search] time unknown : {}", report.session_time_unknown());
+    }
+    for machine in &report.machines_without_index {
+        println!(
+            "  !! no activity index for machine `{machine}` — its sessions cannot be placed in time"
+        );
+    }
     for path in &report.unreadable {
         println!("  !! unreadable: {path}");
     }
+    println!("[search] matched      : {}", report.hits.len());
+    for hit in &report.hits {
+        println!(
+            "  {}  machine={}  harness={}  shards={}  bytes={}  snapshot={}  active={}",
+            hit.short_id(),
+            hit.machine,
+            hit.harness.as_deref().unwrap_or("unknown"),
+            hit.shard_count,
+            hit.bytes,
+            hit.short_snapshot(),
+            describe_span(hit.first_unix, hit.last_unix, hit.time_why.as_deref())
+        );
+    }
+    if !report.unplaced.is_empty() {
+        println!(
+            "[search] could not be placed: {} (NOT 'not matched' — an active filter had no answer for these)",
+            report.unplaced.len()
+        );
+        for u in &report.unplaced {
+            println!(
+                "  {}  machine={}  harness={}  shards={}  bytes={}  why: {}",
+                u.short_id(),
+                u.machine,
+                u.harness.as_deref().unwrap_or("unknown"),
+                u.shard_count,
+                u.bytes,
+                u.why
+            );
+        }
+    }
+    println!("[search] not matched  : {}", report.not_matched);
 
     let code = if report.hits.is_empty() {
         println!("{}", report.no_hit_line());
-        if report.complete() {
+        if report.answer_complete() {
             ExitCode::from(1)
         } else {
             ExitCode::from(3)
         }
+    } else if !report.answer_complete() {
+        // Hits *and* something unread or unplaceable: the hits are real, the
+        // absence of further hits is not established. Say so, and do not 0.
+        println!(
+            "search: PARTIAL — the matches above are real, but `{}` could not be read in full ({} unreadable) and {} session(s) could not be placed in time, so there may be more",
+            report.destination,
+            report.unreadable.len(),
+            report.unplaced.len()
+        );
+        ExitCode::from(3)
     } else {
-        println!("[search] matched      : {}", report.hits.len());
-        for hit in &report.hits {
-            println!(
-                "  {}  machine={}  shards={}  bytes={}  snapshot={}  archive_time_unix={}",
-                hit.short_id(),
-                hit.machine,
-                hit.shard_count,
-                hit.bytes,
-                hit.short_snapshot(),
-                hit.archive_time_unix
-            );
-        }
-        if !report.complete() {
-            // Hits *and* unreadable parts: the hits are real, the absence of
-            // further hits is not established. Say so, and do not exit 0.
-            println!(
-                "search: PARTIAL — the matches above are real, but `{}` could not be read in full ({} unreadable), so there may be more",
-                report.destination,
-                report.unreadable.len()
-            );
-            ExitCode::from(3)
-        } else {
-            ExitCode::SUCCESS
-        }
+        ExitCode::SUCCESS
     };
 
     if cost {
@@ -2501,9 +2563,19 @@ fn cmd_search(
         );
         println!("  (not performed — full-text matching is not implemented)");
     }
-
-    reap_remote(&cfg, keep_ssh_masters);
     code
+}
+
+/// One line describing a session's conversation interval, with the unknown
+/// case spelled out instead of printed as an empty field.
+fn describe_span(first_unix: Option<i64>, last_unix: Option<i64>, why: Option<&str>) -> String {
+    match (first_unix, last_unix) {
+        (Some(f), Some(l)) => format!("{f}..{l}"),
+        _ => format!(
+            "unknown ({})",
+            why.unwrap_or("no reason was recorded for this session")
+        ),
+    }
 }
 
 /// `view` — an ephemeral loopback web view of one destination's session list.
@@ -2566,14 +2638,17 @@ fn cmd_view(
         }
     };
 
-    let mut filter = chat_stasher::search::SearchFilter::default();
+    // `view` has no time flags, so its selector carries only the two identity
+    // constraints — but it is the same type and the same decision function, so
+    // the listing and the search cannot drift apart.
+    let mut selector = chat_stasher::selector::Selector::default();
     if let Some(m) = machine {
-        filter = filter.machine(m);
+        selector = selector.machine(m);
     }
     if let Some(p) = session {
-        filter = filter.session_id_prefix(p);
+        selector = selector.session_id_prefix(p);
     }
-    let report = match chat_stasher::search::search_sessions(&store, &mk, &filter) {
+    let report = match chat_stasher::search::search_sessions(&store, &mk, &selector) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("view: cannot read `{}`: {e}", cfg.repo_root);

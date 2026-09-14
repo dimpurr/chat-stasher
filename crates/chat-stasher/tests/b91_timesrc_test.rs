@@ -53,18 +53,113 @@ fn combined(out: &Output) -> String {
     )
 }
 
-/// A's old behaviour counterexample: the public query is described as a
-/// session-activity filter even though the metadata available to it is the
-/// archive snapshot/tree time.
+/// A's old behaviour counterexample, now inverted.
+///
+/// It used to require that `search --help` say "archive time": the public query
+/// was described as a session-activity filter while the metadata it actually
+/// had was the snapshot time. Both halves of that sentence were wrong — the
+/// help said activity, the filter did snapshot time — and ADR-027 removed the
+/// gap from the other end: the filter now really does compare activity time.
+///
+/// So the assertion flips. Help must name the *conversation*, and must not
+/// quietly still be advertising the snapshot time as what `--since` means.
 #[test]
-fn search_time_window_is_explicitly_named_archive_time() {
+fn search_time_window_help_names_conversation_time_not_archive_time() {
     let sandbox = tempfile::tempdir().unwrap();
     let registry = registry_for_empty_fixture(sandbox.path());
     let out = isolated_env(sandbox.path(), &["search", "--help"], &registry);
     let text = combined(&out);
     assert!(
-        text.contains("archive time"),
-        "time-window help must identify archive time, not session activity time:\n{text}"
+        text.contains("conversation"),
+        "time-window help must say whose time it compares:\n{text}"
+    );
+    assert!(
+        !text.contains("archive time") && !text.contains("rustic snapshot time"),
+        "help must not still describe the window as archive/snapshot time:\n{text}"
+    );
+    for flag in ["--day", "--since", "--until", "--harness", "--json"] {
+        assert!(
+            text.contains(flag),
+            "`{flag}` must be discoverable from help:\n{text}"
+        );
+    }
+}
+
+/// Date flags and unix-seconds flags are two spellings of one thing, so mixing
+/// them is ambiguous and must be refused as a usage error — before anything is
+/// opened, so the sandbox needs no repository at all.
+#[test]
+fn mixing_date_and_unix_time_flags_is_a_usage_error() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let registry = registry_for_empty_fixture(sandbox.path());
+    for args in [
+        vec!["search", "--since", "2026-01-15", "--since-unix", "100"],
+        vec!["search", "--until", "2026-01-15", "--until-unix", "100"],
+        vec!["search", "--day", "2026-01-15", "--since-unix", "100"],
+        vec!["search", "--day", "2026-01-15", "--until", "2026-01-16"],
+    ] {
+        let out = isolated_env(sandbox.path(), &args, &registry);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} must be a usage error, got {:?}\n{}",
+            out.status.code(),
+            combined(&out)
+        );
+    }
+}
+
+/// A date that is not a date is refused, not guessed at. Nothing was read and
+/// nothing matched, so this is a usage error (2), never "0 results" (1).
+#[test]
+fn malformed_dates_are_refused_before_anything_is_read() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let registry = registry_for_empty_fixture(sandbox.path());
+    for bad in ["2026-1-5", "20260105", "2026-02-30", "yesterday"] {
+        let out = isolated_env(
+            sandbox.path(),
+            &["search", "--destination", "nope", "--day", bad],
+            &registry,
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`--day {bad}` must be a usage error, got {:?}\n{}",
+            out.status.code(),
+            combined(&out)
+        );
+        assert!(
+            combined(&out).contains("YYYY-MM-DD"),
+            "the error must say the accepted shape:\n{}",
+            combined(&out)
+        );
+    }
+}
+
+/// The deprecated flags still work and still mean conversation time, but they
+/// say so on stderr. Checked without a repository: the notice has to be printed
+/// before any read is attempted, otherwise a later failure would swallow it.
+#[test]
+fn deprecated_unix_flags_warn_on_stderr() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let registry = registry_for_empty_fixture(sandbox.path());
+    let out = isolated_env(
+        sandbox.path(),
+        &["search", "--destination", "nope", "--since-unix", "100"],
+        &registry,
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("deprecated"),
+        "the notice must reach stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--day"),
+        "the notice must name the replacement:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("deprecated"),
+        "a machine reading stdout must not have to filter prose out of it"
     );
 }
 
