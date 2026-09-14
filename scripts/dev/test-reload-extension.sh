@@ -14,7 +14,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELOAD="$here/reload-extension.sh"
 
-SCRATCH="$(mktemp -d /tmp/test-reload-ext.XXXXXX)"
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/test-reload-ext.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
 # --- a minimal committed repo so `git worktree add` has a ref to build ------
@@ -148,6 +148,102 @@ rm -f "$REPO/apps/extension/UNCOMMITTED-MARKER"
 [ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.61" ] || fail "expected 0.1.0.61"
 [ "$(manifest_version "$LOAD.prev/manifest.json")" = "0.1.0.60" ] || fail ".prev should hold 0.1.0.60"
 note "--ref builds the ref, not the working tree"
+
+# 10. --init must not move an unrelated directory aside. A non-empty directory
+#     that is not a chat-stasher build is refused even with --init: "--init" on,
+#     say, a projects directory would otherwise rename that whole directory to
+#     <dir>.prev and drop a build in its place. Nothing in the decoy may change.
+DECOY="$SCRATCH/decoy"
+mkdir -p "$DECOY/sub"
+printf 'not ours\n' > "$DECOY/keep-me.txt"
+if bash "$RELOAD" --load-dir "$DECOY" --init >"$SCRATCH/o10" 2>&1; then
+  fail "--init must refuse a non-empty directory that is not a build"
+fi
+grep -q "refusing to --init" "$SCRATCH/o10" || fail "the refusal should say it is about --init"
+grep -q "point --load-dir at an empty or new directory" "$SCRATCH/o10" || fail "the refusal should say what to point at instead"
+[ ! -e "$DECOY.prev" ] || fail "the decoy directory must not have been renamed to .prev"
+[ -f "$DECOY/keep-me.txt" ] || fail "the decoy directory's file must be untouched"
+[ -d "$DECOY/sub" ] || fail "the decoy directory's subdirectory must be untouched"
+note "--init refuses a non-empty non-build directory and leaves it untouched"
+
+# 11. --init still seeds a directory that exists but is empty, which is the case
+#     it exists for (a load dir made ahead of the first build).
+EMPTY="$SCRATCH/empty-load"
+mkdir -p "$EMPTY"
+if ! bash "$RELOAD" --load-dir "$EMPTY" --init >"$SCRATCH/o11" 2>&1; then
+  fail "--init must seed an empty existing directory"; cat "$SCRATCH/o11" >&2
+fi
+[ "$(manifest_version "$EMPTY/manifest.json")" = "0.1.0.1" ] || fail "an empty load dir should build 0.1.0.1"
+note "--init seeds an empty existing directory"
+
+# 12. a rename that fails between the two steps of the swap is recoverable. The
+#     hook CS_RELOAD_TEST_FAIL_SWAP (test-only, documented in the script header)
+#     fails the second rename; the script must put .prev back, say so, and exit
+#     non-zero rather than leaving the load dir missing.
+before_swap="$(manifest_version "$LOAD/manifest.json")"
+if CS_RELOAD_TEST_FAIL_SWAP=1 bash "$RELOAD" --load-dir "$LOAD" >"$SCRATCH/o12" 2>&1; then
+  fail "a failed swap must exit non-zero"
+fi
+grep -q "could not move the staged build into" "$SCRATCH/o12" || fail "the failed rename should be named"
+grep -q "restored the previous build" "$SCRATCH/o12" || fail "the restore should be reported"
+[ "$(manifest_version "$LOAD/manifest.json")" = "$before_swap" ] || fail "the load dir must hold the previous build again"
+[ ! -e "$LOAD.prev" ] || fail ".prev should have been moved back, not left behind"
+note "a failed swap restores the previous build and exits non-zero"
+
+# 13. a run interrupted between the two renames leaves the load dir missing and
+#     .prev in place. That must not be read as "a fresh directory": the next run
+#     refuses and asks for --recover, and --recover puts the build back.
+interrupted="$(manifest_version "$LOAD/manifest.json")"
+rm -rf "$LOAD.prev"
+mv "$LOAD" "$LOAD.prev"
+if bash "$RELOAD" --load-dir "$LOAD" >"$SCRATCH/o13a" 2>&1; then
+  fail "an interrupted state must be refused, not built over"
+fi
+grep -q "an earlier run stopped between its two renames" "$SCRATCH/o13a" || fail "the refusal should name the interrupted state"
+grep -q -- "--recover" "$SCRATCH/o13a" || fail "the refusal should point at --recover"
+[ ! -e "$LOAD" ] || fail "the refusal must not create the load dir"
+[ "$(manifest_version "$LOAD.prev/manifest.json")" = "$interrupted" ] || fail "the refusal must leave .prev alone"
+if ! bash "$RELOAD" --load-dir "$LOAD" --recover --build-number 70 >"$SCRATCH/o13b" 2>&1; then
+  fail "--recover failed"; cat "$SCRATCH/o13b" >&2
+fi
+grep -q "recovered" "$SCRATCH/o13b" || fail "--recover should report the restore"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.70" ] || fail "expected 0.1.0.70 after recovery"
+[ "$(manifest_version "$LOAD.prev/manifest.json")" = "$interrupted" ] || fail ".prev should hold the recovered build"
+note "an interrupted swap is refused, and --recover restores it"
+
+# 14. --recover on a load dir that is not in the interrupted state is a usage
+#     error (exit 2), not a silent no-op: there is nothing to recover there.
+if bash "$RELOAD" --load-dir "$LOAD" --recover >"$SCRATCH/o14" 2>&1; then
+  fail "--recover without an interrupted state should fail"
+else
+  rc=$?
+  [ "$rc" = "2" ] || fail "--recover without an interrupted state should exit 2 (usage), got $rc"
+fi
+note "--recover outside the interrupted state is a usage error"
+
+# 15. a throwaway worktree that `git worktree remove` cannot delete is reported,
+#     not swallowed, and does not stay behind in `git worktree list`. The stub
+#     git fails only that one subcommand and delegates everything else.
+REAL_GIT="$(command -v git)"
+GITSTUB="$SCRATCH/gitstub"
+mkdir -p "$GITSTUB"
+cat > "$GITSTUB/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "worktree" ] && [ "\$2" = "remove" ]; then
+  echo "gitstub: refusing to remove a worktree" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$GITSTUB/git"
+if ! PATH="$GITSTUB:$PATH" bash "$RELOAD" --load-dir "$LOAD" --build-number 80 >"$SCRATCH/o15" 2>&1; then
+  fail "a worktree-removal failure must not fail the reload itself"; cat "$SCRATCH/o15" >&2
+fi
+grep -q "warning: could not remove the throwaway worktree" "$SCRATCH/o15" || fail "the cleanup failure must be reported"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.80" ] || fail "the reload itself should still have happened"
+stale="$(git -C "$REPO" worktree list | grep "chat-stasher-reload" || true)"
+[ -z "$stale" ] || fail "a stale worktree entry was left in git worktree list: $stale"
+note "an undeletable worktree is reported and left no stale entry"
 
 echo
 echo "test-reload-extension: ${PASS} cases passed"
