@@ -137,9 +137,10 @@ popup:
       Running: NOT running — the switch is on, but there is no usable fetch
       channel right now, so not one conversation is being fetched.
     active: >-
-      Running: archiving — one debt is cleared automatically every {minutes}
-      minutes (at most {maxPerDay} a day, and at least {minIntervalSeconds}
-      seconds apart).
+      Running: archiving — one debt is cleared automatically at an irregular
+      interval of about {minMinutes} to {maxMinutes} minutes (never a fixed
+      period), at most {maxPerDay} a day, and never less than
+      {minIntervalSeconds} seconds apart.
   missing:
     noStore: >-
       Missing: browser.storage.local. Without persistence there is no
@@ -226,10 +227,11 @@ popup:
       scope to show here.
     whatOpening: >-
       What turning it on does: as long as one page of a supported platform is
-      open, every {minutes} minutes it quietly backfills one past conversation
-      in the background, using the login of that page of yours; at most
-      {maxPerDay} a day, so a long history fills in over several days. Turning it
-      off stops it (and clears the timer with it).
+      open, it quietly backfills one past conversation in the background at an
+      irregular interval of about {minMinutes} to {maxMinutes} minutes (never a
+      fixed period), using the login of that page of yours; at most {maxPerDay}
+      a day, so a long history fills in over several days. Turning it off stops
+      it (and clears the timer with it).
     halted:
       unsupportedPlatform: >-
         This platform ({platform}) has no history backfill implemented, so this

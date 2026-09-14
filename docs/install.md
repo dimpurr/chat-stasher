@@ -120,7 +120,7 @@ save only the first few turns of every conversation while you believed you had
 it all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:621-634`).
+(`apps/extension/lib/popup-view.ts:628-641`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the six platforms above are each registered in the table at
@@ -217,7 +217,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:409-416`).
+`apps/extension/entrypoints/background.ts:413-420`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
@@ -500,10 +500,13 @@ confirmed in the code, not a temporary disclaimer.
   recovery process, no recovery code, no customer service. The source's own
   words are in section 4.3 (`crates/chat-stasher/src/store.rs:1106-1113`).
 
-- **History backfill takes days, not minutes.** The backfill leg's rate limit
-  for fetching content is **at most 200 per day**, with at least 20 seconds
-  between two requests (`apps/extension/lib/backfill/pace.ts:49`; the arithmetic
-  behind both numbers is the comment at `:16-22`). At that cap, a thousand
+- **History backfill takes days, not minutes, and never runs on a fixed beat.**
+  Content is fetched **at most 150–200 per day** (the day's cap is drawn once per
+  local day and can never exceed 200), with at least 20 seconds plus a random
+  0–25 seconds between two requests
+  (`apps/extension/lib/backfill/pace.ts:92-103`, `:120-121`), and each round
+  starts a random 5–10 minutes after the previous one
+  (`apps/extension/lib/backfill/alarm.ts:79-80`). At that cap, a thousand
   conversations take at least 5 days. This is deliberately slow, not a bug.
 
 - **Backfill is off by default.** The default is off

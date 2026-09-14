@@ -27,34 +27,87 @@
 
 import type { BackfillStore } from './store';
 import type { TickReason } from './schedule';
+import { systemRandom, uniformBetween, type RandomFn } from './random';
 
-/** The alarm name. Creating the same name twice overwrites, so it is naturally idempotent. */
+/**
+ * The jittered **one-shot** tick alarm. Creating the same name twice overwrites,
+ * so it is naturally idempotent.
+ *
+ * 🔴 W16 · This is no longer a `periodInMinutes` alarm. It is armed with
+ *    `delayInMinutes` alone and is re-armed after every tick with a **fresh
+ *    random draw**, so the leg never wakes on a fixed cadence. See
+ *    `BACKFILL_SAFETY_ALARM_NAME` for what stops a killed worker from breaking
+ *    the chain forever.
+ */
 export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
 
 /**
- * 🔴 Period = 5 minutes. This number is derived, not picked out of the air:
+ * 🔴 W16 · The gap between two ticks is **drawn uniformly from `[5, 10]` minutes**
+ * (mean 7.5). These numbers are derived, not picked out of the air:
  *
- *  · **The floor**: Chrome imposes a minimum alarm period for packaged MV3
- *    extensions (1 minute); anything smaller is silently rounded up by the
- *    browser, and writing a number that cannot take effect only leaves code that
- *    disagrees with reality.
- *  · **The ceiling follows from the daily cap**: one tick clears exactly 1 debt
- *    (DEFAULT_TICK_DETAILS = 1), and the daily quota is
- *    DEFAULT_DETAIL_PACE.maxPerDay = 200.
- *    Once every 5 minutes ⇒ at most 288 wakes a day > 200 ⇒ **what actually caps
- *    the speed is the daily limit, not the alarm**. That is exactly the direction
- *    the product owner set: gentleness is governed by the daily cap.
- *    (A 10-minute period would give only 144 wakes a day < 200, making the alarm
- *     the bottleneck instead; 1000 conversations would drag past 7 days and the
- *     daily cap would be meaningless.)
- *  · **It does not fight the per-item interval**: 300 seconds ≫ the 20-second
- *    per-item minimum ⇒ on the alarm's path the interval gate is always a 0 wait;
- *    the interval only bites when the live leg kicks repeatedly (C19 task 3).
- *  · Each wake does one very small thing (read storage, fetch at most 1), which is
- *    friendly to MV3's SW lifecycle — short ticks × many, equivalent in progress
- *    to long ticks but gentler.
+ *  · **The floor is 5 minutes — the exact fixed period this replaces.** That is
+ *    the whole argument for `[5, 10]` rather than a wider band with the same
+ *    mean (the task offered `[4, 11]`, also mean 7.5): W16's rule is that
+ *    *jitter only ever adds delay*, and a 4-minute floor would be the removal of
+ *    a documented minimum. With the floor at 5, **every draw is ≥ the old fixed
+ *    period**, so the alarm can only ever tick later than before; its maximum
+ *    wake rate stays bit-for-bit what it was (1440/5 = 288 a day) while its mean
+ *    drops to 1440/7.5 = 192.
+ *  · **The ceiling is 10 minutes.** It bounds how long the leg can sit still —
+ *    which matters, because a one-shot alarm that is never re-armed is exactly
+ *    the failure the watchdog below exists for.
+ *  · **Both brakes now bite, neither alone.** Before W16 the alarm ticked 288
+ *    times a day against a fixed cap of 200, so the cap was *always* what
+ *    decided the rate and the alarm was pure overhead. With the gap drawn from
+ *    `[5, 10]` the wake count is itself a random variable (144-288 a day, mean
+ *    192) against a cap that is also a random variable (150-200, mean 175): on
+ *    a day the cap drew 150 the alarm is the looser of the two, on a day it drew
+ *    200 the cap is, and which one binds changes from day to day. That
+ *    interleaving is the "the frequency must not be steady" the product asked
+ *    for, expressed in the two places that govern the rate rather than
+ *    cosmetically.
+ *  · **The band is 2× wide**, so two consecutive gaps differ by a factor of up
+ *    to 2 — plainly irregular to anyone watching, and impossible to distinguish
+ *    from a person working through their own history.
+ *  · **It still does not fight the per-item interval**: 300 seconds ≫ the
+ *    20-second per-item minimum ⇒ on the alarm's path the interval gate is
+ *    always a 0 wait; the interval only bites when the live leg kicks
+ *    repeatedly (C19 task 3).
+ *  · Each wake still does one very small thing (read storage, fetch at most 1),
+ *    which is friendly to MV3's SW lifecycle.
  */
-export const BACKFILL_ALARM_PERIOD_MINUTES = 5;
+export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
+export const BACKFILL_TICK_DELAY_MAX_MINUTES = 10;
+/** The mean of the uniform draw above, as a constant so the popup and the docs cannot disagree about it. */
+export const BACKFILL_TICK_MEAN_MINUTES =
+  (BACKFILL_TICK_DELAY_MIN_MINUTES + BACKFILL_TICK_DELAY_MAX_MINUTES) / 2;
+
+/**
+ * 🔴 W16 · **The watchdog.**
+ *
+ * A one-shot alarm is removed by the browser the moment it fires, so between
+ * firing and the end-of-tick re-arm there is a window in which nothing is
+ * armed — and if the service worker is reclaimed inside that window, the
+ * jittered chain stops. (The window is not only theoretical: a tick that is
+ * killed mid-fetch never reaches its re-arm at all.)
+ *
+ * This alarm closes it with a plain **fixed period**, which is the one thing
+ * that survives a dead service worker, because the browser holds it, not us.
+ * Its period is the bound on how long a broken chain can stay broken: one hour.
+ *
+ * 🔴 It is a watchdog, **not a second heartbeat**: its handler does nothing at
+ *    all while the jittered alarm is armed, so it adds no tick, no storage read,
+ *    no page ping and no request to a healthy leg. It only acts when the chain
+ *    is genuinely broken. The irregular cadence is therefore preserved — this
+ *    costs 24 cheap wake-ups a day and nothing else.
+ */
+export const BACKFILL_SAFETY_ALARM_NAME = 'cs-backfill-safety';
+export const BACKFILL_SAFETY_PERIOD_MINUTES = 60;
+
+/** Draw the next gap between two ticks, in minutes. Never below the floor, never above the ceiling. */
+export function drawTickDelayMinutes(random: RandomFn = systemRandom): number {
+  return uniformBetween(random, BACKFILL_TICK_DELAY_MIN_MINUTES, BACKFILL_TICK_DELAY_MAX_MINUTES);
+}
 
 export interface AlarmsApi {
   create(name: string, info: { periodInMinutes?: number; delayInMinutes?: number }): void | Promise<void>;
@@ -65,31 +118,72 @@ export interface AlarmsApi {
 export type AlarmSyncResult = 'created' | 'kept' | 'cleared' | 'unavailable';
 
 /**
- * Keep the alarm in step with the switch. **This is the only entry point to the
- * alarm's lifecycle.**
- *  · switch on ⇒ an alarm exists (an existing one is left alone, so every SW wake
- *    does not restart the period from zero);
- *  · switch off ⇒ cleared.
+ * Arm the jittered one-shot tick alarm with a fresh draw. Returns the delay it
+ * used, so a caller (or a test) can assert the draw without re-deriving it.
+ *
+ * 🔴 This is the only place the tick alarm is armed, and it is called from
+ *    exactly two places: the end of every tick, and `syncBackfillAlarm` when the
+ *    alarm is missing. Both draw afresh, so there is no "remembered period"
+ *    anywhere that could turn this back into a metronome.
+ */
+export async function armBackfillTick(
+  alarms: AlarmsApi,
+  random: RandomFn = systemRandom,
+): Promise<number> {
+  const minutes = drawTickDelayMinutes(random);
+  await alarms.create(BACKFILL_ALARM_NAME, { delayInMinutes: minutes });
+  return minutes;
+}
+
+/**
+ * Keep both alarms in step with the switch. **This is the only entry point to
+ * the alarm's lifecycle.**
+ *  · switch on ⇒ both alarms exist (an existing one is left alone, so every SW
+ *    wake does not restart the countdown);
+ *  · switch off ⇒ **both** are cleared.
  * Without an alarms API (say, the node test environment) it returns 'unavailable'
  * and never pretends to have succeeded.
+ *
+ * 🔴 Both, in both directions. A switch-off that cleared only the tick alarm
+ *    would leave the watchdog firing for the rest of time with the leg
+ *    disabled — "no consent ⇒ no periodic behaviour" would be false.
  */
 export async function syncBackfillAlarm(
   alarms: AlarmsApi | null | undefined,
   enabled: boolean,
+  random: RandomFn = systemRandom,
 ): Promise<AlarmSyncResult> {
   if (!alarms || typeof alarms.create !== 'function' || typeof alarms.clear !== 'function') {
     return 'unavailable';
   }
   if (!enabled) {
     await alarms.clear(BACKFILL_ALARM_NAME);
+    await alarms.clear(BACKFILL_SAFETY_ALARM_NAME);
     return 'cleared';
   }
-  if (typeof alarms.get === 'function') {
-    const existing = await alarms.get(BACKFILL_ALARM_NAME);
-    if (existing) return 'kept';
+  // Without `get` we cannot tell "already armed" from "missing", so we arm both
+  // unconditionally — the same degradation as before W16 (creating an alarm that
+  // exists only overwrites it), and never a state with nothing armed.
+  const armed = async (name: string): Promise<boolean> => {
+    if (typeof alarms.get !== 'function') return false;
+    return Boolean(await alarms.get(name));
+  };
+  let created = false;
+  if (!(await armed(BACKFILL_ALARM_NAME))) {
+    await armBackfillTick(alarms, random);
+    created = true;
   }
-  await alarms.create(BACKFILL_ALARM_NAME, { periodInMinutes: BACKFILL_ALARM_PERIOD_MINUTES });
-  return 'created';
+  if (!(await armed(BACKFILL_SAFETY_ALARM_NAME))) {
+    await alarms.create(BACKFILL_SAFETY_ALARM_NAME, { periodInMinutes: BACKFILL_SAFETY_PERIOD_MINUTES });
+    created = true;
+  }
+  return created ? 'created' : 'kept';
+}
+
+/** Whether the jittered chain is currently armed. The watchdog's whole decision. */
+export async function isBackfillChainArmed(alarms: AlarmsApi | null | undefined): Promise<boolean> {
+  if (!alarms || typeof alarms.get !== 'function') return false;
+  return Boolean(await alarms.get(BACKFILL_ALARM_NAME));
 }
 
 // ---------------------------------------------------------------------------

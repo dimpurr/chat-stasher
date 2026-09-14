@@ -119,6 +119,17 @@ function tick(opts: TickOptions) {
     listLimit: PAGE,
     maxDetails: opts.maxDetails ?? 1,
     sink: opts.sink as never,
+    /**
+     * 🔴 W16 · This file is about the **interleave** — how much of a tick the
+     *    list page takes before the body gate gets its turn — and every one of
+     *    its assertions is an exact number of milliseconds (`the wait is > 0`,
+     *    `the wait is <= the interval`, and the total clock advance is exactly
+     *    `9 × 20_000`). Those are assertions about the *seam*, not about the
+     *    jitter, so the draw is pinned to the bottom of every band, where each
+     *    gap is exactly the documented minimum — the same numbers this file was
+     *    written against. The jittered case has its own file: tests/w3-jitter.test.ts.
+     */
+    random: () => 0,
   });
 }
 

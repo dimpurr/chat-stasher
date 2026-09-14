@@ -286,6 +286,14 @@ describe('C23-3 · a method or url outside the allowlist ⇒ refused, with a tra
       platform: 'chatgpt', origin: ORIGIN, scope: 'acct-halt',
       store, http: (url) => port(url, { method: 'POST', body: '{"offset":0}', contentType: 'application/json' }),
       clock: fakeClock(), pace: NO_WAIT,
+      /**
+       * 🔴 W16 · The backoff is jittered now, so the exact `5 * 60_000` pinned
+       *    below needs the draw pinned too. `() => 1` is the **top** of the
+       *    `[0.5, 1.0]` band, where the delay is exactly the un-jittered
+       *    exponential — so the assertion keeps its exact value and is not
+       *    relaxed. tests/w3-jitter.test.ts pins the other end.
+       */
+      random: () => 1,
       sink: () => ({ saved: true }),
     });
     console.log('[C23-3] halt record:', JSON.stringify(report.halted));

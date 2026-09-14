@@ -82,6 +82,15 @@ describe('C19 task 3 · BUG-3: the body-fetch minimum interval must take effect 
       http: server.port,
       clock,
       maxDetails: 1,   // consistent with runtime: one tick clears exactly 1 debt
+      /**
+       * 🔴 W16 · Pinned to the bottom of every jitter band, so the split between
+       *    the two segments of a tick is exactly `2_000` / `18_000` / `20_000`
+       *    for the reasons the comments below spell out. The criterion — the
+       *    body interval is made up in full **across ticks** — is unchanged;
+       *    only the exact figures needed the draw pinned, because the production
+       *    default is now a random one. Jitter itself: tests/w3-jitter.test.ts.
+       */
+      random: () => 0,
     });
 
     const r1 = await tick();
@@ -319,24 +328,51 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
     expect(alarmLog.every((l) => l.startsWith('clear'))).toBe(true);
   });
 
-  it('switch on ⇒ the alarm is created; off ⇒ it is cleared', async () => {
-    const { syncBackfillAlarm, BACKFILL_ALARM_NAME, BACKFILL_ALARM_PERIOD_MINUTES } =
-      await import('../lib/backfill/alarm');
+  it('switch on ⇒ both alarms are created; off ⇒ both are cleared', async () => {
+    const {
+      syncBackfillAlarm,
+      BACKFILL_ALARM_NAME,
+      BACKFILL_SAFETY_ALARM_NAME,
+      BACKFILL_SAFETY_PERIOD_MINUTES,
+      BACKFILL_TICK_DELAY_MIN_MINUTES,
+      BACKFILL_TICK_DELAY_MAX_MINUTES,
+    } = await import('../lib/backfill/alarm');
 
     const created = await syncBackfillAlarm(fakeBrowser.alarms, true);
     console.log('[C19-1] switch on ->', created, 'alarms now:', [...alarmBook.entries()]);
     expect(created).toBe('created');
-    expect(alarmBook.get(BACKFILL_ALARM_NAME)).toEqual({
-      periodInMinutes: BACKFILL_ALARM_PERIOD_MINUTES,
+    /**
+     * 🔴 W16 · The tick alarm is no longer a fixed `periodInMinutes: 5`; it is a
+     *    **one-shot** armed with `delayInMinutes`, drawn from `[5, 10]`. What the
+     *    C19 criterion actually asserted — "switch on ⇒ an alarm exists, and it
+     *    is the right one" — is unchanged, so the assertion is kept and only its
+     *    shape follows the deliberate change. The exact draw is a random
+     *    variable here (this call uses the production source), so it is asserted
+     *    as a **range**, which is strictly more than the old pin proved.
+     */
+    const tick = alarmBook.get(BACKFILL_ALARM_NAME)! as { delayInMinutes?: number; periodInMinutes?: number };
+    expect(tick.periodInMinutes).toBeUndefined();
+    expect(tick.delayInMinutes).toBeGreaterThanOrEqual(BACKFILL_TICK_DELAY_MIN_MINUTES);
+    expect(tick.delayInMinutes).toBeLessThanOrEqual(BACKFILL_TICK_DELAY_MAX_MINUTES);
+    // The watchdog is the one that must stay fixed-period: it is what survives a
+    // dead worker, and it is the bound on how long a broken chain stays broken.
+    expect(alarmBook.get(BACKFILL_SAFETY_ALARM_NAME)).toEqual({
+      periodInMinutes: BACKFILL_SAFETY_PERIOD_MINUTES,
     });
 
-    // Syncing again must not restart the period from zero (every SW wake goes down this path).
+    // Syncing again must not restart the countdown from zero (every SW wake goes down this path).
+    const before = alarmBook.get(BACKFILL_ALARM_NAME);
     expect(await syncBackfillAlarm(fakeBrowser.alarms, true)).toBe('kept');
+    expect(alarmBook.get(BACKFILL_ALARM_NAME)).toBe(before);
 
     const cleared = await syncBackfillAlarm(fakeBrowser.alarms, false);
     console.log('[C19-1] switch off ->', cleared, 'alarms now:', [...alarmBook.keys()]);
     expect(cleared).toBe('cleared');
+    // 🔴 Both. A switch-off that left the watchdog armed would keep this
+    //    extension waking up on a schedule with the leg disabled — "no consent ⇒
+    //    no periodic behaviour" has to hold for every alarm, not just the one.
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
+    expect(alarmBook.has(BACKFILL_SAFETY_ALARM_NAME)).toBe(false);
   });
 
   it('when the switch is already on, an SW start restores the alarm (no second click after a restart)', async () => {
@@ -507,7 +543,16 @@ describe('C19 task 4 · what the popup says agrees with the real state', () => {
     console.log('[C19-4 · really running]\n' + text + '\n');
     expect(view.running).toContain('Running: archiving');
     expect(view.missing).toBeNull();
-    expect(view.running).toContain('5 minutes');
+    /**
+     * 🔴 W16 · The rate is stated as the **range** it is drawn from now, not as
+     *    a single number, so "5 minutes" (the old fixed period) is gone from the
+     *    copy and the two ends of the band are what the user is owed. What this
+     *    criterion guards is "the popup states the real rate rather than a
+     *    flattering one", and a range is a more honest version of that than the
+     *    fixed figure was — the assertion follows the deliberate wording change
+     *    and keeps checking that both ends and the daily ceiling are shown.
+     */
+    expect(view.running).toContain('5 to 10 minutes');
     expect(view.running).toContain('200');
     expect(text).not.toContain('estimated remaining');
   });

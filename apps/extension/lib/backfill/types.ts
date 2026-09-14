@@ -16,6 +16,10 @@
  * the tests can both reuse it.
  */
 
+// 🔴 W16 · The one source of randomness, injected. `types.ts` still does no I/O
+//    of its own — this only pulls in a pure function and the production draw.
+import { systemRandom, uniformBetween, type RandomFn } from './random';
+
 export const BACKFILL_STATE_VERSION = 1;
 
 /**
@@ -199,12 +203,13 @@ export function haltClassOf(reason: HaltReason): HaltClass {
  *    rate-limiting than for transport errors — is what these numbers keep.
  *
  * What is re-based: Echoes' retries happen *inside one session's request loop*,
- * so 1 s is a natural unit there. Ours happens once per alarm tick, and the tick
- * is `BACKFILL_ALARM_PERIOD_MINUTES = 5` (lib/backfill/alarm.ts). Any delay at or
- * below the tick period therefore degenerates to "the next tick retries" — a
- * perfectly reasonable outcome, but not a backoff, and shipping it with a tuned
- * looking number would be a lie about what has been tuned. So the unit here is
- * one tick, and the ladders are expressed in ticks:
+ * so 1 s is a natural unit there. Ours happens once per alarm tick, and the
+ * shortest possible tick gap is `BACKFILL_TICK_DELAY_MIN_MINUTES = 5`
+ * (lib/backfill/alarm.ts — the tick is jittered since W16, and this is its
+ * floor). Any delay at or below that floor therefore degenerates to "the next
+ * tick retries" — a perfectly reasonable outcome, but not a backoff, and
+ * shipping it with a tuned looking number would be a lie about what has been
+ * tuned. So the unit here is one tick, and the ladders are expressed in ticks:
  *
  *   reason            base     cap      in ticks        why these
  *   ---------------   ------   ------   -------------   -------------------------
@@ -256,18 +261,49 @@ export function isTransientReason(reason: HaltReason): reason is TransientHaltRe
 }
 
 /**
- * `base * 2^(attempts-1)`, clamped to the cap. `attempts` is the consecutive-failure
- * count **including this one**, so attempt 1 waits exactly `base`.
+ * `base * 2^(attempts-1)`, clamped to the cap — **and then jittered**.
+ * `attempts` is the consecutive-failure count **including this one**, so
+ * attempt 1's exponential value is exactly `base`.
  * The exponent is bounded before the multiply: a long-running streak must not
  * produce `Infinity` on its way to a cap that is 30 minutes.
+ *
+ * 🔴 W16 · **Full jitter**: the returned delay is
+ * `uniform[0.5, 1.0] × (base · 2^(attempts-1))`, still clamped to the cap.
+ *
+ * Why a backoff needs jitter at all, when it is already exponential: every
+ * client that failed at the same instant schedules its retry for the same
+ * instant, so a deterministic ladder *re-synchronises* the traffic it was meant
+ * to spread out — the platform gets the whole cohort back in one lump, one rung
+ * later. Drawing the delay decorrelates them.
+ *
+ * 🔴 This is the one place in W16 where a jittered draw can be **below** the old
+ *    deterministic value (half of it, at the bottom of the band), because that
+ *    is what full jitter is. Two things keep that from being a raised request
+ *    rate:
+ *      · the ceiling is unchanged — the cap still holds, and nothing above it
+ *        is reachable;
+ *      · the actual request is still gated by the detail pacer's own minimum
+ *        interval (20 s), which is three orders of magnitude below the smallest
+ *        delay this can return (0.5 × 5 min = 2.5 minutes for a transport
+ *        error, 0.5 × 15 min = 7.5 minutes for a 429).
+ *    So the retry *schedule* shifts earlier; the request *rate* does not rise.
+ *
+ * `random` is the last parameter with the production source as its default, so
+ * every existing call keeps its exact meaning and a test can pin both ends of
+ * the band with `() => 0` (half) and `() => 1` (the full exponential).
  */
-export function transientRetryDelayMs(reason: TransientHaltReason, attempts: number): number {
+export function transientRetryDelayMs(
+  reason: TransientHaltReason,
+  attempts: number,
+  random: RandomFn = systemRandom,
+): number {
   const base = TRANSIENT_RETRY_BASE_MS[reason];
   const max = TRANSIENT_RETRY_MAX_MS[reason];
   const step = Math.max(1, Math.floor(attempts)) - 1;
   // 2^40 is already far past both caps; clamping the exponent keeps the product finite.
   const factor = 2 ** Math.min(step, 40);
-  return Math.min(base * factor, max);
+  const exponential = base * factor;
+  return Math.min(uniformBetween(random, 0.5, 1) * exponential, max);
 }
 
 export interface HaltRecord {
@@ -364,6 +400,28 @@ export interface DailyCounter {
   /** YYYY-MM-DD（UTC） */
   day: string;
   count: number;
+  /**
+   * 🔴 W16 · **This day's quota, drawn once when the day rolled over.**
+   *
+   * The cap used to be the constant `pace.detail.maxPerDay = 200`, which meant
+   * the leg published exactly the same ceiling every single day — the most
+   * predictable number it has. It is now drawn uniformly from
+   * `[DAILY_CAP_MIN, DAILY_CAP_MAX]` (lib/backfill/pace.ts) at the moment
+   * `day` changes, so it is irregular *across* days and perfectly stable
+   * *within* one:
+   *
+   *  · it is persisted here rather than remembered in a module variable, so a
+   *    restart re-reads the cap it already had instead of drawing a new one —
+   *    otherwise a user who restarts the browser often enough would keep
+   *    re-rolling and, with enough restarts, sit at the top of the range;
+   *  · the value actually enforced is `min(cap ?? maxPerDay, maxPerDay)`, so a
+   *    stored cap can never exceed the plan's ceiling and an explicit small
+   *    `maxPerDay` is never raised by the draw;
+   *  · optional: a state written before W16 has no `cap` and reads back as
+   *    undefined ⇒ "no cap was drawn for this day", and the plan's own ceiling
+   *    applies for the rest of that day. No version bump, no progress lost.
+   */
+  cap?: number;
 }
 
 /**

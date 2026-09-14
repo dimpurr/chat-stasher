@@ -89,7 +89,12 @@ describe('i18n overlay · a chosen locale', () => {
       ['export.note', [{ at: '2026-01-02 03:04:05 UTC', entries: 4, bytes: '2.0 KiB', filename: 'f.jsonl' }]],
       ['outbox.head', [{ pending: 3, rejected: 1, bytes: '1.0 MiB', capacity: '256.0 MiB' }]],
       ['channel.disconnected.head', [{ why: 'timeout', at: '2026-01-02 03:04:05 UTC' }]],
-      ['popup.running.active', [{ minutes: 5, maxPerDay: 200, minIntervalSeconds: 20 }]],
+      // 🔴 W16 · The rate line no longer carries a single `{minutes}`: the tick
+      //    gap is drawn from a range, so the copy states the range. This case
+      //    only checks that the overlay and the package render identically (the
+      //    `not.toContain('{')` below catches a placeholder left unfilled), so
+      //    the arguments follow the catalog's placeholders and nothing else.
+      ['popup.running.active', [{ minMinutes: 5, maxMinutes: 10, maxPerDay: 200, minIntervalSeconds: 20 }]],
       ['badge.title', [{ parts: 'x · y' }]],
       ['tick.reason.unknown', [{ reason: 'weird-code' }]],
     ];

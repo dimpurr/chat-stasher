@@ -115,7 +115,16 @@ function liveCapture(account = 'acct-fixture-1'): CapturedFetch {
 /** Take the real entry point: load background → run defineBackground's callback → dispatch a message. */
 async function bootAndDispatch(payload: CapturedFetch): Promise<{ mod: any; responded: any }> {
   const mod: any = await import('../entrypoints/background');
-  mod.configureBackfillPace({ clock: fakeClock });
+  /**
+   * 🔴 W16 · `random: () => 0` joined this seam because the jitter is now the
+   *    **default**: the pacer's gap is `minIntervalMs + uniform[0, jitterMs]`,
+   *    so without pinning the draw, the total-clock-advance assertions below
+   *    (`60_000` ms after four ticks) would become a lottery. `() => 0` is the
+   *    bottom of every band, at which each drawn gap is exactly the documented
+   *    minimum — i.e. exactly the numbers this file was written against. The
+   *    jitter *itself* is exercised in tests/w3-jitter.test.ts, not here.
+   */
+  mod.configureBackfillPace({ clock: fakeClock, random: () => 0 });
   if (runtimeListeners.length === 0) await mod.default();
   const responded = await new Promise<any>((resolve) => {
     const ret = runtimeListeners[0]!({ type: 'chat-captured', payload }, { id: 's' }, resolve);

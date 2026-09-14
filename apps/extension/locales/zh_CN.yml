@@ -103,8 +103,9 @@ popup:
       运行：未在运行 —— 开关已经打开了，但此刻没有可用的取数通道，一条也没有
       在取。
     active: >-
-      运行：正在归档 —— 每 {minutes} 分钟自动清 1 笔账（每天最多 {maxPerDay}
-      笔，每笔之间至少隔 {minIntervalSeconds} 秒）。
+      运行：正在归档 —— 大约每 {minMinutes} 到 {maxMinutes} 分钟自动清 1 笔账，
+      间隔刻意不固定（不是固定周期）；每天最多 {maxPerDay} 笔，每笔之间至少隔
+      {minIntervalSeconds} 秒。
   missing:
     noStore: >-
       缺：browser.storage.local。没有持久化就没有可断可续，与其每次重启都从头
@@ -170,9 +171,10 @@ popup:
     target: "这份进度对应：平台 {platform} · 归档范围 {scope}"
     noTarget: 还没有任何平台的回溯记录，所以这里没有可显示的归档范围。
     whatOpening: >-
-      打开之后会做什么：只要有一个受支持平台的页面开着，就每 {minutes} 分钟在
-      后台悄悄补一笔历史对话，用的是你自己那个页面的登录态；每天最多
-      {maxPerDay} 笔，好几天里慢慢补完。关掉即停（定时器也会一并清掉）。
+      打开之后会做什么：只要有一个受支持平台的页面开着，就在后台悄悄补历史对话，
+      间隔刻意不固定，大约每 {minMinutes} 到 {maxMinutes} 分钟一笔，用的是你
+      自己那个页面的登录态；每天最多 {maxPerDay} 笔，好几天里慢慢补完。关掉即停
+      （定时器也会一并清掉）。
     halted:
       unsupportedPlatform: >-
         这个平台（{platform}）的历史回溯还没有实现，所以这条腿在发出任何请求

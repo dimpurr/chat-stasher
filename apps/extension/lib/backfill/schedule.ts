@@ -187,6 +187,13 @@ export interface TickDeps {
   maxDetails?: number;
   pace?: BackfillOptions['pace'];
   clock?: BackfillOptions['clock'];
+  /**
+   * 🔴 W16 · The injected source of randomness for the jittered gaps and the
+   * day's cap draw. Omitted ⇒ the production `Math.random`; neither of
+   * background.ts's two call sites sets it, so the shipped behaviour is not
+   * decided anywhere in a test.
+   */
+  random?: BackfillOptions['random'];
   shouldAbort?: () => boolean;
 }
 
@@ -264,6 +271,7 @@ export async function tickBackfill(deps: TickDeps): Promise<TickResult> {
       http,
       clock: deps.clock,
       pace: deps.pace,
+      random: deps.random,
       maxDetails: deps.maxDetails ?? DEFAULT_TICK_DETAILS,
       shouldAbort: deps.shouldAbort,
       sink: deps.sink,

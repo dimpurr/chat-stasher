@@ -34,7 +34,8 @@ import {
   type BackfillRequestInit,
 } from './enumerate';
 import { formatProgress } from './progress';
-import { DEFAULT_PACE, Pacer, systemClock, type BackfillPace, type Clock } from './pace';
+import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
+import { systemRandom, type RandomFn } from './random';
 import type { BackfillStore } from './store';
 import {
   BACKFILL_STATE_VERSION,
@@ -197,6 +198,19 @@ export interface BackfillOptions {
   plans?: (platform: string) => import('./enumerate').BackfillEnumPlan | null;
   clock?: Clock;
   pace?: BackfillPace;
+  /**
+   * 🔴 W16 · The source of randomness for this run's jittered gaps and for the
+   * day's cap draw.
+   *
+   * A test seam in the same family as `clock` / `pace` / `http`: omitted ⇒ the
+   * production `Math.random` (`systemRandom`), which is what both of
+   * background.ts's call sites do — neither sets this field, so nothing about
+   * the shipped behaviour is decided by a test. Injecting `() => 0` makes every
+   * jittered value land exactly on its documented minimum and `() => 1` on its
+   * documented maximum, which is how the boundary is asserted rather than
+   * sampled.
+   */
+  random?: RandomFn;
   listLimit?: number;
   /** How many bodies this run fetches at most; used to run in slices and to simulate "interrupted half way". */
   maxDetails?: number;
@@ -286,6 +300,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const pace = opts.pace ?? DEFAULT_PACE;
   const http = opts.http ?? notWiredHttp;
   const listLimit = opts.listLimit ?? DEFAULT_LIST_LIMIT;
+  // 🔴 W16 · One draw source for the whole run, so "which number came from
+  //    where" is answerable and a test can swap all of it with one function.
+  const random = opts.random ?? systemRandom;
 
   // 🔴 C19: the Pacer construction moved after loadState — it now needs
   // state.lastFetchAt as its seed. The branch with no store never ran a single
@@ -325,8 +342,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // so the interval takes effect across ticks.
   // Old sets have no such field ⇒ null ⇒ byte-identical to C11.
   const anchors = state.lastFetchAt ?? { enumerate: null, detail: null };
-  const enumPacer = new Pacer(pace.enumerate, clock, 'enumerate', anchors.enumerate);
-  const detailPacer = new Pacer(pace.detail, clock, 'detail', anchors.detail);
+  const enumPacer = new Pacer(pace.enumerate, clock, 'enumerate', anchors.enumerate, random);
+  const detailPacer = new Pacer(pace.detail, clock, 'detail', anchors.detail, random);
   /** Write the moment a segment was just let through back into state (persisting is each caller's own job). */
   const anchor = (segment: 'enumerate' | 'detail', at: number | null): void => {
     state.lastFetchAt = { ...(state.lastFetchAt ?? { enumerate: null, detail: null }), [segment]: at };
@@ -406,7 +423,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         at,
         detail,
         attempts: transientStreak,
-        retryAt: at + transientRetryDelayMs(reason, transientStreak),
+        retryAt: at + transientRetryDelayMs(reason, transientStreak, random),
       };
     } else {
       state.halted = { reason, at, detail };
@@ -752,10 +769,35 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
   // ---- Segment two: fetching bodies one by one (expensive, must be gentle) ----
   const today = dayKeyOf(clock.now());
+  /**
+   * 🔴 W16 · The day's cap is **drawn once, when the day rolls over**, and then
+   *    persisted in `state.detailToday.cap` along with the counter.
+   *
+   * Why it is drawn here and nowhere else: this is the single point where the
+   * day key changes, so there is exactly one moment a day at which a new cap can
+   * be chosen. Every later run of the same day takes the `!==` branch as false
+   * and therefore re-reads the stored cap — a restart cannot re-roll it, and in
+   * particular cannot re-roll it *upward*.
+   *
+   * 🔴 `todaysCap` is `min(stored, plan)`, never the raw stored value: the
+   *    plan's `maxPerDay` stays the hard ceiling, so a cap drawn at 200 can never
+   *    exceed a caller that asked for less, and a hand-edited or corrupt stored
+   *    value cannot raise the rate either. `maxPerDay: null` draws nothing.
+   */
   if (state.detailToday.day !== today) {
-    state.detailToday = { day: today, count: 0 };
+    state.detailToday = { day: today, count: 0, cap: drawDailyCap(pace.detail.maxPerDay, random) ?? undefined };
+    // 🔴 Persist the draw **before acting on it**. Without this line the very
+    //    first run of a new day that stops early (the cap was already reached, or
+    //    the budget was 0) would return without ever writing the counter, the
+    //    stored day would stay yesterday's, and the next run would roll again —
+    //    i.e. a restart loop could keep re-rolling upward until it hit 200. One
+    //    write per platform-scope per local day buys the "drawn once, kept" rule.
+    await persist(store, state);
   }
-  const dailyCap = pace.detail.maxPerDay;
+  const planCap = pace.detail.maxPerDay;
+  const dailyCap = planCap === null
+    ? null
+    : Math.min(state.detailToday.cap ?? planCap, planCap);
   const budget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
 
   while (state.pending.length > 0) {

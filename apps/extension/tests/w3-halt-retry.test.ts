@@ -34,7 +34,7 @@ import {
 } from '../lib/backfill/types';
 import { retryMinutesLeft } from '../lib/backfill/progress';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
-import { BACKFILL_ALARM_PERIOD_MINUTES } from '../lib/backfill/alarm';
+import { BACKFILL_TICK_DELAY_MIN_MINUTES } from '../lib/backfill/alarm';
 import { forgetTab, loadTabs, pickLiveTab, rememberTab, TAB_PING_MISSES_BEFORE_FORGET } from '../lib/backfill/tab-port';
 
 const ORIGIN = 'https://chatgpt.com';
@@ -110,6 +110,15 @@ function opts(store: ReturnType<typeof memoryStore>, http: (url: string) => Prom
     http,
     clock,
     pace: { enumerate: DEFAULT_ENUM_PACE, detail: { ...DEFAULT_DETAIL_PACE, minIntervalMs: 0 } },
+    /**
+     * 🔴 W16 · The backoff ladder is jittered now (full jitter, `[0.5, 1.0] ×`
+     *    the exponential). `() => 1` is the **top of that band**, at which the
+     *    draw is exactly the un-jittered exponential — so this file's ladder
+     *    assertions (`[5, 10, 20, 30, 30, 30]` minutes) keep their exact values
+     *    and now additionally pin the band's ceiling. `() => 0` (the floor, half
+     *    of each) is pinned explicitly in tests/w3-jitter.test.ts.
+     */
+    random: () => 1,
   } as const;
 }
 
@@ -212,7 +221,17 @@ describe('W13-2 · the backoff ladder itself', () => {
     for (const reason of ['transport-error', 'rate-limited'] as const) {
       const base = TRANSIENT_RETRY_BASE_MS[reason];
       const cap = TRANSIENT_RETRY_MAX_MS[reason];
-      expect(transientRetryDelayMs(reason, 1)).toBe(base);
+      /**
+       * 🔴 W16 · Attempt 1 is no longer *exactly* `base`: full jitter multiplies
+       *    it by `uniform[0.5, 1.0]`. The criterion the old `toBe(base)` guarded
+       *    is "the first rung is one whole base tall, not a fraction of one", so
+       *    it is kept as the band it now is — and the top of the band is still
+       *    exactly `base`, which is asserted at `() => 1`.
+       */
+      expect(transientRetryDelayMs(reason, 1, () => 1)).toBe(base);
+      expect(transientRetryDelayMs(reason, 1, () => 0)).toBe(base / 2);
+      expect(transientRetryDelayMs(reason, 1)).toBeGreaterThanOrEqual(base / 2);
+      expect(transientRetryDelayMs(reason, 1)).toBeLessThanOrEqual(base);
       let prev = 0;
       for (let attempt = 1; attempt <= 50; attempt += 1) {
         const d = transientRetryDelayMs(reason, attempt);
@@ -221,8 +240,9 @@ describe('W13-2 · the backoff ladder itself', () => {
         expect(d).toBeLessThanOrEqual(cap);
         prev = d;
       }
-      // Long streaks settle on the cap rather than on Infinity.
-      expect(transientRetryDelayMs(reason, 999)).toBe(cap);
+      // Long streaks settle on the cap rather than on Infinity — including at the
+      // bottom of the jitter band, where the exponential is still far past the cap.
+      expect(transientRetryDelayMs(reason, 999, () => 0)).toBe(cap);
       expect(transientRetryDelayMs(reason, 1e9)).toBe(cap);
     }
   });
@@ -233,7 +253,12 @@ describe('W13-2 · the backoff ladder itself', () => {
     // 🔴 Both bases are at least one whole alarm tick. A base below the tick period
     //    would degenerate to "the next tick retries" — a backoff in name only, and
     //    the number would be a lie about what had been tuned.
-    const tick = BACKFILL_ALARM_PERIOD_MINUTES * 60_000;
+    // 🔴 W16 · The tick gap is drawn from `[5, 10]` minutes now rather than fixed
+    //    at 5, so the reference is its **floor** — the tightest case this bound
+    //    has to hold against. Referencing the mean (7.5) would let a base sit
+    //    below the shortest real gap and quietly become the "next tick retries"
+    //    degenerate case the comment above rules out.
+    const tick = BACKFILL_TICK_DELAY_MIN_MINUTES * 60_000;
     expect(TRANSIENT_RETRY_BASE_MS['transport-error']).toBeGreaterThanOrEqual(tick);
     expect(TRANSIENT_RETRY_BASE_MS['rate-limited']).toBeGreaterThan(tick);
   });

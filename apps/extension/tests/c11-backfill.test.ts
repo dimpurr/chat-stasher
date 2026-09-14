@@ -269,9 +269,17 @@ describe('C11 criterion 4 · throttling takes effect (enumeration and body-fetch
     const clock = fakeClock();
     // 6 rows => 3 pages of 2, plus the empty page that confirms the list is finished.
     const backend = fakeBackend(ids(6), { pageSize: 2 });
+    /**
+     * 🔴 W16 · `random: () => 0` pins every draw to the bottom of its band, so
+     *    the pacer's gap is exactly `minIntervalMs` and the two wait sequences
+     *    asserted below stay the numbers this criterion was written around. The
+     *    criterion itself — "each segment makes up **its own** interval" — is
+     *    unaffected by the jitter; only the exact figures are, and the jittered
+     *    case is covered in tests/w3-jitter.test.ts.
+     */
     const tick = (maxDetails: number) => runBackfill({
       platform: 'chatgpt', origin: ORIGIN, scope: 'pace', store,
-      http: backend.http, clock, maxDetails,
+      http: backend.http, clock, maxDetails, random: () => 0,
     });
 
     // 🔴 W10 · The tick is now "one list page, then this tick's body budget", so a

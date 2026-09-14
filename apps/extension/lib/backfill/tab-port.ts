@@ -107,7 +107,7 @@ export const MAX_TAB_ENTRIES = 12;
  * profile: the registry was left as an empty `[]`.
  *
  * Why 2, and not 3 or more:
- *  · the alarm pings once per 5 minutes (`BACKFILL_ALARM_PERIOD_MINUTES`), so two
+ *  · the alarm pings at most once per 5 minutes (`BACKFILL_TICK_DELAY_MIN_MINUTES`), so two
  *    consecutive misses already means the tab has been silent across a whole tick —
  *    far longer than any renderer stall;
  *  · the cost of being wrong in each direction is not symmetric. Forgetting a live
@@ -493,8 +493,10 @@ export type TabSend = (tabId: number, message: unknown) => Promise<unknown>;
  *    16 MiB conversation body plus one token read. A smaller budget would abort a
  *    fetch that was going to succeed, which turns a slow page into a lost one —
  *    a worse failure than the one this bounds.
- *  · And it must stay **below the 5-minute alarm period**
- *    (lib/backfill/alarm.ts's BACKFILL_ALARM_PERIOD_MINUTES = 5). One stuck page
+ *  · And it must stay **below the shortest alarm gap**
+ *    (lib/backfill/alarm.ts's BACKFILL_TICK_DELAY_MIN_MINUTES = 5 — since W16
+ *    the gap is drawn from `[5, 10]` minutes, so 5 is its floor, i.e. the
+ *    tightest case this bound has to hold against). One stuck page
  *    round is then declared lost within a fraction of an alarm period, instead of
  *    still being in flight when the next alarm arrives. (This bounds one *request*;
  *    the round as a whole is bounded separately by the engine's own detail budget.)

@@ -31,7 +31,8 @@ import {
   type FailureEntry,
 } from './backfill/failures';
 import {
-  BACKFILL_ALARM_PERIOD_MINUTES,
+  BACKFILL_TICK_DELAY_MAX_MINUTES,
+  BACKFILL_TICK_DELAY_MIN_MINUTES,
   type BackfillTickRecord,
 } from './backfill/alarm';
 import {
@@ -40,7 +41,7 @@ import {
   BACKFILL_UNSUPPORTED,
   BACKFILL_UNSUPPORTED_PLATFORMS,
 } from './backfill/enumerate';
-import { DEFAULT_DETAIL_PACE } from './backfill/pace';
+import { DAILY_CAP_MAX, DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import { haltClassOf, stateKey, BACKFILL_STATE_VERSION, type BackfillState } from './backfill/types';
 import type { HostPauseRecord, HostStatusRecord } from './host-status';
@@ -462,9 +463,15 @@ function runningLine(model: PopupModel): string {
       //    **there really is a live, logged-in platform tab to fetch through
       //    right now**. The alarm is already running too (created when the
       //    switch was turned on). Only at this point may "archiving" be said.
+      // 🔴 W16 · The rate is no longer one number, so it can no longer be
+      //    stated as one number. The popup says the *range* the tick gap is
+      //    drawn from and the ceiling the daily cap is drawn under, and never a
+      //    figure the leg does not actually honour: the old text promised
+      //    "every 5 minutes", which was true then and would now be a lie.
       return t('popup.running.active', {
-        minutes: BACKFILL_ALARM_PERIOD_MINUTES,
-        maxPerDay: DEFAULT_DETAIL_PACE.maxPerDay,
+        minMinutes: BACKFILL_TICK_DELAY_MIN_MINUTES,
+        maxMinutes: BACKFILL_TICK_DELAY_MAX_MINUTES,
+        maxPerDay: DAILY_CAP_MAX,
         minIntervalSeconds: Math.round(DEFAULT_DETAIL_PACE.minIntervalMs / 1000),
       });
   }
@@ -667,8 +674,9 @@ function notesFor(model: PopupModel): string[] {
 
   if (!model.enabled) {
     notes.push(t('popup.notes.whatOpening', {
-      minutes: BACKFILL_ALARM_PERIOD_MINUTES,
-      maxPerDay: DEFAULT_DETAIL_PACE.maxPerDay,
+      minMinutes: BACKFILL_TICK_DELAY_MIN_MINUTES,
+      maxMinutes: BACKFILL_TICK_DELAY_MAX_MINUTES,
+      maxPerDay: DAILY_CAP_MAX,
     }));
   }
 

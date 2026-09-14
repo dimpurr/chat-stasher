@@ -97,7 +97,7 @@ the sentence.
    `:309-377`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:182-199`).
+   (`apps/extension/entrypoints/background.ts:186-203`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -176,7 +176,7 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:109-137`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:113-141`;
 `apps/extension/lib/outbox.ts:64-80`, `:309-377`). The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
@@ -201,8 +201,8 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:106`; `apps/extension/lib/backfill/tab-port.ts:95` |
-| `cs_backfill_v1:<platform>:<scope>` | The backfill progress set: **conversation/session ids** already archived and still pending, plus counters | `apps/extension/lib/backfill/types.ts:374-403`, `:451-472` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:200`; `apps/extension/lib/backfill/tab-port.ts:95` |
+| `cs_backfill_v1:<platform>:<scope>` | The backfill progress set: **conversation/session ids** already archived and still pending, plus counters | `apps/extension/lib/backfill/types.ts:432-461`, `:509-530` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
 
@@ -213,15 +213,15 @@ Two things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:610-629` — the identity itself is
+  (`apps/extension/entrypoints/background.ts:631-650` — the identity itself is
   read by `apps/extension/lib/contract.ts:635-651`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:628`). It is used to
+  the `||` at `apps/extension/entrypoints/background.ts:649`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
   pressing the popup button records `default` deliberately, because the channel
   that starts it carries no account information
-  (`apps/extension/entrypoints/background.ts:568-599`).
+  (`apps/extension/entrypoints/background.ts:589-620`).
 
 **c. Your archive destination.** Whatever you configured: a directory on your
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
@@ -248,13 +248,13 @@ The parties who *do* see something, stated plainly:
 One further disclosure about the optional **backfill** feature, which walks your
 conversation history to archive older chats. When you turn it on, it issues
 additional requests to the chat platform, from your own logged-in session
-(`apps/extension/lib/backfill/engine.ts:284`). That produces a request pattern
+(`apps/extension/lib/backfill/engine.ts:298`). That produces a request pattern
 the platform can see and which does not look like a human reading their history.
 **We have not investigated** whether any platform's terms of service prohibit
 this, or whether it triggers rate-limiting. Backfill is off unless you enable it
 (`apps/extension/lib/backfill/schedule.ts:29`), and with no HTTP port wired the
 code refuses to fetch at all rather than defaulting to a live one
-(`apps/extension/lib/backfill/engine.ts:84-87`).
+(`apps/extension/lib/backfill/engine.ts:85-88`).
 
 Which platforms actually see those extra requests, stated exactly:
 **ChatGPT** and **DeepSeek** (conversation list *and* each conversation's

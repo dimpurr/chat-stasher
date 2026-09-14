@@ -39,13 +39,17 @@ import {
 } from '../lib/backfill/schedule';
 import type { BackfillOptions, HttpPort } from '../lib/backfill/engine';
 import {
+  armBackfillTick,
   BACKFILL_ALARM_NAME,
+  BACKFILL_SAFETY_ALARM_NAME,
+  isBackfillChainArmed,
   loadTargets,
   rememberTarget,
   saveLastTick,
   syncBackfillAlarm,
   type AlarmsApi,
 } from '../lib/backfill/alarm';
+import { systemRandom, type RandomFn } from '../lib/backfill/random';
 import {
   BACKFILL_PING_MESSAGE,
   isTabHello,
@@ -443,16 +447,33 @@ export async function hostStatusForPopup(): Promise<HostStatusRecord | null> {
 let backfillTransport: HttpPort | null = null;
 let lastTick: TickResult | null = null;
 let pendingTick: Promise<unknown> = Promise.resolve();
-/** Test seam: inject a fake clock / a custom pacing so tests do not really sleep 20 seconds. Always null in production. */
-let backfillPaceOverride: { pace?: BackfillOptions['pace']; clock?: BackfillOptions['clock'] } | null = null;
+/**
+ * Test seam: inject a fake clock / a custom pacing / a deterministic source of
+ * randomness so tests do not really sleep 20 seconds and do not have to sample
+ * a jittered interval. Always null in production.
+ *
+ * 🔴 W16 · `random` joined this seam because the jitter is now the *default*:
+ *    a test that pins an exact wait (or an exact total clock advance) has to be
+ *    able to say what the draw is, and `() => 0` is the boundary that reproduces
+ *    the old deterministic numbers exactly.
+ */
+interface BackfillSeam {
+  pace?: BackfillOptions['pace'];
+  clock?: BackfillOptions['clock'];
+  random?: RandomFn;
+}
+let backfillPaceOverride: BackfillSeam | null = null;
+
+/** The draw source the *runtime* uses for its own decisions (arming the alarm). Production unless a test says otherwise. */
+function backfillRandom(): RandomFn {
+  return backfillPaceOverride?.random ?? systemRandom;
+}
 
 export function configureBackfillTransport(http: HttpPort | null): void {
   backfillTransport = http;
 }
 
-export function configureBackfillPace(
-  override: { pace?: BackfillOptions['pace']; clock?: BackfillOptions['clock'] } | null,
-): void {
+export function configureBackfillPace(override: BackfillSeam | null): void {
   backfillPaceOverride = override;
 }
 
@@ -671,8 +692,39 @@ export async function kickBackfill(
  * Its only difference from the live leg: the target is read from the registry in
  * storage rather than taken from a message that just arrived.
  * One alarm clears at most 1 debt (DEFAULT_TICK_DETAILS); once it runs, it stops.
+ *
+ * 🔴 W16 · **This function is also where the next tick is armed**, at the very
+ *    end, with a fresh draw from `[5, 10]` minutes. The alarm that woke us was a
+ *    one-shot and the browser has already removed it, so the line below is the
+ *    only thing standing between "the leg is running" and "the leg has silently
+ *    stopped" — which is why it runs on *every* exit path, including the ones
+ *    that did no work at all, and why it is in a `finally`-style position after
+ *    the tick rather than inside the tick's own logic.
  */
 export async function runAlarmTick(): Promise<TickResult> {
+  try {
+    return await runAlarmTickBody();
+  } finally {
+    await rearmBackfillTick();
+  }
+}
+
+/**
+ * Arm the next jittered tick. Best-effort: the safety alarm below is the
+ * guarantee, this is the fast path, and a failure here must never turn a tick
+ * that did its work into a thrown error.
+ */
+async function rearmBackfillTick(): Promise<void> {
+  const alarms = alarmsApi();
+  if (!alarms) return;
+  try {
+    await armBackfillTick(alarms, backfillRandom());
+  } catch (err) {
+    console.warn('[chat-stasher] backfill alarm re-arm failed', (err as Error).message);
+  }
+}
+
+async function runAlarmTickBody(): Promise<TickResult> {
   const store = browserLocalStore();
 
   // 🔴 W2 · Every alarm wake sends the outbox first (the first of task 5's two
@@ -729,6 +781,39 @@ export async function runAlarmTick(): Promise<TickResult> {
   }
   await recordAlarmTick(store, last, targets.length);
   return last;
+}
+
+/** What the watchdog decided. `idle` is the healthy case and must be the common one. */
+export type WatchdogOutcome = 'idle' | 'rearmed' | 'disabled';
+
+/**
+ * 🔴 W16 · **The safety net's handler.** It is not a second heartbeat — it is a
+ * watchdog, and in the healthy case it does nothing at all.
+ *
+ * The failure it exists for: the tick alarm is a one-shot, so the chain only
+ * continues because the end of each tick arms the next one. A service worker
+ * killed inside a tick never reaches that line, and a one-shot alarm that fired
+ * is already gone — so without this, nothing would ever wake the leg again.
+ *
+ * It is deliberately cheap: it reads the switch and asks the browser whether the
+ * jittered alarm exists. No storage snapshot, no target lookup, no tab ping, no
+ * request. If the chain is armed it returns `idle` and the tick count for the
+ * day is exactly what the jittered alarm decided — the cadence stays irregular.
+ * If the chain is broken it runs one normal tick, and that tick arms the next
+ * one, so a single watchdog fire is enough to restore the whole chain.
+ */
+export async function runBackfillWatchdog(): Promise<WatchdogOutcome> {
+  const store = browserLocalStore();
+  // With the switch off there is nothing to watch: no consent, no periodic
+  // behaviour, not even a wake-up that reads anything else.
+  if (!(await isBackfillEnabled(store))) return 'disabled';
+  if (await isBackfillChainArmed(alarmsApi())) return 'idle';
+  console.warn(
+    '[chat-stasher] backfill watchdog: the jittered tick alarm was not armed'
+    + ' (a worker killed before re-arming) — restoring the chain',
+  );
+  await runAlarmTick();
+  return 'rearmed';
 }
 
 /** The gate's "are we paused right now" — read-only, no recovery attempt (recovery is tickBackfill's job). */
@@ -795,10 +880,22 @@ function cancelledIdLike(id: string | null): boolean {
   return id.length < 8 || id === 'unknown';
 }
 
-/** Whatever state the switch is in, the alarm should be in. Every SW wake re-syncs the two. */
+/**
+ * Whatever state the switch is in, the alarm should be in. Every SW wake re-syncs the two.
+ *
+ * 🔴 W16 · This is the **second half** of "the chain can never stay broken".
+ *    Since the tick alarm is a one-shot, it is absent whenever it has fired and
+ *    not yet been re-armed — and this function runs on every single service
+ *    worker wake (`runtime.onStartup`, every live capture via `kickBackfill`'s
+ *    SW being alive, every switch change, and the startup setup below). Each
+ *    time it finds the chain missing it arms a fresh draw. So in practice a
+ *    broken chain is repaired by the next ordinary wake, long before the
+ *    watchdog's one hour is up; the watchdog covers the case where nothing else
+ *    wakes the worker at all.
+ */
 export async function syncAlarmWithSwitch(): Promise<string> {
   const enabled = await isBackfillEnabled(browserLocalStore());
-  return syncBackfillAlarm(alarmsApi(), enabled);
+  return syncBackfillAlarm(alarmsApi(), enabled, backfillRandom());
 }
 
 type StorageChange = { newValue?: unknown };
@@ -939,6 +1036,19 @@ export default defineBackground(() => {
         await refreshBadgeSafely();
         await syncOutboxAlarmSafely();
         return report;
+      });
+      return;
+    }
+    // 🔴 W16 · The watchdog's wake is **not** a tick. It decides for itself
+    //    whether the chain is broken; on a healthy leg it returns without doing
+    //    anything, so the backfill cadence stays the jittered one and only the
+    //    jittered one. It must therefore not be routed through runAlarmTick
+    //    unconditionally — that would be a fixed hourly tick, i.e. exactly the
+    //    periodic behaviour this change removed.
+    if (alarm?.name === BACKFILL_SAFETY_ALARM_NAME) {
+      pendingTick = runBackfillWatchdog().catch((err) => {
+        console.warn('[chat-stasher] backfill watchdog failed', (err as Error).message);
+        return null;
       });
       return;
     }

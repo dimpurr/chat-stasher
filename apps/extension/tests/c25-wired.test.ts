@@ -134,17 +134,26 @@ describe('C25 · background wiring', () => {
   it('the alarm is created when the switch goes on and cleared at once via the storage change when it goes off', async () => {
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
-    const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
+    const { BACKFILL_ALARM_NAME, BACKFILL_SAFETY_ALARM_NAME } = await import('../lib/backfill/alarm');
 
     await setBackfillEnabled(browserLocalStore(), true);
     await boot();
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
-    expect(alarmCreates).toEqual([BACKFILL_ALARM_NAME]);
+    // 🔴 W16 · Two alarms now, and the create order is the one syncBackfillAlarm
+    //    writes: the jittered tick first, then the watchdog. The criterion this
+    //    case guards — "switch on ⇒ the wiring really creates the alarm(s), and
+    //    the storage change really clears them" — is unchanged; the list grew
+    //    because the design grew a second alarm, not because the assertion was
+    //    loosened.
+    expect(alarmCreates).toEqual([BACKFILL_ALARM_NAME, BACKFILL_SAFETY_ALARM_NAME]);
 
     await setBackfillEnabled(browserLocalStore(), false);
     await waitForAsyncEvent();
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
+    // 🔴 Both, or a disabled leg would keep waking up on the watchdog's period.
+    expect(alarmBook.has(BACKFILL_SAFETY_ALARM_NAME)).toBe(false);
     expect(alarmClears).toContain(BACKFILL_ALARM_NAME);
+    expect(alarmClears).toContain(BACKFILL_SAFETY_ALARM_NAME);
   });
 
   it('main() is synchronous and registers onStartup / onAlarm before its async setup runs', async () => {
