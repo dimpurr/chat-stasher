@@ -469,9 +469,10 @@ another copy of it: an extra copy in your archive, never a lost one.
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
 the same capture decision above (`apps/extension/lib/page-hook.ts:223-263`).
 An XHR body is read only when the page itself reads it as text or JSON
-(`:297-302`); a binary XHR body (arraybuffer, blob, document) is never read and
-only prints a console warning (`:303-306`, `:166-173`). `EventSource` streams
-are never read either — the hook only warns that one was used (`:317-329`).
+(`apps/extension/lib/page-hook.ts:297-302`); a binary XHR body (arraybuffer,
+blob, document) is never read and only prints a console warning (`:303-306`,
+`:166-173`). `EventSource` streams are never read either — the hook only warns
+that one was used (`apps/extension/lib/page-hook.ts:317-329`).
 
 ## 6. What each permission is for
 
