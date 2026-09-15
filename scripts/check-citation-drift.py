@@ -80,11 +80,16 @@ CITATION_RE = re.compile(
 
 # A path the regex above does not recognise is NOT automatically a continuation.
 # This picks up the token sitting directly before the colon inside the same code
-# span; when one is there, it is the file the author named, and resolve_target()
-# either resolves it or says it cannot. `.gitignore:15` is the case that
-# motivated this: `.gitignore` has no extension, so the citation matched as a
-# bare `:15` and silently inherited the file named five lines above it — an
-# anchor pointing at a file the sentence never mentioned, with every gate green.
+# span. `.gitignore:15` is the case that motivated this: `.gitignore` has no
+# extension, so the citation matched as a bare `:15` and silently inherited the
+# file named five lines above it — an anchor pointing at a file the sentence
+# never mentioned, with every gate green.
+#
+# 🔴 A token found here is a citation only when it is *shaped* like a path —
+# see is_path_shaped(). The first version of this rule demanded that every token
+# before a `:N` resolve, which made ordinary inline code a hard failure:
+# `http://x:8080` (token `//x`), `example.com:8080`, `std::fmt:5` and `HH:23`
+# are not citations, and a document that mentions one must not go red.
 PATH_TOKEN_RE = re.compile(r"(?P<token>[A-Za-z0-9_./-]+)$")
 
 # A sentence ends where one of these is followed by whitespace or the end of the
@@ -138,6 +143,51 @@ class Citation:
     @property
     def where(self) -> str:
         return f"{self.doc}:{self.doc_line}"
+
+
+def is_url_tail(before_token: str, token: str) -> bool:
+    """Whether `token` is what follows `scheme://` in a URL, not a file name.
+
+    `PATH_TOKEN_RE` cannot match the colon, so in `http://x:8080` the token is
+    `//x` and in `https://host/a.ts:8080` it is `//host/a.ts`. Both look like
+    paths to a shape test; neither names a file.
+
+    The test is deliberately narrow — a `/`-leading token whose character
+    before it is a colon. A path written after a word and a colon still reads as
+    a path (`see:a/b.rs:3`), which is why the leading `/` is required rather
+    than the colon alone.
+    """
+    return token.startswith("/") and before_token.endswith(":")
+
+
+def is_path_shaped(token: str, basenames: dict[str, list[str]]) -> bool:
+    """Whether a token written before a `:N` is shaped like a file path.
+
+    Three shapes qualify, and only these three:
+
+      * it contains `/` — a path, not a bare name (`not-a-real/dir.rs`);
+      * it ends in an extension the checker knows (`main.rs`, `a.ts`);
+      * it names a file that exists in the repository, whatever its extension
+        (`.gitignore`, `LICENSE`, `Makefile`, a script under `scripts/hooks/`).
+
+    Everything else is ordinary inline code that happens to precede a number:
+    `HH:23` is a time, `std::fmt:5` is a Rust path, and both would otherwise be
+    forced through resolve_target() and reported as "not a file in this
+    repository" — a red gate for a document that only mentioned them.
+
+    🔴 This asks about *shape*, never about resolvability. A path-shaped token
+    that does not resolve is still a hard failure (W35): `example.com:8080` is
+    not a citation, but `not-a-real/dir.rs:3` is one and the file is missing.
+    Deciding by "did it resolve" would turn exactly the wrong way: the citation
+    that should be loudest (a path to a file nobody can find) would go quiet.
+    """
+    if "/" in token:
+        return True
+    if os.path.splitext(token)[1].lstrip(".") in CITED_EXTS:
+        # A path group in CITATION_RE normally catches these first; this branch
+        # is what keeps that path branch must-resolve in one place.
+        return True
+    return token in basenames
 
 
 def resolve_target(
@@ -212,29 +262,52 @@ def parse_docs(basenames: dict[str, list[str]]) -> tuple[list[Citation], list[st
                     stop += 1
                 text = span.group(1)
                 for m in CITATION_RE.finditer(text):
-                    path = m.group("path")
-                    if path is None:
-                        # No path in the match. If a path token sits directly
-                        # before the colon, that token is the file the author
-                        # named: resolve it or refuse it, but never step over it
-                        # to the previous citation's file.
+                    # The token the author wrote before this colon: the path the
+                    # regex recognised, or — when it recognised none — the run of
+                    # path characters sitting directly before the colon.
+                    token = m.group("path")
+                    token_start = m.start()
+                    if token is None:
                         named = PATH_TOKEN_RE.search(text[: m.start()])
                         if named is not None:
                             token = named.group("token")
-                            raw = token + m.group(0)
-                            target, problem = resolve_target(token, last_target, basenames)
-                        else:
-                            raw = m.group(0)
-                            if last_target is None:
-                                problems.append(
-                                    f"{doc}:{lineno}: citation `{raw}` omits the file name, and no "
-                                    f"citation in the same sentence names one to inherit it from"
-                                )
-                                continue
-                            target, problem = last_target, None
+                            token_start = named.start()
+                    # A token is a citation only when it is shaped like a path and
+                    # is not the tail of a URL. Anything else is ordinary inline
+                    # code (`HH:23`) — it names no file, so there is nothing to
+                    # resolve. Such a `:N` is then read exactly as a token-less
+                    # one: it continues a citation from its own sentence if there
+                    # is one, and otherwise it is not a citation at all (quiet,
+                    # not red — a document may mention `HH:23` in a sentence that
+                    # cites nothing).
+                    not_a_citation = token is not None and (
+                        is_url_tail(text[:token_start], token)
+                        or not is_path_shaped(token, basenames)
+                    )
+                    if not_a_citation:
+                        token = None
+                    if token is not None:
+                        # The citation as the author wrote it: from the token's
+                        # start, so a path the regex recognised is still reported
+                        # as `a.rs:3` and not as the token plus its own tail.
+                        raw = text[token_start : m.end()]
+                        target, problem = resolve_target(token, last_target, basenames)
+                    elif last_target is not None:
+                        # A bare `:N` inside the sentence of a citation: the
+                        # common `\`a.ts:1\`, \`:2\`` list.
+                        raw = m.group(0)
+                        target, problem = last_target, None
+                    elif not_a_citation:
+                        # Nothing here names a file, and nothing was cited
+                        # earlier in the sentence to continue. Not a citation.
+                        continue
                     else:
                         raw = m.group(0)
-                        target, problem = resolve_target(path, last_target, basenames)
+                        problems.append(
+                            f"{doc}:{lineno}: citation `{raw}` omits the file name, and no "
+                            f"citation in the same sentence names one to inherit it from"
+                        )
+                        continue
                     if target is None:
                         problems.append(f"{doc}:{lineno}: citation `{raw}` {problem}")
                         continue

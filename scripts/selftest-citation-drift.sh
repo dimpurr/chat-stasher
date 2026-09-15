@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The selftest for scripts/check-citation-drift.py: proof that it still catches
-# drift. Seven probes. Each one edits a real file in place and restores it from a
+# drift. Nine probes. Each one edits a real file in place and restores it from a
 # backup whatever the outcome; the run ends by printing `git status`.
 #
 # The first version of the checker asked only two questions — is the line number
@@ -15,6 +15,8 @@
 #   probe 5  every contracts/*.md is in the scan set (W32)                    => green
 #   probe 6  an extensionless citation is its own anchor (.gitignore, W35)   => green
 #   probe 7  a continuation behind an unresolvable path token (W35)          => red
+#   probe 8  code that precedes a :N but names no file (W35b)                => green
+#   probe 9  a path-shaped citation of a missing file (W35b)                 => red
 #
 # 🔴 Probes 1 and 2 name coordinates in real files, and coordinates rot when
 #    those files move. They had rotted by W32: both could no longer apply their
@@ -249,14 +251,20 @@ cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
 echo
 
 echo "=============================================================="
-echo "Probe 7 (W35): a continuation whose own path token cannot be"
-echo "  resolved must fail instead of inheriting the citation before"
-echo "  it."
+echo "Probe 7 (W35; token re-pointed by W35b): a continuation whose own"
+echo "  path token cannot be resolved must fail instead of inheriting"
+echo "  the citation before it."
 echo "  The probe appends one line to the real contract document: a"
 echo "  citation of a range the lockfile holds, then a bare range"
-echo "  written behind a token that is not a file in the repository."
+echo "  written behind a token that is shaped like a path — it contains"
+echo "  a slash, so W35b treats it as a citation that must resolve — and"
+echo "  names no file in the repository."
 echo "  Hereditary reading of that bare range points at the locked"
 echo "  anchor, so an inheriting parser stays green — which is the bug."
+echo "  W35b narrowed what this probe can be aimed at: a token with no"
+echo "  slash is plain inline code there (HH:23), it is not a citation,"
+echo "  and inheriting is the documented behaviour for it. The slash is"
+echo "  what keeps this probe pointed at the fail-loudly rule."
 echo "  The locked anchor is read from docs/citations.lock at run time,"
 echo "  so it cannot rot into a copy of a range that no longer exists."
 echo "=============================================================="
@@ -268,11 +276,12 @@ if [ -z "$PROBE7_ANCHOR" ] || ! grep -q -F "$PROBE7_ANCHOR  " "$REPO/docs/citati
   FAILED=1
   PROBE7_ANCHOR=""
 fi
+PROBE7_TOKEN='W35-PROBE-NOT-A-DIR/not-a-file'
 cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
 if [ -n "$PROBE7_ANCHOR" ]; then
-  printf '\nW35 probe: see `%s`, `W35-PROBE-NOT-A-FILE:%s`.\n' "$PROBE7_ANCHOR" "$PROBE7_RANGE" \
+  printf '\nW35 probe: see `%s`, `%s:%s`.\n' "$PROBE7_ANCHOR" "$PROBE7_TOKEN" "$PROBE7_RANGE" \
     >> "$REPO/contracts/nativehost-protocol.md"
-  if ! grep -q 'W35-PROBE-NOT-A-FILE' "$REPO/contracts/nativehost-protocol.md"; then
+  if ! grep -q -F "$PROBE7_TOKEN" "$REPO/contracts/nativehost-protocol.md"; then
     echo "  ✘ probe 7 could not modify the contract document; the selftest itself is void"
     FAILED=1
   fi
@@ -280,11 +289,83 @@ fi
 $CHECK >"$TMP/probe7.out" 2>&1
 rc=$?
 expect 1 "$rc" "a continuation behind an unresolvable path token must be red"
-if grep -q -F 'W35-PROBE-NOT-A-FILE' "$TMP/probe7.out"; then
+if grep -q -F "$PROBE7_TOKEN" "$TMP/probe7.out"; then
   echo "  ✔ the failure names the token it could not resolve"
 else
-  echo "  ✘ the failure does not name W35-PROBE-NOT-A-FILE:"
+  echo "  ✘ the failure does not name $PROBE7_TOKEN:"
   sed 's/^/      /' "$TMP/probe7.out"
+  FAILED=1
+fi
+cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
+echo
+
+echo "=============================================================="
+echo "Probe 8 (W35b): ordinary inline code that precedes a number is"
+echo "  not a citation."
+echo "  The probe appends one sentence to the real contract document:"
+echo "  a port, a host and a port, a Rust path and a clock time, each in"
+echo "  backticks. The token before each colon is \`//x\` (inside a URL"
+echo "  scheme), \`example.com\`, \`fmt\` and \`HH\` — none of them a file,"
+echo "  and none of them shaped like one."
+echo "  Two things are asked of the run: it must stay green, and the"
+echo "  anchor list must not change. A parser that demands every token"
+echo "  resolve fails here with 'is not a file in this repository'; a"
+echo "  parser that silently gives the bare \`:8080\` an inherited file"
+echo "  invents an anchor. Both are caught: the first by the exit code,"
+echo "  the second by the --list diff."
+echo "=============================================================="
+PROBE8_TEXT='W35b probe: a port like `http://x:8080`, a host and port like `example.com:8080`,
+a Rust path like `std::fmt:5` and a time like `HH:23` are plain code.'
+cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
+$CHECK --list >"$TMP/probe8.before" 2>&1
+printf '\n%s\n' "$PROBE8_TEXT" >> "$REPO/contracts/nativehost-protocol.md"
+if ! grep -q -F 'http://x:8080' "$REPO/contracts/nativehost-protocol.md" \
+  || ! grep -q -F 'HH:23' "$REPO/contracts/nativehost-protocol.md"; then
+  echo "  ✘ probe 8 could not modify the contract document; the selftest itself is void"
+  FAILED=1
+fi
+$CHECK >"$TMP/probe8.out" 2>&1
+rc=$?
+expect 0 "$rc" "code that merely precedes a colon and a number must not be red"
+$CHECK --list >"$TMP/probe8.after" 2>&1
+if diff -q "$TMP/probe8.before" "$TMP/probe8.after" >/dev/null; then
+  echo "  ✔ no anchor was created for any of the four tokens"
+else
+  echo "  ✘ the citation list changed; a token that names no file became an anchor:"
+  diff "$TMP/probe8.before" "$TMP/probe8.after" | sed 's/^/      /'
+  FAILED=1
+fi
+if [ "$rc" -ne 0 ]; then
+  sed 's/^/      /' "$TMP/probe8.out"
+fi
+cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
+echo
+
+echo "=============================================================="
+echo "Probe 9 (W35b): a path-shaped citation of a missing file is"
+echo "  still red."
+echo "  Probe 8 widens what counts as *not* a citation. This one pins"
+echo "  the other edge: the same document gets a citation that is a"
+echo "  path by the letter of the rule — it contains a slash and ends"
+echo "  in a known extension — and that file does not exist. Silencing"
+echo "  it would be the cheap way to make probe 8 green, so the red is"
+echo "  asserted here, together with the token named in the failure."
+echo "=============================================================="
+PROBE9_CITE='W35b probe: see `not-a-real/dir.rs:3`.'
+cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
+printf '\n%s\n' "$PROBE9_CITE" >> "$REPO/contracts/nativehost-protocol.md"
+if ! grep -q -F 'not-a-real/dir.rs:3' "$REPO/contracts/nativehost-protocol.md"; then
+  echo "  ✘ probe 9 could not modify the contract document; the selftest itself is void"
+  FAILED=1
+fi
+$CHECK >"$TMP/probe9.out" 2>&1
+rc=$?
+expect 1 "$rc" "a citation of a file that does not exist must be red"
+if grep -q -F 'not-a-real/dir.rs' "$TMP/probe9.out"; then
+  echo "  ✔ the failure names the path it could not resolve"
+else
+  echo "  ✘ the failure does not name not-a-real/dir.rs:"
+  sed 's/^/      /' "$TMP/probe9.out"
   FAILED=1
 fi
 cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
@@ -297,7 +378,7 @@ git status --porcelain
 echo
 
 if [ "$FAILED" -eq 0 ]; then
-  echo "SELFTEST PASS: all seven probes returned the exit code they must."
+  echo "SELFTEST PASS: all nine probes returned the exit code they must."
   exit 0
 fi
 echo "SELFTEST FAIL: a probe returned the wrong exit code."
