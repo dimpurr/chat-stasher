@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The selftest for scripts/check-citation-drift.py: proof that it still catches
-# drift. Five probes. Each one edits a real file in place and restores it from a
+# drift. Seven probes. Each one edits a real file in place and restores it from a
 # backup whatever the outcome; the run ends by printing `git status`.
 #
 # The first version of the checker asked only two questions — is the line number
@@ -13,6 +13,8 @@
 #   probe 3  change nothing                                                  => green
 #   probe 4  add a dangling citation to contracts/ (W32)                     => red
 #   probe 5  every contracts/*.md is in the scan set (W32)                    => green
+#   probe 6  an extensionless citation is its own anchor (.gitignore, W35)   => green
+#   probe 7  a continuation behind an unresolvable path token (W35)          => red
 #
 # 🔴 Probes 1 and 2 name coordinates in real files, and coordinates rot when
 #    those files move. They had rotted by W32: both could no longer apply their
@@ -193,13 +195,109 @@ expect 0 "$rc" "contracts/*.md must all be in the scan set"
 echo
 
 echo "=============================================================="
+echo "Probe 6 (W35): an extensionless citation must be attributed to"
+echo "  its own file."
+echo "  docs/install.md:188 writes \`.gitignore:15\`. The parser used to"
+echo "  recognise a path only when its extension was in CITED_EXTS, so"
+echo "  \`:15\` read as a *continuation* and inherited"
+echo "  apps/extension/package.json — a file the sentence never names,"
+echo "  anchored to content that had nothing to do with the claim."
+echo ""
+echo "  The probe cites \`.gitignore:15\` from the contract document — a"
+echo "  citation the lockfile already holds, word for word — and asks"
+echo "  two things of the run: it must stay green (so the citation is"
+echo "  answered by .gitignore's own lines, which have not changed), and"
+echo "  --list must attribute it to .gitignore and to nothing else."
+echo "  A parser that does not see .gitignore as a path reads the bare"
+echo "  \`:15\` instead, and there is no citation in that sentence for it"
+echo "  to inherit: red, and no such anchor in --list."
+echo "=============================================================="
+PROBE6_CITE='W35 probe: see `.gitignore:15`.'
+PROBE6_DOC_ANCHOR='`.gitignore:15`'
+PROBE6_DOC_HITS="$(grep -c -F "$PROBE6_DOC_ANCHOR" "$REPO/docs/install.md")"
+echo "  Target: contracts/nativehost-protocol.md, citing ${PROBE6_DOC_ANCHOR}"
+if [ "$PROBE6_DOC_HITS" != "1" ]; then
+  echo "  ✘ probe 6's anchor is on ${PROBE6_DOC_HITS} line(s) of docs/install.md, not 1;"
+  echo "    the selftest itself is void (the citation moved, or the wording changed)"
+  FAILED=1
+  PROBE6_CITE=""
+fi
+if ! grep -q '^\.gitignore:15  ' "$REPO/docs/citations.lock"; then
+  echo "  ✘ .gitignore:15 is not a locked anchor; the probe would prove nothing"
+  FAILED=1
+  PROBE6_CITE=""
+fi
+cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
+if [ -n "$PROBE6_CITE" ]; then
+  printf '\n%s\n' "$PROBE6_CITE" >> "$REPO/contracts/nativehost-protocol.md"
+  if ! grep -q -F "$PROBE6_CITE" "$REPO/contracts/nativehost-protocol.md"; then
+    echo "  ✘ probe 6 could not modify the contract document; the selftest itself is void"
+    FAILED=1
+  fi
+fi
+$CHECK >"$TMP/probe6.out" 2>&1
+rc=$?
+expect 0 "$rc" "an extensionless citation of an unchanged, locked range must be green"
+if $CHECK --list 2>/dev/null | grep -q '^\.gitignore:15  '; then
+  echo "  ✔ --list attributes the citation to .gitignore:15"
+else
+  echo "  ✘ --list has no .gitignore:15 anchor; the citation was attributed elsewhere:"
+  sed 's/^/      /' "$TMP/probe6.out"
+  FAILED=1
+fi
+cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
+echo
+
+echo "=============================================================="
+echo "Probe 7 (W35): a continuation whose own path token cannot be"
+echo "  resolved must fail instead of inheriting the citation before"
+echo "  it."
+echo "  The probe appends one line to the real contract document: a"
+echo "  citation of a range the lockfile holds, then a bare range"
+echo "  written behind a token that is not a file in the repository."
+echo "  Hereditary reading of that bare range points at the locked"
+echo "  anchor, so an inheriting parser stays green — which is the bug."
+echo "  The locked anchor is read from docs/citations.lock at run time,"
+echo "  so it cannot rot into a copy of a range that no longer exists."
+echo "=============================================================="
+PROBE7_ANCHOR="$(awk '!/^#/ && NF>=3 && $1 ~ /\// {print $1; exit}' "$REPO/docs/citations.lock")"
+PROBE7_RANGE="${PROBE7_ANCHOR##*:}"
+echo "  Target: contracts/nativehost-protocol.md, anchor ${PROBE7_ANCHOR:-none}"
+if [ -z "$PROBE7_ANCHOR" ] || ! grep -q -F "$PROBE7_ANCHOR  " "$REPO/docs/citations.lock"; then
+  echo "  ✘ probe 7 found no path-shaped anchor in docs/citations.lock; the selftest itself is void"
+  FAILED=1
+  PROBE7_ANCHOR=""
+fi
+cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
+if [ -n "$PROBE7_ANCHOR" ]; then
+  printf '\nW35 probe: see `%s`, `W35-PROBE-NOT-A-FILE:%s`.\n' "$PROBE7_ANCHOR" "$PROBE7_RANGE" \
+    >> "$REPO/contracts/nativehost-protocol.md"
+  if ! grep -q 'W35-PROBE-NOT-A-FILE' "$REPO/contracts/nativehost-protocol.md"; then
+    echo "  ✘ probe 7 could not modify the contract document; the selftest itself is void"
+    FAILED=1
+  fi
+fi
+$CHECK >"$TMP/probe7.out" 2>&1
+rc=$?
+expect 1 "$rc" "a continuation behind an unresolvable path token must be red"
+if grep -q -F 'W35-PROBE-NOT-A-FILE' "$TMP/probe7.out"; then
+  echo "  ✔ the failure names the token it could not resolve"
+else
+  echo "  ✘ the failure does not name W35-PROBE-NOT-A-FILE:"
+  sed 's/^/      /' "$TMP/probe7.out"
+  FAILED=1
+fi
+cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
+echo
+
+echo "=============================================================="
 echo "After: the working tree should hold only the intended new files"
 echo "=============================================================="
 git status --porcelain
 echo
 
 if [ "$FAILED" -eq 0 ]; then
-  echo "SELFTEST PASS: all five probes returned the exit code they must."
+  echo "SELFTEST PASS: all seven probes returned the exit code they must."
   exit 0
 fi
 echo "SELFTEST FAIL: a probe returned the wrong exit code."
