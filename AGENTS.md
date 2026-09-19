@@ -6,11 +6,7 @@ first. This file exists only because some agents do not open `CLAUDE.md` on thei
 own; it deliberately does not restate their contents, because two copies of a
 rule drift apart and the copy nobody reads is the one that rots.
 
-One rule matters enough to be stated in full in `CLAUDE.md` rather than only
-summarized here: **every commit message, pull request title and body, issue,
-code comment, and document here is written in English**, with the single
-exception of `apps/extension/locales/zh_CN.yml`. Read that section of
-`CLAUDE.md` — it is the single source for the language invariants, including
-where the `commit-msg` hook and the CI checker live and how to enable the hook.
-This file deliberately does not repeat the rule, because two copies of an
-invariant drift apart.
+The language invariant is stated once, in the "Language" section of `CLAUDE.md`,
+together with its single exception, where the `commit-msg` hook and the CI
+checker live, and how to enable the hook. Read it there; this file deliberately
+does not restate it, because two copies of an invariant drift apart.
