@@ -41,6 +41,7 @@ import {
   BACKFILL_TICK_DELAY_MAX_MINUTES,
   BACKFILL_TICK_DELAY_MIN_MINUTES,
   type BackfillTickRecord,
+  type LegacyMigration,
 } from './backfill/alarm';
 import {
   BACKFILL_PARTIAL,
@@ -144,6 +145,20 @@ export interface PopupModel {
    * it is not due), and it is said as-is, never invented.
    */
   lastTick?: BackfillTickRecord | null;
+  /**
+   * 🔴 W36b · **What the popup's own state load did with the pre-W18 records.**
+   *
+   * The popup is a place a user's storage layout gets loaded, and until now it
+   * was the one place that showed the old layout's absence and moved nothing:
+   * a user who opened it in the 5-10 minutes before the next alarm tick, or with
+   * the switch off so no alarm fires at all, saw "not started yet" over a
+   * `cs_backfill_v1:*` record that was sitting right there. The scan now runs
+   * here too, on the same function the tick preflight uses.
+   *
+   * Omitted ⇒ this call site does not do the scan (the optional-field pattern the
+   * other fields here follow, so no existing call site changes a character).
+   */
+  legacyMigration?: LegacyMigration | null;
   /**
    * 🔴 C33 · The platform/origin the live channel belongs to right now (from
    * BackfillRuntimeStatus). Omitted/null ⇒ no usable channel ⇒ the "start
@@ -641,12 +656,24 @@ function failureNote(summary: FailureSummary): string {
 function lastTickNote(rec: BackfillTickRecord | null): string | null {
   if (!rec) return t('popup.lastTick.none');
   const when = stampOf(rec.at);
-  if (rec.ran) return t('popup.lastTick.ran', { when, targets: rec.targets });
-  return t('popup.lastTick.skipped', {
-    when,
-    reason: describeTickReason(rec.reason),
-    targets: rec.targets,
-  });
+  const head = rec.ran
+    ? t('popup.lastTick.ran', { when, targets: rec.targets })
+    : t('popup.lastTick.skipped', {
+      when,
+      reason: describeTickReason(rec.reason),
+      targets: rec.targets,
+    });
+  // 🔴 W36b · **"It ran" and "it got anywhere" are different sentences.** A run
+  //    that halts on a record it cannot read returns a report like any other, so
+  //    `ran: true` used to be the whole story the popup told — and the one thing
+  //    the user needed (this leg is stopped, here is why) was in the trace and
+  //    printed nowhere. The trace now carries the run's own halt, and this is
+  //    where it is read back out.
+  if (!rec.halted) return head;
+  return `${head}\n${t('popup.lastTick.halted', {
+    reason: rec.halted,
+    detail: rec.detail ?? t('common.unknownShort'),
+  })}`;
 }
 
 /** Named outcome → one plain sentence. 🔴 Each one must read differently, or the naming is pointless. */
@@ -932,6 +959,24 @@ export async function openDashboardTab(
   return { url, message: t('popup.dashboard.opened') };
 }
 
+/**
+ * 🔴 W36b · One sentence per outcome of the pre-W18 sweep, and they must not be
+ * the same sentence. "Moved" is a completed repair; "refused" means the old
+ * record is still there and still holding the user's ids, which is the fact the
+ * first real-Chrome acceptance could not get at.
+ */
+function legacyMigrationNote(migration: LegacyMigration): string {
+  if (migration.moved < migration.found) {
+    return t('popup.notes.legacy.refused', {
+      found: migration.found,
+      moved: migration.moved,
+      reason: migration.refusal?.reason ?? t('common.unknownShort'),
+      detail: migration.refusal?.detail ?? t('common.unknownShort'),
+    });
+  }
+  return t('popup.notes.legacy.moved', { count: migration.moved });
+}
+
 /** What each platform is missing. Goes into the notes for a user who wants a closer look — the main line gives only the conclusion. */
 function coverageNote(): string {
   const lines = [t('popup.coverage.noteTitle')];
@@ -957,6 +1002,12 @@ function notesFor(model: PopupModel): string[] {
 
   const tickNote = lastTickNote(model.lastTick ?? null);
   if (tickNote) notes.push(tickNote);
+
+  // 🔴 W36b · The pre-W18 layout, said out loud at the moment this popup itself
+  //    tried to move it. Before this, a user whose storage still held the old
+  //    key saw only "Progress: not started yet" beside it — the one place the
+  //    old layout was visible was the one place that did not mention it.
+  if (model.legacyMigration && model.legacyMigration.found > 0) notes.push(legacyMigrationNote(model.legacyMigration));
 
   if (model.target) {
     notes.push(t('popup.notes.target', { platform: model.target.platform, scope: model.target.scope }));

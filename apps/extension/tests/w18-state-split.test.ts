@@ -221,6 +221,7 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
     const order: string[] = [];
     const watched: BackfillStore = {
       load: (key: string) => store.load(key),
+      keys: () => store.keys(),
       remove: async (key: string) => { order.push(`remove:${key}`); await store.remove(key); },
       save: async (key: string, value: unknown) => {
         order.push(`save:${key}`);
@@ -250,6 +251,7 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
     // is not, and the old record must be untouched.
     const killed: BackfillStore = {
       load: (key: string) => store.load(key),
+      keys: () => store.keys(),
       remove: (key: string) => store.remove(key),
       save: async (key: string, value: unknown) => {
         if (key === stateKey(PLATFORM, SCOPE)) throw new Error('killed while writing the header');
@@ -423,6 +425,7 @@ describe('W18-3 · killed in the middle of a settle', () => {
     let headerWrites = 0;
     const killed: BackfillStore = {
       load: (key: string) => store.load(key),
+      keys: () => store.keys(),
       remove: (key: string) => store.remove(key),
       save: async (key: string, value: unknown) => {
         if (key === stateKey(PLATFORM, SCOPE)) {

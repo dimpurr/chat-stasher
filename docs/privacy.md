@@ -97,7 +97,7 @@ the sentence.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
    page, on the same origin (`apps/extension/lib/page-hook.ts:442-447`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:323-349`). That request —
+   `apps/extension/entrypoints/dw-bridge.content.ts:390-416`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin. The token is held only
@@ -117,14 +117,14 @@ the sentence.
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
    conversations” (`apps/extension/lib/platform-auth.ts:214-246`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:207-213`).
+   `apps/extension/entrypoints/dw-bridge.content.ts:274-280`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,
    `:309-377`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:193-210`).
+   (`apps/extension/entrypoints/background.ts:195-212`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -235,7 +235,7 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:120-148`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:122-150`;
 `apps/extension/lib/outbox.ts:64-80`, `:309-377`). The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
@@ -260,7 +260,7 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:200`; `apps/extension/lib/backfill/tab-port.ts:162` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:210`; `apps/extension/lib/backfill/tab-port.ts:162` |
 | `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts`), so settling one conversation does not rewrite the whole list. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. | `apps/extension/lib/backfill/types.ts:655-677`; `apps/extension/lib/backfill/debt-store.ts:37-39` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
@@ -272,9 +272,9 @@ Two things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:779-803` — the identity itself is
+  (`apps/extension/entrypoints/background.ts:781-805` — the identity itself is
   read by `apps/extension/lib/contract.ts:911-927`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:816`). It is used to
+  the `||` at `apps/extension/entrypoints/background.ts:818`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
@@ -284,7 +284,7 @@ Two things in that table deserve to be called out rather than buried:
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:698-770`).
+  (`apps/extension/entrypoints/background.ts:700-772`).
 - **On claude.ai the scope is not read from a response body: it is the
   organization the page's own requests are addressed to**, and that value is
   required in every request path on that platform while appearing in no page URL
@@ -307,7 +307,7 @@ Two things in that table deserve to be called out rather than buried:
   are never probed one by one, and once that has been recorded the page is not
   asked again on every wake-up — the answer is already known
   (`apps/extension/lib/backfill/claude-org.ts:170-224`;
-  `apps/extension/entrypoints/background.ts:681-696`). The sentinel
+  `apps/extension/entrypoints/background.ts:683-698`). The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
   organization that does not exist (`apps/extension/lib/backfill/engine.ts:638-682`).
@@ -317,7 +317,7 @@ Two things in that table deserve to be called out rather than buried:
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:919-941`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:921-943`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
@@ -436,7 +436,25 @@ explicitly (`apps/extension/lib/contract.ts:177`, `:245`, `:261`, `:302`, `:360`
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
-that site gets archived. The optional backfill feature — the only part that goes
+that site gets archived, and — measured on 2026-09-19 in a real browser — it did
+not even mean the conversation in front of you was, on two of the seven. On a
+logged-in `gemini.google.com/app/<id>` tab, `window.fetch` and
+`XMLHttpRequest.prototype.open` were still the browser's own functions, so
+nothing of ours had run in that document; on a logged-in
+`www.kimi.com/chat/<id>` page, a page-context POST to the messages endpoint was
+answered 200 with a `{messages}` body and **no capture was produced at all**.
+One cause is fixed on this branch (a same-origin **subframe** of a supported
+origin was never injected into, `allFrames` being off, so a request made from
+one was invisible); the other — a document that existed before the extension was
+loaded or updated, which Chrome will not re-inject into without host permissions
+this extension does not request — is not fixable from inside the page, and
+**reloading the tab is what resolves it**. Until one of the two is ruled out for
+a given tab, treat Gemini and Kimi live capture as **not working on a tab that
+predates the extension's load**, and the cause as still under investigation. The
+extension does not silently pretend otherwise: it carries no marker saying a
+conversation was captured when none was.
+
+The optional backfill feature — the only part that goes
 looking for *past* conversations — is limited to a shorter list, and the middle
 tier of that list is easy to misread:
 
@@ -482,7 +500,7 @@ The extension declares exactly four permissions and no host permissions
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
 | `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:75-88`, `:341-385`, `:1906-1940`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
-| `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-28`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:65-77`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
+| `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-48`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the chat tab open; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:65`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:53`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:77`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
 

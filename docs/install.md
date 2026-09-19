@@ -30,6 +30,27 @@ DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`), Grok (`grok.com`)
 (`apps/extension/lib/contract.ts:177,245,261,302,360,487,574`).
+
+🔴 **Recognizing a platform is not the same as capturing on it, and for two of
+the seven it measurably was not.** On 2026-09-19, in a real browser with the
+extension loaded, a logged-in `gemini.google.com/app/<id>` tab still had the
+browser's own `window.fetch` and `XMLHttpRequest.prototype.open` (nothing of
+ours had run in that document), and a logged-in `www.kimi.com/chat/<id>` page
+made a `POST /apiv2/kimi.gateway.chat.v1.ChatService/ListMessages` that was
+answered **200** with a top-level `{messages}` body — the shape the capture row
+declares — and produced **no capture at all**. One cause is fixed on this
+branch: a same-origin **subframe** of a supported origin was never injected into
+(`allFrames` was off), so a request made from one was invisible to the hook
+(`apps/extension/entrypoints/dw-fetch-main.content.ts`;
+`e2e/frame-capture.spec.ts` reproduces the reading above and passes only with
+that fixed). The other — a document that already existed when the extension was
+loaded, which Chrome does not re-inject into without host permissions this
+extension deliberately does not request — is not fixable from inside the page:
+**reloading the tab is what resolves it.** Which of the two a given tab is
+cannot be told from here, so until one is ruled out, read Gemini and Kimi live
+capture as **not working on a tab that predates the extension's load or
+update**, and the cause as still under investigation.
+
 It requests four permissions — `nativeMessaging`, `storage`, `alarms` and
 `unlimitedStorage` — and **no host permissions at all**
 (`apps/extension/wxt.config.ts:87`). There is no `downloads` permission and no
@@ -129,7 +150,7 @@ content-endpoint profile — a wrong guess would not error; it would save only t
 first few turns of every conversation while you believed you had it all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:684-697`).
+(`apps/extension/lib/popup-view.ts:711-724`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -226,7 +247,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:420-427`).
+`apps/extension/entrypoints/background.ts:422-429`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
@@ -551,7 +572,7 @@ confirmed in the code, not a temporary disclaimer.
   0–25 seconds between two requests
   (`apps/extension/lib/backfill/pace.ts:92-103`, `:120-121`), and each round
   starts a random 5–10 minutes after the previous one
-  (`apps/extension/lib/backfill/alarm.ts:79-80`). At that cap, a thousand
+  (`apps/extension/lib/backfill/alarm.ts:89-90`). At that cap, a thousand
   conversations take at least 5 days. This is deliberately slow, not a bug.
 
 - **Backfill is off by default.** The default is off
@@ -600,7 +621,7 @@ confirmed in the code, not a temporary disclaimer.
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two
   then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:919-941`). Perplexity **only lists
+  (`apps/extension/entrypoints/background.ts:921-943`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
   `apps/extension/lib/backfill/enumerate.ts:3262-3289`). The

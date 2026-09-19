@@ -28,6 +28,16 @@
 import type { BackfillStore } from './store';
 import type { TickReason } from './schedule';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
+import { completeInterruptedMigration, openLedger, type LedgerRefusal } from './ledger';
+import {
+  isHeader,
+  isLegacyState,
+  legacyStateKey,
+  stateKey,
+  LEGACY_STATE_VERSION,
+  type HaltReason,
+  type StopReason,
+} from './types';
 
 /**
  * The jittered **one-shot** tick alarm. Creating the same name twice overwrites,
@@ -284,6 +294,182 @@ export async function forgetTarget(
 /** The trace of the alarm's most recent tick. Same cs_* key family; no new permission. */
 export const BACKFILL_LAST_TICK_KEY = 'cs_backfill_lasttick_v1';
 
+/** The key prefix the pre-W18 layout wrote at: `cs_backfill_v1:`. */
+export const LEGACY_STATE_KEY_PREFIX = `cs_backfill_v${LEGACY_STATE_VERSION}:`;
+
+/**
+ * 🔴 W36b · **What one `migrateLegacyScopes` sweep did.**
+ *
+ * Three counts rather than a bare refusal, because "there was nothing to move"
+ * and "there was something and it would not move" are the two facts a user needs
+ * to tell apart, and the tick trace's single `halted` field cannot carry both.
+ * `found` and `moved` are measurements: 0 is 0, undecorated.
+ */
+export interface LegacyMigration {
+  /** How many pre-W18 keys the scan found in `storage.local`. */
+  found: number;
+  /** How many pre-W18 records the new layout now holds (a moved record, or an orphaned one whose copy was confirmed and cleared). */
+  moved: number;
+  /** How many pre-W18 keys sit beside a new-layout record that does not match them — left exactly where they are. */
+  orphaned: number;
+  /** The first refusal, or null. The same one-field rule the tick trace follows. */
+  refusal: LedgerRefusal | null;
+}
+
+const NOTHING_TO_MIGRATE: LegacyMigration = { found: 0, moved: 0, orphaned: 0, refusal: null };
+
+/**
+ * The `{platform, scope}` a `cs_backfill_v1:<platform>:<scope>` key names, or null
+ * when the key is not one of ours.
+ *
+ * 🔴 The platform is one path segment and the scope is **everything after it**,
+ *    not a second segment: a scope is an account/organization identifier and may
+ *    itself contain a colon, while a platform id never does (it is the `id` field
+ *    of lib/contract.ts's platform table). Splitting on the last colon instead
+ *    would name a platform that does not exist and quietly skip the record.
+ */
+export function legacyScopeFromKey(key: string): { platform: string; scope: string } | null {
+  if (!key.startsWith(LEGACY_STATE_KEY_PREFIX)) return null;
+  const rest = key.slice(LEGACY_STATE_KEY_PREFIX.length);
+  const separator = rest.indexOf(':');
+  if (separator <= 0 || separator === rest.length - 1) return null;
+  return { platform: rest.slice(0, separator), scope: rest.slice(separator + 1) };
+}
+
+/**
+ * 🔴 W36/W36b · **Carry any pre-W18 record over now, before the gates decide
+ * anything — and find it by scanning `storage.local`, not the target registry.**
+ *
+ * ## Why the migration cannot live only inside a run any more
+ *
+ * `runBackfill` opens the ledger, and the ledger is what migrates — so the whole
+ * storage layout moved only on a tick that got all the way to "a fetch is about
+ * to happen": switch on, host answering, a registered target **and an open
+ * platform tab** (the http port). The first real-Chrome acceptance was in
+ * exactly the other state for days — tabs closed, every tick blocked at
+ * `no-http-port` — so the user's 7,737-id v1 record sat there untouched, no
+ * `cs_backfill_v2:*` key existed, the popup had no debt set to show, and nothing
+ * anywhere said so.
+ *
+ * ## Why W36 was still not enough, and what changed
+ *
+ * W36 hung the migration off the top of the alarm tick but walked
+ * `loadTargets()` — the scopes the user is *currently registered for*. So a
+ * pre-W18 record whose scope is not in that registry was visited by nothing at
+ * all, and on a machine whose switch is off, or in the 5-10 minutes before the
+ * next tick, neither the tick nor anything else touched it either. The layout is
+ * a property of `storage.local`, not of the registry: the scan below enumerates
+ * the **keys**, so every pre-W18 record is reachable from every caller of this
+ * function — the tick preflight and the popup's first state load alike.
+ *
+ * ## What this does not change
+ *
+ *  · **no scope is invented.** The keys are the ones already in storage; a
+ *    `{platform, scope}` comes out of the key itself, and `openLedger` refuses
+ *    any record whose own identity disagrees with its address;
+ *  · **a layout that has already moved costs one `keys()` read and nothing
+ *    else.** The ledger is opened only for a key that really is `cs_backfill_v1:*`
+ *    — opening one reads the scope's whole debt set back out of IndexedDB, the
+ *    very read W18 exists to stop paying per tick;
+ *  · **a refusal still writes nothing.** `openLedger` is the migration's only
+ *    entry point and it leaves an unreadable record exactly as it found it; what
+ *    is new is that the reason is returned to the caller, which puts it in the
+ *    tick trace and in the popup instead of dropping it on the floor.
+ */
+export async function migrateLegacyScopes(store: BackfillStore | null): Promise<LegacyMigration> {
+  if (!store) return NOTHING_TO_MIGRATE;
+
+  let keys: string[];
+  try {
+    keys = await store.keys();
+  } catch (err) {
+    // 🔴 "I could not look" is not "there is nothing to find". The sweep reports
+    //    the refusal it can name — the store itself — rather than a zero that
+    //    would read as a completed migration.
+    console.warn('[chat-stasher] backfill state preflight could not list storage keys', (err as Error).message);
+    return {
+      ...NOTHING_TO_MIGRATE,
+      refusal: {
+        reason: 'storage-unavailable',
+        detail: 'storage.local could not be listed, so the pre-W18 records (if any) were not looked for',
+      },
+    };
+  }
+
+  const report: LegacyMigration = { ...NOTHING_TO_MIGRATE };
+  for (const key of keys.sort()) {
+    const named = legacyScopeFromKey(key);
+    if (!named) continue;
+    report.found += 1;
+    // 🔴 One unreadable scope must not hide the ones behind it: `continue`, never
+    //    `return`. (W36 returned here; a store that threw on the first key skipped
+    //    every later scope, including healthy ones.)
+    let outcome: OneMigration;
+    try {
+      outcome = await migrateOneLegacyKey(store, named.platform, named.scope, key);
+    } catch (err) {
+      console.warn('[chat-stasher] backfill state preflight read failed', (err as Error).message);
+      outcome = {
+        kind: 'refused',
+        refusal: {
+          reason: 'storage-unavailable',
+          detail: 'a pre-W18 record could not be read out of storage.local, so it was not moved',
+        },
+      };
+    }
+    if (outcome.kind === 'moved') report.moved += 1;
+    else if (outcome.kind === 'orphaned') report.orphaned += 1;
+    // 🔴 An orphan that could not be cleared is a refusal like an ordinary one:
+    //    either way the old record is still holding this account's ids and nothing
+    //    moved it. Only the first is kept — they are the same class of fact and
+    //    the trace has one field for it.
+    if (outcome.kind !== 'moved' && report.refusal === null) report.refusal = outcome.refusal;
+  }
+  return report;
+}
+
+/** What one pre-W18 key turned out to be. Three different facts, never collapsed. */
+type OneMigration =
+  | { kind: 'moved' }
+  /** Carried over, but its copy could not be confirmed against the debt store. */
+  | { kind: 'orphaned'; refusal: LedgerRefusal }
+  | { kind: 'refused'; refusal: LedgerRefusal };
+
+/**
+ * One pre-W18 key. Two shapes, and they are different facts:
+ *  · the scope has **no** v2 header ⇒ the ordinary migration, through
+ *    `openLedger` (its only entry point, so the whole safety argument is one
+ *    function);
+ *  · the scope **has** one ⇒ a migration interrupted between its header write and
+ *    its last step. `openLedger` would never look at the old key again, so the
+ *    copy is confirmed against the debt store and, if it matches, cleared —
+ *    `completeInterruptedMigration` states the proof it insists on.
+ */
+async function migrateOneLegacyKey(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+  key: string,
+): Promise<OneMigration> {
+  const legacy = await store.load(key);
+  if (isHeader(await store.load(stateKey(platform, scope)))) {
+    if (!isLegacyState(legacy) || legacy.platform !== platform || legacy.scope !== scope) {
+      return {
+        kind: 'orphaned',
+        refusal: {
+          reason: 'state-unreadable',
+          detail: `the pre-W18 record at ${key} sits beside a new-layout record and is not a record this `
+            + 'build can read; it has been left untouched',
+        },
+      };
+    }
+    const refusal = await completeInterruptedMigration(store, platform, scope, key, legacy);
+    return refusal === null ? { kind: 'moved' } : { kind: 'orphaned', refusal };
+  }
+  const opened = await openLedger(store, platform, scope);
+  return opened.ok ? { kind: 'moved' } : { kind: 'refused', refusal: opened.refusal };
+}
+
 export interface BackfillTickRecord {
   /** When this tick happened (Date.now()). */
   at: number;
@@ -293,6 +479,38 @@ export interface BackfillTickRecord {
   reason: TickReason;
   /** How many backfill targets the registry held when this tick woke. 0 is 0, undecorated. */
   targets: number;
+  /**
+   * 🔴 W36 · **How the run itself ended**, when there was one.
+   *
+   * Why `ran: true` was not enough — the first real-Chrome acceptance read
+   * `{ran: true, reason: 'ran'}` next to a storage layout that had not moved and
+   * concluded that the W18 migration had never run. It had run: `tickBackfill`
+   * reports `ran` whenever `runBackfill` **returns**, and a run that halts on a
+   * state record it cannot read returns a report like any other. The two
+   * outcomes were indistinguishable in the trace, so the one fact that would
+   * have answered the question in seconds — the run's own stop reason and the
+   * halt it recorded — was thrown away by `recordAlarmTick`.
+   *
+   * Optional, and read as "no run happened": a record written before this field
+   * existed (or by a tick blocked at a gate) still parses, and the popup's
+   * `isTickRecord` does not require it — the same compatibility rule the other
+   * optional fields in this project follow.
+   */
+  stopped?: StopReason | null;
+  /**
+   * The `HaltReason` the run left behind, or the one a refusal reached **before**
+   * the run could start (see `migrateLegacyScopes`) — `null` when neither
+   * happened. This is the field that turns "it ran and nothing moved" into a
+   * named fact.
+   */
+  halted?: HaltReason | null;
+  /**
+   * The halt's own technical detail, verbatim. Metadata only by construction —
+   * the engine's details name keys, paths, statuses and counts, never a
+   * conversation body (CLAUDE.md's privacy rule, and the reason the detail is
+   * safe to persist at all).
+   */
+  detail?: string | null;
 }
 
 function isTickRecord(v: unknown): v is BackfillTickRecord {

@@ -31,7 +31,7 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:309-377`;
-   `apps/extension/entrypoints/background.ts:193-210`).
+   `apps/extension/entrypoints/background.ts:195-212`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -108,7 +108,7 @@ Concretely, four separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:64-80`, `:309-377`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:120-148`). It sits there,
+   (`apps/extension/entrypoints/background.ts:122-150`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:379-394`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -221,6 +221,24 @@ storage for the key, or passphrase-wrapping of the key file.
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
 | **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:468-485` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:461`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:754-809`, `:1119-1141`). |
 
+**Caveat, stated honestly, and one measurement this document owes the reader:**
+the "cannot see that the capture happened" line above is about what the platform
+observes, and it presumes a capture happened. On 2026-09-19, in a real browser
+with the extension loaded, live capture on **Gemini** and **Kimi** did **not**
+happen: the `gemini.google.com/app/<id>` tab still had the browser's own
+`window.fetch` and `XMLHttpRequest.prototype.open`, and the `www.kimi.com/chat/<id>`
+page's own messages request was answered 200 with a `{messages}` body and
+produced no capture. One cause is fixed on this branch (a same-origin **subframe**
+of a supported origin was never injected into — `allFrames` was off — so a
+request made from one never reached the hook); the other is that a document
+existing **before** the extension was loaded or updated is not re-injected into
+by Chrome without host permissions this extension does not request, and is fixed
+only by reloading the tab. Which one a given tab is cannot be told from outside
+it, and the cause is still under investigation. This is stated here because the
+opposite reading — "capture works on all seven, so the platforms see nothing
+distinctive" — would be a claim about a channel that, on those two, was not
+running. `e2e/frame-capture.spec.ts` is the reproduction of the first cause.
+
 **Caveat, stated honestly:** on every platform except ChatGPT and Gemini the
 passive hook adds no traffic, so there is nothing distinctive for the platform to
 observe from it. **On Gemini it does add traffic:** when a conversation is
@@ -235,7 +253,7 @@ while holding only the oldest turns. **On ChatGPT it does add traffic:** when yo
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
 `/api/auth/session` (`apps/extension/lib/page-hook.ts:442-447`;
-`apps/extension/entrypoints/dw-bridge.content.ts:323-349`;
+`apps/extension/entrypoints/dw-bridge.content.ts:390-416`;
 `apps/extension/lib/platform-auth.ts:99-118`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
@@ -295,7 +313,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:752-765`, `:911-927`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:135-137`). It never leaves your
+(`apps/extension/entrypoints/background.ts:137-139`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 ### The browser extension ecosystem — other extensions installed alongside ours
@@ -552,7 +570,7 @@ a real limitation of the current code.
    sent only when the page's own requests and the cookie both named none, and a
    recorded "several organizations, no signal" is not asked again
    (`apps/extension/lib/backfill/claude-page.ts:62-136`;
-   `apps/extension/entrypoints/background.ts:681-696`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:683-698`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:214-246`); a body
    response that admits it is incomplete is refused and listed as a failure

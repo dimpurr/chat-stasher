@@ -25,6 +25,26 @@ export interface BackfillStore {
    * green. An optional method would make "the old key was removed" unfalsifiable.
    */
   remove(key: string): Promise<void>;
+  /**
+   * 🔴 W36b · **Every key in the area.**
+   *
+   * Why this exists, and why it is required rather than optional. The W36 fix for
+   * the un-migrated pre-W18 record walked the **target registry** — the scopes the
+   * user is currently registered for — so a `cs_backfill_v1:<platform>:<scope>`
+   * record whose scope is not in that registry was never visited by anything, and
+   * neither was one on a machine whose switch is off or whose next tick is 5-10
+   * minutes away. The layout is not a property of the target registry; it is a
+   * property of `storage.local`, and the only thing that can enumerate it is the
+   * area itself.
+   *
+   * 🔴 Required for the same reason `remove` is: a store that cannot list keys is
+   *    a store the migration cannot run against, and a **falsey** answer would be
+   *    read by the caller as "there is no pre-W18 record anywhere" — an unknown
+   *    recorded as empty, which is the one thing this project does not do
+   *    (CLAUDE.md invariant 1). A store that cannot answer has to say so, so the
+   *    caller can say so too.
+   */
+  keys(): Promise<string[]>;
 }
 
 type LocalArea = {
@@ -110,6 +130,14 @@ export function browserLocalStore(): BackfillStore | null {
     async remove(key: string): Promise<void> {
       await area.remove(key);
     },
+    // `get(null)` is "everything" in the real API (the same call
+    // `browserLocalSnapshot` makes); a fake that does not support it throws, and
+    // `migrateLegacyScopes` catches that and says it could not look rather than
+    // reporting that there was nothing.
+    async keys(): Promise<string[]> {
+      const all = await (area.get as unknown as (q: null) => Promise<Record<string, unknown>>)(null);
+      return Object.keys(all);
+    },
   };
   cachedLocalStore = { area, store };
   return store;
@@ -152,6 +180,9 @@ export function memoryStore(seed: Record<string, unknown> = {}): BackfillStore &
     async remove(key: string): Promise<void> {
       delete data[key];
       this.writes += 1;
+    },
+    async keys(): Promise<string[]> {
+      return Object.keys(data);
     },
   };
 }

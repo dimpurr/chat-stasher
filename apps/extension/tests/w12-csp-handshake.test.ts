@@ -46,6 +46,15 @@ interface FakePage {
   createdScripts: number;
   /** Model the page's CSP: false ⇒ the script is appended but never executes. */
   allowInlineScripts: boolean;
+  /**
+   * 🔴 W36 · Model **Trusted Types enforcement**: true ⇒ assigning the script's
+   * `textContent` throws, exactly as Chrome does on a page whose policy carries
+   * `require-trusted-types-for 'script'` (`HTMLScriptElement.text` is a
+   * TrustedScript sink). This is a different failure from `allowInlineScripts:
+   * false`: there the script is appended and merely never executes, and the
+   * bridge's own verification sees the difference.
+   */
+  trustedTypes: boolean;
   /** Deliver every message the page world has posted so far, and any it posts in response. */
   pump(): void;
 }
@@ -77,6 +86,7 @@ function makeFakePage(hook: {
     injectedSources: [],
     createdScripts: 0,
     allowInlineScripts: false,
+    trustedTypes: false,
     pump() {
       // FIFO, and a task may queue another: the handshake is two round trips.
       while (tasks.length > 0) {
@@ -122,7 +132,24 @@ function makeFakePage(hook: {
     createElement(tag: string) {
       page.createdScripts += 1;
       expect(tag).toBe('script');
-      return { textContent: '', remove() { /* detached again by the bridge */ } };
+      const script: { textContent: string; remove(): void } = {
+        textContent: '',
+        remove() { /* detached again by the bridge */ },
+      };
+      if (page.trustedTypes) {
+        // Chrome's own refusal, verbatim (measured 2026-09-19 on a page served
+        // with `require-trusted-types-for 'script'`): the assignment throws
+        // before anything can be appended or executed.
+        Object.defineProperty(script, 'textContent', {
+          set() {
+            throw new TypeError(
+              "Failed to set the 'textContent' property on 'HTMLScriptElement':"
+              + " This document requires 'TrustedScript' assignment.",
+            );
+          },
+        });
+      }
+      return script;
     },
     // 🔴 W27 · Every real page's `document` has these two, and the bridge now
     //    listens for the tab becoming visible (lib/backfill/tab-hello.ts). This
@@ -283,6 +310,40 @@ describe('W12 · MAIN world silent: the fallback still runs, and says so exactly
     // world — verification without a second <script> reading `window.fetch`.
     expect(probeAnswers(page).length).toBeGreaterThanOrEqual(1);
     expect(warn.mock.calls.filter((c) => c[0] === FALLBACK_HOOK_VERIFICATION_WARNING)).toHaveLength(0);
+  });
+
+  it('🔴 a page that enforces Trusted Types refuses the assignment ⇒ the fallback failure is named, not thrown', async () => {
+    // 🔴 W36 · The third refusal, and the one the first real-Chrome acceptance ran
+    //    into (measured 2026-09-19 on gemini.google.com): `script.textContent =
+    //    source` is a TrustedScript sink, so on a page whose policy carries
+    //    `require-trusted-types-for 'script'` the assignment **throws**. The other
+    //    two cases model "appended but not executed" — this one models the browser,
+    //    where the refusal happens before anything can be appended at all.
+    //
+    //    The property under test is the one this file's whole fallback machinery
+    //    exists for: an inline script this extension could not get into the page
+    //    must be a **named** fact. A throw escapes `injectPageScript` before
+    //    `fallbackScriptAppended` is assigned, so the warning below is never
+    //    reached — the failure is silent exactly where it cannot be fixed.
+    const page = makeFakePage(await pageHook());
+    page.trustedTypes = true;
+    stubRuntime();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await loadBridge();
+    await settle(page, 1);             // the probe goes unanswered
+    await settle(page, 150);           // the fallback is attempted here — and refused
+
+    const warnings = warn.mock.calls.filter((c) => c[0] === FALLBACK_HOOK_VERIFICATION_WARNING);
+    expect(warnings).toHaveLength(1);
+
+    // Nothing was appended (the refusal came first), so the two states stay apart:
+    // "this page refused to run our script" is not "our script ran and did nothing".
+    expect(page.injectedSources).toEqual([]);
+
+    // Still once per page, however long we watch.
+    await settle(page, 5_000);
+    expect(warn.mock.calls.filter((c) => c[0] === FALLBACK_HOOK_VERIFICATION_WARNING)).toHaveLength(1);
   });
 });
 
