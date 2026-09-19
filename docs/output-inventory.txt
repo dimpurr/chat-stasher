@@ -230,7 +230,7 @@ help_doc     crates/chat-stasher/src/main.rs:116  Masterkey file override.
 help_doc     crates/chat-stasher/src/main.rs:119  Concurrency cap override.
 help_doc     crates/chat-stasher/src/main.rs:122  Backend option `key=value`, repeatable.
 help_doc     crates/chat-stasher/src/main.rs:125  Keep the ssh ControlMaster processes open after this run (do not shut them down).
-help_doc     crates/chat-stasher/src/main.rs:130  The subcommands. `push`/`read` are backed by the BackupStore
+help_doc     crates/chat-stasher/src/main.rs:130  Subcommands. `push`/`read` are backed by the BackupStore
 help_doc     crates/chat-stasher/src/main.rs:131  (rustic_core); `doctor` answers one question — is a harness silently
 help_doc     crates/chat-stasher/src/main.rs:132  deleting your history?
 help_doc     crates/chat-stasher/src/main.rs:135  Write a commented default config if none exists (non-destructive).

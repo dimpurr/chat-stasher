@@ -351,8 +351,8 @@ crates/chat-stasher/src/inbox.rs:853-881  81d263fdddc2  lines=29
   <- docs/install.md:281, docs/threat-model.md:375  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:81  51c934204980  lines=1
   <- README.md:3, docs/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:130-991  7be893e88cfa  lines=862
-  <- README.md:87, docs/install.md:539, docs/privacy.md:553, docs/threat-model.md:515  :: /// The subcommands. `push`/`read` are backed by the Backup…
+crates/chat-stasher/src/main.rs:130-991  ff71c8fcb2a8  lines=862
+  <- README.md:87, docs/install.md:539, docs/privacy.md:553, docs/threat-model.md:515  :: /// Subcommands. `push`/`read` are backed by the BackupStore
 crates/chat-stasher/src/main.rs:134-135  82ade6217eb6  lines=2
   <- README.md:89  :: enum Command {
 crates/chat-stasher/src/main.rs:135-136  6f7da3119197  lines=2

@@ -1,6 +1,6 @@
 # Privacy Policy — Chat Stasher
 
-**Last updated: 2026-09-12.**
+**Last updated: 2026-09-19.**
 
 This policy covers the **Chat Stasher browser extension** and the **`chat-stasher`
 command-line tool**. Together they copy your own AI-chat conversations into an

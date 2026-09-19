@@ -127,7 +127,7 @@ struct UiArgs {
     keep_ssh_masters: bool,
 }
 
-/// The subcommands. `push`/`read` are backed by the BackupStore
+/// Subcommands. `push`/`read` are backed by the BackupStore
 /// (rustic_core); `doctor` answers one question — is a harness silently
 /// deleting your history?
 #[derive(Subcommand)]

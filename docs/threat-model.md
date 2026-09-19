@@ -521,7 +521,7 @@ a real limitation of the current code.
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:521-601`) — see exposure 5
-   below. Bulk retrieval of the sessions a time window selects is therefore
+   above. Bulk retrieval of the sessions a time window selects is therefore
    possible; what remains missing is restoring them into a harness's own
    directories.
 
