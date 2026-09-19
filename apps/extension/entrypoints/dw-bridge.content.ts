@@ -33,6 +33,7 @@ import {
 } from '../lib/platform-auth';
 import { completeGeminiLiveCapture, isGeminiDetailRequest } from '../lib/gemini-capture';
 import { createFallbackWarningGate } from '../lib/fallback-verification';
+import { createStaleLinkWarningGate } from '../lib/page-link';
 
 /**
  * ISOLATED-world bridge. WHY ISOLATED: MAIN/page world has no extension API
@@ -52,6 +53,8 @@ export default defineContentScript({
     let fallbackVerificationTimer: ReturnType<typeof setTimeout> | undefined;
     /** 🔴 At most one fallback warning per page; see lib/fallback-verification.ts. */
     const warnFallbackUnverified = createFallbackWarningGate();
+    /** 🔴 W36 · At most one stale-link warning per page; see lib/page-link.ts. */
+    const warnStaleLink = createStaleLinkWarningGate();
 
     const pageOrigin = window.location.origin;
     const isPageMessage = (event: MessageEvent<unknown>): boolean =>
@@ -142,19 +145,58 @@ export default defineContentScript({
       }
       browser.runtime
         .sendMessage({ type: 'chat-captured', payload: outgoing })
-        .catch(() => {
-          // A failed extension channel must never disturb the page.
+        .catch((err: unknown) => {
+          // 🔴 W36 · An empty catch here is how a real conversation disappears
+          //    without a trace: on a page left open across an extension reload
+          //    this document's scripts are the previous build's, so the capture
+          //    is produced (the page-world hook is still installed) and then
+          //    dropped against a context that no longer exists. The page is
+          //    never disturbed — that rule stands — but the drop is **named**,
+          //    once per page. See lib/page-link.ts.
+          warnStaleLink(err);
         });
     }
 
+    /**
+     * 🔴 W36 · **A refusal is a value here, never an exception.**
+     *
+     * Building the script is three statements that can each be refused by the
+     * page, and only one of them used to be survivable:
+     *  · `document.createElement` — a page can be gone (the `typeof document`
+     *    guard above) or have no root element;
+     *  · **`script.textContent = source` — a Trusted Types page throws here.**
+     *    Measured 2026-09-19 in a real Chromium on a page served with
+     *    `require-trusted-types-for 'script'`:
+     *      TypeError: Failed to set the 'textContent' property on
+     *      'HTMLScriptElement': This document requires 'TrustedScript' assignment.
+     *    `HTMLScriptElement.text` is a TrustedScript sink, so on such a page the
+     *    assignment is refused *before* anything is appended or executed.
+     *    This is the failure the first acceptance saw as "the MAIN-world hook is
+     *    absent" — and it was silent, because the throw left `injectPageScript`
+     *    before `fallbackScriptAppended` was assigned and so skipped
+     *    `warnFallbackUnverified` entirely;
+     *  · `appendChild` — the CSP case the W12 comment below describes (appended,
+     *    never executed).
+     *
+     * Swallowing the exception is not the point; **reporting it is**. The return
+     * value is what the caller's verification reads, so `false` means "we could
+     * not get the fallback into this page" and the fixed warning — the one
+     * signal this whole capability has — fires. Losing the exception object is
+     * deliberate: its message is the browser's, and the warning is fixed and
+     * metadata-only by design (lib/fallback-verification.ts).
+     */
     function injectPageScript(source: string): boolean {
       if (typeof document === 'undefined') return false;
       const parent = document.documentElement ?? document.head;
       if (!parent) return false;
-      const script = document.createElement('script');
-      script.textContent = source;
-      parent.appendChild(script);
-      script.remove();
+      try {
+        const script = document.createElement('script');
+        script.textContent = source;
+        parent.appendChild(script);
+        script.remove();
+      } catch {
+        return false;
+      }
       return true;
     }
 
@@ -343,8 +385,10 @@ export default defineContentScript({
             capturedAt: Date.now(),
           },
         })
-        .catch(() => {
-          // A failed extension channel must never disturb the page.
+        .catch((err: unknown) => {
+          // W36 · The same rule as deliverCapture: never disturb the page, never
+          // lose the fact. See lib/page-link.ts.
+          warnStaleLink(err);
         });
     }
 
@@ -412,6 +456,12 @@ export default defineContentScript({
       hello: () => browser.runtime.sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin }),
       // A test running under node has no `document`; the page always does.
       visibility: typeof document === 'undefined' ? null : document,
+      // 🔴 W36 · This is the occasion a page with no traffic gets: the hello
+      //    repeats every few minutes, and on a document whose scripts predate the
+      //    current build every one of them fails the same way. Naming it here is
+      //    what turns "no-http-port for days while the site is open on screen"
+      //    into a sentence the developer can act on.
+      onFailure: (err) => { warnStaleLink(err); },
     });
 
     window.addEventListener('message', onMessage);
