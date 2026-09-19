@@ -1176,9 +1176,29 @@ async function recordAlarmTick(
      * value `reason` already carries.
      */
     stopped: result.report?.stopped ?? result.reason,
-    halted: halt?.reason ?? preflightRefusal?.reason ?? null,
-    detail: halt?.detail ?? preflightRefusal?.detail ?? null,
+    /**
+     * 🔴 R47 · The preflight is attached **only when no run happened**. It walks
+     *    every `cs_backfill_v2:*` key, not the target this tick used, so a single
+     *    unreadable record left over from another scope would otherwise ride along
+     *    on a tick that ran and archived — and the popup would say "that tick
+     *    stopped before it could finish" under a `ran: true` head, for every tick,
+     *    until someone removed the stale key by hand.
+     */
+    halted: halt?.reason ?? (result.ran ? null : preflightRefusal?.reason) ?? null,
+    detail: halt?.detail ?? (result.ran ? null : preflightRefusal?.detail) ?? null,
   });
+}
+
+/**
+ * 🔴 R47 · An origin, or nothing. A message that named something which is not a
+ * URL named no origin, and the decline record says so rather than storing a path.
+ */
+function originOf(value: string): string | null {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
 }
 
 function cancelledIdLike(id: string | null): boolean {
@@ -1332,22 +1352,24 @@ export default defineBackground(() => {
          *    the origin's record — the one way it is ever cleared
          *    (`lib/hook-status.ts`).
          *
-         * 🔴 W47 · **A refusal here is a fact, and it is written down.** This used
-         *    to be the exact shape of the day W47 exists for: the message reached
-         *    this listener, the listener ran, the store was writable — and the
-         *    report was declined by the origin check below, so no record appeared
-         *    and no console line was caught. From outside, "background refused this
-         *    report" and "nothing ever arrived" were the same state, and they are
-         *    two different facts. `recordHookDecline` writes the second one down;
-         *    the page's own record is still not written, because a record naming an
-         *    origin this extension does not inject into would be a sentence about
-         *    somebody else's page.
+         * 🔴 W47 · **A refusal here is a fact, and it is written down.** From
+         *    outside, "background refused this report" and "nothing ever arrived"
+         *    are the same state, and they are two different facts.
+         *    `recordHookDecline` writes the refusal down; the page's own record is
+         *    still not written, because a record naming an origin this extension
+         *    does not inject into would be a sentence about somebody else's page.
          */
         const platform = PLATFORMS.find((row) => row.origins.includes(message.origin));
         if (!platform) {
           recordHookDecline(browserLocalStore(), {
             reason: HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
-            origin: message.origin,
+            // 🔴 R47 · `isHookStatusMessage` proves only "a non-empty string". What
+            //    is stored and shown must be an origin, so it is normalised here;
+            //    a value that is not a URL is recorded as `null`, which the record
+            //    already means as "it named no usable origin". The guard itself is
+            //    left alone: widening what counts as a valid message is not this
+            //    change.
+            origin: originOf(message.origin),
             observation: message.reason,
             at: message.observedAt,
           })

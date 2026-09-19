@@ -41,11 +41,11 @@ apps/extension/entrypoints/background.ts:848  6539997ed831  lines=1
   <- docs/privacy.md:309  :: return { platform: row.id, origin, scope: identity.value ||…
 apps/extension/entrypoints/background.ts:948-970  f08bd697b536  lines=23
   <- README.md:172, docs/install.md:635, docs/privacy.md:352  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1141-1182  a64df4800009  lines=42
+apps/extension/entrypoints/background.ts:1141-1190  d23e0691fada  lines=50
   <- docs/privacy.md:276  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:1300-1316  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:1320-1336  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:1346-1356  3249a7f92eeb  lines=11
+apps/extension/entrypoints/background.ts:1362-1378  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:432-438  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -221,7 +221,7 @@ apps/extension/lib/gemini-capture.ts:150-234  2f22e0ff5308  lines=85
   <- README.md:171, docs/privacy.md:384, docs/privacy.md:441, docs/threat-model.md:258  :: export async function completeGeminiLiveCapture(
 apps/extension/lib/hook-status.ts:69-101  b6a648abde1a  lines=33
   <- docs/privacy.md:277  :: export const HOOK_STATUS_KEY_PREFIX = 'cs_hook_v1:';
-apps/extension/lib/hook-status.ts:226-349  b55b07df3519  lines=124
+apps/extension/lib/hook-status.ts:226-355  cf4d4983ffd4  lines=130
   <- docs/privacy.md:277  :: export const HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN = 'not-a-pl…
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
   <- docs/privacy.md:274  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
@@ -287,7 +287,7 @@ apps/extension/lib/platform-auth.ts:214-246  f714ed2af5c0  lines=33
   <- README.md:169, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:505, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:595  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:355-417  b4aa1f8f6f82  lines=63
   <- README.md:171, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:602  :: export function createGeminiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:766-779  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:768-781  00dceceff078  lines=14
   <- README.md:173, docs/install.md:161  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:263  :: export function fixCommand(stage: string | null | undefined…

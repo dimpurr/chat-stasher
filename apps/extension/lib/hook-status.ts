@@ -335,7 +335,13 @@ export async function recordHookDecline(
   if (!store) return;
   try {
     const previous = await loadHookDecline(store);
-    const count = (previous?.reason === decline.reason ? previous.count : 0) + 1;
+    // 🔴 R47 · A streak is the same refusal about the same origin. Comparing the
+    //    reason alone made "origin A refused once, then origin B refused once" read
+    //    as "B was refused twice" — the saved origin is the latest one, and the
+    //    sentence names it.
+    const sameOrigin = (previous?.origin ?? null) === (decline.origin ?? null);
+    const continues = previous?.reason === decline.reason && sameOrigin;
+    const count = (continues ? previous.count : 0) + 1;
     await store.save(HOOK_DECLINED_KEY, {
       at: decline.at,
       reason: decline.reason,

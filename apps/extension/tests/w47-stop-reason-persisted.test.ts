@@ -270,6 +270,35 @@ describe('W47 · every path that writes a trace names how it ended', () => {
     expect(rec.targets).toBe(1);
   });
 
+  it('🔴 a run that succeeded does not inherit a refusal about somebody else', async () => {
+    // The preflight sweeps **every** state key in storage, not just the target's.
+    // So a record belonging to a platform this tick never touches can be
+    // unreadable while the tick's own leg runs perfectly well. Those are two
+    // different facts, and `halted` is the field for the *run's* conclusion: a
+    // run that ran and did not halt must say so, or the next person reading the
+    // trace diagnoses a halt on a leg that never halted.
+    store['cs_backfill_v2:gemini:someone-elses-scope'] = { not: 'a header', v: 99 };
+    await enabledWithTarget();
+    liveTabs.set(101, ORIGIN);
+    const mod = await bootBackground();
+    await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 101);
+
+    await alarmTick(mod);
+    const rec = await trace();
+    // The run really happened — same shape as the healthy case above.
+    expect(rec.ran).toBe(true);
+    expect(rec.reason).toBe('ran');
+    expect(contentFetches.length).toBeGreaterThan(0);
+    expect(rec.stopped).toBe('host-unavailable');
+    // 🔴 The claim: `state-unreadable` is about the gemini record, and this leg
+    //    did not halt. Before the fix the preflight's refusal was written here
+    //    unconditionally, so a healthy run reported a halt it never had.
+    expect(rec.halted).toBeNull();
+    expect(rec.detail ?? null).toBeNull();
+    // And the record the refusal is about is still untouched.
+    expect(store['cs_backfill_v2:gemini:someone-elses-scope']).toEqual({ not: 'a header', v: 99 });
+  });
+
   it('🔴 a trace written before these fields existed still parses', async () => {
     const { loadLastTick, BACKFILL_LAST_TICK_KEY } = await import('../lib/backfill/alarm');
     const { browserLocalStore } = await import('../lib/backfill/store');
@@ -387,6 +416,46 @@ describe('W47 · a report background declines is a fact, not a silence', () => {
       observedAt: 1_700_000_005_000,
     });
     expect(store[HOOK_DECLINED_KEY]).toMatchObject({ count: 2 });
+  });
+
+  it('🔴 a decline from a different origin starts its own streak', async () => {
+    const OTHER_ORIGIN = 'https://a-second-unmatched-site.example';
+    await bootBackground();
+
+    await dispatch({
+      type: 'cs-hook-status',
+      origin: UNKNOWN_ORIGIN,
+      reason: 'hook-was-replaced',
+      observedAt: 1_700_000_000_000,
+    });
+    expect(store[HOOK_DECLINED_KEY]).toMatchObject({ origin: UNKNOWN_ORIGIN, count: 1 });
+
+    // A different origin refused for the same reason is **not** the same thing
+    // happening again. The streak answers "how long has this been going on", and
+    // one record is shared by every origin — so counting across origins would
+    // report `count: 2` for two unrelated pages that each spoke once, which reads
+    // as a page in a loop. The origin printed beside the count would be the
+    // second one, making the number a claim about a page it does not describe.
+    await dispatch({
+      type: 'cs-hook-status',
+      origin: OTHER_ORIGIN,
+      reason: 'hook-was-replaced',
+      observedAt: 1_700_000_005_000,
+    });
+    expect(store[HOOK_DECLINED_KEY]).toMatchObject({
+      origin: OTHER_ORIGIN,
+      reason: 'not-a-platform-origin',
+      count: 1,
+    });
+
+    // …and the streak still counts when the same origin really does repeat.
+    await dispatch({
+      type: 'cs-hook-status',
+      origin: OTHER_ORIGIN,
+      reason: 'hook-was-replaced',
+      observedAt: 1_700_000_010_000,
+    });
+    expect(store[HOOK_DECLINED_KEY]).toMatchObject({ origin: OTHER_ORIGIN, count: 2 });
   });
 
   it('🔴 a report this build cannot read is recorded, and nothing is invented about it', async () => {

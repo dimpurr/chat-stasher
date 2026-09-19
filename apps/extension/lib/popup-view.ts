@@ -62,6 +62,8 @@ import type { HostPauseRecord, HostStatusRecord } from './host-status';
 import {
   HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
   HOOK_DECLINE_UNREADABLE_MESSAGE,
+  isHookDecline,
+  type HookDecline,
   type HookDeclineRecord,
   type HookStatusRecord,
 } from './hook-status';
@@ -1108,20 +1110,24 @@ function hookStatusNote(record: HookStatusRecord): string {
 function hookDeclineNote(record: HookDeclineRecord): string {
   const when = ui.stamp(record.at);
   const count = record.count;
-  switch (record.reason) {
-    case HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN:
-      return t('popup.notes.hook.declinedOrigin', {
-        origin: record.origin ?? t('common.unknownShort'),
-        when,
-        count,
-      });
-    case HOOK_DECLINE_UNREADABLE_MESSAGE:
-      return t('popup.notes.hook.declinedMessage', { when, count });
-    default:
-      // A reason code from a build newer than this one, printed as itself — see
-      // HookDeclineRecord.reason for why it is not read as "no record at all".
-      return t('popup.notes.hook.declinedOther', { reason: record.reason, when, count });
+  // 🔴 R47 · Two different unknowns, kept apart. A code this build does not know
+  //    comes from a NEWER build and must print as itself (HookDeclineRecord.reason
+  //    says why). But a member added to HOOK_DECLINES in THIS build with no
+  //    sentence must not quietly fall through to that same fallback — so the known
+  //    set is an exhaustive Record, the pattern HOOK_REASON_NOTE_KEYS already uses,
+  //    and a new member fails to compile until someone writes its words.
+  if (!isHookDecline(record.reason)) {
+    return t('popup.notes.hook.declinedOther', { reason: record.reason, when, count });
   }
+  const known: Record<HookDecline, () => string> = {
+    [HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN]: () => t('popup.notes.hook.declinedOrigin', {
+      origin: record.origin ?? t('common.unknownShort'),
+      when,
+      count,
+    }),
+    [HOOK_DECLINE_UNREADABLE_MESSAGE]: () => t('popup.notes.hook.declinedMessage', { when, count }),
+  };
+  return known[record.reason]();
 }
 
 /**
