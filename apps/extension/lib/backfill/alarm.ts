@@ -28,8 +28,9 @@
 import type { BackfillStore } from './store';
 import type { TickReason } from './schedule';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
-import { completeInterruptedMigration, openLedger, type LedgerRefusal } from './ledger';
+import { completeInterruptedMigration, openLedger, unreadableStateRefusal, type LedgerRefusal } from './ledger';
 import {
+  BACKFILL_STATE_VERSION,
   isHeader,
   isLegacyState,
   legacyStateKey,
@@ -298,6 +299,16 @@ export const BACKFILL_LAST_TICK_KEY = 'cs_backfill_lasttick_v1';
 export const LEGACY_STATE_KEY_PREFIX = `cs_backfill_v${LEGACY_STATE_VERSION}:`;
 
 /**
+ * The key prefix the current layout writes at: `cs_backfill_v2:`.
+ *
+ * 🔴 Derived from the same constant `stateKey()` uses, not typed out a second
+ *    time: `findUnreadableState` walks these keys, and a prefix that disagreed
+ *    with the one the writer uses would silently find nothing — an absence read as
+ *    "no record is unreadable".
+ */
+export const STATE_KEY_PREFIX = `cs_backfill_v${BACKFILL_STATE_VERSION}:`;
+
+/**
  * 🔴 W36b · **What one `migrateLegacyScopes` sweep did.**
  *
  * Three counts rather than a bare refusal, because "there was nothing to move"
@@ -329,8 +340,25 @@ const NOTHING_TO_MIGRATE: LegacyMigration = { found: 0, moved: 0, orphaned: 0, r
  *    would name a platform that does not exist and quietly skip the record.
  */
 export function legacyScopeFromKey(key: string): { platform: string; scope: string } | null {
-  if (!key.startsWith(LEGACY_STATE_KEY_PREFIX)) return null;
-  const rest = key.slice(LEGACY_STATE_KEY_PREFIX.length);
+  return scopeFromStateKey(key, LEGACY_STATE_KEY_PREFIX);
+}
+
+/**
+ * The `{platform, scope}` any `cs_backfill_v<n>:` key names, or null when the key
+ * is not one of ours.
+ *
+ * 🔴 W47 · The same split, for the same reason, applied to the **current** layout
+ *    as well as the pre-W18 one. `legacyScopeFromKey` is this function with the v1
+ *    prefix, so the two can never disagree about what a scope containing a colon
+ *    is called — which is the one thing the caller below relies on to name the
+ *    scope a record it cannot read belongs to.
+ */
+export function scopeFromStateKey(
+  key: string,
+  prefix: string,
+): { platform: string; scope: string } | null {
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
   const separator = rest.indexOf(':');
   if (separator <= 0 || separator === rest.length - 1) return null;
   return { platform: rest.slice(0, separator), scope: rest.slice(separator + 1) };
@@ -428,6 +456,87 @@ export async function migrateLegacyScopes(store: BackfillStore | null): Promise<
   return report;
 }
 
+/**
+ * 🔴 W47 · **"Is there a record in the current layout that this build cannot read?"
+ *
+ * ## The hole this closes, and why the engine's own refusal could not close it
+ *
+ * `openLedger` refuses a run whose state record it cannot read, and since W36 the
+ * run's own report carries that refusal into the tick trace. But the run only
+ * happens on a tick that got past every gate — switch on, host answering, a
+ * registered target **and an open platform page**. With the tabs closed, which is
+ * the ordinary state of a laptop, no tick ever opens the ledger, so the refusal is
+ * reached by nothing: the trace reads `no-http-port`, the popup shows no debt set,
+ * and `state.halted` being absent from storage does **not** mean no refusal
+ * happened. That is the same shape of hole W36b closed for the pre-W18 layout, and
+ * it is closed the same way: by looking at `storage.local` itself.
+ *
+ * ## What it costs, and why it is not an `openLedger` per scope
+ *
+ * One `keys()` read of the area, then **one `storage.local` read per current-layout
+ * key** — the header of a scope, which is small. It does not open a ledger: opening
+ * one reads the scope's whole debt set back out of IndexedDB, which is the
+ * per-tick cost W18 exists to remove, and it is why this cannot simply call
+ * `openLedger` and throw the state away. The migration above already pays a
+ * `keys()` read of its own; the two are kept apart rather than merged because they
+ * answer different questions and either one is allowed to be the only one that
+ * finds something.
+ *
+ * ## Nothing is written, and nothing is invented
+ *
+ * It **loads** the records and writes nothing — not the header, not the record it
+ * found, not a marker of its own. The refusal is decided by the very function
+ * `openLedger` uses (`unreadableStateRefusal`, lib/backfill/ledger.ts), so this can
+ * neither raise a refusal the engine would not raise nor miss one it would; where
+ * the refusal is stored is the caller's decision (the tick trace, whose key is a
+ * constant and not derived from the scope — see `recordAlarmTick`).
+ *
+ * 🔴 A key that names no scope (`cs_backfill_v2:` with nothing after it) is not a
+ *    record and is skipped, not reported: it is not a thing this build wrote, and
+ *    naming it would be inventing a scope out of a malformed key.
+ */
+export async function findUnreadableState(
+  store: BackfillStore | null,
+): Promise<LedgerRefusal | null> {
+  if (!store) return null;
+
+  let keys: string[];
+  try {
+    keys = await store.keys();
+  } catch (err) {
+    // "I could not look" is not "there is nothing wrong", and it is not silent
+    // either: the migration sweep in the same tick already refuses with
+    // `storage-unavailable` for the very same failure, and returning a second
+    // refusal here would make the trace name whichever happened to run first. So
+    // this is the log line, and the trace's one field is the migration's.
+    console.warn('[chat-stasher] backfill state preflight could not list storage keys', (err as Error).message);
+    return null;
+  }
+
+  for (const key of keys.sort()) {
+    const named = scopeFromStateKey(key, STATE_KEY_PREFIX);
+    if (!named) continue;
+    let raw: unknown;
+    try {
+      raw = await store.load(key);
+    } catch (err) {
+      // 🔴 This one **is** reported, unlike the `keys()` failure above: the
+      //    migration never loads a current-layout key, so nothing else in the tick
+      //    would ever notice, and a record that cannot be read at all is not the
+      //    same fact as a record that is not there.
+      console.warn('[chat-stasher] backfill state preflight read failed', (err as Error).message);
+      return {
+        reason: 'storage-unavailable',
+        detail: `a backfill state record at ${key} could not be read out of storage.local, so this build `
+          + 'cannot tell whether the scope it names is usable',
+      };
+    }
+    const refusal = unreadableStateRefusal(raw, named.platform, named.scope);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
 /** What one pre-W18 key turned out to be. Three different facts, never collapsed. */
 type OneMigration =
   | { kind: 'moved' }
@@ -495,13 +604,29 @@ export interface BackfillTickRecord {
    * existed (or by a tick blocked at a gate) still parses, and the popup's
    * `isTickRecord` does not require it — the same compatibility rule the other
    * optional fields in this project follow.
+   *
+   * 🔴 W47 · **How the tick ended, not only how a run did.** W36 filled this from
+   *    the run's report, and that left it `null` on every path that never reached
+   *    the run — a tick blocked at a gate came out as `{stopped: null, halted:
+   *    null}`, which is the same "it did nothing, and nothing says why" the field
+   *    was added to end. So it now carries the tick's **own** named outcome when
+   *    there was no run: the value `tickBlockReason`/`tickBackfill` returned, from
+   *    the same closed set `reason` above holds. Values are read out of the two
+   *    existing closed sets and nothing else — the field answers "how did this
+   *    end", and both layers answer it in words that already existed.
    */
-  stopped?: StopReason | null;
+  stopped?: StopReason | TickReason | null;
   /**
    * The `HaltReason` the run left behind, or the one a refusal reached **before**
-   * the run could start (see `migrateLegacyScopes`) — `null` when neither
-   * happened. This is the field that turns "it ran and nothing moved" into a
-   * named fact.
+   * the run could start (`migrateLegacyScopes`, `findUnreadableState`, or the
+   * engine's own `openLedger` refusal) — `null` when neither happened. This is the
+   * field that turns "it ran and nothing moved" into a named fact.
+   *
+   * 🔴 W47 · **A refusal is named here on ticks that never reach the engine too.**
+   *    See `findUnreadableState`: without it, a scope whose state record this build
+   *    cannot read was reported as `no-http-port` whenever no platform page was
+   *    open, so `null` here did not mean "no refusal happened" — it meant "no
+   *    refusal was looked for".
    */
   halted?: HaltReason | null;
   /**

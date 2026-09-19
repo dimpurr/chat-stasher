@@ -64,7 +64,7 @@ import {
   undeliveredEntries,
 } from '../../lib/outbox';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
-import { hookStatusOf } from '../../lib/hook-status';
+import { hookStatusOf, loadHookDecline } from '../../lib/hook-status';
 import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 
@@ -187,6 +187,12 @@ async function collect(): Promise<PopupModel> {
     // 🔴 W43 · Read from the same snapshot as the failures above, and with the
     //    same rule for an unreadable one (see PopupModel.hookStatus).
     hookStatus: hookStatusOf(snapshot),
+    // 🔴 W47 · The other half of the pair: a report a page sent that background
+    //    received and did not record, read from its own key. `null` = nothing has
+    //    been declined, which is not the same sentence as "a page told us about
+    //    its hook and it is broken" above — they are two different facts and the
+    //    popup words them differently.
+    hookDecline: await loadHookDecline(store),
     lastTick,
     legacyMigration,
     // 🔴 C33 · The two preconditions of the "start backfilling this platform"

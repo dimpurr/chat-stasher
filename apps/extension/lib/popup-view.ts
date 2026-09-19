@@ -59,7 +59,12 @@ import {
   type BackfillHeader,
 } from './backfill/types';
 import type { HostPauseRecord, HostStatusRecord } from './host-status';
-import type { HookStatusRecord } from './hook-status';
+import {
+  HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
+  HOOK_DECLINE_UNREADABLE_MESSAGE,
+  type HookDeclineRecord,
+  type HookStatusRecord,
+} from './hook-status';
 import {
   HOOK_REASON_DID_NOT_RUN,
   HOOK_REASON_DID_NOT_TAKE,
@@ -231,6 +236,21 @@ export interface PopupModel {
    * worse than the silence it replaces.
    */
   hookStatus?: HookStatusRecord[];
+  /**
+   * 🔴 W47 · **A report a page sent that background received and did not record,
+   *    and why** (`lib/hook-status.ts`'s `HookDeclineRecord`).
+   *
+   * The other half of the field above, and it exists because the two states were
+   * one state: a page whose observation was *declined* left exactly the same thing
+   * behind as a page that never sent one — nothing. On the machine W47 is about, a
+   * page reported `hook-was-replaced` every 5 seconds and every one of those
+   * reports was refused by the origin check; what the user could look at was a
+   * blank, so the failure was chased in fourteen wrong directions.
+   *
+   * Omitted or null ⇒ nothing has been declined (or this build has not looked) —
+   * and like `hookStatus`, `null` here must not be worded as anything else.
+   */
+  hookDecline?: HookDeclineRecord | null;
 }
 
 /**
@@ -1066,6 +1086,45 @@ function hookStatusNote(record: HookStatusRecord): string {
 }
 
 /**
+ * 🔴 W47 · **One report a page sent that background did not write down, and why.**
+ *
+ * The sentence has two jobs and the reason code decides which one it does:
+ *
+ *  · `not-a-platform-origin` names the origin, which is the only thing a person
+ *    needs to open the tab that has the problem — and it says plainly that this is
+ *    why nothing was recorded, so the user does not go looking for a record that
+ *    was never going to exist;
+ *  · `unreadable-message` names no origin, because a report this build could not
+ *    read is one whose origin is exactly the part that did not check out. It says
+ *    the report arrived and was not understood; inventing the rest would be the
+ *    failure it exists to report.
+ *
+ * `count` is the length of the streak, and it is printed because that is the fact
+ * that turns "one odd message" into "this is happening on a timer" — the measured
+ * case was one report every 5 seconds over a page whose user could see none of it.
+ * An unrecognised reason code prints verbatim rather than being rounded into one of
+ * the two above (the same rule `capabilityWords` follows).
+ */
+function hookDeclineNote(record: HookDeclineRecord): string {
+  const when = ui.stamp(record.at);
+  const count = record.count;
+  switch (record.reason) {
+    case HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN:
+      return t('popup.notes.hook.declinedOrigin', {
+        origin: record.origin ?? t('common.unknownShort'),
+        when,
+        count,
+      });
+    case HOOK_DECLINE_UNREADABLE_MESSAGE:
+      return t('popup.notes.hook.declinedMessage', { when, count });
+    default:
+      // A reason code from a build newer than this one, printed as itself — see
+      // HookDeclineRecord.reason for why it is not read as "no record at all".
+      return t('popup.notes.hook.declinedOther', { reason: record.reason, when, count });
+  }
+}
+
+/**
  * 🔴 W44 · **One capability value, in words.**
  *
  * The popup has to name both sides of an expiry — what the record said the build
@@ -1103,6 +1162,15 @@ function notesFor(model: PopupModel): string[] {
   //    not installed is live capture that will never produce anything, on a page
   //    the user is looking at right now. Saying "waiting" first would bury it.
   for (const record of model.hookStatus ?? []) notes.push(hookStatusNote(record));
+
+  // 🔴 W47 · **And immediately after it, the page whose report was not recorded.**
+  //    The two are neighbours on purpose: `hookStatusNote` says "a page told us
+  //    its hook is not installed", and this one says "a page told us something and
+  //    we did not write it down". Both are about a page the user is looking at,
+  //    both outrank the backfill tick note, and until W47 the second one had no
+  //    sentence anywhere — the report was received, refused, and forgotten, which
+  //    read from outside exactly like a page that never reported anything.
+  if (model.hookDecline) notes.push(hookDeclineNote(model.hookDecline));
 
   const tickNote = lastTickNote(model.lastTick ?? null);
   if (tickNote) notes.push(tickNote);
