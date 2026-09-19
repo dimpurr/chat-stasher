@@ -5,6 +5,7 @@ import {
   pathSafeSessionId,
   findPlatformForUrl,
   getPlatformByOrigin,
+  HOOK_STATUS_MESSAGE,
   isHookStatusMessage,
   PLATFORMS,
   type CapturedFetch,
@@ -12,7 +13,12 @@ import {
 } from '../lib/contract';
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
-import { recordHookStatus } from '../lib/hook-status';
+import {
+  HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
+  HOOK_DECLINE_UNREADABLE_MESSAGE,
+  recordHookDecline,
+  recordHookStatus,
+} from '../lib/hook-status';
 import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import { contentFingerprint, isUnchangedSinceDelivery, rememberDelivered } from '../lib/recapture';
 import {
@@ -46,6 +52,7 @@ import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
+  findUnreadableState,
   forgetTarget,
   isBackfillChainArmed,
   loadTargets,
@@ -985,7 +992,28 @@ async function runAlarmTickBody(): Promise<TickResult> {
   //    all; and W36's version walked `loadTargets()`, so a pre-W18 record whose
   //    scope is not registered was visited by nothing even here. See
   //    migrateLegacyScopes.
-  const preflightRefusal = (await migrateLegacyScopes(store)).refusal;
+  // 🔴 W47 · **The other half of the same preflight: a record this build cannot
+  //    read is named here, before the gates, because the gates can stop the tick
+  //    before anything ever opens the ledger.**
+  //
+  //    `openLedger`'s refusal is carried into the run's report, and the run only
+  //    happens on a tick that got past every gate — switch on, host answering, a
+  //    registered target and an open platform page. With the tabs closed, which is
+  //    the ordinary state of a laptop, no tick ever reaches it: the trace says
+  //    `no-http-port` and the unreadable record is named by nothing. That is
+  //    exactly the state the W18 comment forbids reading as "no refusal happened",
+  //    and it is why this is looked for in `storage.local` rather than in a run.
+  //    See findUnreadableState for what it costs and what it deliberately does not
+  //    write.
+  //
+  //    The two preflights can both find something and the trace has one field, so
+  //    the migration's refusal wins and the probe is skipped (`??` short-circuits,
+  //    which also makes a tick whose layout has not moved no more expensive than it
+  //    was): the migration's refusal is a fact about a record **this build was asked
+  //    to move**, while the probe's is about one it merely read.
+  const migration = await migrateLegacyScopes(store);
+  const preflightRefusal: LedgerRefusal | null =
+    migration.refusal ?? await findUnreadableState(store);
 
   if (targets.length === 0) {
     // No targets at all ⇒ the user has never been captured on a supported
@@ -1115,10 +1143,11 @@ async function recordAlarmTick(
   result: TickResult,
   targets: number,
   /**
-   * 🔴 W36 · A refusal reached **before** the run could start (the pre-W18
-   * migration's preflight). When the run did happen, its own report is the more
-   * precise fact and wins; when the tick was blocked at a gate, this is the only
-   * thing that knows why nothing moved — which is exactly the state the first
+   * 🔴 W36 · A refusal reached **before** the run could start — the pre-W18
+   * migration's preflight (W36b) or a current-layout record this build cannot read
+   * (W47, `findUnreadableState`). When the run did happen, its own report is the
+   * more precise fact and wins; when the tick was blocked at a gate, this is the
+   * only thing that knows why nothing moved — which is exactly the state the first
    * acceptance found (a v1 record, no v2 key, and a trace that said only `ran`).
    */
   preflightRefusal: LedgerRefusal | null = null,
@@ -1129,10 +1158,47 @@ async function recordAlarmTick(
     ran: result.ran,
     reason: result.reason,
     targets,
-    stopped: result.report?.stopped ?? null,
-    halted: halt?.reason ?? preflightRefusal?.reason ?? null,
-    detail: halt?.detail ?? preflightRefusal?.detail ?? null,
+    /**
+     * 🔴 W47 · **Every path that writes a trace names how it ended.**
+     *
+     * `report?.stopped` is the run's own stop; the fallback is the tick's own
+     * named outcome, for the paths that never reached a run (blocked at a gate,
+     * or already running). Both are existing members of closed sets — `StopReason`
+     * in lib/backfill/types.ts, `TickReason` in lib/backfill/schedule.ts — and the
+     * field is read as "how this ended, at whichever layer ended it".
+     *
+     * Why it may not stay null here: the null was the *first* thing a person read
+     * on a real machine (`{ran: false, reason: 'no-http-port', stopped: null,
+     * halted: null}`) and it says nothing that `reason` does not — but the whole
+     * audience of this record is someone asking "why is nothing moving", and the
+     * field that answers it falls back to the tick's own answer rather than to a
+     * blank. Nothing new is named: `stopped` for a gate-blocked tick is the same
+     * value `reason` already carries.
+     */
+    stopped: result.report?.stopped ?? result.reason,
+    /**
+     * 🔴 R47 · The preflight is attached **only when no run happened**. It walks
+     *    every `cs_backfill_v2:*` key, not the target this tick used, so a single
+     *    unreadable record left over from another scope would otherwise ride along
+     *    on a tick that ran and archived — and the popup would say "that tick
+     *    stopped before it could finish" under a `ran: true` head, for every tick,
+     *    until someone removed the stale key by hand.
+     */
+    halted: halt?.reason ?? (result.ran ? null : preflightRefusal?.reason) ?? null,
+    detail: halt?.detail ?? (result.ran ? null : preflightRefusal?.detail) ?? null,
   });
+}
+
+/**
+ * 🔴 R47 · An origin, or nothing. A message that named something which is not a
+ * URL named no origin, and the decline record says so rather than storing a path.
+ */
+function originOf(value: string): string | null {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
 }
 
 function cancelledIdLike(id: string | null): boolean {
@@ -1239,6 +1305,34 @@ export default defineBackground(() => {
           });
         return true;
       }
+      /**
+       * 🔴 W47 · **A message that claims to be a hook report and is not one this
+       * build can read.**
+       *
+       * It fell through to the `chat-captured` test below and was dropped there
+       * without a word — which is the same silence as a report that never arrived.
+       * The condition is deliberately narrower than "any message that failed a
+       * guard": only a message that **says** it is a hook report
+       * (`type === HOOK_STATUS_MESSAGE`) and then fails that report's own guard is
+       * counted here. Every other message type on this listener is somebody else's
+       * traffic, and recording those would be recording a fact about a request that
+       * was never made.
+       */
+      if (message?.type === HOOK_STATUS_MESSAGE && !isHookStatusMessage(message)) {
+        recordHookDecline(browserLocalStore(), {
+          reason: HOOK_DECLINE_UNREADABLE_MESSAGE,
+          // Deliberately nothing else: a message this build cannot read is a message
+          // whose origin and reason are exactly the parts that did not check out,
+          // and writing either into a record a person reads would be inventing it.
+          at: Date.now(),
+        })
+          .then(() => sendResponse({ ok: false, error: 'unreadable hook report' }))
+          .catch((err: Error) => {
+            console.warn('[chat-stasher] hook decline record write failed', err.message);
+            sendResponse({ ok: false, error: 'unreadable hook report' });
+          });
+        return true;
+      }
       if (isHookStatusMessage(message)) {
         /**
          * 🔴 W43 · **A page telling us what it observed about its own hook.**
@@ -1257,10 +1351,33 @@ export default defineBackground(() => {
          *    the page. `reason: null` is a page whose hook verified, which clears
          *    the origin's record — the one way it is ever cleared
          *    (`lib/hook-status.ts`).
+         *
+         * 🔴 W47 · **A refusal here is a fact, and it is written down.** From
+         *    outside, "background refused this report" and "nothing ever arrived"
+         *    are the same state, and they are two different facts.
+         *    `recordHookDecline` writes the refusal down; the page's own record is
+         *    still not written, because a record naming an origin this extension
+         *    does not inject into would be a sentence about somebody else's page.
          */
         const platform = PLATFORMS.find((row) => row.origins.includes(message.origin));
         if (!platform) {
-          sendResponse({ ok: false, error: 'unknown origin' });
+          recordHookDecline(browserLocalStore(), {
+            reason: HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
+            // 🔴 R47 · `isHookStatusMessage` proves only "a non-empty string". What
+            //    is stored and shown must be an origin, so it is normalised here;
+            //    a value that is not a URL is recorded as `null`, which the record
+            //    already means as "it named no usable origin". The guard itself is
+            //    left alone: widening what counts as a valid message is not this
+            //    change.
+            origin: originOf(message.origin),
+            observation: message.reason,
+            at: message.observedAt,
+          })
+            .then(() => sendResponse({ ok: false, error: 'unknown origin' }))
+            .catch((err: Error) => {
+              console.warn('[chat-stasher] hook decline record write failed', err.message);
+              sendResponse({ ok: false, error: 'unknown origin' });
+            });
           return true;
         }
         recordHookStatus(browserLocalStore(), {

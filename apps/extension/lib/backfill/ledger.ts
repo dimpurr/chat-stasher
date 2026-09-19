@@ -224,20 +224,53 @@ export async function openLedger(
     return await openHeaderLedger(store, platform, scope, rawHeader);
   }
 
-  if (rawHeader !== null && rawHeader !== undefined) {
+  const unreadable = unreadableStateRefusal(rawHeader, platform, scope);
+  if (unreadable) {
     // Something is at our key and it is not a header we can read. Do not touch it,
     // do not fall back to the legacy key, do not write.
-    return {
-      ok: false,
-      refusal: {
-        reason: 'state-unreadable',
-        detail: `the saved state at ${stateKey(platform, scope)} could not be read; `
-          + 'it has been left untouched and this leg will not run against it',
-      },
-    };
+    return { ok: false, refusal: unreadable };
   }
 
   return await openFromLegacy(store, platform, scope);
+}
+
+/**
+ * 🔴 W47 · **"What sits at this scope's key is not a record this build can read",
+ * decided once, for two callers that must not disagree.**
+ *
+ * Why it is a function rather than the two lines it replaces, and why it takes the
+ * already-loaded value rather than the store:
+ *
+ *  · `openLedger` asks it and refuses the run — that is the decision the whole
+ *    engine's safety rests on;
+ *  · the alarm tick's preflight (`findUnreadableState`, lib/backfill/alarm.ts) asks
+ *    the *same* question on a tick that will never reach `openLedger`, because the
+ *    gates stopped it first (no open platform page — the ordinary state of a
+ *    laptop). Until W47 that tick reported `no-http-port` and the unreadable record
+ *    was named by nothing at all, so `state.halted` being null in storage did not
+ *    mean no refusal had happened.
+ *
+ * 🔴 One decision, two readers: a second copy of "is this a header?" would be free
+ *    to drift, and the drift would be silent in the safe-looking direction — the
+ *    preflight would name a refusal the engine would not have raised, or miss one
+ *    it would. The wording of the refusal is shared with it for the same reason.
+ *
+ * It **writes nothing** and does not open the debt store: it is the one question
+ * that can be answered from a single `storage.local` read, which is what makes it
+ * affordable on every tick.
+ */
+export function unreadableStateRefusal(
+  raw: unknown,
+  platform: string,
+  scope: string,
+): LedgerRefusal | null {
+  if (raw === null || raw === undefined) return null;
+  if (isHeader(raw)) return null;
+  return {
+    reason: 'state-unreadable',
+    detail: `the saved state at ${stateKey(platform, scope)} could not be read; `
+      + 'it has been left untouched and this leg will not run against it',
+  };
 }
 
 // ---------------------------------------------------------------------------

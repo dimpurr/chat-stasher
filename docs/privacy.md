@@ -126,7 +126,7 @@ the sentence.
    `:309-377`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:198-215`).
+   (`apps/extension/entrypoints/background.ts:205-222`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -237,7 +237,7 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:125-153`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:132-160`;
 `apps/extension/lib/outbox.ts:64-80`, `:309-377`). The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
@@ -269,12 +269,14 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:210`; `apps/extension/lib/backfill/tab-port.ts:162` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:211`; `apps/extension/lib/backfill/tab-port.ts:162` |
 | `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, and the record that a platform's id list had to be read again. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:930-964`; `apps/extension/lib/backfill/debt-store.ts:68-87` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
+| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. Metadata only: reason codes, a count and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:582-640`; `apps/extension/entrypoints/background.ts:1141-1190` |
+| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A page's own report about its capture hook: one record per origin, holding each observation and when it was made. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:69-101`, `:226-355`; `apps/extension/entrypoints/background.ts:1320-1336`, `:1362-1378` |
 
-Two things in that table deserve to be called out rather than buried:
+Three things in that table deserve to be called out rather than buried:
 
 - The progress set stores **session ids** — not conversation text, but a list of
   which conversations exist and which you have archived.
@@ -302,9 +304,9 @@ Two things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:796-820` — the identity itself is
+  (`apps/extension/entrypoints/background.ts:803-827` — the identity itself is
   read by `apps/extension/lib/contract.ts:1051-1067`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:833`). It is used to
+  the `||` at `apps/extension/entrypoints/background.ts:848`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
@@ -314,7 +316,7 @@ Two things in that table deserve to be called out rather than buried:
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:715-787`).
+  (`apps/extension/entrypoints/background.ts:722-794`).
 - **On claude.ai the scope is not read from a response body: it is the
   organization the page's own requests are addressed to**, and that value is
   required in every request path on that platform while appearing in no page URL
@@ -337,7 +339,7 @@ Two things in that table deserve to be called out rather than buried:
   are never probed one by one, and once that has been recorded the page is not
   asked again on every wake-up — the answer is already known
   (`apps/extension/lib/backfill/claude-org.ts:170-224`;
-  `apps/extension/entrypoints/background.ts:697-713`). The sentinel
+  `apps/extension/entrypoints/background.ts:704-720`). The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
   organization that does not exist (`apps/extension/lib/backfill/engine.ts:691-735`).
@@ -347,11 +349,19 @@ Two things in that table deserve to be called out rather than buried:
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:941-963`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:948-970`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
   scope.
+- **The trace of a declined hook report may name a site this extension is not
+  built for.** That record says which page's report was refused, and a refusal
+  happens precisely when that origin is *not* one of the eight in the platform
+  table. What can reach it is bounded by who can send the message at all: a
+  content script of this extension, whose origin is computed in the extension's
+  own isolated world and is never taken from anything the page posts on its own
+  window. So the value is one this extension produced; a page cannot put an
+  arbitrary string into it.
 
 **c. Your archive destination.** Whatever you configured: a directory on your
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
@@ -586,7 +596,7 @@ Retention on **your** machine is under your control:
 | Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:379-394`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** | Uninstall the extension, or clear its site data in your browser; there is no per-record delete button. |
 | An export file you triggered | Until `ingest` consumes it, which moves it to `<inbox>/consumed/` once every line was sealed or found to be a duplicate (`crates/chat-stasher/src/inbox.rs:57-60`). | Delete it from your download directory with your file manager. |
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
-| Extension local storage (backfill progress, host status, pause record, last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
+| Extension local storage (backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
 | A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:521-601`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`, `activity-index`, `machine-declare`, `machine-label`, `overview` (`crates/chat-stasher/src/main.rs:130-991`). Selective per-conversation deletion inside an archive is not implemented. |

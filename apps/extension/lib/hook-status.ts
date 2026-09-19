@@ -31,6 +31,20 @@
  *    two parties that can see the hook's state directly: the hook itself, and the
  *    bridge whose probe it answers.
  *
+ *  🔴 W47 · **And what a page told us that we did not write down.** The W43 record
+ *     above has one hole, and it is the one that cost a day: background can
+ *     *receive* a hook report and **decline** it — currently by refusing an origin
+ *     that is not in the platform table — and until W47 a declined report left no
+ *     record and no console line anywhere. A page that reported
+ *     `hook-was-replaced` every 5 seconds produced, in everything a person could
+ *     look at, exactly the same state as a page that reported nothing at all:
+ *     fourteen hypotheses, each refuted by the next measurement, because the only
+ *     surface the product had for this path was a `console.warn` in an MV3 worker
+ *     that is reclaimed between events. So a decline is written down too — one
+ *     record, not one per origin (see `HookDeclineRecord`), naming the check that
+ *     refused it, the origin and observation where they are known, and how long the
+ *     same refusal has been repeating.
+ *
  * ## Where the vocabulary lives
  *
  * The three reason codes are declared in `lib/contract.ts`, not here, because
@@ -189,5 +203,153 @@ export async function recordHookStatus(
     );
   } catch (err) {
     console.warn('[chat-stasher] hook status write failed', (err as Error).message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 🔴 W47 · What a page told us that was **not** written down, and why
+// ---------------------------------------------------------------------------
+
+/**
+ * **Why one observation a page sent never became a record.**
+ *
+ * A closed set, like the observations themselves, and for the same reason: the
+ * popup prints it, so a value with no sentence would be a blank where a fact
+ * belongs.
+ *
+ * 🔴 These are **not** new members of `HOOK_OBSERVATIONS` and must never be
+ *    confused with one. An observation says what a page's own hook did; a decline
+ *    says what *background* did with a report it received. A page whose report was
+ *    declined is precisely the page this whole file exists to make visible, and
+ *    the two facts were one silent nothing until W47.
+ */
+export const HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN = 'not-a-platform-origin';
+/**
+ * The message claimed to be a hook report and is not one this build can read — a
+ * missing or non-numeric `observedAt`, an origin that is not a non-empty string, a
+ * reason outside the closed set. The "nothing of ours is listening" case is not
+ * this one: a message of another type is not a hook report at all and is not
+ * counted here.
+ */
+export const HOOK_DECLINE_UNREADABLE_MESSAGE = 'unreadable-message';
+
+export const HOOK_DECLINES = [
+  HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
+  HOOK_DECLINE_UNREADABLE_MESSAGE,
+] as const;
+
+export type HookDecline = (typeof HOOK_DECLINES)[number];
+
+export function isHookDecline(value: unknown): value is HookDecline {
+  return typeof value === 'string' && (HOOK_DECLINES as readonly string[]).includes(value);
+}
+
+/**
+ * **The one record of the most recent decline.** A single record, not one per
+ * origin: what a decline names may not be an origin this extension is built for,
+ * so an origin-keyed family would mean writing arbitrary site strings into it as
+ * key names — where nothing bounds them and nothing ever removes them. One record
+ * is bounded by construction and is always the *current* fact, which is the one a
+ * reader wants ("is this still happening").
+ *
+ * 🔴 The three fields that are not the count are the same three the accepted
+ *    record would have carried — the observation, the origin, the time — so a
+ *    reader can tell "a page on this origin said `hook-was-replaced` and we did not
+ *    record it" from "some message we could not read arrived". Nothing is invented
+ *    where a field is not known: `origin` and `observation` are `null` for a
+ *    message that did not validate, and the record then says only what is true.
+ */
+export const HOOK_DECLINED_KEY = 'cs_hook_declined_v1';
+
+export interface HookDeclineRecord {
+  /** When the most recent decline happened (`Date.now()` ms). */
+  at: number;
+  /**
+   * Which check refused it.
+   *
+   * 🔴 A `string`, not the closed union, and that is deliberate: this record can be
+   *    written by a **newer build** than the one reading it, and a reason this build
+   *    does not know must be shown as itself rather than read as "no record at all"
+   *    — the same rule `popup.capability.other` follows, and W44's lesson one record
+   *    along (a record a build cannot recognise is not the same fact as no record).
+   *    `recordHookDecline` still takes the closed `HookDecline`, so *this* build can
+   *    only ever write one of the two values above.
+   */
+  reason: string;
+  /** The origin the report named, when it named a usable one. */
+  origin: string | null;
+  /** The observation the report carried, when it was one of the closed set. */
+  observation: HookObservation | null;
+  /**
+   * How many declines **in a row** carried this reason, this one included. A
+   * streak, not a total: the same shape `HaltRecord.attempts` uses, and it is what
+   * turns "a page reported this every 5 seconds" into something a reader can see
+   * rather than something they have to infer from one timestamp.
+   */
+  count: number;
+}
+
+/** Strict enough that junk in storage is never read as a record — but not so strict that another build's record reads as nothing. */
+export function looksLikeHookDecline(value: unknown): value is HookDeclineRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.at !== 'number' || !Number.isFinite(record.at)) return false;
+  // Shape, not membership: see the `reason` field's comment.
+  if (typeof record.reason !== 'string' || record.reason.length === 0) return false;
+  if (record.origin !== null && typeof record.origin !== 'string') return false;
+  if (record.observation !== null && !isHookObservation(record.observation)) return false;
+  if (typeof record.count !== 'number' || !Number.isFinite(record.count)) return false;
+  return true;
+}
+
+/** Read it back. Missing / unreadable / wrong shape ⇒ null ("I do not know" is also the truth). */
+export async function loadHookDecline(store: BackfillStore | null): Promise<HookDeclineRecord | null> {
+  if (!store) return null;
+  try {
+    const raw = await store.load(HOOK_DECLINED_KEY);
+    return looksLikeHookDecline(raw) ? raw : null;
+  } catch (err) {
+    console.warn('[chat-stasher] hook decline record read failed', (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Write down that a page's report was received and **not** recorded.
+ *
+ * 🔴 Best-effort, like `recordHookStatus` and for the same reason: a report about a
+ *    page must never become the reason a page's own path breaks. When the store
+ *    itself is gone there is nowhere to write and this only reaches the log — which
+ *    is stated here rather than implied, because it is the one case where the
+ *    "visible without a debugger" rule cannot be kept.
+ */
+export async function recordHookDecline(
+  store: BackfillStore | null,
+  decline: {
+    reason: HookDecline;
+    origin?: string | null;
+    observation?: HookObservation | null;
+    at: number;
+  },
+): Promise<void> {
+  if (!store) return;
+  try {
+    const previous = await loadHookDecline(store);
+    // 🔴 R47 · A streak is the same refusal about the same origin. Comparing the
+    //    reason alone made "origin A refused once, then origin B refused once" read
+    //    as "B was refused twice" — the saved origin is the latest one, and the
+    //    sentence names it.
+    const sameOrigin = (previous?.origin ?? null) === (decline.origin ?? null);
+    const continues = previous?.reason === decline.reason && sameOrigin;
+    const count = (continues ? previous.count : 0) + 1;
+    await store.save(HOOK_DECLINED_KEY, {
+      at: decline.at,
+      reason: decline.reason,
+      origin: decline.origin ?? null,
+      observation: decline.observation ?? null,
+      count,
+    } satisfies HookDeclineRecord);
+  } catch (err) {
+    console.warn('[chat-stasher] hook decline record write failed', (err as Error).message);
   }
 }

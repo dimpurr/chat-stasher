@@ -350,6 +350,31 @@ popup:
         didNotRun: no copy of the hook ran in that page at all
         didNotTake: the hook ran, and the page's own global refused its patch
         wasReplaced: the hook was installed, and something replaced it afterwards
+      # 🔴 W47 · A page told us about its own capture hook and background did NOT
+      # write it down. That case used to produce nothing at all — no record, no
+      # line in any console a person can read — so it looked exactly like a page
+      # that had said nothing, and a report arriving every 5 seconds was
+      # indistinguishable from silence (that is the day this exists for).
+      # The sentence says which page, that it was received, and that it was not
+      # recorded — three facts, and it does not guess at a cause.
+      declinedOrigin: >-
+        {origin} reported something about its own live-capture hook, and it was
+        not recorded: this extension is not built for that site, so it does not
+        install a capture hook there and will not say that it did. The page's own
+        report reached the extension and was received as of {when}. The same
+        report refused in a row so far: {count}.
+      # The message did not survive the check every report has to pass (its
+      # origin, its time, or its reason code was not one this build can read), so
+      # neither the origin nor the observation is known and neither is guessed at.
+      declinedMessage: >-
+        A page sent a live-capture report that this build could not read, so
+        nothing was recorded from it. The report arrived as of {when}; which page
+        sent it and what it observed are exactly the parts that did not check out.
+        The same report refused in a row so far: {count}.
+      declinedOther: >-
+        A page's live-capture report was received as of {when} and was not
+        recorded ({reason}); this build does not know that reason code. The same
+        report refused in a row so far: {count}.
     whatOpening: >-
       What turning it on does: as long as one page of a supported platform is
       open, it quietly backfills one past conversation in the background at an

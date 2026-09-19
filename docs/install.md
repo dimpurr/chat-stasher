@@ -158,7 +158,7 @@ content-endpoint profile — a wrong guess would not error; it would save only t
 first few turns of every conversation while you believed you had it all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:746-759`).
+(`apps/extension/lib/popup-view.ts:768-781`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -255,7 +255,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:425-432`).
+`apps/extension/entrypoints/background.ts:432-439`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
@@ -583,7 +583,7 @@ confirmed in the code, not a temporary disclaimer.
   0–25 seconds between two requests
   (`apps/extension/lib/backfill/pace.ts:92-103`, `:120-121`), and each round
   starts a random 5–10 minutes after the previous one
-  (`apps/extension/lib/backfill/alarm.ts:89-90`). At that cap, a thousand
+  (`apps/extension/lib/backfill/alarm.ts:90-91`). At that cap, a thousand
   conversations take at least 5 days. This is deliberately slow, not a bug.
 
 - **Backfill is off by default.** The default is off
@@ -632,7 +632,7 @@ confirmed in the code, not a temporary disclaimer.
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two
   then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:941-963`). Perplexity **only lists
+  (`apps/extension/entrypoints/background.ts:948-970`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
   `apps/extension/lib/backfill/enumerate.ts:3890-3917`). The
