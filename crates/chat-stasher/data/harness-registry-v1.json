@@ -445,6 +445,58 @@
         "source_url": "https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts",
         "license_url": "https://raw.githubusercontent.com/continuedev/continue/main/LICENSE"
       }
+    },
+    {
+      "id": "kimi-code",
+      "display_name": "Kimi Code",
+      "paths": {
+        "macos": {
+          "template": "~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl",
+          "env_override": "KIMI_CODE_HOME",
+          "format": "jsonl",
+          "session_dir": {
+            "pattern": "session_*",
+            "file": "agents/main/wire.jsonl"
+          },
+          "confidence": "source-confirmed",
+          "source": "installed implementation (Kimi Code 0.39.1, <KIMI_CODE_HOME>/bin/kimi) read 2026-09-19: homeDir() = $KIMI_CODE_HOME, else os.homedir()/.kimi-code; this.sessionsDir = join(homeDir, 'sessions'); sessionDirOf(home, scope, id) = <sessions>/<workspaceId>/<sessionId>; agentScopeOf(sessionScope, agentId) = <sessionScope>/agents/<agentId>; the main transcript is agents/main/wire.jsonl; the id is built as 'session_' + randomUUID(). The same layout was measured live on macOS the same day: 3 session directories under 1 workspace."
+        },
+        "linux": {
+          "template": "$HOME/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl",
+          "env_override": "KIMI_CODE_HOME",
+          "format": "jsonl",
+          "session_dir": {
+            "pattern": "session_*",
+            "file": "agents/main/wire.jsonl"
+          },
+          "confidence": "unascertained",
+          "source": "unverified: no Linux install to measure, and the Linux-specific storage path was not read. The path code that was read is platform-independent (os.homedir()), so the shape below is expected rather than confirmed."
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.kimi-code\\sessions\\<workspaceId>\\<sessionId>\\agents\\main\\wire.jsonl",
+          "env_override": "KIMI_CODE_HOME",
+          "format": "jsonl",
+          "session_dir": {
+            "pattern": "session_*",
+            "file": "agents/main/wire.jsonl"
+          },
+          "confidence": "unascertained",
+          "source": "unverified: no Windows install to measure, and no Windows-specific branch was read (os.homedir() -> %USERPROFILE%; no %APPDATA%/XDG branch seen for sessions). Shape below is expected, not confirmed."
+        }
+      },
+      "notes": "Kimi Code (Moonshot AI CLI). Home directory: $KIMI_CODE_HOME when set, otherwise ~/.kimi-code; sessions live under <home>/sessions, one directory per session, named by the session id itself (session_<uuid>). The transcript is agents/<agentId>/wire.jsonl inside that directory, main agent = agents/main/wire.jsonl. The filename is a constant, so the scanner cannot take the session id from it: this cell declares session_dir instead, which takes the id from the directory name and accepts only the declared relative file path. <home>/session_index.jsonl is a one-line-per-session index (sessionId, sessionDir, workDir) and <home>/workspaces.json maps workspaceId -> project root; neither is read by this tool. On-disk retention/cleanup: not established (no retention or sweep constant was found in the implementation that was read, so this stays unknown rather than 'none').",
+      "seal_policy": "rename",
+      "seal_source": "installed Kimi Code 0.39.1 implementation read 2026-09-19: the wire.jsonl writer is JournalWriter.append(scope, key, data), which per call does mkdir -> open(filePath, 'a') -> fh.writeFile(data) -> fh.sync() -> fh.close() in a finally block. No file descriptor is held across calls, so a later append reopens the path and a rename cannot strand it (same evidence class as the gemini-cli cell). The file's own comment states that append-only paths such as wire.jsonl use exactly this append path, not the atomic temp-file+rename writer used for whole-file writes.",
+      "reference": {
+        "upstream_project": "Kimi Code (Moonshot AI)",
+        "file_path": "not found",
+        "line_count": "unascertained",
+        "license": "unascertained",
+        "relationship": "no reference",
+        "source_url": "unascertained",
+        "license_url": "unascertained",
+        "verification": "No public repository or documentation was read for this entry. The evidence is the implementation shipped inside the installed CLI bundle, which is not part of this repository and is version-pinned by <KIMI_CODE_HOME>/updates/latest.json (0.39.1). Treat it as measured-at-a-version, not as a citable public source."
+      }
     }
   ]
 }

@@ -15,9 +15,9 @@ Status as of **2026-09**. **Verified** means real sessions were archived end to 
 | opencode | ✅ Verified | 1.18.4 (2026-09) |
 | Gemini CLI | ✅ Verified | 0.36.0 (2026-09) |
 | Cursor | ✅ Verified | not recorded |
-| Grok CLI | 🟡 Registered; installed, but no sessions archived yet | — |
+| Grok CLI | 🟡 Registered; a real local store was read (5 sessions, ids and times matched); not yet archived end to end | — |
+| Kimi Code | 🟡 Registered (macOS-measured); a real local store was read (3 sessions, ids and times matched); not yet archived end to end | — |
 | GitHub Copilot CLI · aider · crush · Zed · Continue | 🟡 Registered, not verified | — |
-| Kimi Code | 📋 Planned | — |
 
 **Web AI chats** (the browser extension)
 

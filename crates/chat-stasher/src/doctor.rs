@@ -42,7 +42,13 @@ const CLEANUP_SAFE_DAYS: u64 = 180;
 
 /// Extra harness-like directories we notice but do *not* reason about for
 /// retention (they land in a "detected, out of scope" note, never silently).
-pub const OTHER_HARNESS_DIRS: &[&str] = &[".cursor", ".windsurf", ".kimi-code"];
+///
+/// `.kimi-code` used to be listed here; it was removed when Kimi Code became a
+/// registry harness, because the note this feeds says "installed but out of
+/// scope for this command" and that stopped being true — the scanner now
+/// walks it and it has its own footprint row. Leaving it would have reported
+/// the same directory twice, once as out of scope and once as scanned.
+pub const OTHER_HARNESS_DIRS: &[&str] = &[".cursor", ".windsurf"];
 
 // ---------------------------------------------------------------------------
 // D1 — Claude Code `cleanupPeriodDays`

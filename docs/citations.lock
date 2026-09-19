@@ -335,9 +335,9 @@ crates/chat-stasher/src/destinit.rs:104-118  4e3ae691d5bc  lines=15
   <- docs/threat-model.md:458  :: /// `false` — which this module then used as *evidence* tha…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs/threat-model.md:458  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:806-835  429cdcb2ccc4  lines=30
+crates/chat-stasher/src/doctor.rs:812-841  429cdcb2ccc4  lines=30
   <- docs/install.md:489  :: /// [`run()`] entry point fills it in; the field is an `Opt…
-crates/chat-stasher/src/doctor.rs:873-911  79d40b5c0768  lines=39
+crates/chat-stasher/src/doctor.rs:879-917  79d40b5c0768  lines=39
   <- docs/install.md:489  :: }
 crates/chat-stasher/src/inbox.rs:56-60  e1fcd19c1369  lines=5
   <- README.md:102  :: pub const PART_SUFFIX: &str = ".part";
