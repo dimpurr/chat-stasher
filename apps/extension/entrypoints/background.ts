@@ -38,6 +38,7 @@ import {
   type TickResult,
 } from '../lib/backfill/schedule';
 import { recordBackfillHalt, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
+import type { LedgerRefusal } from '../lib/backfill/ledger';
 import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
@@ -45,6 +46,7 @@ import {
   forgetTarget,
   isBackfillChainArmed,
   loadTargets,
+  migrateLegacyScopes,
   rememberTarget,
   saveLastTick,
   syncBackfillAlarm,
@@ -955,6 +957,13 @@ async function runAlarmTickBody(): Promise<TickResult> {
 
   const targets = await loadTargets(store);
 
+  // 🔴 W36 · The storage layout moves **here**, before any gate decides whether
+  //    this tick may fetch anything. The migration used to be reachable only
+  //    from a run that was about to make a request, so a scope whose ticks were
+  //    all blocked (no tab open — the ordinary state of a laptop) never moved at
+  //    all. See migrateLegacyScopes.
+  const preflightRefusal = await migrateLegacyScopes(store, targets);
+
   if (targets.length === 0) {
     // No targets at all ⇒ the user has never been captured on a supported
     // platform. The gates are still run once, so that the popup's lastTickReason
@@ -972,7 +981,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
       hasTargets: false,
     });
     lastTick = { ran: false, reason: blocked ?? 'no-targets', report: null };
-    await recordAlarmTick(store, lastTick, 0);
+    await recordAlarmTick(store, lastTick, 0, preflightRefusal);
     return lastTick;
   }
 
@@ -995,7 +1004,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     // there is no point trying another target — the conclusion would be the same.
     if (result.reason !== 'no-http-port') break;
   }
-  await recordAlarmTick(store, last, targets.length);
+  await recordAlarmTick(store, last, targets.length, preflightRefusal);
   return last;
 }
 
@@ -1082,12 +1091,24 @@ async function recordAlarmTick(
   store: ReturnType<typeof browserLocalStore>,
   result: TickResult,
   targets: number,
+  /**
+   * 🔴 W36 · A refusal reached **before** the run could start (the pre-W18
+   * migration's preflight). When the run did happen, its own report is the more
+   * precise fact and wins; when the tick was blocked at a gate, this is the only
+   * thing that knows why nothing moved — which is exactly the state the first
+   * acceptance found (a v1 record, no v2 key, and a trace that said only `ran`).
+   */
+  preflightRefusal: LedgerRefusal | null = null,
 ): Promise<void> {
+  const halt = result.report?.halted ?? null;
   await saveLastTick(store, {
     at: Date.now(),
     ran: result.ran,
     reason: result.reason,
     targets,
+    stopped: result.report?.stopped ?? null,
+    halted: halt?.reason ?? preflightRefusal?.reason ?? null,
+    detail: halt?.detail ?? preflightRefusal?.detail ?? null,
   });
 }
 

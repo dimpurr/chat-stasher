@@ -28,6 +28,8 @@
 import type { BackfillStore } from './store';
 import type { TickReason } from './schedule';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
+import { openLedger, type LedgerRefusal } from './ledger';
+import { legacyStateKey, type HaltReason, type StopReason } from './types';
 
 /**
  * The jittered **one-shot** tick alarm. Creating the same name twice overwrites,
@@ -284,6 +286,62 @@ export async function forgetTarget(
 /** The trace of the alarm's most recent tick. Same cs_* key family; no new permission. */
 export const BACKFILL_LAST_TICK_KEY = 'cs_backfill_lasttick_v1';
 
+/**
+ * 🔴 W36 · **Carry any pre-W18 record over now, before the gates decide anything.**
+ *
+ * ## Why the migration cannot live only inside a run any more
+ *
+ * `runBackfill` opens the ledger, and the ledger is what migrates — so the whole
+ * storage layout moved only on a tick that got all the way to "a fetch is about
+ * to happen": switch on, host answering, a registered target **and an open
+ * platform tab** (the http port). The first real-Chrome acceptance was in
+ * exactly the other state for days — tabs closed, every tick blocked at
+ * `no-http-port` — so the user's 7,737-id v1 record sat there untouched, no
+ * `cs_backfill_v2:*` key existed, the popup had no debt set to show, and nothing
+ * anywhere said so. When a tick finally did run, the migration happened (this
+ * spec's own e2e case proves it); the days before it had not.
+ *
+ * So the layout now moves at the top of every alarm tick, in the state the
+ * acceptance was actually in. What this does **not** change:
+ *  · **no scope is invented.** The scopes are the registered targets, which come
+ *    from the user's own captures — the same list the tick is about to walk;
+ *  · **a scope with no pre-W18 record is not touched at all.** The check is one
+ *    `storage.local` read, and the ledger is not opened, because opening one
+ *    reads the scope's whole debt set back out of IndexedDB for no reason
+ *    (lib/backfill/ledger.ts's `openLedger` — the very read W18 exists to stop
+ *    paying per tick);
+ *  · **a refusal still writes nothing.** `openLedger` is the migration's only
+ *    entry point and it leaves an unreadable record exactly as it found it; what
+ *    is new is that the reason is returned to the caller, which puts it in the
+ *    tick trace instead of dropping it on the floor.
+ */
+export async function migrateLegacyScopes(
+  store: BackfillStore | null,
+  targets: readonly BackfillTarget[],
+): Promise<LedgerRefusal | null> {
+  if (!store) return null;
+  let refusal: LedgerRefusal | null = null;
+  for (const target of targets) {
+    let legacy: unknown;
+    try {
+      legacy = await store.load(legacyStateKey(target.platform, target.scope));
+    } catch (err) {
+      // A store that cannot be read says nothing about the scopes behind it: the
+      // run's own gate already reports 'no-store'/'storage-unavailable', and
+      // inventing a refusal here would name a cause this call did not establish.
+      console.warn('[chat-stasher] backfill state preflight read failed', (err as Error).message);
+      return refusal;
+    }
+    if (legacy === null || legacy === undefined) continue;
+    const opened = await openLedger(store, target.platform, target.scope);
+    // Ok ⇒ the record is in the new layout and the old key is gone; not ok ⇒ the
+    // reason is carried back to the tick's trace. Only the first refusal is kept:
+    // they are the same class of fact and the trace has one field for it.
+    if (!opened.ok && refusal === null) refusal = opened.refusal;
+  }
+  return refusal;
+}
+
 export interface BackfillTickRecord {
   /** When this tick happened (Date.now()). */
   at: number;
@@ -293,6 +351,38 @@ export interface BackfillTickRecord {
   reason: TickReason;
   /** How many backfill targets the registry held when this tick woke. 0 is 0, undecorated. */
   targets: number;
+  /**
+   * 🔴 W36 · **How the run itself ended**, when there was one.
+   *
+   * Why `ran: true` was not enough — the first real-Chrome acceptance read
+   * `{ran: true, reason: 'ran'}` next to a storage layout that had not moved and
+   * concluded that the W18 migration had never run. It had run: `tickBackfill`
+   * reports `ran` whenever `runBackfill` **returns**, and a run that halts on a
+   * state record it cannot read returns a report like any other. The two
+   * outcomes were indistinguishable in the trace, so the one fact that would
+   * have answered the question in seconds — the run's own stop reason and the
+   * halt it recorded — was thrown away by `recordAlarmTick`.
+   *
+   * Optional, and read as "no run happened": a record written before this field
+   * existed (or by a tick blocked at a gate) still parses, and the popup's
+   * `isTickRecord` does not require it — the same compatibility rule the other
+   * optional fields in this project follow.
+   */
+  stopped?: StopReason | null;
+  /**
+   * The `HaltReason` the run left behind, or the one a refusal reached **before**
+   * the run could start (see `migrateLegacyScopes`) — `null` when neither
+   * happened. This is the field that turns "it ran and nothing moved" into a
+   * named fact.
+   */
+  halted?: HaltReason | null;
+  /**
+   * The halt's own technical detail, verbatim. Metadata only by construction —
+   * the engine's details name keys, paths, statuses and counts, never a
+   * conversation body (CLAUDE.md's privacy rule, and the reason the detail is
+   * safe to persist at all).
+   */
+  detail?: string | null;
 }
 
 function isTickRecord(v: unknown): v is BackfillTickRecord {

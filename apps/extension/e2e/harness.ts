@@ -263,9 +263,34 @@ export interface OutboxEntry {
 export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
 export const OUTBOX_STORE = 'entries';
 
+/** The backfill's debt set (`lib/backfill/debt-store.ts`). The migration's destination. */
+export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
+export const DEBTS_STORE = 'debts';
+
+/**
+ * The extension APIs the specs reach for **from inside the worker**.
+ *
+ * Declared here rather than pulled from `@types/chrome`: this repository does not
+ * depend on that package, and a spec that reaches for an API the extension does
+ * not have should fail on the browser's own error, not on a type.
+ */
+declare const chrome: {
+  storage: {
+    local: {
+      get(query: null | string[] | Record<string, unknown>): Promise<Record<string, unknown>>;
+      set(values: Record<string, unknown>): Promise<void>;
+    };
+  };
+  alarms: {
+    create(name: string, info: { when?: number; delayInMinutes?: number }): Promise<void>;
+  };
+};
+
 interface ReadRequest {
   dbName: string;
   storeName: string;
+  /** Prefix for the thrown messages, so a failure names which store it was. */
+  label: string;
 }
 
 /**
@@ -286,20 +311,40 @@ const READ_OUTBOX = async (request: ReadRequest): Promise<unknown[]> => {
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
     const open = indexedDB.open(request.dbName);
     open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(new Error('outbox: open failed'));
-    open.onblocked = () => reject(new Error('outbox: open blocked'));
+    open.onerror = () => reject(new Error(`${request.label}: open failed`));
+    open.onblocked = () => reject(new Error(`${request.label}: open blocked`));
   });
   try {
     return await new Promise<unknown[]>((resolve, reject) => {
       const tx = db.transaction(request.storeName, 'readonly');
       const read = tx.objectStore(request.storeName).getAll();
       read.onsuccess = () => resolve(read.result as unknown[]);
-      read.onerror = () => reject(new Error('outbox: read failed'));
+      read.onerror = () => reject(new Error(`${request.label}: read failed`));
     });
   } finally {
     db.close();
   }
 };
+
+/**
+ * Every IndexedDB database this extension's service worker can see, by name.
+ *
+ * 🔴 The list is the **measurement**, not a convenience: "the debt database does
+ *    not exist" and "the debt database exists and is empty" are different facts
+ *    (CLAUDE.md invariant 1), and a reader that opened the database to look
+ *    inside would create it if it were absent — the failure `READ_OUTBOX`'s own
+ *    comment warns about. Asking which databases exist answers the first
+ *    question without touching anything.
+ */
+export async function listDatabases(extension: Extension): Promise<string[]> {
+  const worker = extension.context.serviceWorkers()[0];
+  if (!worker) throw new Error('databases: no service worker is running, so nothing was listed');
+  const names = await worker.evaluate(async () => {
+    const databases = await indexedDB.databases();
+    return databases.map((entry) => String(entry.name));
+  });
+  return names.sort();
+}
 
 function asEntry(row: unknown): OutboxEntry {
   if (!row || typeof row !== 'object') throw new Error('outbox: row is not an object');
@@ -323,8 +368,90 @@ export async function readOutbox(extension: Extension): Promise<OutboxEntry[]> {
   const rows = await worker.evaluate(READ_OUTBOX, {
     dbName: OUTBOX_DB_NAME,
     storeName: OUTBOX_STORE,
+    label: 'outbox',
   });
   return rows.map(asEntry).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+}
+
+/** One row of the backfill debt set (`lib/backfill/debt-store.ts`'s `DebtRecord`). */
+export interface DebtRow {
+  scope: string;
+  id: string;
+  state: 'pending' | 'archived';
+  seq: number;
+}
+
+/**
+ * Every debt row in the backfill database, or `[]` when the database does not
+ * exist. Throws when a service worker is not running — the same three-state rule
+ * as `readOutbox`, so a spec can never read "I could not ask" as "there is none".
+ */
+export async function readDebtRows(extension: Extension): Promise<DebtRow[]> {
+  const worker = extension.context.serviceWorkers()[0];
+  if (!worker) {
+    throw new Error('debt set: no service worker is running, so the debt set was not read');
+  }
+  const rows = await worker.evaluate(READ_OUTBOX, {
+    dbName: BACKFILL_DB_NAME,
+    storeName: DEBTS_STORE,
+    label: 'debt set',
+  });
+  return rows.map((row) => {
+    const record = row as Record<string, unknown>;
+    if (typeof record.scope !== 'string' || typeof record.id !== 'string') {
+      throw new Error('debt set: row has no scope/id');
+    }
+    return record as unknown as DebtRow;
+  });
+}
+
+/**
+ * Read keys out of the extension's own `storage.local`, from inside the worker.
+ *
+ * `get(null)` for everything (which is what the acceptance's own dump did), or a
+ * list of keys. Never a page: `chrome.storage` is not exposed to pages at all.
+ */
+export async function readStorage(
+  extension: Extension,
+  keys: string[] | null,
+): Promise<Record<string, unknown>> {
+  const worker = extension.context.serviceWorkers()[0];
+  if (!worker) throw new Error('storage: no service worker is running, so storage was not read');
+  return await worker.evaluate(
+    async (query: string[] | null) => chrome.storage.local.get(query as never) as Promise<
+      Record<string, unknown>
+    >,
+    keys,
+  );
+}
+
+/**
+ * Wake one of the extension's own alarms now.
+ *
+ * The alarm is a production event, not a test hook: `cs-backfill-tick` is the
+ * one-shot the leg re-arms after every tick, and firing it here is the same wake
+ * the browser would deliver — just without waiting out the jittered 5-10 minute
+ * draw. It is also the only path that writes the tick trace the acceptance read.
+ */
+export async function fireAlarm(extension: Extension, name: string): Promise<void> {
+  const worker = extension.context.serviceWorkers()[0];
+  if (!worker) throw new Error('alarm: no service worker is running, so nothing was fired');
+  await worker.evaluate(async (alarmName: string) => {
+    await chrome.alarms.create(alarmName, { when: Date.now() + 100 });
+  }, name);
+}
+
+/** Write into the extension's own `storage.local` — how a spec sets up "a user's storage". */
+export async function writeStorage(
+  extension: Extension,
+  values: Record<string, unknown>,
+): Promise<void> {
+  const worker = extension.context.serviceWorkers()[0];
+  if (!worker) throw new Error('storage: no service worker is running, so nothing was written');
+  await worker.evaluate(
+    async (entries: Record<string, unknown>) => chrome.storage.local.set(entries as never),
+    values,
+  );
 }
 
 /**
