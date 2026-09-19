@@ -189,8 +189,10 @@ Three things worth knowing before reading either:
   unreadable forever, with no recovery path of any kind
   (`crates/chat-stasher/src/store.rs:1189-1196`, `:1147-1151`).
 - **There is no restore command.** `read` returns one session at a time to
-  stdout (`crates/chat-stasher/src/main.rs:312-314,4979-5097`); bulk restore is not
-  implemented.
+  stdout (`crates/chat-stasher/src/main.rs:312-314,4979-5097`) and `export`
+  writes many to files under `--out` (`crates/chat-stasher/src/main.rs:521-601`);
+  both are payload-output commands. Getting sessions *back into* a harness's own
+  directories is not implemented, by either of them or by anything else.
 - **Captured conversations are plaintext until they are delivered.** A live
   capture is written into the extension's own IndexedDB outbox *before* any
   delivery is attempted, and is removed only when the host answers with a

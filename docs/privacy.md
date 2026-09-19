@@ -1,6 +1,6 @@
 # Privacy Policy — Chat Stasher
 
-**Last updated: 2026-09-12.**
+**Last updated: 2026-09-19.**
 
 This policy covers the **Chat Stasher browser extension** and the **`chat-stasher`
 command-line tool**. Together they copy your own AI-chat conversations into an
@@ -57,7 +57,9 @@ that document is the honest one.
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
   same bodies. We do not encrypt it, restrict its permissions, or shorten that
-  window. See [Known weaknesses](#known-weaknesses).
+  window. See [Known weaknesses](#known-weaknesses). Separately, `export --out`
+  writes archived sessions back out decrypted into a directory you name; that
+  copy is yours to delete and nothing of ours moves it on (section 9).
 - **Contact: `work@team.iopho.com`.**
 
 ## Contents
@@ -243,7 +245,7 @@ contents are not encrypted.** A record stays there until the host acknowledges
 it, and a record the host refused outright is kept until you delete it by
 uninstalling. See [Known weaknesses](#known-weaknesses).
 
-A capture has a second plaintext copy only if you press the popup's **export**
+A capture has a second plaintext copy if you press the popup's **export**
 button: that writes one `chat-stasher-export-<UTC>.jsonl` file, one undelivered
 bundle per line, into your browser's download directory
 (`apps/extension/lib/outbox.ts:439-475`). That file is an ordinary download, so
@@ -251,6 +253,13 @@ your browser keeps a download-history entry for it — just its name and
 timestamp, not its content. We do not delete it; `ingest` retires it to
 `consumed/` when it has consumed every line
 (`crates/chat-stasher/src/inbox.rs:57-60`).
+
+The CLI makes one plaintext copy too, and it is not a capture but an archive
+session: `chat-stasher export --out <dir>` writes the sessions it selected back
+out **decrypted**, one file per session, into the directory you name
+(`crates/chat-stasher/src/main.rs:521-601`). Nothing moves those files on and
+we keep no record of where they went, so deleting the directory is yours to do.
+The CLI writes no archive content anywhere you did not name.
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,
@@ -328,6 +337,8 @@ own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:96`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
 kept on your machine (`crates/chat-stasher/src/store.rs:261-296,1064-1149`).
+A directory written by `export --out` is **not** this: it is a separate,
+unencrypted copy, and it is not created unless you run that command.
 
 ## 4. Who your data is shared with
 
@@ -556,7 +567,8 @@ Retention on **your** machine is under your control:
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (backfill progress, host status, pause record, last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no `restore` subcommand in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `install-native-host`, `native-host` (`crates/chat-stasher/src/main.rs:130-991`). Selective per-conversation deletion inside an archive is not implemented. |
+| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:521-601`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`, `activity-index`, `machine-declare`, `machine-label`, `overview` (`crates/chat-stasher/src/main.rs:130-991`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension stops all capture immediately** and removes its
 local storage, which is where the outbox lives — so uninstalling also deletes
