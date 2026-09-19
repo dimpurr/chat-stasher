@@ -21,6 +21,11 @@ safe to reproduce without access to anyone's private conversations.
 
 ## Commit messages
 
+The language invariant the rest of this section enforces is stated once, in
+`CLAUDE.md` (the "Language" section): the public surface is English, with one
+exception. That file is the single source for it; this section is how it is
+enforced.
+
 Commit messages are English, like the rest of the public surface: an imperative
 subject line, and a body that explains why the change is worth making. The diff
 already says what it does; the message is the only place the reason survives.

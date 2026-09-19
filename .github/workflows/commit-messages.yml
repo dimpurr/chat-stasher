@@ -1,0 +1,55 @@
+name: Commit messages are English
+
+# This is the ONLY workflow that checks commit messages. It fires on every push
+# (every branch AND every tag) and every pull_request, and it deliberately has NO
+# concurrency cancellation: a commit escapes a range gate only if the run that
+# would check it is cancelled, so removing cancellation removes the hole rather
+# than naming each ref that could smuggle a commit past it. Every push ranges its
+# own delta (EVENT_BEFORE..HEAD); when EVENT_BEFORE is unusable (a new ref, a
+# force-push whose old tip is gone) the range falls back to origin/main..HEAD on
+# non-main refs, and exits 3 on main because main's base moves and so proves
+# nothing. ci.yml's heavy gates job does NOT run this check, so no commit-message
+# step lives inside a cancelled concurrency group anywhere.
+#
+# It is a separate workflow rather than a trigger on ci.yml because it runs only
+# the cheap Python gate - no Rust, no extension, no e2e matrix - and because it
+# must not share ci.yml's cancel-in-progress, which is what let a burst of main
+# pushes drop the earlier push's delta. Both this workflow and any future caller
+# use scripts/commit-message-range.sh, so the event -> range mapping is written
+# once.
+on:
+  pull_request:
+  push:
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: commit messages are English (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is load-bearing here: the gate compares a RANGE of commits
+      # (base..head on a PR, EVENT_BEFORE..HEAD on a push) and needs origin/main
+      # resolved, and a depth-1 checkout has no base commit to compare against -
+      # with default depth the range would degrade to "check the tip", which is a
+      # smaller claim than this job makes.
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Commit messages are English
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: bash scripts/commit-message-range.sh
+
+      # The same reason the self-test runs in ci.yml: a gate that cannot prove
+      # it still catches anything is worth nothing.
+      - name: Commit-message gate self-test
+        run: python3 scripts/check-commit-messages.py --selftest

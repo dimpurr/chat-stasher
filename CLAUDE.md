@@ -43,7 +43,10 @@ issues, and the source, comments and docs that ship with the tool. The one
 exception is `apps/extension/locales/zh_CN.yml` — the same exception
 `check-terminology.py`'s T5 rule encodes, and no new Chinese belongs anywhere
 else either. `scripts/hooks/commit-msg` stops a violation before the commit
-exists and `scripts/check-commit-messages.py` in CI catches it after.
+exists and `scripts/check-commit-messages.py` in CI catches it after. The hook
+only runs if `core.hooksPath` points at `scripts/hooks`; git does not read hooks
+out of a checkout by itself, so set that once per clone (`git config
+core.hooksPath scripts/hooks`).
 
 ## Do not
 

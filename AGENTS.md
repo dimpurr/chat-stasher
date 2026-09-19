@@ -6,8 +6,7 @@ first. This file exists only because some agents do not open `CLAUDE.md` on thei
 own; it deliberately does not restate their contents, because two copies of a
 rule drift apart and the copy nobody reads is the one that rots.
 
-One rule repeated in full, because it is easy to break by accident and a bad
-commit message cannot be fixed after the fact without rewriting history: **every
-commit message, pull request title and body, issue, and code comment or document
-here is written in English.** The only file allowed to contain Chinese is
-`apps/extension/locales/zh_CN.yml`.
+The language invariant is stated once, in the "Language" section of `CLAUDE.md`,
+together with its single exception, where the `commit-msg` hook and the CI
+checker live, and how to enable the hook. Read it there; this file deliberately
+does not restate it, because two copies of an invariant drift apart.

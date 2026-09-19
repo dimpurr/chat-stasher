@@ -21,8 +21,10 @@ Two modes:
     check-commit-messages.py --range <rev>
         Every commit in the range, each message checked in full (subject and
         body). The single-revision form checks exactly that one commit, for the
-        case where there is no usable base: a new branch, or a tag push. Used by
-        CI, which can only see what is already recorded.
+        case where a range has nothing to walk: a push (branch or tag) whose HEAD
+        is already reachable from the base, i.e. a ref that adds no commit beyond
+        what the base already records. Used by CI, which can only see what is
+        already recorded.
 
     check-commit-messages.py --selftest
         Proves the gate still catches what it is for, using fixtures in a temp
@@ -199,6 +201,8 @@ def subject_of(text: str, limit: int = 120) -> str:
 
 def parse_range_spec(spec: str) -> str | None:
     """Reject a malformed range. Returns an error message, or None if it is usable."""
+    if spec.startswith("-"):
+        return "a spec that starts with '-' would be read by git as an option, not a revision"
     if "..." in spec:
         return "'...' has different semantics than '..' and is not supported"
     if ".." not in spec:
@@ -218,7 +222,12 @@ def check_range(repo: str, spec: str) -> int:
     # No "..": check exactly the named commit. `git log -1 <rev>` walks no
     # further, which is what "only this one commit" has to mean here.
     cmd = ["log", "--no-color", "-z", LOG_FORMAT]
-    cmd += ["-1", spec] if ".." not in spec else [spec]
+    # `--end-of-options` makes git read the spec as a revision (or range) even
+    # if it diverged from the shape parse_range_spec already rejected - so a
+    # value that walks like a git flag is never forwarded as one. `-1` has to
+    # stay before it in the single-revision form: that is a real git flag that
+    # limits the walk, not part of the spec.
+    cmd += ["-1", "--end-of-options", spec] if ".." not in spec else ["--end-of-options", spec]
 
     proc = _git(repo, *cmd)
     if proc.returncode != 0:
@@ -229,6 +238,14 @@ def check_range(repo: str, spec: str) -> int:
         return 3
 
     records = [rec for rec in proc.stdout.split(RECORD_SEP) if rec.strip()]
+    if not records:
+        # A range that resolves to zero commits proves nothing about any commit.
+        # "OK - 0 commit(s)" would report a measurement nobody made, turning
+        # "we did not look" into "we looked and it was clean".
+        print(f"check-commit-messages: the range {spec!r} resolved to 0 commit(s); nothing was proven",
+              file=sys.stderr)
+        print(UNREADABLE_NOTE, file=sys.stderr)
+        return 3
     violations: list[tuple[str, str, list[tuple[str, int, str]]]] = []
     for rec in records:
         short, sep, message = rec.partition(FIELD_SEP)
@@ -415,10 +432,11 @@ def selftest() -> int:
         expect(f"! {d[:7]}" not in run("--range", f"{b}..{d}", "--repo", repo).stdout,
                "--range does not blame the clean commit next to it")
 
-        expect(run("--range", f"{a}..{a}", "--repo", repo).returncode == 0,
-               "an empty range exits 0")
-        expect("0 commit(s)" in run("--range", f"{a}..{a}", "--repo", repo).stdout,
-               "an empty range says so instead of printing a bare OK")
+        empty = run("--range", f"{a}..{a}", "--repo", repo)
+        expect(empty.returncode == 3,
+               "an empty range proves nothing and exits 3, not 0")
+        expect("0 commit(s)" in empty.stderr and "nothing was proven" in empty.stderr,
+               "an empty range says so on stderr instead of printing a bare OK")
 
         expect(run("--range", d, "--repo", repo).returncode == 0,
                "the single-revision form exits 0 for an English commit")
@@ -431,6 +449,8 @@ def selftest() -> int:
                "an unresolvable revision exits 3, not 0")
         expect(run("--range", "A...B", "--repo", repo).returncode == 2,
                "'...' is rejected as a usage error rather than silently misread")
+        expect(run("--range", "-1", "--repo", repo).returncode == 2,
+               "a range spec that starts with '-' is rejected rather than forwarded to git as a flag")
         expect(run("--range", f"{a}..", "--repo", repo).returncode == 2,
                "a half-open range is a usage error")
 
