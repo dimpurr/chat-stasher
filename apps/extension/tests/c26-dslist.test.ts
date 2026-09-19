@@ -93,10 +93,15 @@ function deepSeekBody(id: string): string {
       biz_code: 0,
       biz_msg: 'ok',
       biz_data: {
-        chat_session: { id, title: 'synthetic-fixture' },
+        // 🔴 W42 · `current_message_id` and each message's `parent_id` are part of the envelope the
+        //    2026-09-13 session measured (same names at tests/unsupported-transport.test.ts:141), and
+        //    W42 made them load-bearing: DEEPSEEK_PLAN.parseDetailPage walks them, and a body without a
+        //    readable leaf halts rather than passing as whole. The fixture is therefore given them, so
+        //    that it keeps reproducing the shape it claims to reproduce. No assertion in this file changed.
+        chat_session: { id, title: 'synthetic-fixture', current_message_id: 2 },
         chat_messages: [
-          { message_id: 1, role: 'USER', content: 'synthetic-turn-1' },
-          { message_id: 2, role: 'ASSISTANT', content: 'synthetic-turn-2' },
+          { message_id: 1, parent_id: null, role: 'USER', content: 'synthetic-turn-1' },
+          { message_id: 2, parent_id: 1, role: 'ASSISTANT', content: 'synthetic-turn-2' },
         ],
       },
     },

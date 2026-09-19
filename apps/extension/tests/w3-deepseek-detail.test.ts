@@ -81,16 +81,24 @@ function listPage(ids: string[]): string {
 
 /**
  * A synthetic single-conversation body, in the envelope a logged-in browser session measured on
- * 2026-09-13: { code, msg, data: { biz_code, biz_msg, biz_data: { chat_session: { id },
+ * 2026-09-13: { code, msg, data: { biz_code, biz_msg, biz_data: { chat_session: { id, ... },
  * chat_messages: [...] } } }. `omit` deletes one nested key, which is how the shape-drift case below
  * is built without writing a second fixture that could drift from this one.
+ *
+ * 🔴 W42 · `current_message_id` and each message's `parent_id` are part of that measured envelope —
+ *    the same names this repository already records at tests/unsupported-transport.test.ts:141 — and
+ *    W42 made them load-bearing (DEEPSEEK_PLAN.parseDetailPage walks them). The fixture is therefore
+ *    given them: without a readable `current_message_id` a body is not "incomplete" but *unreadable*,
+ *    and the leg halts. That is the fixture being made faithful to the shape it claims to reproduce,
+ *    not an assertion being relaxed — every assertion in this file is unchanged by W42 except the
+ *    empty-array one in section 4, which is labelled there.
  */
 function bodyFor(id: string, omit?: readonly string[]): string {
   const bizData: Record<string, unknown> = {
-    chat_session: { id, title: 'synthetic-fixture' },
+    chat_session: { id, title: 'synthetic-fixture', current_message_id: 2 },
     chat_messages: [
-      { message_id: 1, role: 'USER', content: 'synthetic-turn-1' },
-      { message_id: 2, role: 'ASSISTANT', content: 'synthetic-turn-2' },
+      { message_id: 1, parent_id: null, role: 'USER', content: 'synthetic-turn-1' },
+      { message_id: 2, parent_id: 1, role: 'ASSISTANT', content: 'synthetic-turn-2' },
     ],
   };
   for (const key of omit ?? []) delete bizData[key];
@@ -356,7 +364,7 @@ describe('W8-4 · "we could not read it" may never be recorded as "we read it"',
     expect(matchesResponseShape(getPlatformByOrigin(ORIGIN)!, drifted)).toBe(false);
   });
 
-  it('an empty chat_messages array is a shape the contract accepts — it is not read as an empty body here', async () => {
+  it('an empty chat_messages array is a shape the contract accepts — and it is never settled as an empty conversation', async () => {
     const store = memoryStore();
     const be = backend(JSON.stringify({ data: { biz_data: { chat_session: { id: ID }, chat_messages: [] } } }));
     const seen: CapturedFetch[] = [];
@@ -366,13 +374,33 @@ describe('W8-4 · "we could not read it" may never be recorded as "we read it"',
       return { saved: true, sessionId: captured.sessionId };
     });
 
-    // 🔴 Deliberately only this much: W8 declares no parseDetailPage for DeepSeek, so it makes no claim
-    //    about whether an empty conversation is legitimate. What it does claim is that the raw body is
-    //    carried to the sink untouched, so a later parser can decide with the payload in hand.
-    expect(report.halted).toBeNull();
-    expect(seen.length).toBe(1);
-    expect(seen[0]!.text).toContain('"chat_messages":[]');
-    expect(report.detailOutcomes).toEqual([]);
+    /**
+     * 🔴 W42 · **This assertion set changed, and the change is a strengthening. The premise is what
+     *    moved.** W8 asserted `halted === null`, one sink call, and no receipt — because W8 declared no
+     *    parseDetailPage for DeepSeek and therefore claimed nothing about an empty body. W42 declares
+     *    one, so the same body now has an answer, and the answer is the one CLAUDE.md invariant 1
+     *    requires: from this response alone "this conversation has no messages" and "this response is a
+     *    window with nothing in it" are not distinguishable, so the ambiguous case takes the **unknown**
+     *    path (a receipt with `complete:false`) and never the empty one. Nothing is archived and the
+     *    sink is never reached, which is strictly more than W8 could say.
+     *    Before: halted null · sink called · detailOutcomes []
+     *    After:  halted detail-empty-unverified · sink NOT called · one receipt, complete:false · unarchived
+     */
+    expect(report.stopped).toBe('halted');
+    expect(report.halted?.reason).toBe('detail-empty-unverified');
+    // 🔴 The sink is never reached: an empty body may not be handed on as if it were a conversation.
+    expect(seen.length).toBe(0);
+    expect(report.archivedThisRun).toEqual([]);
+    expect(report.state.archived).toEqual([]);
+    // The receipt is the durable half: `complete:false` is the difference between "we saw nothing" and
+    // "there was nothing", and it is on the ledger rather than only in a log line.
+    expect(report.detailOutcomes).toEqual([
+      { sessionId: ID, outcome: 'detail-empty-unverified', complete: false, at: expect.any(Number) },
+    ]);
+    expect(report.state.detailOutcomes).toEqual(report.detailOutcomes);
+    // And the debt is neither settled nor written off: it is still owed, so a later, better answer can
+    // pick it up instead of the conversation being counted as handled.
+    expect(report.state.pending).toEqual([ID]);
   });
 });
 

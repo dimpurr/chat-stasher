@@ -128,9 +128,13 @@ export type FailureReason =
   | 'detail-too-long'
   /**
    * 🔴 W31 · The body was fetched, HTTP succeeded, the shape was recognised — and
-   * **the response's own parent links do not reach a root** (claude.ai: the chain
-   * from `current_leaf_message_uuid` upward hits a message the response does not
-   * carry).
+   * **the response's own parent links do not reach a root**. Two platforms reach
+   * this reason, and both are trees with a named current leaf: claude.ai (the
+   * chain from `current_leaf_message_uuid` upward hits a message the response does
+   * not carry) and, since 🔴 W42, DeepSeek (the chain from
+   * `chat_session.current_message_id` upward along `parent_id` leaves the messages
+   * the response carries, revisits one, or starts at a leaf the response does not
+   * hold).
    *
    * A fact we observed, phrased as one: it says "walking back from the leaf left
    * the messages this response holds". It is deliberately **not** phrased as "the
@@ -138,6 +142,11 @@ export type FailureReason =
    * is absent, and the open question the research records is exactly whether a
    * long conversation is capped server-side. It is also not 'shape-changed': the
    * shape is precisely what the platform row describes.
+   *
+   * 🔴 What it is **not** used for: a body whose tree pointers are absent entirely.
+   *    There the plan's parser answers `{ok:false}` and the leg halts
+   *    'shape-changed', because "this conversation is partial" is not a statement
+   *    this code may make about a conversation whose branch it never walked.
    *
    * 🔴 Why an incomplete tree is a failure and not a stored conversation: this is
    *    the same reasoning as 'detail-paged-unsupported' above. The archive would

@@ -132,6 +132,53 @@
  *    assumption rather than a measurement. It is stated here, in DEEPSEEK_PLAN's
  *    provenance, and in this repository's privacy notes — never rounded into
  *    "the body is complete".
+ *
+ * ## W42 · DeepSeek's body no longer *assumes* it is whole; it is checked, and it
+ * is refused when it is not
+ *
+ * W8's paragraph above left one open question and one hole. The question —
+ * "does this endpoint page or truncate a long conversation?" — is **still not
+ * answered by any source** after W42 re-opened every implementation that reaches
+ * the route (see the W42 report §2: not one sends a paging parameter on the body
+ * request; the complete body envelope carries no total, no has_more, no cursor;
+ * the closest thing to evidence is one implementation's own record of a 46-turn
+ * conversation fetched in one round trip, which an export missing twenty turns
+ * would have produced identically).
+ *
+ * The hole is the part that mattered, and it is closed. W8 recorded it exactly:
+ * "a truncated body would be *stored* and its debt *settled*". A DeepSeek body
+ * went from the shape gate straight into the sink, through the same path as a
+ * Gemini body the paging loop had walked to the end and proved whole, and the
+ * archive could not tell the two apart. That is CLAUDE.md invariant 1 applied to
+ * a body rather than to a count.
+ *
+ * **What W42 does about it, without guessing at the API.** The envelope carries a
+ * tree: `chat_session.current_message_id` names the newest message of the branch
+ * the user was looking at, and every message names its `parent_id`. Both names
+ * are measured, not inferred (three independent bases, one of them this
+ * repository's own fixture of the 2026-09-13 live shape). So
+ * `parseDeepSeekDetailPage` walks that chain and archives the body only when the
+ * walk closes at a root; when it does not, the conversation is refused with the
+ * named failure `detail-tree-incomplete` — the same per-conversation shape Kimi's
+ * `detail-paged-unsupported` and Gemini's `detail-too-long` already use — and
+ * when the pointers are not there at all the leg halts `shape-changed` instead of
+ * filing a verdict about a conversation it never checked.
+ *
+ * 🔴 **W42 chose that over the two alternatives, and the reasoning is in the W42
+ *    report.** Briefly: a leg-level halt would have refused bodies that are
+ *    *provably* whole (turning a known into an unknown), and marking the archive
+ *    instead would have needed a field on a bundle schema the live leg shares and
+ *    would still have settled a debt for a conversation that was never captured.
+ *    Refusing per conversation is the only one of the three that keeps the
+ *    "three consistent" rule this file already states — see failures.ts on why
+ *    `detail-too-long` is per-conversation and `detail-unsupported` is a halt.
+ *
+ * 🔴 **The residual, named rather than left out:** the walk proves the response is
+ *    closed under the visible branch, not under every discarded sibling branch
+ *    (claude.ai's walk accepts the same limit), and it cannot catch a server that
+ *    truncates the body *and* rewrites the boundary message's `parent_id` to
+ *    `null` so the chain looks rooted. §5 of the W42 report lists the one
+ *    measurement that would close it.
  */
 
 import { PLATFORMS } from '../contract';
@@ -642,10 +689,16 @@ export type DetailParseOutcome =
   | 'detail-paged-unsupported'
   /**
    * 🔴 W31 · The response is the platform's own tree, its shape is recognised,
-   * and **walking the active branch from `current_leaf_message_uuid` upward hits
-   * a parent that is not in the response**. The body is therefore real content
-   * and may be missing messages, so it is not the conversation and must not be
-   * archived (claude.ai; see parseClaudeDetailPage).
+   * and **the walk of the visible branch does not close**. The body is therefore
+   * real content and may be missing messages, so it is not the conversation and
+   * must not be archived.
+   *
+   * Two platforms declare it, and both are trees with a named current leaf:
+   *  · claude.ai — walking up from `current_leaf_message_uuid` hits a parent the
+   *    response does not carry (parseClaudeDetailPage);
+   *  · 🔴 W42 · DeepSeek — walking up from `chat_session.current_message_id` along
+   *    `parent_id` leaves the messages the response carries, revisits one, or
+   *    starts at a leaf the response does not hold (parseDeepSeekDetailPage).
    *
    * A per-conversation fact, exactly like 'detail-paged-unsupported': every other
    * conversation in the same run is unaffected, so it takes the failure path and
@@ -653,6 +706,19 @@ export type DetailParseOutcome =
    * 'shape-changed' (the shape is precisely what the row describes) or an
    * archived conversation (that would put a partial tree in the archive with
    * nothing marking it partial).
+   *
+   * 🔴 **DeepSeek, and only DeepSeek, draws a further line here.** When a tree
+   *    pointer the walk has to read is not readable in the response — no numeric
+   *    `chat_session.current_message_id`, a chat message that is not an object, a
+   *    `message_id` that is not a number — that is a different fact and does not
+   *    land here: parseDeepSeekDetailTree returns `{ok:false}` and the leg halts
+   *    'shape-changed'. Saying "this conversation is incomplete" about a
+   *    conversation whose branch was never walked would be a diagnosis with no
+   *    evidence behind it, and one type change would turn into a leg's worth of
+   *    them. claude.ai's parser does **not** follow that rule at its own leaf:
+   *    parseClaudeDetailTree reports a missing `current_leaf_message_uuid` as this
+   *    outcome and parseClaudeDetailPage passes it through unchanged, so this
+   *    paragraph is not a description of 'detail-tree-incomplete' in general.
    */
   | 'detail-tree-incomplete';
 
@@ -1197,6 +1263,281 @@ export function parseDeepSeekListPage(text: string): ParseResult {
 }
 
 /**
+ * 🔴 W42 · The **tree pointers** of one DeepSeek conversation body, as measured.
+ *
+ * Every name below is read out of a real response, not invented, and each has
+ * more than one independent witness:
+ *
+ *  · `chat_session.current_message_id` — the message the user was last looking
+ *    at, i.e. the leaf of the visible branch. Measured in a logged-in browser
+ *    session (2026-09-13) and recorded in this repository's own fixture of that
+ *    shape (tests/unsupported-transport.test.ts:141); also present in a later
+ *    sanitized real capture (2026-08-24) and in two independent open-source
+ *    implementations, one of which documents it as the way the visible mainline
+ *    is reconstructed (walk back along `parent_id` to a root, then reverse; the
+ *    discarded regenerated siblings are excluded).
+ *  · `parent_id` — the link upward. `null` on the root of a branch.
+ *  · `message_id` — the value `parent_id` and `current_message_id` point at.
+ *
+ * 🔴 The names are read **only here**, and only to answer the completeness
+ *    question. They are not required by the platform row's shape gate
+ *    (lib/contract.ts), so a response that stops carrying them still passes that
+ *    gate — which is exactly why the walk below has its own answer for
+ *    "the pointers are gone" that is not "this conversation is incomplete".
+ */
+export const DEEPSEEK_TREE_LEAF_KEY = 'current_message_id';
+export const DEEPSEEK_TREE_PARENT_KEY = 'parent_id';
+export const DEEPSEEK_TREE_MESSAGE_KEY = 'message_id';
+
+/**
+ * 🔴 W42 · **Can this one response prove it holds the whole visible branch?**
+ *
+ * The problem this answers, in the plan's own words before this change: "a very
+ * long conversation may come back as only its first part, and this plan has **no
+ * way to tell that response from a complete one**". A response carrying a page
+ * parameter would have been the obvious instrument, and §2 of the W42 report
+ * establishes that no reviewed implementation sends one and the measured envelope
+ * carries no token to send — but the body is not opaque: it is a **tree** with a
+ * named current leaf, the same structure claude.ai's body has, for which this
+ * file already has a walk (`parseClaudeDetailTree`).
+ *
+ * So the check is that walk, applied to DeepSeek's own field names: start at
+ * `current_message_id`, follow `parent_id` upward, and require that every step
+ * resolves to a message the response carries and that the chain ends at a root
+ * (`parent_id === null`). Anything else means the response is **not** the whole
+ * visible branch.
+ *
+ * 🔴 **Why this detects the truncation the plan was worried about.** The two ways
+ *    a long conversation could come back short both break the chain:
+ *      · truncated to the OLDEST n messages ⇒ `current_message_id` (the newest)
+ *        is not among the messages this response carries;
+ *      · truncated to the NEWEST n ⇒ the chain upward leaves the messages.
+ *    A response that really holds the branch ends at a root, and nothing else does.
+ *
+ * 🔴 **The two failure kinds are not the same fact, and the split is deliberate.**
+ *    `parseClaudeDetailTree` folds every imperfection into one
+ *    `detail-tree-incomplete`. Here they are separated by whether the *inputs of
+ *    the check itself* are present:
+ *      · `kind: 'unreadable'` — the response does not carry what the check reads
+ *        (it is not JSON, has no `data.biz_data.chat_messages` array, has no
+ *        `data.biz_data.chat_session` object, names no numeric
+ *        `current_message_id`, carries a chat message that is not an object, or
+ *        carries a non-numeric `message_id`). We therefore did **not** check this
+ *        conversation, and saying "this conversation is incomplete" about a
+ *        conversation we never checked would be a diagnosis with no evidence
+ *        behind it — and, because the engine writes off the debt of a
+ *        `detail-tree-incomplete` conversation, one upstream type change would
+ *        write off every conversation in the run. The caller turns this into
+ *        `{ok:false}` ⇒ halt('shape-changed'), a traced stop.
+ *      · `kind: 'incomplete'` — the check's inputs are all there and the tree does
+ *        not close: the leaf is missing from the array, a link leaves the array or
+ *        revisits a node, two messages claim one `message_id`, or a **reached**
+ *        message's `parent_id` is neither `null` nor a number. That is a
+ *        per-conversation fact about this conversation, and the caller turns it
+ *        into the named outcome `detail-tree-incomplete`. Note where the line
+ *        falls: an id that cannot be **read** is `'unreadable'` above, while a
+ *        link that cannot be **followed** is this one — the first means the node
+ *        set was never built, the second means the walk ran and did not close.
+ *
+ * 🔴 The walk is bounded by the message count, so a response whose parent links
+ *    form a cycle cannot loop forever. A cycle is not "complete" — it is a tree
+ *    this code cannot read — so, like claude.ai's, it is reported as incomplete
+ *    rather than as a root.
+ *
+ * 🔴 **This function's job is completeness. It reorders nothing and rewrites
+ *    nothing.** What gets archived is the response body, byte for byte, exactly
+ *    as every other body parser in this file leaves it: `parseDeepSeekDetailPage`
+ *    reads the walk's verdict and nothing else, and no ordering decision here can
+ *    change what a reader of the shard sees.
+ *
+ * ⚠️ **What a successful walk does and does not prove.** It proves the response is
+ *    *closed under the visible branch*: every ancestor of the newest message is
+ *    present and the chain reaches a root. It does not prove the response holds
+ *    every *discarded* sibling branch (the same limit claude.ai's walk has, and
+ *    the same one the archive accepts there), and it cannot detect a server that
+ *    truncated the body **and** rewrote the boundary message's `parent_id` to
+ *    `null` to make it look like a root. That residual is written down in
+ *    DEEPSEEK_PLAN's provenance and is what §5 of the W42 report measures.
+ */
+export type DeepSeekDetailTreeWalk =
+  | { ok: true }
+  | { ok: false; kind: 'unreadable'; detail: string }
+  | { ok: false; kind: 'incomplete'; detail: string };
+
+export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, kind: 'unreadable', detail: 'the detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, kind: 'unreadable', detail: 'the detail response is not an object' };
+  }
+  const data = (body as Record<string, unknown>).data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data` object' };
+  }
+  const biz = (data as Record<string, unknown>).biz_data;
+  if (!biz || typeof biz !== 'object' || Array.isArray(biz)) {
+    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data` object' };
+  }
+  const bizRecord = biz as Record<string, unknown>;
+  const messages = bizRecord.chat_messages;
+  if (!Array.isArray(messages)) {
+    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data.chat_messages` array' };
+  }
+  const session = bizRecord.chat_session;
+  if (!session || typeof session !== 'object' || Array.isArray(session)) {
+    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data.chat_session` object' };
+  }
+  // 🔴 A type change is `unreadable`, not "incomplete": the same rule
+  //    parseDeepSeekListPage applies to a non-numeric `updated_at`. It applies to
+  //    every field this walk reads — the leaf below, and each message's own
+  //    `message_id` further down. A body whose ids are strings is a body we did
+  //    not walk, and saying "this conversation is incomplete" about it would be a
+  //    diagnosis with no evidence, repeated for every conversation in the run.
+  const leaf = (session as Record<string, unknown>)[DEEPSEEK_TREE_LEAF_KEY];
+  if (typeof leaf !== 'number' || !Number.isFinite(leaf)) {
+    return {
+      ok: false,
+      kind: 'unreadable',
+      detail: 'the detail response names no numeric `chat_session.current_message_id`',
+    };
+  }
+
+  const byId = new Map<number, Record<string, unknown>>();
+  for (const message of messages) {
+    // 🔴 A message this code cannot read is `unreadable`, not "incomplete" — the
+    //    same rule as the leaf above and for the same reason. Filing it as
+    //    "incomplete" would make one upstream type change (ids arriving as
+    //    strings, or a message that is not an object) a per-conversation verdict
+    //    for **every** conversation: the engine writes the debt off
+    //    (`engine.ts`, 'detail-tree-incomplete') and never retries it. Nothing
+    //    was walked, so "this conversation is incomplete" is not a fact this code
+    //    may state. The chain checks below still are.
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      return { ok: false, kind: 'unreadable', detail: 'a chat message is not an object' };
+    }
+    const messageRecord = message as Record<string, unknown>;
+    const messageId = messageRecord[DEEPSEEK_TREE_MESSAGE_KEY];
+    if (typeof messageId !== 'number' || !Number.isFinite(messageId)) {
+      return { ok: false, kind: 'unreadable', detail: 'a chat message carries no numeric `message_id`' };
+    }
+    // A duplicate id would make this map lose a message, and a walk over the
+    // remainder would resolve a link to the wrong node. Two messages claiming one
+    // identity is not a tree this code can read.
+    if (byId.has(messageId)) {
+      return { ok: false, kind: 'incomplete', detail: 'two chat messages carry the same `message_id`' };
+    }
+    byId.set(messageId, messageRecord);
+  }
+  if (!byId.has(leaf)) {
+    return {
+      ok: false,
+      kind: 'incomplete',
+      detail: 'the current message is not among the chat messages this response carries',
+    };
+  }
+
+  const visited = new Set<number>();
+  let current: number | null = leaf;
+  while (current !== null) {
+    if (visited.has(current)) {
+      return { ok: false, kind: 'incomplete', detail: 'the parent chain revisits a message' };
+    }
+    visited.add(current);
+    const message = byId.get(current);
+    if (!message) {
+      return {
+        ok: false,
+        kind: 'incomplete',
+        detail: 'the parent chain leaves the messages this response carries',
+      };
+    }
+    const parentId = message[DEEPSEEK_TREE_PARENT_KEY];
+    if (parentId === null) break; // a root: the branch is whole
+    if (typeof parentId !== 'number' || !Number.isFinite(parentId)) {
+      // 🔴 Deliberately **not** treated as a root. An unreadable link read as
+      //    "the end of the branch" would turn a response this code cannot read
+      //    into a complete conversation, which is the one outcome here that must
+      //    never be reachable by accident.
+      return { ok: false, kind: 'incomplete', detail: 'a chat message carries a `parent_id` this code cannot read' };
+    }
+    current = parentId;
+  }
+  return { ok: true };
+}
+
+/**
+ * 🔴 W42 · DeepSeek's body segment's C28 hook.
+ *
+ * Before this change `DEEPSEEK_PLAN` declared none, so a DeepSeek body went from
+ * the shape gate straight to the sink through the same path as a Gemini body the
+ * paging loop had walked to the end and proved whole — and the archive could not
+ * tell the two apart. "Does this response hold the whole conversation" was an
+ * assumption, not a measurement, and a silently partial conversation would have
+ * been stored and its debt settled.
+ *
+ * What each answer means, and why each one is a different fact to the user:
+ *
+ *  · `{ok:false}` — the shape this plan knows is not there: no
+ *    `data.biz_data.chat_messages` array, or no readable tree to check with (a
+ *    non-numeric leaf, a message that is not an object, a `message_id` that is
+ *    not a number — see parseDeepSeekDetailTree). Halt with a trace. 🔴 This is
+ *    the branch that keeps a **wrong field name or type** from turning into a
+ *    quiet storm of wrong per-conversation verdicts: we cannot say "this
+ *    conversation is incomplete" about a conversation we never checked.
+ *  · `'detail-empty-unverified'` — the array is there and is **empty**. From this
+ *    response alone, "this conversation has no messages" and "this response is a
+ *    window with nothing in it" are not distinguishable, so the ambiguous case
+ *    takes the unknown path (a receipt with `complete: false`) and never the empty
+ *    one. Same trade-off, same wording, as parseClaudeDetailPage.
+ *  · `'detail-tree-incomplete'` — the walk above ran and the visible branch does
+ *    not close: the response is real content and is **not the conversation**. The
+ *    engine records that named failure, stores nothing, and carries on with the
+ *    next conversation — the same per-conversation shape as Kimi's
+ *    `detail-paged-unsupported` and Gemini's `detail-too-long`.
+ *  · `'non-empty'` — the walk closed at a root, so the response is closed under
+ *    the visible branch and goes on to the sink whole, byte for byte. Note what
+ *    this is *not*: it is not "the endpoint cannot truncate". It is "this
+ *    response does not show the truncation the plan was worried about", which is
+ *    strictly more than the plan could say before.
+ */
+export function parseDeepSeekDetailPage(text: string): DetailParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'deepseek detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'deepseek detail response is not a JSON object' };
+  }
+  const data = (body as Record<string, unknown>).data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, detail: 'deepseek detail response has no `data` object (envelope changed?)' };
+  }
+  const biz = (data as Record<string, unknown>).biz_data;
+  if (!biz || typeof biz !== 'object' || Array.isArray(biz)) {
+    return { ok: false, detail: 'deepseek detail response has no `data.biz_data` object (envelope changed?)' };
+  }
+  const messages = (biz as Record<string, unknown>).chat_messages;
+  if (!Array.isArray(messages)) {
+    // The same line parseClaudeDetailPage draws: no such array is the drift case
+    // and must be halted on, never read as a conversation with nothing in it.
+    return { ok: false, detail: 'deepseek detail response has no `data.biz_data.chat_messages` array (shape changed?)' };
+  }
+  if (messages.length === 0) {
+    return { ok: true, outcome: 'detail-empty-unverified' };
+  }
+  const walked = parseDeepSeekDetailTree(text);
+  if (walked.ok) return { ok: true, outcome: 'non-empty' };
+  if (walked.kind === 'unreadable') return { ok: false, detail: `deepseek detail body: ${walked.detail}` };
+  return { ok: true, outcome: 'detail-tree-incomplete' };
+}
+
+/**
  * Parse one page of a Perplexity conversation list.
  *
  * 🔴 All three independent sources in R26 consume this endpoint as "returns a
@@ -1681,24 +2022,34 @@ export const DEEPSEEK_DETAIL_QUERY_KEY = 'chat_session_id';
  *    provenance" — and it has been removed by evidence, not by a decision to relax
  *    the standard.
  *
- *  · 🔴 **Not verified: whether this endpoint pages or truncates a long
- *    conversation.** None of the reviewed implementations pages it (one of them
- *    adds `&cache_version=0`; none sends a page/offset/cursor parameter), and W8
- *    adds no paging. So a very long conversation may come back as only its first
- *    part, and this plan has **no way to tell that response from a complete one** —
- *    no `total`, no `has_more`, no cursor is read from the body envelope here.
- *    Consequences, stated rather than hidden:
- *      · a truncated body would be *stored* and its debt *settled* — the engine's
- *        existing semantics ("shape is right, the sink saved it ⇒ done") cannot
- *        distinguish it, and inventing a truncation signal with no source would be
- *        exactly the kind of guess this file refuses to make;
- *      · what bounds the risk is that the live leg captures this same endpoint
- *        while the user browses, so the archive is not solely reliant on this leg,
- *        and the privacy notes carry the same caveat.
- *    If a raw payload from a genuinely long conversation ever becomes available,
- *    the place to settle this is a `parseDetailPage` (see its doc above): if the
- *    envelope turns out to carry a "there is more" field, read it there and report
- *    detail-empty-unverified rather than settling.
+ *  · 🔴 W42 · **Whether this endpoint pages or truncates a long conversation is
+ *    still not answered by any source — and this plan no longer has to assume the
+ *    answer.** W8 wrote the hole down as "we have no way to tell a complete
+ *    response from a truncated one". W42 read the body's measured envelope again
+ *    and found a way to tell: the envelope carries no page token and no total
+ *    (W42's research re-confirmed that across every implementation that reaches
+ *    this route, and across two measured captures of real responses — see the
+ *    provenance below), but it carries a **tree**: `chat_session.current_message_id`
+ *    names the newest message of the branch the user was looking at, and every
+ *    message names its `parent_id`. So the visible branch is a chain that can be
+ *    walked, which is the same completeness proof claude.ai's body already gets
+ *    (parseClaudeDetailTree), applied to DeepSeek's own field names.
+ *    ⇒ `parseDetailPage` is `parseDeepSeekDetailPage`, and a body whose walk does
+ *    not close is **not archived**: it is refused per conversation with
+ *    `detail-tree-incomplete`, the named failure, exactly as Kimi's
+ *    `detail-paged-unsupported` and Gemini's `detail-too-long` are.
+ *    What is still unproven, and is written down rather than dressed up:
+ *      · the walk proves the response is **closed under the visible branch** — every
+ *        ancestor of the newest message present, the chain ending at a root. It does
+ *        not prove the response holds every *discarded sibling* branch (claude.ai's
+ *        walk accepts the same limit);
+ *      · it cannot detect a server that truncated the body **and** rewrote the
+ *        boundary message's `parent_id` to `null` to make it look like a root. That
+ *        is the residual, and §5 of the W42 report lists the one measurement that
+ *        would close it;
+ *      · a body whose tree pointers are *absent* is not judged incomplete at all —
+ *        it halts `shape-changed`, because "this conversation is partial" is not
+ *        something this code may say about a conversation it never checked.
  *
  * ## ⚠️ Staleness and risk (written as it is, not dressed up)
  * The response shape has circumstantial evidence dated 2026-08-17; but **the
@@ -1732,6 +2083,10 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
   detailUrl: (origin, conversationId) =>
     `${origin}${DEEPSEEK_DETAIL_PATH}?${DEEPSEEK_DETAIL_QUERY_KEY}=${encodeURIComponent(conversationId)}`,
   detailQueryKey: DEEPSEEK_DETAIL_QUERY_KEY,
+  // 🔴 W42 · DeepSeek's body segment's completeness check. Before this, the plan
+  //    declared none and a possibly-partial body was stored and its debt settled.
+  //    See parseDeepSeekDetailPage and parseDeepSeekDetailTree.
+  parseDetailPage: parseDeepSeekDetailPage,
   provenance:
     'cross-source reverse-engineering (research ticket R25, 2026-08-17; four mutually '
     + 'independent open-source implementations agreeing) · '
@@ -1751,9 +2106,40 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
     + 'route with the same query key. '
     + '🔴 Unverified, stated here rather than left out: whether that endpoint pages or '
     + 'truncates a LONG conversation. No reviewed implementation pages it and W8 added '
-    + 'no paging, so a truncated body would be indistinguishable from a complete one at '
-    + 'this layer. Not official documentation, and W8 itself sent no request to '
-    + 'deepseek.com (the 2026-09-13 observation was a real browser session, not this change).',
+    + 'no paging. '
+    + '🔴 W42 (2026-09-19) re-read the whole body envelope and did NOT answer that '
+    + 'question either — what it did is make the plan stop assuming it. Every '
+    + 'implementation that reaches this route was opened again: not one sends a '
+    + 'page/offset/cursor/limit parameter on the body request (the only query variation '
+    + 'anywhere is one implementation\'s `&cache_version=0`, a cache-buster), and the '
+    + 'complete key list of `data.biz_data` in two measured real responses is '
+    + '{ chat_session, chat_messages, cache_control, cache_reset_at } — no total, no '
+    + 'has_more, no next-page token, no cursor, so there is nothing to page with and '
+    + 'nothing to read a completeness claim from. What the envelope DOES carry is a tree, '
+    + 'and the field names are measured, not inferred: '
+    + 'chat_session.current_message_id + messages[].{message_id, parent_id}. '
+    + 'Evidence: (1) this repository\'s own record of the live shape of '
+    + 'history_messages seen in a logged-in session on 2026-09-13 '
+    + '(apps/extension/tests/unsupported-transport.test.ts:141); (2) a later sanitized '
+    + 'real capture (2026-08-24) of a whole body, same names; (3) two independent '
+    + 'open-source implementations, one of which documents exactly this walk '
+    + '(current_message_id back along parent_id to a root) as the way the user-visible '
+    + 'mainline is reconstructed. So parseDeepSeekDetailPage walks that chain: closed at '
+    + 'a root ⇒ the response is archived; the chain leaves the messages, revisits one, '
+    + 'or starts at a leaf the response does not carry ⇒ detail-tree-incomplete per '
+    + 'conversation (nothing stored, debt not settled, run carries on); the pointers '
+    + 'themselves unreadable ⇒ halt shape-changed, because a wrong field name must not '
+    + 'become a quiet storm of "this conversation is incomplete" verdicts about '
+    + 'conversations that were never checked. '
+    + '🔴 Still unproven after W42, stated rather than dressed up: the walk proves the '
+    + 'response is closed under the visible branch, NOT that the response is closed under '
+    + 'every discarded sibling branch (the same limit claude.ai\'s walk accepts), and it '
+    + 'cannot catch a server that truncates the body AND rewrites the boundary message\'s '
+    + 'parent_id to null so the chain looks rooted. The one measurement that would close '
+    + 'that residual is listed in the W42 report. '
+    + 'Not official documentation, and W42 itself sent no request to deepseek.com '
+    + 'either (the 2026-09-13 and 2026-08-24 observations were real browser sessions, '
+    + 'not this change).',
 };
 
 export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
