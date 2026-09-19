@@ -4,12 +4,17 @@ import {
   MAIN_FALLBACK_TIMEOUT_MS,
   MAIN_PROBE_MESSAGE,
   GEMINI_TOKENS_REQUEST_MESSAGE,
+  HOOK_REASON_DID_NOT_RUN,
+  HOOK_STATUS_MESSAGE,
   findPlatformForUrl,
   isCaptureMessage,
   isGeminiTokensReply,
+  isHookReportMessage,
   isMainReadyMessage,
   type CapturedFetch,
   type GeminiBootstrapTokens,
+  type HookObservation,
+  type HookStatusMessage,
 } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 import {
@@ -32,7 +37,11 @@ import {
   GEMINI_TOKEN_PULL_TIMEOUT_MS,
 } from '../lib/platform-auth';
 import { completeGeminiLiveCapture, isGeminiDetailRequest } from '../lib/gemini-capture';
-import { createFallbackWarningGate } from '../lib/fallback-verification';
+import {
+  createFallbackWarningGate,
+  isFallbackHookVerified,
+  type FallbackHookVerification,
+} from '../lib/fallback-verification';
 import { createStaleLinkWarningGate } from '../lib/page-link';
 
 /**
@@ -63,6 +72,7 @@ export default defineContentScript({
    *    frame.
    */
   allFrames: true,
+  matchOriginAsFallback: true,
   main() {
     const probeToken = makeProbeToken();
     let mainReady = false;
@@ -75,7 +85,92 @@ export default defineContentScript({
     /** 🔴 W36 · At most one stale-link warning per page; see lib/page-link.ts. */
     const warnStaleLink = createStaleLinkWarningGate();
 
-    const pageOrigin = window.location.origin;
+    /**
+     * 🔴 W43 · **The environment's origin, not the URL's** — the same rule as
+     *    `lib/page-hook.ts`, and the two copies must agree or the hook and this
+     *    bridge stop recognising each other.
+     *
+     * In an `about:blank` / `about:srcdoc` subframe of a matched origin,
+     * `location.origin` is the string `"null"` while `window.origin` is the
+     * inherited `https://…`. The hook posts with this value as its
+     * `targetOrigin`, this file compares `event.origin` against it — and
+     * `postMessage` with `"null"` throws outright. So on that frame shape the two
+     * sides could neither speak nor be heard, and the fix has to be made in both
+     * or in neither.
+     *
+     * A truly opaque document reports `"null"` here as well, and stays exactly as
+     * isolated as it was: `isPageMessage` finds no platform for `"null"`, so
+     * nothing is relayed.
+     */
+    const pageOrigin = ((): string => {
+      const environmentOrigin = typeof window.origin === 'string' ? window.origin : '';
+      return environmentOrigin.length > 0 ? environmentOrigin : window.location.origin;
+    })();
+
+    /**
+     * 🔴 W43 · **One page's word about its own capture hook, on its way to storage.**
+     *
+     * What used to happen when the hook was not installed: the probe went
+     * unanswered, the fallback was tried and refused, and the only trace was one
+     * fixed line in the page's console — a line no user reads and no part of the
+     * extension can show. The page then looked exactly like a page where nobody
+     * opened a conversation, which is the one thing the project's first invariant
+     * forbids. This function is the sender that closes that hole: one fixed,
+     * metadata-only message — an origin and a reason code from the closed set in
+     * `lib/contract.ts`, never a URL, a body, an id or a token — to background,
+     * which writes it down under `lib/hook-status.ts` and the popup shows.
+     *
+     * 🔴 `reason: null` is the **positive** observation, and it is not an
+     *    afterthought: a page whose probe this side's own invented token came back
+     *    from is the evidence that clears an older record for the same origin.
+     *    Without it the record could only ever be written, never withdrawn, and a
+     *    user who reloaded the tab and fixed the page would keep a sentence saying
+     *    it was broken — a record that has stopped being a record of anything.
+     *
+     * 🔴 At most one report per page **per outcome** — the three failure reasons
+     *    and `null` each count once — for the same reason the warning it
+     *    accompanies is gated: a page that keeps failing must stay legible. The
+     *    gate is per outcome rather than per page because these are different
+     *    facts and one page can genuinely produce more than one of them (a hook
+     *    that refused a patch, then a probe that went unanswered, then a fallback
+     *    that verified), and a page-wide flag would quietly drop the second. The
+     *    set is bounded by the closed vocabulary plus one, so it cannot grow with
+     *    uptime.
+     */
+    const hookStatusReported = new Set<string>();
+    function reportHookStatus(reason: HookObservation | null): void {
+      const key = reason ?? 'verified';
+      if (hookStatusReported.has(key)) return;
+      hookStatusReported.add(key);
+      // 🔴 Delivery is best-effort in both directions, and a failure here must not
+      //    disturb the page: a capture that was already lost cannot be made worse
+      //    by a report about it, and `warnStaleLink` names the one cause that is
+      //    worth naming (this document's scripts predate the current build, so
+      //    background is not there to hear it).
+      Promise.resolve(
+        browser.runtime.sendMessage({
+          type: HOOK_STATUS_MESSAGE,
+          origin: pageOrigin,
+          reason,
+          observedAt: Date.now(),
+        } satisfies HookStatusMessage),
+      ).catch(() => { /* the page is never disturbed by a report about the page */ });
+    }
+
+    /**
+     * 🔴 W43 · The one place a fallback failure is turned into a *record*, next to
+     * the console warning it already produced. Both call sites of
+     * `warnFallbackUnverified` in this file go through here, so "the hook is not
+     * installed on this page" is one decision made once, and no path can warn
+     * without recording.
+     */
+    function noteFallbackUnverified(result: FallbackHookVerification): void {
+      warnFallbackUnverified(result);
+      // The report is sent only for a failure; a verified fallback is a hook that
+      // is installed, and there is nothing for a reader to act on. `isFallbackHook
+      // Verified` is that rule's one definition, shared with the warning.
+      if (!isFallbackHookVerified(result)) reportHookStatus(HOOK_REASON_DID_NOT_RUN);
+    }
     const isPageMessage = (event: MessageEvent<unknown>): boolean =>
       event.source === window &&
       event.origin === pageOrigin &&
@@ -101,9 +196,36 @@ export default defineContentScript({
           // is a hook that verified, so this is a no-op. It is routed here so
           // that "verified or not" stays one decision in one module instead of
           // being re-derived at each call site.
-          warnFallbackUnverified({ scriptAppended: fallbackScriptAppended, markerInstalled: true });
+          noteFallbackUnverified({ scriptAppended: fallbackScriptAppended, markerInstalled: true });
         }
+        /**
+         * 🔴 W43 · **And the positive observation goes to storage.**
+         *
+         * This is the only moment in the extension's life at which it can say a
+         * page's hook is installed *and in effect* — the token came back from the
+         * page world and, since W43, only while `window.fetch` is still the
+         * wrapper (`lib/page-hook.ts`) — so it is also the only evidence that may
+         * withdraw a record left by an earlier page on this origin. Sent once per
+         * page; the gate inside drops the repeats the probe cadence would
+         * otherwise produce.
+         */
+        reportHookStatus(null);
         mainReady = true;
+        return;
+      }
+
+      /**
+       * 🔴 W43 · **The hook's own report about itself.**
+       *
+       * Placed before the capture check because it is not a capture and must not
+       * be mistaken for one: it carries no URL, no body, no id and no token — only
+       * a reason code, and `isHookReportMessage` checks that code against the
+       * closed set rather than forwarding whatever the page posted, because a page
+       * can post anything on its own window and what arrives here is written into
+       * a record a person reads.
+       */
+      if (isHookReportMessage(event.data)) {
+        reportHookStatus(event.data.reason);
         return;
       }
 
@@ -237,7 +359,7 @@ export default defineContentScript({
       const source = `(${installPageFetchHook.toString()})(${JSON.stringify(PAGE_HOOK_OPTIONS)});`;
       fallbackScriptAppended = injectPageScript(source);
       if (!fallbackScriptAppended) {
-        warnFallbackUnverified({ scriptAppended: false, markerInstalled: false });
+        noteFallbackUnverified({ scriptAppended: false, markerInstalled: false });
         return;
       }
 
@@ -255,7 +377,7 @@ export default defineContentScript({
         if (!fallbackVerificationRequested) return;
         fallbackVerificationRequested = false;
         fallbackVerificationTimer = undefined;
-        warnFallbackUnverified({ scriptAppended: fallbackScriptAppended, markerInstalled: false });
+        noteFallbackUnverified({ scriptAppended: fallbackScriptAppended, markerInstalled: false });
       }, MAIN_FALLBACK_TIMEOUT_MS);
     }
 

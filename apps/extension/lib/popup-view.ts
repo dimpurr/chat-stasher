@@ -59,6 +59,13 @@ import {
   type BackfillHeader,
 } from './backfill/types';
 import type { HostPauseRecord, HostStatusRecord } from './host-status';
+import type { HookStatusRecord } from './hook-status';
+import {
+  HOOK_REASON_DID_NOT_RUN,
+  HOOK_REASON_DID_NOT_TAKE,
+  HOOK_REASON_WAS_REPLACED,
+  type HookObservation,
+} from './contract';
 import type { LastExport, OutboxEntry } from './outbox';
 import { OUTBOX_CAPACITY_BYTES } from './outbox';
 import * as ui from './ui-strings';
@@ -208,6 +215,22 @@ export interface PopupModel {
    * no existing call site changes a character.
    */
   summary?: SummaryState;
+  /**
+   * 🔴 W43 · **Every origin whose own page told us its capture hook is not
+   *    installed** (`lib/hook-status.ts`), newest first.
+   *
+   * This is the field that turns "the stage stayed empty" from an ambiguity into
+   * a fact: before W43 a page where nothing of ours ran produced exactly what a
+   * page where the user opened no conversation produces, and no surface of the
+   * extension could tell them apart.
+   *
+   * Omitted ⇒ this load did not look (the same optional-field pattern as the
+   * fields above). An unreadable storage snapshot reads as an empty list here, the
+   * same rule `failures` follows: at that point nothing is known about any origin,
+   * and the alternative — a note claiming a failure that may not exist — would be
+   * worse than the silence it replaces.
+   */
+  hookStatus?: HookStatusRecord[];
 }
 
 /**
@@ -995,10 +1018,51 @@ function coverageNote(): string {
   return lines.join('\n');
 }
 
+/**
+ * 🔴 W43 · **One reason code → the sentence a person reads.**
+ *
+ * A total map over the closed set in `lib/contract.ts`, not a lookup with a
+ * fallback: a reason this table does not name must fail `tsc` here rather than
+ * reaching a user as its own raw code or, worse, as a sentence about a different
+ * fact.
+ */
+const HOOK_REASON_NOTE_KEYS: Record<HookObservation, string> = {
+  [HOOK_REASON_DID_NOT_RUN]: 'popup.notes.hook.reason.didNotRun',
+  [HOOK_REASON_DID_NOT_TAKE]: 'popup.notes.hook.reason.didNotTake',
+  [HOOK_REASON_WAS_REPLACED]: 'popup.notes.hook.reason.wasReplaced',
+};
+
+/**
+ * 🔴 W43 · One origin's hook record, as a sentence.
+ *
+ * Every observation the record holds is named — they are different facts and the
+ * one that matters to a reader (did captures happen and then stop, or did nothing
+ * ever run?) differs between them — and the time is printed as the stamp it is,
+ * because "the hook is not installed" is only ever true **as of** that moment: a
+ * page that verifies afterwards clears the record.
+ */
+function hookStatusNote(record: HookStatusRecord): string {
+  const reasons = record.reasons
+    .map((row) => t(HOOK_REASON_NOTE_KEYS[row.reason]))
+    .join(' · ');
+  return t('popup.notes.hook.notInstalled', {
+    platform: record.platform,
+    origin: record.origin,
+    reasons,
+    when: ui.stamp(record.at),
+  });
+}
+
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 Failure details come before every other note. If something was lost, say that first.
   if (model.failures.entries.length > 0) notes.push(failureNote(model.failures));
+
+  // 🔴 W43 · **Second, and before the tick note, because it outranks it.** A
+  //    backfill that has not ticked yet is a wait; a page whose capture hook is
+  //    not installed is live capture that will never produce anything, on a page
+  //    the user is looking at right now. Saying "waiting" first would bury it.
+  for (const record of model.hookStatus ?? []) notes.push(hookStatusNote(record));
 
   const tickNote = lastTickNote(model.lastTick ?? null);
   if (tickNote) notes.push(tickNote);

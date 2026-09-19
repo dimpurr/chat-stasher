@@ -23,15 +23,15 @@ trust the code and treat the sentence as unverified.
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:104-129`, `:579-581`;
-   the `fetch` wrap at `apps/extension/lib/page-hook.ts:468-485`, the
-   `response.clone().text()` read at `:461`, and the capture decision at
-   `:223-263`).
+   the raw response text (`apps/extension/lib/contract.ts:210-235`, `:685-687`;
+   the `fetch` wrap at `apps/extension/lib/page-hook.ts:614-639`, the
+   `response.clone().text()` read at `:607`, and the capture decision at
+   `:347-387`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:309-377`;
-   `apps/extension/entrypoints/background.ts:195-212`).
+   `apps/extension/entrypoints/background.ts:198-215`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -108,7 +108,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:64-80`, `:309-377`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:122-150`). It sits there,
+   (`apps/extension/entrypoints/background.ts:125-153`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:379-394`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -230,7 +230,7 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:468-485` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:461`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:754-809`, `:1119-1141`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:614-639` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:607`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:754-809`, `:1119-1141`). |
 
 **Caveat, stated honestly, and one measurement this document owes the reader:**
 the "cannot see that the capture happened" line above is about what the platform
@@ -263,8 +263,8 @@ turns as you scroll, and a copy anchored anywhere but page 1 could look complete
 while holding only the oldest turns. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:442-447`;
-`apps/extension/entrypoints/dw-bridge.content.ts:390-416`;
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:588-593`;
+`apps/extension/entrypoints/dw-bridge.content.ts:512-538`;
 `apps/extension/lib/platform-auth.ts:99-118`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
@@ -277,7 +277,7 @@ Gemini reads three values out of the page's own `WIZ_global_data` — the XSRF t
 that goes in the request body, and two identifiers that go in the query — through
 a page-world pull, per request, holding no copy, and attaches them to its two RPCs
 and nothing else (`apps/extension/lib/platform-auth.ts:355-417`;
-`apps/extension/lib/contract.ts:19-80`). By the same argument that applies on
+`apps/extension/lib/contract.ts:39-100`). By the same argument that applies on
 ChatGPT, neither adds a party who could not already see it — any script on those
 origins, and the pages' own requests, carry those same values. Gemini's borrow
 one more property worth naming: the extension *asks the page* for them, and the
@@ -311,7 +311,7 @@ leg leaves that conversation-content segment unfilled precisely because a wrong
 guess fails silently: it would archive a truncated version of every chat and
 still look like success. The route itself is no longer the unknown — the
 extension's live-capture row reads the response the page fetches when you open a
-conversation (`apps/extension/lib/contract.ts:198-213`) — but the sources
+conversation (`apps/extension/lib/contract.ts:304-319`) — but the sources
 disagree about that route's parameters, and nothing establishes whether one
 response holds a whole long conversation. Reading a response the page already
 fetched is also not the same as issuing that request yourself, and backfill
@@ -322,9 +322,9 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:752-765`, `:911-927`). That value is written
+(`apps/extension/lib/contract.ts:858-871`, `:1017-1033`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:137-139`). It never leaves your
+(`apps/extension/entrypoints/background.ts:140-142`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 ### The browser extension ecosystem — other extensions installed alongside ours
@@ -340,7 +340,7 @@ questions we did **not** answer, and which a reader should not assume are safe:
 - Whether an extension with broad host permissions on a chat origin can observe
   our MAIN-world hook, the `window.postMessage` traffic between the page hook
   and the bridge (`apps/extension/lib/contract.ts:6-16`), or the page-world
-  markers we set (`apps/extension/lib/contract.ts:82-84`).
+  markers we set (`apps/extension/lib/contract.ts:102-104`).
 - Whether a second extension can reach another extension's IndexedDB — which is
   where the outbox, and therefore the undelivered conversations, live
   (`apps/extension/lib/outbox.ts:34-37`).
@@ -348,8 +348,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on the hook's ready message
-(`apps/extension/lib/contract.ts:735-745`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:700-733`). Those
+(`apps/extension/lib/contract.ts:841-851`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:806-839`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.
@@ -590,7 +590,7 @@ a real limitation of the current code.
    sent only when the page's own requests and the cookie both named none, and a
    recorded "several organizations, no signal" is not asked again
    (`apps/extension/lib/backfill/claude-page.ts:62-136`;
-   `apps/extension/entrypoints/background.ts:683-698`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:686-701`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:214-246`); a body
    response that admits it is incomplete is refused and listed as a failure

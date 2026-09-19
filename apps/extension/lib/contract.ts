@@ -15,6 +15,26 @@ export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
 export const WS_OBSERVED_MESSAGE = '__chat_stasher_ws_observed__';
 
 /**
+ * 🔴 W43 · **The page world saying "I could not install the capture hook", or
+ *    "the wrapper I installed is no longer in effect".**
+ *
+ * Why this is a name and not a `console.warn`: until W43 the only report of a
+ * missing hook was a line in the page's console, which no user reads and no part
+ * of the extension can show. A page where the hook never ran therefore produced
+ * an empty stage, and an empty stage is what a user who opened no conversations
+ * produces as well (CLAUDE.md invariant 1 — an unknown must never be recorded as
+ * empty). This message is the hook's own observation travelling to the side of
+ * the extension that can write it down; `lib/hook-status.ts` holds the closed set
+ * of reasons, and the bridge relays them to background under `'hook-report'`.
+ *
+ * 🔴 Deliberately a distinct name from MAIN_READY_MESSAGE, which is the *positive*
+ *    answer to a probe. A page can answer a probe and still be unable to capture
+ *    on one transport (the partial-install case), so "ready" and "fully working"
+ *    are two facts and must not share a channel.
+ */
+export const HOOK_REPORT_MESSAGE = '__chat_stasher_hook_report__';
+
+/**
  * 🔴 W29 · **Gemini's bootstrap tokens, pulled from the page world when a request
  * needs them.**
  *
@@ -82,6 +102,92 @@ export function isGeminiTokensReply(value: unknown): value is { type: string } &
 export const PAGE_HOOK_VERSION = 'v1';
 export const PAGE_HOOK_STATE_KEY = '__chat_stasher_fetch_hook_state__';
 export const PAGE_HOOK_FETCH_MARKER = '__chat_stasher_fetch_hook_marker__';
+
+/**
+ * 🔴 W43 · **The reasons a page can report its own capture hook as not working.**
+ *
+ * Declared in this module — the one thing the MAIN-world script can share with
+ * the extension side — because all three worlds need the same vocabulary: the
+ * hook (page world) is the only party that can see a patch refused or replaced,
+ * the bridge (isolated) is the only party that can see a probe go unanswered, and
+ * background is the only party that can write the observation down. The type, the
+ * merge and the storage record live in `lib/hook-status.ts`; the wording lives in
+ * `lib/ui-strings.ts`.
+ *
+ * 🔴 Every member states an **observation**, never a cause, and the three are
+ *    three different facts that must not be merged: "nothing of ours ran",
+ *    "ours ran and could not take effect", and "ours ran, took effect, and is
+ *    gone" are different things to tell a reader, and only the last one means
+ *    captures already exist for this page.
+ */
+export const HOOK_REASON_DID_NOT_RUN = 'hook-did-not-run';
+export const HOOK_REASON_DID_NOT_TAKE = 'hook-did-not-take';
+export const HOOK_REASON_WAS_REPLACED = 'hook-was-replaced';
+
+export const HOOK_OBSERVATIONS = [
+  HOOK_REASON_DID_NOT_RUN,
+  HOOK_REASON_DID_NOT_TAKE,
+  HOOK_REASON_WAS_REPLACED,
+] as const;
+
+export type HookObservation = (typeof HOOK_OBSERVATIONS)[number];
+
+export function isHookObservation(value: unknown): value is HookObservation {
+  return typeof value === 'string' && (HOOK_OBSERVATIONS as readonly string[]).includes(value);
+}
+
+/**
+ * 🔴 W43 · The page world's hook report, validated where it arrives.
+ *
+ * A page can post anything on its own window, so the reason is checked against
+ * the closed set here instead of being trusted and forwarded: the bridge writes
+ * what this guard accepts into a record a person reads.
+ */
+export function isHookReportMessage(
+  value: unknown,
+): value is { type: string; reason: HookObservation } {
+  return isRecord(value) && value.type === HOOK_REPORT_MESSAGE && isHookObservation(value.reason);
+}
+
+/**
+ * 🔴 W43 · **Bridge → background: what this page just learned about its own hook.**
+ *
+ * The one message by which a page's hook state reaches the place that can write
+ * it down. It carries an origin and a reason code and nothing else — no URL path,
+ * no conversation id, no body, no token — because what it produces is a record a
+ * person reads (`lib/hook-status.ts`) and because a capture that was lost must
+ * not be made worse by a report about it.
+ *
+ * 🔴 **`reason: null` is not an absence, it is the positive fact.** A page whose
+ *    probe was answered echoed a token this side invented, which is the proof
+ *    that the hook is installed and in effect *there*; that page is how an older
+ *    record for the same origin gets cleared. A nullable field would be a poor way
+ *    to say that if the two cases were "something" and "nothing" — they are two
+ *    observations, and the guard below accepts exactly those two.
+ *
+ * 🔴 One record per origin, last word wins. A frame that fails and a frame that
+ *    verifies on the same origin are both real, and the record cannot hold both;
+ *    which one is current is the newest thing a page on that origin said, and the
+ *    record keeps the time so a reader can see how current it is.
+ */
+export const HOOK_STATUS_MESSAGE = 'cs-hook-status';
+
+export interface HookStatusMessage {
+  type: string;
+  /** The origin of the page that observed it. Checked against the platform table on arrival. */
+  origin: string;
+  /** The observation, or `null` for "the hook verified on this page". */
+  reason: HookObservation | null;
+  observedAt: number;
+}
+
+export function isHookStatusMessage(value: unknown): value is HookStatusMessage {
+  if (!isRecord(value)) return false;
+  if (value.type !== HOOK_STATUS_MESSAGE) return false;
+  if (typeof value.origin !== 'string' || value.origin.length === 0) return false;
+  if (typeof value.observedAt !== 'number' || !Number.isFinite(value.observedAt)) return false;
+  return value.reason === null || isHookObservation(value.reason);
+}
 
 /** Capability wait: short enough to precede normal app traffic, no browser sniffing. */
 export const MAIN_FALLBACK_TIMEOUT_MS = 100;

@@ -64,6 +64,7 @@ import {
   undeliveredEntries,
 } from '../../lib/outbox';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
+import { hookStatusOf } from '../../lib/hook-status';
 import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 
@@ -183,6 +184,9 @@ async function collect(): Promise<PopupModel> {
     // 🔴 C20: aggregated across every platform/account. An unreadable snapshot ⇒
     //    empty list (at that point we genuinely know nothing).
     failures: collectFailures(snapshot),
+    // 🔴 W43 · Read from the same snapshot as the failures above, and with the
+    //    same rule for an unreadable one (see PopupModel.hookStatus).
+    hookStatus: hookStatusOf(snapshot),
     lastTick,
     legacyMigration,
     // 🔴 C33 · The two preconditions of the "start backfilling this platform"

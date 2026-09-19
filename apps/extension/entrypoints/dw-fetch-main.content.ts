@@ -47,6 +47,7 @@ export default defineContentScript({
    * hosts only. `e2e/frame-capture.spec.ts` is the test that fails without it.
    */
   allFrames: true,
+  matchOriginAsFallback: true,
   main() {
     installPageFetchHook(PAGE_HOOK_OPTIONS);
   },
