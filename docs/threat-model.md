@@ -98,10 +98,10 @@ answer.
 
 | | |
 |---|---|
-| **Can see** | The captured conversations **in plaintext**, in the extension's outbox inside your browser profile; the master key that opens your entire archive; the staged shards before they are pushed; your config, including your destination address. |
+| **Can see** | The captured conversations **in plaintext**, in the extension's outbox inside your browser profile; the master key that opens your entire archive; the staged shards before they are pushed; any directory you exported to; your config, including your destination address. |
 | **Cannot see** | Nothing meaningful is withheld from a process running as your user. |
 
-Concretely, four separate plaintext exposures:
+Concretely, five separate plaintext exposures:
 
 1. **The outbox window, before delivery.** The extension writes each captured
    session as an ordinary, unencrypted record into its outbox IndexedDB
@@ -113,9 +113,11 @@ Concretely, four separate plaintext exposures:
    and the record is deleted (`apps/extension/lib/outbox.ts:379-394`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
    that window.** How long it is depends on how often the host is reachable; if
-   it never is, the plaintext stays indefinitely. A second plaintext copy exists
-   only if you press the popup's export button, which writes the same bodies
-   into an ordinary download file (`apps/extension/lib/outbox.ts:465-475`).
+   it never is, the plaintext stays indefinitely. A second plaintext copy of a
+   capture exists if you press the popup's export button, which writes the same
+   bodies into an ordinary download file
+   (`apps/extension/lib/outbox.ts:465-475`). (An **archived** session can also be
+   written out decrypted, by `export --out` — that is exposure 5, below.)
 
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
@@ -136,6 +138,15 @@ Concretely, four separate plaintext exposures:
    which conversations were in it — and it may be synced by your browser to your
    browser vendor. **We have not investigated** whether any particular browser
    syncs download history by default.
+
+5. **A directory you exported to.** `chat-stasher export --out <dir>` writes the
+   archived sessions it selected back out **decrypted**, one file per session,
+   into a directory you name (`crates/chat-stasher/src/main.rs:521-601`). Unlike
+   the stage, nothing here is sealed and nothing moves it on: the files stay
+   exactly as written until you delete them, and the command keeps no record of
+   where they went. Name a directory you would be willing to lose, and delete it
+   yourself when you are done. `--turns user` and `--trim-to-window` write less,
+   but what they write is still plaintext.
 
 **We do not defend against a hostile process running as your user.** On a
 single-user desktop this is the normal situation and the exposure is
@@ -498,15 +509,21 @@ a real limitation of the current code.
 
 4. **There is no restore command.** The subcommands in this version are `init`,
    `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
-   `dest-init`, `search`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`
-   (`crates/chat-stasher/src/main.rs:130-991`); **a bulk restore-to-disk command
-   does not exist**. The only retrieval path is `read`, which dumps **one
-   session at a time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:312-314,4976-5094`), and note that `read` therefore
-   *is* a payload-output command — it prints conversation content. Restoring a
-   whole archive is not something you can currently do with one command. If
-   getting everything back in bulk matters to you, this is not ready for you
-   yet.
+   `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
+   `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
+   `activity-index`, `machine-declare`, `machine-label`, `overview`
+   (`crates/chat-stasher/src/main.rs:130-991`); **a command that puts sessions
+   back into a harness's own directories does not exist**. There are two
+   retrieval paths, and both are payload-output commands — each puts
+   conversation content where you can read it. `read` dumps **one session at a
+   time** to stdout and prints its SHA-256
+   (`crates/chat-stasher/src/main.rs:312-314,4976-5094`). `export --out <dir>`
+   writes **many** sessions to files in one command, laid out as
+   `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
+   **plaintext** (`crates/chat-stasher/src/main.rs:521-601`) — see exposure 5
+   below. Bulk retrieval of the sessions a time window selects is therefore
+   possible; what remains missing is restoring them into a harness's own
+   directories.
 
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
    never fetches or decrypts a **session shard** — the conversation payload;

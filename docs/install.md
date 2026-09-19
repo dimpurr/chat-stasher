@@ -534,12 +534,15 @@ write are real, and the manifest says what is missing) · `2` usage error
 This section is an **honest list**. Everything below is the current state we
 confirmed in the code, not a temporary disclaimer.
 
-- **There is no `restore` (bulk recovery) command. Not in phase one.** The
-  subcommand table has no `restore` entry
-  (`crates/chat-stasher/src/main.rs:130-991`). What you can do is `read`, which
-  dumps **one** conversation to standard output at a time
-  (`crates/chat-stasher/src/main.rs:312-356`). Bulk restore = for now you have
-  to write your own script loop.
+- **There is no `restore` command — nothing puts a session back into a
+  harness's own directory, and that is not in phase one.** The subcommand table
+  has no `restore` entry (`crates/chat-stasher/src/main.rs:130-991`). Getting
+  content *out* does have a bulk path: `export --out <dir>` writes every session
+  a time window selects to files in one command
+  (`crates/chat-stasher/src/main.rs:521-601`), and `read` dumps **one**
+  conversation to standard output at a time
+  (`crates/chat-stasher/src/main.rs:312-356`). Restoring = for now you have to
+  write your own script loop.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
