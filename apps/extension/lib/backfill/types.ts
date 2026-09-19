@@ -438,12 +438,13 @@ export const CAPABILITY_UNMARKED = 'unmarked';
  * 🔴 W44 · **Does a stored record still apply to a build whose capability is
  * `capability`?**
  *
- * One function, in one place, because three callers ask this question and the
- * failure mode of three answers is the one this project keeps meeting: two lists
+ * One function, in one place, because two callers ask this question and the
+ * failure mode of two answers is the one this project keeps meeting: two lists
  * that disagree. The engine asks it before refusing to run; the alarm's
  * `scopeRetryDue` asks it before deciding that a scope is not worth asking the
- * page about again; the popup asks it before deciding that a record is a stop a
- * user has to act on.
+ * page about again. The popup is **not** a third caller: it reads the
+ * `haltExpired` record the engine already wrote, so there is no second judgement
+ * for it to get wrong.
  *
  * A record for any other subject **always applies** — this function is not a
  * second expiry mechanism, and it deliberately answers `true` for the account,

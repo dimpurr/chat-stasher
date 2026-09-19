@@ -31,15 +31,15 @@ apps/extension/entrypoints/background.ts:198-215  41d87a302a6d  lines=18
   <- README.md:213, docs/privacy.md:129, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
 apps/extension/entrypoints/background.ts:425-432  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:697-713  14c8004b1949  lines=17
+apps/extension/entrypoints/background.ts:697-713  05ae48bc44ee  lines=17
   <- docs/privacy.md:319, docs/threat-model.md:593  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:715-787  3fd39fc379fb  lines=73
-  <- docs/privacy.md:296  :: /**
-apps/extension/entrypoints/background.ts:796-820  651a72caf54b  lines=25
-  <- docs/privacy.md:284  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:833  c4f31673b0d8  lines=1
-  <- docs/privacy.md:286  :: // The archive-scope key follows ADR-002's account axis; an…
-apps/extension/entrypoints/background.ts:936-958  f08bd697b536  lines=23
+apps/extension/entrypoints/background.ts:715-787  44f7b21a4646  lines=73
+  <- docs/privacy.md:296  :: if (!haltStillApplies(raw.halted, backfillCapabilityOf(plat…
+apps/extension/entrypoints/background.ts:796-820  6287e0b9e52b  lines=25
+  <- docs/privacy.md:284  :: export function backfillTickSettled(): Promise<unknown> {
+apps/extension/entrypoints/background.ts:833  ed9623369ff0  lines=1
+  <- docs/privacy.md:286  :: */
+apps/extension/entrypoints/background.ts:941-963  f08bd697b536  lines=23
   <- README.md:172, docs/install.md:635, docs/privacy.md:329  :: async function resolveScopeForTick(
 apps/extension/entrypoints/dw-bridge.content.ts:396-402  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -135,7 +135,7 @@ apps/extension/lib/backfill/tab-port.ts:447-463  7049b6f9bc26  lines=17
   <- README.md:172, docs/threat-model.md:304  :: *    has two more segments, so the two cannot collide by co…
 apps/extension/lib/backfill/tab-port.ts:1043-1060  18db841e280b  lines=18
   <- README.md:172, docs/privacy.md:313  :: export async function askTabForClaudeOrg(
-apps/extension/lib/backfill/types.ts:929-963  73a635ee0b17  lines=35
+apps/extension/lib/backfill/types.ts:930-964  73a635ee0b17  lines=35
   <- docs/privacy.md:273  :: export interface BackfillHeader {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:265  :: export function badgeFor(state: OutboxSummary | null): Badg…

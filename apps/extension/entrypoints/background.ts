@@ -707,7 +707,12 @@ export async function scopeRetryDue(
   // the thing that would make it worse, and refusing to ask would freeze a target
   // for a reason that is about parsing, not about organizations.)
   if (!isHeader(raw) || raw.halted === null) return true;
-  if (!haltStillApplies(raw.halted, backfillCapabilityOf(platform))) return false;
+  // 🔴 R44 · A halt that no longer applies is not a reason to stay silent: the
+  //    whole point of W44 is that such a record stops deciding anything, so the
+  //    question it once answered has to be asked again. Returning false here made
+  //    this layer a no-op — capability reasons are permanent, so the next line
+  //    returned false anyway, and the target stayed frozen exactly as before.
+  if (!haltStillApplies(raw.halted, backfillCapabilityOf(platform))) return true;
   if (haltClassOf(raw.halted.reason) === 'permanent') return false;
   return raw.halted.retryAt === undefined || now >= raw.halted.retryAt;
 }
