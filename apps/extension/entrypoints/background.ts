@@ -5,11 +5,14 @@ import {
   pathSafeSessionId,
   findPlatformForUrl,
   getPlatformByOrigin,
+  isHookStatusMessage,
+  PLATFORMS,
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore } from '../lib/backfill/store';
+import { recordHookStatus } from '../lib/hook-status';
 import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import { contentFingerprint, isUnchangedSinceDelivery, rememberDelivered } from '../lib/recapture';
 import {
@@ -1215,6 +1218,43 @@ export default defineBackground(() => {
           .then(() => sendResponse({ ok: true }))
           .catch((err: Error) => {
             console.warn('[chat-stasher] tab registry write failed', err.message);
+            sendResponse({ ok: false, error: err.message });
+          });
+        return true;
+      }
+      if (isHookStatusMessage(message)) {
+        /**
+         * 🔴 W43 · **A page telling us what it observed about its own hook.**
+         *
+         * Two checks before a single byte is written, and both are about not
+         * trusting the message. The **origin** must be one of the eight in the
+         * platform table: the sender is a content script of this extension, but
+         * the record this produces is shown to the user, and a record naming an
+         * origin the extension does not even inject into would be a sentence about
+         * somebody else's page. The **reason** is checked by the guard
+         * (`isHookStatusMessage`) against the closed set, because the page world
+         * can post anything on its own window and the bridge relays what that
+         * guard accepts.
+         *
+         * 🔴 The reply says only that the write happened; nothing is claimed about
+         *    the page. `reason: null` is a page whose hook verified, which clears
+         *    the origin's record — the one way it is ever cleared
+         *    (`lib/hook-status.ts`).
+         */
+        const platform = PLATFORMS.find((row) => row.origins.includes(message.origin));
+        if (!platform) {
+          sendResponse({ ok: false, error: 'unknown origin' });
+          return true;
+        }
+        recordHookStatus(browserLocalStore(), {
+          origin: message.origin,
+          platform: platform.id,
+          reason: message.reason,
+          at: message.observedAt,
+        })
+          .then(() => sendResponse({ ok: true }))
+          .catch((err: Error) => {
+            console.warn('[chat-stasher] hook status write failed', err.message);
             sendResponse({ ok: false, error: err.message });
           });
         return true;

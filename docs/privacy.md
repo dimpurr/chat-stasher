@@ -91,15 +91,15 @@ the sentence.
 1. **Capture.** A content script, injected only on a fixed list of chat origins,
    wraps `fetch` in the page and keeps a **clone** of the response text of
    requests **the page itself already made** in your already-logged-in session
-   (`apps/extension/lib/page-hook.ts:422`, `:461`, `:468-485`). Only responses
+   (`apps/extension/lib/page-hook.ts:650`, `:689`, `:550-567`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:130-576`, `:700-728`).
+   (`apps/extension/lib/contract.ts:236-682`, `:806-834`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
-   page, on the same origin (`apps/extension/lib/page-hook.ts:442-447`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:390-416`). That request —
+   page, on the same origin (`apps/extension/lib/page-hook.ts:670-675`;
+   `apps/extension/entrypoints/dw-bridge.content.ts:512-538`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin. The token is held only
@@ -119,14 +119,14 @@ the sentence.
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
    conversations” (`apps/extension/lib/platform-auth.ts:214-246`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:274-280`).
+   `apps/extension/entrypoints/dw-bridge.content.ts:396-402`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,
    `:309-377`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:195-212`).
+   (`apps/extension/entrypoints/background.ts:198-215`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -209,7 +209,7 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:461`, `:468-485`). The one feature that does
+  (`apps/extension/lib/page-hook.ts:689`, `:550-567`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
   [section 4](#4-who-your-data-is-shared-with).
 - **Check the code for a tracker.** Searching the extension and CLI sources for
@@ -237,7 +237,7 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:122-150`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:125-153`;
 `apps/extension/lib/outbox.ts:64-80`, `:309-377`). The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
@@ -281,9 +281,9 @@ Two things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:781-805` — the identity itself is
-  read by `apps/extension/lib/contract.ts:911-927`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:818`). It is used to
+  (`apps/extension/entrypoints/background.ts:784-808` — the identity itself is
+  read by `apps/extension/lib/contract.ts:1017-1033`; the `default` fallback is on
+  the `||` at `apps/extension/entrypoints/background.ts:821`). It is used to
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
@@ -293,7 +293,7 @@ Two things in that table deserve to be called out rather than buried:
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:700-772`).
+  (`apps/extension/entrypoints/background.ts:703-775`).
 - **On claude.ai the scope is not read from a response body: it is the
   organization the page's own requests are addressed to**, and that value is
   required in every request path on that platform while appearing in no page URL
@@ -316,7 +316,7 @@ Two things in that table deserve to be called out rather than buried:
   are never probed one by one, and once that has been recorded the page is not
   asked again on every wake-up — the answer is already known
   (`apps/extension/lib/backfill/claude-org.ts:170-224`;
-  `apps/extension/entrypoints/background.ts:683-698`). The sentinel
+  `apps/extension/entrypoints/background.ts:686-701`). The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
   organization that does not exist (`apps/extension/lib/backfill/engine.ts:691-735`).
@@ -326,7 +326,7 @@ Two things in that table deserve to be called out rather than buried:
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:921-943`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:924-946`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
@@ -350,7 +350,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:461`, `:468-485`; `apps/extension/lib/gemini-capture.ts:150-234` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:689`, `:550-567`; `apps/extension/lib/gemini-capture.ts:150-234` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:261-296`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:465-475` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -418,16 +418,16 @@ oldest turns while looking complete.
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:133`)
-- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:245`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:249`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:265`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:306`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:372`)
-- `https://grok.com` (`apps/extension/lib/contract.ts:494`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:239`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:283`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:355`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:371`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:412`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:478`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:600`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:579-581`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:685-687`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -438,12 +438,12 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:679-698`, `:791-799`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:785-804`, `:897-905`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:601`; `apps/extension/lib/page-hook.ts:241`). No shipped
+(`apps/extension/lib/contract.ts:707`; `apps/extension/lib/page-hook.ts:365`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
-explicitly (`apps/extension/lib/contract.ts:177`, `:245`, `:261`, `:302`, `:360`,
-`:487`, `:574`).
+explicitly (`apps/extension/lib/contract.ts:283`, `:351`, `:367`, `:408`, `:466`,
+`:593`, `:680`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
@@ -496,12 +496,12 @@ unchanged Grok conversation is more likely than on other platforms to deliver
 another copy of it: an extra copy in your archive, never a lost one.
 
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
-the same capture decision above (`apps/extension/lib/page-hook.ts:223-263`).
+the same capture decision above (`apps/extension/lib/page-hook.ts:347-387`).
 An XHR body is read only when the page itself reads it as text or JSON
-(`apps/extension/lib/page-hook.ts:297-302`); a binary XHR body (arraybuffer,
-blob, document) is never read and only prints a console warning (`:303-306`,
-`:166-173`). `EventSource` streams are never read either — the hook only warns
-that one was used (`apps/extension/lib/page-hook.ts:317-329`).
+(`apps/extension/lib/page-hook.ts:498-503`); a binary XHR body (arraybuffer,
+blob, document) is never read and only prints a console warning (`:504-507`,
+`:245-252`). `EventSource` streams are never read either — the hook only warns
+that one was used (`apps/extension/lib/page-hook.ts:538-557`).
 
 ## 6. What each permission is for
 

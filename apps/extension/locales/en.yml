@@ -330,6 +330,26 @@ popup:
         only {moved} could be moved. The rest are still in storage, untouched, and
         this leg will not run against them — the ids in them are yours and are not
         being discarded. Reason: {reason}. Technical detail: {detail}
+    # 🔴 W43 · A page that told us its own capture hook is not installed. Until
+    # this existed, such a page produced an empty stage — exactly what a page
+    # where the user opened no conversation produces — so the two states were
+    # one state in everything the user could see.
+    # The sentence states the observation and the one action that fixes it, and
+    # it does NOT name a cause: the measurement behind it (2026-09-19) left the
+    # cause of one of the two platforms it was seen on unsettled.
+    hook:
+      notInstalled: >-
+        Live capture is not installed on {origin} (platform: {platform}). A
+        conversation you open there is not archived, and this page looked the
+        same as a page where you opened nothing until this line was recorded.
+        What was observed, as of {when}: {reasons}. Reloading the tab is what
+        makes the extension install its hook into a page: a tab that was already
+        open when the extension was loaded or updated is the usual reason, and
+        nothing else fixes it.
+      reason:
+        didNotRun: no copy of the hook ran in that page at all
+        didNotTake: the hook ran, and the page's own global refused its patch
+        wasReplaced: the hook was installed, and something replaced it afterwards
     whatOpening: >-
       What turning it on does: as long as one page of a supported platform is
       open, it quietly backfills one past conversation in the background at an
