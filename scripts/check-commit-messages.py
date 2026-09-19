@@ -21,9 +21,9 @@ Two modes:
     check-commit-messages.py --range <rev>
         Every commit in the range, each message checked in full (subject and
         body). The single-revision form checks exactly that one commit, for the
-        case where a range has nothing to walk: a tag push, whose commit was
-        already proven on main, or a push whose range is empty because HEAD is
-        already reachable from the base. Used by CI, which can only see what is
+        case where a range has nothing to walk: a push (branch or tag) whose HEAD
+        is already reachable from the base, i.e. a ref that adds no commit beyond
+        what the base already records. Used by CI, which can only see what is
         already recorded.
 
     check-commit-messages.py --selftest
