@@ -44,6 +44,25 @@ import { createStaleLinkWarningGate } from '../lib/page-link';
 export default defineContentScript({
   matches: CONTENT_MATCHES,
   runAt: 'document_start',
+  /**
+   * 🔴 W36b · **Every subframe, because a capture is relayed from the frame that
+   *    made the request.**
+   *
+   * `dw-fetch-main.content.ts` now installs its hook in subframes too, and the
+   * hook posts its capture to **its own window** — so without this the patch would
+   * be installed and the message would go nowhere (measured: a same-origin iframe
+   * with the hook absent posts nothing at all, and with the hook present but no
+   * bridge here posts the same nothing).
+   *
+   * 🔴 The tab-level half of this file is **top-frame only** (`isTopFrame` below):
+   *    the backfill fetch channel and the periodic hello belong to the tab, not to
+   *    each of its frames. `browser.tabs.sendMessage(tabId, …)` with no `frameId`
+   *    is delivered to every frame in the tab and settles with the first answer,
+   *    so a listener in every frame would put several answers in a race for one
+   *    request. The capture path itself is per-frame by nature and stays in every
+   *    frame.
+   */
+  allFrames: true,
   main() {
     const probeToken = makeProbeToken();
     let mainReady = false;
@@ -171,10 +190,16 @@ export default defineContentScript({
      *      'HTMLScriptElement': This document requires 'TrustedScript' assignment.
      *    `HTMLScriptElement.text` is a TrustedScript sink, so on such a page the
      *    assignment is refused *before* anything is appended or executed.
-     *    This is the failure the first acceptance saw as "the MAIN-world hook is
-     *    absent" — and it was silent, because the throw left `injectPageScript`
-     *    before `fallbackScriptAppended` was assigned and so skipped
-     *    `warnFallbackUnverified` entirely;
+     *    🔴 W36b · **This is the FALLBACK being refused, and it is not what the
+     *    first acceptance measured.** The acceptance saw a `gemini.google.com/app/<id>`
+     *    document whose `window.fetch` and `XMLHttpRequest.prototype.open` were
+     *    both the browser's own — which means no hook was installed there by any
+     *    route, and a page's CSP has no say over the **declarative** MAIN-world
+     *    registration in the first place (`e2e/main-world-hook.spec.ts` serves
+     *    exactly that CSP and the declarative hook installs and captures on it).
+     *    A refused assignment here is silent, and silence is what this change
+     *    fixes; it is not an explanation of that tab. See W36b's notes on
+     *    `e2e/frame-capture.spec.ts` for the two shapes that are;
      *  · `appendChild` — the CSP case the W12 comment below describes (appended,
      *    never executed).
      *
@@ -409,7 +434,10 @@ export default defineContentScript({
     // in lib/backfill/tab-port.ts (same origin + in the platform table + only the
     // backfill leg's two paths); nothing is decided here.
     // -----------------------------------------------------------------------
-    browser.runtime.onMessage.addListener(
+    // 🔴 W36b · The tab-level channel: the top document of the tab, and only it.
+    //    See the `allFrames` note at the top of this file — a listener in every
+    //    frame would answer one `tabs.sendMessage` several times over.
+    if (isTopFrame()) browser.runtime.onMessage.addListener(
       (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
         // 🔴 W31c · The organization question, asked **before** the fetch channel
         //    below only because it is a different kind of thing: it carries no URL
@@ -452,17 +480,23 @@ export default defineContentScript({
     //    cadence, and why it is a plain page timer rather than an alarm, are in
     //    lib/backfill/tab-hello.ts. Background dedups by tab id, so repeats cost
     //    one message and change nothing else.
-    installTabHello({
-      hello: () => browser.runtime.sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin }),
-      // A test running under node has no `document`; the page always does.
-      visibility: typeof document === 'undefined' ? null : document,
-      // 🔴 W36 · This is the occasion a page with no traffic gets: the hello
-      //    repeats every few minutes, and on a document whose scripts predate the
-      //    current build every one of them fails the same way. Naming it here is
-      //    what turns "no-http-port for days while the site is open on screen"
-      //    into a sentence the developer can act on.
-      onFailure: (err) => { warnStaleLink(err); },
-    });
+    // 🔴 W36b · The hello is the tab's, not each frame's: background dedups by tab
+    //    id, so a hello from every frame would cost N messages to say one thing —
+    //    and on a page left open across an extension reload it would name the same
+    //    stale link N times.
+    if (isTopFrame()) {
+      installTabHello({
+        hello: () => browser.runtime.sendMessage({ type: BACKFILL_TAB_HELLO_MESSAGE, origin: pageOrigin }),
+        // A test running under node has no `document`; the page always does.
+        visibility: typeof document === 'undefined' ? null : document,
+        // 🔴 W36 · This is the occasion a page with no traffic gets: the hello
+        //    repeats every few minutes, and on a document whose scripts predate the
+        //    current build every one of them fails the same way. Naming it here is
+        //    what turns "no-http-port for days while the site is open on screen"
+        //    into a sentence the developer can act on.
+        onFailure: (err) => { warnStaleLink(err); },
+      });
+    }
 
     window.addEventListener('message', onMessage);
     // A tokenized probe makes the readiness handshake insensitive to which
@@ -476,6 +510,24 @@ export default defineContentScript({
     }, MAIN_FALLBACK_TIMEOUT_MS);
   },
 });
+
+/**
+ * 🔴 W36b · **Is this the tab's top document?**
+ *
+ * The question the two gates above ask. `window.top` is the one fact a content
+ * script can read about its own frame without any permission, and comparing it to
+ * `window` is a comparison of two same-origin references, so it cannot throw even
+ * across origins.
+ *
+ * 🔴 A context with **no `top` at all** is not a nested browsing context — the
+ *    node test environment's stub window is the only such place, and it stands in
+ *    for the top document. Treating it as a subframe would silently disable the
+ *    backfill channel in the one environment that exercises it under node.
+ */
+function isTopFrame(): boolean {
+  const self = window as unknown as { top?: unknown };
+  return self.top === undefined || self.top === window;
+}
 
 function makeProbeToken(): string {
   try {
