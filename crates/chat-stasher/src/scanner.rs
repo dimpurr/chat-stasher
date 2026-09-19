@@ -375,6 +375,35 @@ pub struct RegistryCell {
     /// Optional named qualification rule for JSON key/value stores.
     #[serde(default)]
     pub sql_qualification: Option<String>,
+    /// Optional "one directory per session" rule. Present only for harnesses
+    /// that give every session its own directory whose *name* is the session
+    /// id; see [`SessionDirRule`].
+    #[serde(default)]
+    pub session_dir: Option<SessionDirRule>,
+}
+
+/// A harness that gives every session its own directory, and writes the
+/// transcript at a fixed path inside it.
+///
+/// Kimi Code is the case this exists for:
+/// `<sessions>/<workspaceId>/session_<uuid>/agents/main/wire.jsonl`. The
+/// file's own stem is the constant `wire`, so the walk in
+/// [`collect_records`] cannot identify a session from the discovered path
+/// alone — every session on the machine would come out with the same native
+/// id (`wire`), and two different conversations would collapse into one
+/// archive slot. A cell that declares this rule takes the id from the
+/// directory instead.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionDirRule {
+    /// Basename glob for the session directory — the same `*`-only syntax as
+    /// [`RegistryCell::session_pattern`].
+    pub pattern: String,
+    /// Literal path from that directory to the transcript file, `/`-separated
+    /// on every platform (compared component by component, so a Windows
+    /// backslash path matches too). Literal on purpose: a glob here could
+    /// admit a second file per session and reintroduce the id collision this
+    /// rule exists to prevent.
+    pub file: String,
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
@@ -1179,6 +1208,7 @@ fn probe_harness(
             machine,
             &cell.format,
             cell.session_pattern.as_deref(),
+            cell.session_dir.as_ref(),
         );
         let count = recs.records.len() as u64;
         let recognized_files = recs
@@ -1259,6 +1289,10 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
         ".codex/"
     } else if template.contains(".gemini/") {
         ".gemini/"
+    } else if template.contains(".kimi-code/") {
+        // `KIMI_CODE_HOME` is Kimi Code's data directory, i.e. the `.kimi-code`
+        // layer itself; what hangs below it is the constant `sessions/`.
+        ".kimi-code/"
     } else {
         return None;
     };
@@ -1854,18 +1888,72 @@ struct DirectoryScan {
     unreadable_entry_count: u64,
 }
 
+/// Where a directory sits relative to the cell's [`SessionDirRule`].
+///
+/// The state travels down the walk instead of being recomputed per file, so a
+/// file at any depth "sees" the session directory it actually sits in. A
+/// directory that matches replaces whatever match was open above it: the
+/// session a file belongs to is the nearest matching directory above it, and
+/// [`relpath_matches`] then decides whether the file is that session's
+/// transcript. The root itself never counts — the rule matches directories
+/// *below* the declared root, so a root that happens to be named `session-x`
+/// does not turn every file beneath it into one session.
+#[derive(Debug, Clone)]
+enum SessionScope {
+    /// No ancestor directory matched the rule's `pattern`.
+    Outside,
+    /// Nearest matching ancestor: its path, and its name — the native id.
+    In { dir: PathBuf, id: String },
+}
+
+/// The scope a child directory inherits: unchanged, or replaced when the
+/// child's own name matches.
+fn descend_scope(parent: &SessionScope, dir: &Path, rule: Option<&SessionDirRule>) -> SessionScope {
+    let Some(rule) = rule else {
+        return parent.clone();
+    };
+    // reason: `dir` is a directory pushed from `read_dir`, so it always has a
+    // final component; a path without one cannot match a basename glob anyway.
+    let Some(name) = dir.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return parent.clone();
+    };
+    if !matches_session_pattern(&name, Some(&rule.pattern)) {
+        return parent.clone();
+    }
+    SessionScope::In {
+        dir: dir.to_path_buf(),
+        id: name,
+    }
+}
+
+/// True when `file`'s path below `dir` is exactly `expected` (`/`-separated,
+/// component-wise, so `\`-separated paths on Windows compare equal).
+fn relpath_matches(dir: &Path, file: &Path, expected: &str) -> bool {
+    let Ok(rel) = file.strip_prefix(dir) else {
+        return false;
+    };
+    let want: Vec<&str> = expected.split('/').filter(|s| !s.is_empty()).collect();
+    let got: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    got.len() == want.len() && got.iter().zip(&want).all(|(got, want)| got == want)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn collect_records(
     root: &Path,
     source: HarnessSource,
     machine: &str,
     format: &str,
     session_pattern: Option<&str>,
+    session_dir: Option<&SessionDirRule>,
 ) -> DirectoryScan {
     let mut records = Vec::new();
     let mut unreadable_count = 0;
     let mut unreadable_entry_count = 0;
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack: Vec<(PathBuf, SessionScope)> = vec![(root.to_path_buf(), SessionScope::Outside)];
+    while let Some((dir, scope)) = stack.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => {
@@ -1890,13 +1978,22 @@ fn collect_records(
                 }
             };
             if file_type.is_dir() {
-                stack.push(path);
+                let child = descend_scope(&scope, &path, session_dir);
+                stack.push((path, child));
                 continue;
             }
             if !file_type.is_file() {
                 continue; // skip sockets, FIFOs, and (crucially) symlinks
             }
-            match build_record(&path, source, machine, format, session_pattern) {
+            match build_record(
+                &path,
+                source,
+                machine,
+                format,
+                session_pattern,
+                &scope,
+                session_dir,
+            ) {
                 RecordBuild::Record(record) => records.push(record),
                 RecordBuild::Unreadable => unreadable_count += 1,
                 RecordBuild::NotSession => {}
@@ -1996,6 +2093,8 @@ fn build_record(
     machine: &str,
     format: &str,
     session_pattern: Option<&str>,
+    scope: &SessionScope,
+    session_dir: Option<&SessionDirRule>,
 ) -> RecordBuild {
     let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
         return RecordBuild::NotSession;
@@ -2014,6 +2113,23 @@ fn build_record(
         return RecordBuild::NotSession;
     }
 
+    // A cell that declares a session directory takes the native id from that
+    // directory and accepts only the one file path the rule names. A file with
+    // no such directory above it, or one that is not that session's declared
+    // transcript, is simply not a session of this harness — it is never
+    // silently labelled with the constant filename stem, which is what would
+    // merge every session into one slot.
+    let native_id = match (session_dir, scope) {
+        (Some(rule), SessionScope::In { dir, id }) => {
+            if !relpath_matches(dir, path, &rule.file) {
+                return RecordBuild::NotSession;
+            }
+            id.clone()
+        }
+        (Some(_), SessionScope::Outside) => return RecordBuild::NotSession,
+        (None, _) => stem,
+    };
+
     let source = detect_source(path).unwrap_or(expected);
     let source_short = source.short();
 
@@ -2031,7 +2147,7 @@ fn build_record(
     let ident = crate::id::SessionIdentity {
         source_short,
         machine: machine.to_string(),
-        native_id: stem,
+        native_id,
     };
 
     RecordBuild::Record(SessionRecord {

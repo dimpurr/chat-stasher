@@ -486,7 +486,7 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:806-835`, `:873-911`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:812-841`, `:879-917`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. This is the one thing `doctor` does that touches
 the network; see section 4.4 if it reports a host it cannot trust.

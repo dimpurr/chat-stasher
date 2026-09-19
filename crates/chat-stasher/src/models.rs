@@ -21,6 +21,7 @@ pub enum HarnessSource {
     Crush,
     Zed,
     Continue,
+    KimiCode,
 }
 
 /// Layout of a virtual session backed by a read-only SQLite source.
@@ -51,6 +52,7 @@ impl HarnessSource {
             HarnessSource::Crush => "crush",
             HarnessSource::Zed => "zed",
             HarnessSource::Continue => "continue",
+            HarnessSource::KimiCode => "kimi-code",
         }
     }
 
@@ -70,6 +72,7 @@ impl HarnessSource {
             "crush" => Some(HarnessSource::Crush),
             "zed" => Some(HarnessSource::Zed),
             "continue" => Some(HarnessSource::Continue),
+            "kimi-code" => Some(HarnessSource::KimiCode),
             _ => None,
         }
     }
