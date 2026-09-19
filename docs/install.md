@@ -204,7 +204,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:933-944`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:963-974`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -269,7 +269,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:933-944`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:963-974`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -281,10 +281,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:853-881`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:885-945`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:915-975`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:1132-1136`). In every case the reason
+  (`crates/chat-stasher/src/nativehost.rs:1162-1166`). In every case the reason
   names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -294,7 +294,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:950-979`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:980-1009`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -334,11 +334,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:3164-3177`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:3167-3180`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:3200-3224`). An
+it does anything else (`crates/chat-stasher/src/main.rs:3203-3227`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -370,10 +370,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3179-3188`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3182-3191`;
 `crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:3167-3175`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:3170-3178`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -430,12 +430,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:6240-6241`). This is the
+does not (`crates/chat-stasher/src/main.rs:6243-6244`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:6021-6022`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:6024-6025`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -451,7 +451,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:6231-6241`):
+(`crates/chat-stasher/src/main.rs:6234-6244`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -464,7 +464,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:6089-6096`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:6092-6099`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -681,7 +681,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Item | Status |
 | --- | --- |
 | Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:87`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
-| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:210-299`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
+| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:204-320`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
 | Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:40`; we did not test every browser's locale resolution) |
 | Each browser's menu path for "Load unpacked extension" | **Unverified** |
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |

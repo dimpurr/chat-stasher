@@ -423,57 +423,57 @@ crates/chat-stasher/src/main.rs:789-831  00c9d6ccdc4b  lines=43
   <- README.md:105, docs/install.md:41  :: InstallNativeHost {
 crates/chat-stasher/src/main.rs:832-853  ebb71dce29b8  lines=22
   <- README.md:106  :: /// The Native Messaging host process itself.
-crates/chat-stasher/src/main.rs:1737-1747  91658be625f3  lines=11
+crates/chat-stasher/src/main.rs:1740-1750  91658be625f3  lines=11
   <- README.md:106  :: /// stdout, which is exactly what the browser launch path d…
-crates/chat-stasher/src/main.rs:3164-3177  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:3167-3180  6e297c93e74c  lines=14
   <- docs/install.md:337  :: Err(e) => {
-crates/chat-stasher/src/main.rs:3167-3175  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:3170-3178  7606cd68232e  lines=9
   <- docs/install.md:376  :: }
-crates/chat-stasher/src/main.rs:3179-3188  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:3182-3191  a14261353a59  lines=10
   <- docs/install.md:373  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:3200-3224  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:3203-3227  6d97af905715  lines=25
   <- docs/install.md:341  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:3360-3416  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:3363-3419  d1e3f53d40dc  lines=57
   <- docs/threat-model.md:462  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:4623-4630  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:4626-4633  f369ca3fd940  lines=8
   <- docs/threat-model.md:451  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:4651-4744  f4b26b9e403e  lines=94
+crates/chat-stasher/src/main.rs:4654-4747  f4b26b9e403e  lines=94
   <- docs/threat-model.md:449  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:4734-4743  fae6f081f82c  lines=10
+crates/chat-stasher/src/main.rs:4737-4746  fae6f081f82c  lines=10
   <- SECURITY.md:67  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:4976-5094  6179727696b7  lines=119
+crates/chat-stasher/src/main.rs:4979-5097  6179727696b7  lines=119
   <- README.md:121, README.md:171, docs/threat-model.md:505  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:6021-6022  a70af44131aa  lines=2
+crates/chat-stasher/src/main.rs:6024-6025  a70af44131aa  lines=2
   <- docs/install.md:438  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:6089-6096  e726e719a9a4  lines=8
+crates/chat-stasher/src/main.rs:6092-6099  e726e719a9a4  lines=8
   <- docs/install.md:467  :: Err(ActivityIndexError::Write(message)) => {
-crates/chat-stasher/src/main.rs:6231-6241  962afa583ed8  lines=11
+crates/chat-stasher/src/main.rs:6234-6244  962afa583ed8  lines=11
   <- docs/install.md:454  :: )
-crates/chat-stasher/src/main.rs:6240-6241  52b8c92908b4  lines=2
+crates/chat-stasher/src/main.rs:6243-6244  52b8c92908b4  lines=2
   <- docs/install.md:433  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:6345-6372  37bbae2ee352  lines=28
+crates/chat-stasher/src/main.rs:6348-6375  37bbae2ee352  lines=28
   <- README.md:114, README.md:121  :: /// What the exit code means, in words — the piece a 20-lin…
-crates/chat-stasher/src/nativehost.rs:74-87  b160255bd493  lines=14
+crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs/privacy.md:484, docs/threat-model.md:350  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
-crates/chat-stasher/src/nativehost.rs:210-299  aea86e97320b  lines=90
-  <- docs/install.md:684  :: pub fn default_root(platform: Platform, home: &Path) -> Pat…
-crates/chat-stasher/src/nativehost.rs:311-355  c611ef069f1c  lines=45
+crates/chat-stasher/src/nativehost.rs:204-320  9f3a51e5f984  lines=117
+  <- docs/install.md:684  :: /// Default discovery root for a platform, derived from `ho…
+crates/chat-stasher/src/nativehost.rs:341-385  c611ef069f1c  lines=45
   <- docs/privacy.md:484, docs/threat-model.md:350  :: pub fn render_manifest(
-crates/chat-stasher/src/nativehost.rs:885-945  166a51c20b01  lines=61
+crates/chat-stasher/src/nativehost.rs:915-975  166a51c20b01  lines=61
   <- docs/install.md:284, docs/threat-model.md:360  :: fn resolve_target() -> HostTarget {
-crates/chat-stasher/src/nativehost.rs:933-944  c1d3ca75f622  lines=12
+crates/chat-stasher/src/nativehost.rs:963-974  c1d3ca75f622  lines=12
   <- docs/install.md:207, docs/install.md:272  :: // Read-only: existence and kind are both checked, and neit…
-crates/chat-stasher/src/nativehost.rs:950-979  0317baf37da8  lines=30
+crates/chat-stasher/src/nativehost.rs:980-1009  0317baf37da8  lines=30
   <- docs/install.md:297, docs/threat-model.md:360  :: /// Unlike every CLI command, the host never *creates* the …
-crates/chat-stasher/src/nativehost.rs:1085-1094  74f364fec566  lines=10
+crates/chat-stasher/src/nativehost.rs:1115-1124  74f364fec566  lines=10
   <- docs/threat-model.md:371  :: // Recomputed over the UTF-8 bytes of the *decoded* payload…
-crates/chat-stasher/src/nativehost.rs:1101-1107  a444120e69ed  lines=7
+crates/chat-stasher/src/nativehost.rs:1131-1137  a444120e69ed  lines=7
   <- docs/threat-model.md:375  :: // `invalid-bundle` is the answer for a payload this channe…
-crates/chat-stasher/src/nativehost.rs:1109-1136  4ceba3a8d636  lines=28
+crates/chat-stasher/src/nativehost.rs:1139-1166  4ceba3a8d636  lines=28
   <- docs/privacy.md:134, docs/threat-model.md:41  :: match inbox::seal_payload(
-crates/chat-stasher/src/nativehost.rs:1132-1136  4520d3869c60  lines=5
+crates/chat-stasher/src/nativehost.rs:1162-1166  4520d3869c60  lines=5
   <- docs/install.md:287  :: Err(inbox::SealError::Lock(e)) => {
-crates/chat-stasher/src/nativehost.rs:1876-1910  6e78c5dd7bec  lines=35
+crates/chat-stasher/src/nativehost.rs:1906-1940  6e78c5dd7bec  lines=35
   <- docs/privacy.md:484, docs/threat-model.md:161, docs/threat-model.md:355  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs/threat-model.md:80, docs/threat-model.md:406  :: //! Connection reaping for remote SSH backends.
