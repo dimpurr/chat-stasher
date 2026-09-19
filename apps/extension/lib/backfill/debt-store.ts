@@ -98,7 +98,19 @@ export const DEBTS_LEGACY_STORE = 'debts';
  *    its store the same way. The order is restored in memory by `seq` (a few
  *    thousand numbers, sorted once per run).
  */
-export const DEBTS_INDEX = 'byScope';
+export const DEBTS_INDEX = 'byPlatformScope';
+
+/**
+ * The pre-W45 store's own index, on `scope` alone.
+ *
+ * It keeps the old name because an index cannot be renamed without recreating the
+ * store it belongs to, and that store is deliberately left exactly as it was found
+ * (see `DEBTS_LEGACY_STORE`). Reading it through `DEBTS_INDEX` would match nothing
+ * and come back empty — which, inside a `catch` that turns failures into "could not
+ * be read", is precisely the empty-versus-missing confusion this change exists to
+ * remove. Two names because there are two stores with two different keys.
+ */
+export const DEBTS_LEGACY_INDEX = 'byScope';
 
 /** A whole scope's debt set, in FIFO order. */
 export interface DebtSetSnapshot {
@@ -564,7 +576,7 @@ export async function legacyDebtRowCount(scope: string): Promise<number | null> 
   try {
     const tx = db.transaction(DEBTS_LEGACY_STORE, 'readonly');
     return await requestToPromise(
-      tx.objectStore(DEBTS_LEGACY_STORE).index(DEBTS_INDEX).count(scope) as IDBRequest<number>,
+      tx.objectStore(DEBTS_LEGACY_STORE).index(DEBTS_LEGACY_INDEX).count(scope) as IDBRequest<number>,
     );
   } catch {
     return null;
@@ -613,7 +625,7 @@ export async function carryLegacyDebtRows(
   try {
     const tx = db.transaction(DEBTS_LEGACY_STORE, 'readonly');
     legacy = await requestToPromise(
-      tx.objectStore(DEBTS_LEGACY_STORE).index(DEBTS_INDEX).getAll(scope) as IDBRequest<unknown[]>,
+      tx.objectStore(DEBTS_LEGACY_STORE).index(DEBTS_LEGACY_INDEX).getAll(scope) as IDBRequest<unknown[]>,
     );
   } catch {
     return null;

@@ -57,9 +57,10 @@ const CHATGPT_LIST_PATH = '/backend-api/conversations';
  * The scope a capture on this fixture registers (`extractIdentity` finds no
  * account field in the body, so `identity.value || 'default'`).
  */
+const PLATFORM = 'chatgpt';
 const SCOPE = 'default';
-const LEGACY_KEY = `cs_backfill_v1:chatgpt:${SCOPE}`;
-const HEADER_KEY = `cs_backfill_v2:chatgpt:${SCOPE}`;
+const LEGACY_KEY = `cs_backfill_v1:${PLATFORM}:${SCOPE}`;
+const HEADER_KEY = `cs_backfill_v2:${PLATFORM}:${SCOPE}`;
 const ENABLED_KEY = 'cs_backfill_enabled_v1';
 
 const CHATGPT_BODY = fixture('chatgpt-conversation.json');
@@ -219,7 +220,7 @@ test('a real tick carries a pre-W18 record over: ids in the debt database, heade
 
   // 3 · The ids really are in the debt database, exactly once each, in order.
   const rows = await readDebtRows(ext);
-  const mine = rows.filter((row) => row.scope === SCOPE);
+  const mine = rows.filter((row) => row.platform === PLATFORM && row.scope === SCOPE);
   expect(mine.filter((row) => row.state === 'pending').map((row) => row.id)).toEqual(PENDING);
   expect(new Set(mine.filter((row) => row.state === 'archived').map((row) => row.id)))
     .toEqual(new Set(ARCHIVED));
@@ -306,6 +307,6 @@ test('with no platform tab open at all, the layout still moves: the migration do
   expect(all[HEADER_KEY]).toBeTruthy();
   expect(Object.keys(all)).not.toContain(LEGACY_KEY);
   const rows = await readDebtRows(ext);
-  expect(rows.filter((row) => row.scope === SCOPE && row.state === 'pending').map((r) => r.id))
+  expect(rows.filter((row) => row.platform === PLATFORM && row.scope === SCOPE && row.state === 'pending').map((r) => r.id))
     .toEqual(PENDING);
 });

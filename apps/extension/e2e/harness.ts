@@ -265,7 +265,7 @@ export const OUTBOX_STORE = 'entries';
 
 /** The backfill's debt set (`lib/backfill/debt-store.ts`). The migration's destination. */
 export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
-export const DEBTS_STORE = 'debts';
+export const DEBTS_STORE = 'debts_by_platform';
 
 /**
  * The extension APIs the specs reach for **from inside the worker**.
@@ -375,6 +375,7 @@ export async function readOutbox(extension: Extension): Promise<OutboxEntry[]> {
 
 /** One row of the backfill debt set (`lib/backfill/debt-store.ts`'s `DebtRecord`). */
 export interface DebtRow {
+  platform: string;
   scope: string;
   id: string;
   state: 'pending' | 'archived';
@@ -398,8 +399,15 @@ export async function readDebtRows(extension: Extension): Promise<DebtRow[]> {
   });
   return rows.map((row) => {
     const record = row as Record<string, unknown>;
-    if (typeof record.scope !== 'string' || typeof record.id !== 'string') {
-      throw new Error('debt set: row has no scope/id');
+    if (
+      typeof record.platform !== 'string'
+      || typeof record.scope !== 'string'
+      || typeof record.id !== 'string'
+    ) {
+      // The platform is part of the key since W45. A row without it is not a row
+      // this reader understands, and returning it as if it were would let a spec
+      // count one platform's ids as another's.
+      throw new Error('debt set: row has no platform/scope/id');
     }
     return record as unknown as DebtRow;
   });
