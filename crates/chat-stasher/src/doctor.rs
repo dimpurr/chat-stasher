@@ -1043,8 +1043,12 @@ pub fn run() -> DoctorReport {
     // D6
     let cache = inspect_cache(&config);
 
-    // D8 — read-only, opens nothing but the manifests themselves.
-    let native_host = inspect_native_host(&config, &home);
+    // D8 — read-only, opens nothing but the manifests themselves. The root is
+    // the machine's, resolved here because this is the one caller that means the
+    // real machine: `%LOCALAPPDATA%` on Windows, and `home` everywhere else.
+    let native_host_root =
+        crate::nativehost::machine_root(crate::nativehost::Platform::current(), &home);
+    let native_host = inspect_native_host(&config, &native_host_root);
 
     let probes = scan.probes;
     DoctorReport {
@@ -1642,11 +1646,21 @@ fn inspect_host_manifest(browser: crate::nativehost::Browser, root: &Path) -> Ho
 
 /// D8 — read every browser's host manifest and the configured stage. Read-only:
 /// it opens files and stats paths, and creates nothing at all.
-pub fn inspect_native_host(config: &Config, home: &Path) -> NativeHostCheck {
-    let root = crate::nativehost::default_root(crate::nativehost::Platform::current(), home);
+///
+/// `root` is the discovery root to look under — on macOS and Linux the home
+/// directory (`~/Library/Application Support`, `$HOME`), on Windows the
+/// machine's `%LOCALAPPDATA%`. It is an argument rather than something this
+/// function resolves, for the same reason `install-native-host` has
+/// `--target-root`: a probe must answer about the directory it was handed and
+/// nothing else. Resolving it here meant the answer depended on the *process
+/// environment*, so a caller asking about one directory was silently told about
+/// another — and on Windows every caller in a test binary got the same answer
+/// and drove the same manifest file. [`run`] resolves the machine's root with
+/// [`crate::nativehost::machine_root`] and passes it in.
+pub fn inspect_native_host(config: &Config, root: &Path) -> NativeHostCheck {
     let manifests = crate::nativehost::Browser::ALL
         .iter()
-        .map(|browser| inspect_host_manifest(*browser, &root))
+        .map(|browser| inspect_host_manifest(*browser, root))
         .collect();
 
     let stage = if config.source.is_error_fallback() {

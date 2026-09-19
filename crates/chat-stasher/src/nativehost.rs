@@ -57,6 +57,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -200,22 +201,51 @@ impl Target {
     }
 }
 
-/// Default discovery root for a platform.
+/// Default discovery root for a platform, derived from `home` alone.
 ///
 /// macOS: `~/Library/Application Support` — verified on the author's machine,
 /// where seven browsers' `NativeMessagingHosts` directories already exist
 /// under it. Linux: `$HOME` (each browser's relative path carries its own
-/// `.config/…`). Windows: `%LOCALAPPDATA%`, which only holds the JSON — the
-/// browser finds it through the registry.
+/// `.config/…`). Windows: `<home>\AppData\Local`, which only holds the JSON —
+/// the browser finds it through the registry.
+///
+/// **Pure on purpose.** The same `(platform, home)` gives the same answer on
+/// every machine, so a caller that has a specific home in mind — a test with a
+/// `tempfile` home, `--target-root`, a probe asked about a directory — gets an
+/// answer about *that* home. On Windows the *machine's* own answer can differ
+/// (a profile may redirect the `LocalAppData` known folder), but that is a fact
+/// about the machine and not about the home, so it lives in [`machine_root`].
 pub fn default_root(platform: Platform, home: &Path) -> PathBuf {
     match platform {
         Platform::Macos => home.join("Library").join("Application Support"),
         Platform::Linux => home.to_path_buf(),
-        Platform::Windows => match std::env::var_os("LOCALAPPDATA") {
-            Some(local) if !local.is_empty() => PathBuf::from(local),
-            _ => home.join("AppData").join("Local"),
-        },
+        Platform::Windows => home.join("AppData").join("Local"),
     }
+}
+
+/// The discovery root *this machine* uses: [`default_root`], except on Windows
+/// where `%LOCALAPPDATA%` is the known-folder answer and wins when it is set.
+/// A profile can redirect that folder away from `<home>\AppData\Local`, and the
+/// browser then reads the file where the variable points.
+///
+/// This is the only place the environment is consulted. It is deliberately a
+/// separate function rather than a branch inside [`default_root`]: installing
+/// the host wants the machine's answer, while probing a named directory wants
+/// that directory's answer, and a shared function could only give one of them.
+pub fn machine_root(platform: Platform, home: &Path) -> PathBuf {
+    machine_root_with(platform, home, std::env::var_os("LOCALAPPDATA").as_deref())
+}
+
+/// [`machine_root`] with the environment read passed in, so the rule — the
+/// variable wins on Windows, and nowhere else — can be asserted without
+/// mutating a process-global that every other test in the binary shares.
+fn machine_root_with(platform: Platform, home: &Path, local_appdata: Option<&OsStr>) -> PathBuf {
+    if platform == Platform::Windows {
+        if let Some(local) = local_appdata.filter(|value| !value.is_empty()) {
+            return PathBuf::from(local);
+        }
+    }
+    default_root(platform, home)
 }
 
 /// Resolve one browser's target under `root`, or `None` when this build has no
@@ -1996,6 +2026,80 @@ mod tests {
         assert!(validate_chromium_extension_id("tooshort").is_err());
         // `z` is outside a-p.
         assert!(validate_chromium_extension_id(&"z".repeat(32)).is_err());
+    }
+
+    // ------------------------------------------------- discovery-root shape
+
+    /// The root a home directory implies is a fact about the home, not about
+    /// the machine reading it.
+    ///
+    /// This is the property `nativehost_doctor_test.rs` was silently relying on
+    /// while it was red on `windows-latest`: it hands the doctor a `tempfile`
+    /// home and expects the answer to be about *that* home. Asserted for all
+    /// three layouts here, from whichever platform is running, because the shape
+    /// is a pure function of `(platform, home)` and a Windows-only assertion
+    /// would leave two of the three unchecked.
+    #[test]
+    fn the_root_is_derived_from_the_home_it_is_given() {
+        let unix_home = Path::new("/home/someone");
+        assert_eq!(
+            default_root(Platform::Macos, unix_home),
+            unix_home.join("Library").join("Application Support")
+        );
+        assert_eq!(default_root(Platform::Linux, unix_home), unix_home);
+
+        // A Windows home is spelled with backslashes; `Path::join` appends with
+        // whatever the *host* separator is, so compare component-wise rather
+        // than against a literal path string.
+        let windows_home = Path::new(r"C:\Users\someone");
+        let windows_root = default_root(Platform::Windows, windows_home);
+        assert_eq!(
+            windows_root,
+            windows_home.join("AppData").join("Local"),
+            "the Windows root must be under the home it was given, not wherever \
+             this process happens to point"
+        );
+    }
+
+    /// `%LOCALAPPDATA%` is the machine's answer and wins on Windows — but only
+    /// on Windows, and only when it is actually set.
+    ///
+    /// The environment read is injected rather than performed, so the rule can
+    /// be asserted without mutating a process-global that other tests in this
+    /// binary share.
+    #[test]
+    fn a_redirected_known_folder_wins_on_windows_and_nowhere_else() {
+        let home = Path::new("/home/someone");
+
+        // Set: the known folder is authoritative, because a profile can
+        // redirect it away from `<home>\AppData\Local`.
+        let redirected = OsStr::new(r"D:\LocalAppData");
+        assert_eq!(
+            machine_root_with(Platform::Windows, home, Some(redirected)),
+            PathBuf::from(redirected)
+        );
+
+        // Unset or empty: fall back to the home-derived root.
+        assert_eq!(
+            machine_root_with(Platform::Windows, home, None),
+            home.join("AppData").join("Local")
+        );
+        assert_eq!(
+            machine_root_with(Platform::Windows, home, Some(OsStr::new(""))),
+            home.join("AppData").join("Local"),
+            "an empty variable is not a root"
+        );
+
+        // The variable is a Windows known folder; elsewhere it is not a fact
+        // about the layout at all and must not move the root.
+        assert_eq!(
+            machine_root_with(Platform::Macos, home, Some(redirected)),
+            home.join("Library").join("Application Support")
+        );
+        assert_eq!(
+            machine_root_with(Platform::Linux, home, Some(redirected)),
+            home
+        );
     }
 
     // -------------------------------------------------- §6.4 summary: counts
