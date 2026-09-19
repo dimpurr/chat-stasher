@@ -14,6 +14,9 @@
 #   HEAD_SHA     github.sha                        commit the event is about
 #   PR_BASE_SHA  github.event.pull_request.base.sha
 #   PR_HEAD_SHA  github.event.pull_request.head.sha
+#   GITHUB_REF   github.ref                        refs/tags/* => a tag push
+#   PUSH_BASE    base a branch push ranges against (origin/main) when the
+#                workflow wants every push proven against the default branch
 #
 # Exit codes follow the checker's contract: 0 = checked and clean, 1 = a
 # violation found, 2 = usage / event-misconfiguration, 3 = no usable base, so
@@ -32,23 +35,43 @@ case "${EVENT_NAME:-}" in
     range="$PR_BASE_SHA..$PR_HEAD_SHA"
     ;;
   push)
-    if [ -n "${EVENT_BEFORE:-}" ] && [ "$EVENT_BEFORE" != "$zero" ] \
+    # A tag push is a new ref: the event carries no "before". The tagged commit
+    # was already proven when it landed on main, so ranging against any base is
+    # either empty (HEAD already on origin/main) or misleading. The honest check
+    # is the tagged commit itself - the thing the release names, checked for
+    # English on its own rather than let an empty range fail the gate for nothing.
+    if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+      echo "tag push ${GITHUB_REF}: no new branch history to prove; checking the tagged commit" >&2
+      range="$HEAD_SHA"
+    elif [ -n "${EVENT_BEFORE:-}" ] && [ "$EVENT_BEFORE" != "$zero" ] \
        && git cat-file -e "${EVENT_BEFORE}^{commit}" 2>/dev/null; then
-      # A normal push: check exactly the commits this push adds.
+      # A normal push: check exactly the commits this push adds. A rewind whose
+      # range resolves to nothing still exits 3 - that empty range reaches the
+      # checker through this branch, and 3 is the honest answer for it.
       range="$EVENT_BEFORE..$HEAD_SHA"
-    elif git rev-parse --verify -q origin/main >/dev/null 2>&1; then
-      # A new branch, or a force-push whose old tip is not in the checkout.
-      # There is no plausible "before". Ranging against the default branch
-      # checks every commit this branch introduces, not just its tip, so a
-      # non-English commit hiding under an English tip cannot pass.
-      echo "no usable before-sha (before=${EVENT_BEFORE:-unset}); ranging against origin/main" >&2
-      range="origin/main..$HEAD_SHA"
     else
-      # No base at all: failing loudly is the only honest outcome. Checking the
-      # tip alone and passing would report "we looked" for a length of history
-      # we did not look at.
-      echo "no usable base commit (before=${EVENT_BEFORE:-unset}) and no origin/main to range against" >&2
-      exit 3
+      # No usable before-sha: a new branch, a force-push whose old tip is gone,
+      # or - when the calling workflow sets PUSH_BASE - every branch push. Range
+      # against that base (origin/main by default), so a cancelled earlier run of
+      # a burst can never remove a commit from the window a later run proves:
+      # the base does not move when you push to a branch, while `before` does.
+      PUSH_BASE="${PUSH_BASE:-origin/main}"
+      if ! git rev-parse --verify -q "$PUSH_BASE" >/dev/null 2>&1; then
+        echo "no usable base commit (before=${EVENT_BEFORE:-unset}) and $PUSH_BASE cannot be resolved" >&2
+        exit 3
+      fi
+      if [ "$(git rev-list --count "$PUSH_BASE..$HEAD_SHA" 2>/dev/null || echo 1)" = "0" ]; then
+        # HEAD is already reachable from the base - a branch at a main commit, or
+        # a release tagged on main. Ranging would prove nothing; nothing new was
+        # introduced, and "nothing new" is a measurement of an empty set, not a
+        # failure to look. Still check the one commit HEAD names, because it is
+        # cheap and honest to confirm the ref's message is English.
+        echo "HEAD ($HEAD_SHA) is already reachable from $PUSH_BASE; nothing new to prove, checking HEAD itself" >&2
+        range="$HEAD_SHA"
+      else
+        echo "ranging ${PUSH_BASE}..$HEAD_SHA (no before-sha)" >&2
+        range="$PUSH_BASE..$HEAD_SHA"
+      fi
     fi
     ;;
   *)

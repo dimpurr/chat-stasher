@@ -1,21 +1,33 @@
 name: Commit messages are English
 
-# The commit-message gate must run on commits ci.yml would otherwise never see:
-# a pull request's commits (so a merge cannot smuggle a non-English commit in)
-# and every push to every branch (so the rule is enforced when the commit is
-# recorded, not only after the branch reaches main). This is deliberately a
+# The commit-message gate must run on commits ci.yml would otherwise never see
+# in full: a pull request's commits (so a merge cannot smuggle a non-English
+# commit in) and every push to every branch OUTSIDE main (main is gated by
+# ci.yml's own gates job, which ranges the pushed delta). This is deliberately a
 # SEPARATE workflow rather than more triggers on ci.yml: it runs only the cheap
 # Python gate - no Rust, no extension, no e2e matrix - so it can fire on every
 # push and every pull request without reviving the expensive matrix ci.yml runs
 # only on main and tags. Both this workflow and ci.yml's gates job call
 # scripts/commit-message-range.sh, so the event -> range mapping is written once.
+#
+# Branch pushes deliberately do NOT range the pushed delta (event.before..HEAD):
+# with cancel-in-progress below, a burst of pushes cancels every earlier run, and
+# `before` advances with each push - so a Chinese commit pushed and then buried
+# under an English tip would fall out of the last run's window and never be
+# checked. Instead every branch push ranges PUSH_BASE..HEAD (origin/main..HEAD),
+# a base that does not move while the burst is pushed. Whatever run of the burst
+# executes last therefore still sees every commit the runs it cancelled would
+# have seen. origin/main must exist, and is why fetch-depth: 0 is load-bearing:
+# action/checkout builds it from the remote during the clone.
 on:
   pull_request:
   push:
-    branches: ['**']
+    branches-ignore: [main]
 
-# A burst of pushes to one ref cancels the run behind it: the newest push views
-# the whole branch, so only its result matters.
+# A burst of pushes to one ref cancels the runs an earlier push held: only the
+# last run to actually execute supplies a result. That is safe here because the
+# base does not move mid-burst (see the comment above) - the last run proves
+# every commit any cancelled run would have covered.
 concurrency:
   group: commit-msgs-${{ github.ref }}
   cancel-in-progress: true
@@ -29,10 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 is load-bearing here: the gate compares a RANGE of commits
-      # (base..head on a PR, before..sha on a push, origin/main..HEAD when the
-      # before-sha is unusable), and a depth-1 checkout has no base commit to
-      # compare against - with default depth the range would degrade to
-      # "check the tip", which is a smaller claim than this job makes.
+      # (base..head on a PR, origin/main..HEAD on a branch push), and a depth-1
+      # checkout has no base commit to compare against - with default depth the
+      # range would degrade to "check the tip", which is a smaller claim than
+      # this job makes.
       - name: Check out repository
         uses: actions/checkout@v4
         with:
@@ -42,10 +54,11 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_BEFORE: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REF: ${{ github.ref }}
+          PUSH_BASE: origin/main
         run: bash scripts/commit-message-range.sh
 
       # The same reason the self-test runs in ci.yml: a gate that cannot prove

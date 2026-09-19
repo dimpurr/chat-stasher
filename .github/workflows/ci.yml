@@ -244,6 +244,7 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: bash scripts/commit-message-range.sh
 
       # Same reason the terminology lint's self-test runs here: a gate that cannot
