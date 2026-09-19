@@ -615,6 +615,59 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     expect(pageCalls).toEqual([]);
     expect(conversationRequests()).toEqual([]);
   });
+
+  // 🔴 R44 · A stored judgement that no longer applies must make the alarm ask
+  //    again. `scopeRetryDue` read "this halt no longer applies" and answered
+  //    "do not ask the page" — the same answer it gives when the halt does
+  //    apply — and since every capability reason is permanent, the next line
+  //    answered false too. The layer was a no-op and the target stayed frozen.
+  //
+  //    The record is built here by hand rather than through `recordBackfillHalt`,
+  //    which stamps the capability of the build it runs on and so can only ever
+  //    produce a record that matches. The shape below is the one measured on a
+  //    real machine on 2026-09-19: a judgement left behind by a build that had
+  //    no plan for this platform.
+  it('🔴 a capability halt from another build is re-asked; an account halt is not', async () => {
+    const { scopeRetryDue, UNRESOLVED_SCOPE } = await import('../entrypoints/background');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { headerOf, initialState, stateKey } = await import('../lib/backfill/types');
+
+    const s = browserLocalStore();
+    const now = Date.now();
+    const key = stateKey('claude', UNRESOLVED_SCOPE);
+    const withHalt = (halted: Record<string, unknown>) => ({
+      ...headerOf(initialState('claude', UNRESOLVED_SCOPE)),
+      halted,
+    });
+
+    // 1 · Judged by a build that had no plan for claude. This build has one.
+    store[key] = withHalt({
+      reason: 'unsupported-platform',
+      at: now - 3_600_000,
+      detail: 'synthetic: written by a build with no plan for this platform',
+      capability: 'none',
+    });
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(true);
+
+    // 2 · No marker at all — every record written before W44, and the shape of
+    //     the three found on the real machine.
+    store[key] = withHalt({
+      reason: 'unsupported-platform',
+      at: now - 3_600_000,
+      detail: 'synthetic: written before a stop said what it was judged against',
+    });
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(true);
+
+    // 3 · 🔴 An account-class judgement is untouched: it is a fact about the
+    //     account, not about the build, so it stays permanent. Otherwise this
+    //     fix would turn "wait for a human" into a slow poll of the account.
+    store[key] = withHalt({
+      reason: 'org-unresolved',
+      at: now - 3_600_000,
+      detail: 'synthetic: no organization could be named',
+    });
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

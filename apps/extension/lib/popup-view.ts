@@ -1065,6 +1065,34 @@ function hookStatusNote(record: HookStatusRecord): string {
   });
 }
 
+/**
+ * 🔴 W44 · **One capability value, in words.**
+ *
+ * The popup has to name both sides of an expiry — what the record said the build
+ * could do, and what this build can do — and a reader who is told "judged against
+ * list-only, now full" has been told nothing. So each value becomes the sentence a
+ * person would use.
+ *
+ * 🔴 `unmarked` is a *kind of statement*, not a capability, and it gets words that
+ *    say so: the record did not say. It is never rounded into 'none' — "this build
+ *    could do nothing" and "this record never said what the build could do" are
+ *    different facts, and a reader deciding whether to trust the note needs to know
+ *    which one they are looking at.
+ * 🔴 An unrecognised value is printed verbatim rather than defaulted: a value this
+ *    build does not know is exactly the case where a guess would be invented.
+ */
+const CAPABILITY_WORDS: Record<string, string> = {
+  none: 'popup.capability.none',
+  'list-only': 'popup.capability.listOnly',
+  full: 'popup.capability.full',
+  unmarked: 'popup.capability.unmarked',
+};
+
+function capabilityWords(value: string): string {
+  const key = CAPABILITY_WORDS[value];
+  return key ? t(key) : t('popup.capability.other', { capability: value });
+}
+
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 Failure details come before every other note. If something was lost, say that first.
@@ -1146,6 +1174,30 @@ function notesFor(model: PopupModel): string[] {
         detail: model.state.halted.detail,
       }));
     }
+  }
+
+  // 🔴 W44 · **A stop that stopped applying, said out loud.**
+  //
+  //    When a stored capability-class halt expires, the engine clears it and the
+  //    leg starts again — and a cleared record is silence. This note is what a user
+  //    sees instead: which judgement stopped applying, what the record said the
+  //    build could do, what this build can do, and when the leg started again. It
+  //    reads the header (`haltExpired`), which survives the run that wrote it.
+  //
+  //    🔴 It is NOT the sentence for a stop still in force, and that is the point:
+  //      `popup.notes.halted.unsupportedPlatform` says this platform's history
+  //      cannot be backfilled yet, which is the opposite of what happened here.
+  //      Printing one for the other would be the same defect wearing a different
+  //      coat — a leg that starts again for no stated reason reads as a leg that
+  //      fixed itself, which is not what happened either.
+  if (model.state?.haltExpired) {
+    notes.push(t('popup.notes.haltExpired', {
+      reason: model.state.haltExpired.reason,
+      when: stampOf(model.state.haltExpired.recordedAt),
+      judgedAgainst: capabilityWords(model.state.haltExpired.judgedAgainst),
+      capability: capabilityWords(model.state.haltExpired.capability),
+      cleared: stampOf(model.state.haltExpired.clearedAt),
+    }));
   }
 
   // 🔴 W45 · **The durable half of the `ledger-mismatch` refusal.**

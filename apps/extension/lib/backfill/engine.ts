@@ -26,8 +26,10 @@ import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import {
   applyScope,
+  backfillCapabilityOf,
   backfillPlanFor,
   canBackfillDetail,
+  capabilityOf,
   detailRequestInit,
   listRequestInit,
   listTokenPostInit,
@@ -41,8 +43,11 @@ import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
 import { openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
 import {
+  CAPABILITY_UNMARKED,
   dayKeyOf,
   haltClassOf,
+  haltStillApplies,
+  haltSubjectOf,
   initialState,
   isTransientReason,
   transientRetryDelayMs,
@@ -340,6 +345,20 @@ export async function recordBackfillHalt(
   if (!opened.ok) return false;
   const at = (opts.clock ?? systemClock).now();
   const state = opened.state;
+  /**
+   * 🔴 W44 · The same marker rule as `runBackfill`'s halt funnel, for the same
+   * reason and with one honest difference: this function is reached from the
+   * background's resolver path, where no plan lookup is injected, so it asks the
+   * **production** table (`backfillCapabilityOf`). The three reasons it is called
+   * with today — the two organization facts and a transport error — are all
+   * non-capability, so `haltSubjectOf` returns `{}` here and every record it writes
+   * is byte-identical to what it wrote before W44. The line is here rather than
+   * omitted so that a future caller reaching it with a capability reason cannot
+   * write a record the engine will never expire.
+   */
+  const capabilityMark = haltSubjectOf(opts.reason) === 'capability'
+    ? { capability: backfillCapabilityOf(opts.platform) }
+    : {};
   if (haltClassOf(opts.reason) === 'transient' && isTransientReason(opts.reason)) {
     const previous = state.halted;
     const streak = (previous?.reason === opts.reason ? (previous.attempts ?? 0) : 0) + 1;
@@ -351,7 +370,7 @@ export async function recordBackfillHalt(
       retryAt: at + transientRetryDelayMs(opts.reason, streak, opts.random ?? systemRandom),
     };
   } else {
-    state.halted = { reason: opts.reason, at, detail: opts.detail };
+    state.halted = { reason: opts.reason, at, detail: opts.detail, ...capabilityMark };
   }
   await saveHeader(store, state);
   return true;
@@ -566,8 +585,30 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    */
   let transientStreak = 0;
 
+  /**
+   * 🔴 W44 · **What this build can do, asked of the same lookup the judgement comes
+   *    from.** `opts.plans` is the injected plan table (production never sets it),
+   *    so a record written through the seam is judged against the very table the
+   *    seam answered with — the marker and the halt cannot be computed from two
+   *    different tables, which is what makes the expiry check sound rather than
+   *    merely plausible.
+   *    The platform is `state.platform`: the one this record is **stored under**, so
+   *    the answer belongs to the same key as the record, whichever origin this run
+   *    was handed.
+   */
+  const currentCapability = () => capabilityOf((opts.plans ?? backfillPlanFor)(state.platform));
+
   const halt = async (reason: HaltReason, detail: string): Promise<RunReport> => {
     const at = clock.now();
+    /**
+     * 🔴 W44 · A capability-class record carries what it was a judgement about;
+     *    every other reason's record is written **without the field at all** (not
+     *    with `undefined`), so the account, upstream and storage records are
+     *    byte-identical to what they were before this change.
+     */
+    const capabilityMark = haltSubjectOf(reason) === 'capability'
+      ? { capability: currentCapability() }
+      : {};
     // 🔴 W13 · A transient reason gets a "when may we try again" and a streak count;
     //    a permanent one is written exactly as before (no `retryAt`, no `attempts`),
     //    which is what keeps the permanent semantics byte-identical.
@@ -581,7 +622,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         retryAt: at + transientRetryDelayMs(reason, transientStreak, random),
       };
     } else {
-      state.halted = { reason, at, detail };
+      state.halted = { reason, at, detail, ...capabilityMark };
     }
     await persist(state);
     // Only the technical detail is logged, never a conversation body.
@@ -627,28 +668,76 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   //      the same cursor and the same debt set**. Nothing is written off: `pending`
   //      and `archived` are not touched on any path through this branch.
   if (state.halted) {
-    if (haltClassOf(state.halted.reason) === 'permanent') return report('halted');
+    /**
+     * 🔴 W44 · **A record that is a judgement about the build stops applying when
+     *    the build changes.** This branch is the fix for the defect measured on
+     *    2026-09-19, and it is deliberately placed *before* the permanent stop below:
+     *    a capability-class record is permanent in the `HaltClass` sense — no
+     *    amount of waiting makes a plan appear — and it was exactly that permanence,
+     *    with no way to notice that the plan **had** appeared, that held down two
+     *    platforms this build can backfill.
+     *
+     * The test is `haltStillApplies`, one function shared with the alarm's
+     * preflight and the record's own writer, so no third opinion about "is this
+     * record still in force" exists. It compares the marker against
+     * `currentCapability()` — the same lookup the halt itself was raised from.
+     *
+     * What happens when it does not apply:
+     *   · the record is **cleared**, and only the record. `pending`, `archived`,
+     *     the cursor and every counter are untouched — a capability halt fires
+     *     before the request it is about, so there was never anything of the user's
+     *     in flight to undo;
+     *   · the expiry is written down (`state.haltExpired`) **before** the run
+     *     continues, because the run may halt again with a different reason and
+     *     would then overwrite the only trace that this one ever existed;
+     *   · the run carries on into the ordinary path below, where the plan lookup
+     *     either answers — and the leg works — or refuses again, writing the same
+     *     halt back, now marked. Nothing is decided here that the rest of the run
+     *     does not decide for itself.
+     */
+    if (haltSubjectOf(state.halted.reason) === 'capability') {
+      const judged = state.halted;
+      const capability = currentCapability();
+      if (haltStillApplies(judged, capability)) return report('halted');
 
-    // 🔴 A record written before W13 has no `retryAt` and is read as **due now** —
-    //    "no delay was ever decided" is not "wait forever". That is precisely the
-    //    state the real account was stuck in (reason 'transport-error', detail
-    //    starting `list offset=`), and it has to come back on its own.
-    const retryAt = state.halted.retryAt;
-    if (retryAt !== undefined && clock.now() < retryAt) {
-      // 🔴 No request, and no write either: a waiting round must be free. Returning
-      //    the persisted record lets the popup say which attempt this is and when
-      //    the next one comes — 'waiting-retry' is neither 'ran' nor 'halted'.
-      return report('waiting-retry');
+      state.haltExpired = {
+        reason: judged.reason,
+        recordedAt: judged.at,
+        judgedAgainst: judged.capability ?? CAPABILITY_UNMARKED,
+        capability,
+        clearedAt: clock.now(),
+      };
+      state.halted = null;
+      await persist(state);
+      console.warn(
+        `[chat-stasher] backfill resuming: the stored ${judged.reason} stop was a judgement about`
+        + ` this build's own capability (${judged.capability ?? CAPABILITY_UNMARKED}), which is now`
+        + ` ${capability}; the record no longer applies and nothing was written off while it stood`,
+      );
+    } else if (haltClassOf(state.halted.reason) === 'permanent') {
+      return report('halted');
+    } else {
+      // 🔴 A record written before W13 has no `retryAt` and is read as **due now** —
+      //    "no delay was ever decided" is not "wait forever". That is precisely the
+      //    state the real account was stuck in (reason 'transport-error', detail
+      //    starting `list offset=`), and it has to come back on its own.
+      const retryAt = state.halted.retryAt;
+      if (retryAt !== undefined && clock.now() < retryAt) {
+        // 🔴 No request, and no write either: a waiting round must be free. Returning
+        //    the persisted record lets the popup say which attempt this is and when
+        //    the next one comes — 'waiting-retry' is neither 'ran' nor 'halted'.
+        return report('waiting-retry');
+      }
+
+      // Due: the streak continues across the resume, so the ladder does not restart.
+      transientStreak = state.halted.attempts ?? 1;
+      state.halted = null;
+      await persist(state);
+      console.warn(
+        `[chat-stasher] backfill resuming after a transient stop`
+        + ` (attempt ${transientStreak}; the debts were never touched)`,
+      );
     }
-
-    // Due: the streak continues across the resume, so the ladder does not restart.
-    transientStreak = state.halted.attempts ?? 1;
-    state.halted = null;
-    await persist(state);
-    console.warn(
-      `[chat-stasher] backfill resuming after a transient stop`
-      + ` (attempt ${transientStreak}; the debts were never touched)`,
-    );
   }
 
   const platformRow = getPlatformByOrigin(opts.origin);

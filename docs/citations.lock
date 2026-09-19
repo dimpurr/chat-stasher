@@ -31,15 +31,15 @@ apps/extension/entrypoints/background.ts:198-215  41d87a302a6d  lines=18
   <- README.md:213, docs/privacy.md:129, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
 apps/extension/entrypoints/background.ts:425-432  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:686-701  c3d365c9f2d7  lines=16
+apps/extension/entrypoints/background.ts:697-713  05ae48bc44ee  lines=17
   <- docs/privacy.md:319, docs/threat-model.md:593  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:703-775  3fd39fc379fb  lines=73
-  <- docs/privacy.md:296  :: /**
-apps/extension/entrypoints/background.ts:784-808  651a72caf54b  lines=25
-  <- docs/privacy.md:284  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:821  c4f31673b0d8  lines=1
-  <- docs/privacy.md:286  :: // The archive-scope key follows ADR-002's account axis; an…
-apps/extension/entrypoints/background.ts:924-946  f08bd697b536  lines=23
+apps/extension/entrypoints/background.ts:715-787  44f7b21a4646  lines=73
+  <- docs/privacy.md:296  :: if (!haltStillApplies(raw.halted, backfillCapabilityOf(plat…
+apps/extension/entrypoints/background.ts:796-820  6287e0b9e52b  lines=25
+  <- docs/privacy.md:284  :: export function backfillTickSettled(): Promise<unknown> {
+apps/extension/entrypoints/background.ts:833  ed9623369ff0  lines=1
+  <- docs/privacy.md:286  :: */
+apps/extension/entrypoints/background.ts:941-963  f08bd697b536  lines=23
   <- README.md:172, docs/install.md:635, docs/privacy.md:329  :: async function resolveScopeForTick(
 apps/extension/entrypoints/dw-bridge.content.ts:396-402  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -63,25 +63,25 @@ apps/extension/lib/backfill/claude-page.ts:84-92  b8faf8b2d241  lines=9
   <- docs/privacy.md:307  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/debt-store.ts:68-87  c2b9b363b155  lines=20
   <- docs/privacy.md:273  :: export const BACKFILL_DB_VERSION = 2;
-apps/extension/lib/backfill/engine.ts:86-89  5cfeee9f2531  lines=4
+apps/extension/lib/backfill/engine.ts:91-94  5cfeee9f2531  lines=4
   <- docs/privacy.md:368, docs/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
-apps/extension/lib/backfill/engine.ts:405  4e88764df1da  lines=1
+apps/extension/lib/backfill/engine.ts:424  4e88764df1da  lines=1
   <- docs/privacy.md:362  :: export async function runBackfill(opts: BackfillOptions): P…
-apps/extension/lib/backfill/engine.ts:691-735  2e1189ed00fe  lines=45
+apps/extension/lib/backfill/engine.ts:780-824  2e1189ed00fe  lines=45
   <- docs/privacy.md:322  :: /**
-apps/extension/lib/backfill/engine.ts:807-862  9b4d97eff717  lines=56
+apps/extension/lib/backfill/engine.ts:896-951  9b4d97eff717  lines=56
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: const listWhere = (): string =>
-apps/extension/lib/backfill/engine.ts:886-931  f8405b040a2f  lines=46
+apps/extension/lib/backfill/engine.ts:975-1020  f8405b040a2f  lines=46
   <- README.md:168, docs/install.md:725, docs/privacy.md:493, docs/threat-model.md:302  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
-apps/extension/lib/backfill/engine.ts:915-931  378b84747704  lines=17
+apps/extension/lib/backfill/engine.ts:1004-1020  378b84747704  lines=17
   <- README.md:172  :: *    (`listOffsetInferred`: claude.ai). There is no token t…
-apps/extension/lib/backfill/engine.ts:1172-1194  86b2234a756c  lines=23
+apps/extension/lib/backfill/engine.ts:1261-1283  86b2234a756c  lines=23
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: while (state.pending.length > 0) {
-apps/extension/lib/backfill/engine.ts:1302-1354  1ad645e96bae  lines=53
+apps/extension/lib/backfill/engine.ts:1391-1443  1ad645e96bae  lines=53
   <- README.md:171, docs/install.md:109, docs/privacy.md:388, docs/privacy.md:407, docs/privacy.md:474, docs/threat-model.md:302, docs/threat-model.md:603  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:1406-1441  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:1495-1530  2cb492e06a56  lines=36
   <- README.md:169, docs/install.md:109, docs/install.md:728, docs/privacy.md:474, docs/privacy.md:488, docs/threat-model.md:302, docs/threat-model.md:597  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
-apps/extension/lib/backfill/engine.ts:1459-1472  a081dede5475  lines=14
+apps/extension/lib/backfill/engine.ts:1548-1561  a081dede5475  lines=14
   <- docs/privacy.md:476  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
 apps/extension/lib/backfill/enumerate.ts:2009-2023  30e272d8bf3f  lines=15
   <- README.md:167, docs/install.md:133, docs/install.md:727  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
@@ -113,7 +113,7 @@ apps/extension/lib/backfill/enumerate.ts:3131-3187  b7f5cc3c59da  lines=57
   <- README.md:172, docs/privacy.md:476, docs/threat-model.md:304, docs/threat-model.md:579  :: export function parseClaudeDetailTree(
 apps/extension/lib/backfill/enumerate.ts:3339-3359  a70cadf72bcc  lines=21
   <- docs/threat-model.md:574  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:3648-3675  5b6b2f814d3e  lines=28
+apps/extension/lib/backfill/enumerate.ts:3676-3703  5b6b2f814d3e  lines=28
   <- README.md:167, README.md:170, docs/install.md:105, docs/install.md:638, docs/privacy.md:387, docs/privacy.md:474, docs/privacy.md:475, docs/threat-model.md:302, docs/threat-model.md:303, docs/threat-model.md:571, docs/threat-model.md:605  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/pace.ts:92-103  9e56eb8452f2  lines=12
   <- docs/install.md:584  :: export const DEFAULT_DETAIL_PACE: PacePlan = {
@@ -135,7 +135,7 @@ apps/extension/lib/backfill/tab-port.ts:447-463  7049b6f9bc26  lines=17
   <- README.md:172, docs/threat-model.md:304  :: *    has two more segments, so the two cannot collide by co…
 apps/extension/lib/backfill/tab-port.ts:1043-1060  18db841e280b  lines=18
   <- README.md:172, docs/privacy.md:313  :: export async function askTabForClaudeOrg(
-apps/extension/lib/backfill/types.ts:721-753  206e155b598c  lines=33
+apps/extension/lib/backfill/types.ts:930-964  73a635ee0b17  lines=35
   <- docs/privacy.md:273  :: export interface BackfillHeader {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:265  :: export function badgeFor(state: OutboxSummary | null): Badg…
