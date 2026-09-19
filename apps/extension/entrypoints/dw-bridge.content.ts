@@ -5,6 +5,7 @@ import {
   MAIN_PROBE_MESSAGE,
   GEMINI_TOKENS_REQUEST_MESSAGE,
   HOOK_REASON_DID_NOT_RUN,
+  HOOK_SELF_CHECK_INTERVAL_MS,
   HOOK_STATUS_MESSAGE,
   findPlatformForUrl,
   isCaptureMessage,
@@ -136,12 +137,31 @@ export default defineContentScript({
      *    that verified), and a page-wide flag would quietly drop the second. The
      *    set is bounded by the closed vocabulary plus one, so it cannot grow with
      *    uptime.
+     *
+     * 🔴 W43c · **That gate is for this side's own, once-per-page observations.**
+     *    The page's hook now re-reads its own globals on a timer
+     *    (`HOOK_SELF_CHECK_INTERVAL_MS`), and each of those readings is a fresh
+     *    observation of the *same* page: relaying only the first one would make
+     *    that re-check pointless, because the one thing that removes a record on
+     *    this origin is another document's positive observation
+     *    (`lib/hook-status.ts`, last word wins) — so a still-broken page would be
+     *    silenced by a verifying frame and never heard from again. The page's own
+     *    reports therefore go out every time, bounded by the same interval the
+     *    hook uses.
+     *
+     * 🔴 That bound is the reason `hookStatusSentAt` exists. The page world can
+     *    post this message as often as it likes on its own window, and what
+     *    arrives is written to storage, so a page that spammed it could turn one
+     *    record into an unbounded write loop. The floor keeps the honest cadence
+     *    and the abusive one at the same rate; the first report of each reason
+     *    always goes out, so the two distinct observations a single page can make
+     *    early in its life (its install-time patch refusal, then the probe) are
+     *    never affected by it.
      */
     const hookStatusReported = new Set<string>();
-    function reportHookStatus(reason: HookObservation | null): void {
-      const key = reason ?? 'verified';
-      if (hookStatusReported.has(key)) return;
-      hookStatusReported.add(key);
+    const hookStatusSentAt = new Map<string, number>();
+    /** The report message itself, ungated: the gate belongs to whoever decided to send. */
+    function sendHookStatus(reason: HookObservation | null): void {
       // 🔴 Delivery is best-effort in both directions, and a failure here must not
       //    disturb the page: a capture that was already lost cannot be made worse
       //    by a report about it, and `warnStaleLink` names the one cause that is
@@ -155,6 +175,22 @@ export default defineContentScript({
           observedAt: Date.now(),
         } satisfies HookStatusMessage),
       ).catch(() => { /* the page is never disturbed by a report about the page */ });
+    }
+    /** One of this side's own observations: sent once per outcome, ever. */
+    function reportHookStatus(reason: HookObservation | null): void {
+      const key = reason ?? 'verified';
+      if (hookStatusReported.has(key)) return;
+      hookStatusReported.add(key);
+      sendHookStatus(reason);
+    }
+    /** An observation the page made about itself; see the W43c note above. */
+    function reportHookStatusFromPage(reason: HookObservation): void {
+      const key = reason;
+      const now = Date.now();
+      const last = hookStatusSentAt.get(key);
+      if (last !== undefined && now - last < HOOK_SELF_CHECK_INTERVAL_MS) return;
+      hookStatusSentAt.set(key, now);
+      sendHookStatus(reason);
     }
 
     /**
@@ -225,7 +261,7 @@ export default defineContentScript({
        * a record a person reads.
        */
       if (isHookReportMessage(event.data)) {
-        reportHookStatus(event.data.reason);
+        reportHookStatusFromPage(event.data.reason);
         return;
       }
 

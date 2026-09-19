@@ -53,6 +53,7 @@ import {
   HOOK_REASON_DID_NOT_TAKE,
   HOOK_REASON_WAS_REPLACED,
   HOOK_REPORT_MESSAGE,
+  HOOK_SELF_CHECK_INTERVAL_MS,
   HOOK_STATUS_MESSAGE,
   isHookStatusMessage,
   MAIN_READY_MESSAGE,
@@ -360,6 +361,10 @@ function makeFakePage(hook: {
     origin: environmentOrigin === 'none' ? undefined : environmentOrigin,
     XMLHttpRequest: FakeXhr,
     fetch: async () => new Response(body, { status: 200 }),
+    // 🔴 W43c · The hook's re-check is a page timer (`window.setInterval`), so the
+    //    fake window carries one. Vitest's fake clock is installed in `beforeEach`,
+    //    so this is the faked timer and `settle` is what advances it.
+    setInterval: setInterval as unknown,
     addEventListener(name: string, fn: (event: unknown) => void) {
       if (name === 'message') listeners.push(fn);
     },
@@ -763,3 +768,127 @@ async function postProbe(page: FakePage): Promise<void> {
   page.win.postMessage({ type: MAIN_PROBE_MESSAGE, token: PROBE_TOKEN }, ORIGIN);
   page.pump();
 }
+
+/**
+ * W43c · **The hook asks about itself again, after the handshake.**
+ *
+ * Everything the two groups above test happens in a document's first moments:
+ * the read-back at install and the answer to the probe. The measured failure is
+ * the one those cannot see, on a real logged-in page after a full reload:
+ *
+ * ```
+ * fetchNative=false   xhrNative=true   hookWhole=false   cs_hook_v1:* {}
+ * ```
+ *
+ * The live XHR half is not ours, `fetch` is, and nothing writes a record. The
+ * install-time read-back cannot be silent about a patch that never took (it
+ * reports `did-not-take` on the spot), and a page that breaks the half before
+ * the probe is reported by the listener (measured in the e2e harness). What is
+ * left is a page that takes the transport back **after** it answered a probe —
+ * which is the shape below, and which these cases pin as recorded.
+ *
+ * The three cases are different claims about the same re-check:
+ *
+ *  1. it reports the half-install the handshake already blessed;
+ *  2. a healthy page stays silent, however many times it runs (so the new
+ *     timer cannot file a failure against a page that is fine);
+ *  3. a hook that is *still* broken repeats the observation, which is what
+ *     keeps the record alive when another document on the origin verifies —
+ *     `lib/hook-status.ts` lets the newest word win, and the newest word has to
+ *     keep being the true one.
+ */
+describe('W43c · the hook re-checks itself after the handshake', () => {
+  it('🔴 a page that takes the XHR half back after answering a probe is reported by the next check', async () => {
+    const page = makeFakePage(await pageHook());
+    // The page's own two functions, before the hook touches them.
+    const pageOpen = page.win.XMLHttpRequest.prototype.open;
+    const pageSend = page.win.XMLHttpRequest.prototype.send;
+
+    const hook = await pageHook();
+    hook.installPageFetchHook(hook.PAGE_HOOK_OPTIONS);
+    const sent = stubRuntime();
+    await loadBridge();
+
+    // The handshake completes on a whole hook: the probe is answered, and the
+    // one thing that clears an origin's record is sent — there is nothing wrong
+    // with this page yet, and the extension says exactly that.
+    await postProbe(page);
+    expect(probeAnswers(page)).toHaveLength(1);
+    expect(hookStatusReports(sent).map((message) => message.reason)).toEqual([null]);
+
+    // 🔴 The measured half-install, one moment after the handshake blessed it:
+    //    `fetch` stays ours and the constructor the page will use from now on is
+    //    its own again. No probe follows this — that is the whole point.
+    class RestoredXhr {}
+    Object.defineProperty(RestoredXhr.prototype, 'open', { value: pageOpen, configurable: true });
+    Object.defineProperty(RestoredXhr.prototype, 'send', { value: pageSend, configurable: true });
+    page.win.XMLHttpRequest = RestoredXhr;
+
+    await settle(page, 0);
+    // Still nothing: this is the silence, and it is not a rendering problem.
+    expect(hookStatusReports(sent).map((message) => message.reason)).toEqual([null]);
+
+    // The re-check reads the live global and reports what it sees. Deleting the
+    // `window.setInterval(recheckHook, …)` registration in `lib/page-hook.ts`
+    // turns this assertion red, and nothing else in the suite notices.
+    await settle(page, HOOK_SELF_CHECK_INTERVAL_MS + 1);
+    expect(hookStatusReports(sent).map((message) => message.reason))
+      .toEqual([null, HOOK_REASON_WAS_REPLACED]);
+    // And it is still not answered: nothing about the page became capturable.
+    expect(probeAnswers(page)).toHaveLength(1);
+  });
+
+  it('🔴 a page whose hook stays whole is never reported, however many checks run', async () => {
+    const page = makeFakePage(await pageHook());
+    const hook = await pageHook();
+    hook.installPageFetchHook(hook.PAGE_HOOK_OPTIONS);
+    const sent = stubRuntime();
+    await loadBridge();
+    await postProbe(page);
+
+    // Ten intervals of a page that is fine. A check that reported anything here
+    // would file a failure against every healthy page in the product.
+    for (let tick = 0; tick < 10; tick += 1) await settle(page, HOOK_SELF_CHECK_INTERVAL_MS + 1);
+
+    expect(hookStatusReports(sent).map((message) => message.reason)).toEqual([null]);
+    expect(page.posted.filter((entry) => entry.data?.type === HOOK_REPORT_MESSAGE)).toEqual([]);
+  });
+
+  it('🔴 a repeated report from the page is relayed again after one check, and not before', async () => {
+    // No hook here on purpose: what this case pins is the bridge's rule for a
+    // page's *own* reports, which the re-check above depends on to be heard more
+    // than once.
+    const page = makeFakePage(await pageHook());
+    const sent = stubRuntime();
+    await loadBridge();
+
+    const reportFromPage = (): void => {
+      page.win.postMessage({ type: HOOK_REPORT_MESSAGE, reason: HOOK_REASON_DID_NOT_TAKE }, ORIGIN);
+      page.pump();
+    };
+    const didNotTakeRelays = (): number =>
+      hookStatusReports(sent).filter((message) => message.reason === HOOK_REASON_DID_NOT_TAKE).length;
+
+    reportFromPage();
+    expect(didNotTakeRelays()).toBe(1);
+
+    // 🔴 A second one in the same breath is dropped. The page world can post this
+    //    message as often as it likes, and every relayed one is a storage read and
+    //    write, so without a floor a page could turn its own record into a write
+    //    loop. The floor is the hook's own check interval, so the honest cadence
+    //    and the abusive one are the same rate.
+    reportFromPage();
+    expect(didNotTakeRelays()).toBe(1);
+
+    // 🔴 And after one check interval it goes out again. This is what keeps a
+    //    page that is *still* broken audible on its own origin: any document whose
+    //    hook verified removes the origin's record (`lib/hook-status.ts`, newest
+    //    word wins), so a repeated observation is the only thing that stops a
+    //    whole frame from silencing the page in front of the user. The record
+    //    itself merges the repeat into one row — what repeats is the observation,
+    //    and it carries a fresh time.
+    await settle(page, HOOK_SELF_CHECK_INTERVAL_MS + 1);
+    reportFromPage();
+    expect(didNotTakeRelays()).toBe(2);
+  });
+});

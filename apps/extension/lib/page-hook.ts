@@ -10,6 +10,7 @@ import {
   HOOK_REASON_DID_NOT_TAKE,
   HOOK_REASON_WAS_REPLACED,
   HOOK_REPORT_MESSAGE,
+  HOOK_SELF_CHECK_INTERVAL_MS,
   MAX_RAW_BYTES,
   MAIN_PROBE_MESSAGE,
   MAIN_READY_MESSAGE,
@@ -68,6 +69,13 @@ export interface PageHookOptions {
     /** The patch was in effect and something replaced it afterwards. */
     wasReplaced: string;
   };
+  /**
+   * 🔴 W43c · How often the installed hook re-reads the live globals it patched
+   * (see `HOOK_SELF_CHECK_INTERVAL_MS` in `lib/contract.ts` for the value and
+   * its cost). It travels in the options for the same reason every other value
+   * here does: the fallback path serialises this object.
+   */
+  selfCheckIntervalMs: number;
   /** RegExp source (serialisable) for ChatGPT's paged detail path; group 1 = id. */
   chatgptPagedDetailPattern: string;
   /**
@@ -122,6 +130,7 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
     didNotTake: HOOK_REASON_DID_NOT_TAKE,
     wasReplaced: HOOK_REASON_WAS_REPLACED,
   },
+  selfCheckIntervalMs: HOOK_SELF_CHECK_INTERVAL_MS,
   chatgptPagedDetailPattern: CHATGPT_PAGED_DETAIL_PATTERN.source,
   geminiTokensRequestMessage: GEMINI_TOKENS_REQUEST_MESSAGE,
   geminiTokensReplyMessage: GEMINI_TOKENS_REPLY_MESSAGE,
@@ -758,6 +767,29 @@ export function installPageFetchHook(options: PageHookOptions): void {
     reportHookFailure(options.hookReportReasons.didNotTake);
   }
 
+  /**
+   * 🔴 W43c · **Is either half of this hook still the page's own global?**
+   *
+   * The one question the probe listener and the periodic re-check both ask, so
+   * the two cannot drift — the same rule the W43b read-back follows, one level
+   * up. `null` means both halves are the functions this hook installed; anything
+   * else is the reason code to report, and it is a code from the closed set in
+   * `lib/contract.ts` rather than a sentence.
+   *
+   * Both halves are read from the **live** globals on every call:
+   * `window.fetch` against the wrapper this function made, and the live
+   * `XMLHttpRequest` constructor's `prototype.open`/`send` against the wrappers
+   * it installed (`xhrHookInEffect`). A document with no XHR global has no XHR
+   * half to lose, which is why that case contributes no failure.
+   */
+  const hookFailureNow = (): string | null => {
+    if (window.fetch !== hookedFetch) return options.hookReportReasons.wasReplaced;
+    if (xhrHookExpected && !xhrHookInEffect()) {
+      return xhrPatched ? options.hookReportReasons.wasReplaced : options.hookReportReasons.didNotTake;
+    }
+    return null;
+  };
+
   // 🔴 The probe listener is registered **here**, after the wrapper is actually
   //    in place, and not a line earlier. Answering a probe is the isolated
   //    side's proof that this hook is installed (it is what replaced the inline
@@ -785,33 +817,80 @@ export function installPageFetchHook(options: PageHookOptions): void {
     const record = data as Record<string, unknown>;
     if (record.type !== options.probeMessage || typeof record.token !== 'string') return;
     if (record.token.length < 8) return;
-    if (window.fetch !== hookedFetch) {
+    const failure = hookFailureNow();
+    if (failure !== null) {
       // 🔴 W43 · The wrapper was in effect when it was installed and is not any
-      //    more: something on this page replaced `window.fetch`. Reported, not
-      //    answered — answering would tell the bridge "this page is captured"
-      //    while the page's own calls go straight past us, which is precisely
-      //    the false negative this handshake exists to remove.
-      reportHookFailure(options.hookReportReasons.wasReplaced);
-      return;
-    }
-    if (!xhrHookInEffect()) {
-      // 🔴 W43b · The measured half-install, and the reason the answer above may
-      //    not be sent from it. `fetch` being ours says nothing about the XHR
-      //    global the page now holds, and on this shape the page's own capture
-      //    goes through XHR — so an answer here would be the false negative this
-      //    handshake exists to remove, and worse than a false negative: `null`
-      //    from the bridge **withdraws** the origin's record.
+      //    more: something on this page replaced `window.fetch` (or, W43b, its
+      //    XHR half). Reported, not answered — answering would tell the bridge
+      //    "this page is captured" while the page's own calls go straight past
+      //    us, which is precisely the false negative this handshake exists to
+      //    remove. And `null` from the bridge **withdraws** the origin's record,
+      //    so answering from a half-install deletes the record it just earned.
       //    The reason names which of the two shapes it is, and both are
       //    observations: `did-not-take` if the patch never took at install time,
       //    `was-replaced` if it took and the page has since put its own function
       //    back.
-      reportHookFailure(
-        xhrPatched ? options.hookReportReasons.wasReplaced : options.hookReportReasons.didNotTake,
-      );
+      reportHookFailure(failure);
       return;
     }
     post({ type: options.readyMessage, version: options.version, token: record.token });
   });
+
+  /**
+   * 🔴 W43c · **The same question, asked after the handshake.**
+   *
+   * Everything above observes a document in its first moments: the read-back at
+   * install, and the answer to the bridge's probe a heartbeat later. Both are
+   * one-shot, and the measured failure is what one-shot observation cannot see —
+   * on a real, logged-in page a full reload later:
+   *
+   * ```
+   * fetchNative=false   xhrNative=true   hookWhole=false   cs_hook_v1:* {}
+   * ```
+   *
+   * `window.fetch` is still this hook's wrapper, the live
+   * `XMLHttpRequest.prototype.open` is not, and nothing anywhere says so. The
+   * install-time read-back cannot be silent about a patch that never took —
+   * `xhrPatched` false reports `did-not-take` on the spot — and a page that
+   * breaks the half *before* the probe is reported by the listener above, whose
+   * report is what keeps the probe unanswered. What remains is a page that takes
+   * its transport back **after** that answer: the hook's last observation stays
+   * "whole" for the rest of the document's life, and capture is gone with no
+   * record of it.
+   *
+   * So the question is asked again on a timer, and on the two events that mean a
+   * person is looking at this tab: it becomes visible, or it comes back from the
+   * back/forward cache with its timers having been frozen. `hookFailureNow` is
+   * the single definition all three checks share, so "is this hook whole?" cannot
+   * come to mean three different things.
+   *
+   * 🔴 A report from here is the same observation as any other, and the bridge
+   *    treats it that way: the record's timestamp moves and its reason set is
+   *    merged, so a page that stays broken keeps saying so **as of now** rather
+   *    than as of some moment before it broke. That is also what makes the record
+   *    survive the one thing on this origin that can still remove it: another
+   *    document whose own hook verified (`lib/hook-status.ts`, last word wins).
+   *
+   * 🔴 Nothing here is a precondition for the hook working, and nothing here may
+   *    throw into the page: a window that refuses a timer keeps the two
+   *    observations it already had.
+   */
+  const recheckHook = (): void => {
+    const failure = hookFailureNow();
+    if (failure !== null) reportHookFailure(failure);
+  };
+  try {
+    window.setInterval(recheckHook, options.selfCheckIntervalMs);
+    window.addEventListener('pageshow', recheckHook);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') recheckHook();
+      });
+    }
+  } catch {
+    // Never into the page. See the note above: the re-check is an addition to
+    // what this hook already observed, not a condition of it.
+  }
 
   /**
    * 🔴 W29 · **The Gemini bootstrap-token pull** (see lib/contract.ts).

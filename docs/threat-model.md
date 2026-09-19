@@ -23,10 +23,10 @@ trust the code and treat the sentence as unverified.
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:210-235`, `:685-687`;
-   the `fetch` wrap at `apps/extension/lib/page-hook.ts:696-721`, the
-   `response.clone().text()` read at `:689`, and the capture decision at
-   `:347-387`).
+   the raw response text (`apps/extension/lib/contract.ts:244-269`, `:719-721`;
+   the `fetch` wrap at `apps/extension/lib/page-hook.ts:705-730`, the
+   `response.clone().text()` read at `:698`, and the capture decision at
+   `:356-396`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
@@ -230,7 +230,7 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:696-721` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:689`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:807-862`, `:1172-1194`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:705-730` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:698`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:807-862`, `:1172-1194`). |
 
 **Caveat, stated honestly, and one measurement this document owes the reader:**
 the "cannot see that the capture happened" line above is about what the platform
@@ -263,8 +263,8 @@ turns as you scroll, and a copy anchored anywhere but page 1 could look complete
 while holding only the oldest turns. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:670-675`;
-`apps/extension/entrypoints/dw-bridge.content.ts:512-538`;
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:679-684`;
+`apps/extension/entrypoints/dw-bridge.content.ts:548-574`;
 `apps/extension/lib/platform-auth.ts:99-118`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
@@ -311,7 +311,7 @@ leg leaves that conversation-content segment unfilled precisely because a wrong
 guess fails silently: it would archive a truncated version of every chat and
 still look like success. The route itself is no longer the unknown — the
 extension's live-capture row reads the response the page fetches when you open a
-conversation (`apps/extension/lib/contract.ts:304-319`) — but the sources
+conversation (`apps/extension/lib/contract.ts:338-353`) — but the sources
 disagree about that route's parameters, and nothing establishes whether one
 response holds a whole long conversation. Reading a response the page already
 fetched is also not the same as issuing that request yourself, and backfill
@@ -322,7 +322,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:858-871`, `:1017-1033`). That value is written
+(`apps/extension/lib/contract.ts:892-905`, `:1051-1067`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:140-142`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -348,8 +348,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on the hook's ready message
-(`apps/extension/lib/contract.ts:841-851`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:806-839`). Those
+(`apps/extension/lib/contract.ts:875-885`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:840-873`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.
