@@ -419,10 +419,10 @@ export async function migrateLegacyScopes(store: BackfillStore | null): Promise<
     }
     if (outcome.kind === 'moved') report.moved += 1;
     else if (outcome.kind === 'orphaned') report.orphaned += 1;
-    // 🔴 An orphan that could not be cleared is a refusal like any other: the old
-    //    record is still holding this account's ids and nothing moved it. Only the
-    //    first is kept — they are the same class of fact and the trace has one
-    //    field for it.
+    // 🔴 An orphan that could not be cleared is a refusal like an ordinary one:
+    //    either way the old record is still holding this account's ids and nothing
+    //    moved it. Only the first is kept — they are the same class of fact and
+    //    the trace has one field for it.
     if (outcome.kind !== 'moved' && report.refusal === null) report.refusal = outcome.refusal;
   }
   return report;
