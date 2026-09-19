@@ -98,6 +98,20 @@ export interface TabHelloOptions {
   random?: RandomFn;
   /** `document`, or null where there is none (a test running under node). */
   visibility?: VisibilityTarget | null;
+  /**
+   * 🔴 W36 · Called with every failure, **before** it is swallowed.
+   *
+   * Swallowing stays the default: "the worker was asleep" is the ordinary case
+   * and the caller is right to say nothing about it. But one failure is not
+   * ordinary — `Extension context invalidated` means this document's scripts
+   * belong to an extension that is gone, and no later hello will ever succeed.
+   * That is the state a page left open across an extension reload is in, and it
+   * is the state a real machine reported as `no-http-port` for days with the
+   * platform page sitting open on screen. The caller decides what to say; this
+   * module only guarantees the failure is *offered* to it rather than dropped.
+   * Omitted ⇒ the pre-W36 behaviour, byte for byte.
+   */
+  onFailure?: (error: unknown) => void;
 }
 
 /**
@@ -124,8 +138,11 @@ export function installTabHello(options: TabHelloOptions): void {
     // runtime API has.
     void Promise.resolve()
       .then(() => options.hello())
-      .catch(() => {
-        /* background asleep / nobody listening: do not disturb the page */
+      .catch((err: unknown) => {
+        // The page is not disturbed either way; the caller is offered the failure
+        // so that a *dead* link can be told apart from a sleeping worker (W36,
+        // see onFailure). Not offering it is the pre-W36 behaviour.
+        options.onFailure?.(err);
       });
   };
 

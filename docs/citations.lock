@@ -23,35 +23,35 @@ SECURITY.md:9  381d717079a5  lines=1
   <- docs/privacy.md:629  :: **Contact: `work@team.iopho.com`.** Mail that address direc…
 SECURITY.md:29-35  02cf2eee45d3  lines=7
   <- docs/privacy.md:637  :: This is a personal project with a single maintainer. **We d…
-apps/extension/entrypoints/background.ts:120-148  30c84e84ef5b  lines=29
+apps/extension/entrypoints/background.ts:122-150  30c84e84ef5b  lines=29
   <- docs/privacy.md:238, docs/threat-model.md:111  :: function buildBundle(captured: CapturedFetch): InboxBundle {
-apps/extension/entrypoints/background.ts:135-137  36c85931504a  lines=3
+apps/extension/entrypoints/background.ts:137-139  36c85931504a  lines=3
   <- docs/threat-model.md:298  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
-apps/extension/entrypoints/background.ts:193-210  41d87a302a6d  lines=18
+apps/extension/entrypoints/background.ts:195-212  41d87a302a6d  lines=18
   <- README.md:177, docs/privacy.md:127, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
-apps/extension/entrypoints/background.ts:420-427  185eedd6b024  lines=8
+apps/extension/entrypoints/background.ts:422-429  185eedd6b024  lines=8
   <- docs/install.md:229  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:681-696  c3d365c9f2d7  lines=16
+apps/extension/entrypoints/background.ts:683-698  c3d365c9f2d7  lines=16
   <- docs/privacy.md:310, docs/threat-model.md:555  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:698-770  3fd39fc379fb  lines=73
+apps/extension/entrypoints/background.ts:700-772  3fd39fc379fb  lines=73
   <- docs/privacy.md:287  :: /**
-apps/extension/entrypoints/background.ts:779-803  651a72caf54b  lines=25
+apps/extension/entrypoints/background.ts:781-805  651a72caf54b  lines=25
   <- docs/privacy.md:275  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:816  c4f31673b0d8  lines=1
+apps/extension/entrypoints/background.ts:818  c4f31673b0d8  lines=1
   <- docs/privacy.md:277  :: // The archive-scope key follows ADR-002's account axis; an…
-apps/extension/entrypoints/background.ts:919-941  f08bd697b536  lines=23
+apps/extension/entrypoints/background.ts:921-943  f08bd697b536  lines=23
   <- README.md:138, docs/install.md:603, docs/privacy.md:320  :: async function resolveScopeForTick(
-apps/extension/entrypoints/dw-bridge.content.ts:207-213  ff11500827ff  lines=7
+apps/extension/entrypoints/dw-bridge.content.ts:249-255  ff11500827ff  lines=7
   <- docs/privacy.md:120  :: function readKimiAccessToken(): string | null {
-apps/extension/entrypoints/dw-bridge.content.ts:323-349  119bab292d93  lines=27
+apps/extension/entrypoints/dw-bridge.content.ts:365-391  c4f63f6e72e7  lines=27
   <- docs/privacy.md:100, docs/threat-model.md:238  :: const seenGate = createSeenGate(15_000);
 apps/extension/entrypoints/dw-fetch-main.content.ts:13-15  0a41796be631  lines=3
   <- docs/threat-model.md:222  :: matches: CONTENT_MATCHES,
 apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
   <- docs/privacy.md:492  :: * In Chrome's permission-warning list, `alarms` — like `sto…
-apps/extension/lib/backfill/alarm.ts:79-80  8ec0655980dd  lines=2
+apps/extension/lib/backfill/alarm.ts:81-82  8ec0655980dd  lines=2
   <- docs/install.md:554  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
-apps/extension/lib/backfill/alarm.ts:200  b9377ab9524d  lines=1
+apps/extension/lib/backfill/alarm.ts:202  b9377ab9524d  lines=1
   <- docs/privacy.md:263  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs/privacy.md:291  :: * ## Why this module exists at all

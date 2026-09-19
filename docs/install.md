@@ -226,7 +226,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:420-427`).
+`apps/extension/entrypoints/background.ts:422-429`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
@@ -551,7 +551,7 @@ confirmed in the code, not a temporary disclaimer.
   0–25 seconds between two requests
   (`apps/extension/lib/backfill/pace.ts:92-103`, `:120-121`), and each round
   starts a random 5–10 minutes after the previous one
-  (`apps/extension/lib/backfill/alarm.ts:79-80`). At that cap, a thousand
+  (`apps/extension/lib/backfill/alarm.ts:81-82`). At that cap, a thousand
   conversations take at least 5 days. This is deliberately slow, not a bug.
 
 - **Backfill is off by default.** The default is off
@@ -600,7 +600,7 @@ confirmed in the code, not a temporary disclaimer.
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two
   then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:919-941`). Perplexity **only lists
+  (`apps/extension/entrypoints/background.ts:921-943`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
   `apps/extension/lib/backfill/enumerate.ts:3262-3289`). The
