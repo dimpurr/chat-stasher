@@ -58,9 +58,9 @@ import {
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
 //    captured URL, and the plan table is asked whether this platform is one of them.
-import { backfillPlanFor } from '../lib/backfill/enumerate';
+import { backfillCapabilityOf, backfillPlanFor } from '../lib/backfill/enumerate';
 import { orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { haltClassOf, isHeader, stateKey } from '../lib/backfill/types';
+import { haltClassOf, haltStillApplies, isHeader, stateKey } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -679,6 +679,17 @@ async function claudeScopeFromTab(tabId: number | null, origin: string): Promise
  *    re-asking before `retryAt` would both spend the question early and push the
  *    ladder's next rung further out.
  *
+ * 🔴 W44 · **A capability-class record is asked a third question, and it is not
+ *    "permanent".** "Permanent" in the engine's sense means "waiting does not
+ *    change it" — true of `unsupported-platform`, and beside the point: what
+ *    changed it was **this build**, and the engine's own expiry check is what
+ *    notices. Holding the question back on the strength of such a record would
+ *    reproduce the W44 defect one layer up: the plan arrives, the engine would run,
+ *    and the question that gives the run a scope is never asked because a record
+ *    about a *capability* says the leg is stopped. So the record is asked the same
+ *    question the engine asks (`haltStillApplies`), and a record that no longer
+ *    applies does not stand in the way.
+ *
  * 🔴 `now` is a parameter rather than a call to `Date.now()` here: this is a
  *    decision about a clock, and a decision about a clock that cannot be handed a
  *    clock cannot be tested at its boundary.
@@ -696,6 +707,7 @@ export async function scopeRetryDue(
   // the thing that would make it worse, and refusing to ask would freeze a target
   // for a reason that is about parsing, not about organizations.)
   if (!isHeader(raw) || raw.halted === null) return true;
+  if (!haltStillApplies(raw.halted, backfillCapabilityOf(platform))) return false;
   if (haltClassOf(raw.halted.reason) === 'permanent') return false;
   return raw.halted.retryAt === undefined || now >= raw.halted.retryAt;
 }

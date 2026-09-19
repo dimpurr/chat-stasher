@@ -405,6 +405,41 @@ popup:
         number keeps climbing, the platform is genuinely unhappy rather than
         briefly unreachable. Technical detail: {detail}
       other: "This leg has stopped and left a record: {reason} — {detail}"
+    # 🔴 W44 · **A stop that stopped applying, because the extension changed.**
+    #
+    # A stored stop whose reason is a judgement about the extension itself is tied
+    # to the capability it was judged against, and it stops applying when that
+    # capability changes. This sentence is what a user sees instead of the leg
+    # quietly starting again: what the record said, what it was a judgement about,
+    # what this build can do, and when the leg started again.
+    #
+    # 🔴 It must never be the sentence for a stop still in force. Neither of those
+    #    is true here: the stop is over, and nothing was lost while it stood
+    #    (a stop about a capability fires before the request it is about).
+    haltExpired: >-
+      Backfill history for this platform: on {when} it was stopped by a record
+      that said {reason}. That record was a judgement about what this extension
+      itself could do, not about your account or the platform. It recorded
+      {judgedAgainst}; this build records {capability}. So the record no longer
+      applies and the leg started again on {cleared}, from the same place.
+      Nothing was written off while it stood: a stop like this happens before the
+      request it is about, so no conversation was passed over in the meantime.
+
+  # 🔴 W44 · One capability value in words, for the sentence above. Both sides of
+  # an expiry are named with these, because "judged against list-only, now full"
+  # tells a reader nothing. Every value is a noun phrase: the sentence around them
+  # reads "It recorded ..., this build records ...".
+  capability:
+    # What the extension could do when the record was written.
+    none: no capability at all — it could not read this platform's conversation list
+    listOnly: the conversation list only, with no way to fetch a conversation's body
+    full: the conversation list and every conversation's body
+    # 🔴 Not a capability: the record was written before stops said what they were
+    # judged against. It must not read as "nothing was possible" — that is `none`,
+    # and the two facts lead a reader to different conclusions.
+    unmarked: nothing — that record was written before a stop said what it was judged against
+    # A value this build does not recognise is printed as-is; never rounded into one of the above.
+    other: "an unrecognised value ({capability})"
 
 # ---------------------------------------------------------------------------
 # The alarm's last tick — why it did nothing

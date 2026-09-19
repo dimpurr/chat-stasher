@@ -191,7 +191,7 @@ import {
   readDetailResponse,
   readListResponse,
 } from '../gemini-rpc';
-import type { DetailOutcome } from './types';
+import type { BackfillCapability, DetailOutcome } from './types';
 
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
 export const CHATGPT_DETAIL_PATH = '/backend-api/conversation/';
@@ -3637,6 +3637,34 @@ export function unsupportedBackfillFor(platform: string): UnsupportedBackfill | 
  */
 export function canBackfillDetail(plan: BackfillEnumPlan): boolean {
   return plan.detailPath !== null && plan.detailUrl !== null;
+}
+
+/**
+ * 🔴 W44 · **How much of a platform this plan can backfill** — the value a
+ * capability-class halt is judged against (see `BackfillCapability` in
+ * lib/backfill/types.ts).
+ *
+ * 🔴 Read the two branches against the two halt sites in engine.ts, because they
+ *    are the same two questions:
+ *      · no plan ⇒ the engine halts 'unsupported-platform' **before any request**
+ *        ⇒ 'none';
+ *      · a plan whose body segment has no source ⇒ the engine halts
+ *        'detail-unsupported' after the list ⇒ 'list-only';
+ *      · otherwise both segments exist ⇒ 'full'.
+ *
+ * It is a pure function of the plan it is handed, and the caller hands it the
+ * **same lookup the halt was raised from** (`opts.plans ?? backfillPlanFor`), so
+ * "what the record says it was judged against" and "what this build can do now"
+ * cannot be computed from two different tables.
+ */
+export function capabilityOf(plan: BackfillEnumPlan | null): BackfillCapability {
+  if (plan === null) return 'none';
+  return canBackfillDetail(plan) ? 'full' : 'list-only';
+}
+
+/** The same answer for a platform id, through the production plan table. Used where there is no injected lookup (the alarm's own preflight). */
+export function backfillCapabilityOf(platform: string): BackfillCapability {
+  return capabilityOf(backfillPlanFor(platform));
 }
 
 /**

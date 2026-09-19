@@ -317,6 +317,145 @@ export function haltClassOf(reason: HaltReason): HaltClass {
 }
 
 /**
+ * 🔴 W44 · **What a halt is a judgement about.** The question `HaltClass` does not
+ * ask, and whose absence let a fact about a build outlive the build.
+ *
+ * `HaltClass` says *when* a stop may be re-asked (never / after a backoff). It does
+ * not say *what would have to change* for the answer to change — and that is the
+ * distinction W44 needed. A record saying "this platform has no backfill
+ * enumeration yet" is not a fact about the account or the platform; it is a fact
+ * about the code that wrote it, and it stopped being true the moment the plan
+ * table gained that platform. Measured on a real logged-in Chrome (2026-09-19):
+ * three such records, 53-61 minutes old, written by earlier builds, held down two
+ * platforms whose plans this build ships — the popup said they can backfill while
+ * the engine refused to run them.
+ *
+ * So every reason is classified by its **subject**:
+ *
+ *   · 'capability' — a statement about what **this build** can do. Its whole
+ *     truth condition is the plan table, so it can be checked against the plan
+ *     table and expires by itself when that table changes. See `haltSubjectOf`.
+ *   · 'upstream'   — a statement about a **response that arrived** (or did not):
+ *     the bytes are not a shape we know, the body came back empty, the platform
+ *     said "not now", the transport threw. Nothing this build ships can make one
+ *     of these untrue; only the platform (or a human reading the wire) can.
+ *   · 'account'    — a statement about the **user's account**: which organization
+ *     it belongs to, and whether one could be named at all. A human action on the
+ *     platform is what changes it, and the popup names that action.
+ *   · 'storage'    — a statement about **our own persisted record**: there is no
+ *     store, or there is one and it cannot be read, or it disagrees with what it
+ *     says about its own debts. A human looks at the storage; waiting and running
+ *     again cannot repair any of them.
+ *
+ * 🔴 **The switch below has no `default`, on purpose.** Adding a value to
+ *    `HaltReason` fails `tsc --noEmit` until someone says what that new stop is a
+ *    judgement about — which is the one thing this file cannot leave to a reviewer,
+ *    because the failure mode of getting it wrong is invisible: a permanent stop
+ *    that quietly expires, or a stop that quietly never does.
+ *
+ * 🔴 A reason may be classified 'capability' **only if the engine raises it purely
+ *    from the plan-table lookup**. That is what makes the expiry check sound: the
+ *    marker is computed from the same lookup the judgement came from, so the two
+ *    cannot disagree. A future 'capability' reason whose condition lives anywhere
+ *    else would need a marker of its own rather than this one.
+ */
+export type HaltSubject = 'capability' | 'upstream' | 'account' | 'storage';
+
+export function haltSubjectOf(reason: HaltReason): HaltSubject {
+  switch (reason) {
+    // The two the plan table decides, and nothing else does. Both fire before the
+    // request they describe would have been sent, so a re-decision is free of
+    // requests *and* of consequences.
+    case 'unsupported-platform':
+    case 'detail-unsupported':
+      return 'capability';
+
+    // Arrived-and-unreadable, arrived-empty, refused, or never arrived. The build
+    // that reads them next is not what makes them true or false.
+    case 'shape-changed':
+    case 'detail-empty-unverified':
+    case 'rate-limited':
+    case 'transport-error':
+      return 'upstream';
+
+    case 'org-ambiguous':
+    case 'org-unresolved':
+      return 'account';
+
+    // No store, an unreadable store, a store that lost rows, and "there is nowhere
+    // to persist a retry" — all four are about the record itself.
+    case 'storage-unavailable':
+    case 'state-unreadable':
+    case 'ledger-mismatch':
+      return 'storage';
+  }
+}
+
+/**
+ * 🔴 W44 · **How much of a platform this build can backfill.** The value a
+ * capability-class halt is judged against, and the only thing it is judged against.
+ *
+ * Why a three-value answer and not a plan revision or a hand-kept version number:
+ * the record's own claim is about **which of the two segments exist** — "we cannot
+ * even list your conversations" ('none'), "we can list them but cannot fetch a
+ * body" ('list-only'), "both segments exist" ('full') — and this is that claim,
+ * derived rather than declared. A version number bumped by hand is exactly the
+ * mechanism that fails silently: someone adds a plan, ships, and the number they
+ * forgot to bump means the record still applies.
+ *
+ * 🔴 The derivation lives in `lib/backfill/enumerate.ts` (`capabilityOf`, which
+ *    reads the same `backfillPlanFor` / `canBackfillDetail` pair the halt itself
+ *    is raised from). This type lives here, with no import of its own, so that
+ *    `types.ts` keeps its promise of doing no I/O and depending on nothing — and
+ *    so a record's shape cannot drift from the classification above.
+ */
+export type BackfillCapability = 'none' | 'list-only' | 'full';
+
+/**
+ * 🔴 W44 · **The value a record written before this change carries: it did not
+ * say.** Not a fourth capability — a fourth *kind of statement*, and the two must
+ * not be rounded into each other.
+ *
+ * A record with no marker cannot be checked against anything: whichever build
+ * wrote it, it was written in a world where nothing asked the question. So the
+ * migration rule is per **class**, not per value (see `haltStillApplies`):
+ *
+ *   · a **capability**-class record without a marker is treated as stale, and the
+ *     leg re-decides. The cost is bounded and is stated where it is paid
+ *     (`engine.ts`'s expiry branch): at most one run per legacy record, which
+ *     re-asks the plan table and, if the answer is still no, writes the same halt
+ *     back — now marked, so it cannot happen twice. Both reasons fire before the
+ *     request they are about, so the re-decision sends nothing in the 'none' case
+ *     and only reads the list it can already read in the 'list-only' case;
+ *   · an **account**, **upstream** or **storage** record without a marker keeps
+ *     its full force. Reading "unmarked" as "expired" for those would clear real
+ *     halts — a platform whose wire changed, an account whose organization could
+ *     not be named — and that is worse than the defect this task exists to fix.
+ */
+export const CAPABILITY_UNMARKED = 'unmarked';
+
+/**
+ * 🔴 W44 · **Does a stored record still apply to a build whose capability is
+ * `capability`?**
+ *
+ * One function, in one place, because three callers ask this question and the
+ * failure mode of three answers is the one this project keeps meeting: two lists
+ * that disagree. The engine asks it before refusing to run; the alarm's
+ * `scopeRetryDue` asks it before deciding that a scope is not worth asking the
+ * page about again; the popup asks it before deciding that a record is a stop a
+ * user has to act on.
+ *
+ * A record for any other subject **always applies** — this function is not a
+ * second expiry mechanism, and it deliberately answers `true` for the account,
+ * upstream and storage classes so that a caller cannot accidentally treat one of
+ * them as capability-class by forgetting to check the subject first.
+ */
+export function haltStillApplies(record: HaltRecord, capability: BackfillCapability): boolean {
+  if (haltSubjectOf(record.reason) !== 'capability') return true;
+  return (record.capability ?? CAPABILITY_UNMARKED) === capability;
+}
+
+/**
  * How long to wait before the next attempt, per reason.
  *
  * 🔴 Shape borrowed from a reference implementation, numbers re-based on our
@@ -459,6 +598,65 @@ export interface HaltRecord {
    * simply by not writing one.
    */
   attempts?: number;
+  /**
+   * 🔴 W44 · **What this build could do when the record was written** — present on
+   * capability-class reasons (`unsupported-platform`, `detail-unsupported`) and on
+   * nothing else. Absent on every other reason, and absent on a record written
+   * before W44 (read as `CAPABILITY_UNMARKED`).
+   *
+   * Why the field is on the record rather than in a key of its own: the same
+   * reason `retryAt` is (W13). The popup's question is "is this leg stopped, and
+   * why", and a marker in a parallel key could disagree with `halted` about
+   * whether the record it describes is still in force. One record, one answer.
+   *
+   * 🔴 Why this cannot silently fail to change when the capability does: it is not
+   *    maintained by hand anywhere. `engine.ts` computes it from `opts.plans ??
+   *    backfillPlanFor` — the **same lookup function** whose `null` answer raises
+   *    'unsupported-platform' and whose plan raises 'detail-unsupported' — and
+   *    `capabilityOf` reads that plan's own `canBackfillDetail` rather than a
+   *    separate table. Add a plan to `PLANS` and the next record says 'full'
+   *    without anyone editing a constant; there is no number to forget to bump.
+   *    The two facts that must agree, `halted` and `capability`, are written by
+   *    the same statement for that reason.
+   */
+  capability?: BackfillCapability;
+}
+
+/**
+ * 🔴 W44 · **A stored halt stopped applying because the build changed — the trace
+ * that says so.**
+ *
+ * Why this has to exist, and has to outlive the record it replaces: the moment a
+ * capability-class halt expires the engine clears it, and a cleared record is
+ * *silence*. A user who saw "this platform's history cannot be backfilled yet"
+ * and later sees the platform backfilling has been told nothing about why the
+ * sentence disappeared — and silence in that direction is the same defect as the
+ * one this task fixes, wearing a different coat (a leg that appears to start by
+ * itself for no reason). So the expiry leaves a record the popup can read.
+ *
+ * 🔴 It is **durable**, on the header rather than in a run report, for the same
+ *    reason W45's `relisted` is: the run that clears the record is gone from
+ *    memory by the time anyone opens a popup, and what has to survive is the fact
+ *    that it ever happened. It is overwritten by the next expiry for the same
+ *    scope, so a scope can hold one of these at a time.
+ *
+ * The four values are observations, not estimates: which reason the record named,
+ * when the build that wrote it recorded that (`recordedAt`), what it said its
+ * capability was — or `CAPABILITY_UNMARKED` when it did not say — and what this
+ * build's capability is (`capability`), which is the whole reason the record no
+ * longer applies.
+ */
+export interface HaltExpiry {
+  /** The reason the expired record named. */
+  reason: HaltReason;
+  /** When that record was written, by the build that judged it. */
+  recordedAt: number;
+  /** What the record said the build could do, or `CAPABILITY_UNMARKED` when it did not say. */
+  judgedAgainst: BackfillCapability | typeof CAPABILITY_UNMARKED;
+  /** What this build can do — the value that made the record stop applying. */
+  capability: BackfillCapability;
+  /** When this build stopped applying it. */
+  clearedAt: number;
 }
 
 /** Why one run ended. Everything other than `halted` is a normal "gentle pause". */
@@ -673,6 +871,16 @@ export interface BackfillState {
    * with no version bump and no progress invalidated.
    */
   relisted?: { at: number; recorded: number; held: number };
+  /**
+   * 🔴 W44 · **The last capability-class halt that stopped applying because this
+   * build's capability is not the one the record was judged against.** See
+   * `HaltExpiry`.
+   *
+   * Optional: a state written before W44 has no such field and reads back as
+   * undefined ⇒ "no stored halt has ever expired here", byte-identical to before,
+   * with no version bump and no progress invalidated.
+   */
+  haltExpired?: HaltExpiry;
   /** Non-null means this leg has stopped and left a trace. */
   halted: HaltRecord | null;
 }
@@ -736,6 +944,8 @@ export interface BackfillHeader {
   failuresDropped?: number;
   /** W45 · Same meaning and same compatibility rule as `BackfillState.relisted`; spelled out here so a change to one is forced to be a change to the other. */
   relisted?: { at: number; recorded: number; held: number };
+  /** W44 · Same meaning and same compatibility rule as `BackfillState.haltExpired`; spelled out here so a change to one is forced to be a change to the other. */
+  haltExpired?: HaltExpiry;
   halted: HaltRecord | null;
 }
 
@@ -769,6 +979,7 @@ export function headerOf(state: BackfillState): BackfillHeader {
     failures: state.failures,
     failuresDropped: state.failuresDropped,
     relisted: state.relisted,
+    haltExpired: state.haltExpired,
     halted: state.halted,
   };
 }
@@ -795,6 +1006,7 @@ export function stateFrom(header: BackfillHeader, pending: string[], archived: s
     failures: header.failures,
     failuresDropped: header.failuresDropped,
     relisted: header.relisted,
+    haltExpired: header.haltExpired,
     halted: header.halted,
   };
 }
