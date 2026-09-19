@@ -277,6 +277,20 @@ popup:
     halted: >-
       And that tick stopped before it could finish: {reason}. Technical detail:
       {detail}
+    # 🔴 W45 · The one halt that is a LOSS rather than a pause, so it may not be
+    # read out through `halted` above: that sentence says "stopped before it could
+    # finish", which is exactly what a temporary pause says too. This one has to
+    # name the two facts that make it different — the progress record listed
+    # conversations that were no longer there, and the scope was reset so the list
+    # is read again — because a user who is not told the second one sees an
+    # unexplained re-listing days later.
+    ledgerMismatch: >-
+      And that tick refused to fetch anything: this platform's progress record
+      listed conversations that its debt store no longer held, so there was no
+      debt set left to work through. No conversation was written off, and the leg
+      tried to reset this scope so its conversation list is read again from the
+      start — the detail below says what it recorded and whether that succeeded.
+      Technical detail: {detail}
   progress:
     notStarted: >-
       Progress: not started yet — storage holds no debt set for this platform,
@@ -323,6 +337,19 @@ popup:
       fixed period), using the login of that page of yours; at most {maxPerDay}
       a day, so a long history fills in over several days. Turning it off stops
       it (and clears the timer with it).
+    # 🔴 W45 · The durable half of the `ledger-mismatch` refusal (see
+    # `popup.lastTick.ledgerMismatch`). That sentence is a run's halt record and
+    # is gone as soon as the scope is re-listed — which is the point of the
+    # repair, and exactly why it cannot be the only place this is said. This one
+    # reads the header, so it survives, and it says the one cost the user would
+    # otherwise have to guess at: the ids are gone, so a conversation that had
+    # already been archived cannot be told from one that never was.
+    relisted: >-
+      Backfill history for this platform: on {when} its progress record listed
+      {recorded} conversation id(s) and the stored debt set held only {held}. The
+      record of what had already been fetched could not be recovered, so the
+      conversation list was read again from the start and those conversations are
+      being worked through a second time. Nothing was deleted from your archive.
     halted:
       unsupportedPlatform: >-
         This platform ({platform}) has no history backfill implemented, so this

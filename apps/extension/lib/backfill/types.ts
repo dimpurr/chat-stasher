@@ -166,7 +166,38 @@ export type HaltReason =
    *    there. Its popup sentence names the action that fixes both cases: open a
    *    conversation on the platform once.
    */
-  | 'org-unresolved';
+  | 'org-unresolved'
+  /**
+   * 🔴 W45 · **This scope's header records debts the debt store no longer holds.**
+   *
+   * Measured on a real logged-in Chrome (2026-09-19): the header at
+   * `cs_backfill_v2:chatgpt:default` said 7,736 pending / 17 archived while the
+   * `debts` store held **0 rows**. The store used to be keyed by scope alone, and
+   * three platforms share the scope string `default` — so the ordinary open of a
+   * *fresh, empty* ledger for deepseek or gemini computed every one of chatgpt's
+   * 7,736 rows as a deletion and removed them. The run then loaded an empty
+   * `pending`, returned `queue-empty`, and reported `ran` on every alarm tick for
+   * four hours while fetching nothing at all.
+   *
+   * Why it must be its own reason rather than `queue-empty`: an empty queue and a
+   * **destroyed** one are different facts, and collapsing them is what made four
+   * hours of "ran, nothing happened" look like success. The wording is about the
+   * disagreement itself, not about its cause: rows are provably gone, and how they
+   * went is not something this record can know.
+   *
+   * 🔴 The comparison is one-directional on purpose. `Ledger.save` writes the debt
+   *    store *before* the header, so a worker killed between the two leaves a
+   *    store that is **ahead** of the header's counts — which is normal, because
+   *    the counts are recomputed from the store on every load. Only the store
+   *    holding *fewer* debts than the header recorded is a loss. A naive equality
+   *    test would turn every ordinary crash into a refusal.
+   *
+   * What happens when it is seen: the run refuses to fetch (nothing is fetched
+   * against a debt set that lost rows), the header is repaired so the scope can be
+   * filled again (`recoverLedgerLoss` in lib/backfill/ledger.ts), and the popup
+   * says so.
+   */
+  | 'ledger-mismatch';
 
 /**
  * 🔴 C28 · The two observable outcomes of an "empty" body.
@@ -273,6 +304,13 @@ export type HaltClass = 'transient' | 'permanent';
  *    behind it can progress while it re-fails), and a body that suddenly parses to
  *    nothing is most likely a contract change — the human-look class. The C28
  *    receipt stays the trace.
+ *  · 'ledger-mismatch' — W45. A **permanent** record, and not because waiting would
+ *    not help: the repair is a one-shot header reset, not a retry, and it is driven
+ *    by the state this reason describes rather than by a clock. Classifying it
+ *    transient would put it on the backoff ladder and have the popup promise a
+ *    self-resuming wait, which is a different story from the one that is true —
+ *    that the leg found a provable loss, refused to fetch against it, and reset the
+ *    scope so the next run can read its list again.
  */
 export function haltClassOf(reason: HaltReason): HaltClass {
   return reason === 'transport-error' || reason === 'rate-limited' ? 'transient' : 'permanent';
@@ -607,6 +645,34 @@ export interface BackfillState {
   failures?: import('./failures').FailureEntry[];
   /** How many older failures were dropped for exceeding the cap. 🔴 Never a silent truncation. */
   failuresDropped?: number;
+  /**
+   * 🔴 W45 · **The last time this scope's debt set was found behind its own header
+   * and the enumeration cursor was reset so the list would be read again.**
+   *
+   * It exists because the repair has to be *sayable*. The refusal itself is a halt
+   * (`ledger-mismatch`) and a run report, and both are gone by the time the user
+   * opens the popup; a scope that lost 7,736 ids and then quietly refilled would
+   * leave no trace that anything had ever been wrong. This is that trace, and it
+   * survives in the header.
+   *
+   * `recorded` and `held` are the two numbers the disagreement was measured with:
+   * how many conversation ids the header recorded, and how many the store actually
+   * held for this platform and scope. They are **observations, not estimates** —
+   * two reads and one subtraction on numbers that were really there — and they are
+   * the totals rather than the pending/archived split because the split is not
+   * something this record can know (see `DebtLoss` in lib/backfill/ledger.ts).
+   *
+   * 🔴 What it does **not** claim: why the ids went, or which of them were already
+   *    archived. The count is not the ids, and the ids are exactly what was lost —
+   *    so an already-archived conversation cannot be told from one that was never
+   *    fetched, and re-listing will enqueue it again. That is stated in the popup
+   *    sentence rather than hidden here.
+   *
+   * Optional: a state written before W45 has no such field and reads back as
+   * undefined ⇒ "this scope has never been re-listed", byte-identical to before,
+   * with no version bump and no progress invalidated.
+   */
+  relisted?: { at: number; recorded: number; held: number };
   /** Non-null means this leg has stopped and left a trace. */
   halted: HaltRecord | null;
 }
@@ -668,6 +734,8 @@ export interface BackfillHeader {
   lastFetchAt?: { enumerate: number | null; detail: number | null };
   failures?: import('./failures').FailureEntry[];
   failuresDropped?: number;
+  /** W45 · Same meaning and same compatibility rule as `BackfillState.relisted`; spelled out here so a change to one is forced to be a change to the other. */
+  relisted?: { at: number; recorded: number; held: number };
   halted: HaltRecord | null;
 }
 
@@ -700,6 +768,7 @@ export function headerOf(state: BackfillState): BackfillHeader {
     lastFetchAt: state.lastFetchAt,
     failures: state.failures,
     failuresDropped: state.failuresDropped,
+    relisted: state.relisted,
     halted: state.halted,
   };
 }
@@ -725,6 +794,7 @@ export function stateFrom(header: BackfillHeader, pending: string[], archived: s
     lastFetchAt: header.lastFetchAt,
     failures: header.failures,
     failuresDropped: header.failuresDropped,
+    relisted: header.relisted,
     halted: header.halted,
   };
 }

@@ -61,27 +61,27 @@ apps/extension/lib/backfill/claude-page.ts:62-136  434dcd589586  lines=75
   <- README.md:159, docs/install.md:630, docs/privacy.md:312, docs/threat-model.md:592  :: export function createClaudePageScope(deps: ClaudePageScope…
 apps/extension/lib/backfill/claude-page.ts:84-92  b8faf8b2d241  lines=9
   <- docs/privacy.md:307  :: const fetchOrganizations = async (): Promise<string> => {
-apps/extension/lib/backfill/debt-store.ts:37-39  fa04eecd9ada  lines=3
-  <- docs/privacy.md:273  :: export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
+apps/extension/lib/backfill/debt-store.ts:68-87  c2b9b363b155  lines=20
+  <- docs/privacy.md:273  :: export const BACKFILL_DB_VERSION = 2;
 apps/extension/lib/backfill/engine.ts:86-89  5cfeee9f2531  lines=4
   <- docs/privacy.md:368, docs/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
-apps/extension/lib/backfill/engine.ts:366  4e88764df1da  lines=1
+apps/extension/lib/backfill/engine.ts:405  4e88764df1da  lines=1
   <- docs/privacy.md:362  :: export async function runBackfill(opts: BackfillOptions): P…
-apps/extension/lib/backfill/engine.ts:638-682  2e1189ed00fe  lines=45
+apps/extension/lib/backfill/engine.ts:691-735  2e1189ed00fe  lines=45
   <- docs/privacy.md:322  :: /**
-apps/extension/lib/backfill/engine.ts:754-809  9b4d97eff717  lines=56
+apps/extension/lib/backfill/engine.ts:807-862  9b4d97eff717  lines=56
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: const listWhere = (): string =>
-apps/extension/lib/backfill/engine.ts:833-878  f8405b040a2f  lines=46
+apps/extension/lib/backfill/engine.ts:886-931  f8405b040a2f  lines=46
   <- README.md:155, docs/install.md:725, docs/privacy.md:493, docs/threat-model.md:302  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
-apps/extension/lib/backfill/engine.ts:862-878  378b84747704  lines=17
+apps/extension/lib/backfill/engine.ts:915-931  378b84747704  lines=17
   <- README.md:159  :: *    (`listOffsetInferred`: claude.ai). There is no token t…
-apps/extension/lib/backfill/engine.ts:1119-1141  86b2234a756c  lines=23
+apps/extension/lib/backfill/engine.ts:1172-1194  86b2234a756c  lines=23
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: while (state.pending.length > 0) {
-apps/extension/lib/backfill/engine.ts:1249-1301  1ad645e96bae  lines=53
+apps/extension/lib/backfill/engine.ts:1302-1354  1ad645e96bae  lines=53
   <- README.md:158, docs/install.md:109, docs/privacy.md:388, docs/privacy.md:407, docs/privacy.md:474, docs/threat-model.md:302, docs/threat-model.md:603  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:1353-1388  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:1406-1441  2cb492e06a56  lines=36
   <- README.md:156, docs/install.md:109, docs/install.md:728, docs/privacy.md:474, docs/privacy.md:488, docs/threat-model.md:302, docs/threat-model.md:597  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
-apps/extension/lib/backfill/engine.ts:1406-1419  a081dede5475  lines=14
+apps/extension/lib/backfill/engine.ts:1459-1472  a081dede5475  lines=14
   <- docs/privacy.md:476  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
 apps/extension/lib/backfill/enumerate.ts:2009-2023  30e272d8bf3f  lines=15
   <- README.md:154, docs/install.md:133, docs/install.md:727  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
@@ -135,7 +135,7 @@ apps/extension/lib/backfill/tab-port.ts:447-463  7049b6f9bc26  lines=17
   <- README.md:159, docs/threat-model.md:304  :: *    has two more segments, so the two cannot collide by co…
 apps/extension/lib/backfill/tab-port.ts:1043-1060  18db841e280b  lines=18
   <- README.md:159, docs/privacy.md:313  :: export async function askTabForClaudeOrg(
-apps/extension/lib/backfill/types.ts:655-677  248b3164e003  lines=23
+apps/extension/lib/backfill/types.ts:721-753  206e155b598c  lines=33
   <- docs/privacy.md:273  :: export interface BackfillHeader {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:265  :: export function badgeFor(state: OutboxSummary | null): Badg…
@@ -265,7 +265,7 @@ apps/extension/lib/platform-auth.ts:214-246  f714ed2af5c0  lines=33
   <- README.md:156, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:474, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:595  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:355-417  b4aa1f8f6f82  lines=63
   <- README.md:158, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:602  :: export function createGeminiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:711-724  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:723-736  00dceceff078  lines=14
   <- README.md:160, docs/install.md:161  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:263  :: export function fixCommand(stage: string | null | undefined…

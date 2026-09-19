@@ -35,9 +35,10 @@ import { readDebtRows, readStorage, test, writeStorage, type Extension } from '.
  * W36's preflight walked the target registry, so a record like this one was
  * reachable from nothing at all.
  */
+const PLATFORM = 'chatgpt';
 const SCOPE = 'acct-w36b-popup';
-const LEGACY_KEY = `cs_backfill_v1:chatgpt:${SCOPE}`;
-const HEADER_KEY = `cs_backfill_v2:chatgpt:${SCOPE}`;
+const LEGACY_KEY = `cs_backfill_v1:${PLATFORM}:${SCOPE}`;
+const HEADER_KEY = `cs_backfill_v2:${PLATFORM}:${SCOPE}`;
 
 const PENDING = ['p-1', 'p-2', 'p-3'];
 const ARCHIVED = ['a-1'];
@@ -108,7 +109,8 @@ test('opening the popup moves a pre-W18 record on its own, and says so', async (
   expect(header?.archivedCount).toBe(ARCHIVED.length);
   expect(Object.keys(after)).not.toContain(LEGACY_KEY);
 
-  const debts = await readDebtRows(ext);
+  const debts = (await readDebtRows(ext))
+    .filter((row) => row.platform === PLATFORM && row.scope === SCOPE);
   expect(debts.map((row) => row.id).sort()).toEqual([...PENDING, ...ARCHIVED].sort());
   expect(debts.filter((row) => row.state === 'pending').map((row) => row.id)).toEqual(PENDING);
 

@@ -670,6 +670,18 @@ function lastTickNote(rec: BackfillTickRecord | null): string | null {
   //    printed nowhere. The trace now carries the run's own halt, and this is
   //    where it is read back out.
   if (!rec.halted) return head;
+  // 🔴 W45 · One reason reads badly in the generic form, and it is the one that
+  //    means "rows are provably gone". `popup.lastTick.halted` says "the tick
+  //    stopped before it could finish", which is true but leaves out the only two
+  //    facts a user needs: that this was a *loss* rather than a pause, and that the
+  //    scope was reset so the list is read again. It gets its own sentence for the
+  //    same reason `org-ambiguous` did — a named reason whose wording is the
+  //    `other` fallback's is not really named.
+  if (rec.halted === 'ledger-mismatch') {
+    return `${head}\n${t('popup.lastTick.ledgerMismatch', {
+      detail: rec.detail ?? t('common.unknownShort'),
+    })}`;
+  }
   return `${head}\n${t('popup.lastTick.halted', {
     reason: rec.halted,
     detail: rec.detail ?? t('common.unknownShort'),
@@ -1070,6 +1082,23 @@ function notesFor(model: PopupModel): string[] {
         detail: model.state.halted.detail,
       }));
     }
+  }
+
+  // 🔴 W45 · **The durable half of the `ledger-mismatch` refusal.**
+  //
+  //    The refusal itself is a run's halt record: it is right there in the tick
+  //    line above for as long as that tick is the last one, and gone the moment the
+  //    scope is re-listed — which is the whole point of the repair and exactly why
+  //    the repair cannot be the only trace. This note reads `relisted` off the
+  //    header, which survives, and it is the one place a user can find out that a
+  //    platform's backfill lost its record of what it had already done and started
+  //    reading the list again.
+  if (model.state?.relisted) {
+    notes.push(t('popup.notes.relisted', {
+      recorded: model.state.relisted.recorded,
+      held: model.state.relisted.held,
+      when: stampOf(model.state.relisted.at),
+    }));
   }
 
   // 🔴 W30 · Why the summary line says "unknown", before the long-term coverage

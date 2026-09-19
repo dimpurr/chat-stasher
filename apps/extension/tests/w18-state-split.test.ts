@@ -269,7 +269,7 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
     if (!second.ok) return;
     expect(second.state.pending).toEqual(legacy.pending);
     expect(await store.load(legacyKey)).toBeNull();
-    const back = await readDebtSet(SCOPE);
+    const back = await readDebtSet(PLATFORM, SCOPE);
     expect(back?.pending).toHaveLength(PENDING);
     expect(back?.archived).toHaveLength(ARCHIVED);
   });
@@ -383,7 +383,7 @@ describe('W18-2 · settling one debt no longer rewrites the debt set', () => {
     // The per-record framing really is what caps it: 100 records × 64 bytes is
     // 6.4 KB of the 16.1 KB the new side writes, i.e. two fifths of the total.
     expect(after.bytesByStore.debt).toBeGreaterThanOrEqual(100 * 64);
-    const back = await readDebtSet(SCOPE);
+    const back = await readDebtSet(PLATFORM, SCOPE);
     expect(back?.pending).toHaveLength(PENDING + 100);
     // The 100 new ones went to the back of the FIFO, in the order they were listed.
     expect(back?.pending.slice(PENDING)).toEqual(fresh);
@@ -440,7 +440,7 @@ describe('W18-3 · killed in the middle of a settle', () => {
     await expect(tick(killed, backend().http, 1)).rejects.toThrow('killed after the debt write');
 
     // A restart: the same store, the same IndexedDB, no in-memory state carried over.
-    const reopened = await readDebtSet(SCOPE);
+    const reopened = await readDebtSet(PLATFORM, SCOPE);
     expect(reopened).not.toBeNull();
     expect(reopened!.pending).not.toContain(victim);      // it really was settled…
     expect(reopened!.archived).toContain(victim);         // …exactly once, not lost and not pending
@@ -479,7 +479,7 @@ describe('W18-3 · killed in the middle of a settle', () => {
     // Nothing was committed, so nothing may be believed: put the same factory back
     // and read the store, which is the state a restart would find.
     (globalThis as any).indexedDB = factory;
-    const reopened = await readDebtSet(SCOPE);
+    const reopened = await readDebtSet(PLATFORM, SCOPE);
     expect(reopened).not.toBeNull();
     expect(reopened!.pending).toEqual(state.pending);
     expect(reopened!.archived).toHaveLength(ARCHIVED);      // not one extra
@@ -490,7 +490,7 @@ describe('W18-3 · killed in the middle of a settle', () => {
     const recovered = new LedgerAdapter(store);
     resetWriteStatsForTest();
     await recovered.save(settled);
-    const back = await readDebtSet(SCOPE);
+    const back = await readDebtSet(PLATFORM, SCOPE);
     expect(back!.pending).not.toContain(victim);
     expect(back!.archived).toContain(victim);
   });
@@ -516,7 +516,7 @@ describe('W18-4 · a record that cannot be read is never an empty debt set', () 
     expect(await store.load(legacyKey)).toEqual(unreadable);
     // And not one byte written anywhere else.
     expect(store.data[stateKey(PLATFORM, SCOPE)]).toBeUndefined();
-    expect(await readDebtSet(SCOPE)).toEqual({ pending: [], archived: [], nextSeq: 1 });
+    expect(await readDebtSet(PLATFORM, SCOPE)).toEqual({ pending: [], archived: [], nextSeq: 1 });
   });
 
   it('🔴 the engine refuses to run against it, sends no request, and says why', async () => {
