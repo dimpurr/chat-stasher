@@ -50,6 +50,7 @@ extension deliberately does not request — is not fixable from inside the page:
 cannot be told from here, so until one is ruled out, read Gemini and Kimi live
 capture as **not working on a tab that predates the extension's load or
 update**, and the cause as still under investigation.
+
 It requests four permissions — `nativeMessaging`, `storage`, `alarms` and
 `unlimitedStorage` — and **no host permissions at all**
 (`apps/extension/wxt.config.ts:87`). There is no `downloads` permission and no

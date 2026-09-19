@@ -303,7 +303,7 @@ export const LEGACY_STATE_KEY_PREFIX = `cs_backfill_v${LEGACY_STATE_VERSION}:`;
  * Three counts rather than a bare refusal, because "there was nothing to move"
  * and "there was something and it would not move" are the two facts a user needs
  * to tell apart, and the tick trace's single `halted` field cannot carry both.
- * `found` and `recovered` are measurements: 0 is 0, undecorated.
+ * `found` and `moved` are measurements: 0 is 0, undecorated.
  */
 export interface LegacyMigration {
   /** How many pre-W18 keys the scan found in `storage.local`. */

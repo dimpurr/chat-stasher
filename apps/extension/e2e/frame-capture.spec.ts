@@ -170,8 +170,21 @@ test('a conversation fetched from a same-origin frame is captured, with the hook
 
   // 🔴 And the capture message is posted on **that frame's own window**, before
   //    delivery — so this is a statement about the hook, not about the outbox.
-  const frameMsgs = await frame.evaluate(() => (window as unknown as { __msgs: string[] }).__msgs);
-  expect(frameMsgs).toEqual(['__chat_stasher_capture__']);
+  //
+  //    🔴 Polled, not read once. `hookedFetch` does not await `maybeCapture`
+  //    (`lib/page-hook.ts:475-476`), so the message is posted in a task of its
+  //    own: a single read straight after the request settles can legitimately see
+  //    the 200 served above and an empty `__msgs`, and would then report a hook
+  //    that is present as a hook that is missing. This is the same wait the
+  //    outbox gets (`waitForOutbox`), in the polling idiom this file already uses
+  //    for the frame appearing — and `toEqual` still pins **exactly one**, so a
+  //    retry that found a second message would fail rather than pass.
+  await expect
+    .poll(
+      () => frame.evaluate(() => (window as unknown as { __msgs: string[] }).__msgs),
+      { timeout: 20_000 },
+    )
+    .toEqual(['__chat_stasher_capture__']);
 
   // The whole path, end to end: page world → bridge in the frame → background.
   // 🔴 Exactly one entry, not one per frame: the top document makes no request of
