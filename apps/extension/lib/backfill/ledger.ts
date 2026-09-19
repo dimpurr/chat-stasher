@@ -384,6 +384,58 @@ async function migrate(
   };
 }
 
+/**
+ * 🔴 W36b · **Finish a migration that was interrupted between its header write and
+ * its last step.**
+ *
+ * The one way this build can leave two records for one scope: `migrate` writes the
+ * debt set (step 1), reads it back (step 2), writes the header (step 3), reads the
+ * header back (step 4) — and then, before step 5, the worker is killed. The scope
+ * now has a readable v2 header **and** the pre-W18 key it came from. `openLedger`
+ * looks at `stateKey` first and stops there, so it never sees the old key again:
+ * the resurrection is permanent, and (since W36b's preflight scans `storage.local`
+ * for `cs_backfill_v1:*`) it would also be *re-visited on every tick and every
+ * popup open* — paying one `keys()` read and one whole debt-set read, forever, for
+ * a record that was already carried over.
+ *
+ * The removal is safe by the same argument `migrate`'s step 5 rests on, and it is
+ * **checked here rather than assumed**: the ids in the debt store must be exactly
+ * the ids in the old record — same pending sequence, same archived set — before a
+ * byte is deleted. If they are not, nothing is removed and the caller is told why.
+ * The comparison costs one debt-set read, but it runs only while an orphan exists,
+ * so the state it repairs converges to "no orphan" instead of costing this every
+ * tick.
+ *
+ * 🔴 This is not the archive being rotated. Nothing here is source data: every id
+ *    it removes a copy of is already in the debt store, verified first.
+ */
+export async function completeInterruptedMigration(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+  legacyKey: string,
+  legacy: LegacyBackfillState,
+): Promise<LedgerRefusal | null> {
+  const snapshot = await readDebtSet(scope);
+  if (!snapshot) {
+    return {
+      reason: 'storage-unavailable',
+      detail: `the pre-W18 record at ${legacyKey} sits beside a new-layout record whose debt set could `
+        + 'not be read from IndexedDB; nothing has been removed',
+    };
+  }
+  const mismatch = compareSets(legacy.pending, legacy.archived, snapshot);
+  if (mismatch) {
+    return {
+      reason: 'state-unreadable',
+      detail: `the pre-W18 record at ${legacyKey} sits beside a new-layout record and the two do not agree `
+        + `(${mismatch}); it has been left untouched`,
+    };
+  }
+  await store.remove(legacyKey);
+  return null;
+}
+
 /** `null` when the move was exact: same pending sequence, same archived set. */
 function compareSets(
   pending: readonly string[],

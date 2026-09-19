@@ -957,12 +957,15 @@ async function runAlarmTickBody(): Promise<TickResult> {
 
   const targets = await loadTargets(store);
 
-  // 🔴 W36 · The storage layout moves **here**, before any gate decides whether
-  //    this tick may fetch anything. The migration used to be reachable only
+  // 🔴 W36/W36b · The storage layout moves **here**, before any gate decides
+  //    whether this tick may fetch anything, and the sweep scans `storage.local`
+  //    rather than the target registry. The migration used to be reachable only
   //    from a run that was about to make a request, so a scope whose ticks were
   //    all blocked (no tab open — the ordinary state of a laptop) never moved at
-  //    all. See migrateLegacyScopes.
-  const preflightRefusal = await migrateLegacyScopes(store, targets);
+  //    all; and W36's version walked `loadTargets()`, so a pre-W18 record whose
+  //    scope is not registered was visited by nothing even here. See
+  //    migrateLegacyScopes.
+  const preflightRefusal = (await migrateLegacyScopes(store)).refusal;
 
   if (targets.length === 0) {
     // No targets at all ⇒ the user has never been captured on a supported

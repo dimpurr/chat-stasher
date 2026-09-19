@@ -20,6 +20,9 @@ common:
   unknownTime: unknown time
   unknownTimeShort: time unknown
   unknownSize: unknown size
+  # 🔴 W36b · A one-word "I do not know", for a field that has no unit and no
+  # longer sentence to carry. Never used where a number is expected.
+  unknownShort: unknown
 
 # ---------------------------------------------------------------------------
 # Delivery channel (the native host)
@@ -267,6 +270,13 @@ popup:
     skipped: >-
       Alarm: the last wake-up was {when}, and that tick did nothing at all —
       {reason} ({targets} backfill target(s) in the registry at the time).
+    # 🔴 W36b · A tick that RAN is not a tick that got anywhere. `ran: true` next
+    # to a storage layout that had not moved is what the first real-Chrome
+    # acceptance read, and this line is the missing half: the run's own stop
+    # reason, which used to be thrown away before it reached storage.
+    halted: >-
+      And that tick stopped before it could finish: {reason}. Technical detail:
+      {detail}
   progress:
     notStarted: >-
       Progress: not started yet — storage holds no debt set for this platform,
@@ -291,6 +301,21 @@ popup:
     noTarget: >-
       There is no backfill record for any platform yet, so there is no archive
       scope to show here.
+    # 🔴 W36b · The pre-W18 storage layout, said out loud where it was found.
+    # These two are NOT the same sentence, and the difference is the whole point:
+    # `moved` is a completed repair, `refused` means the old record is still
+    # holding the user's ids and this leg will not touch it.
+    legacy:
+      moved: >-
+        Storage layout: this page moved {count} older (pre-W18) backfill record(s)
+        into the current layout before displaying anything, so what is shown above
+        is the record as it now stands. Nothing was lost: an older record is only
+        deleted after its contents have been written and read back.
+      refused: >-
+        Storage layout: {found} older (pre-W18) backfill record(s) were found and
+        only {moved} could be moved. The rest are still in storage, untouched, and
+        this leg will not run against them — the ids in them are yours and are not
+        being discarded. Reason: {reason}. Technical detail: {detail}
     whatOpening: >-
       What turning it on does: as long as one page of a supported platform is
       open, it quietly backfills one past conversation in the background at an

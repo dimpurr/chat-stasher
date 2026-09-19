@@ -163,6 +163,26 @@ function idbFactory(): IDBFactory | null {
  */
 let dbPromise: { factory: IDBFactory; opened: Promise<IDBDatabase | null> } | null = null;
 
+/**
+ * Open the debt database, or answer `null` for "it would not open".
+ *
+ * 🔴 W36b · **A failed open is not remembered.** The memo above used to cache
+ *    whatever the first attempt produced, `null` included — so one refused open
+ *    (a blocked upgrade, a factory that threw, a browser that had not finished
+ *    starting IndexedDB) became this worker's answer for the rest of its life.
+ *    Downstream that is `readDebtSet() === null` ⇒ `openLedger` refuses with
+ *    `storage-unavailable`, and in the migration that means the pre-W18 record is
+ *    never carried over: **every later attempt re-reads the same cached `null`**,
+ *    the old key keeps its ids, and the only trace is a refusal whose cause was
+ *    one transient open. "Could not be read just now" is not "cannot be read"
+ *    (CLAUDE.md invariant 1), so only a **successful** open is kept; a failure is
+ *    retried by the next caller.
+ *
+ * 🔴 A `blocked` open answers `null` rather than waiting forever (an upgrade held
+ *    by another connection has no bound, and a promise that never settles would
+ *    hang the caller just as silently). The retry above is what makes that safe:
+ *    once the other connection goes away, the next call opens normally.
+ */
 function openDb(): Promise<IDBDatabase | null> {
   const factory = idbFactory();
   if (factory && dbPromise?.factory === factory) return dbPromise.opened;
@@ -170,28 +190,36 @@ function openDb(): Promise<IDBDatabase | null> {
     dbPromise = null;
     return Promise.resolve(null);
   }
-  const opened = new Promise<IDBDatabase | null>((resolve) => {
-    let request: IDBOpenDBRequest;
-    try {
-      request = factory.open(BACKFILL_DB_NAME, BACKFILL_DB_VERSION);
-    } catch {
-      resolve(null);
-      return;
-    }
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(DEBTS_STORE)) {
-        const store = db.createObjectStore(DEBTS_STORE, { keyPath: ['scope', 'id'] });
-        store.createIndex(DEBTS_INDEX, 'scope');
+  const entry = {
+    factory,
+    opened: new Promise<IDBDatabase | null>((resolve) => {
+      let request: IDBOpenDBRequest;
+      try {
+        request = factory.open(BACKFILL_DB_NAME, BACKFILL_DB_VERSION);
+      } catch {
+        resolve(null);
+        return;
       }
-    };
-    request.onsuccess = () => resolve(request.result);
-    // A database that will not open is a named refusal for the caller, never a silent "there were no debts".
-    request.onerror = () => resolve(null);
-    request.onblocked = () => resolve(null);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(DEBTS_STORE)) {
+          const store = db.createObjectStore(DEBTS_STORE, { keyPath: ['scope', 'id'] });
+          store.createIndex(DEBTS_INDEX, 'scope');
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      // A database that will not open is a named refusal for the caller, never a silent "there were no debts".
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    }),
+  };
+  dbPromise = entry;
+  void entry.opened.then((db) => {
+    // Only the entry this call installed may be dropped: a later call that already
+    // re-opened (a different factory) must not have its memo cleared from here.
+    if (db === null && dbPromise === entry) dbPromise = null;
   });
-  dbPromise = { factory, opened };
-  return opened;
+  return entry.opened;
 }
 
 /**

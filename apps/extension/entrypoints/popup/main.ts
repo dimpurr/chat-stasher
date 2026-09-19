@@ -35,8 +35,10 @@ import {
 import {
   loadLastTick,
   loadTargets,
+  migrateLegacyScopes,
   syncBackfillAlarm,
   type AlarmsApi,
+  type LegacyMigration,
 } from '../../lib/backfill/alarm';
 import {
   backfillStateEntries,
@@ -115,6 +117,26 @@ async function collect(): Promise<PopupModel> {
 
   const enabled = await isBackfillEnabled(store);
 
+  // 🔴 W36b · **The migration runs on the first state load, not only on a tick.**
+  //
+  // Opening the popup is the one other occasion the backfill layout gets read,
+  // and until now it was the one that left the old layout alone: a user who opened
+  // the popup in the 5-10 minutes before the next alarm tick — or with the switch
+  // off, so no alarm fires at all — saw "not started yet" over a
+  // `cs_backfill_v1:*` record still holding every id. This is the same scan the
+  // tick preflight runs (lib/backfill/alarm.ts's `migrateLegacyScopes`), against
+  // the same `storage.local`, and it runs **before** the snapshot is read so what
+  // is displayed is the layout as it now stands.
+  let legacyMigration: LegacyMigration | null = null;
+  try {
+    legacyMigration = await migrateLegacyScopes(store);
+  } catch (err) {
+    // The scan reports its own refusals as values; reaching here means a bug or an
+    // environment without storage at all. Either way it is not a zero: the field
+    // stays null ("this load did not check"), never a false "nothing was found".
+    console.warn('[chat-stasher] popup legacy-state scan failed', (err as Error).message);
+  }
+
   let snapshot: Record<string, unknown> | null = null;
   try {
     snapshot = await browserLocalSnapshot();
@@ -162,6 +184,7 @@ async function collect(): Promise<PopupModel> {
     //    empty list (at that point we genuinely know nothing).
     failures: collectFailures(snapshot),
     lastTick,
+    legacyMigration,
     // 🔴 C33 · The two preconditions of the "start backfilling this platform"
     //    button, both of them **facts**, not inferences.
     liveTarget: runtime.liveTarget ?? null,
