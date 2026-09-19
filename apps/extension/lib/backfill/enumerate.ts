@@ -1147,6 +1147,114 @@ export function parseConversationListPage(text: string): ParseResult {
 }
 
 /**
+ * 🔴 W48 · **What a shape refusal is allowed to say about the body it refused.**
+ *
+ * Before this, a refusal named only the field that was missing. On 2026-09-19 a
+ * real logged-in response stopped the DeepSeek leg with
+ *
+ *     list cursor=first-page (enumerated 0): deepseek list response has no
+ *     `data` object (envelope changed?)
+ *
+ * That sentence is true, and halting on it is correct — but it is also the whole
+ * of what survived: the one thing that could say what the envelope *became* is
+ * the response, and it had been dropped by the time a human read the ledger.
+ * Answering "then what did it look like?" took another logged-in session. A
+ * refusal that cannot be acted on in one pass is a refusal that costs a session
+ * per shape change.
+ *
+ * So a refusal now carries the **structure** of the body it refused, and only
+ * the structure. The vocabulary is three things, and each is here because it
+ * cannot be a value out of the response:
+ *
+ *  · **key names** — `data`, `biz_data`, `chat_sessions` are schema. A name is
+ *    what the platform calls a field; it is chosen by the server's code, not by
+ *    anyone's conversation. 🔴 A key is *not* automatically safe — an object
+ *    keyed by what it holds (a response that maps titles or ids to bodies) is a
+ *    plausible shape, and its keys are content. So a key is echoed only when it
+ *    also reads like a field name: see SHAPE_KEY_NAME and SHAPE_OPAQUE_RUN. A
+ *    key that fails either test is replaced by SHAPE_WITHHELD_KEY, so the *fact*
+ *    that something was there survives even when its name may not.
+ *  · **types** — `number` / `string` / `boolean` / `null` / `array(n)` / `{…}`.
+ *    A type is a claim about the shape, and it is exactly what a parser's
+ *    disagreement is *about*: "`chat_sessions` is an array" versus "`chat_sessions`
+ *    is a number" is the whole diagnosis.
+ *  · **array lengths** — a count of elements. A count is a measurement of the
+ *    envelope, not a member of it; CONTRIBUTING already allows counts in a
+ *    report. Lengths are also the one number this report prints — no other
+ *    numeric value is ever echoed, because a number in a conversation body is
+ *    content (an id, a timestamp, a seq_id).
+ *
+ * 🔴 What is deliberately absent from the vocabulary: **no string is quoted, not
+ *    even in part or by length.** A string is the one JSON type that is nearly
+ *    always content — a title, a message body, an id, or a fragment of one — and
+ *    a prefix of a conversation title is still that conversation's text. So a
+ *    string prints as `string` and nothing else.
+ *
+ * 🔴 This is a *report*, not a relaxation. The callers below refuse for exactly
+ *    the same inputs as before; only the sentence grew. Every `{ok:false}` in the
+ *    DeepSeek list and detail parsers is still `{ok:false}`, still reaches
+ *    halt('shape-changed'), and still archives nothing.
+ */
+
+/** How far the report descends: the body, the objects in it, and their objects. */
+const SHAPE_DEPTH = 2;
+
+/** How many keys of one object are named before the rest become a count. */
+const SHAPE_MAX_KEYS = 24;
+
+/** A key is echoed only when it looks like a field name rather than like a value. */
+const SHAPE_KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+/**
+ * ...and never when it is one long unbroken run of letters and digits, which is
+ * what an opaque identifier looks like (`<32 hex chars>` is such a run; `seq_id`
+ * and `current_message_id` are not). This is a heuristic and is written as one:
+ * it can withhold a legitimate field name, which costs a second diagnosis, and
+ * that is the cheaper of the two mistakes here.
+ */
+const SHAPE_OPAQUE_RUN = /[A-Za-z0-9]{24,}/;
+
+/** Where a key that failed the two tests above goes — withheld, but visibly so. */
+export const SHAPE_WITHHELD_KEY = '<withheld>';
+
+function echoKey(key: string): string {
+  return SHAPE_KEY_NAME.test(key) && !SHAPE_OPAQUE_RUN.test(key) ? key : SHAPE_WITHHELD_KEY;
+}
+
+/**
+ * The structure of one JSON value, in the vocabulary above: key names, types and
+ * array lengths. Values are never read, only `typeof`-ed, so a conversation title
+ * and a conversation id are alike invisible to it.
+ *
+ * Keys are sorted so that two responses differing only in member order read the
+ * same — this is a description of a shape, and JSON member order is not part of
+ * one.
+ */
+export function describeJsonShape(value: unknown, depth: number = SHAPE_DEPTH): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value !== 'object') return typeof value;
+  const record = value as Record<string, unknown>;
+  if (depth <= 0) return 'object';
+  const keys = Object.keys(record).sort();
+  const shown = keys
+    .slice(0, SHAPE_MAX_KEYS)
+    .map((key) => `${echoKey(key)}:${describeJsonShape(record[key], depth - 1)}`);
+  if (keys.length > shown.length) shown.push(`+${keys.length - shown.length} more`);
+  return `{${shown.join(', ')}}`;
+}
+
+/**
+ * The one way a refusal says what it saw: ` [saw <where>: <shape>]`, appended to
+ * the sentence the refusal already had. The sentence keeps its place and its
+ * wording — it is what the ledger has always said and what the tests pin — and
+ * the bracket is the evidence that was missing.
+ */
+function sawShape(where: string, value: unknown): string {
+  return ` [saw ${where}: ${describeJsonShape(value)}]`;
+}
+
+/**
  * Parse one page of a DeepSeek conversation list.
  *
  * ## 🔴 This function is where "written knowing it might be wrong" lives
@@ -1170,6 +1278,13 @@ export function parseConversationListPage(text: string): ParseResult {
  *  · cannot read `has_more` ⇒ hasMore=undefined, the engine records
  *    'has-more-missing' and stops, likewise **never** treating it as "no next page".
  *
+ * 🔴 W48 · **And every one of those refusals says what it saw.** A `{ok:false}`
+ *    from here ends with ` [saw <where>: <shape>]` — the names, types and array
+ *    lengths of the body at the level that disagreed (see describeJsonShape for
+ *    the vocabulary and why no value is ever in it). The sentence above is
+ *    unchanged and the refusal is unchanged; this only stops a shape change from
+ *    costing a second logged-in session to diagnose.
+ *
  * ## `updated_at` is a **number**, not an ISO string
  * All three sources show it is a numeric timestamp. So here:
  *  · a finite number ⇒ taken as-is (no new Date, no unit conversion, no guessing
@@ -1189,24 +1304,35 @@ export function parseDeepSeekListPage(text: string): ParseResult {
     return { ok: false, detail: 'deepseek list response is not JSON' };
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { ok: false, detail: 'deepseek list response is not a JSON object' };
+    return { ok: false, detail: `deepseek list response is not a JSON object${sawShape('body', body)}` };
   }
   // Envelope: data.biz_data (5 sources agree). 🔴 The top-level business code
   // (code / biz_code) has two sources in conflict, so **it is not read**.
   const data = (body as Record<string, unknown>).data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return { ok: false, detail: 'deepseek list response has no `data` object (envelope changed?)' };
+    return {
+      ok: false,
+      detail: `deepseek list response has no \`data\` object (envelope changed?)${sawShape('body', body)}`,
+    };
   }
   const biz = (data as Record<string, unknown>).biz_data;
   if (!biz || typeof biz !== 'object' || Array.isArray(biz)) {
-    return { ok: false, detail: 'deepseek list response has no `data.biz_data` object (envelope changed?)' };
+    return {
+      ok: false,
+      detail: `deepseek list response has no \`data.biz_data\` object (envelope changed?)${sawShape('data', data)}`,
+    };
   }
   const bizRecord = biz as Record<string, unknown>;
   const sessions = bizRecord.chat_sessions;
   if (!Array.isArray(sessions)) {
     // 🔴 This is the line that guards "do not record an unknown as empty":
     //    no such array = the shape changed, not "there are no conversations".
-    return { ok: false, detail: 'deepseek list response has no `data.biz_data.chat_sessions` array (shape changed?)' };
+    return {
+      ok: false,
+      detail:
+        'deepseek list response has no `data.biz_data.chat_sessions` array (shape changed?)'
+        + sawShape('data.biz_data', bizRecord),
+    };
   }
 
   const ids: string[] = [];
@@ -1216,12 +1342,18 @@ export function parseDeepSeekListPage(text: string): ParseResult {
 
   for (const item of sessions) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      return { ok: false, detail: 'deepseek chat_sessions item is not an object' };
+      return {
+        ok: false,
+        detail: `deepseek chat_sessions item is not an object${sawShape('item', item)}`,
+      };
     }
     const record = item as Record<string, unknown>;
     const id = record.id;
     if (typeof id !== 'string' || id.length === 0) {
-      return { ok: false, detail: 'deepseek chat_sessions item has no string `id`' };
+      return {
+        ok: false,
+        detail: `deepseek chat_sessions item has no string \`id\`${sawShape('item', record)}`,
+      };
     }
     ids.push(id);
 
@@ -1239,7 +1371,9 @@ export function parseDeepSeekListPage(text: string): ParseResult {
       if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) {
         return {
           ok: false,
-          detail: 'deepseek chat_sessions item has a non-numeric `updated_at` (wire shape changed?)',
+          detail:
+            'deepseek chat_sessions item has a non-numeric `updated_at` (wire shape changed?)'
+            + sawShape('item', record),
         };
       }
       newestUpdatedAt = newestUpdatedAt === null ? updatedAt : Math.max(newestUpdatedAt, updatedAt);
@@ -1329,6 +1463,12 @@ export const DEEPSEEK_TREE_MESSAGE_KEY = 'message_id';
  *        `detail-tree-incomplete` conversation, one upstream type change would
  *        write off every conversation in the run. The caller turns this into
  *        `{ok:false}` ⇒ halt('shape-changed'), a traced stop.
+ *        🔴 W48: every `'unreadable'` detail also carries ` [saw <where>: <shape>]`
+ *        — the names, types and array lengths at the level that failed — so the
+ *        next real occurrence names the new shape instead of only the missing
+ *        field. Same vocabulary, same refusals (describeJsonShape);
+ *        `'incomplete'` details are **not** extended, because that verdict is
+ *        about a conversation rather than about a wire shape.
  *      · `kind: 'incomplete'` — the check's inputs are all there and the tree does
  *        not close: the leaf is missing from the array, a link leaves the array or
  *        revisits a node, two messages claim one `message_id`, or a **reached**
@@ -1372,24 +1512,46 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
     return { ok: false, kind: 'unreadable', detail: 'the detail response is not JSON' };
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { ok: false, kind: 'unreadable', detail: 'the detail response is not an object' };
+    return {
+      ok: false,
+      kind: 'unreadable',
+      detail: `the detail response is not an object${sawShape('body', body)}`,
+    };
   }
   const data = (body as Record<string, unknown>).data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data` object' };
+    return {
+      ok: false,
+      kind: 'unreadable',
+      detail: `the detail response has no \`data\` object${sawShape('body', body)}`,
+    };
   }
   const biz = (data as Record<string, unknown>).biz_data;
   if (!biz || typeof biz !== 'object' || Array.isArray(biz)) {
-    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data` object' };
+    return {
+      ok: false,
+      kind: 'unreadable',
+      detail: `the detail response has no \`data.biz_data\` object${sawShape('data', data)}`,
+    };
   }
   const bizRecord = biz as Record<string, unknown>;
   const messages = bizRecord.chat_messages;
   if (!Array.isArray(messages)) {
-    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data.chat_messages` array' };
+    return {
+      ok: false,
+      kind: 'unreadable',
+      detail: `the detail response has no \`data.biz_data.chat_messages\` array${sawShape('data.biz_data', bizRecord)}`,
+    };
   }
   const session = bizRecord.chat_session;
   if (!session || typeof session !== 'object' || Array.isArray(session)) {
-    return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data.chat_session` object' };
+    return {
+      ok: false,
+      kind: 'unreadable',
+      detail:
+        'the detail response has no `data.biz_data.chat_session` object'
+        + sawShape('data.biz_data', bizRecord),
+    };
   }
   // 🔴 A type change is `unreadable`, not "incomplete": the same rule
   //    parseDeepSeekListPage applies to a non-numeric `updated_at`. It applies to
@@ -1402,7 +1564,9 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
     return {
       ok: false,
       kind: 'unreadable',
-      detail: 'the detail response names no numeric `chat_session.current_message_id`',
+      detail:
+        'the detail response names no numeric `chat_session.current_message_id`'
+        + sawShape('chat_session', session),
     };
   }
 
@@ -1417,12 +1581,20 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
     //    was walked, so "this conversation is incomplete" is not a fact this code
     //    may state. The chain checks below still are.
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
-      return { ok: false, kind: 'unreadable', detail: 'a chat message is not an object' };
+      return {
+        ok: false,
+        kind: 'unreadable',
+        detail: `a chat message is not an object${sawShape('message', message)}`,
+      };
     }
     const messageRecord = message as Record<string, unknown>;
     const messageId = messageRecord[DEEPSEEK_TREE_MESSAGE_KEY];
     if (typeof messageId !== 'number' || !Number.isFinite(messageId)) {
-      return { ok: false, kind: 'unreadable', detail: 'a chat message carries no numeric `message_id`' };
+      return {
+        ok: false,
+        kind: 'unreadable',
+        detail: `a chat message carries no numeric \`message_id\`${sawShape('message', messageRecord)}`,
+      };
     }
     // A duplicate id would make this map lose a message, and a walk over the
     // remainder would resolve a link to the wrong node. Two messages claiming one
@@ -1488,6 +1660,10 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
  *    the branch that keeps a **wrong field name or type** from turning into a
  *    quiet storm of wrong per-conversation verdicts: we cannot say "this
  *    conversation is incomplete" about a conversation we never checked.
+ *    🔴 W48: this is also the branch that names what the response *was*, not
+ *    only what it was not — the detail ends with the observed shape at the level
+ *    that failed (describeJsonShape). A halt is where this leg goes quiet, so it
+ *    has to be the place that says the most.
  *  · `'detail-empty-unverified'` — the array is there and is **empty**. From this
  *    response alone, "this conversation has no messages" and "this response is a
  *    window with nothing in it" are not distinguishable, so the ambiguous case
@@ -1512,21 +1688,35 @@ export function parseDeepSeekDetailPage(text: string): DetailParseResult {
     return { ok: false, detail: 'deepseek detail response is not JSON' };
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { ok: false, detail: 'deepseek detail response is not a JSON object' };
+    return {
+      ok: false,
+      detail: `deepseek detail response is not a JSON object${sawShape('body', body)}`,
+    };
   }
   const data = (body as Record<string, unknown>).data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return { ok: false, detail: 'deepseek detail response has no `data` object (envelope changed?)' };
+    return {
+      ok: false,
+      detail: `deepseek detail response has no \`data\` object (envelope changed?)${sawShape('body', body)}`,
+    };
   }
   const biz = (data as Record<string, unknown>).biz_data;
   if (!biz || typeof biz !== 'object' || Array.isArray(biz)) {
-    return { ok: false, detail: 'deepseek detail response has no `data.biz_data` object (envelope changed?)' };
+    return {
+      ok: false,
+      detail: `deepseek detail response has no \`data.biz_data\` object (envelope changed?)${sawShape('data', data)}`,
+    };
   }
   const messages = (biz as Record<string, unknown>).chat_messages;
   if (!Array.isArray(messages)) {
     // The same line parseClaudeDetailPage draws: no such array is the drift case
     // and must be halted on, never read as a conversation with nothing in it.
-    return { ok: false, detail: 'deepseek detail response has no `data.biz_data.chat_messages` array (shape changed?)' };
+    return {
+      ok: false,
+      detail:
+        'deepseek detail response has no `data.biz_data.chat_messages` array (shape changed?)'
+        + sawShape('data.biz_data', biz),
+    };
   }
   if (messages.length === 0) {
     return { ok: true, outcome: 'detail-empty-unverified' };

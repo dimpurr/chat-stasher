@@ -215,16 +215,25 @@ describe('W42-1 · the completeness walk reads the response, and refuses three d
 // ---------------------------------------------------------------------------
 describe('W42-2 · a body we could not check is never reported as a conversation that came back short', () => {
   it('no readable current_message_id ⇒ {ok:false} ⇒ halt, not a per-conversation verdict', () => {
+    // 🔴 W48 · The expected detail grew: a refusal now ends with the observed shape at the
+    //    level that failed. The assertion is still exact equality on the whole sentence —
+    //    nothing was loosened — and the session's `title` there is a key name, not its value.
+    const noLeaf = 'the detail response names no numeric `chat_session.current_message_id`';
     // The field is gone entirely.
     expect(parseDeepSeekDetailTree(body([msg(1, null), msg(2, 1)], { omitCurrent: true }))).toEqual({
       ok: false,
       kind: 'unreadable',
-      detail: 'the detail response names no numeric `chat_session.current_message_id`',
+      detail: `${noLeaf} [saw chat_session: {id:string, title:string}]`,
     });
     // 🔴 Present but of the wrong type is the same answer, deliberately: the same rule
     //    parseDeepSeekListPage applies to a non-numeric `updated_at`. A type change is a wire change.
+    //    The shape differs by that one key, and it is the type — never the value — that it reports.
     expect(parseDeepSeekDetailTree(body([msg(1, null), msg(2, 1)], { current: '2' })))
-      .toEqual({ ok: false, kind: 'unreadable', detail: 'the detail response names no numeric `chat_session.current_message_id`' });
+      .toEqual({
+        ok: false,
+        kind: 'unreadable',
+        detail: `${noLeaf} [saw chat_session: {current_message_id:string, id:string, title:string}]`,
+      });
     // And at the parser level it is `{ok:false}`, which the engine turns into halt('shape-changed') —
     // never into 'detail-tree-incomplete' about a conversation whose branch was never walked.
     const parsed = parseDeepSeekDetailPage(body([msg(1, null), msg(2, 1)], { omitCurrent: true }));
@@ -242,7 +251,9 @@ describe('W42-2 · a body we could not check is never reported as a conversation
     expect(parseDeepSeekDetailTree(stringIdBody())).toEqual({
       ok: false,
       kind: 'unreadable',
-      detail: 'a chat message carries no numeric `message_id`',
+      detail:
+        'a chat message carries no numeric `message_id`'
+        + ' [saw message: {message_id:string, parent_id:null, role:string}]', // 🔴 W48 appended shape
     });
     const parsed = parseDeepSeekDetailPage(stringIdBody());
     expect(parsed.ok).toBe(false);
@@ -256,7 +267,8 @@ describe('W42-2 · a body we could not check is never reported as a conversation
     expect(parseDeepSeekDetailTree(notAnObject)).toEqual({
       ok: false,
       kind: 'unreadable',
-      detail: 'a chat message is not an object',
+      // 🔴 W48 appended shape: the element arrived as `null`, and that is what it says.
+      detail: 'a chat message is not an object [saw message: null]',
     });
     expect(parseDeepSeekDetailPage(notAnObject).ok).toBe(false);
   });
