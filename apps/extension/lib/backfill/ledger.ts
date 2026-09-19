@@ -17,19 +17,35 @@
  *    and `archivedCount` are a convenience for the popup, are re-derived on every
  *    load, and are re-derived *from the store* rather than trusted, so a header
  *    written before an interrupted run can never be the last word.
+ *
+ * 🔴 **W45 · "The debt store is the authority" has one exception, and it is the
+ *    interesting one.** The store is not merely the authority on *what is owed*; it
+ *    is also the thing that can be **wrong about having any debts at all**. A store
+ *    that has lost rows answers `0` in exactly the shape a genuinely empty store
+ *    does, and reading that as `queue-empty` is "an unknown recorded as empty" at
+ *    the top of the leg — measured, on a real machine, as four hours of alarm ticks
+ *    reporting `ran` while fetching nothing. So the header is still not trusted for
+ *    the counts, but it *is* read as a second witness to them: when it records more
+ *    ids than the store holds, the two disagree about a fact they are both supposed
+ *    to know, and that is a named refusal (`ledger-mismatch`) rather than an empty
+ *    queue. See `openHeaderLedger` and `recoverLedgerLoss`.
  */
 
 import type { BackfillStore } from './store';
 import {
   applyDebtDiff,
+  carryLegacyDebtRows,
   countHeaderWrite,
+  legacyDebtRowCount,
   readDebtSet,
   replaceDebtSet,
   type DebtDiff,
   type DebtSetSnapshot,
+  type LegacyCarryOutcome,
 } from './debt-store';
 import {
   BACKFILL_STATE_VERSION,
+  LEGACY_STATE_VERSION,
   headerOf,
   initialState,
   isHeader,
@@ -100,7 +116,7 @@ export class Ledger {
     const diff = this.diffAgainst(state);
 
     if (diff.enqueue.length > 0 || diff.settle.length > 0 || diff.drop.length > 0) {
-      const applied = await applyDebtDiff(this.scope, diff, this.nextSeq);
+      const applied = await applyDebtDiff(this.platform, this.scope, diff, this.nextSeq);
       if (!applied) {
         throw new Error(
           '[chat-stasher] the backfill debt store refused a write; refusing to fetch bodies'
@@ -190,6 +206,12 @@ export async function saveHeader(store: BackfillStore, state: BackfillState): Pr
  *   · **a readable record** ⇒ its content;
  *   · **a record we cannot read** ⇒ a refusal. Never an empty set, and not one
  *     byte is written: the record is left exactly as it was found.
+ *
+ * 🔴 W45 adds a fourth: **a readable record that disagrees with the debt store**.
+ *    A header recording ids the store no longer holds is a *loss*, and it is the
+ *    state that produced four hours of "ran, nothing happened" on a real machine.
+ *    It gets its own reason (`ledger-mismatch`), never `queue-empty` — see
+ *    `openHeaderLedger`.
  */
 export async function openLedger(
   store: BackfillStore,
@@ -199,21 +221,7 @@ export async function openLedger(
   const rawHeader = await store.load(stateKey(platform, scope));
 
   if (isHeader(rawHeader)) {
-    const snapshot = await readDebtSet(scope);
-    if (!snapshot) {
-      return {
-        ok: false,
-        refusal: {
-          reason: 'storage-unavailable',
-          detail: 'the debt set could not be read from IndexedDB; without it there is no stop-and-resume',
-        },
-      };
-    }
-    return {
-      ok: true,
-      state: stateFrom(rawHeader, snapshot.pending, snapshot.archived),
-      ledger: new Ledger(store, platform, scope, snapshot),
-    };
+    return await openHeaderLedger(store, platform, scope, rawHeader);
   }
 
   if (rawHeader !== null && rawHeader !== undefined) {
@@ -230,6 +238,312 @@ export async function openLedger(
   }
 
   return await openFromLegacy(store, platform, scope);
+}
+
+// ---------------------------------------------------------------------------
+// W45 · A header that records debts the store does not hold
+// ---------------------------------------------------------------------------
+
+/**
+ * Ids the header recorded and the store no longer holds.
+ *
+ * 🔴 **The compared quantity is the total, not `pending` or `archived` separately,
+ *    and that is not a simplification — comparing either one alone is wrong.**
+ *
+ * `Ledger.save` writes the debt store first and the header second, so a worker
+ * killed between the two leaves a header one persist behind the store. Walk a
+ * single settle through that window: the store's `pending` drops by one and its
+ * `archived` gains one, while the header still records the old, larger `pending`
+ * count. So `store.pending < header.pendingCount` is the **ordinary shape of an
+ * interrupted run** — and a check on `pending` alone would refuse every clean
+ * restart, which is exactly what the first draft of this function did to
+ * `tests/w18-state-split.test.ts`'s kill tests. A quiescent enqueue shows the
+ * mirror image: there `store.pending` is *ahead* of the header. Neither direction
+ * of either count works.
+ *
+ * The total does, because **a debt only ever leaves this ledger by `drop`**, which
+ * takes an id out of `pending` and into neither list — and `drop` is a decision a
+ * run makes about a conversation whose body was just fetched and refused, one per
+ * persist (`runBackfill`'s loop persists immediately after each). Everything else
+ * (enqueue, settle) leaves the total alone or raises it. So a header recording more
+ * ids than the store holds is not something an interrupted run can produce at any
+ * size, and a deficit of thousands is not something it can produce at all.
+ *
+ * 🔴 One consequence is deliberately accepted rather than smoothed over with a
+ *    tolerance of one: a crash between a drop's two writes can present as a
+ *    one-id deficit and be refused. It costs a re-listing that re-enqueues exactly
+ *    that one conversation, because `archived` survives — and the alternative, a
+ *    threshold, would mean a genuine loss is only reported once it is large enough
+ *    to cross an arbitrary line. The project's rule is that the store is the
+ *    authority; when the header contradicts it, the leg says so.
+ */
+export interface DebtLoss {
+  /** Ids the header recorded, pending + archived. */
+  recorded: number;
+  /** Ids the store actually holds for this (platform, scope), pending + archived. */
+  held: number;
+  /** `recorded - held`. Always ≥ 1 when this is returned. */
+  missing: number;
+}
+
+export function debtLossBetween(header: BackfillHeader, snapshot: DebtSetSnapshot): DebtLoss | null {
+  const recorded = header.pendingCount + header.archivedCount;
+  const held = snapshot.pending.length + snapshot.archived.length;
+  if (held >= recorded) return null;
+  return { recorded, held, missing: recorded - held };
+}
+
+/**
+ * 🔴 W45 · **Which platforms `storage.local` says hold a debt set at this scope.**
+ *
+ * This is the evidence that lets a pre-W45 row be attributed at all, and it is the
+ * only such evidence there is: the row itself is `{scope, id, state, seq}`, and the
+ * scope string is not a platform. Both record layouts count — a `cs_backfill_v2:`
+ * header and a `cs_backfill_v1:` record each say "this platform holds a debt set at
+ * this scope".
+ *
+ * 🔴 **A rule about every platform, not a special case for one scope string.** It
+ *    does not know or care that `default` is the sentinel a target carries before
+ *    its organization is resolved; it says that a scope recorded by more than one
+ *    platform is *ambiguous*, which is true for any scope string a future platform
+ *    might share. That is the property the key change exists to restore, and this
+ *    function is where it is read back out for rows that predate it.
+ *
+ * The platform is one path segment and the scope is everything after it, for the
+ * same reason `legacyScopeFromKey` splits it that way: a scope is an account or
+ * organization identifier and may itself contain a colon.
+ */
+export function ownersOfScope(keys: readonly string[], scope: string): string[] {
+  const prefixes = [`cs_backfill_v${BACKFILL_STATE_VERSION}:`, `cs_backfill_v${LEGACY_STATE_VERSION}:`];
+  const owners = new Set<string>();
+  for (const key of keys) {
+    for (const prefix of prefixes) {
+      if (!key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      const separator = rest.indexOf(':');
+      if (separator < 1) continue;
+      if (rest.slice(separator + 1) === scope) owners.add(rest.slice(0, separator));
+    }
+  }
+  // Sorted so a detail string built from this is stable across runs and assertable.
+  return [...owners].sort();
+}
+
+/** What a carry attempt did, or why it did not happen. `blocked` is a fragment for the refusal's detail. */
+interface CarryAttempt {
+  outcome: LegacyCarryOutcome | null;
+  blocked: string | null;
+}
+
+/**
+ * Try to move this scope's pre-W45 rows into `(platform, scope)`, but only when the
+ * platform can be established from storage.
+ *
+ * Every branch that cannot establish it returns with the rows untouched. Handing
+ * them to whichever platform happened to open first is exactly the mistake W45
+ * exists to undo — and it would be worse here than it was there, because this code
+ * would be doing it deliberately, to rows it can see.
+ */
+async function carryLegacyInto(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+): Promise<CarryAttempt> {
+  const rows = await legacyDebtRowCount(scope);
+  if (rows === null) {
+    return { outcome: null, blocked: 'the pre-W45 debt store could not be read' };
+  }
+  if (rows === 0) return { outcome: null, blocked: null };
+
+  let keys: string[];
+  try {
+    keys = await store.keys();
+  } catch (err) {
+    return { outcome: null, blocked: `storage.local could not be listed (${(err as Error).message})` };
+  }
+  const owners = ownersOfScope(keys, scope);
+  if (owners.length !== 1 || owners[0] !== platform) {
+    return {
+      outcome: null,
+      blocked: owners.length === 0
+        ? `no platform records the scope ${scope}`
+        : `${owners.length} platforms (${owners.join(', ')}) record the scope ${scope}, so ${rows} pre-W45 id(s) cannot be attributed to one of them`,
+    };
+  }
+  return { outcome: await carryLegacyDebtRows(platform, scope), blocked: null };
+}
+
+/**
+ * The header path: a readable header, the debt store, and the disagreement that
+ * must never be read as an empty queue.
+ *
+ * The carry attempt comes **before** the judgement, and only when the store is
+ * behind. That ordering matters in both directions: a machine upgrading from the
+ * pre-W45 layout has every id still in the old store, so judging first would refuse
+ * every healthy scope on first open; and the check that gates the carry
+ * (`legacyDebtRowCount`) is a `count()`, so the ordinary open of a normal scope does
+ * not pay for a `storage.local` listing it has no use for.
+ */
+async function openHeaderLedger(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+  header: BackfillHeader,
+): Promise<LedgerOpen> {
+  const unavailable = (): LedgerOpen => ({
+    ok: false,
+    refusal: {
+      reason: 'storage-unavailable',
+      detail: 'the debt set could not be read from IndexedDB; without it there is no stop-and-resume',
+    },
+  });
+
+  let snapshot = await readDebtSet(platform, scope);
+  if (!snapshot) return unavailable();
+  let loss = debtLossBetween(header, snapshot);
+
+  let attempt: CarryAttempt = { outcome: null, blocked: null };
+  if (loss) {
+    attempt = await carryLegacyInto(store, platform, scope);
+    if (attempt.outcome && attempt.outcome.moved > 0) {
+      const again = await readDebtSet(platform, scope);
+      if (!again) return unavailable();
+      snapshot = again;
+      loss = debtLossBetween(header, snapshot);
+    }
+  }
+
+  if (loss) {
+    return {
+      ok: false,
+      refusal: { reason: 'ledger-mismatch', detail: debtLossDetail(platform, scope, header, snapshot, loss, attempt) },
+    };
+  }
+  return {
+    ok: true,
+    state: stateFrom(header, snapshot.pending, snapshot.archived),
+    ledger: new Ledger(store, platform, scope, snapshot),
+  };
+}
+
+/** The refusal's own words: the four numbers it was decided from, and what was tried before saying so. */
+function debtLossDetail(
+  platform: string,
+  scope: string,
+  header: BackfillHeader,
+  snapshot: DebtSetSnapshot,
+  loss: DebtLoss,
+  attempt: CarryAttempt,
+): string {
+  const parts = [
+    `the header at ${stateKey(platform, scope)} records ${header.pendingCount} pending and`
+    + ` ${header.archivedCount} archived (${loss.recorded} in all), and the debt store holds`
+    + ` ${snapshot.pending.length} and ${snapshot.archived.length} (${loss.held} in all) —`
+    + ` ${loss.missing} recorded conversation id(s) are not there`,
+  ];
+  if (attempt.blocked) {
+    parts.push(`pre-W45 rows for this scope could not be carried over: ${attempt.blocked}`);
+  } else if (attempt.outcome) {
+    const { moved, left, skipped, failed } = attempt.outcome;
+    parts.push(
+      failed
+        ? `carrying the pre-W45 rows failed (${failed}); ${left} row(s) were left where they were`
+        : `carried ${moved} pre-W45 row(s) for this scope, ${left} left unreadable`
+          + (skipped ? ` (${skipped})` : ''),
+    );
+  }
+  return parts.join('; ');
+}
+
+/**
+ * 🔴 W45 · **The path back for a scope whose debts were destroyed.**
+ *
+ * Why it is needed at all: a wiped scope is not merely empty. Its `enumCursor` is
+ * `complete`, so the enumeration will never run again for it — there is nothing left
+ * that could refill it, and the leg would sit at zero pending forever while the
+ * header went on claiming thousands. Resetting `enumCursor` is the whole of the
+ * repair: `runBackfill` reads the list from the first page again on the next tick,
+ * `enqueueDebts` writes the ids back, and the debt set is rebuilt.
+ *
+ * 🔴 **It cannot become "re-list everything on every tick".** Everything that made
+ *    the scope un-listable is written in the *same* header write: the cursor is
+ *    reset and the counts are taken from the store, so after this call the header no
+ *    longer records a single id the store does not hold — the condition that calls
+ *    this function is gone, and it cannot fire again until rows are destroyed again.
+ *    There is no marker to forget to clear and no retry ladder to advance. The dead
+ *    state is repaired once because the repaired state is not the dead state.
+ *
+ * 🔴 What it does **not** do, and why the header says so out loud: the ids are gone,
+ *    so `archived` is gone with them. A conversation that was already archived cannot
+ *    be told from one that was never fetched, and re-listing will enqueue it again —
+ *    one duplicate body fetch, not a lost conversation. Saying that is the difference
+ *    between a repair and a cover-up, which is why `relisted` is written into the
+ *    header where the popup can read it rather than only into a log line.
+ *
+ * The header is **read back** before this returns, like every other write in this
+ * file: a caller that reports "reset, the next run will re-list" on the strength of
+ * a `storage.local.set` that silently did nothing would be wrong in exactly the way
+ * this module exists to prevent.
+ */
+export type LedgerRecovery =
+  | { ok: true; loss: DebtLoss; state: BackfillState }
+  | { ok: false; why: 'no-loss' | 'state-unreadable' | 'storage-unavailable' | 'not-written'; detail: string };
+
+export async function recoverLedgerLoss(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+  at: number,
+): Promise<LedgerRecovery> {
+  const rawHeader = await store.load(stateKey(platform, scope));
+  if (!isHeader(rawHeader)) {
+    return {
+      ok: false,
+      why: 'state-unreadable',
+      detail: `the header at ${stateKey(platform, scope)} could not be read, so its enumeration cursor cannot be reset`,
+    };
+  }
+  const snapshot = await readDebtSet(platform, scope);
+  if (!snapshot) {
+    return {
+      ok: false,
+      why: 'storage-unavailable',
+      detail: 'the debt set could not be read from IndexedDB, so the counts to write back are unknown',
+    };
+  }
+  const loss = debtLossBetween(rawHeader, snapshot);
+  if (!loss) {
+    // Already consistent. Doing nothing is the whole of the one-shot guarantee: a
+    // second call cannot reset a cursor that the first call's write already made
+    // consistent, so this can never become a periodic re-list.
+    return { ok: false, why: 'no-loss', detail: 'the header and the debt store already agree; nothing was reset' };
+  }
+
+  const state = stateFrom(rawHeader, snapshot.pending, snapshot.archived);
+  // 🔴 Two fields and one addition, and nothing else — `stateFrom` carried the rest
+  //    over, including any halt record that was already there. Clearing that halt
+  //    would be this repair reaching outside its job: it is not this function's
+  //    record to drop, and a transient one carries the streak the next run is
+  //    counting. The `truncated` mark goes with the cursor it belonged to: it says
+  //    "we could not read past here", which stops being true the moment the reading
+  //    starts again from the beginning.
+  state.enumCursor = { offset: 0, complete: false };
+  state.relisted = { at, recorded: loss.recorded, held: loss.held };
+
+  try {
+    await saveHeader(store, state);
+    const back = await store.load(stateKey(platform, scope));
+    if (!isHeader(back) || back.enumCursor.offset !== 0 || back.enumCursor.complete !== false) {
+      return {
+        ok: false,
+        why: 'not-written',
+        detail: 'the header was written but did not read back with the cursor reset; nothing else was changed',
+      };
+    }
+  } catch (err) {
+    return { ok: false, why: 'not-written', detail: (err as Error).message };
+  }
+  return { ok: true, loss, state };
 }
 
 /**
@@ -314,7 +628,11 @@ async function migrate(
     refusal: { reason: 'state-unreadable', detail },
   });
 
-  const written = await replaceDebtSet(scope, { pending, archived, nextSeq: pending.length + archived.length + 1 });
+  const written = await replaceDebtSet(platform, scope, {
+    pending,
+    archived,
+    nextSeq: pending.length + archived.length + 1,
+  });
   if (!written) {
     return refusal(
       `the pre-W18 record at ${legacyKey} could not be carried over (the debt store refused the write); `
@@ -322,7 +640,7 @@ async function migrate(
     );
   }
 
-  const readBack = await readDebtSet(scope);
+  const readBack = await readDebtSet(platform, scope);
   if (!readBack) {
     return refusal(
       `the pre-W18 record at ${legacyKey} was written to the debt store but could not be read back; `
@@ -416,7 +734,7 @@ export async function completeInterruptedMigration(
   legacyKey: string,
   legacy: LegacyBackfillState,
 ): Promise<LedgerRefusal | null> {
-  const snapshot = await readDebtSet(scope);
+  const snapshot = await readDebtSet(platform, scope);
   if (!snapshot) {
     return {
       reason: 'storage-unavailable',

@@ -23,32 +23,80 @@
  * 🔴 Reads obey the same rule as the outbox's: `null` means **could not be read**,
  *    never "empty". An unknown must never be recorded as empty (CLAUDE.md
  *    invariant 1), and here the temptation is a single `?? []`.
+ *
+ * 🔴 **W45 · The key is `(platform, scope, id)`, and it used to be `(scope, id)`.**
+ *    That missing platform destroyed a real account's debt set: three platforms
+ *    share the scope string `default`, and `replaceDebtSet` makes one scope hold a
+ *    snapshot, so opening a fresh ledger for a second platform at that scope read
+ *    the first platform's 7,736 ids as deletions and removed every one of them. The
+ *    depth of the fix is in `replaceDebtSet`'s own note; the shape of it is here,
+ *    in the key path, because the key is the only thing that decides which records
+ *    a write may delete. Rows written before that change are carried over by
+ *    `carryLegacyDebtRows`, and a row whose platform cannot be established from
+ *    what is on disk is left exactly where it is.
  */
 
-/** One conversation's place in the ledger. `seq` is what makes the pending order a FIFO that survives a restart. */
+/**
+ * One conversation's place in the ledger. `seq` is what makes the pending order a FIFO that survives a restart.
+ *
+ * 🔴 **W45 · `platform` used to be missing, and that omission destroyed a real
+ *    account's debt set.** The record was keyed and indexed by `scope` alone, and
+ *    the scope string is the *account* axis — on the measured machine three
+ *    platforms shared the scope `default`. `replaceDebtSet` makes one scope hold a
+ *    snapshot, so the ordinary open of a fresh, empty ledger for deepseek or gemini
+ *    read chatgpt's 7,736 rows as "not in the snapshot" and deleted every one of
+ *    them. A debt set belongs to a (platform, scope) pair; a key that cannot say so
+ *    cannot keep two of them apart, and the difference was 7,736 lost ids.
+ */
 export interface DebtRecord {
+  platform: string;
   scope: string;
   id: string;
   state: 'pending' | 'archived';
-  /** Monotonic within a scope. A debt settled and later re-enqueued takes a fresh one, i.e. goes to the back. */
+  /** Monotonic within a (platform, scope). A debt settled and later re-enqueued takes a fresh one, i.e. goes to the back. */
   seq: number;
 }
 
 export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
-export const BACKFILL_DB_VERSION = 1;
-export const DEBTS_STORE = 'debts';
 /**
- * One index on `scope`, and nothing cleverer.
+ * 🔴 1 → 2 in W45: the debt store's key grew the platform. A version bump is the
+ *    only way to change an IndexedDB key path, and there is deliberately **no data
+ *    movement inside `onupgradeneeded`** — a version-change transaction cannot ask
+ *    `storage.local` which platform an old row belonged to, and a migration that
+ *    guessed would be the same bug with a new name. See DEBTS_LEGACY_STORE.
+ */
+export const BACKFILL_DB_VERSION = 2;
+/** The W45 store. Keyed by (platform, scope, id). */
+export const DEBTS_STORE = 'debts_by_platform';
+/**
+ * 🔴 W45 · **The pre-W45 store, kept exactly where it is.**
  *
- * 🔴 It is deliberately **not** a compound `['scope','state','seq']` index read
+ * It is named `debts` because that is the name it already had on disk: an
+ * IndexedDB store cannot be renamed, so the new layout had to take a new name and
+ * leave this one alone. Nothing writes here any more; the only reader is
+ * `carryLegacyDebtRows`, and the only writer of its records was the W18 migration.
+ *
+ * 🔴 Why its rows are not simply moved during the upgrade: a row here holds
+ *    `{scope, id, state, seq}` and **no platform**. The upgrade transaction cannot
+ *    see `storage.local`, which is the only thing that records "platform P holds a
+ *    debt set at scope S", so any platform it stamped on a row would be invented.
+ *    Instead the rows stay put until a caller who *can* read that evidence asks for
+ *    them — and a row whose platform cannot be established from what is stored stays
+ *    here, unread, uncounted and undeleted, for as long as that is true.
+ */
+export const DEBTS_LEGACY_STORE = 'debts';
+/**
+ * One index on `(platform, scope)`, and nothing cleverer.
+ *
+ * 🔴 It is deliberately **not** a `['platform','scope','state','seq']` index read
  *    through an `IDBKeyRange`. `IDBKeyRange` is a global of its own, separate
  *    from `indexedDB`, and a test environment that installs a factory without
  *    also installing the range constructor makes every ranged read throw —
  *    which, inside a `catch` that turns failures into "could not be read", would
- *    have looked exactly like an empty debt set. `getAll(scope)` takes a plain
- *    key, no range object at all, and `lib/outbox.ts` reads its store the same
- *    way. The order is restored in memory by `seq` (a few thousand numbers,
- *    sorted once per run).
+ *    have looked exactly like an empty debt set. `getAll([platform, scope])`
+ *    takes a plain array key, no range object at all, and `lib/outbox.ts` reads
+ *    its store the same way. The order is restored in memory by `seq` (a few
+ *    thousand numbers, sorted once per run).
  */
 export const DEBTS_INDEX = 'byScope';
 
@@ -203,8 +251,11 @@ function openDb(): Promise<IDBDatabase | null> {
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(DEBTS_STORE)) {
-          const store = db.createObjectStore(DEBTS_STORE, { keyPath: ['scope', 'id'] });
-          store.createIndex(DEBTS_INDEX, 'scope');
+          // 🔴 `DEBTS_LEGACY_STORE` is deliberately **not** touched here, and not
+          //    because it was forgotten: see its own note. Creating this store next
+          //    to it is the whole of the upgrade.
+          const store = db.createObjectStore(DEBTS_STORE, { keyPath: ['platform', 'scope', 'id'] });
+          store.createIndex(DEBTS_INDEX, ['platform', 'scope']);
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -256,14 +307,23 @@ function txDone(tx: IDBTransaction): Promise<void> {
 // Reading
 // ---------------------------------------------------------------------------
 
-/** One scope's raw records, or `null` when the store cannot be read at all. */
-async function readRows(scope: string): Promise<DebtRecord[] | null> {
+/**
+ * Raw records from one store's index, or `null` when they cannot be read at all.
+ * `missing` decides the meaning of an absent store: see `legacyDebtRowCount`.
+ */
+async function readIndexAll<T>(
+  storeName: string,
+  indexName: string,
+  key: IDBValidKey,
+  missing: 'null' | 'empty',
+): Promise<T[] | null> {
   const db = await openDb();
   if (!db) return null;
+  if (!db.objectStoreNames.contains(storeName)) return missing === 'empty' ? [] : null;
   try {
-    const tx = db.transaction(DEBTS_STORE, 'readonly');
+    const tx = db.transaction(storeName, 'readonly');
     return await requestToPromise(
-      tx.objectStore(DEBTS_STORE).index(DEBTS_INDEX).getAll(scope) as IDBRequest<DebtRecord[]>,
+      tx.objectStore(storeName).index(indexName).getAll(key) as IDBRequest<T[]>,
     );
   } catch {
     // A transaction that fails part way through is "could not be read", not "empty".
@@ -271,12 +331,17 @@ async function readRows(scope: string): Promise<DebtRecord[] | null> {
   }
 }
 
+/** One (platform, scope)'s raw records, or `null` when the store cannot be read at all. */
+function readRows(platform: string, scope: string): Promise<DebtRecord[] | null> {
+  return readIndexAll<DebtRecord>(DEBTS_STORE, DEBTS_INDEX, [platform, scope], 'null');
+}
+
 /**
- * The whole debt set for one scope, pending first in FIFO order.
+ * The whole debt set for one (platform, scope), pending first in FIFO order.
  * 🔴 `null` (never an empty snapshot) when the store cannot be read.
  */
-export async function readDebtSet(scope: string): Promise<DebtSetSnapshot | null> {
-  const rows = await readRows(scope);
+export async function readDebtSet(platform: string, scope: string): Promise<DebtSetSnapshot | null> {
+  const rows = await readRows(platform, scope);
   if (rows === null) return null;
   // One scope's rows, in `seq` order — this is the FIFO order the debt set had in
   // memory, restored from the only thing that can restore it across a restart. A
@@ -311,6 +376,7 @@ export async function readDebtSet(scope: string): Promise<DebtSetSnapshot | null
  *    hold in the in-memory debt set.
  */
 export async function applyDebtDiff(
+  platform: string,
   scope: string,
   diff: DebtDiff,
   nextSeq: number,
@@ -321,23 +387,23 @@ export async function applyDebtDiff(
   const puts: DebtRecord[] = [];
   let seq = nextSeq;
   for (const id of diff.enqueue) {
-    puts.push({ scope, id, state: 'pending', seq: seq++ });
+    puts.push({ platform, scope, id, state: 'pending', seq: seq++ });
   }
   for (const id of diff.settle) {
     // A settled id takes a fresh `seq`: order only ever mattered for ids that are
     // still owed, and the id is leaving `pending` for good. `settleDebt` is
     // idempotent, so settling one twice cannot resurrect a `seq` that is already
     // gone.
-    puts.push({ scope, id, state: 'archived', seq: seq++ });
+    puts.push({ platform, scope, id, state: 'archived', seq: seq++ });
   }
   // An id that is enqueued *and* dropped inside one persist is owed again — the
   // enqueue is the later fact, so it must not be deleted by the drop's tombstone.
   // (Not reachable from the engine's tick order today; written down because the
   // other order silently loses the debt, and a lost debt is what this file is for.)
   const owed = new Set(diff.enqueue);
-  const deletes: Array<[string, string]> = diff.drop
+  const deletes: Array<[string, string, string]> = diff.drop
     .filter((id) => !owed.has(id))
-    .map((id) => [scope, id]);
+    .map((id) => [platform, scope, id]);
 
   try {
     const tx = db.transaction(DEBTS_STORE, 'readwrite');
@@ -354,23 +420,34 @@ export async function applyDebtDiff(
 }
 
 /**
- * Replace one scope's whole debt set, in one transaction. The migration's write.
+ * Replace one (platform, scope)'s whole debt set, in one transaction. The migration's write.
  *
- * 🔴 Clears the scope first, so a half-finished earlier attempt cannot leave
- *    records behind that the new set does not mention. `readDebtSet` is the
+ * 🔴 Clears the (platform, scope) first, so a half-finished earlier attempt cannot
+ *    leave records behind that the new set does not mention. `readDebtSet` is the
  *    caller's verification step; this function makes no promise about content.
+ *
+ * 🔴 W45 · "Clears the (platform, scope)" is the whole of the fix and it is worth
+ *    reading twice, because the same sentence with `scope` alone was the defect:
+ *    the clear is computed from `readRows(platform, scope)`, i.e. from the rows of
+ *    **this pair and nothing else**. Before W45 it read `readRows(scope)`, so
+ *    opening an empty ledger for a second platform at the same scope made every row
+ *    of the first platform's set a deletion.
  */
-export async function replaceDebtSet(scope: string, snapshot: DebtSetSnapshot): Promise<boolean> {
+export async function replaceDebtSet(
+  platform: string,
+  scope: string,
+  snapshot: DebtSetSnapshot,
+): Promise<boolean> {
   const db = await openDb();
   if (!db) return false;
 
   const records: DebtRecord[] = [];
   let seq = 1;
-  for (const id of snapshot.pending) records.push({ scope, id, state: 'pending', seq: seq++ });
-  for (const id of snapshot.archived) records.push({ scope, id, state: 'archived', seq: seq++ });
+  for (const id of snapshot.pending) records.push({ platform, scope, id, state: 'pending', seq: seq++ });
+  for (const id of snapshot.archived) records.push({ platform, scope, id, state: 'archived', seq: seq++ });
 
   try {
-    const existing = await readRows(scope);
+    const existing = await readRows(platform, scope);
     if (existing === null) return false;
 
     // 🔴 Written as a **difference**, and that is not an optimisation for its own
@@ -384,10 +461,10 @@ export async function replaceDebtSet(scope: string, snapshot: DebtSetSnapshot): 
     //    what this function does: it makes the scope hold `snapshot`, and does not
     //    care how it got there.
     const wanted = new Map(records.map((r) => [r.id, r]));
-    const deletions: Array<[string, string]> = [];
+    const deletions: Array<[string, string, string]> = [];
     for (const row of existing) {
       const want = wanted.get(row.id);
-      if (!want || want.state !== row.state || want.seq !== row.seq) deletions.push([scope, row.id]);
+      if (!want || want.state !== row.state || want.seq !== row.seq) deletions.push([platform, scope, row.id]);
     }
     const present = new Map(existing.map((r) => [r.id, r]));
     const writes = records.filter((r) => {
@@ -410,4 +487,197 @@ export async function replaceDebtSet(scope: string, snapshot: DebtSetSnapshot): 
     return false;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// W45 · Carrying the pre-platform rows over
+// ---------------------------------------------------------------------------
+
+/** Why nothing was carried. `null` on the outcome means "it was carried", not "fine". */
+export type LegacyCarrySkip =
+  /** This database has no pre-W45 store, or nothing in it for this scope. Nothing to do. */
+  | 'no-legacy-rows'
+  /**
+   * The (platform, scope) already holds rows. The pre-W45 rows are **left alone**:
+   * merging two sets would have to invent which `seq` wins, and the old rows carry
+   * no evidence that they are the same set as the new ones rather than a stale
+   * copy of it.
+   */
+  | 'target-not-empty';
+
+export interface LegacyCarryOutcome {
+  /** Rows now recorded under (platform, scope). */
+  moved: number;
+  /** Pre-W45 rows left exactly where they were. See `failed` for the two reasons. */
+  left: number;
+  skipped: LegacyCarrySkip | null;
+  /**
+   * Non-null when the move could not be finished or **could not be verified**. When
+   * this is set, not one pre-W45 row was deleted — the whole point of reading the
+   * new records back before removing the old ones is that a failed move leaves the
+   * original in place.
+   */
+  failed: string | null;
+}
+
+/**
+ * Is this one pre-W45 row a shape this build can carry?
+ *
+ * The row was written by the W18 migration, so its fields should be
+ * `{scope, id, state, seq}`. Nothing guarantees it: the store is a storage-layer
+ * object that any earlier build — or anything else living in this database — could
+ * have written. A row that fails here is **not** repaired, not guessed at and not
+ * deleted; it is counted in `left` and stays where it is.
+ */
+function readableLegacyRow(
+  value: unknown,
+  platform: string,
+  scope: string,
+): { key: IDBValidKey; record: DebtRecord } | null {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Partial<DebtRecord> & { scope?: unknown };
+  if (typeof row.id !== 'string' || row.id === '') return null;
+  if (row.state !== 'pending' && row.state !== 'archived') return null;
+  if (typeof row.seq !== 'number' || !Number.isFinite(row.seq)) return null;
+  // The key is the record's own, built from the scope it was found under — this
+  // store's key path is `[scope, id]`. A row whose `scope` is not the string we
+  // queried by cannot be named, so it is left rather than deleted blind.
+  if (row.scope !== scope) return null;
+  return { key: [scope, row.id], record: { platform, scope, id: row.id, state: row.state, seq: row.seq } };
+}
+
+/**
+ * 🔴 W45 · **How many pre-W45 rows still sit under this scope.** `null` = could not
+ *   be read, which is a different fact from `0`.
+ *
+ * It is a `count()` and not a read on purpose: its one caller asks the question on
+ * a path that may repeat on every tick while a scope is in the `ledger-mismatch`
+ * state, and paying for a full `getAll` of a 7,700-row set to learn that there are
+ * none would be the same shape of waste the W36b note warns about.
+ */
+export async function legacyDebtRowCount(scope: string): Promise<number | null> {
+  const db = await openDb();
+  if (!db) return null;
+  // No pre-W45 store at all is a measurement — this database never had one, so it
+  // holds no such rows — and not "could not be read".
+  if (!db.objectStoreNames.contains(DEBTS_LEGACY_STORE)) return 0;
+  try {
+    const tx = db.transaction(DEBTS_LEGACY_STORE, 'readonly');
+    return await requestToPromise(
+      tx.objectStore(DEBTS_LEGACY_STORE).index(DEBTS_INDEX).count(scope) as IDBRequest<number>,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 🔴 W45 · **Carry the pre-W45 rows under `scope` to `(platform, scope)`.**
+ *
+ * The caller has already established that `platform` is the scope's **only**
+ * recorded owner (see `ownersOfScope` in lib/backfill/ledger.ts). That is not a
+ * detail of this function's implementation, it is the whole of its evidence: a
+ * pre-W45 row holds `{scope, id, state, seq}` and no platform, so the platform has
+ * to come from somewhere else on disk, and the only somewhere else is the record of
+ * which platform holds that scope. When two platforms record the same scope string,
+ * no row under it can be attributed and none is moved.
+ *
+ * The order is the W18 migration's, step for step, and it is the whole safety
+ * argument:
+ *
+ *   1. read the pre-W45 rows for this scope;
+ *   2. write the readable ones under `(platform, scope)`, in one transaction;
+ *   3. **read them back** and require every one, with the same state and `seq`;
+ *   4. only then delete exactly the rows that were verified.
+ *
+ * A failure before step 4 deletes nothing, so the next attempt starts from the same
+ * complete set. Step 4's deletions are `delete [scope, id]` over the keys that came
+ * back, never "clear the scope" — a row that could not be read is not a row that may
+ * be removed.
+ *
+ * `null` means the database would not open; every other outcome is reported in
+ * `LegacyCarryOutcome`, `failed` included, so a caller never has to read a `null`
+ * as "there was nothing to do".
+ */
+export async function carryLegacyDebtRows(
+  platform: string,
+  scope: string,
+): Promise<LegacyCarryOutcome | null> {
+  const db = await openDb();
+  if (!db) return null;
+  if (!db.objectStoreNames.contains(DEBTS_LEGACY_STORE)) {
+    return { moved: 0, left: 0, skipped: 'no-legacy-rows', failed: null };
+  }
+
+  let legacy: unknown[];
+  try {
+    const tx = db.transaction(DEBTS_LEGACY_STORE, 'readonly');
+    legacy = await requestToPromise(
+      tx.objectStore(DEBTS_LEGACY_STORE).index(DEBTS_INDEX).getAll(scope) as IDBRequest<unknown[]>,
+    );
+  } catch {
+    return null;
+  }
+  if (legacy.length === 0) return { moved: 0, left: 0, skipped: 'no-legacy-rows', failed: null };
+
+  const existing = await readRows(platform, scope);
+  if (existing === null) {
+    return { moved: 0, left: legacy.length, skipped: null, failed: 'the new debt set could not be read' };
+  }
+  if (existing.length > 0) {
+    return { moved: 0, left: legacy.length, skipped: 'target-not-empty', failed: null };
+  }
+
+  const readable: Array<{ key: IDBValidKey; record: DebtRecord }> = [];
+  for (const row of legacy) {
+    const parsed = readableLegacyRow(row, platform, scope);
+    if (parsed) readable.push(parsed);
+  }
+  const left = legacy.length - readable.length;
+
+  try {
+    const tx = db.transaction(DEBTS_STORE, 'readwrite');
+    const store = tx.objectStore(DEBTS_STORE);
+    for (const { record } of readable) store.put(record);
+    await txDone(tx);
+  } catch {
+    return { moved: 0, left: legacy.length, skipped: null, failed: 'the debt store refused the write' };
+  }
+
+  const readBack = await readRows(platform, scope);
+  if (readBack === null) {
+    return { moved: 0, left: legacy.length, skipped: null, failed: 'the carried rows could not be read back' };
+  }
+  const back = new Map(readBack.map((r) => [r.id, r]));
+  for (const { record } of readable) {
+    const got = back.get(record.id);
+    if (!got || got.state !== record.state || got.seq !== record.seq) {
+      // 🔴 No id in the detail, not even a prefix: this string is persisted (the
+      //    header, the tick record) and a conversation id is the one thing the
+      //    privacy rule keeps out of a stored trace. The count says as much as the
+      //    diagnosis needs.
+      return { moved: 0, left: legacy.length, skipped: null, failed: 'a carried row came back different' };
+    }
+  }
+
+  try {
+    const tx = db.transaction(DEBTS_LEGACY_STORE, 'readwrite');
+    const store = tx.objectStore(DEBTS_LEGACY_STORE);
+    for (const { key } of readable) store.delete(key);
+    await txDone(tx);
+  } catch {
+    // The rows are in **both** stores now. That is recoverable — the carry is a
+    // `put` of the same `(platform, scope, id)` and this function refuses to run
+    // over a non-empty target — and deleting nothing is the side to fail on.
+    return {
+      moved: readable.length,
+      left,
+      skipped: null,
+      failed: 'the carried rows could not be removed from the pre-W45 store',
+    };
+  }
+
+  for (const { record } of readable) countWrite('debt', record);
+  for (const { key } of readable) countWrite('debt', key);
+  return { moved: readable.length, left, skipped: null, failed: null };
 }

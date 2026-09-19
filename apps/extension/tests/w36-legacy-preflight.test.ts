@@ -114,7 +114,7 @@ describe('W36 · the migration preflight', () => {
     const header = store.data[stateKey(PLATFORM, SCOPE)];
     expect(isHeader(header)).toBe(true);
     expect(Object.keys(store.data)).not.toContain(legacyStateKey(PLATFORM, SCOPE));
-    const debts = await readDebtSet(SCOPE);
+    const debts = await readDebtSet(PLATFORM, SCOPE);
     expect(debts?.pending).toEqual(PENDING);
     expect(debts?.archived).toEqual(ARCHIVED);
   });
@@ -232,14 +232,14 @@ describe('W36 · the migration preflight', () => {
     resetDebtDbConnectionForTest();
 
     // The first read is an honest "could not be read".
-    expect(await readDebtSet(SCOPE)).toBeNull();
+    expect(await readDebtSet(PLATFORM, SCOPE)).toBeNull();
 
     // 🔴 …and it is NOT the answer for the rest of this worker's life. Caching it
     //    would make every later `openLedger` refuse with 'storage-unavailable',
     //    which in the migration means the pre-W18 record never moves: the old key
     //    keeps every id and the trace blames the debt store forever, on the
     //    strength of one transient open.
-    const second = await readDebtSet(SCOPE);
+    const second = await readDebtSet(PLATFORM, SCOPE);
     expect(second).toEqual({ pending: [], archived: [], nextSeq: 1 });
   });
 
@@ -257,7 +257,7 @@ describe('W36 · the migration preflight', () => {
     expect(report).toMatchObject({ found: 1, moved: 1, orphaned: 0, refusal: null });
     expect(Object.keys(store.data)).not.toContain(legacyKey);
     // The new layout was not touched: the debt set is still the one it was.
-    const debts = await readDebtSet(SCOPE);
+    const debts = await readDebtSet(PLATFORM, SCOPE);
     expect(debts?.pending).toEqual(PENDING);
   });
 

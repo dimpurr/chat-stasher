@@ -39,7 +39,7 @@ import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
-import { openLedger, saveHeader, type Ledger } from './ledger';
+import { openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
 import {
   dayKeyOf,
   haltClassOf,
@@ -363,6 +363,45 @@ function haltReasonForStatus(status: number): HaltReason {
   return 'shape-changed';
 }
 
+/**
+ * 🔴 W45 · **Turn a `ledger-mismatch` refusal into the detail that says what happens next.**
+ *
+ * The refusal's own detail is the diagnosis (four numbers, and what was tried
+ * before giving up). This appends the *prognosis*, because the two outcomes are
+ * different facts about the user's history and neither may be left to be inferred
+ * from the other:
+ *
+ *   · the scope was made listable again ⇒ say so, and say the honest cost. The ids
+ *     are gone, so `archived` is gone with them: a conversation that had already
+ *     been archived cannot be told from one that never was, and re-listing will
+ *     enqueue it again. One duplicate body fetch, and **not** a lost conversation —
+ *     but a user who was not told would read a second copy as the archive
+ *     misbehaving;
+ *   · it was not ⇒ say that too, and name why. "The leg is stopped and we could not
+ *     prepare it to start again" is not the same sentence as "it will fix itself",
+ *     and reporting the first as the second is what this whole task is about.
+ *
+ * The returned string is persisted (the run's halt record and the tick record), so
+ * it carries counts and reasons only — never a conversation id, never a body.
+ */
+async function recoverAndSay(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+  detail: string,
+  at: number,
+): Promise<string> {
+  const recovery = await recoverLedgerLoss(store, platform, scope, at);
+  if (!recovery.ok) {
+    return `${detail}. This scope was NOT prepared to be listed again (${recovery.why}: `
+      + `${recovery.detail}), so it stays exactly as it is until that is fixed`;
+  }
+  return `${detail}. Its enumeration cursor has been reset, so the next run will read the conversation list again from`
+    + ` the start; the ${recovery.loss.missing} id(s) it can no longer account for (of ${recovery.loss.recorded} recorded)`
+    + ' could not be recovered, and an already-archived conversation cannot be told from one that was never fetched —'
+    + ' it will be listed again and its body fetched a second time';
+}
+
 export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const clock = opts.clock ?? systemClock;
   const pace = opts.pace ?? DEFAULT_PACE;
@@ -417,7 +456,21 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       at: clock.now(),
       detail: opened.refusal.detail,
     };
-    console.warn(`[chat-stasher] backfill halted: ${opened.refusal.reason} — ${opened.refusal.detail}`);
+    if (opened.refusal.reason === 'ledger-mismatch') {
+      // 🔴 W45 · **The refusal is not the end of the story, and leaving it there
+      //    would be the same failure with a better name.** A scope whose debts were
+      //    destroyed has `enumCursor.complete === true`, so it will never enumerate
+      //    again: refusing forever would trade four hours of silence for a permanent
+      //    one, with the same zero rows underneath. The repair is a one-shot header
+      //    reset — reset the cursor, write the counts the store actually has — after
+      //    which this condition cannot recur (see `recoverLedgerLoss`), and the next
+      //    run reads the list again from the start.
+      //
+      //    This run still **fetches nothing**: the refusal stands, and it is what
+      //    the caller, the tick record and the popup see.
+      refused.halted.detail = await recoverAndSay(store, opts.platform, opts.scope, opened.refusal.detail, clock.now());
+    }
+    console.warn(`[chat-stasher] backfill halted: ${opened.refusal.reason} — ${refused.halted.detail}`);
     return {
       stopped: 'halted',
       enumeratedPages: 0,
