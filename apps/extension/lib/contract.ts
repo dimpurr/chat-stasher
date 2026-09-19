@@ -192,6 +192,40 @@ export function isHookStatusMessage(value: unknown): value is HookStatusMessage 
 /** Capability wait: short enough to precede normal app traffic, no browser sniffing. */
 export const MAIN_FALLBACK_TIMEOUT_MS = 100;
 
+/**
+ * 🔴 W43c · **How long the installed hook may go without asking whether it is
+ * still the page's own transport.**
+ *
+ * The install-time read-back and the probe answer are two observations, and both
+ * happen within the first moments of a document's life. Everything after them
+ * was unobserved until this: a page that takes `window.fetch` or
+ * `XMLHttpRequest.prototype` back *after* the handshake was never asked again,
+ * so the hook's last word stayed "whole" while the page's capture path was gone
+ * — measured on 2026-09-19 (build 0.1.0.11) as `fetchNative=false`,
+ * `xhrNative=true` and **no** `cs_hook_v1:*` record anywhere.
+ *
+ * So the question is asked again, on a plain page timer (and when the document
+ * becomes visible, or comes back from the back/forward cache, which are the
+ * moments a reader is actually looking at the tab). The value is a compromise
+ * between two costs:
+ *
+ *  · **What a shorter value costs** — the check itself is two property reads and
+ *    two identity comparisons, but a *deviation* makes it post a report, and a
+ *    report becomes a `runtime.sendMessage` and a `storage.local` write. A
+ *    healthy page never reports, so the volume is bounded by the broken pages,
+ *    which are the rare case this exists for. A hidden tab's timers are
+ *    throttled by the browser — this repository has not measured that cadence,
+ *    so do not read a number into it — which makes a backgrounded page cost less
+ *    than the interval below, not more.
+ *  · **What a longer value costs** — the window in which a half-installed page
+ *    is still silent, which is the whole defect.
+ *
+ * The bridge uses the same value as its floor for relaying a *repeated* report
+ * from one page (`entrypoints/dw-bridge.content.ts`), so the honest cadence and
+ * the bound on a page that spams the report itself cannot drift apart.
+ */
+export const HOOK_SELF_CHECK_INTERVAL_MS = 5_000;
+
 /** Open string: adding a platform must not require a type/logic edit. */
 export type PlatformId = string;
 export type CaptureConfidence = 'from-source' | 'unverified';
