@@ -1202,8 +1202,27 @@ const SHAPE_DEPTH = 2;
 /** How many keys of one object are named before the rest become a count. */
 const SHAPE_MAX_KEYS = 24;
 
-/** A key is echoed only when it looks like a field name rather than like a value. */
-const SHAPE_KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** 🔴 R48 · The byte budget for one shape description; it is persisted in a halt detail. */
+const SHAPE_MAX_CHARS = 2000;
+
+/**
+ * A key is echoed only when it looks like a field name rather than like a value.
+ *
+ * 🔴 R48 · Lower-case only, and that is the whole of the fix: an upstream that
+ *    keys an object by what it holds — a map from conversation title to body —
+ *    produces keys like `Kyoto` or `TripPlanning`, and the earlier pattern
+ *    admitted them because they are letters. Field names in these envelopes are
+ *    snake_case (`data`, `biz_data`, `chat_sessions`, `has_more`), so requiring
+ *    lower case keeps every name this diagnosis needs and drops the capitalised
+ *    shapes a title takes.
+ *
+ * 🔴 The residual, stated rather than hidden: an all-lower-case single word is
+ *    still echoed, so a title or account name that happens to look like that
+ *    (`dimpurr`) would survive this test. It is named in docs/privacy.md for what
+ *    it is; the alternative — withholding every key — removes the diagnosis this
+ *    whole trace exists for.
+ */
+const SHAPE_KEY_NAME = /^[a-z_][a-z0-9_]{0,63}$/;
 
 /**
  * ...and never when it is one long unbroken run of letters and digits, which is
@@ -1236,12 +1255,17 @@ export function describeJsonShape(value: unknown, depth: number = SHAPE_DEPTH): 
   if (typeof value !== 'object') return typeof value;
   const record = value as Record<string, unknown>;
   if (depth <= 0) return 'object';
-  const keys = Object.keys(record).sort();
-  const shown = keys
-    .slice(0, SHAPE_MAX_KEYS)
-    .map((key) => `${echoKey(key)}:${describeJsonShape(record[key], depth - 1)}`);
-  if (keys.length > shown.length) shown.push(`+${keys.length - shown.length} more`);
-  return `{${shown.join(', ')}}`;
+  // 🔴 R48 · Bounded before it is sorted. A body with 100,000 keys must not pay
+  //    for a full sort to print 24 of them, and the string that comes out of here
+  //    is appended to a stored halt detail — so it is capped as well. Sorting the
+  //    slice keeps the property the sort was for (two responses differing only in
+  //    member order read the same) for everything that is actually printed.
+  const allKeys = Object.keys(record);
+  const named = allKeys.slice(0, SHAPE_MAX_KEYS).sort();
+  const shown = named.map((key) => `${echoKey(key)}:${describeJsonShape(record[key], depth - 1)}`);
+  if (allKeys.length > named.length) shown.push(`+${allKeys.length - named.length} more`);
+  const body = `{${shown.join(', ')}}`;
+  return body.length > SHAPE_MAX_CHARS ? `${body.slice(0, SHAPE_MAX_CHARS)}…}` : body;
 }
 
 /**

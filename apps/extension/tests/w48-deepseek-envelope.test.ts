@@ -390,3 +390,36 @@ describe('W48-5 · no value out of the response ever reaches the detail', () => 
     expect(parsed.detail).not.toContain('Kyoto');
   });
 });
+
+// ---------------------------------------------------------------------------
+// R48 · A key can be content. An upstream that maps conversation titles to
+// bodies produces capitalised keys, and the earlier pattern admitted them
+// because they are letters — so a title would have been echoed into a stored
+// halt detail, into console.warn, and into the popup sentence.
+// ---------------------------------------------------------------------------
+describe('R48 · identifier-shaped keys never reach the trace', () => {
+  it('🔴 capitalised and secret-looking keys are withheld; snake_case field names survive', async () => {
+    const { describeJsonShape, SHAPE_WITHHELD_KEY } = await import('../lib/backfill/enumerate');
+    const shape = describeJsonShape({
+      Kyoto: [1],
+      TripPlanning: [1],
+      sk_live_abc: 1,
+      chat_sessions: [1],
+      has_more: false,
+    });
+    expect(shape).not.toContain('Kyoto');
+    expect(shape).not.toContain('TripPlanning');
+    expect(shape).toContain('chat_sessions');
+    expect(shape).toContain('has_more');
+    expect(shape).toContain(SHAPE_WITHHELD_KEY);
+  });
+
+  it('🔴 a huge object is bounded in both key count and output length', async () => {
+    const { describeJsonShape } = await import('../lib/backfill/enumerate');
+    const big: Record<string, unknown> = {};
+    for (let i = 0; i < 5000; i++) big[`field_${i}`] = i;
+    const shape = describeJsonShape(big);
+    expect(shape).toContain('more');
+    expect(shape.length).toBeLessThanOrEqual(2100);
+  });
+});
