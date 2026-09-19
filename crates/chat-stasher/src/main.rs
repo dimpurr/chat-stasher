@@ -1479,7 +1479,10 @@ fn cmd_install_native_host(
     let platform = platform.unwrap_or_else(nativehost::Platform::current);
     let root = match target_root {
         Some(root) => absolute_path(&root),
-        None => nativehost::default_root(platform, &config::home_dir()),
+        // The machine's root, not the home-derived one: on Windows the
+        // `LocalAppData` known folder is authoritative and a profile may have
+        // redirected it away from `<home>\AppData\Local`.
+        None => nativehost::machine_root(platform, &config::home_dir()),
     };
     let binary = match binary {
         Some(path) => absolute_path(&path),

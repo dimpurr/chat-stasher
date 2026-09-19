@@ -9,20 +9,44 @@
 //!
 //! Everything is driven through [`doctor::inspect_native_host`] against a
 //! `tempfile` home, so no real browser directory is read and nothing is
-//! written.
+//! written. The probe takes the discovery *root* that was derived from that
+//! home ([`root_for`]) rather than resolving one itself: a probe that resolved
+//! its own root answered about wherever the process pointed, so on
+//! `windows-latest` all nine tests in this file drove one shared
+//! `%LOCALAPPDATA%` manifest file and failed one another. `the_probe_reads_only_under_the_root_it_is_given`
+//! pins that.
 
 use chat_stasher::config::{Config, NativeHostConfig};
-use chat_stasher::doctor::{inspect_native_host, HostManifestState, StageConfigCheck};
+use chat_stasher::doctor::{
+    inspect_native_host, HostManifestState, NativeHostCheck, StageConfigCheck,
+};
 use chat_stasher::nativehost;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The manifest path this build would use for Chrome under `home`.
-fn chrome_manifest(home: &Path) -> PathBuf {
-    let root = nativehost::default_root(nativehost::Platform::current(), home);
+/// The discovery root this build derives from `home` on this platform.
+///
+/// `default_root` is a pure function of `(platform, home)`, so deriving it here
+/// is the same answer `doctor::run()` reaches on macOS and Linux — and on
+/// Windows it is the answer for *this* home rather than the machine's
+/// `%LOCALAPPDATA%`. That difference is the whole point: the root of a test
+/// fixture must be inside that fixture's `tempfile` directory, or the tests in
+/// this binary share one manifest file and assert against each other's writes.
+fn root_for(home: &Path) -> PathBuf {
+    nativehost::default_root(nativehost::Platform::current(), home)
+}
+
+/// D8 about `home`, the way a test means it: the root is derived, and the
+/// platform's real layout under it is what gets exercised.
+fn inspect(config: &Config, home: &Path) -> NativeHostCheck {
+    inspect_native_host(config, &root_for(home))
+}
+
+/// The manifest path this build would use for Chrome under `root`.
+fn chrome_manifest(root: &Path) -> PathBuf {
     nativehost::target(
         nativehost::Platform::current(),
-        &root,
+        root,
         nativehost::Browser::Chrome,
         nativehost::HOST_NAME,
     )
@@ -30,8 +54,8 @@ fn chrome_manifest(home: &Path) -> PathBuf {
     .manifest
 }
 
-fn write_manifest(home: &Path, host_path: &Path) -> PathBuf {
-    let manifest = chrome_manifest(home);
+fn write_manifest(root: &Path, host_path: &Path) -> PathBuf {
+    let manifest = chrome_manifest(root);
     fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     fs::write(
         &manifest,
@@ -46,6 +70,18 @@ fn write_manifest(home: &Path, host_path: &Path) -> PathBuf {
     )
     .unwrap();
     manifest
+}
+
+/// Make `path` look like a binary the browser would agree to start: a file with
+/// an execute bit where that idea exists.
+fn plant_binary(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 fn chrome_state(check: &chat_stasher::doctor::NativeHostCheck) -> HostManifestState {
@@ -76,7 +112,7 @@ fn an_unregistered_machine_says_so_without_calling_it_broken() {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     assert_eq!(check.manifests.len(), nativehost::Browser::ALL.len());
     for entry in &check.manifests {
         assert_eq!(
@@ -96,16 +132,10 @@ fn a_registered_host_with_a_live_binary_is_ok() {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
     let binary = dir.path().join("bin").join("chat-stasher");
-    fs::create_dir_all(binary.parent().unwrap()).unwrap();
-    fs::write(&binary, "#!/bin/sh\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    write_manifest(&home, &binary);
+    plant_binary(&binary);
+    write_manifest(&root_for(&home), &binary);
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     assert_eq!(chrome_state(&check), HostManifestState::Ok { path: binary });
 }
 
@@ -115,9 +145,9 @@ fn a_registered_host_whose_binary_is_gone_is_reported_as_missing() {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
     let gone = dir.path().join("bin").join("chat-stasher");
-    write_manifest(&home, &gone);
+    write_manifest(&root_for(&home), &gone);
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     assert_eq!(
         chrome_state(&check),
         HostManifestState::PathMissing { path: gone }
@@ -135,16 +165,10 @@ fn a_binary_under_target_is_flagged_as_a_build_artifact() {
         .join("target")
         .join("debug")
         .join("chat-stasher");
-    fs::create_dir_all(binary.parent().unwrap()).unwrap();
-    fs::write(&binary, "#!/bin/sh\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    write_manifest(&home, &binary);
+    plant_binary(&binary);
+    write_manifest(&root_for(&home), &binary);
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     assert_eq!(
         chrome_state(&check),
         HostManifestState::BuildArtifact { path: binary },
@@ -167,9 +191,9 @@ fn a_non_executable_binary_is_reported_only_where_executability_exists() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).unwrap();
     }
-    write_manifest(&home, &binary);
+    write_manifest(&root_for(&home), &binary);
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     let state = chrome_state(&check);
     if cfg!(unix) {
         assert_eq!(
@@ -191,11 +215,11 @@ fn a_manifest_that_is_not_json_is_reported_as_invalid_not_as_absent() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
-    let manifest = chrome_manifest(&home);
+    let manifest = chrome_manifest(&root_for(&home));
     fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     fs::write(&manifest, "this is not json").unwrap();
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     match chrome_state(&check) {
         HostManifestState::Invalid { error } => assert!(!error.is_empty()),
         other => panic!("a present-but-broken manifest must not read as absent: {other:?}"),
@@ -207,7 +231,7 @@ fn a_manifest_without_a_path_field_is_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
-    let manifest = chrome_manifest(&home);
+    let manifest = chrome_manifest(&root_for(&home));
     fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     fs::write(
         &manifest,
@@ -215,7 +239,7 @@ fn a_manifest_without_a_path_field_is_invalid() {
     )
     .unwrap();
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     match chrome_state(&check) {
         HostManifestState::Invalid { error } => assert!(error.contains("path"), "{error}"),
         other => panic!("expected Invalid, got {other:?}"),
@@ -230,7 +254,7 @@ fn the_three_stage_findings_stay_three_findings() {
 
     // Absent key.
     assert_eq!(
-        inspect_native_host(&Config::default(), &home).stage,
+        inspect(&Config::default(), &home).stage,
         StageConfigCheck::NotConfigured
     );
 
@@ -238,7 +262,7 @@ fn the_three_stage_findings_stay_three_findings() {
     let present = dir.path().join("stage");
     fs::create_dir_all(&present).unwrap();
     assert_eq!(
-        inspect_native_host(&config_with_stage(Some(&present)), &home).stage,
+        inspect(&config_with_stage(Some(&present)), &home).stage,
         StageConfigCheck::Present {
             path: present.clone()
         }
@@ -247,7 +271,7 @@ fn the_three_stage_findings_stay_three_findings() {
     // Configured, and nothing is there.
     let absent = dir.path().join("never-created");
     assert_eq!(
-        inspect_native_host(&config_with_stage(Some(&absent)), &home).stage,
+        inspect(&config_with_stage(Some(&absent)), &home).stage,
         StageConfigCheck::Missing {
             path: absent.clone()
         }
@@ -257,7 +281,7 @@ fn the_three_stage_findings_stay_three_findings() {
     let file = dir.path().join("not-a-dir");
     fs::write(&file, "x").unwrap();
     assert_eq!(
-        inspect_native_host(&config_with_stage(Some(&file)), &home).stage,
+        inspect(&config_with_stage(Some(&file)), &home).stage,
         StageConfigCheck::NotADirectory { path: file }
     );
 
@@ -271,7 +295,7 @@ fn the_json_shape_keeps_absence_and_unknown_apart() {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
 
-    let check = inspect_native_host(&Config::default(), &home);
+    let check = inspect(&Config::default(), &home);
     let json = chat_stasher::doctor::native_host_json(&check);
     assert_eq!(json["checked"], true);
     assert_eq!(json["registered"], 0);
@@ -283,4 +307,47 @@ fn the_json_shape_keeps_absence_and_unknown_apart() {
             "an unregistered browser has no path to report: {manifest}"
         );
     }
+}
+
+/// The probe answers about the root it is handed, and about nothing else.
+///
+/// This is the regression test for the Windows nightly. The probe used to
+/// resolve its own root from the process environment, so on `windows-latest`
+/// every test in this binary read and wrote the *same*
+/// `%LOCALAPPDATA%\chat-stasher\...\<host>.json` and asserted against whichever
+/// test wrote last — which is why four of them failed together while their
+/// assertions, in isolation, were all correct.
+///
+/// A registration that is present under another root is not this root's
+/// registration: the answer for the root being probed is `NotRegistered`, and
+/// no count moves.
+#[test]
+fn the_probe_reads_only_under_the_root_it_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let populated = dir.path().join("populated");
+    let probed = dir.path().join("probed");
+    fs::create_dir_all(&probed).unwrap();
+
+    // A live-looking registration, planted under a root this call does not name.
+    let binary = dir.path().join("bin").join("chat-stasher");
+    plant_binary(&binary);
+    let elsewhere = write_manifest(&populated, &binary);
+    assert!(elsewhere.is_file(), "fixture: the decoy must exist");
+
+    let check = inspect_native_host(&Config::default(), &probed);
+    for entry in &check.manifests {
+        assert_eq!(
+            entry.state,
+            HostManifestState::NotRegistered,
+            "{}: the probe reported a registration under a root it was not asked \
+             about ({:?})",
+            entry.browser,
+            entry.state
+        );
+    }
+    let json = chat_stasher::doctor::native_host_json(&check);
+    assert_eq!(
+        json["registered"], 0,
+        "a manifest outside the probed root must not be counted: {json}"
+    );
 }
