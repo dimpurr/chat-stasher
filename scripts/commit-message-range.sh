@@ -2,11 +2,13 @@
 # commit-message-range.sh - resolve which commits the commit-message gate must
 # check for a given CI event, then run the checker on that range.
 #
-# This is the single source of the event -> range mapping that both
-# .github/workflows/ci.yml and .github/workflows/commit-messages.yml invoke.
-# It lives in scripts/ so the two workflows cannot drift: a change to when a PR
-# vs a push is checked, or how a new branch is ranged, is made here once and
-# picked up by both.
+# There is exactly ONE caller: .github/workflows/commit-messages.yml. ci.yml must
+# not grow a second one. The check lives in a workflow with no concurrency
+# cancellation because a commit escapes a range gate only when the run that would
+# check it is cancelled; invoking this script from ci.yml, whose jobs run under
+# cancel-in-progress, would reopen that hole by exactly the mechanism this design
+# removes. It lives in scripts/ rather than inline so the event -> range mapping
+# is written once and can be driven directly in a test.
 #
 # Environment (all provided by the workflow step that calls this script):
 #   EVENT_NAME   github.event_name                 'pull_request' | 'push' | ...
@@ -82,8 +84,14 @@ case "${EVENT_NAME:-}" in
     fi
     ;;
   *)
-    echo "${EVENT_NAME:-unset} has no base commit; checking $HEAD_SHA alone" >&2
-    range="$HEAD_SHA"
+    # Only 'push' and 'pull_request' have a defined base here. Any other event -
+    # merge_group, workflow_dispatch, a trigger added later - has no base this
+    # script can name, and checking HEAD alone is the original tip-only hole: a
+    # Chinese parent under an English tip would pass. Exit 3, the same honest
+    # "nothing was proven" used everywhere else, so a new trigger has to come
+    # back here and say what its range is.
+    echo "${EVENT_NAME:-unset} has no base commit this script can resolve; nothing was proven" >&2
+    exit 3
     ;;
 esac
 
