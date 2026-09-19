@@ -44,7 +44,13 @@ import type { Clock } from '../lib/backfill/pace';
 const ORIGIN = 'https://chat.deepseek.com';
 const ID = 'ds-0001-aaaaaaaa';
 const ID2 = 'ds-0002-aaaaaaaa';
-const SCOPES = { whole: 'acct-w42-whole', mixed: 'acct-w42-mixed', unknown: 'acct-w42-unknown' } as const;
+const SCOPES = {
+  whole: 'acct-w42-whole',
+  mixed: 'acct-w42-mixed',
+  unknown: 'acct-w42-unknown',
+  siblings: 'acct-w42-siblings',
+  stringIds: 'acct-w42-stringids',
+} as const;
 
 const NO_WAIT = {
   enumerate: { minIntervalMs: 0, maxPerDay: null },
@@ -73,7 +79,7 @@ function msg(messageId: number, parentId: number | null): Record<string, unknown
  * readable* is built — the case that must halt rather than accuse.
  */
 function body(
-  messages: Record<string, unknown>[],
+  messages: unknown[],
   opts: { current?: unknown; omitCurrent?: boolean; session?: Record<string, unknown> } = {},
 ): string {
   const session: Record<string, unknown> = { id: ID, title: 'synthetic-fixture', ...opts.session };
@@ -91,6 +97,33 @@ function wholeBody(leaf = 4): string {
   return body(messages, { current: leaf });
 }
 
+/**
+ * 🔴 W42b · The shape the endpoint **actually** returns: a whole conversation that
+ * also carries the branches the user did not take. The walk follows one branch —
+ * the chain from `current_message_id` back to a root — and everything off that
+ * chain is carried along in the archived bytes but never visited. 9→2 and 10→9 are
+ * a discarded sibling branch that resolves; 11→77 is a discarded sibling whose own
+ * parent is not in the response at all, which is exactly what a caller must not
+ * mistake for a broken chain.
+ */
+function branchingBody(leaf = 4): string {
+  return body(
+    [msg(1, null), msg(2, 1), msg(3, 2), msg(4, 3), msg(9, 2), msg(10, 9), msg(11, 77)],
+    { current: leaf },
+  );
+}
+
+/** The measured shape with one upstream type change: every `message_id` arrives as a string. */
+function stringIdBody(): string {
+  return body(
+    [
+      { message_id: '1', parent_id: null, role: 'USER' },
+      { message_id: '2', parent_id: '1', role: 'ASSISTANT' },
+    ],
+    { current: 2 },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 1 · The walk itself: what proves a body whole, and what refuses it
 // ---------------------------------------------------------------------------
@@ -99,6 +132,28 @@ describe('W42-1 · the completeness walk reads the response, and refuses three d
     const verdict = parseDeepSeekDetailTree(wholeBody());
     expect(verdict).toEqual({ ok: true });
     expect(parseDeepSeekDetailPage(wholeBody())).toEqual({ ok: true, outcome: 'non-empty' });
+  });
+
+  it('a body carrying discarded sibling branches is whole: the walk follows one branch, not the tree', () => {
+    // 🔴 W42b · The endpoint returns a tree, not a chain — the visible branch plus the branches the
+    //    user did not take (blueprint.md:235). `branchingBody()` carries both a sibling that resolves
+    //    (9→2, 10→9) and one whose own parent is absent from the response (11→77). Both are off the
+    //    chain the walk follows, so neither may be visited, and neither may turn a whole conversation
+    //    into a refusal. A walk that validated every message's link, or that read a stranded sibling
+    //    as "the chain leaves the response", would fail this and nothing else in the file.
+    expect(parseDeepSeekDetailTree(branchingBody())).toEqual({ ok: true });
+    expect(parseDeepSeekDetailPage(branchingBody())).toEqual({ ok: true, outcome: 'non-empty' });
+    // The chain itself is what is walked, so a gap in it still refuses the body with the siblings
+    // present — the fixture is the measured shape, not a weaker one.
+    const withGapInTheChain = body(
+      [msg(1, null), msg(2, 1), msg(4, 3), msg(9, 2), msg(10, 9), msg(11, 77)],
+      { current: 4 },
+    );
+    expect(parseDeepSeekDetailTree(withGapInTheChain)).toEqual({
+      ok: false,
+      kind: 'incomplete',
+      detail: 'the parent chain leaves the messages this response carries',
+    });
   });
 
   it('truncated to the NEWEST messages ⇒ incomplete: the chain upward leaves the response', () => {
@@ -176,6 +231,50 @@ describe('W42-2 · a body we could not check is never reported as a conversation
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.detail).toContain('current_message_id');
+  });
+
+  it('a `message_id` of the wrong type ⇒ {ok:false} ⇒ halt, not a debt written off', () => {
+    // 🔴 W42b · One upstream type change (ids arriving as strings) must not become a
+    //    per-conversation "this conversation is incomplete" for **every** conversation. That verdict
+    //    is not a halt: the engine writes the debt off (`engine.ts`, 'detail-tree-incomplete'), so a
+    //    changed type would silently count every conversation as handled, with no retry and nothing
+    //    archived. Nothing was walked here, so it is the wire that changed and the leg that stops.
+    expect(parseDeepSeekDetailTree(stringIdBody())).toEqual({
+      ok: false,
+      kind: 'unreadable',
+      detail: 'a chat message carries no numeric `message_id`',
+    });
+    const parsed = parseDeepSeekDetailPage(stringIdBody());
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.detail).toContain('message_id');
+    expect(parseDeepSeekDetailPage(stringIdBody()))
+      .not.toEqual({ ok: true, outcome: 'detail-tree-incomplete' });
+
+    // A chat message that is not an object at all is the same answer, for the same reason.
+    const notAnObject = body([null, msg(2, 1)], { current: 2 });
+    expect(parseDeepSeekDetailTree(notAnObject)).toEqual({
+      ok: false,
+      kind: 'unreadable',
+      detail: 'a chat message is not an object',
+    });
+    expect(parseDeepSeekDetailPage(notAnObject).ok).toBe(false);
+  });
+
+  it('a genuinely broken chain is still refused per conversation: readable ids, unclosed walk', () => {
+    // The line the fix draws, asserted from the other side. Every id here is readable and every
+    // message is an object, so the walk really ran — and it is the walk, not a type change, that did
+    // not close. These stay 'detail-tree-incomplete' (nothing archived, a named failure, the leg
+    // carries on); halting on them instead would stop a run for a long conversation.
+    const brokenChains: { bytes: string; detail: string }[] = [
+      { bytes: body([msg(3, 2), msg(4, 3)], { current: 4 }), detail: 'the parent chain leaves the messages this response carries' },
+      { bytes: body([msg(1, null), msg(2, 1)], { current: 9 }), detail: 'the current message is not among the chat messages this response carries' },
+      { bytes: body([msg(1, 3), msg(2, 1), msg(3, 2)], { current: 3 }), detail: 'the parent chain revisits a message' },
+    ];
+    for (const { bytes, detail } of brokenChains) {
+      expect(parseDeepSeekDetailTree(bytes)).toEqual({ ok: false, kind: 'incomplete', detail });
+      expect(parseDeepSeekDetailPage(bytes)).toEqual({ ok: true, outcome: 'detail-tree-incomplete' });
+    }
   });
 
   it('the envelope itself unreadable ⇒ {ok:false}, never a verdict', () => {
@@ -277,6 +376,39 @@ describe('W42-4 · the leg archives a whole body and refuses a short one, in the
     expect(report.state.archived).toEqual([ID]);
     expect(report.state.pending).toEqual([]);
     expect(report.failedThisRun).toEqual([]);
+  });
+
+  it('a body that also carries discarded sibling branches is archived, siblings and all', async () => {
+    // 🔴 W42b · The measured shape, end to end: the archived bytes are the response byte for byte, so
+    //    the discarded branches travel with it — and the walk that decides "whole" follows the one
+    //    chain and never visits them.
+    const store = memoryStore();
+    const be = backend({ [ID]: branchingBody() });
+    const report = await run(store, be, SCOPES.siblings);
+
+    expect(report.halted).toBeNull();
+    expect(report.stopped).toBe('queue-empty');
+    expect(report.archivedThisRun).toEqual([ID]);
+    expect(report.state.pending).toEqual([]);
+    expect(report.failedThisRun).toEqual([]);
+  });
+
+  it('a body whose message ids arrive as strings halts, so no debt is written off', async () => {
+    const store = memoryStore();
+    const be = backend({ [ID2]: stringIdBody(), [ID]: stringIdBody() });
+    const report = await run(store, be, SCOPES.stringIds);
+
+    // 🔴 W42b · Before this, a string id was 'detail-tree-incomplete': every conversation in the run
+    //    took that outcome, the debt was dropped, and a later parser fix had nothing left to resume.
+    expect(report.stopped).toBe('halted');
+    expect(report.halted?.reason).toBe('shape-changed');
+    expect(report.halted?.detail).toContain('message_id');
+    expect(report.archivedThisRun).toEqual([]);
+    expect(report.failedThisRun).toEqual([]);
+    expect(report.state.failures ?? []).toEqual([]);
+    expect(report.state.pending).toEqual([ID2, ID]);
+    // The leg stopped at the first body, before the conversation behind it: a halt is about the wire.
+    expect(be.calls.length).toBe(2);
   });
 
   it('a truncated body is refused by name while the whole conversation beside it is still archived', async () => {

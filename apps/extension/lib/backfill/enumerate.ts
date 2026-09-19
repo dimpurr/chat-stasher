@@ -707,12 +707,18 @@ export type DetailParseOutcome =
    * archived conversation (that would put a partial tree in the archive with
    * nothing marking it partial).
    *
-   * 🔴 **When the tree pointers a walk needs are not in the response at all**, that
-   *    is a different fact and does not land here: the plan's parser returns
-   *    `{ok:false}` and the leg halts 'shape-changed'. Saying "this conversation is
-   *    incomplete" about a conversation whose branch was never walked would be a
-   *    diagnosis with no evidence behind it — and a wrong field name would turn
-   *    into a leg's worth of them. See parseDeepSeekDetailTree.
+   * 🔴 **DeepSeek, and only DeepSeek, draws a further line here.** When a tree
+   *    pointer the walk has to read is not readable in the response — no numeric
+   *    `chat_session.current_message_id`, a chat message that is not an object, a
+   *    `message_id` that is not a number — that is a different fact and does not
+   *    land here: parseDeepSeekDetailTree returns `{ok:false}` and the leg halts
+   *    'shape-changed'. Saying "this conversation is incomplete" about a
+   *    conversation whose branch was never walked would be a diagnosis with no
+   *    evidence behind it, and one type change would turn into a leg's worth of
+   *    them. claude.ai's parser does **not** follow that rule at its own leaf:
+   *    parseClaudeDetailTree reports a missing `current_leaf_message_uuid` as this
+   *    outcome and parseClaudeDetailPage passes it through unchanged, so this
+   *    paragraph is not a description of 'detail-tree-incomplete' in general.
    */
   | 'detail-tree-incomplete';
 
@@ -1314,14 +1320,24 @@ export const DEEPSEEK_TREE_MESSAGE_KEY = 'message_id';
  *    the check itself* are present:
  *      · `kind: 'unreadable'` — the response does not carry what the check reads
  *        (it is not JSON, has no `data.biz_data.chat_messages` array, has no
- *        `data.biz_data.chat_session` object, or names no numeric
- *        `current_message_id`). We therefore did **not** check this conversation,
- *        and saying "this conversation is incomplete" about a conversation we never
- *        checked would be a diagnosis with no evidence behind it. The caller turns
- *        this into `{ok:false}` ⇒ halt('shape-changed'), a traced stop.
+ *        `data.biz_data.chat_session` object, names no numeric
+ *        `current_message_id`, carries a chat message that is not an object, or
+ *        carries a non-numeric `message_id`). We therefore did **not** check this
+ *        conversation, and saying "this conversation is incomplete" about a
+ *        conversation we never checked would be a diagnosis with no evidence
+ *        behind it — and, because the engine writes off the debt of a
+ *        `detail-tree-incomplete` conversation, one upstream type change would
+ *        write off every conversation in the run. The caller turns this into
+ *        `{ok:false}` ⇒ halt('shape-changed'), a traced stop.
  *      · `kind: 'incomplete'` — the check's inputs are all there and the tree does
- *        not close. That is a per-conversation fact about this conversation, and
- *        the caller turns it into the named outcome `detail-tree-incomplete`.
+ *        not close: the leaf is missing from the array, a link leaves the array or
+ *        revisits a node, two messages claim one `message_id`, or a **reached**
+ *        message's `parent_id` is neither `null` nor a number. That is a
+ *        per-conversation fact about this conversation, and the caller turns it
+ *        into the named outcome `detail-tree-incomplete`. Note where the line
+ *        falls: an id that cannot be **read** is `'unreadable'` above, while a
+ *        link that cannot be **followed** is this one — the first means the node
+ *        set was never built, the second means the walk ran and did not close.
  *
  * 🔴 The walk is bounded by the message count, so a response whose parent links
  *    form a cycle cannot loop forever. A cycle is not "complete" — it is a tree
@@ -1376,7 +1392,11 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
     return { ok: false, kind: 'unreadable', detail: 'the detail response has no `data.biz_data.chat_session` object' };
   }
   // 🔴 A type change is `unreadable`, not "incomplete": the same rule
-  //    parseDeepSeekListPage applies to a non-numeric `updated_at`.
+  //    parseDeepSeekListPage applies to a non-numeric `updated_at`. It applies to
+  //    every field this walk reads — the leaf below, and each message's own
+  //    `message_id` further down. A body whose ids are strings is a body we did
+  //    not walk, and saying "this conversation is incomplete" about it would be a
+  //    diagnosis with no evidence, repeated for every conversation in the run.
   const leaf = (session as Record<string, unknown>)[DEEPSEEK_TREE_LEAF_KEY];
   if (typeof leaf !== 'number' || !Number.isFinite(leaf)) {
     return {
@@ -1388,13 +1408,21 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
 
   const byId = new Map<number, Record<string, unknown>>();
   for (const message of messages) {
+    // 🔴 A message this code cannot read is `unreadable`, not "incomplete" — the
+    //    same rule as the leaf above and for the same reason. Filing it as
+    //    "incomplete" would make one upstream type change (ids arriving as
+    //    strings, or a message that is not an object) a per-conversation verdict
+    //    for **every** conversation: the engine writes the debt off
+    //    (`engine.ts`, 'detail-tree-incomplete') and never retries it. Nothing
+    //    was walked, so "this conversation is incomplete" is not a fact this code
+    //    may state. The chain checks below still are.
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
-      return { ok: false, kind: 'incomplete', detail: 'a chat message is not an object' };
+      return { ok: false, kind: 'unreadable', detail: 'a chat message is not an object' };
     }
     const messageRecord = message as Record<string, unknown>;
     const messageId = messageRecord[DEEPSEEK_TREE_MESSAGE_KEY];
     if (typeof messageId !== 'number' || !Number.isFinite(messageId)) {
-      return { ok: false, kind: 'incomplete', detail: 'a chat message carries no numeric `message_id`' };
+      return { ok: false, kind: 'unreadable', detail: 'a chat message carries no numeric `message_id`' };
     }
     // A duplicate id would make this map lose a message, and a walk over the
     // remainder would resolve a link to the wrong node. Two messages claiming one
@@ -1454,10 +1482,12 @@ export function parseDeepSeekDetailTree(text: string): DeepSeekDetailTreeWalk {
  * What each answer means, and why each one is a different fact to the user:
  *
  *  · `{ok:false}` — the shape this plan knows is not there: no
- *    `data.biz_data.chat_messages` array, or no readable tree to check with. Halt
- *    with a trace. 🔴 This is the branch that keeps a **wrong field name** from
- *    turning into a quiet storm of wrong per-conversation verdicts: we cannot say
- *    "this conversation is incomplete" about a conversation we never checked.
+ *    `data.biz_data.chat_messages` array, or no readable tree to check with (a
+ *    non-numeric leaf, a message that is not an object, a `message_id` that is
+ *    not a number — see parseDeepSeekDetailTree). Halt with a trace. 🔴 This is
+ *    the branch that keeps a **wrong field name or type** from turning into a
+ *    quiet storm of wrong per-conversation verdicts: we cannot say "this
+ *    conversation is incomplete" about a conversation we never checked.
  *  · `'detail-empty-unverified'` — the array is there and is **empty**. From this
  *    response alone, "this conversation has no messages" and "this response is a
  *    window with nothing in it" are not distinguishable, so the ambiguous case
