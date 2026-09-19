@@ -52,8 +52,10 @@ import {
   HOOK_REASON_DID_NOT_RUN,
   HOOK_REASON_DID_NOT_TAKE,
   HOOK_REASON_WAS_REPLACED,
+  HOOK_REPORT_MESSAGE,
   HOOK_STATUS_MESSAGE,
   isHookStatusMessage,
+  MAIN_READY_MESSAGE,
   PLATFORMS,
   type HookObservation,
 } from '../lib/contract';
@@ -634,10 +636,121 @@ describe('W43 · the hook reports a patch that did not take', () => {
     const reports = hookStatusReports(sent);
     expect(reports.map((message) => message.reason)).toEqual([HOOK_REASON_WAS_REPLACED]);
     // 🔴 And it was not answered: an answer here would tell the bridge this page
-    //    is captured while the page's own calls go straight past us.
-    expect(page.posted.some((entry) => entry.data?.type === 'cs-backfill-ready')).toBe(false);
+    //    is captured while the page's own calls go straight past us. (The old
+    //    form of this line tested for a message name no code has ever posted, so
+    //    it could not fail; the token is what makes it an assertion.)
+    expect(probeAnswers(page)).toEqual([]);
   });
 });
+
+/**
+ * W43b · **"Installed" means both live globals are still the wrappers this hook
+ * installed.**
+ *
+ * The shape these two cases model is the measured one, and it is the shape the
+ * file above could not fail on: `window.fetch` is ours while
+ * `XMLHttpRequest.prototype.open` is the page's own function again. Capture on
+ * such a page goes through XHR, so nothing is staged and no backfill target is
+ * registered — and because the probe only asked about `fetch`, the page answered
+ * it, which sent `reason: null` to background and **withdrew** the record the
+ * hook had just written. The user saw the same empty popup as a user who had
+ * opened nothing, which is the ambiguity this whole change exists to remove.
+ *
+ * Both cases assert the same three things about the half-install: it is recorded,
+ * the positive observation is not sent for it, and the probe is left unanswered
+ * (an answer is the isolated side's only proof that capture is live, and
+ * `MAIN_READY_MESSAGE` is that answer).
+ */
+describe('W43b · a page whose XHR half is not ours is never reported as healthy', () => {
+  it('🔴 a page that replaces XMLHttpRequest after the install is reported, not answered', async () => {
+    const page = makeFakePage(await pageHook());
+    // The page's own two functions, before the hook touches them — what a page
+    // that restores its constructor puts back.
+    const pageOpen = page.win.XMLHttpRequest.prototype.open;
+    const pageSend = page.win.XMLHttpRequest.prototype.send;
+
+    const hook = await pageHook();
+    hook.installPageFetchHook(hook.PAGE_HOOK_OPTIONS);
+    // Both wrappers took a moment ago, so this is a regression from a working
+    // install rather than an install that never happened.
+    expect(String(page.win.fetch)).not.toContain('[native code]');
+
+    const sent = stubRuntime();
+    await loadBridge();
+
+    // 🔴 The measured half-install itself: `fetch` stays ours, and the constructor
+    //    the page will use from now on is its own again.
+    class RestoredXhr { /* the page's replacement, with its own prototype */ }
+    Object.defineProperty(RestoredXhr.prototype, 'open', { value: pageOpen, configurable: true });
+    Object.defineProperty(RestoredXhr.prototype, 'send', { value: pageSend, configurable: true });
+    page.win.XMLHttpRequest = RestoredXhr;
+
+    await postProbe(page);
+
+    const reports = hookStatusReports(sent);
+    expect(reports.map((message) => message.reason)).toEqual([HOOK_REASON_WAS_REPLACED]);
+    // 🔴 A half-install is never the positive observation. `null` is what removes
+    //    the origin's record, so sending it here would delete the record this page
+    //    just earned — the exact sequence the review measured: written, then
+    //    withdrawn moments later.
+    expect(reports.some((message) => message.reason === null)).toBe(false);
+    // 🔴 And it was not answered: on this page the user's own conversation request
+    //    goes straight past us.
+    expect(probeAnswers(page)).toEqual([]);
+  });
+
+  it('🔴 an XHR whose setter swallows the patch is recorded at install, and still not healthy', async () => {
+    const page = makeFakePage(await pageHook());
+    const pageOpen = page.win.XMLHttpRequest.prototype.open;
+    // 🔴 The install-time shape: the assignment neither takes nor throws — what a
+    //    read-only prototype does in the sloppy-mode function the built hook
+    //    compiles to — so the fetch half below it still installs.
+    Object.defineProperty(page.win.XMLHttpRequest.prototype, 'open', {
+      configurable: true,
+      get: () => pageOpen,
+      set: () => { /* swallowed */ },
+    });
+
+    const hook = await pageHook();
+    hook.installPageFetchHook(hook.PAGE_HOOK_OPTIONS);
+
+    // 🔴 The installer's own observation, before any probe exists: the XHR half did
+    //    not take and that is written down rather than assumed. Deleting
+    //    `if (xhrHookExpected && !xhrPatched)` in `lib/page-hook.ts` turns this
+    //    assertion red, and nothing else in the suite notices.
+    expect(
+      page.posted.filter((entry) => entry.data?.type === HOOK_REPORT_MESSAGE)
+        .map((entry) => entry.data.reason),
+    ).toEqual([HOOK_REASON_DID_NOT_TAKE]);
+    // The install continued past the refused half: a refusal is not a reason to
+    // abandon the wrapper that did work.
+    expect(String(page.win.fetch)).not.toContain('[native code]');
+
+    const sent = stubRuntime();
+    await loadBridge();
+    await settle(page, 0);
+    await postProbe(page);
+
+    const reports = hookStatusReports(sent);
+    expect(reports.map((message) => message.reason)).toEqual([HOOK_REASON_DID_NOT_TAKE]);
+    expect(reports.some((message) => message.reason === null)).toBe(false);
+    expect(probeAnswers(page)).toEqual([]);
+  });
+});
+
+/**
+ * The probe's token, and the only thing that distinguishes a probe **answer** from
+ * the best-effort install-time signal: both carry `MAIN_READY_MESSAGE`, and only
+ * the answer echoes the token it was asked with (the signal posts `token: null`).
+ * So "the probe was answered" is a test on the type *and* the token.
+ */
+const PROBE_TOKEN = 'probe-token-1234';
+
+function probeAnswers(page: FakePage): any[] {
+  return page.posted.filter(
+    (entry) => entry.data?.type === MAIN_READY_MESSAGE && entry.data.token === PROBE_TOKEN,
+  );
+}
 
 /**
  * Ask the page world to verify itself, the way the bridge's probe does.
@@ -647,6 +760,6 @@ describe('W43 · the hook reports a patch that did not take', () => {
  */
 async function postProbe(page: FakePage): Promise<void> {
   const { MAIN_PROBE_MESSAGE } = await import('../lib/contract');
-  page.win.postMessage({ type: MAIN_PROBE_MESSAGE, token: 'probe-token-1234' }, ORIGIN);
+  page.win.postMessage({ type: MAIN_PROBE_MESSAGE, token: PROBE_TOKEN }, ORIGIN);
   page.pump();
 }

@@ -17,7 +17,9 @@
  *  (b) MAIN is silent ⇒ the fallback still runs, and if it does not answer either
  *      the fixed warning is emitted — exactly once, no matter how long we watch.
  *  (c) the property that makes (a) safe: an answered probe implies an installed
- *      hook, so a hook that fell over before patching `fetch` must stay silent.
+ *      hook, so a hook that could not complete its install must stay silent.
+ *      🔴 W43b · "Installed" now means **both** halves: a page whose XHR patch did
+ *      not take is still not answered from, even though its `fetch` half is.
  *  (d) the fallback that *is* blocked (append succeeds, execution does not) is the
  *      case that must warn rather than pass for working.
  */
@@ -25,6 +27,8 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { withI18n } from './i18n-harness';
 import {
+  HOOK_REASON_DID_NOT_TAKE,
+  HOOK_REPORT_MESSAGE,
   MAIN_PROBE_MESSAGE,
   MAIN_READY_MESSAGE,
   PAGE_HOOK_FETCH_MARKER,
@@ -348,27 +352,36 @@ describe('W12 · MAIN world silent: the fallback still runs, and says so exactly
 });
 
 describe('W12 · what an answered probe is allowed to mean', () => {
-  it('🔴 a hook that throws before it patches fetch does not answer the probe', async () => {
+  it('🔴 a hook whose XHR patch cannot take does not answer the probe', async () => {
     const page = makeFakePage(await pageHook());
     stubRuntime();
 
-    // A page that froze `XMLHttpRequest.prototype`: the XHR patch assignment in
-    // `installPageFetchHook` throws before the fetch wrapper is ever assigned, so
-    // the hook did NOT install. `installPageFetchHook` has always let that throw
-    // escape (the WebSocket patch below it is guarded for the same reason).
+    // A page that froze `XMLHttpRequest.prototype`: neither the `open` nor the
+    // `send` assignment can take.
+    // 🔴 W43b · This case's premise changed with the fix, and it is worth naming
+    //    which way: the XHR assignment is now guarded the way the fetch assignment
+    //    and the WebSocket patch already were, so a refusal of one half is a
+    //    **recorded** observation instead of an exception thrown at
+    //    `document_start` that abandoned the other half. What the case exists for is
+    //    unchanged — the probe is not answered, because an answer is the isolated
+    //    side's only proof that capture is live, and on this page the XHR requests
+    //    go straight past us.
     const Xhr = function Xhr() { /* never constructed */ } as unknown as { prototype: object };
     Object.freeze(Xhr.prototype);
     page.win.XMLHttpRequest = Xhr;
 
     const { installPageFetchHook, PAGE_HOOK_OPTIONS } = await import('../lib/page-hook');
-    expect(() => installPageFetchHook(PAGE_HOOK_OPTIONS)).toThrow();
+    expect(() => installPageFetchHook(PAGE_HOOK_OPTIONS)).not.toThrow();
 
-    // The marker is absent, so the hook is not installed...
-    expect(page.win.fetch[PAGE_HOOK_FETCH_MARKER]).not.toBe(PAGE_HOOK_VERSION);
+    // The refusal is the hook's own report, posted into the page world for the
+    // bridge to record; the fetch half is in place and is not what is broken.
+    expect(page.posted).toContainEqual(
+      expect.objectContaining({ type: HOOK_REPORT_MESSAGE, reason: HOOK_REASON_DID_NOT_TAKE }),
+    );
+    expect(page.win.fetch[PAGE_HOOK_FETCH_MARKER]).toBe(PAGE_HOOK_VERSION);
 
-    // ...and the probe must get no answer, because an answer is now the only
-    // proof the isolated side has. Registering the listener before the patch —
-    // which is where it used to live — answered from a page that was still
+    // ...and the probe must get no answer. Registering the listener before the
+    // patch — which is where it used to live — answered from a page that was still
     // talking to the original `fetch`.
     page.win.postMessage({ type: MAIN_PROBE_MESSAGE, token: 'tok-0123456789' }, ORIGIN);
     await settle(page, 1);

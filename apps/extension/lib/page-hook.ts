@@ -393,6 +393,17 @@ export function installPageFetchHook(options: PageHookOptions): void {
   // bodies that cannot be read without changing what the page sees
   // (arraybuffer / blob / document) stay a visible "unsupported" warning.
   const xhrConstructor = pageWindow.XMLHttpRequest;
+  /** The two signatures this hook replaces on `XMLHttpRequest.prototype`. */
+  type XhrOpenWrapper = (
+    this: XMLHttpRequest,
+    method: string,
+    url: string | URL,
+    ...rest: unknown[]
+  ) => void;
+  type XhrSendWrapper = (
+    this: XMLHttpRequest,
+    body?: Document | XMLHttpRequestBodyInit | null,
+  ) => void;
   /**
    * 🔴 W43 · **Which transports this hook actually patched.**
    *
@@ -402,14 +413,69 @@ export function installPageFetchHook(options: PageHookOptions): void {
    * are two different facts and only the second one is capture. Before W43 the
    * hook reported neither, so a page that refused a patch looked exactly like a
    * page where nothing had been requested yet.
+   *
+   * 🔴 W43b · **And the read-back is of the live global, every time it is asked.**
+   *    The first version compared `xhrConstructor.prototype.open` — the object
+   *    this function captured a line earlier — against the function it had before
+   *    the assignment. That answers "did my assignment take?" and nothing else. A
+   *    page that replaces `window.XMLHttpRequest` *afterwards* leaves the captured
+   *    object exactly as we left it, so on that page the read-back said "ours"
+   *    while the constructor the page actually calls had a native `open` again —
+   *    the measured half-install (fetch wrapped, `XMLHttpRequest.prototype.open`
+   *    native, on a logged-in page whose capture goes through XHR). What is
+   *    compared now is `pageWindow.XMLHttpRequest.prototype.*`: the object the
+   *    page's own code will reach for, re-read on every question rather than
+   *    remembered from install time.
    */
   let xhrPatched = false;
-  if (typeof xhrConstructor === 'function') {
+  /**
+   * 🔴 W43b · The wrappers this function installs, kept so the live global can be
+   *    compared against **them** rather than against "whatever is there now" — a
+   *    page that replaced `open` with its own function is not a page we patched.
+   *    `null` until the block below runs, and for a document with no XHR global.
+   */
+  let xhrOpenWrapper: XhrOpenWrapper | null = null;
+  let xhrSendWrapper: XhrSendWrapper | null = null;
+  /**
+   * Whether this document had an XHR transport to hook at all. A page with no
+   * `XMLHttpRequest` global has no XHR capture to lose, so its absence is
+   * "nothing to install" rather than a missing half — the opposite reading would
+   * file a failure against every document that never had the transport.
+   */
+  const xhrHookExpected = typeof xhrConstructor === 'function';
+
+  /**
+   * 🔴 W43b · **Is the XHR half of this installer in effect, right now?**
+   *
+   * The one question both the install below and the probe listener ask, so the
+   * two cannot drift: `true` only while the live `window.XMLHttpRequest` is a
+   * constructor whose `prototype.open` **and** `prototype.send` are the functions
+   * this hook installed. `send` is part of the answer because it is the half that
+   * attaches the capture listener — a constructor that kept our `open` and
+   * recovered a native `send` records the request and then reads nothing.
+   *
+   * A global that is missing, unreadable, or not constructible is not a wrapper
+   * this hook installed, which is the answer that keeps a refusal from reading as
+   * a success.
+   */
+  const xhrHookInEffect = (): boolean => {
+    if (!xhrHookExpected) return true;
+    if (!xhrOpenWrapper || !xhrSendWrapper) return false;
+    try {
+      const live = pageWindow.XMLHttpRequest;
+      if (typeof live !== 'function') return false;
+      return live.prototype?.open === xhrOpenWrapper && live.prototype?.send === xhrSendWrapper;
+    } catch {
+      return false;
+    }
+  };
+
+  if (xhrHookExpected) {
     const originalOpen = xhrConstructor.prototype.open;
     const originalSend = xhrConstructor.prototype.send;
     const xhrRequests = new WeakMap<object, { url: string; method: string }>();
 
-    xhrConstructor.prototype.open = function (
+    const openWrapper: XhrOpenWrapper = function (
       this: XMLHttpRequest,
       method: string,
       url: string | URL,
@@ -418,7 +484,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
       xhrRequests.set(this, { url: String(url), method: String(method ?? 'GET') });
       originalOpen.apply(this, [method, url, ...rest] as never);
     };
-    xhrConstructor.prototype.send = function (
+    const sendWrapper: XhrSendWrapper = function (
       this: XMLHttpRequest,
       body?: Document | XMLHttpRequestBodyInit | null,
     ): void {
@@ -447,10 +513,26 @@ export function installPageFetchHook(options: PageHookOptions): void {
       }
       originalSend.call(this, body);
     };
-    // The read-back. `open` is ours only if it is no longer the function the page
-    // had a moment ago; an assignment the page's own descriptor refused leaves
-    // this false, and that is a fact about this page worth recording.
-    xhrPatched = xhrConstructor.prototype.open !== originalOpen;
+    xhrOpenWrapper = openWrapper;
+    xhrSendWrapper = sendWrapper;
+    // 🔴 W43b · Guarded exactly as the fetch assignment below and the WebSocket
+    //    patch above are, and for the same reason: a prototype whose setter throws
+    //    (a frozen `XMLHttpRequest.prototype`, measured in `w12-csp-handshake`) is
+    //    a **recorded** observation, not an exception thrown into the page at
+    //    `document_start` that abandons the rest of this installer — which is what
+    //    it used to do, leaving the fetch half unwrapped as a side effect of an
+    //    XHR refusal. The read-back below names it; there is nothing to add here.
+    try {
+      xhrConstructor.prototype.open = openWrapper;
+      xhrConstructor.prototype.send = sendWrapper;
+    } catch {
+      // See above: the read-back is the report.
+    }
+    // The read-back — of the live global, not of the object captured above. An
+    // assignment the page's own descriptor refused leaves this false, and so does
+    // a page that has since replaced the constructor; both are facts about this
+    // page worth recording.
+    xhrPatched = xhrHookInEffect();
   }
 
   const eventSourceConstructor = pageWindow.EventSource;
@@ -665,10 +747,14 @@ export function installPageFetchHook(options: PageHookOptions): void {
     reportHookFailure(options.hookReportReasons.didNotTake);
     return;
   }
-  if (!xhrPatched) {
-    // Capture still works for `fetch`, so the hook stays installed and answers
-    // probes — but the requests that would have come through XHR are invisible,
-    // and that is a fact this page's row must carry rather than a detail.
+  if (xhrHookExpected && !xhrPatched) {
+    // 🔴 W43b · The XHR requests this page makes are invisible, and that is a fact
+    //    its row must carry rather than a detail. Capture over `fetch` still works,
+    //    so the wrapper above stays installed — but the hook is **not** whole, and
+    //    the probe listener below refuses to answer from this state. Answering was
+    //    the second half of the old bug: one healthy wrapper was enough to say
+    //    "captured", and that answer is what withdraws a record (a page whose hook
+    //    is half-installed had its own record removed moments after it appeared).
     reportHookFailure(options.hookReportReasons.didNotTake);
   }
 
@@ -678,10 +764,18 @@ export function installPageFetchHook(options: PageHookOptions): void {
   //    verifier DeepSeek's CSP refuses to execute), so "answered" has to imply
   //    "installed" by construction rather than by luck.
   //    🔴 W43 · And "installed" is now read back rather than assumed: the answer
-  //    below is sent only while `window.fetch` is still the wrapper this function
-  //    installed, so a page that replaced it after the patch — the one way a
-  //    page can silently end capture mid-life — gets a recorded observation
-  //    instead of a reassuring answer. See the verification inside the listener.
+  //    below is sent only while the wrappers this function installed are still
+  //    the page's own globals, so a page that replaced one after the patch — the
+  //    one way a page can silently end capture mid-life — gets a recorded
+  //    observation instead of a reassuring answer. See the verification inside
+  //    the listener.
+  //    🔴 W43b · **Both** halves, re-read on every probe. The fetch-only check was
+  //    exactly the hole: a page whose `window.fetch` is ours and whose
+  //    `XMLHttpRequest.prototype.open` is native again (measured, on a page whose
+  //    capture goes through XHR) answered this probe, and that answer withdrew a
+  //    record that had been written correctly a moment earlier. "It was ours when
+  //    we installed it" is not "it is ours now", and the only moment the isolated
+  //    side asks is now.
   //    Still atomic with respect to the probe: `window.postMessage` is delivered
   //    as a task, so no probe can be dispatched in the middle of this function.
   window.addEventListener('message', (event: MessageEvent<unknown>) => {
@@ -698,6 +792,22 @@ export function installPageFetchHook(options: PageHookOptions): void {
       //    while the page's own calls go straight past us, which is precisely
       //    the false negative this handshake exists to remove.
       reportHookFailure(options.hookReportReasons.wasReplaced);
+      return;
+    }
+    if (!xhrHookInEffect()) {
+      // 🔴 W43b · The measured half-install, and the reason the answer above may
+      //    not be sent from it. `fetch` being ours says nothing about the XHR
+      //    global the page now holds, and on this shape the page's own capture
+      //    goes through XHR — so an answer here would be the false negative this
+      //    handshake exists to remove, and worse than a false negative: `null`
+      //    from the bridge **withdraws** the origin's record.
+      //    The reason names which of the two shapes it is, and both are
+      //    observations: `did-not-take` if the patch never took at install time,
+      //    `was-replaced` if it took and the page has since put its own function
+      //    back.
+      reportHookFailure(
+        xhrPatched ? options.hookReportReasons.wasReplaced : options.hookReportReasons.didNotTake,
+      );
       return;
     }
     post({ type: options.readyMessage, version: options.version, token: record.token });

@@ -24,8 +24,8 @@ Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
    the raw response text (`apps/extension/lib/contract.ts:210-235`, `:685-687`;
-   the `fetch` wrap at `apps/extension/lib/page-hook.ts:614-639`, the
-   `response.clone().text()` read at `:607`, and the capture decision at
+   the `fetch` wrap at `apps/extension/lib/page-hook.ts:696-721`, the
+   `response.clone().text()` read at `:689`, and the capture decision at
    `:347-387`).
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
@@ -230,7 +230,7 @@ storage for the key, or passphrase-wrapping of the key file.
 |---|---|
 | **Can see** | Your conversations — they always could; they host them. Additionally, the extension's capture is indistinguishable from your own browsing, because it reads responses to requests **made in your already-logged-in session**. |
 | **Cannot see** | That the capture happened, as far as we know — but see the caveat below. |
-| **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:614-639` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:607`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:754-809`, `:1119-1141`). |
+| **Evidence** | The hook wraps `fetch` in the page's own world — `window.fetch` is replaced by the wrapper defined at `apps/extension/lib/page-hook.ts:696-721` — and reads a clone of responses the page already requested (`apps/extension/lib/page-hook.ts:689`; `apps/extension/entrypoints/dw-fetch-main.content.ts:13-15`). Backfill, when enabled, issues additional requests to the same origin (`apps/extension/lib/backfill/engine.ts:754-809`, `:1119-1141`). |
 
 **Caveat, stated honestly, and one measurement this document owes the reader:**
 the "cannot see that the capture happened" line above is about what the platform
@@ -263,7 +263,7 @@ turns as you scroll, and a copy anchored anywhere but page 1 could look complete
 while holding only the oldest turns. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:588-593`;
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:670-675`;
 `apps/extension/entrypoints/dw-bridge.content.ts:512-538`;
 `apps/extension/lib/platform-auth.ts:99-118`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token

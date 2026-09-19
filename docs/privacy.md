@@ -91,14 +91,14 @@ the sentence.
 1. **Capture.** A content script, injected only on a fixed list of chat origins,
    wraps `fetch` in the page and keeps a **clone** of the response text of
    requests **the page itself already made** in your already-logged-in session
-   (`apps/extension/lib/page-hook.ts:568`, `:607`, `:468-485`). Only responses
+   (`apps/extension/lib/page-hook.ts:650`, `:689`, `:550-567`). Only responses
    matching a known platform route are kept
    (`apps/extension/lib/contract.ts:236-682`, `:806-834`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
-   page, on the same origin (`apps/extension/lib/page-hook.ts:588-593`;
+   page, on the same origin (`apps/extension/lib/page-hook.ts:670-675`;
    `apps/extension/entrypoints/dw-bridge.content.ts:512-538`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
@@ -209,7 +209,7 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:607`, `:468-485`). The one feature that does
+  (`apps/extension/lib/page-hook.ts:689`, `:550-567`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
   [section 4](#4-who-your-data-is-shared-with).
 - **Check the code for a tracker.** Searching the extension and CLI sources for
@@ -350,7 +350,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:607`, `:468-485`; `apps/extension/lib/gemini-capture.ts:150-234` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:689`, `:550-567`; `apps/extension/lib/gemini-capture.ts:150-234` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:261-296`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:465-475` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -498,10 +498,10 @@ another copy of it: an extra copy in your archive, never a lost one.
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
 the same capture decision above (`apps/extension/lib/page-hook.ts:347-387`).
 An XHR body is read only when the page itself reads it as text or JSON
-(`apps/extension/lib/page-hook.ts:432-437`); a binary XHR body (arraybuffer,
-blob, document) is never read and only prints a console warning (`:438-441`,
+(`apps/extension/lib/page-hook.ts:498-503`); a binary XHR body (arraybuffer,
+blob, document) is never read and only prints a console warning (`:504-507`,
 `:245-252`). `EventSource` streams are never read either — the hook only warns
-that one was used (`apps/extension/lib/page-hook.ts:456-475`).
+that one was used (`apps/extension/lib/page-hook.ts:538-557`).
 
 ## 6. What each permission is for
 
