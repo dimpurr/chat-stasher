@@ -174,6 +174,8 @@ test('a conversation fetched from a same-origin frame is captured, with the hook
   expect(frameMsgs).toEqual(['__chat_stasher_capture__']);
 
   // The whole path, end to end: page world → bridge in the frame → background.
+  // 🔴 Exactly one entry, not one per frame: the top document makes no request of
+  //    its own, and a second copy would mean one conversation filed twice.
   const entries = await waitForOutbox(ext, (rows) => rows.length >= 1);
   expect(entries).toHaveLength(1);
   expect(entries[0]!.name).toBe(`kimi-${SESSION_ID}.json`);
@@ -182,10 +184,6 @@ test('a conversation fetched from a same-origin frame is captured, with the hook
   expect(bundle.url).toBe(`${ORIGIN}${API_PATH}`);
   expect(bundle.method).toBe('POST');
   expect(bundle.status).toBe(200);
-
-  // Exactly one capture, not one per frame: the top document makes no request of
-  // its own, and a second copy would mean the same conversation filed twice.
-  expect(entries).toHaveLength(1);
 
   expect(escaped).toEqual([]);
 });
