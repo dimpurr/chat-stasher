@@ -158,17 +158,19 @@ export function isHookReportMessage(
  * person reads (`lib/hook-status.ts`) and because a capture that was lost must
  * not be made worse by a report about it.
  *
- * 🔴 **`reason: null` is not an absence, it is the positive fact.** A page whose
- *    probe was answered echoed a token this side invented, which is the proof
- *    that the hook is installed and in effect *there*; that page is how an older
- *    record for the same origin gets cleared. A nullable field would be a poor way
- *    to say that if the two cases were "something" and "nothing" — they are two
- *    observations, and the guard below accepts exactly those two.
+ * 🔴 **`reason: null` is not an absence, it is the positive fact.** A top frame
+ *    whose probe was answered echoed a token this side invented, which is the
+ *    proof that the hook is installed and in effect *there*; that top frame is how
+ *    an older record for the same origin gets cleared. A nullable field would be a
+ *    poor way to say that if the two cases were "something" and "nothing" — they
+ *    are two observations, and the guard below accepts exactly those two.
  *
- * 🔴 One record per origin, last word wins. A frame that fails and a frame that
- *    verifies on the same origin are both real, and the record cannot hold both;
- *    which one is current is the newest thing a page on that origin said, and the
- *    record keeps the time so a reader can see how current it is.
+ * 🔴 One record per origin, last word wins — but only among the observations
+ *    that are allowed to speak for the origin. A frame's observation is a
+ *    statement about that frame; only the top frame speaks for the origin
+ *    (`entrypoints/dw-bridge.content.ts`), so the record holds the newest top-frame
+ *    word and a healthy child frame cannot withdraw a failure the main document
+ *    wrote down. The record keeps the time so a reader can see how current it is.
  */
 export const HOOK_STATUS_MESSAGE = 'cs-hook-status';
 

@@ -762,8 +762,9 @@ export function installPageFetchHook(options: PageHookOptions): void {
     //    so the wrapper above stays installed — but the hook is **not** whole, and
     //    the probe listener below refuses to answer from this state. Answering was
     //    the second half of the old bug: one healthy wrapper was enough to say
-    //    "captured", and that answer is what withdraws a record (a page whose hook
-    //    is half-installed had its own record removed moments after it appeared).
+    //    "captured", and that answer is what withdraws a top-frame record (a page
+    //    whose hook is half-installed had its own record removed moments after it
+    //    appeared).
     reportHookFailure(options.hookReportReasons.didNotTake);
   }
 
@@ -824,8 +825,8 @@ export function installPageFetchHook(options: PageHookOptions): void {
       //    XHR half). Reported, not answered — answering would tell the bridge
       //    "this page is captured" while the page's own calls go straight past
       //    us, which is precisely the false negative this handshake exists to
-      //    remove. And `null` from the bridge **withdraws** the origin's record,
-      //    so answering from a half-install deletes the record it just earned.
+      //    remove. And `null` from the bridge **withdraws** the origin's top-frame
+      //    record, so answering from a half-install deletes the record it just earned.
       //    The reason names which of the two shapes it is, and both are
       //    observations: `did-not-take` if the patch never took at install time,
       //    `was-replaced` if it took and the page has since put its own function
@@ -868,8 +869,9 @@ export function installPageFetchHook(options: PageHookOptions): void {
    *    treats it that way: the record's timestamp moves and its reason set is
    *    merged, so a page that stays broken keeps saying so **as of now** rather
    *    than as of some moment before it broke. That is also what makes the record
-   *    survive the one thing on this origin that can still remove it: another
-   *    document whose own hook verified (`lib/hook-status.ts`, last word wins).
+   *    survive the one thing on this origin that can still remove it: a later
+   *    top-frame observation from the same origin whose hook verified
+   *    (`lib/hook-status.ts`, last word wins).
    *
    * 🔴 Nothing here is a precondition for the hook working, and nothing here may
    *    throw into the page: a window that refuses a timer keeps the two

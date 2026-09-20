@@ -11,8 +11,17 @@
  * different facts (CLAUDE.md invariant 1), and this was the one place the
  * extension itself collapsed them.
  *
- * So: an observation the extension makes **itself, in the page that made it**, is
- * written down here, per origin, and read back by the popup.
+ * So: an observation the extension makes **itself, in the top frame of the page
+ * that made it**, is written down here, per origin, and read back by the popup.
+ *
+ * 🔴 W46 · **Who may speak for an origin.** A frame's observation is a statement
+ *    about *that frame*, not about the origin as a whole. A child frame whose hook
+ *    verified is not evidence that the main document's hook is healthy, and a
+ *    child frame whose hook failed is not evidence that the main document is
+ *    broken. Only the top frame speaks for the origin: it is the document the user
+ *    is looking at, and the record is keyed by origin because the user needs to
+ *    know which tab to reload. The bridge enforces this
+ *    (`entrypoints/dw-bridge.content.ts`); this module records what reaches it.
  *
  * ## What is recorded, and what is deliberately not
  *
@@ -160,16 +169,22 @@ export function hookStatusOf(snapshot: Record<string, unknown> | null): HookStat
 }
 
 /**
- * Write one page's observation down — or, for `reason: null`, clear the origin's
- * record because that page's hook **verified**.
+ * Write one top-frame observation down — or, for `reason: null`, clear the
+ * origin's record because that top frame's hook **verified**.
  *
  * 🔴 The clear is evidence, not acknowledgement, and that is why there is no
  *    button for it. A record the user could dismiss without the condition having
  *    changed would be a note that says "this was broken" about a page that is
  *    still broken — which is the failure mode invariant 1 exists to prevent, one
- *    level up. What clears it is the only thing that can honestly clear it: a
- *    page on that origin whose hook answered a probe. Reloading the tab is how a
- *    user makes that happen, and the popup's sentence says so.
+ *    level up. What clears it is the only thing that can honestly clear it: the
+ *    top frame on that origin whose hook answered a probe. Reloading the tab is
+ *    how a user makes that happen, and the popup's sentence says so.
+ *
+ * 🔴 W46 · A child frame's observation never reaches this function (the bridge
+ *    drops it), so `reason: null` from a healthy iframe cannot erase a failure
+ *    the main document wrote down. The record is per origin because the user
+ *    needs one place to look; the top-frame gate is what keeps one document from
+ *    speaking for another.
  *
  * 🔴 `remove`, not "save an empty record". The two look the same on the next read
  *    and are not the same thing on disk: an empty record is a row that has to be

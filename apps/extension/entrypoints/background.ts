@@ -1348,9 +1348,10 @@ export default defineBackground(() => {
          * guard accepts.
          *
          * 🔴 The reply says only that the write happened; nothing is claimed about
-         *    the page. `reason: null` is a page whose hook verified, which clears
-         *    the origin's record — the one way it is ever cleared
-         *    (`lib/hook-status.ts`).
+         *    the page. `reason: null` is a top frame whose hook verified, which
+         *    clears the origin's record — the one way it is ever cleared
+         *    (`lib/hook-status.ts`). A child frame never reaches this branch: the
+         *    bridge drops its observation (`entrypoints/dw-bridge.content.ts`).
          *
          * 🔴 W47 · **A refusal here is a fact, and it is written down.** From
          *    outside, "background refused this report" and "nothing ever arrived"
