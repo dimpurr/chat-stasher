@@ -34,7 +34,9 @@
  *    sweep and registered through `rememberTab` (so repeats cannot duplicate).
  *  · `no-http-port` is still reported faithfully when there genuinely is no
  *    platform tab. A sweep that looked and found nothing is distinguishable
- *    in the tick trace from a tick that never swept.
+ *    in the tick trace from a tick that never swept, from a sweep that hit
+ *    its ping cap, and from a sweep that found an answering tab and refused
+ *    it for want of a slot.
  *  · Any prune goes through `writeRegistry` (the W33-C mirror). Writing
  *    `store.save` directly would leave a stale mirror that silently undoes it.
  *
@@ -281,6 +283,7 @@ describe('W51-A · a tick that is about to concede no-http-port sweeps once', ()
       pinged: 0,
       registered: 0,
       deferred: 0,
+      crowded: 0,
     });
     expect(await mod.backfillRuntimeStatus()).toMatchObject({
       transportWired: false,
@@ -393,7 +396,7 @@ describe('W51-B · pruning a gone id is not a missed ping, and it writes through
 
     expect(BACKFILL_PING_MESSAGE).toBe('cs-backfill-ping');
     expect(asked.sort((a, b) => a - b), 'known / discarded / frozen are not pinged').toEqual([2, 3, 6]);
-    expect(report).toMatchObject({ looked: true, queried: 6, pruned: 0, pinged: 3, registered: 2, deferred: 0 });
+    expect(report).toMatchObject({ looked: true, queried: 6, pruned: 0, pinged: 3, registered: 2, deferred: 0, crowded: 0 });
     expect(report.looked).toBe(true);
     if (report.looked) {
       expect([...report.origins].sort()).toEqual([ORIGIN, OTHER_ORIGIN].sort());
@@ -477,6 +480,49 @@ describe('W51-C · a sweep burst cannot evict a live listed row (D2)', () => {
       expect(remaining, 'a row whose tabId the query just listed as live is not sliced off by a burst of rememberTab').toContain(id);
     }
     expect(remaining, 'MAX_TAB_ENTRIES is unchanged; the fix is not to raise the ceiling').toHaveLength(MAX_TAB_ENTRIES);
+    expect(report.looked).toBe(true);
+    if (report.looked) {
+      expect(report.registered, 'the answering chatgpt tabs were not slotted in — that is the D2 skip').toBe(0);
+      expect(report.deferred, 'every answering tab was pinged; this is not the ping cap').toBe(0);
+      expect(report.crowded, 'an answering tab turned away for want of a slot is a counted refusal, not "found nobody"').toBe(chatgptIds.length);
+      expect(report.recovered, 'recovered stays empty: the retry must not fire').toEqual([]);
+    }
+  });
+
+  it('🔴 a full live registry that refuses one answering tab is distinguishable in storage from looking and finding nobody', async () => {
+    await enabledWithTarget();
+    const { rememberTab, MAX_TAB_ENTRIES } = await import('../lib/backfill/tab-port');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const s = browserLocalStore()!;
+    for (let i = 1; i <= MAX_TAB_ENTRIES; i += 1) {
+      await rememberTab(s, { tabId: i, origin: OTHER_ORIGIN, at: i });
+      queriedTabs.push({ id: i });
+    }
+    const chatgptId = MAX_TAB_ENTRIES + 1;
+    liveTabs.set(chatgptId, ORIGIN);
+    queriedTabs.push({ id: chatgptId });
+
+    const mod = await bootBackground();
+    await alarmTick(mod);
+
+    const remaining = (await registry()).map((t) => t.tabId);
+    const rec = await trace();
+    console.log('[W51-C D2 persisted] registry:', remaining, 'reason:', rec?.reason, 'tabSweep:', rec?.tabSweep);
+    for (let i = 1; i <= MAX_TAB_ENTRIES; i += 1) {
+      expect(remaining, 'the twelve live grok rows are still there').toContain(i);
+    }
+    expect(remaining, 'MAX_TAB_ENTRIES is unchanged').toHaveLength(MAX_TAB_ENTRIES);
+    expect(remaining, 'the answering chatgpt tab was not registered').not.toContain(chatgptId);
+    expect(rec?.reason, 'no slot, so the retry never fires and the tick still concedes').toBe('no-http-port');
+    expect(rec?.tabSweep, 'refused-for-space is not "looked and found nobody", and not the ping cap').toEqual({
+      looked: true,
+      queried: MAX_TAB_ENTRIES + 1,
+      pruned: 0,
+      pinged: 1,
+      registered: 0,
+      deferred: 0,
+      crowded: 1,
+    });
   });
 });
 
@@ -508,11 +554,12 @@ describe('W51-C · the ping fan-out is capped (D3)', () => {
       pinged: MAX_TAB_ENTRIES,
       registered: 0,
       deferred: extra,
+      crowded: 0,
     });
 
     asked.length = 0;
     const rotated = await sweepUnregisteredTabs(s, query, ping, MAX_TAB_ENTRIES);
-    expect(rotated).toMatchObject({ looked: true, pinged: MAX_TAB_ENTRIES, deferred: extra });
+    expect(rotated).toMatchObject({ looked: true, pinged: MAX_TAB_ENTRIES, deferred: extra, crowded: 0 });
     expect(asked, 'a later tick is not stuck on the same never-answering prefix').toContain(n);
 
     await enabledWithTarget();
@@ -527,7 +574,9 @@ describe('W51-C · the ping fan-out is capped (D3)', () => {
       pinged: MAX_TAB_ENTRIES,
       registered: 0,
       deferred: extra,
+      crowded: 0,
     });
     expect(rec?.tabSweep && 'deferred' in rec.tabSweep, 'the trace carries the cap as a count, not as tab ids').toBe(true);
+    expect(rec?.tabSweep && 'crowded' in rec.tabSweep, 'a ping-capped sweep is not a full-registry refusal').toBe(true);
   });
 });

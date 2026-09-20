@@ -1125,9 +1125,11 @@ export async function askTabForClaudeOrg(
 // ping, and not folded into `TAB_PING_MISSES_BEFORE_FORGET`. `tabs.query`
 // returns `id` / `discarded` / `frozen` / `status` without the `tabs`
 // permission; a fix that added a permission would be the wrong fix. A sweep
-// that looks and finds nothing is `{ looked: true, registered: 0 }`; a tick
-// that never swept leaves the field `null`. Those two must stay distinct:
-// "we looked and found nothing" is not "we never looked".
+// that looks and finds nothing is `{ looked: true, registered: 0, crowded: 0 }`;
+// a sweep that finds an answering tab and refuses it for want of a slot is
+// `{ looked: true, crowded: N }`; a tick that never swept leaves the field
+// `null`. Those must stay distinct: "we looked and found nothing" is not
+// "we never looked", and it is not "we found the tab and turned it away".
 // ---------------------------------------------------------------------------
 
 function isTabEntry(v: unknown): v is TabEntry {
@@ -1328,7 +1330,10 @@ export interface TabQueryRow {
  * row without walking `pickLiveTab` again; they are not persisted (the trace
  * keeps counts only). `deferred` is how many eligible tabs were not pinged
  * because the sweep hit `TAB_SWEEP_PING_CAP` — so a capped sweep is not the
- * same record as one that pinged everything it wanted to.
+ * same record as one that pinged everything it wanted to. `crowded` is how
+ * many answering tabs the sweep refused because the registry was already
+ * full of live-listed rows — so a full-registry refusal is not the same
+ * record as "looked and found nobody", and not the same as the ping cap.
  */
 export type TabSweepReport =
   | { looked: false }
@@ -1339,6 +1344,7 @@ export type TabSweepReport =
       pinged: number;
       registered: number;
       deferred: number;
+      crowded: number;
       origins: string[];
       pingedIds: number[];
       recovered: Array<{ tabId: number; origin: string }>;
@@ -1419,7 +1425,9 @@ function takeSweepPingBatch(candidates: readonly number[], now: number): { batch
  * — so a repeat cannot duplicate a row (W27-C). A burst of those insertions
  * does not evict a row whose tabId the query just listed as live: prune
  * already dropped gone ids, so every remaining row is live, and a new row at
- * `MAX_TAB_ENTRIES` would slice one of them off.
+ * `MAX_TAB_ENTRIES` would slice one of them off. An answering tab refused
+ * for that reason is counted as `crowded`, not as a successful look that
+ * found nobody, and not as `deferred` (that count is tabs never pinged).
  *
  * `now` and `pingTimeoutMs` are injectable **for tests only**.
  */
@@ -1483,6 +1491,7 @@ export async function sweepUnregisteredTabs(
   const origins: string[] = [];
   const recovered: Array<{ tabId: number; origin: string }> = [];
   let registered = 0;
+  let crowded = 0;
   for (const found of replies) {
     if (!found) continue;
     const knownNow = await readRegistry(store);
@@ -1491,8 +1500,12 @@ export async function sweepUnregisteredTabs(
     // row is live. rememberTab's prepend+slice would evict one of them for
     // each new insertion; a burst of those is the defect. A single hello
     // evicting one tail row is the accepted old behaviour and still lives
-    // on rememberTab's own path.
-    if (!before && knownNow.length >= MAX_TAB_ENTRIES) continue;
+    // on rememberTab's own path. Refusing an answering tab for want of a
+    // slot is not "looked and found nobody": it is counted as crowded.
+    if (!before && knownNow.length >= MAX_TAB_ENTRIES) {
+      crowded += 1;
+      continue;
+    }
     await rememberTab(store, { tabId: found.tabId, origin: found.origin, at: now });
     if (!before) {
       registered += 1;
@@ -1508,6 +1521,7 @@ export async function sweepUnregisteredTabs(
     pinged: batch.length,
     registered,
     deferred,
+    crowded,
     origins: [...new Set(origins)],
     pingedIds: batch,
     recovered,

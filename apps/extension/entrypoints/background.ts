@@ -568,6 +568,7 @@ function persistSweep(report: TabSweepReport | null): TabSweepTrace | null {
     pinged: report.pinged,
     registered: report.registered,
     deferred: report.deferred,
+    crowded: report.crowded,
   };
 }
 
