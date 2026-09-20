@@ -579,6 +579,40 @@ async function migrateOneLegacyKey(
   return opened.ok ? { kind: 'moved' } : { kind: 'refused', refusal: opened.refusal };
 }
 
+/**
+ * 🔴 W51 · What one alarm tick's tab-registry recovery sweep did.
+ *
+ * `null` (and a missing field on a record written before this existed) means
+ * the tick never swept — it never reached the port gate, or it already had a
+ * channel. `{ looked: false }` is "we wanted to look and could not"
+ * (`tabs.query` missing or it threw). `{ looked: true, registered: 0,
+ * crowded: 0 }` is a completed sweep that found no answering unregistered
+ * tab. `{ looked: true, crowded: N }` is a completed sweep that found
+ * answering tabs and refused them because the registry was already full of
+ * live-listed rows. Those are different facts; collapsing a refusal into
+ * "no-http-port, nothing else" is the hole this field exists to close.
+ *
+ * Counts only: origins, tab ids and URLs stay out of the trace. `deferred`
+ * is a count of eligible tabs the sweep did not ping because it hit its cap
+ * — a sweep that pinged everyone it wanted to writes `deferred: 0`. `crowded`
+ * is a count of answering tabs the sweep refused for want of a slot — a
+ * sweep that registered everyone who answered writes `crowded: 0`. A ping
+ * cap and a full registry are not the same fact.
+ */
+export type TabSweepTrace =
+  | { looked: false }
+  | {
+      looked: true;
+      queried: number;
+      pruned: number;
+      pinged: number;
+      registered: number;
+      /** Eligible unknown tabs not pinged because the sweep hit its cap. 0 if it pinged everyone it wanted to. */
+      deferred: number;
+      /** Answering tabs refused because the registry was already full of live-listed rows. 0 if every answering tab was registered. */
+      crowded: number;
+    };
+
 export interface BackfillTickRecord {
   /** When this tick happened (Date.now()). */
   at: number;
@@ -636,6 +670,13 @@ export interface BackfillTickRecord {
    * safe to persist at all).
    */
   detail?: string | null;
+  /**
+   * 🔴 W51 · **Whether this tick swept `chrome.tabs` for a live tab the
+   * registry had lost.** See `TabSweepTrace`. Optional so a record written
+   * before this field existed still parses (`isTickRecord` does not require
+   * it); `null` is the written form of "never swept".
+   */
+  tabSweep?: TabSweepTrace | null;
 }
 
 function isTickRecord(v: unknown): v is BackfillTickRecord {
