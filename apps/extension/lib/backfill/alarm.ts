@@ -579,6 +579,29 @@ async function migrateOneLegacyKey(
   return opened.ok ? { kind: 'moved' } : { kind: 'refused', refusal: opened.refusal };
 }
 
+/**
+ * 🔴 W51 · What one alarm tick's tab-registry recovery sweep did.
+ *
+ * `null` (and a missing field on a record written before this existed) means
+ * the tick never swept — it never reached the port gate, or it already had a
+ * channel. `{ looked: false }` is "we wanted to look and could not"
+ * (`tabs.query` missing or it threw). `{ looked: true, registered: 0 }` is a
+ * completed sweep that found no answering unregistered tab. Those three are
+ * different facts; collapsing the last two into "no-http-port, nothing else"
+ * is the hole this field exists to close.
+ *
+ * Counts only: origins, tab ids and URLs stay out of the trace.
+ */
+export type TabSweepTrace =
+  | { looked: false }
+  | {
+      looked: true;
+      queried: number;
+      pruned: number;
+      pinged: number;
+      registered: number;
+    };
+
 export interface BackfillTickRecord {
   /** When this tick happened (Date.now()). */
   at: number;
@@ -636,6 +659,13 @@ export interface BackfillTickRecord {
    * safe to persist at all).
    */
   detail?: string | null;
+  /**
+   * 🔴 W51 · **Whether this tick swept `chrome.tabs` for a live tab the
+   * registry had lost.** See `TabSweepTrace`. Optional so a record written
+   * before this field existed still parses (`isTickRecord` does not require
+   * it); `null` is the written form of "never swept".
+   */
+  tabSweep?: TabSweepTrace | null;
 }
 
 function isTickRecord(v: unknown): v is BackfillTickRecord {

@@ -61,6 +61,7 @@ import {
   saveLastTick,
   syncBackfillAlarm,
   type AlarmsApi,
+  type TabSweepTrace,
 } from '../lib/backfill/alarm';
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
@@ -74,8 +75,10 @@ import {
   isTabHello,
   pickLiveTab,
   rememberTab,
+  sweepUnregisteredTabs,
   tabHttpPort,
   type TabSend,
+  type TabSweepReport,
 } from '../lib/backfill/tab-port';
 import {
   POPUP_START_BACKFILL_MESSAGE,
@@ -505,14 +508,66 @@ function alarmsApi(): AlarmsApi | null {
   return (browser as unknown as { alarms?: AlarmsApi }).alarms ?? null;
 }
 
-function tabsApi(): { sendMessage: TabSend } | null {
-  const tabs = (browser as unknown as { tabs?: { sendMessage?: TabSend } }).tabs;
+function tabsApi(): {
+  sendMessage: TabSend;
+  /**
+   * 🔴 W51 · `chrome.tabs.query({})` returns `id` / `discarded` / `frozen` /
+   *    `status` **without** the `tabs` permission; only `url` / `title` are
+   *    redacted. Missing ⇒ the sweep cannot look, which is `{ looked: false }`,
+   *    not "there are no tabs".
+   */
+  query: (() => Promise<Array<{ id?: number; discarded?: boolean; frozen?: boolean }>>) | null;
+} | null {
+  const tabs = (browser as unknown as {
+    tabs?: {
+      sendMessage?: TabSend;
+      query?: (info: Record<string, never>) => Promise<Array<{
+        id?: number;
+        discarded?: boolean;
+        frozen?: boolean;
+      }>>;
+    };
+  }).tabs;
   // 🔴 tabs.sendMessage does not need the 'tabs' permission ('tabs' only governs
   //    sensitive fields like url/title), and we only message **our own injected
-  //    content script**. The matches need not change a character.
-  return tabs && typeof tabs.sendMessage === 'function'
-    ? { sendMessage: (id, msg) => tabs.sendMessage!(id, msg) }
-    : null;
+  //    content script**. The matches need not change a character. `tabs.query`
+  //    of `{}` is the same permission story: we never read `url` / `title`.
+  if (!tabs || typeof tabs.sendMessage !== 'function') return null;
+  return {
+    sendMessage: (id, msg) => tabs.sendMessage!(id, msg),
+    query: typeof tabs.query === 'function' ? () => tabs.query!({}) : null,
+  };
+}
+
+/**
+ * 🔴 W51 · One unattended recovery pass, used only from the alarm tick.
+ *
+ * Not called from `resolveHttpPort`: that helper is also the popup's
+ * `transportWired` probe, and a sweep there would fan out `BACKFILL_PING_MESSAGE`
+ * to every open tab on every failed resolution. The alarm tick is the one
+ * place a registered target is about to concede `no-http-port` without a
+ * human looking at the page.
+ */
+async function recoverUnregisteredTabs(): Promise<TabSweepReport> {
+  const tabs = tabsApi();
+  if (!tabs || tabs.query === null) return { looked: false };
+  return sweepUnregisteredTabs(
+    browserLocalStore(),
+    tabs.query,
+    (id) => tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }),
+  );
+}
+
+function persistSweep(report: TabSweepReport | null): TabSweepTrace | null {
+  if (report === null) return null;
+  if (!report.looked) return { looked: false };
+  return {
+    looked: true,
+    queried: report.queried,
+    pruned: report.pruned,
+    pinged: report.pinged,
+    registered: report.registered,
+  };
 }
 
 /**
@@ -1032,30 +1087,52 @@ async function runAlarmTickBody(): Promise<TickResult> {
       hasTargets: false,
     });
     lastTick = { ran: false, reason: blocked ?? 'no-targets', report: null };
-    await recordAlarmTick(store, lastTick, 0, preflightRefusal);
+    await recordAlarmTick(store, lastTick, 0, preflightRefusal, null);
     return lastTick;
   }
 
   let last: TickResult = { ran: false, reason: 'no-http-port', report: null };
+  /**
+   * 🔴 W51 · The recovery sweep runs **at most once per tick**, and only when a
+   *    registered target is about to concede `no-http-port`. A tick that already
+   *    has a channel, or that was blocked at an earlier gate, leaves this `null`
+   *    — that is "never swept", and it must stay distinguishable from a sweep
+   *    that looked and found nothing.
+   */
+  let tabSweep: TabSweepReport | null = null;
   for (const target of targets) {
-    const result = await tickBackfill({
-      platform: target.platform,
-      origin: target.origin,
-      scope: await resolveScopeForTick(store, target),
-      store,
-      http: await resolveHttpPort(target.origin),
-      // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
-      //    and one of them reporting while the other does not is not acceptable).
-      sink: (c) => deliverBackfillItem(c),
-      ...(backfillPaceOverride ?? {}),
-    });
+    const scope = await resolveScopeForTick(store, target);
+    const tickOne = (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
+      tickBackfill({
+        platform: target.platform,
+        origin: target.origin,
+        scope,
+        store,
+        http,
+        // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
+        //    and one of them reporting while the other does not is not acceptable).
+        sink: (c) => deliverBackfillItem(c),
+        ...(backfillPaceOverride ?? {}),
+      });
+    let result = await tickOne(await resolveHttpPort(target.origin));
+    if (result.reason === 'no-http-port' && tabSweep === null) {
+      tabSweep = await recoverUnregisteredTabs();
+      // Retry this target only when the sweep actually registered a tab of
+      // *this* origin. Retrying pickLiveTab after a sweep that found a
+      // different origin (or nothing) would ping the same silent tab a
+      // second time in one tick and spend its two-strike budget as if two
+      // ticks had passed.
+      if (tabSweep.looked && tabSweep.origins.includes(target.origin)) {
+        result = await tickOne(await resolveHttpPort(target.origin));
+      }
+    }
     last = result;
     lastTick = result;
     // If it ran, stop. If it was blocked by the switch / storage / a host pause,
     // there is no point trying another target — the conclusion would be the same.
     if (result.reason !== 'no-http-port') break;
   }
-  await recordAlarmTick(store, last, targets.length, preflightRefusal);
+  await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep);
   return last;
 }
 
@@ -1151,6 +1228,12 @@ async function recordAlarmTick(
    * acceptance found (a v1 record, no v2 key, and a trace that said only `ran`).
    */
   preflightRefusal: LedgerRefusal | null = null,
+  /**
+   * 🔴 W51 · The tab-registry recovery sweep, or `null` when this tick never
+   *    swept. Written as `tabSweep` on the trace so a later reader can tell
+   *    "we looked and found nothing" from "we never looked".
+   */
+  tabSweep: TabSweepReport | null = null,
 ): Promise<void> {
   const halt = result.report?.halted ?? null;
   await saveLastTick(store, {
@@ -1186,6 +1269,7 @@ async function recordAlarmTick(
      */
     halted: halt?.reason ?? (result.ran ? null : preflightRefusal?.reason) ?? null,
     detail: halt?.detail ?? (result.ran ? null : preflightRefusal?.detail) ?? null,
+    tabSweep: persistSweep(tabSweep),
   });
 }
 
