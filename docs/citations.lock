@@ -31,21 +31,21 @@ apps/extension/entrypoints/background.ts:208-225  41d87a302a6d  lines=18
   <- README.md:213, docs/privacy.md:129, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
 apps/extension/entrypoints/background.ts:435-442  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:759-775  05ae48bc44ee  lines=17
+apps/extension/entrypoints/background.ts:760-776  05ae48bc44ee  lines=17
   <- docs/privacy.md:342, docs/threat-model.md:593  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:777-849  44f7b21a4646  lines=73
+apps/extension/entrypoints/background.ts:778-850  44f7b21a4646  lines=73
   <- docs/privacy.md:319  :: if (!haltStillApplies(raw.halted, backfillCapabilityOf(plat…
-apps/extension/entrypoints/background.ts:858-882  6287e0b9e52b  lines=25
+apps/extension/entrypoints/background.ts:859-883  6287e0b9e52b  lines=25
   <- docs/privacy.md:307  :: export function backfillTickSettled(): Promise<unknown> {
-apps/extension/entrypoints/background.ts:903  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:904  6539997ed831  lines=1
   <- docs/privacy.md:309  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1003-1025  f08bd697b536  lines=23
+apps/extension/entrypoints/background.ts:1004-1026  f08bd697b536  lines=23
   <- README.md:172, docs/install.md:635, docs/privacy.md:352  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1218-1274  9dbc768d5407  lines=57
+apps/extension/entrypoints/background.ts:1223-1279  9dbc768d5407  lines=57
   <- docs/privacy.md:276  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:1404-1420  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:1409-1425  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:1446-1462  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:1451-1467  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:432-438  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -59,7 +59,7 @@ apps/extension/lib/backfill/alarm.ts:90-91  8ec0655980dd  lines=2
   <- docs/install.md:586  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
 apps/extension/lib/backfill/alarm.ts:211  b9377ab9524d  lines=1
   <- docs/privacy.md:272  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
-apps/extension/lib/backfill/alarm.ts:582-669  b6762521d0f9  lines=88
+apps/extension/lib/backfill/alarm.ts:582-673  e01c82dccaeb  lines=92
   <- docs/privacy.md:276  :: /**
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs/privacy.md:323  :: * ## Why this module exists at all

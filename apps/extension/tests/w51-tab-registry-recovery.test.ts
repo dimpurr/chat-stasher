@@ -72,6 +72,13 @@ const liveTabs = new Map<number, string>();
 const queriedTabs: TabQueryRow[] = [];
 const contentFetches: string[] = [];
 const pingedIds: number[] = [];
+/** How many pings this tabId has received this test (1-based after increment). */
+const pingCounts = new Map<number, number>();
+/**
+ * The Nth ping to this tabId (and every later one) throws. The sweep's first
+ * answer can succeed while the alarm's retry ping fails — the D1 shape.
+ */
+const pingFailsFrom = new Map<number, number>();
 let queryCalls = 0;
 
 function syntheticPageFetch(url: string) {
@@ -126,6 +133,12 @@ const fakeBrowser: any = {
     async sendMessage(tabId: number, message: unknown) {
       if ((message as { type?: string } | null)?.type === 'cs-backfill-ping') {
         pingedIds.push(tabId);
+        const n = (pingCounts.get(tabId) ?? 0) + 1;
+        pingCounts.set(tabId, n);
+        const failFrom = pingFailsFrom.get(tabId);
+        if (failFrom !== undefined && n >= failFrom) {
+          throw new Error('simulated ping failure');
+        }
       }
       const origin = liveTabs.get(tabId);
       if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
@@ -184,6 +197,8 @@ beforeEach(async () => {
   queriedTabs.length = 0;
   contentFetches.length = 0;
   pingedIds.length = 0;
+  pingCounts.clear();
+  pingFailsFrom.clear();
   queryCalls = 0;
   runtimeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', withI18n(fakeBrowser));
@@ -265,6 +280,7 @@ describe('W51-A · a tick that is about to concede no-http-port sweeps once', ()
       pruned: 0,
       pinged: 0,
       registered: 0,
+      deferred: 0,
     });
     expect(await mod.backfillRuntimeStatus()).toMatchObject({
       transportWired: false,
@@ -377,10 +393,12 @@ describe('W51-B · pruning a gone id is not a missed ping, and it writes through
 
     expect(BACKFILL_PING_MESSAGE).toBe('cs-backfill-ping');
     expect(asked.sort((a, b) => a - b), 'known / discarded / frozen are not pinged').toEqual([2, 3, 6]);
-    expect(report).toMatchObject({ looked: true, queried: 6, pruned: 0, pinged: 3, registered: 2 });
+    expect(report).toMatchObject({ looked: true, queried: 6, pruned: 0, pinged: 3, registered: 2, deferred: 0 });
     expect(report.looked).toBe(true);
     if (report.looked) {
       expect([...report.origins].sort()).toEqual([ORIGIN, OTHER_ORIGIN].sort());
+      expect([...report.pingedIds].sort((a, b) => a - b)).toEqual([2, 3, 6]);
+      expect(report.recovered.map((r) => r.tabId).sort((a, b) => a - b)).toEqual([2, 3]);
     }
     expect((await loadTabs(s)).map((t) => t.tabId).sort((a, b) => a - b)).toEqual([1, 2, 3]);
     // rememberTab moved each new row to the front; the known row is still there once.
@@ -396,5 +414,120 @@ describe('W51-B · pruning a gone id is not a missed ping, and it writes through
       async () => ({ ok: true, origin: ORIGIN }),
     );
     expect(report).toEqual({ looked: false });
+  });
+});
+
+// ===========================================================================
+// W51-C · three defects the first recovery commit left open
+// ===========================================================================
+
+describe('W51-C · a retry cannot spend two strikes in one tick (D1)', () => {
+  it('🔴 a silent registered tab is not forgotten when the recovered tab\'s re-ping fails', async () => {
+    await enabledWithTarget();
+    const { rememberTab, TAB_PING_MISSES_BEFORE_FORGET } = await import('../lib/backfill/tab-port');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const s = browserLocalStore()!;
+    const silent = 10;
+    const recovered = 11;
+    await rememberTab(s, { tabId: silent, origin: ORIGIN, at: 1 });
+    liveTabs.set(recovered, ORIGIN);
+    queriedTabs.push({ id: silent }, { id: recovered });
+    // Sweep ping (first) succeeds and registers `recovered`. The alarm's retry
+    // pickLiveTab tries `recovered` first; that second ping fails, and without
+    // the fix the loop walks on to `silent` and spends strike 2 → forgetTab.
+    pingFailsFrom.set(recovered, 2);
+
+    const mod = await bootBackground();
+    await alarmTick(mod);
+
+    const rows = await registry();
+    console.log('[W51-C D1] registry after a same-tick retry whose recovered ping failed:', rows.map((t) => ({ tabId: t.tabId, misses: t.misses ?? 0 })), 'pings:', [...pingedIds]);
+    expect(TAB_PING_MISSES_BEFORE_FORGET).toBe(2);
+    expect(rows.map((t) => t.tabId), 'the silent tab is still listed by query; two strikes in one tick must not forget it').toContain(silent);
+    expect(rows.find((t) => t.tabId === silent)?.misses, 'exactly one strike this tick').toBe(1);
+    expect(rows.map((t) => t.tabId), 'the sweep still registered the answering tab').toContain(recovered);
+  });
+});
+
+describe('W51-C · a sweep burst cannot evict a live listed row (D2)', () => {
+  it('🔴 twelve answering unknown tabs do not drop twelve live grok rows', async () => {
+    const { rememberTab, loadTabs, sweepUnregisteredTabs, MAX_TAB_ENTRIES } = await import('../lib/backfill/tab-port');
+    const s = memoryStore();
+    const grokIds: number[] = [];
+    for (let i = 1; i <= MAX_TAB_ENTRIES; i += 1) {
+      grokIds.push(i);
+      await rememberTab(s, { tabId: i, origin: OTHER_ORIGIN, at: i });
+    }
+    const chatgptIds = Array.from({ length: MAX_TAB_ENTRIES }, (_, i) => MAX_TAB_ENTRIES + 1 + i);
+    const asked: number[] = [];
+    const report = await sweepUnregisteredTabs(
+      s,
+      async () => [...grokIds, ...chatgptIds].map((id) => ({ id })),
+      async (id) => {
+        asked.push(id);
+        if (chatgptIds.includes(id)) return { ok: true, origin: ORIGIN };
+        return { ok: true, origin: OTHER_ORIGIN };
+      },
+      0,
+    );
+
+    const remaining = (await loadTabs(s)).map((t) => t.tabId);
+    console.log('[W51-C D2] after a 12+12 sweep, registry:', remaining, 'pinged:', asked.length, 'report:', report);
+    for (const id of grokIds) {
+      expect(remaining, 'a row whose tabId the query just listed as live is not sliced off by a burst of rememberTab').toContain(id);
+    }
+    expect(remaining, 'MAX_TAB_ENTRIES is unchanged; the fix is not to raise the ceiling').toHaveLength(MAX_TAB_ENTRIES);
+  });
+});
+
+describe('W51-C · the ping fan-out is capped (D3)', () => {
+  it('🔴 a sweep that hits the cap is distinguishable from one that pinged everyone it wanted to', async () => {
+    const { sweepUnregisteredTabs, MAX_TAB_ENTRIES, TAB_SWEEP_PING_CAP } = await import('../lib/backfill/tab-port');
+    expect(TAB_SWEEP_PING_CAP, 'the cap is the registry ceiling, not a new larger burst').toBe(MAX_TAB_ENTRIES);
+    const s = memoryStore();
+    const extra = 8;
+    const n = MAX_TAB_ENTRIES + extra;
+    const asked: number[] = [];
+    const query = async () => Array.from({ length: n }, (_, i) => ({ id: i + 1 }));
+    const ping = async (id: number) => {
+      asked.push(id);
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    };
+
+    const report = await sweepUnregisteredTabs(s, query, ping, 0);
+
+    console.log('[W51-C D3] pinged ids:', asked, 'report:', report);
+    expect(asked.length, 'the fan-out is the cap, not the window').toBe(MAX_TAB_ENTRIES);
+    expect(asked, 'now=0 takes a prefix, so the test can name which ids were pinged').toEqual(
+      Array.from({ length: MAX_TAB_ENTRIES }, (_, i) => i + 1),
+    );
+    expect(report).toMatchObject({
+      looked: true,
+      queried: n,
+      pruned: 0,
+      pinged: MAX_TAB_ENTRIES,
+      registered: 0,
+      deferred: extra,
+    });
+
+    asked.length = 0;
+    const rotated = await sweepUnregisteredTabs(s, query, ping, MAX_TAB_ENTRIES);
+    expect(rotated).toMatchObject({ looked: true, pinged: MAX_TAB_ENTRIES, deferred: extra });
+    expect(asked, 'a later tick is not stuck on the same never-answering prefix').toContain(n);
+
+    await enabledWithTarget();
+    for (let i = 1; i <= n; i += 1) queriedTabs.push({ id: i });
+    const mod = await bootBackground();
+    await alarmTick(mod);
+    const rec = await trace();
+    console.log('[W51-C D3] persisted tabSweep:', rec?.tabSweep);
+    expect(rec?.tabSweep).toMatchObject({
+      looked: true,
+      queried: n,
+      pinged: MAX_TAB_ENTRIES,
+      registered: 0,
+      deferred: extra,
+    });
+    expect(rec?.tabSweep && 'deferred' in rec.tabSweep, 'the trace carries the cap as a count, not as tab ids').toBe(true);
   });
 });

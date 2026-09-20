@@ -567,6 +567,7 @@ function persistSweep(report: TabSweepReport | null): TabSweepTrace | null {
     pruned: report.pruned,
     pinged: report.pinged,
     registered: report.registered,
+    deferred: report.deferred,
   };
 }
 
@@ -1117,13 +1118,17 @@ async function runAlarmTickBody(): Promise<TickResult> {
     let result = await tickOne(await resolveHttpPort(target.origin));
     if (result.reason === 'no-http-port' && tabSweep === null) {
       tabSweep = await recoverUnregisteredTabs();
-      // Retry this target only when the sweep actually registered a tab of
-      // *this* origin. Retrying pickLiveTab after a sweep that found a
-      // different origin (or nothing) would ping the same silent tab a
-      // second time in one tick and spend its two-strike budget as if two
-      // ticks had passed.
-      if (tabSweep.looked && tabSweep.origins.includes(target.origin)) {
-        result = await tickOne(await resolveHttpPort(target.origin));
+      // Retry this target only by aiming at a row the sweep just registered
+      // of *this* origin. Walking pickLiveTab again would re-strike the
+      // silent tab this tick already counted (and, if the recovered tab's
+      // re-ping failed, spend both TAB_PING_MISSES_BEFORE_FORGET strikes in
+      // one wake). Rows the sweep did not touch keep the miss they already
+      // took; pickLiveTab's order and two-strike rule are unchanged.
+      if (tabSweep.looked) {
+        const recoveredId = tabSweep.recovered.find((row) => row.origin === target.origin)?.tabId;
+        if (recoveredId !== undefined) {
+          result = await tickOne(await resolveHttpPort(target.origin, recoveredId));
+        }
       }
     }
     last = result;

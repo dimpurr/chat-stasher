@@ -590,7 +590,9 @@ async function migrateOneLegacyKey(
  * different facts; collapsing the last two into "no-http-port, nothing else"
  * is the hole this field exists to close.
  *
- * Counts only: origins, tab ids and URLs stay out of the trace.
+ * Counts only: origins, tab ids and URLs stay out of the trace. `deferred`
+ * is a count of eligible tabs the sweep did not ping because it hit its cap
+ * — a sweep that pinged everyone it wanted to writes `deferred: 0`.
  */
 export type TabSweepTrace =
   | { looked: false }
@@ -600,6 +602,8 @@ export type TabSweepTrace =
       pruned: number;
       pinged: number;
       registered: number;
+      /** Eligible unknown tabs not pinged because the sweep hit its cap. 0 if it pinged everyone it wanted to. */
+      deferred: number;
     };
 
 export interface BackfillTickRecord {

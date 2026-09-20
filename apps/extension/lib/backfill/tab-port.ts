@@ -1119,14 +1119,15 @@ export async function askTabForClaudeOrg(
 // when that tick is about to concede `no-http-port` for a registered target
 // (never inside `resolveHttpPort`, which is also the popup's probe):
 // `chrome.tabs.query({})` for ids the registry no longer has, ping them with
-// `BACKFILL_PING_MESSAGE`, `rememberTab` whoever answers. Gone ids are pruned
-// through `writeRegistry` — a different rule from a missed ping, and not folded
-// into `TAB_PING_MISSES_BEFORE_FORGET`. `tabs.query` returns `id` / `discarded`
-// / `frozen` / `status` without the `tabs` permission; a fix that added a
-// permission would be the wrong fix. A sweep that looks and finds nothing is
-// `{ looked: true, registered: 0 }`; a tick that never swept leaves the field
-// `null`. Those two must stay distinct: "we looked and found nothing" is not
-// "we never looked".
+// `BACKFILL_PING_MESSAGE` (at most `TAB_SWEEP_PING_CAP` per tick), `rememberTab`
+// whoever answers without evicting a row the query just listed as live. Gone
+// ids are pruned through `writeRegistry` — a different rule from a missed
+// ping, and not folded into `TAB_PING_MISSES_BEFORE_FORGET`. `tabs.query`
+// returns `id` / `discarded` / `frozen` / `status` without the `tabs`
+// permission; a fix that added a permission would be the wrong fix. A sweep
+// that looks and finds nothing is `{ looked: true, registered: 0 }`; a tick
+// that never swept leaves the field `null`. Those two must stay distinct:
+// "we looked and found nothing" is not "we never looked".
 // ---------------------------------------------------------------------------
 
 function isTabEntry(v: unknown): v is TabEntry {
@@ -1322,9 +1323,12 @@ export interface TabQueryRow {
  *
  * `{ looked: false }` is "we could not look" (`tabs.query` missing or it
  * threw, or there is no store). That is not `{ looked: true, queried: 0 }`:
- * an unknown must not be recorded as empty. `origins` is the in-memory answer
- * the tick uses to decide whether to retry a target; it is not persisted (the
- * trace keeps counts only).
+ * an unknown must not be recorded as empty. `origins`, `pingedIds` and
+ * `recovered` are the in-memory answer the tick uses to retry the recovered
+ * row without walking `pickLiveTab` again; they are not persisted (the trace
+ * keeps counts only). `deferred` is how many eligible tabs were not pinged
+ * because the sweep hit `TAB_SWEEP_PING_CAP` — so a capped sweep is not the
+ * same record as one that pinged everything it wanted to.
  */
 export type TabSweepReport =
   | { looked: false }
@@ -1334,7 +1338,10 @@ export type TabSweepReport =
       pruned: number;
       pinged: number;
       registered: number;
+      deferred: number;
       origins: string[];
+      pingedIds: number[];
+      recovered: Array<{ tabId: number; origin: string }>;
     };
 
 /**
@@ -1369,14 +1376,50 @@ function isPingOriginReply(v: unknown): v is { ok: true; origin: string } {
 }
 
 /**
+ * 🔴 W51 · How many unknown tabs one recovery sweep may ping.
+ *
+ * The sweep cannot tell a platform tab from any other without pinging — there
+ * is no `tabs` permission, so `url` is redacted and origin-filtering is not
+ * available. `Promise.all` over the whole `query({})` window would therefore
+ * scale with every open tab, not with the registry. This product does not
+ * burst: no mass refresh, no high-frequency request. Time is not sensitive,
+ * so leftover candidates wait for a later tick.
+ *
+ * 12 is `MAX_TAB_ENTRIES`. More answering tabs cannot be stored, and 12
+ * parallel liveness pings is the same fan-out `pickLiveTab` already accepts
+ * serially (12 × 10 s = 120 s < the 5-minute alarm floor). The batch starts
+ * at `now % n` so a prefix of tabs that will never answer (any page without
+ * our content script) cannot hide a platform tab behind the cap forever.
+ * `now` is already the sweep's clock; no extra state, and no tab id in the
+ * persisted trace. A sweep that hit the cap writes `deferred > 0`; one that
+ * pinged everything it wanted to writes `deferred: 0`.
+ */
+export const TAB_SWEEP_PING_CAP = MAX_TAB_ENTRIES;
+
+function takeSweepPingBatch(candidates: readonly number[], now: number): { batch: number[]; deferred: number } {
+  if (candidates.length <= TAB_SWEEP_PING_CAP) {
+    return { batch: [...candidates], deferred: 0 };
+  }
+  const start = ((now % candidates.length) + candidates.length) % candidates.length;
+  const batch: number[] = [];
+  for (let i = 0; i < TAB_SWEEP_PING_CAP; i += 1) {
+    batch.push(candidates[(start + i) % candidates.length]!);
+  }
+  return { batch, deferred: candidates.length - TAB_SWEEP_PING_CAP };
+}
+
+/**
  * 🔴 W51 · One unattended recovery pass over the tabs the browser currently has.
  *
  * `query` is `() => chrome.tabs.query({})` in production. Unknown tabs are
- * pinged in parallel (a serial 10 s budget per tab would not fit inside the
- * shortest alarm gap once the window holds more than a handful), discarded
- * and frozen tabs are not pinged (they have no content script to answer), and
- * whoever answers is registered through `rememberTab` — so a repeat cannot
- * duplicate a row (W27-C).
+ * pinged in parallel up to `TAB_SWEEP_PING_CAP` (a serial 10 s budget per tab
+ * would not fit inside the shortest alarm gap once the window holds more than
+ * a handful), discarded and frozen tabs are not pinged (they have no content
+ * script to answer), and whoever answers is registered through `rememberTab`
+ * — so a repeat cannot duplicate a row (W27-C). A burst of those insertions
+ * does not evict a row whose tabId the query just listed as live: prune
+ * already dropped gone ids, so every remaining row is live, and a new row at
+ * `MAX_TAB_ENTRIES` would slice one of them off.
  *
  * `now` and `pingTimeoutMs` are injectable **for tests only**.
  */
@@ -1420,7 +1463,9 @@ export async function sweepUnregisteredTabs(
     candidates.push(id);
   }
 
-  const replies = await Promise.all(candidates.map(async (tabId) => {
+  const { batch, deferred } = takeSweepPingBatch(candidates, now);
+
+  const replies = await Promise.all(batch.map(async (tabId) => {
     try {
       const reply = await withReplyTimeout(ping(tabId), tabId, pingTimeoutMs, 'the backfill ping');
       if (isPingOriginReply(reply)) return { tabId, origin: reply.origin };
@@ -1436,14 +1481,23 @@ export async function sweepUnregisteredTabs(
   }));
 
   const origins: string[] = [];
+  const recovered: Array<{ tabId: number; origin: string }> = [];
   let registered = 0;
   for (const found of replies) {
     if (!found) continue;
-    const before = (await readRegistry(store)).some((t) => t.tabId === found.tabId);
+    const knownNow = await readRegistry(store);
+    const before = knownNow.some((t) => t.tabId === found.tabId);
+    // Prune already dropped ids the query does not list, so every remaining
+    // row is live. rememberTab's prepend+slice would evict one of them for
+    // each new insertion; a burst of those is the defect. A single hello
+    // evicting one tail row is the accepted old behaviour and still lives
+    // on rememberTab's own path.
+    if (!before && knownNow.length >= MAX_TAB_ENTRIES) continue;
     await rememberTab(store, { tabId: found.tabId, origin: found.origin, at: now });
     if (!before) {
       registered += 1;
       origins.push(found.origin);
+      recovered.push({ tabId: found.tabId, origin: found.origin });
     }
   }
 
@@ -1451,8 +1505,11 @@ export async function sweepUnregisteredTabs(
     looked: true,
     queried: rows.length,
     pruned,
-    pinged: candidates.length,
+    pinged: batch.length,
     registered,
+    deferred,
     origins: [...new Set(origins)],
+    pingedIds: batch,
+    recovered,
   };
 }

@@ -590,7 +590,7 @@ a real limitation of the current code.
    sent only when the page's own requests and the cookie both named none, and a
    recorded "several organizations, no signal" is not asked again
    (`apps/extension/lib/backfill/claude-page.ts:62-136`;
-   `apps/extension/entrypoints/background.ts:759-775`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:760-776`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:214-246`); a body
    response that admits it is incomplete is refused and listed as a failure
