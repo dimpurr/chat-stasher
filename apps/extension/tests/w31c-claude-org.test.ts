@@ -152,7 +152,9 @@ const fakeBrowser: any = {
         return out;
       },
       async set(values: Record<string, unknown>) { Object.assign(store, values); },
-      async remove(keys: string[]) { for (const k of keys) delete store[k]; },
+      async remove(keys: string | string[]) {
+        for (const k of Array.isArray(keys) ? keys : [keys]) delete store[k];
+      },
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
@@ -817,6 +819,121 @@ describe('W49 · Claude target scope must be an organization and must be the onl
     const scopes = written.filter((t) => t.platform === 'claude').map((t) => t.scope).sort();
     expect(scopes).toEqual([ORG2, ORG].sort());
     expect(written.some((t) => t.scope === TITLE)).toBe(false);
+  });
+
+  it('🔴 D1 · collapsing a title cannot put default ahead of a live organization, and the org is still ticked', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    // Page already shows ORG (so a tick of the live row can fetch). A permanent
+    // halt on 'default' is already written: on 741bb58 the collapse inserts
+    // 'default' in front of ORG, scopeRetryDue is false, the engine runs the
+    // sentinel, and the alarm breaks — ORG is never ticked.
+    await tabHello(7, { seen: ORG });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { headerOf, initialState, stateKey } = await import('../lib/backfill/types');
+    const s = browserLocalStore();
+    const haltedDefault = initialState('claude', 'default');
+    haltedDefault.halted = {
+      reason: 'org-ambiguous', at: 1, detail: 'synthetic: default already halted',
+    };
+    store[stateKey('claude', 'default')] = headerOf(haltedDefault);
+    await rememberTarget(s, {
+      platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1,
+    });
+    await rememberTarget(s, {
+      platform: 'claude', origin: CLAUDE_ORIGIN, scope: TITLE, at: 2,
+    });
+    expect((await targetsInRegistry()).map((t) => t.scope)).toEqual([TITLE, ORG]);
+
+    const first = await mod.runAlarmTick();
+    const afterFirst = await targetsInRegistry();
+    expect(afterFirst.some((t) => t.scope === ORG)).toBe(true);
+    expect(afterFirst.some((t) => t.scope === 'default')).toBe(false);
+    expect(afterFirst.some((t) => t.scope === TITLE)).toBe(false);
+    expect(conversationRequests().some((url) => url.includes(`/api/organizations/${ORG}/`))).toBe(true);
+    expect(first.reason).toBe('ran');
+    expect(first.report?.stopped).toBe('queue-empty');
+
+    await mod.runAlarmTick();
+    expect((await targetsInRegistry()).some((t) => t.scope === 'default')).toBe(false);
+    expect((await targetsInRegistry()).some((t) => t.scope === ORG)).toBe(true);
+  });
+
+  it('🔴 D2 · a cookie that is not an organization id falls through; a success is a row the engine will run', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7, { cookie: `lastActiveOrg=acme-corp` });
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    expect(reply?.ok).toBe(true);
+    expect(reply.target.scope).toBe(ORG);
+    const written = await targetsInRegistry();
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ platform: 'claude', scope: ORG });
+    expect(written[0].scope).not.toBe('default');
+    expect(pageCalls).toEqual([RESOLVE_URL]);
+  });
+
+  it('🔴 D4 · dropping a title row removes that scope\'s local ledger, and the popup does not show the abandoned halt', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { seen: ORG });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+
+    const { rememberTarget, BACKFILL_TARGETS_KEY } = await import('../lib/backfill/alarm');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { headerOf, initialState, stateKey } = await import('../lib/backfill/types');
+    const s = browserLocalStore();
+    await rememberTarget(s, {
+      platform: 'claude', origin: CLAUDE_ORIGIN, scope: TITLE, at: 1,
+    });
+
+    const titleState = initialState('claude', TITLE);
+    titleState.archived = ['deadbeef', 'cafebabe', 'feedface'];
+    titleState.halted = {
+      reason: 'org-unresolved',
+      at: 1,
+      detail: 'synthetic: title ledger halt',
+    };
+    titleState.failures = [{ shortId: 'deadbeef', platform: 'claude', reason: 'not-saved', at: 1 }];
+    store[stateKey('claude', TITLE)] = headerOf(titleState);
+
+    const captured = {
+      url: `${DETAIL_URL}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ uuid: ID, name: TITLE, chat_messages: [] }),
+      pageUrl: `${CLAUDE_ORIGIN}/chat/${ID}`,
+      capturedAt: Date.now(),
+    };
+    await dispatchFromTab({ type: 'chat-captured', payload: captured }, 7);
+    await mod.backfillTickSettled();
+
+    expect(store[stateKey('claude', TITLE)]).toBeUndefined();
+    expect((await targetsInRegistry()).some((t) => t.scope === TITLE)).toBe(false);
+
+    const shown = await popupText();
+    expect(shown.state?.scope).not.toBe(TITLE);
+    expect(shown.text).not.toContain('synthetic: title ledger halt');
+
+    // Belt: even a leftover header is ignored when its scope is not a registered target.
+    const { pickBackfillState, collectFailures } = await import('../lib/popup-view');
+    const leftover = headerOf(titleState);
+    const ghost = pickBackfillState({
+      [stateKey('claude', TITLE)]: leftover,
+      [stateKey('claude', ORG)]: headerOf(initialState('claude', ORG)),
+      [BACKFILL_TARGETS_KEY]: [{ platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1 }],
+    });
+    expect(ghost?.scope).toBe(ORG);
+    expect(collectFailures({
+      [stateKey('claude', TITLE)]: leftover,
+      [BACKFILL_TARGETS_KEY]: [{ platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1 }],
+    }).entries).toEqual([]);
   });
 });
 

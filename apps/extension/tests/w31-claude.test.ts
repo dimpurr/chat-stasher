@@ -265,6 +265,64 @@ describe('W31-1 · resolveClaudeOrg: the order, and the refusals that are not gu
     expect(isClaudeOrgId('default')).toBe(false);
     expect(orgFromRequestUrl(`${ORIGIN}/api/organizations/${title}/chat_conversations/${ID}`)).toBeNull();
   });
+
+  it('🔴 D3 · dashed hex-word titles are not organization ids; uppercase UUIDs still are', () => {
+    // Claude conversation `name` is harvested as a handle with no hex/dash
+    // rejection. The previous predicate (contains '-' and hex-or-dash) treated
+    // these as already-resolved and would substitute them into the path.
+    for (const word of ['-', 'a-b', 'cafe-babe', 'Dead-beef', 'Cafe-bed', 'Add-a-cafe']) {
+      expect(isClaudeOrgId(word), word).toBe(false);
+      expect(orgFromRequestUrl(`${ORIGIN}/api/organizations/${word}/chat_conversations/${ID}`), word).toBeNull();
+    }
+    // Fail-safe: a real organization id must never be rejected, including uppercase.
+    expect(isClaudeOrgId(ORG.toUpperCase())).toBe(true);
+    expect(isClaudeOrgId(ORG)).toBe(true);
+  });
+
+  it('🔴 D2 · cookie and endpoint use the same predicate as the request URL; a miss is a named refusal', () => {
+    const slug = 'acme-corp';
+    const hex32 = '0'.repeat(32);
+    const encodedDashes = 'aaaaaaaa%2Dbbbb-cccc-dddd-eeeeeeeeeeee';
+
+    expect(orgFromCookie(`${CLAUDE_ORG_COOKIE}=${slug}`)).toBeNull();
+    expect(orgFromCookie(`${CLAUDE_ORG_COOKIE}=${hex32}`)).toBeNull();
+    expect(orgFromCookie(`${CLAUDE_ORG_COOKIE}=${encodedDashes}`)).toBeNull();
+    expect(orgFromCookie(`${CLAUDE_ORG_COOKIE}=${ORG}`)).toBe(ORG);
+    expect(orgFromCookie(`${CLAUDE_ORG_COOKIE}=${ORG.toUpperCase()}`)).toBe(ORG.toUpperCase());
+
+    // A uuid that fails the predicate is not listed as an organization.
+    expect(parseOrganizationsResponse(JSON.stringify([{ uuid: slug }]))).toEqual({ ok: true, orgs: [] });
+    expect(parseOrganizationsResponse(JSON.stringify([{ uuid: hex32 }]))).toEqual({ ok: true, orgs: [] });
+    expect(parseOrganizationsResponse(JSON.stringify([{ uuid: ORG }, { uuid: slug }])))
+      .toEqual({ ok: true, orgs: [ORG] });
+
+    const cookieSlug = resolveClaudeOrg({
+      seen: null, cookie: `${CLAUDE_ORG_COOKIE}=${slug}`, endpoint: { kind: 'not-asked' },
+    });
+    expect(cookieSlug.ok).toBe(false);
+    expect(cookieSlug.ok === false && cookieSlug.halt).toBe('org-unresolved');
+
+    const cookieHex = resolveClaudeOrg({
+      seen: null, cookie: `${CLAUDE_ORG_COOKIE}=${hex32}`, endpoint: { kind: 'not-asked' },
+    });
+    expect(cookieHex.ok).toBe(false);
+    expect(cookieHex.ok === false && cookieHex.halt).toBe('org-unresolved');
+
+    const endpointSlug = resolveClaudeOrg({
+      seen: null, cookie: '', endpoint: { kind: 'text', text: JSON.stringify([{ uuid: slug }]) },
+    });
+    expect(endpointSlug.ok).toBe(false);
+    expect(endpointSlug.ok === false && endpointSlug.halt).toBe('org-unresolved');
+
+    // A resolver that succeeds must never produce a row the engine will refuse.
+    const cookieThenEndpoint = resolveClaudeOrg({
+      seen: null,
+      cookie: `${CLAUDE_ORG_COOKIE}=${slug}`,
+      endpoint: { kind: 'text', text: JSON.stringify([{ uuid: ORG }]) },
+    });
+    expect(cookieThenEndpoint).toEqual({ ok: true, org: ORG, source: 'endpoint' });
+    expect(isClaudeOrgId(cookieThenEndpoint.ok ? cookieThenEndpoint.org : '')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

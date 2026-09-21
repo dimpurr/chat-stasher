@@ -158,7 +158,7 @@ content-endpoint profile — a wrong guess would not error; it would save only t
 first few turns of every conversation while you believed you had it all.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:768-781`).
+(`apps/extension/lib/popup-view.ts:769-782`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -632,7 +632,7 @@ confirmed in the code, not a temporary disclaimer.
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two
   then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:1043-1077`). Perplexity **only lists
+  (`apps/extension/entrypoints/background.ts:1052-1092`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
   `apps/extension/lib/backfill/enumerate.ts:3890-3917`). The

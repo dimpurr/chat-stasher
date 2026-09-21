@@ -273,8 +273,8 @@ What is kept there:
 | `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, and the record that a platform's id list had to be read again. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:930-964`; `apps/extension/lib/backfill/debt-store.ts:68-87` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
-| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:608-706`; `apps/extension/entrypoints/background.ts:1274-1330` |
-| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation and when it was made. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-110`, `:241-370`; `apps/extension/entrypoints/background.ts:1460-1476`, `:1503-1519` |
+| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:676-774`; `apps/extension/entrypoints/background.ts:1289-1345` |
+| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation and when it was made. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-110`, `:241-370`; `apps/extension/entrypoints/background.ts:1475-1491`, `:1518-1534` |
 
 
 Three things in that table deserve to be called out rather than buried:
@@ -305,9 +305,9 @@ Three things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:897-940` — the identity itself is
+  (`apps/extension/entrypoints/background.ts:905-948` — the identity itself is
   read by `apps/extension/lib/contract.ts:1053-1069`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:940`). It is used to
+  the `||` at `apps/extension/entrypoints/background.ts:948`). It is used to
 
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
@@ -318,7 +318,7 @@ Three things in that table deserve to be called out rather than buried:
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:808-888`).
+  (`apps/extension/entrypoints/background.ts:812-892`).
 - **On claude.ai the scope is not read from a response body: it is the
   organization the page's own requests are addressed to**, and that value is
   required in every request path on that platform while appearing in no page URL
@@ -340,8 +340,8 @@ Three things in that table deserve to be called out rather than buried:
   the leg instead of choosing: the value is never guessed and the organizations
   are never probed one by one, and once that has been recorded the page is not
   asked again on every wake-up — the answer is already known
-  (`apps/extension/lib/backfill/claude-org.ts:195-249`;
-  `apps/extension/entrypoints/background.ts:790-811`). The sentinel
+  (`apps/extension/lib/backfill/claude-org.ts:211-265`;
+  `apps/extension/entrypoints/background.ts:794-815`). The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
   organization that does not exist (`apps/extension/lib/backfill/engine.ts:824-835`).
@@ -351,7 +351,7 @@ Three things in that table deserve to be called out rather than buried:
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:1043-1077`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:1052-1092`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
@@ -362,12 +362,20 @@ Three things in that table deserve to be called out rather than buried:
   it is dropped when a real organization is registered, it is not written from a
   capture whose path segment is not an organization id, and a wake-up whose
   recorded scope is a title asks the page rather than substituting the title into
-  a request (`apps/extension/lib/backfill/claude-org.ts:100-120`;
-  `apps/extension/entrypoints/background.ts:674-700`). Halt and debt records
-  written under that string stay where they are — a registration is not a fact —
-  and nothing was archived under it, because a title cannot address an
-  organization. What the user loses by abandoning it is a row that made the alarm
-  wake and do nothing.
+  a request (`apps/extension/lib/backfill/claude-org.ts:110-136`;
+  `apps/extension/entrypoints/background.ts:674-704`). Collapsing a title cannot
+  put the unresolved sentinel in front of a live organization — the alarm would
+  otherwise halt on `'default'` and never tick the organization
+  (`apps/extension/lib/backfill/alarm.ts:281-345`;
+  `apps/extension/entrypoints/background.ts:1052-1092`). The host archive is
+  append-only and is not touched. The **local** ledger header at
+  `cs_backfill_v2:<platform>:<scope>` is a different fact: a run opens it before
+  any request, so a title tick has already written `halted` / `failures` /
+  `enumCursor` there. Dropping the registry row also removes that header; the
+  popup ignores a header whose scope is not a registered target, so an abandoned
+  halt cannot outrank the organization's own ledger
+  (`apps/extension/lib/backfill/alarm.ts:309-345`;
+  `apps/extension/lib/popup-view.ts:1364-1426`).
 - **The trace of a declined hook report may name a site this extension is not
   built for.** That record says which page's report was refused, and a refusal
   happens precisely when that origin is *not* one of the eight in the platform

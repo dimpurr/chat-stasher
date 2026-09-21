@@ -53,10 +53,10 @@ import {
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
   findUnreadableState,
-  forgetNonOrganizationTargets,
   isBackfillChainArmed,
   loadTargets,
   migrateLegacyScopes,
+  rememberOrganizationScopedTarget,
   rememberTarget,
   saveLastTick,
   syncBackfillAlarm,
@@ -683,20 +683,24 @@ export const UNRESOLVED_SCOPE = 'default';
  *
  * A value that is not an organization id is stored as `UNRESOLVED_SCOPE` — the
  * existing spelling for "the identifier could not be told" — rather than
- * written as if it were one. Another organization for the same platform is
- * kept: two organizations are two targets.
+ * written as if it were one, and only when this platform has no organization
+ * row: collapsing a title must not put `'default'` in front of a live
+ * organization (the alarm would then halt on the sentinel and never tick the
+ * org). Another organization for the same platform is kept: two organizations
+ * are two targets. One registry write; dropped non-organization rows lose
+ * their local ledger header (the host archive is not touched).
  */
 async function rememberScopedTarget(
   store: ReturnType<typeof browserLocalStore>,
   target: BackfillTarget,
-): Promise<void> {
+): Promise<BackfillTarget[]> {
   if (!backfillPlanFor(target.platform)?.scopeInPath) {
-    await rememberTarget(store, target);
-    return;
+    return await rememberTarget(store, target);
   }
   const scope = isClaudeOrgId(target.scope) ? target.scope : UNRESOLVED_SCOPE;
-  await forgetNonOrganizationTargets(store, target.platform, isClaudeOrgId);
-  await rememberTarget(store, { ...target, scope });
+  return await rememberOrganizationScopedTarget(
+    store, { ...target, scope }, isClaudeOrgId,
+  );
 }
 
 /**
@@ -847,13 +851,17 @@ export async function scopeRetryDue(
  *    with no organization still fetches nothing.
  *  · The cost (written down honestly, and unchanged from C33): a scoped target
  *    that first registered as unresolved and is later resolved is replaced by one
- *    carrying the real organization (`rememberScopedTarget` in the alarm's path),
- *    while the *halt record* written under the unresolved scope stays where it is.
- *    Nothing is archived under it, no debt is written under it,
- *    and a later real capture registers the organization's own target anyway.
- *    The same replacement drops a leftover conversation title: that string is not
- *    an organization, and leaving it would have the alarm wake for a scope that
- *    names no account.
+ *    carrying the real organization (`rememberScopedTarget` in the alarm's path).
+ *    The unresolved row is dropped, and that scope's local ledger header
+ *    (`cs_backfill_v2:<platform>:<scope>` — halt, cursor, failures) is removed
+ *    with it: a run already opened that header before any request, and the
+ *    popup walks every header, so leaving it would show an abandoned halt
+ *    next to the organization's empty ledger. Nothing is sent to the host
+ *    archive under that string (the archive is append-only and is not
+ *    touched). A later real capture registers the organization's own target
+ *    anyway. The same replacement drops a leftover conversation title: that
+ *    string is not an organization, and leaving it would have the alarm wake
+ *    for a scope that names no account.
  */
 export async function registerBackfillTargetHere(): Promise<
   | { ok: true; target: { platform: string; origin: string; scope: string } }
@@ -1035,10 +1043,11 @@ async function rearmBackfillTick(): Promise<void> {
  *    target whose scope names no account is not a target, and leaving it in the
  *    registry would have the alarm wake for it every tick (`rememberScopedTarget`).
  *    The same replacement applies to a leftover conversation title: that string
- *    is not an organization, and `forgetTarget` keyed by the current scope
- *    cannot see it when a different organization arrives on another path.
- *    Nothing about the archive or the debt set moves here — a registration is not
- *    a fact.
+ *    is not an organization. Collapsing it must not insert `'default'` in front
+ *    of a live organization — the alarm `break`s on the sentinel halt and the
+ *    org would starve. If an organization row already exists, this tick runs
+ *    under that organization. The dropped row's local ledger header is removed
+ *    with it; the host archive is not touched.
  */
 async function resolveScopeForTick(
   store: ReturnType<typeof browserLocalStore>,
@@ -1048,15 +1057,21 @@ async function resolveScopeForTick(
   // 🔴 W49 · Only an organization id is "already resolved". `'default'` is the
   //    sentinel, and a conversation title is the same kind of fact: it names no
   //    account. Treating either as an organization would substitute it into
-  //    `/api/organizations/<scope>/…`. A leftover title is collapsed onto the
-  //    sentinel here so `forgetTarget`'s platform+scope key can see it, and so
-  //    the alarm retries through the existing unresolved path.
+  //    `/api/organizations/<scope>/…`.
   if (isClaudeOrgId(target.scope)) return target.scope;
-  if (target.scope !== UNRESOLVED_SCOPE) {
-    await rememberScopedTarget(store, {
-      platform: target.platform, origin: target.origin, scope: UNRESOLVED_SCOPE, at: Date.now(),
-    });
-  }
+  // 🔴 W49b · Collapse through the one-write path. If a live organization is
+  //    already registered, that path drops the title (and its ledger) *without*
+  //    inserting `'default'`, and this tick runs under the organization rather
+  //    than halting on the sentinel and `break`ing. A stale snapshot of a title
+  //    the live leg already replaced is the same fact: re-inserting `'default'`
+  //    in front of the org the capture just registered is the race this stops.
+  const next = await rememberScopedTarget(store, {
+    platform: target.platform, origin: target.origin, scope: UNRESOLVED_SCOPE, at: Date.now(),
+  });
+  const existingOrg = next.find(
+    (t) => t.platform === target.platform && isClaudeOrgId(t.scope),
+  );
+  if (existingOrg) return existingOrg.scope;
   const resolver = scopeResolverFor(target.platform);
   if (!resolver) return UNRESOLVED_SCOPE;
   if (!(await scopeRetryDue(store, target.platform, UNRESOLVED_SCOPE, Date.now()))) {
