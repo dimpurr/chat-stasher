@@ -93,13 +93,13 @@ the sentence.
    requests **the page itself already made** in your already-logged-in session
    (`apps/extension/lib/page-hook.ts:659`, `:698`, `:559-576`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:270-716`, `:840-868`).
+   (`apps/extension/lib/contract.ts:272-718`, `:842-870`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
    page, on the same origin (`apps/extension/lib/page-hook.ts:679-684`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:548-574`). That request —
+   `apps/extension/entrypoints/dw-bridge.content.ts:562-588`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin. The token is held only
@@ -119,7 +119,7 @@ the sentence.
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
    conversations” (`apps/extension/lib/platform-auth.ts:214-246`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:432-438`).
+   `apps/extension/entrypoints/dw-bridge.content.ts:446-452`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,
@@ -274,7 +274,8 @@ What is kept there:
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
 | `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:582-680`; `apps/extension/entrypoints/background.ts:1224-1280` |
-| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A page's own report about its capture hook: one record per origin, holding each observation and when it was made. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:69-101`, `:226-355`; `apps/extension/entrypoints/background.ts:1410-1426`, `:1452-1468` |
+| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation and when it was made. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-110`, `:241-370`; `apps/extension/entrypoints/background.ts:1410-1426`, `:1453-1469` |
+
 
 Three things in that table deserve to be called out rather than buried:
 
@@ -305,8 +306,9 @@ Three things in that table deserve to be called out rather than buried:
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
   (`apps/extension/entrypoints/background.ts:860-884` — the identity itself is
-  read by `apps/extension/lib/contract.ts:1051-1067`; the `default` fallback is on
+  read by `apps/extension/lib/contract.ts:1053-1069`; the `default` fallback is on
   the `||` at `apps/extension/entrypoints/background.ts:905`). It is used to
+
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
@@ -449,16 +451,16 @@ oldest turns while looking complete.
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:273`)
-- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:317`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:389`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:405`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:446`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:512`)
-- `https://grok.com` (`apps/extension/lib/contract.ts:634`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:275`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:323`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:391`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:407`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:448`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:514`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:636`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:719-721`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:721-723`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -469,12 +471,12 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:819-838`, `:931-939`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:821-840`, `:933-941`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:741`; `apps/extension/lib/page-hook.ts:374`). No shipped
+(`apps/extension/lib/contract.ts:743`; `apps/extension/lib/page-hook.ts:374`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
-explicitly (`apps/extension/lib/contract.ts:317`, `:385`, `:401`, `:442`, `:500`,
-`:627`, `:714`).
+explicitly (`apps/extension/lib/contract.ts:319`, `:387`, `:403`, `:444`, `:502`,
+`:629`, `:716`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on

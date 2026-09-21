@@ -23,7 +23,7 @@ trust the code and treat the sentence as unverified.
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:244-269`, `:719-721`;
+   the raw response text (`apps/extension/lib/contract.ts:246-271`, `:721-723`;
    the `fetch` wrap at `apps/extension/lib/page-hook.ts:705-730`, the
    `response.clone().text()` read at `:698`, and the capture decision at
    `:356-396`).
@@ -264,7 +264,7 @@ while holding only the oldest turns. **On ChatGPT it does add traffic:** when yo
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
 `/api/auth/session` (`apps/extension/lib/page-hook.ts:679-684`;
-`apps/extension/entrypoints/dw-bridge.content.ts:548-574`;
+`apps/extension/entrypoints/dw-bridge.content.ts:562-588`;
 `apps/extension/lib/platform-auth.ts:99-118`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
@@ -311,7 +311,7 @@ leg leaves that conversation-content segment unfilled precisely because a wrong
 guess fails silently: it would archive a truncated version of every chat and
 still look like success. The route itself is no longer the unknown — the
 extension's live-capture row reads the response the page fetches when you open a
-conversation (`apps/extension/lib/contract.ts:338-353`) — but the sources
+conversation (`apps/extension/lib/contract.ts:340-355`) — but the sources
 disagree about that route's parameters, and nothing establishes whether one
 response holds a whole long conversation. Reading a response the page already
 fetched is also not the same as issuing that request yourself, and backfill
@@ -322,7 +322,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:892-905`, `:1051-1067`). That value is written
+(`apps/extension/lib/contract.ts:894-907`, `:1053-1069`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:150-152`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -348,8 +348,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on the hook's ready message
-(`apps/extension/lib/contract.ts:875-885`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:840-873`). Those
+(`apps/extension/lib/contract.ts:877-887`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:842-875`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.

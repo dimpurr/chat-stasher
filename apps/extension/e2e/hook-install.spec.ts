@@ -220,7 +220,7 @@ test('a page whose hook did not install is visible in the popup, and a verifying
   // painting rather than for the navigation.
   await expect(popup.locator('#notes')).toContainText(ORIGIN);
   const notes = await popup.locator('#notes').innerText();
-  expect(notes).toContain('Live capture is not installed');
+  expect(notes).toContain('reported that its live-capture hook is not working');
   expect(notes).toContain('chatgpt');
   await popup.close();
 
@@ -240,7 +240,7 @@ test('a page whose hook did not install is visible in the popup, and a verifying
   // Wait for the popup to have painted something before reading the absence —
   // an empty `#notes` also does not contain the sentence.
   await expect(after.locator('#notes')).not.toBeEmpty();
-  expect(await after.locator('#notes').innerText()).not.toContain('Live capture is not installed');
+  expect(await after.locator('#notes').innerText()).not.toContain('reported that its live-capture hook is not working');
   await after.close();
 
   expect(escaped).toEqual([]);

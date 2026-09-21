@@ -15,10 +15,11 @@
  *  1. **The vocabulary is closed and total.** Every reason in
  *     `HOOK_OBSERVATIONS` has a sentence, and `isHookStatusMessage` accepts
  *     exactly the two shapes a page's report can have.
- *  2. **The record is per origin and last-word-wins.** Observations merge by
- *     reason, a non-record in storage is never read as one, and the one thing
- *     that clears a record is a page whose hook *verified* — evidence, not
- *     acknowledgement.
+ *  2. **The record is per origin and last-word-wins among top frames.**
+ *     Observations merge by reason, a non-record in storage is never read as
+ *     one, and the one thing that clears a record is a *top frame* whose hook
+ *     *verified* — evidence, not acknowledgement. A child frame's observation
+ *     is a statement about that frame and is not sent.
  *  3. **The bridge says it out loud.** On a page where the hook answered, one
  *     positive observation leaves; on a page where it did not and the fallback
  *     was refused, one failure observation leaves, exactly once, carrying an
@@ -144,7 +145,16 @@ describe('W43 · the closed vocabulary has a sentence for every member', () => {
     // The 2026-09-19 measurement left the cause on one platform unsettled, so no
     // sentence here may assert one — this is the assertion that keeps a future
     // edit from writing "Trusted Types" (or any other guess) into the popup.
-    for (const guess of ['trusted types', 'content security policy', 'csp']) {
+    // "usual reason" / "already open when the extension was loaded" are the
+    // cause the pre-W46 `notInstalled` copy named; an observation records a
+    // fact and never names a reason.
+    for (const guess of [
+      'trusted types',
+      'content security policy',
+      'csp',
+      'usual reason',
+      'already open when the extension was loaded',
+    ]) {
       expect(joined).not.toContain(guess);
     }
   });
@@ -309,6 +319,13 @@ interface FakePageOptions {
   /** Overrides `useLocationOriginOnly` — the URL-less frame's reading. */
   environmentOrigin?: string;
   locationOrigin?: string;
+  /**
+   * 🔴 W46 · Model a nested browsing context: `window.top` is some other
+   *    window, so `isTopFrame()` is false. The default is a top frame
+   *    (`window.top` unset, which the bridge treats as the top document — the
+   *    node test environment has no `top` at all).
+   */
+  nested?: boolean;
 }
 
 /**
@@ -416,8 +433,11 @@ function makeFakePage(hook: {
     visibilityState: 'visible' as const,
     addEventListener() { /* the visibility listener is not what this file tests */ },
   });
+  // A nested frame has a `top` that is not itself. Leaving it unset is the
+  // top-document case the bridge already treats as `isTopFrame() === true`.
+  if (options.nested) win.top = { /* a parent browsing context, not this window */ };
   vi.stubGlobal('window', win);
-  vi.stubGlobal('top', win);
+  vi.stubGlobal('top', options.nested ? win.top : win);
   return page;
 }
 
@@ -793,9 +813,9 @@ async function postProbe(page: FakePage): Promise<void> {
  *  2. a healthy page stays silent, however many times it runs (so the new
  *     timer cannot file a failure against a page that is fine);
  *  3. a hook that is *still* broken repeats the observation, which is what
- *     keeps the record alive when another document on the origin verifies —
- *     `lib/hook-status.ts` lets the newest word win, and the newest word has to
- *     keep being the true one.
+ *     keeps the record alive when another *top frame* on the origin verifies —
+ *     `lib/hook-status.ts` lets the newest top-frame word win, and the newest
+ *     word has to keep being the true one. A child frame cannot speak.
  */
 describe('W43c · the hook re-checks itself after the handshake', () => {
   it('🔴 a page that takes the XHR half back after answering a probe is reported by the next check', async () => {
@@ -881,14 +901,58 @@ describe('W43c · the hook re-checks itself after the handshake', () => {
     expect(didNotTakeRelays()).toBe(1);
 
     // 🔴 And after one check interval it goes out again. This is what keeps a
-    //    page that is *still* broken audible on its own origin: any document whose
-    //    hook verified removes the origin's record (`lib/hook-status.ts`, newest
-    //    word wins), so a repeated observation is the only thing that stops a
-    //    whole frame from silencing the page in front of the user. The record
-    //    itself merges the repeat into one row — what repeats is the observation,
-    //    and it carries a fresh time.
+    //    page that is *still* broken audible on its own origin: a later top frame
+    //    whose hook verified removes the origin's record (`lib/hook-status.ts`,
+    //    newest top-frame word wins), so a repeated observation is what keeps a
+    //    still-broken tab current when another tab on the same origin verifies.
+    //    The record itself merges the repeat into one row — what repeats is the
+    //    observation, and it carries a fresh time.
     await settle(page, HOOK_SELF_CHECK_INTERVAL_MS + 1);
     reportFromPage();
     expect(didNotTakeRelays()).toBe(2);
+  });
+});
+
+/**
+ * W46 · **A frame's observation is a statement about that frame.**
+ *
+ * The record is keyed by origin because the user needs one place to look, but
+ * a positive report from one document is not evidence that another document's
+ * hook is healthy. Only the top frame speaks for the origin: the bridge drops
+ * every other frame's report, so `reason: null` from a healthy iframe cannot
+ * `remove` a failure the main document wrote down.
+ *
+ * These two cases are the unit-level form of `e2e/hook-origin-authority.spec.ts`.
+ * Deleting `if (!isTopFrame()) return;` in `sendHookStatus` turns both red.
+ */
+describe('W46 · only the top frame speaks for an origin', () => {
+  it('🔴 a healthy subframe does not send the positive observation', async () => {
+    const page = makeFakePage(await pageHook(), { nested: true });
+    const sent = stubRuntime();
+
+    const mainMod: any = await import('../entrypoints/dw-fetch-main.content');
+    mainMod.default.main();
+    await loadBridge();
+    await settle(page);
+
+    // The hook answered — the child is whole. On the unfixed tree that answer
+    // is forwarded as `reason: null` and would clear the origin's record.
+    expect(page.posted.some((entry) => entry.data?.type === MAIN_READY_MESSAGE)).toBe(true);
+    expect(hookStatusReports(sent)).toEqual([]);
+  });
+
+  it('🔴 a subframe whose hook failed does not file a failure for the origin either', async () => {
+    const page = makeFakePage(await pageHook(), { nested: true });
+    page.trustedTypes = true;
+    const sent = stubRuntime();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* asserted by absence of a report */ });
+
+    await loadBridge();
+    await settle(page, 1_000);
+
+    // The fallback was refused in this frame. That is a fact about this frame,
+    // not about the origin the user is looking at.
+    expect(hookStatusReports(sent)).toEqual([]);
+    warn.mockRestore();
   });
 });

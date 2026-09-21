@@ -29,7 +29,7 @@ read-only (`crates/chat-stasher/src/main.rs:653`).
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`), Grok (`grok.com`)
-(`apps/extension/lib/contract.ts:317,385,401,442,500,627,714`).
+(`apps/extension/lib/contract.ts:319,387,403,444,502,629,716`).
 
 🔴 **Recognizing a platform is not the same as capturing on it, and for two of
 the seven it measurably was not.** On 2026-09-19, in a real browser with the
@@ -80,18 +80,18 @@ that platform."** The extension has two legs; please read them separately:
 - **Passive capture** (on by default): the conversation you are currently
   viewing is saved as a side effect when the page fetches its own data. Each
   platform registers in that table which route, method, and response shape
-  count (`apps/extension/lib/contract.ts:270-716`).
+  count (`apps/extension/lib/contract.ts:272-718`).
   🔴 **Perplexity used to be the exception here; read where it stands now:**
   its row registers the **conversation-content** route — path hint
   `/rest/thread/`, method `GET`, response shape requiring `entries`
-  (`apps/extension/lib/contract.ts:320-386`) — and it recognizes the session id
+  (`apps/extension/lib/contract.ts:322-388`) — and it recognizes the session id
   from the page URL, the `/search/<slug>` the thread is open at
-  (`apps/extension/lib/contract.ts:373-376`). The **conversation-list** route is
+  (`apps/extension/lib/contract.ts:375-378`). The **conversation-list** route is
   deliberately outside the row: a list is a summary of conversations, not one of
   them, so it is skipped silently rather than captured.
   So, reading the code, passive capture on Perplexity **does name the
   conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:949-977`) — but this is still a conclusion
+  (`apps/extension/lib/contract.ts:951-979`) — but this is still a conclusion
   drawn from reading the code, and the route itself was read out of public
   source rather than measured: **we have not tested it on a real perplexity.ai
   page.**
@@ -150,7 +150,7 @@ implementations that cross-check one another
 (`apps/extension/lib/backfill/enumerate.ts:2433-2447`), but this plan's
 **single-conversation segment is left unfilled** — and it is left unfilled on
 purpose, not for want of a route. The content route itself is known
-(`apps/extension/lib/contract.ts:338-353`), but the parameters the sources give
+(`apps/extension/lib/contract.ts:340-355`), but the parameters the sources give
 for it disagree with one another and nothing establishes whether one response
 holds a whole long conversation, so `detailPath` stays `null`
 (`apps/extension/lib/backfill/enumerate.ts:2421-2430`, `:2433-2447`). We will not guess a
@@ -162,7 +162,7 @@ The popup shows these three tiers in the same terms as the table above
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
-`apps/extension/lib/contract.ts:270-716`, a separate matter from backfill.)
+`apps/extension/lib/contract.ts:272-718`, a separate matter from backfill.)
 
 ---
 

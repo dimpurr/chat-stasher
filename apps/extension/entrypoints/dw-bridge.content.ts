@@ -122,8 +122,8 @@ export default defineContentScript({
      * which writes it down under `lib/hook-status.ts` and the popup shows.
      *
      * 🔴 `reason: null` is the **positive** observation, and it is not an
-     *    afterthought: a page whose probe this side's own invented token came back
-     *    from is the evidence that clears an older record for the same origin.
+     *    afterthought: a top frame whose probe this side's own invented token came
+     *    back from is the evidence that clears an older record for the same origin.
      *    Without it the record could only ever be written, never withdrawn, and a
      *    user who reloaded the tab and fixed the page would keep a sentence saying
      *    it was broken — a record that has stopped being a record of anything.
@@ -143,10 +143,10 @@ export default defineContentScript({
      *    (`HOOK_SELF_CHECK_INTERVAL_MS`), and each of those readings is a fresh
      *    observation of the *same* page: relaying only the first one would make
      *    that re-check pointless, because the one thing that removes a record on
-     *    this origin is another document's positive observation
+     *    this origin is a later positive observation from the same top frame
      *    (`lib/hook-status.ts`, last word wins) — so a still-broken page would be
-     *    silenced by a verifying frame and never heard from again. The page's own
-     *    reports therefore go out every time, bounded by the same interval the
+     *    silenced by a later healthy reload and never heard from again. The page's
+     *    own reports therefore go out every time, bounded by the same interval the
      *    hook uses.
      *
      * 🔴 That bound is the reason `hookStatusSentAt` exists. The page world can
@@ -160,13 +160,23 @@ export default defineContentScript({
      */
     const hookStatusReported = new Set<string>();
     const hookStatusSentAt = new Map<string, number>();
-    /** The report message itself, ungated: the gate belongs to whoever decided to send. */
+    /**
+     * 🔴 W46 · **The report message itself, gated by who may speak for an origin.**
+     *
+     * A frame's observation is a statement about *that frame*, not about every
+     * document on the origin. Only the top frame speaks for the origin: the user
+     * sees the top frame, and a healthy child frame is not evidence that the main
+     * document's hook is whole. So a subframe's observation is not sent at all;
+     * the record stays with the top frame's word.
+     *
+     * Delivery is best-effort in both directions, and a failure here must not
+     * disturb the page: a capture that was already lost cannot be made worse
+     * by a report about it, and `warnStaleLink` names the one cause that is
+     * worth naming (this document's scripts predate the current build, so
+     * background is not there to hear it).
+     */
     function sendHookStatus(reason: HookObservation | null): void {
-      // 🔴 Delivery is best-effort in both directions, and a failure here must not
-      //    disturb the page: a capture that was already lost cannot be made worse
-      //    by a report about it, and `warnStaleLink` names the one cause that is
-      //    worth naming (this document's scripts predate the current build, so
-      //    background is not there to hear it).
+      if (!isTopFrame()) return;
       Promise.resolve(
         browser.runtime.sendMessage({
           type: HOOK_STATUS_MESSAGE,
@@ -241,9 +251,13 @@ export default defineContentScript({
          * page's hook is installed *and in effect* — the token came back from the
          * page world and, since W43, only while `window.fetch` is still the
          * wrapper (`lib/page-hook.ts`) — so it is also the only evidence that may
-         * withdraw a record left by an earlier page on this origin. Sent once per
-         * page; the gate inside drops the repeats the probe cadence would
-         * otherwise produce.
+         * withdraw a record left by an earlier top-frame observation on this
+         * origin. Sent once per page; the gate inside drops the repeats the probe
+         * cadence would otherwise produce.
+         *
+         * 🔴 W46 · This is sent only from the top frame (`sendHookStatus` checks
+         *    `isTopFrame()`), so a healthy child frame cannot withdraw a failure
+         *    the main document wrote down.
          */
         reportHookStatus(null);
         mainReady = true;

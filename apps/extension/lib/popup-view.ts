@@ -223,8 +223,8 @@ export interface PopupModel {
    */
   summary?: SummaryState;
   /**
-   * 🔴 W43 · **Every origin whose own page told us its capture hook is not
-   *    installed** (`lib/hook-status.ts`), newest first.
+   * 🔴 W43 · **Every origin whose top frame told us its capture hook is not
+   *    working** (`lib/hook-status.ts`), newest first.
    *
    * This is the field that turns "the stage stayed empty" from an ambiguity into
    * a fact: before W43 a page where nothing of ours ran produced exactly what a
@@ -1072,8 +1072,8 @@ const HOOK_REASON_NOTE_KEYS: Record<HookObservation, string> = {
  * Every observation the record holds is named — they are different facts and the
  * one that matters to a reader (did captures happen and then stop, or did nothing
  * ever run?) differs between them — and the time is printed as the stamp it is,
- * because "the hook is not installed" is only ever true **as of** that moment: a
- * page that verifies afterwards clears the record.
+ * because "the hook is not working" is only ever true **as of** that moment: a
+ * top frame that verifies afterwards clears the record.
  */
 function hookStatusNote(record: HookStatusRecord): string {
   const reasons = record.reasons

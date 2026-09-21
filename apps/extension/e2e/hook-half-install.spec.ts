@@ -140,7 +140,7 @@ test('a page that takes the XHR half back after the handshake is recorded, and t
   const popup = await openPopup(ext);
   await expect(popup.locator('#notes')).toContainText(ORIGIN);
   const notes = await popup.locator('#notes').innerText();
-  expect(notes).toContain('Live capture is not installed');
+  expect(notes).toContain('reported that its live-capture hook is not working');
   expect(notes).toContain('something replaced it afterwards');
   await popup.close();
 
