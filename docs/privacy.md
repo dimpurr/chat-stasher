@@ -93,13 +93,13 @@ the sentence.
    requests **the page itself already made** in your already-logged-in session
    (`apps/extension/lib/page-hook.ts:659`, `:698`, `:559-576`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:270-716`, `:840-868`).
+   (`apps/extension/lib/contract.ts:272-718`, `:842-870`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
    page, on the same origin (`apps/extension/lib/page-hook.ts:679-684`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:548-574`). That request —
+   `apps/extension/entrypoints/dw-bridge.content.ts:562-588`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin. The token is held only
@@ -119,14 +119,14 @@ the sentence.
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
    conversations” (`apps/extension/lib/platform-auth.ts:214-246`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:432-438`).
+   `apps/extension/entrypoints/dw-bridge.content.ts:446-452`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,
    `:309-377`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:205-222`).
+   (`apps/extension/entrypoints/background.ts:208-225`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -237,7 +237,7 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:132-160`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:135-163`;
 `apps/extension/lib/outbox.ts:64-80`, `:309-377`). The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
@@ -273,8 +273,9 @@ What is kept there:
 | `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, and the record that a platform's id list had to be read again. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:930-964`; `apps/extension/lib/backfill/debt-store.ts:68-87` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
-| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. Metadata only: reason codes, a count and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:582-640`; `apps/extension/entrypoints/background.ts:1141-1190` |
-| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A page's own report about its capture hook: one record per origin, holding each observation and when it was made. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:69-101`, `:226-355`; `apps/extension/entrypoints/background.ts:1320-1336`, `:1362-1378` |
+| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:582-680`; `apps/extension/entrypoints/background.ts:1224-1280` |
+| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation and when it was made. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-110`, `:241-370`; `apps/extension/entrypoints/background.ts:1410-1426`, `:1453-1469` |
+
 
 Three things in that table deserve to be called out rather than buried:
 
@@ -304,9 +305,10 @@ Three things in that table deserve to be called out rather than buried:
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:803-827` — the identity itself is
-  read by `apps/extension/lib/contract.ts:1051-1067`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:848`). It is used to
+  (`apps/extension/entrypoints/background.ts:860-884` — the identity itself is
+  read by `apps/extension/lib/contract.ts:1053-1069`; the `default` fallback is on
+  the `||` at `apps/extension/entrypoints/background.ts:905`). It is used to
+
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
   transmitted anywhere by this extension. Note that the backfill leg started by
@@ -316,7 +318,7 @@ Three things in that table deserve to be called out rather than buried:
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:722-794`).
+  (`apps/extension/entrypoints/background.ts:779-851`).
 - **On claude.ai the scope is not read from a response body: it is the
   organization the page's own requests are addressed to**, and that value is
   required in every request path on that platform while appearing in no page URL
@@ -339,7 +341,7 @@ Three things in that table deserve to be called out rather than buried:
   are never probed one by one, and once that has been recorded the page is not
   asked again on every wake-up — the answer is already known
   (`apps/extension/lib/backfill/claude-org.ts:170-224`;
-  `apps/extension/entrypoints/background.ts:704-720`). The sentinel
+  `apps/extension/entrypoints/background.ts:761-777`). The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
   organization that does not exist (`apps/extension/lib/backfill/engine.ts:691-735`).
@@ -349,7 +351,7 @@ Three things in that table deserve to be called out rather than buried:
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:948-970`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:1005-1027`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
@@ -449,16 +451,16 @@ oldest turns while looking complete.
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:273`)
-- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:317`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:389`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:405`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:446`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:512`)
-- `https://grok.com` (`apps/extension/lib/contract.ts:634`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:275`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:323`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:391`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:407`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:448`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:514`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:636`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:719-721`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:721-723`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -469,12 +471,12 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:819-838`, `:931-939`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:821-840`, `:933-941`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:741`; `apps/extension/lib/page-hook.ts:374`). No shipped
+(`apps/extension/lib/contract.ts:743`; `apps/extension/lib/page-hook.ts:374`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
-explicitly (`apps/extension/lib/contract.ts:317`, `:385`, `:401`, `:442`, `:500`,
-`:627`, `:714`).
+explicitly (`apps/extension/lib/contract.ts:319`, `:387`, `:403`, `:444`, `:502`,
+`:629`, `:716`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
