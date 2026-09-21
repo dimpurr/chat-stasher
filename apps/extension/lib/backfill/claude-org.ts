@@ -75,6 +75,12 @@ export function parseOrganizationsResponse(
     if (typeof uuid !== 'string' || uuid.length === 0) {
       return { ok: false, detail: 'an organization record carries no non-empty uuid' };
     }
+    // 🔴 W49b · The same predicate the request URL uses. A slug, a 32-hex
+    //    title, or a dashed hex-word is not an organization id: listing it
+    //    would let the resolver succeed with a value the engine then refuses.
+    //    Skip it rather than failing the whole list, so a real uuid sitting
+    //    next to garbage is not rejected.
+    if (!isClaudeOrgId(uuid)) continue;
     orgs.push(uuid);
   }
   return { ok: true, orgs };
@@ -92,9 +98,41 @@ export function orgFromCookie(cookie: string): string | null {
     if (eq < 0) continue;
     if (part.slice(0, eq).trim() !== CLAUDE_ORG_COOKIE) continue;
     const value = part.slice(eq + 1).trim();
-    return value.length > 0 ? value : null;
+    if (value.length === 0) return null;
+    // Same predicate as the request URL. A cookie that is not an organization
+    // id is "the cookie said nothing" — the endpoint still gets its turn —
+    // never a successful resolution the engine will refuse.
+    return isClaudeOrgId(value) ? value : null;
   }
   return null;
+}
+
+/**
+ * 🔴 W49 · **Is this string an organization id, or something else sitting in
+ * the field that must hold one?**
+ *
+ * Every source that names an organization produces the endpoint's `uuid` shape:
+ * 8-4-4-4-12 hex (uppercase allowed), the same value the page puts in
+ * `/api/organizations/<org>/…`. `'default'` is already this repository's
+ * spelling for "the identifier could not be told", and the engine refuses it
+ * before any request. A conversation title — what the identity heuristic
+ * harvests from a conversation body's `name` — is not that shape, including
+ * dashed hex-words (`cafe-babe`) that the previous "contains a dash and only
+ * hex-or-dash" test accepted. Substituting one would address an organization
+ * that does not exist.
+ *
+ * 🔴 This is not a guess about *which* organization an account has. It is a
+ *    refusal to treat a string that cannot be settled as an organization id as
+ *    if it were one. A value that is not this shape is the same fact as
+ *    `'default'`: `org-unresolved`. All three sources (page URL, cookie,
+ *    endpoint) use this predicate; a miss is a named refusal, not a silent
+ *    `'default'` row the engine will then refuse.
+ */
+const CLAUDE_ORG_ID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export function isClaudeOrgId(value: string): boolean {
+  return CLAUDE_ORG_ID_RE.test(value);
 }
 
 /**
@@ -105,7 +143,10 @@ export function orgFromCookie(cookie: string): string | null {
  * belongs, in the page-side caller.
  *
  * Only the exact prefix `/api/organizations/<one segment>/` is read. A URL that
- * merely contains the word is not one of this page's requests.
+ * merely contains the word is not one of this page's requests. A segment that
+ * is not an organization id (a conversation title, the unresolved sentinel) is
+ * not one either: returning it would write a non-organization into the field
+ * that must hold one.
  */
 export function orgFromRequestUrl(url: string): string | null {
   let pathname: string;
@@ -120,7 +161,7 @@ export function orgFromRequestUrl(url: string): string | null {
   const slash = rest.indexOf('/');
   if (slash <= 0) return null;
   const org = rest.slice(0, slash);
-  return org.length > 0 ? org : null;
+  return isClaudeOrgId(org) ? org : null;
 }
 
 /**
@@ -168,7 +209,7 @@ export interface OrgResolutionInput {
  *    and the last one is only allowed to answer when it is unambiguous.
  */
 export function resolveClaudeOrg(input: OrgResolutionInput): OrgResolution {
-  if (input.seen !== null && input.seen.length > 0) {
+  if (input.seen !== null && isClaudeOrgId(input.seen)) {
     return { ok: true, org: input.seen, source: 'page' };
   }
   const fromCookie = orgFromCookie(input.cookie);

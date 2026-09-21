@@ -22,6 +22,7 @@
  */
 
 import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
+import { isClaudeOrgId } from './claude-org';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import {
@@ -814,12 +815,22 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * whose recorded scope is still this word, and a resolved organization replaces
    * the sentinel row. The alternative — substituting the sentinel — would fire a
    * request against an organization that does not exist.
+   *
+   * 🔴 W49 · A conversation title is the same fact. It is not `'default'`, so the
+   *    line above would have let it through and substituted it into the path.
+   *    For claude, only an organization id (isClaudeOrgId) may be substituted;
+   *    anything else is `org-unresolved`, before any request.
    */
-  if (plan.scopeInPath && opts.scope === 'default') {
+  if (plan.scopeInPath && (
+    opts.scope === 'default'
+    || (plan.platform === 'claude' && !isClaudeOrgId(opts.scope))
+  )) {
     return halt(
       'org-unresolved',
-      `platform ${plan.platform} addresses conversations by account scope, and 'default'`
-      + ' means the identifier could not be told — it is not an organization',
+      opts.scope === 'default'
+        ? `platform ${plan.platform} addresses conversations by account scope, and 'default'`
+          + ' means the identifier could not be told — it is not an organization'
+        : `platform ${plan.platform} addresses conversations by account scope, and this run's scope is not an organization`,
     );
   }
 

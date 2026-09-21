@@ -38,6 +38,7 @@ import {
   type FailureEntry,
 } from './backfill/failures';
 import {
+  BACKFILL_TARGETS_KEY,
   BACKFILL_TICK_DELAY_MAX_MINUTES,
   BACKFILL_TICK_DELAY_MIN_MINUTES,
   type BackfillTickRecord,
@@ -1360,15 +1361,50 @@ function looksLikeState(value: unknown): value is BackfillHeader {
   return Number.isFinite(value.pendingCount) && Number.isFinite(value.archivedCount);
 }
 
+/**
+ * 🔴 W49b · Scopes currently in the target registry, or null when the snapshot
+ *    has no registry (or an empty one).
+ *
+ * A title tick opens `cs_backfill_v2:claude:<title>` before any request. Dropping
+ * the registry row used to leave that header in place, and these two walkers
+ * would show its abandoned halt while the organization's own ledger read empty.
+ * When the registry is present, a header whose scope is not a registered target
+ * is not progress — it is a leftover. Snapshots without a registry (C18's
+ * header-only fixtures) keep the previous "every agreeing header" rule.
+ */
+function registeredStateKeys(snapshot: Record<string, unknown>): Set<string> | null {
+  const raw = snapshot[BACKFILL_TARGETS_KEY];
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const keys = new Set<string>();
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue;
+    const platform = (row as { platform?: unknown }).platform;
+    const scope = (row as { scope?: unknown }).scope;
+    if (typeof platform === 'string' && typeof scope === 'string') {
+      keys.add(stateKey(platform, scope));
+    }
+  }
+  return keys.size > 0 ? keys : null;
+}
+
+function isLiveBackfillHeader(
+  key: string,
+  value: unknown,
+  registered: Set<string> | null,
+): value is BackfillHeader {
+  if (!looksLikeState(value)) return false;
+  if (stateKey(value.platform, value.scope) !== key) return false;
+  if (registered && !registered.has(key)) return false;
+  return true;
+}
+
 export function pickBackfillState(snapshot: Record<string, unknown> | null): BackfillHeader | null {
   if (!snapshot) return null;
+  const registered = registeredStateKeys(snapshot);
   let best: BackfillHeader | null = null;
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
-    if (!looksLikeState(value)) continue;
-    // The key carries platform/scope and so does the value; only accept the two
-    // agreeing, so a mismatched progress set can never be displayed.
-    if (stateKey(value.platform, value.scope) !== key) continue;
+    if (!isLiveBackfillHeader(key, value, registered)) continue;
     if (!best || value.archivedCount > best.archivedCount) best = value;
   }
   return best;
@@ -1379,11 +1415,11 @@ export function backfillStateEntries(
   snapshot: Record<string, unknown> | null,
 ): Array<{ key: string; state: BackfillHeader }> {
   if (!snapshot) return [];
+  const registered = registeredStateKeys(snapshot);
   const out: Array<{ key: string; state: BackfillHeader }> = [];
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
-    if (!looksLikeState(value)) continue;
-    if (stateKey(value.platform, value.scope) !== key) continue;
+    if (!isLiveBackfillHeader(key, value, registered)) continue;
     out.push({ key, state: value });
   }
   return out;

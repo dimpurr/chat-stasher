@@ -261,9 +261,10 @@ export async function rememberTarget(
  * it was. Same shape as `forgetTab` in lib/backfill/tab-port.ts, for the same
  * reason ("the registry converges on its own" needs a way to converge).
  *
- * 🔴 It never touches the target's **state**: the halt record written under the
- *    sentinel scope stays where it is, because this removes a registration, not a
- *    fact. Nothing about the archive, the debt set or the ledger moves here.
+ * 🔴 It never touches the target's **state**: this is the one-row primitive
+ *    `rememberTarget` cannot express. Dropping a *non-organization* Claude row
+ *    goes through `rememberOrganizationScopedTarget`, which also removes that
+ *    scope's local ledger header — see that function.
  */
 export async function forgetTarget(
   store: BackfillStore | null,
@@ -275,6 +276,99 @@ export async function forgetTarget(
     (t) => !(t.platform === platform && t.scope === scope),
   );
   await store.save(BACKFILL_TARGETS_KEY, next);
+}
+
+/**
+ * 🔴 W49 / W49b · Store one scoped-platform row, drop every non-organization
+ * row for that platform, and do it in **one** registry write.
+ *
+ * `rememberTarget` prepends and dedups by platform+scope. Collapsing a leftover
+ * conversation title onto `'default'` through "delete non-orgs, then prepend
+ * default" therefore put the unresolved sentinel *in front of* a live
+ * organization the registry already held. The alarm's loop `break`s on any
+ * reason other than `no-http-port`, so a halt written on `'default'` starved
+ * the organization until a new capture dropped the sentinel.
+ *
+ * So: a value that is not an organization is stored as the unresolved
+ * sentinel only when this platform has **no** organization row. If one
+ * already exists, the non-organization rows are dropped and the organization
+ * is left where it is — never outranked by `'default'`. Two organization
+ * rows still coexist.
+ *
+ * The registry is one `save`. A kill between a previous delete-then-insert
+ * pair left the platform with no row; that window is gone. Dropped
+ * non-organization rows also lose their `cs_backfill_v2:<platform>:<scope>`
+ * header (halt, cursor, failures): that key is not unreachable — the popup
+ * walks every header — and claiming nothing was written there was false.
+ * The host archive is append-only and is not touched. A header whose scope
+ * is re-inserted (collapsing title → `'default'` when no org exists) is kept.
+ *
+ * The caller names what an organization looks like, because this module does
+ * not know any platform's identifier shape.
+ */
+export async function rememberOrganizationScopedTarget(
+  store: BackfillStore | null,
+  target: BackfillTarget,
+  isOrganizationScope: (scope: string) => boolean,
+): Promise<BackfillTarget[]> {
+  if (!store) return [];
+  const current = await loadTargets(store);
+  const incomingIsOrg = isOrganizationScope(target.scope);
+  const dropped: BackfillTarget[] = [];
+  const kept: BackfillTarget[] = [];
+  for (const t of current) {
+    if (t.platform === target.platform && !isOrganizationScope(t.scope)) {
+      dropped.push(t);
+    } else {
+      kept.push(t);
+    }
+  }
+  const platformHasOrg = kept.some(
+    (t) => t.platform === target.platform && isOrganizationScope(t.scope),
+  );
+  let next: BackfillTarget[];
+  if (!incomingIsOrg && platformHasOrg) {
+    next = kept;
+  } else {
+    const rest = kept.filter(
+      (t) => !(t.platform === target.platform && t.scope === target.scope),
+    );
+    next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
+  }
+  await store.save(BACKFILL_TARGETS_KEY, next);
+  const stillPresent = new Set(next.map((t) => `${t.platform}\0${t.scope}`));
+  for (const t of dropped) {
+    if (stillPresent.has(`${t.platform}\0${t.scope}`)) continue;
+    await store.remove(stateKey(t.platform, t.scope));
+  }
+  return next;
+}
+
+/**
+ * 🔴 W49 · Drop every target for `platform` whose scope is **not** an
+ * organization, and remove those scopes' local ledger headers.
+ *
+ * Prefer `rememberOrganizationScopedTarget` when a row is being stored: that
+ * path is one registry write and will not insert an unresolved row in front
+ * of a live organization. This remains the drop-only form.
+ */
+export async function forgetNonOrganizationTargets(
+  store: BackfillStore | null,
+  platform: string,
+  isOrganizationScope: (scope: string) => boolean,
+): Promise<void> {
+  if (!store) return;
+  const current = await loadTargets(store);
+  const dropped: BackfillTarget[] = [];
+  const next: BackfillTarget[] = [];
+  for (const t of current) {
+    if (t.platform === platform && !isOrganizationScope(t.scope)) dropped.push(t);
+    else next.push(t);
+  }
+  await store.save(BACKFILL_TARGETS_KEY, next);
+  for (const t of dropped) {
+    await store.remove(stateKey(t.platform, t.scope));
+  }
 }
 
 // ---------------------------------------------------------------------------
