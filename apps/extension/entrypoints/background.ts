@@ -53,7 +53,7 @@ import {
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
   findUnreadableState,
-  forgetTarget,
+  forgetNonOrganizationTargets,
   isBackfillChainArmed,
   loadTargets,
   migrateLegacyScopes,
@@ -61,13 +61,14 @@ import {
   saveLastTick,
   syncBackfillAlarm,
   type AlarmsApi,
+  type BackfillTarget,
   type TabSweepTrace,
 } from '../lib/backfill/alarm';
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
 //    captured URL, and the plan table is asked whether this platform is one of them.
 import { backfillCapabilityOf, backfillPlanFor } from '../lib/backfill/enumerate';
-import { orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
+import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
 import { haltClassOf, haltStillApplies, isHeader, stateKey } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
@@ -671,6 +672,34 @@ async function liveTransport(): Promise<{
 export const UNRESOLVED_SCOPE = 'default';
 
 /**
+ * 🔴 W49 · **Store one organization per scoped-platform row, and drop every
+ * row for that platform whose scope is not an organization.**
+ *
+ * `rememberTarget` dedups by platform+scope, so a leftover conversation title
+ * (or the `'default'` sentinel) is a different key from the organization that
+ * just became known and is left in the registry. `forgetTarget` is the same
+ * key: calling it with the current row's scope cannot see a different one.
+ * The alarm then wakes for a scope that names no account.
+ *
+ * A value that is not an organization id is stored as `UNRESOLVED_SCOPE` — the
+ * existing spelling for "the identifier could not be told" — rather than
+ * written as if it were one. Another organization for the same platform is
+ * kept: two organizations are two targets.
+ */
+async function rememberScopedTarget(
+  store: ReturnType<typeof browserLocalStore>,
+  target: BackfillTarget,
+): Promise<void> {
+  if (!backfillPlanFor(target.platform)?.scopeInPath) {
+    await rememberTarget(store, target);
+    return;
+  }
+  const scope = isClaudeOrgId(target.scope) ? target.scope : UNRESOLVED_SCOPE;
+  await forgetNonOrganizationTargets(store, target.platform, isClaudeOrgId);
+  await rememberTarget(store, { ...target, scope });
+}
+
+/**
  * 🔴 W31c · **Who can turn "this page" into an account scope.**
  *
  * The question this answers is not "which platform is this" (the platform table
@@ -818,10 +847,13 @@ export async function scopeRetryDue(
  *    with no organization still fetches nothing.
  *  · The cost (written down honestly, and unchanged from C33): a scoped target
  *    that first registered as unresolved and is later resolved is replaced by one
- *    carrying the real organization (`forgetTarget` + `rememberTarget` in the
- *    alarm's path), while the *halt record* written under the unresolved scope
- *    stays where it is. Nothing is archived under it, no debt is written under it,
+ *    carrying the real organization (`rememberScopedTarget` in the alarm's path),
+ *    while the *halt record* written under the unresolved scope stays where it is.
+ *    Nothing is archived under it, no debt is written under it,
  *    and a later real capture registers the organization's own target anyway.
+ *    The same replacement drops a leftover conversation title: that string is not
+ *    an organization, and leaving it would have the alarm wake for a scope that
+ *    names no account.
  */
 export async function registerBackfillTargetHere(): Promise<
   | { ok: true; target: { platform: string; origin: string; scope: string } }
@@ -847,12 +879,12 @@ export async function registerBackfillTargetHere(): Promise<
       await recordBackfillHalt(store, {
         platform, scope, reason: resolved.halt, detail: resolved.detail,
       });
-      await rememberTarget(store, { platform, origin, scope, at: Date.now() });
+      await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
       return { ok: false, reason: resolved.halt };
     }
   }
   const target = { platform, origin, scope };
-  await rememberTarget(store, { ...target, at: Date.now() });
+  await rememberScopedTarget(store, { ...target, at: Date.now() });
   return { ok: true, target };
 }
 
@@ -897,6 +929,9 @@ export function backfillTargetFor(
    */
   if (backfillPlanFor(row.id)?.scopeInPath) {
     const scope = orgFromRequestUrl(captured.url);
+    // 🔴 W49 · orgFromRequestUrl already refuses a segment that is not an
+    //    organization id (a conversation title, the unresolved sentinel). A
+    //    null here is "no target", not a title written as if it were one.
     return scope === null ? null : { platform: row.id, origin, scope };
   }
   // The archive-scope key follows ADR-002's account axis; an untellable account
@@ -921,7 +956,7 @@ export async function kickBackfill(
   // there is nothing to guess later. A failed write still lets this tick run —
   // the registry only affects the alarm's path.
   try {
-    await rememberTarget(store, { ...target, at: Date.now() });
+    await rememberScopedTarget(store, { ...target, at: Date.now() });
   } catch (err) {
     console.warn('[chat-stasher] backfill target registry write failed', (err as Error).message);
   }
@@ -998,7 +1033,10 @@ async function rearmBackfillTick(): Promise<void> {
  *
  * 🔴 When the question succeeds, the sentinel row is **replaced**, not joined: a
  *    target whose scope names no account is not a target, and leaving it in the
- *    registry would have the alarm wake for it every tick (`forgetTarget`).
+ *    registry would have the alarm wake for it every tick (`rememberScopedTarget`).
+ *    The same replacement applies to a leftover conversation title: that string
+ *    is not an organization, and `forgetTarget` keyed by the current scope
+ *    cannot see it when a different organization arrives on another path.
  *    Nothing about the archive or the debt set moves here — a registration is not
  *    a fact.
  */
@@ -1007,20 +1045,32 @@ async function resolveScopeForTick(
   target: { platform: string; origin: string; scope: string },
 ): Promise<string> {
   if (!backfillPlanFor(target.platform)?.scopeInPath) return target.scope;
-  if (target.scope.length > 0 && target.scope !== UNRESOLVED_SCOPE) return target.scope;
+  // 🔴 W49 · Only an organization id is "already resolved". `'default'` is the
+  //    sentinel, and a conversation title is the same kind of fact: it names no
+  //    account. Treating either as an organization would substitute it into
+  //    `/api/organizations/<scope>/…`. A leftover title is collapsed onto the
+  //    sentinel here so `forgetTarget`'s platform+scope key can see it, and so
+  //    the alarm retries through the existing unresolved path.
+  if (isClaudeOrgId(target.scope)) return target.scope;
+  if (target.scope !== UNRESOLVED_SCOPE) {
+    await rememberScopedTarget(store, {
+      platform: target.platform, origin: target.origin, scope: UNRESOLVED_SCOPE, at: Date.now(),
+    });
+  }
   const resolver = scopeResolverFor(target.platform);
-  if (!resolver) return target.scope;
-  if (!(await scopeRetryDue(store, target.platform, target.scope, Date.now()))) return target.scope;
+  if (!resolver) return UNRESOLVED_SCOPE;
+  if (!(await scopeRetryDue(store, target.platform, UNRESOLVED_SCOPE, Date.now()))) {
+    return UNRESOLVED_SCOPE;
+  }
   const resolved = await resolver(null, target.origin);
   if (!resolved.ok) {
     await recordBackfillHalt(store, {
-      platform: target.platform, scope: target.scope, reason: resolved.halt, detail: resolved.detail,
+      platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
     // The engine now finds the halt record and stops by name, issuing nothing.
-    return target.scope;
+    return UNRESOLVED_SCOPE;
   }
-  await forgetTarget(store, target.platform, target.scope);
-  await rememberTarget(store, {
+  await rememberScopedTarget(store, {
     platform: target.platform, origin: target.origin, scope: resolved.org, at: Date.now(),
   });
   return resolved.org;

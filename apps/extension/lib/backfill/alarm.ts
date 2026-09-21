@@ -277,6 +277,32 @@ export async function forgetTarget(
   await store.save(BACKFILL_TARGETS_KEY, next);
 }
 
+/**
+ * 🔴 W49 · Drop every target for `platform` whose scope is **not** an
+ * organization.
+ *
+ * `forgetTarget` keys by the same platform+scope pair `rememberTarget` dedups
+ * on. That is why a leftover row whose scope is a conversation title (or the
+ * `'default'` sentinel) survives the arrival of the real organization: the
+ * two rows are different keys, so the new one joins rather than replaces.
+ * The alarm then wakes for a scope that names no account.
+ *
+ * The caller names what an organization looks like, because this module does
+ * not know any platform's identifier shape. Another organization for the same
+ * platform is kept — two organizations are two targets.
+ */
+export async function forgetNonOrganizationTargets(
+  store: BackfillStore | null,
+  platform: string,
+  isOrganizationScope: (scope: string) => boolean,
+): Promise<void> {
+  if (!store) return;
+  const next = (await loadTargets(store)).filter(
+    (t) => t.platform !== platform || isOrganizationScope(t.scope),
+  );
+  await store.save(BACKFILL_TARGETS_KEY, next);
+}
+
 // ---------------------------------------------------------------------------
 // C30 · The **trace** of the alarm's tick
 //

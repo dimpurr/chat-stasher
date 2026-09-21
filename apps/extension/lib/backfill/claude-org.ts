@@ -98,6 +98,28 @@ export function orgFromCookie(cookie: string): string | null {
 }
 
 /**
+ * 🔴 W49 · **Is this string an organization id, or something else sitting in
+ * the field that must hold one?**
+ *
+ * Every source that names an organization produces the endpoint's `uuid` shape:
+ * dashed hex, the same value the page puts in `/api/organizations/<org>/…`.
+ * `'default'` is already this repository's spelling for "the identifier could
+ * not be told", and the engine refuses it before any request. A conversation
+ * title — what the identity heuristic harvests from a conversation body's
+ * `name` — is not that shape. Substituting it would address an organization
+ * that does not exist.
+ *
+ * 🔴 This is not a guess about *which* organization an account has. It is a
+ *    refusal to treat a string that cannot be settled as an organization id as
+ *    if it were one. A value that is not this shape is the same fact as
+ *    `'default'`: `org-unresolved`.
+ */
+export function isClaudeOrgId(value: string): boolean {
+  if (value.length === 0 || value === 'default') return false;
+  return value.includes('-') && /^[0-9a-fA-F-]+$/.test(value);
+}
+
+/**
  * 🔴 Read the organization out of **the page's own request URL**, i.e. one the
  * live hook already saw. This is what makes source 1 above possible, and it is
  * deliberately a pure function of a URL: nothing here remembers anything, so the
@@ -105,7 +127,10 @@ export function orgFromCookie(cookie: string): string | null {
  * belongs, in the page-side caller.
  *
  * Only the exact prefix `/api/organizations/<one segment>/` is read. A URL that
- * merely contains the word is not one of this page's requests.
+ * merely contains the word is not one of this page's requests. A segment that
+ * is not an organization id (a conversation title, the unresolved sentinel) is
+ * not one either: returning it would write a non-organization into the field
+ * that must hold one.
  */
 export function orgFromRequestUrl(url: string): string | null {
   let pathname: string;
@@ -120,7 +145,7 @@ export function orgFromRequestUrl(url: string): string | null {
   const slash = rest.indexOf('/');
   if (slash <= 0) return null;
   const org = rest.slice(0, slash);
-  return org.length > 0 ? org : null;
+  return isClaudeOrgId(org) ? org : null;
 }
 
 /**

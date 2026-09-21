@@ -54,6 +54,13 @@ const ORG = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const ORG2 = '11111111-2222-3333-4444-555555555555';
 /** A synthetic conversation id, in the hex shape the row's session pattern reads. */
 const ID = '99999999-8888-7777-6666-555555555555';
+/**
+ * 🔴 W49 · A synthetic pre-W31 conversation-title-shaped scope. 32 hex characters
+ * and no dash: the shape observed on a real machine sitting next to a 35-character
+ * organization row, harvested from a conversation body's `name` by the identity
+ * heuristic. It is not an organization id.
+ */
+const TITLE = '00000000000000000000000000000000';
 
 const RESOLVE_PATH = '/api/organizations';
 const RESOLVE_URL = `${CLAUDE_ORIGIN}${RESOLVE_PATH}`;
@@ -667,6 +674,149 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
       detail: 'synthetic: no organization could be named',
     });
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6 · W49 · A title is not an organization, and it must not keep a second row
+// ---------------------------------------------------------------------------
+describe('W49 · Claude target scope must be an organization and must be the only non-organization Claude row', () => {
+  it('🔴 a stale title row is removed when a real capture arrives', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    // The page has already shown which organization it is using, so the backfill
+    // request itself is allowed through and the test noise is only about the registry.
+    await tabHello(7, { seen: ORG });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const s = browserLocalStore();
+    // Pre-W31 (or any earlier path) left a scope that is a conversation title,
+    // not an organization id. The live leg's capture is the real row that must win.
+    await rememberTarget(s, {
+      platform: 'claude',
+      origin: CLAUDE_ORIGIN,
+      scope: TITLE,
+      at: 1,
+    });
+
+    const captured = {
+      url: `${DETAIL_URL}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      method: 'GET',
+      status: 200,
+      // `name` is the conversation title — the identity heuristic's handle key.
+      // A scoped platform must not take it as the account scope.
+      text: JSON.stringify({ uuid: ID, name: TITLE, chat_messages: [] }),
+      pageUrl: `${CLAUDE_ORIGIN}/chat/${ID}`,
+      capturedAt: Date.now(),
+    };
+    await dispatchFromTab({ type: 'chat-captured', payload: captured }, 7);
+    await mod.backfillTickSettled();
+
+    const written = await targetsInRegistry();
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ platform: 'claude', scope: ORG });
+    expect(written.some((t) => t.scope === TITLE)).toBe(false);
+  });
+
+  it('🔴 a title-shaped path segment is not written as a Claude target', async () => {
+    const { backfillTargetFor } = await import('../entrypoints/background');
+    const titled = backfillTargetFor({
+      url: `${CLAUDE_ORIGIN}/api/organizations/${TITLE}/chat_conversations/${ID}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ uuid: ID, name: TITLE, chat_messages: [] }),
+      pageUrl: `${CLAUDE_ORIGIN}/chat/${ID}`,
+      capturedAt: Date.now(),
+    });
+    // A path segment that is a conversation title is not an organization. Returning
+    // a target would write that title into cs_backfill_targets_v1.
+    expect(titled).toBeNull();
+  });
+
+  it('🔴 resolving an organization replaces a stale title row instead of joining it', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const s = browserLocalStore();
+    await rememberTarget(s, {
+      platform: 'claude',
+      origin: CLAUDE_ORIGIN,
+      scope: TITLE,
+      at: 1,
+    });
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    expect(reply?.ok).toBe(true);
+
+    const written = await targetsInRegistry();
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ platform: 'claude', scope: ORG });
+    expect(written.some((t) => t.scope === TITLE)).toBe(false);
+
+    // Exactly one question was asked; no conversation was enumerated to learn it.
+    expect(pageCalls).toEqual([RESOLVE_URL]);
+    expect(conversationRequests()).toEqual([]);
+  });
+
+  it('🔴 the alarm does not send a title as an organization, and replaces that row when the page names one', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { seen: ORG });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const s = browserLocalStore();
+    await rememberTarget(s, {
+      platform: 'claude', origin: CLAUDE_ORIGIN, scope: TITLE, at: 1,
+    });
+
+    const result = await mod.runAlarmTick();
+    expect(result.report?.stopped).toBe('queue-empty');
+
+    const written = await targetsInRegistry();
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ platform: 'claude', scope: ORG });
+    expect(written.some((t) => t.scope === TITLE)).toBe(false);
+    expect(conversationRequests().every((url) => url.includes(`/api/organizations/${ORG}/`))).toBe(true);
+    expect(conversationRequests().some((url) => url.includes(TITLE))).toBe(false);
+  });
+
+  it('🔴 two organization rows for the same platform still coexist', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { seen: ORG });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const s = browserLocalStore();
+    await rememberTarget(s, {
+      platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG2, at: 1,
+    });
+
+    const captured = {
+      url: `${DETAIL_URL}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ uuid: ID, name: TITLE, chat_messages: [] }),
+      pageUrl: `${CLAUDE_ORIGIN}/chat/${ID}`,
+      capturedAt: Date.now(),
+    };
+    await dispatchFromTab({ type: 'chat-captured', payload: captured }, 7);
+    await mod.backfillTickSettled();
+
+    const written = await targetsInRegistry();
+    const scopes = written.filter((t) => t.platform === 'claude').map((t) => t.scope).sort();
+    expect(scopes).toEqual([ORG2, ORG].sort());
+    expect(written.some((t) => t.scope === TITLE)).toBe(false);
   });
 });
 

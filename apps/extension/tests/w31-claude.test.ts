@@ -58,6 +58,7 @@ import {
 } from '../lib/backfill/enumerate';
 import {
   CLAUDE_ORG_COOKIE,
+  isClaudeOrgId,
   orgFromCookie,
   orgFromRequestUrl,
   parseOrganizationsResponse,
@@ -257,6 +258,12 @@ describe('W31-1 · resolveClaudeOrg: the order, and the refusals that are not gu
     expect(orgFromRequestUrl(`${ORIGIN}/api/auth/session`)).toBeNull();
     expect(orgFromRequestUrl(`${ORIGIN}/chat/${ID}`)).toBeNull();
     expect(orgFromCookie(`${CLAUDE_ORG_COOKIE}=${ORG}`)).toBe(ORG);
+    // 🔴 W49 · A conversation title in that segment is not an organization.
+    const title = '00000000000000000000000000000000';
+    expect(isClaudeOrgId(ORG)).toBe(true);
+    expect(isClaudeOrgId(title)).toBe(false);
+    expect(isClaudeOrgId('default')).toBe(false);
+    expect(orgFromRequestUrl(`${ORIGIN}/api/organizations/${title}/chat_conversations/${ID}`)).toBeNull();
   });
 });
 
@@ -584,7 +591,7 @@ describe('W31-6 · the allowlist: two templates, one pinned query, one resolutio
 // ---------------------------------------------------------------------------
 describe('W31-7 · the scope reaches the engine, or nothing does', () => {
   it('a scoped plan with no usable scope halts before any request', async () => {
-    for (const scope of ['', 'default']) {
+    for (const scope of ['', 'default', '00000000000000000000000000000000']) {
       const store = memoryStore();
       const be = backend({ [LIST_PATH]: '[]' });
       const report = await run(store, be.http, scope, { maxDetails: 0 });
