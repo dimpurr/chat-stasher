@@ -225,9 +225,14 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
    *    one answer, and a second derivation of it here is how two expressions of
    *    one fact drift apart (the failure C21 removed from the identity path).
    *    `null` writes nothing — a row keyed by a guess is worse than no row.
+   *
+   * 🔴 W69b · `newlyStored` is the caller's answer, and it is the *caller's*
+   *    because only the caller knows which of the two returns it is reaching: the
+   *    row's count is "captures on record as stored", and an unchanged capture was
+   *    not stored a second time. See `LiveCaptureRecord.count`.
    */
-  const recordArrival = async (): Promise<void> => {
-    await recordLiveCapture(recaptureStore, { platform: platformId, at: Date.now() });
+  const recordArrival = async (newlyStored: boolean): Promise<void> => {
+    await recordLiveCapture(recaptureStore, { platform: platformId, at: Date.now(), newlyStored });
   };
 
   if (fingerprint && await isUnchangedSinceDelivery(recaptureStore, name, fingerprint)) {
@@ -237,7 +242,11 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     //    would freeze the row on a page that re-sends an unchanged conversation on
     //    every view (measured on ChatGPT: lib/recapture.ts's header), and the row
     //    would then read as stale while captures kept arriving.
-    await recordArrival();
+    // 🔴 W69b · It moves the row's time and **not** its count: nothing was newly
+    //    stored, and the count is what the popup says was stored. Counting the
+    //    re-send made four views of one acked conversation read as four stored
+    //    (R69 §2). See `LiveCaptureRecord.count`.
+    await recordArrival(false);
     return {
       saved: true,
       status: 'unchanged',
@@ -310,7 +319,9 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     // 🔴 W69 · The other arrival: the host acknowledged this conversation, so it
     //    is on disk. Recorded here, after the fingerprint write above and before
     //    the answer — see `recordArrival`.
-    await recordArrival();
+    // 🔴 W69b · `true`: this one was newly stored, so it moves the count as well
+    //    as the time.
+    await recordArrival(true);
     return {
       saved: true,
       status: 'delivered',

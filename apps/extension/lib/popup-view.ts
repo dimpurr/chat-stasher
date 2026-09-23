@@ -72,6 +72,7 @@ import {
 } from './hook-status';
 import {
   captureVerdict,
+  currentObservation,
   liveCaptureFor,
   CAPTURE_VERDICT_NOT_WORKING,
   CAPTURE_VERDICT_UNKNOWN,
@@ -251,8 +252,8 @@ export interface PopupModel {
    */
   hookStatus?: HookStatusRecord[];
   /**
-   * 🔴 W69 · **When a live capture from each platform was last stored**
-   *    (`lib/live-capture.ts`), newest first.
+   * 🔴 W69 · **When a live capture from each platform was last confirmed in the
+   *    archive** (`lib/live-capture.ts`), newest first.
    *
    * The field that turns the note above from an observation into evidence. W68
    * measured what a page's hook *is* on the three origins that report
@@ -261,11 +262,18 @@ export interface PopupModel {
    * per-delivery store, `cs_last_delivered_v1`, has no time field at all. What
    * the popup reads here is the row that does.
    *
+   * 🔴 W69b · Each row is two facts and the note names both: its `at` is the time
+   *    of the last confirmation (an unchanged re-send moves it), and its `count`
+   *    is how many captures are on record as **newly stored** (only a delivery
+   *    moves it). The count is not a count of arrivals — see
+   *    `LiveCaptureRecord.count` for why that distinction had to be made.
+   *
    * Omitted ⇒ this load did not look, and an empty list ⇒ there is no row for
    * that platform. **Both mean the same thing and must be worded as it**: "no
    * capture from that platform has been recorded", which is a gap in the record
-   * and not a measurement that none arrived. There is no value here that means
-   * zero, and none may be invented.
+   * and not a measurement that none arrived. No reader invents a row, and a row
+   * that exists is printed as it is — a `count` of 0 in a row is not that absence,
+   * and is not rounded up either.
    */
   liveCapture?: LiveCaptureRecord[];
   /**
@@ -1158,9 +1166,25 @@ const HOOK_VERDICT_NOTE_KEYS: Record<CaptureVerdict, string> = {
  *
  * The capture fact is always printed, in all three cases, and it says which of
  * two things it is: a row with a time, or the absence of a row. The absence is
- * worded as a gap in the record, because that is what it is — nothing here ever
- * wrote a zero, so reading the absence as "no captures arrived" would be an
+ * worded as a gap in the record, because that is what it is — no reader here
+ * invents a zero, so reading the absence as "no captures arrived" would be an
  * unknown recorded as empty, which is the invariant this whole file is built on.
+ *
+ * 🔴 W69b · **The capture sentence names the two fields separately**, because
+ *    they are two facts: the time a capture was last confirmed in the archive
+ *    (which an unchanged re-send also moves) and how many are on record as newly
+ *    stored (which only a delivery moves). The old sentence said "{count} in
+ *    total have been stored" over a count of arrivals, so four views of one
+ *    acked conversation read as four stored (R69 §2).
+ *
+ * 🔴 W69b · **The `working` line names when the current observation began.** The
+ *    verdict is decided from the record's *current* observation — the latest one
+ *    — and a capture is evidence about it if it came at or after the moment that
+ *    observation began, not the moment it was last re-sent. The head line above
+ *    prints the re-send (that is when the page last said so); this line prints
+ *    the beginning, so the claim can be checked against the two times the note
+ *    carries. Both come from `currentObservation`, one definition, so the
+ *    sentence cannot disagree with the verdict.
  */
 function hookStatusNote(record: HookStatusRecord, live: LiveCaptureRecord | null): string {
   const reasons = record.reasons
@@ -1172,6 +1196,11 @@ function hookStatusNote(record: HookStatusRecord, live: LiveCaptureRecord | null
       count: live.count,
     })
     : t('popup.notes.hook.capture.noneRecorded');
+  // A record the readers accept always has at least one reason
+  // (`looksLikeHookStatus` rejects an empty one), so `current` is null only for a
+  // hand-built record; `record.at` is then the only time it carries, and the
+  // verdict for that same record is `unknown` — a sentence that uses no time.
+  const current = currentObservation(record.reasons);
   return [
     t('popup.notes.hook.observed', {
       platform: record.platform,
@@ -1180,7 +1209,9 @@ function hookStatusNote(record: HookStatusRecord, live: LiveCaptureRecord | null
       when: ui.stamp(record.at),
     }),
     capture,
-    t(HOOK_VERDICT_NOTE_KEYS[captureVerdict(record, live)]),
+    t(HOOK_VERDICT_NOTE_KEYS[captureVerdict(record, live)], {
+      since: ui.stamp(current?.since ?? record.at),
+    }),
   ].join('\n');
 }
 

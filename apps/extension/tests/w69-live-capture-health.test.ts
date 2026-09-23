@@ -62,6 +62,27 @@
  *    purpose: it is the name `docs/privacy.md` publishes, and a test that asked
  *    the module for it would pass after a rename that silently stranded the row
  *    under a name the documentation no longer describes.
+ *
+ * ## W69b · the three ways the first cut of this still misled (R69 §2)
+ *
+ * 1. **The verdict read the record as a set.** `reasons.some(...)` meant the
+ *    bridge's fallback inference `hook-did-not-run`, filed 100 ms after the
+ *    page's own `hook-was-replaced`, outvoted it forever — on the very page this
+ *    file is about. Groups 4 and 5 below: the state is the record's *latest*
+ *    observation and nothing else.
+ * 2. **`working` compared against the last re-send.** The page re-sends a state
+ *    it is still in every 5 s, so a capture that arrived after the identity
+ *    change stopped being evidence 5 s later. It is compared against when the
+ *    current observation *began*.
+ * 3. **The count counted arrivals.** ChatGPT re-sends the whole conversation on
+ *    every view, and each re-send read as another stored conversation. Only a
+ *    capture that was newly stored raises the count, and the popup's sentence —
+ *    and `docs/privacy.md`'s row for the key — say exactly that.
+ *
+ * Every W69b case is asserted against the same real surfaces: the real merge
+ * (`mergeHookObservation`), the real verdict (`captureVerdict`), the real
+ * `onMessage` listener of `entrypoints/background`, and the real `locales/en.yml`
+ * through `renderPopup`.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -74,7 +95,17 @@ import {
   HOOK_REASON_WAS_REPLACED,
   type HookObservation,
 } from '../lib/contract';
-import { hookStatusKey, type HookStatusRecord } from '../lib/hook-status';
+import {
+  hookStatusKey,
+  mergeHookObservation,
+  type HookStatusRecord,
+} from '../lib/hook-status';
+import {
+  captureVerdict,
+  liveCaptureOf,
+  CAPTURE_VERDICT_UNKNOWN,
+  CAPTURE_VERDICT_WORKING,
+} from '../lib/live-capture';
 import { NO_FAILURES, renderPopup, type PopupModel } from '../lib/popup-view';
 import { stamp } from '../lib/ui-strings';
 
@@ -447,5 +478,221 @@ describe('W69 · the popup presents the capture evidence, not just the observati
       HOOK_REASON_WAS_REPLACED,
     ] as const).map((reason) => note(record(reason)));
     expect(new Set(sentences).size).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4 · W69b · the state the verdict is about (R69 §2, defects 1 and 2)
+// ---------------------------------------------------------------------------
+
+/** One reason first observed at `first` and last observed at `at`. */
+const MOMENT = 1_700_000_000_000;
+
+/**
+ * 🔴 **The measured sequence on a page whose fetch was replaced** (R69 §2), built
+ * through the real merge so the record under test is the record a page produces.
+ *
+ *  1. the page's hook reports `hook-was-replaced`;
+ *  2. the bridge's fallback probe goes unanswered — the hook is ours but the page
+ *     took the global back, so it refuses to answer for a page it no longer wraps
+ *     — and the bridge files its own inference, `hook-did-not-run`, 100 ms later;
+ *  3. the page re-sends the state it is still in 5 s after that, and every 5 s
+ *     after, which moves the record's `at` with it.
+ *
+ * Both reasons stay in the record; that is the record's job (W43). What the
+ * verdict must not do is read the superseded one as the state the page is in.
+ */
+function replacedThenReReported(): HookStatusRecord {
+  const page = { origin: ORIGIN, platform: PLATFORM };
+  const reported = mergeHookObservation(null, {
+    ...page, reason: HOOK_REASON_WAS_REPLACED, at: MOMENT,
+  });
+  const withFallback = mergeHookObservation(reported, {
+    ...page, reason: HOOK_REASON_DID_NOT_RUN, at: MOMENT + 100,
+  });
+  return mergeHookObservation(withFallback, {
+    ...page, reason: HOOK_REASON_WAS_REPLACED, at: MOMENT + 5_000,
+  });
+}
+
+describe('W69b · the verdict is the state the page is in, not everything it ever reported', () => {
+  it('🔴 a superseded hook-did-not-run does not outvote the page\'s own later report', () => {
+    const rebuilt = replacedThenReReported();
+
+    // The premise: the record really does hold both reasons, the older one first,
+    // and its `at` really is the re-report. Without this the case is not the one
+    // being fixed.
+    expect(rebuilt.reasons.map((row) => row.reason)).toEqual([
+      HOOK_REASON_DID_NOT_RUN,
+      HOOK_REASON_WAS_REPLACED,
+    ]);
+    expect(rebuilt.at).toBe(MOMENT + 5_000);
+
+    // The page is in the was-replaced state, and that is not a statement that
+    // capture stopped — so the verdict is unknown, not breakage.
+    expect(captureVerdict(rebuilt, null)).toBe(CAPTURE_VERDICT_UNKNOWN);
+    const text = renderPopup(model({ hookStatus: [rebuilt] })).notes.join('\n');
+    expect(text).toContain('Whether capture still works there is unknown.');
+    expect(text).not.toContain('is not being archived');
+  });
+
+  it('🔴 a hook that is not in effect and re-reports IS the state, and still reads as breakage', () => {
+    // The other direction, so the rule is "the latest observation" and not
+    // "whatever is convenient": a page that keeps saying its hook never ran has
+    // nothing later to outvote it.
+    const page = { origin: ORIGIN, platform: PLATFORM };
+    const reported = mergeHookObservation(null, {
+      ...page, reason: HOOK_REASON_WAS_REPLACED, at: MOMENT,
+    });
+    const superseded = mergeHookObservation(reported, {
+      ...page, reason: HOOK_REASON_DID_NOT_RUN, at: MOMENT + 5_000,
+    });
+
+    expect(captureVerdict(superseded, null)).toBe('not-working');
+    expect(renderPopup(model({ hookStatus: [superseded] })).notes.join('\n'))
+      .toContain('is not being archived');
+  });
+
+  it('🔴 a capture that arrived after the identity change keeps counting when the page re-reports it', () => {
+    const rebuilt = replacedThenReReported();
+    // The conversation was opened 3 s after the hook's place in the page changed
+    // and 2 s before the page re-sent that state. Comparing against the re-send
+    // — which is what the record's `at` is — retired this evidence after 5 s.
+    expect(captureVerdict(rebuilt, { at: MOMENT + 3_000 })).toBe(CAPTURE_VERDICT_WORKING);
+
+    const text = renderPopup(model({
+      hookStatus: [rebuilt],
+      liveCapture: [capture(MOMENT + 3_000)],
+    })).notes.join('\n').toLowerCase();
+    expect(text).toContain('live capture from this platform is working');
+    expect(text).not.toContain('not being archived');
+    // Both times are on screen, so the claim can be checked: when the state
+    // began (which the capture is compared against) and when the page last
+    // re-sent it. The old copy named only the second.
+    expect(text).toContain(stamp(MOMENT).toLowerCase());
+    expect(text).toContain(stamp(MOMENT + 5_000).toLowerCase());
+  });
+
+  it('🔴 a capture from before the state began settles nothing about it', () => {
+    const rebuilt = replacedThenReReported();
+    expect(captureVerdict(rebuilt, { at: MOMENT - 1 })).toBe(CAPTURE_VERDICT_UNKNOWN);
+  });
+
+  it('🔴 a record written before this build carries no first time, and reads conservatively', () => {
+    // `since` is absent: the writer that made this record did not record when the
+    // state began, and the reader must not invent an earlier one. `at` is the
+    // latest time the state is proven to have held, so it is the only honest
+    // bound — a capture before it settles nothing.
+    const legacy: HookStatusRecord = {
+      origin: ORIGIN,
+      platform: PLATFORM,
+      at: MOMENT + 5_000,
+      reasons: [{ reason: HOOK_REASON_WAS_REPLACED, at: MOMENT + 5_000 }],
+    };
+    expect(captureVerdict(legacy, { at: MOMENT + 3_000 })).toBe(CAPTURE_VERDICT_UNKNOWN);
+    expect(captureVerdict(legacy, { at: MOMENT + 6_000 })).toBe(CAPTURE_VERDICT_WORKING);
+
+    // And the next observation of that reason fills the first time in, from the
+    // only time the record had.
+    const merged = mergeHookObservation(legacy, {
+      origin: ORIGIN, platform: PLATFORM, reason: HOOK_REASON_WAS_REPLACED, at: MOMENT + 10_000,
+    });
+    expect(merged.reasons[0]).toEqual({
+      reason: HOOK_REASON_WAS_REPLACED,
+      at: MOMENT + 10_000,
+      since: MOMENT + 5_000,
+    });
+    expect(captureVerdict(merged, { at: MOMENT + 6_000 })).toBe(CAPTURE_VERDICT_WORKING);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5 · W69b · what the count counts (R69 §2, defect 3)
+// ---------------------------------------------------------------------------
+
+describe('W69b · the count is what was newly stored, not what arrived', () => {
+  it('🔴 an unchanged re-capture does not read as another stored conversation', async () => {
+    const first = await dispatch(chatgptCapture(chatgptBody(CHATGPT_SID)));
+    expect(first).toMatchObject({ saved: true, status: 'delivered' });
+    expect(liveRow().count).toBe(1);
+    const storedAt = liveRow().at;
+
+    // The measured behaviour of the page: ChatGPT re-sends the whole conversation
+    // on every view (lib/recapture.ts's header). That is a real arrival and a real
+    // measurement of the page-to-archive path...
+    const again = await dispatch(chatgptCapture(chatgptBody(CHATGPT_SID)));
+    expect(again).toMatchObject({ saved: true, status: 'unchanged' });
+    expect(liveRow().at).toBeGreaterThanOrEqual(storedAt);
+    // ...and it is not another conversation stored, so it does not raise the
+    // count. Four views of one conversation used to read as four stored.
+    expect(liveRow().count).toBe(1);
+  });
+
+  it('🔴 a changed conversation is a second store, and does raise it', async () => {
+    await dispatch(chatgptCapture(chatgptBody(CHATGPT_SID)));
+    await dispatch(chatgptCapture(chatgptBody(CHATGPT_SID, 'synthetic answer, edited')));
+    expect(liveRow().count).toBe(2);
+  });
+
+  it('🔴 a delivery whose row write was lost leaves the arrival, and claims no store', async () => {
+    // The one path to a row whose count is zero, and the reason "nothing here
+    // ever writes a zero" is not the same claim as "no row is a zero": the
+    // delivery's own row write fails, so the later unchanged arrival is the first
+    // arrival this row ever sees and nothing was newly stored *by it*.
+    const realSet = fakeBrowser.storage.local.set;
+    let failNext = true;
+    fakeBrowser.storage.local.set = async (values: Record<string, unknown>) => {
+      if (failNext && Object.keys(values).some((k) => k.startsWith('cs_live_capture_v1:'))) {
+        failNext = false;
+        throw new Error('synthetic storage failure');
+      }
+      return realSet(values);
+    };
+    try {
+      expect(await dispatch(chatgptCapture(chatgptBody(CHATGPT_SID))))
+        .toMatchObject({ saved: true, status: 'delivered' });
+      expect(liveRow()).toBeUndefined();
+
+      expect(await dispatch(chatgptCapture(chatgptBody(CHATGPT_SID))))
+        .toMatchObject({ saved: true, status: 'unchanged' });
+      const row = liveRow();
+      expect(row, 'the later arrival is an arrival and must be recorded').toBeDefined();
+      expect(row.count).toBe(0);
+      expect(typeof row.at).toBe('number');
+      // 🔴 And the row is a row: it is read back, so "this platform has a record"
+      //    stays distinct from "we have nothing on record here".
+      expect(liveCaptureOf(store).map((r) => r.platform)).toEqual([PLATFORM]);
+    } finally {
+      fakeBrowser.storage.local.set = realSet;
+    }
+  });
+
+  it('🔴 the merge moves the time for every arrival and the count for one kind', async () => {
+    const { looksLikeLiveCapture, mergeLiveCapture } = await import('../lib/live-capture');
+    const stored = mergeLiveCapture(null, { platform: PLATFORM, at: 10, newlyStored: true });
+    expect(stored).toEqual({ platform: PLATFORM, at: 10, count: 1 });
+    expect(mergeLiveCapture(stored, { platform: PLATFORM, at: 20, newlyStored: false }))
+      .toEqual({ platform: PLATFORM, at: 20, count: 1 });
+    expect(mergeLiveCapture(stored, { platform: PLATFORM, at: 30, newlyStored: true }))
+      .toEqual({ platform: PLATFORM, at: 30, count: 2 });
+    // A clock that went backwards cannot make the row older than a capture it
+    // already recorded.
+    expect(mergeLiveCapture(stored, { platform: PLATFORM, at: 5, newlyStored: true }))
+      .toEqual({ platform: PLATFORM, at: 10, count: 2 });
+
+    // A row this build wrote is read back whatever its count says; a count that
+    // is not a whole number of captures is still not a record.
+    expect(looksLikeLiveCapture({ platform: PLATFORM, at: 10, count: 0 })).toBe(true);
+    expect(looksLikeLiveCapture({ platform: PLATFORM, at: 10, count: 0.5 })).toBe(false);
+    expect(looksLikeLiveCapture({ platform: PLATFORM, at: 10, count: -1 })).toBe(false);
+  });
+
+  it('🔴 the popup says which of the two facts the count is', () => {
+    const text = note(record(HOOK_REASON_WAS_REPLACED), [capture(CAPTURE_AFTER, PLATFORM, 3)])
+      .toLowerCase();
+    expect(text).toContain('on record as newly stored');
+    expect(text).not.toContain('in total have been stored');
+    // The time is a different fact and says so: an unchanged re-send moves it.
+    expect(text).toContain('was last confirmed in your archive');
   });
 });

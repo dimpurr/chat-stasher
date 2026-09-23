@@ -27,31 +27,33 @@ apps/extension/entrypoints/background.ts:140-168  30c84e84ef5b  lines=29
   <- docs/privacy.md:240, docs/threat-model.md:111  :: function buildBundle(captured: CapturedFetch): InboxBundle {
 apps/extension/entrypoints/background.ts:155-157  36c85931504a  lines=3
   <- docs/threat-model.md:327  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
-apps/extension/entrypoints/background.ts:229-240  999813faf16e  lines=12
-  <- docs/privacy.md:278  :: const recordArrival = async (): Promise<void> => {
-apps/extension/entrypoints/background.ts:251-268  41d87a302a6d  lines=18
+apps/extension/entrypoints/background.ts:234-236  66920853936e  lines=3
+  <- docs/privacy.md:278  :: const recordArrival = async (newlyStored: boolean): Promise…
+apps/extension/entrypoints/background.ts:249  73dcc2a4f27a  lines=1
+  <- docs/privacy.md:278  :: await recordArrival(false);
+apps/extension/entrypoints/background.ts:260-277  41d87a302a6d  lines=18
   <- README.md:214, docs/privacy.md:129, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
-apps/extension/entrypoints/background.ts:313  1cb1367f82ce  lines=1
-  <- docs/privacy.md:278  :: await recordArrival();
-apps/extension/entrypoints/background.ts:482-489  185eedd6b024  lines=8
+apps/extension/entrypoints/background.ts:324  dd1ea05b0312  lines=1
+  <- docs/privacy.md:278  :: await recordArrival(true);
+apps/extension/entrypoints/background.ts:493-500  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:730-760  e6c80301633c  lines=31
+apps/extension/entrypoints/background.ts:741-771  e6c80301633c  lines=31
   <- docs/privacy.md:373  :: /**
-apps/extension/entrypoints/background.ts:864-908  20a9a510a90a  lines=45
+apps/extension/entrypoints/background.ts:875-919  20a9a510a90a  lines=45
   <- docs/privacy.md:345, docs/threat-model.md:597  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:905-1001  e1286e14c7ba  lines=97
+apps/extension/entrypoints/background.ts:916-1012  e1286e14c7ba  lines=97
   <- docs/privacy.md:322  :: //
-apps/extension/entrypoints/background.ts:1014-1057  fda982ba64df  lines=44
+apps/extension/entrypoints/background.ts:1025-1068  fda982ba64df  lines=44
   <- docs/privacy.md:309  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1057  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1068  6539997ed831  lines=1
   <- docs/privacy.md:311  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1161-1222  e92b07871804  lines=62
+apps/extension/entrypoints/background.ts:1172-1233  e92b07871804  lines=62
   <- README.md:172, docs/install.md:635, docs/privacy.md:361, docs/privacy.md:377  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1438-1509  3a57e749886b  lines=72
+apps/extension/entrypoints/background.ts:1449-1520  3a57e749886b  lines=72
   <- docs/privacy.md:276  :: /**
-apps/extension/entrypoints/background.ts:1640-1656  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:1651-1667  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:1683-1699  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:1694-1710  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -233,18 +235,18 @@ apps/extension/lib/contract.ts:1053-1069  61ac9dc62d25  lines=17
   <- docs/privacy.md:310, docs/threat-model.md:325  :: export function extractIdentity(text: string, sessionId: st…
 apps/extension/lib/gemini-capture.ts:150-234  2f22e0ff5308  lines=85
   <- README.md:171, docs/privacy.md:413, docs/privacy.md:470, docs/threat-model.md:258  :: export async function completeGeminiLiveCapture(
-apps/extension/lib/hook-status.ts:78-110  b6a648abde1a  lines=33
+apps/extension/lib/hook-status.ts:78-155  a1b6f1b47629  lines=78
   <- docs/privacy.md:277  :: export const HOOK_STATUS_KEY_PREFIX = 'cs_hook_v1:';
-apps/extension/lib/hook-status.ts:241-370  cf4d4983ffd4  lines=130
+apps/extension/lib/hook-status.ts:289-418  cf4d4983ffd4  lines=130
   <- docs/privacy.md:277  :: export const HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN = 'not-a-pl…
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
   <- docs/privacy.md:274  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
 apps/extension/lib/host-status.ts:89-113  f8682e917e91  lines=25
   <- docs/privacy.md:274  :: export function toRecord(
-apps/extension/lib/live-capture.ts:100-102  a42f85895173  lines=3
+apps/extension/lib/live-capture.ts:149-151  a42f85895173  lines=3
   <- docs/privacy.md:278  :: /** Storage key prefix. One row per platform. */
-apps/extension/lib/live-capture.ts:219-238  4a4541a6e85f  lines=20
-  <- docs/privacy.md:278  :: export async function recordLiveCapture(
+apps/extension/lib/live-capture.ts:273-308  144411873cfe  lines=36
+  <- docs/privacy.md:278  :: /**
 apps/extension/lib/native-host.ts:30  9da915f38ab1  lines=1
   <- docs/privacy.md:134, docs/threat-model.md:62  :: export const NATIVE_HOST_NAME = 'com.chat_stasher.host';
 apps/extension/lib/native-host.ts:755-805  2666d8d980c9  lines=51
@@ -305,9 +307,9 @@ apps/extension/lib/platform-auth.ts:258-295  03784069e1a6  lines=38
   <- README.md:169, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:534, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:599  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:669-769  9037a7e5f6b3  lines=101
   <- README.md:171, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:606  :: export function createGeminiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:823-836  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:831-844  00dceceff078  lines=14
   <- README.md:173, docs/install.md:161  :: /**
-apps/extension/lib/popup-view.ts:1550-1612  bfa880659cd6  lines=63
+apps/extension/lib/popup-view.ts:1581-1643  bfa880659cd6  lines=63
   <- docs/privacy.md:385  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:263  :: export function fixCommand(stage: string | null | undefined…

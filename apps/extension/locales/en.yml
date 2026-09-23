@@ -368,28 +368,40 @@ popup:
       # What is on record for this platform. Deliberately two entries, because a
       # row and the absence of one are two different facts: `recorded` prints the
       # time and the count, and `noneRecorded` says the record is empty rather
-      # than saying that nothing arrived. Nothing here ever writes a zero, so
-      # wording the absence as "no capture arrived" would record an unknown as a
-      # measurement.
+      # than saying that nothing arrived. No reader invents a zero, so wording the
+      # absence as "no capture arrived" would record an unknown as a measurement.
+      # 🔴 W69b · Both facts `recorded` prints are "what is on record", and the
+      # second is not a count of arrivals: an unchanged re-send (ChatGPT sends the
+      # whole conversation on every view) moves the time and is *not* newly
+      # stored, so the old "{count} in total have been stored" over one
+      # conversation read four times said four were stored. The count can be 0 in
+      # a row that exists, and this sentence stays true then: nothing NEW is on
+      # record, and the time beside it is what says a capture did reach the
+      # archive.
       capture:
         recorded: >-
-          What is on record for live capture on this platform: the most recent
-          conversation stored from it arrived {captureWhen}, and {count} in total
-          have been stored.
+          What is on record for live capture on this platform: a capture from it
+          was last confirmed in your archive {captureWhen}, and {count} capture(s)
+          are on record as newly stored. A capture the page sends again unchanged
+          was already in your archive, so it moves the time above and not that
+          count.
         noneRecorded: >-
           What is on record for live capture on this platform: nothing. Not one
           capture from it has ever been recorded here — that is a gap in this
           record, not a measurement that none arrived.
       # The verdict the two facts above support. Exactly one of these is printed.
       verdict:
-        # A stored capture at or after the observation. Scoped to the platform on
-        # purpose: the record is kept per platform while the observation is kept
-        # per origin, so the capture may have come from another tab of that
-        # platform and this line must not claim otherwise.
+        # A stored capture at or after the moment the current observation began.
+        # Scoped to the platform on purpose: the record is kept per platform while
+        # the observation is kept per origin, so the capture may have come from
+        # another tab of that platform and this line must not claim otherwise.
+        # 🔴 W69b · `{since}` is that moment, and the sentence names it because
+        # the time in the line above is the page's last *re-send* of the same
+        # state: comparing against that one made this last five seconds.
         working: >-
           So live capture from this platform is working: a conversation that
           reached your archive is a measurement of the whole path, and it is at
-          least as recent as the observation above.
+          least as recent as {since}, the moment the observation above began.
         # Our hook is not in that page, and the record holds nothing to the
         # contrary. "The record above holds no capture at or after this
         # observation" is the exact condition the verdict was decided on, and it
