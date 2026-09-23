@@ -209,6 +209,48 @@ export interface KimiAuthOptions {
 }
 
 /**
+ * 🔴 W64b · **The same redirect policy DeepSeek's wrapper already has, for the same
+ * reason and with the same shape.**
+ *
+ * `fetch` defaults to `redirect: 'follow'`, and a redirect of a *same-origin* URL
+ * keeps the `Authorization` header (only a cross-origin hop drops it). So a 302
+ * from Kimi's list or detail path to any other path on `www.kimi.com` would be
+ * re-sent **with the page's own bearer token** — to a URL this extension never
+ * chose, on the strength of a decision `needsKimiBearer` made about the *first*
+ * URL. The allowlist cannot help: it approved the request that was sent, not the
+ * one the platform redirected it to. W61b fixed exactly this for DeepSeek and left
+ * this wrapper unguarded, which is the defect W64b's review found.
+ *
+ * So the two paths are fetched with `redirect: 'manual'`. The browser then does not
+ * follow, the header is never re-sent, and what comes back is an **opaque**
+ * response: `status 0`, no readable body. That is not a response this leg can read a
+ * conversation list out of, and it is not a shape either — a redirect is a transport
+ * fact, and it is said as one rather than passed on as `HTTP 0` for the engine's
+ * status branch to call a wire-shape change (which is permanent, and would stop the
+ * leg for good over a redirect that may be a login page today and absent tomorrow).
+ *
+ * 🔴 The throw is deliberate and its scope is exact: it covers the unfollowed
+ *    redirect only (status 0, which with `redirect: 'manual'` is what an
+ *    opaqueredirect response is). Every other response — 200, 401, 403, 500 — is
+ *    returned untouched, so the 401 re-read-and-retry below is unchanged, and no
+ *    other status handling moves.
+ */
+const KIMI_REDIRECT_MODE = 'manual' as const;
+
+/**
+ * The failure an unfollowed redirect becomes. It names the path rather than the URL,
+ * and carries no header and no token — a halt detail is persisted and shown to the
+ * user.
+ */
+function kimiRedirectRefusal(url: string): Error {
+  return new Error(
+    `kimi answered ${new URL(url).pathname} with a redirect; this leg does not follow it,`
+    + ' because the page\'s own bearer token is attached to this request and would be re-sent'
+    + ' to wherever it points (status 0, body unreadable — the request was not read as a result)',
+  );
+}
+
+/**
  * A fetch that adds Kimi's bearer token and the two headers the page sends to
  * Kimi's two backfill paths, and leaves every other request untouched. One
  * instance per content script (one page).
@@ -218,7 +260,7 @@ export function createKimiAuthorizedFetch(
   rawFetch: RawFetch,
   options: KimiAuthOptions,
 ) {
-  const send = (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
+  const send = async (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
     const headers: Record<string, string> = {
       ...(init.headers as Record<string, string> | undefined),
       [KIMI_PLATFORM_HEADER]: KIMI_PLATFORM_HEADER_VALUE,
@@ -231,7 +273,12 @@ export function createKimiAuthorizedFetch(
     if (typeof options.language === 'string' && options.language.length > 0) {
       headers[KIMI_LANGUAGE_HEADER] = options.language;
     }
-    return rawFetch(url, { ...init, headers });
+    // 🔴 `redirect: 'manual'` is set whether or not a token was found: the request is
+    //    built the same way either way, so a trace cannot read as two different
+    //    requests depending on whether the user happened to be signed in.
+    const res = await rawFetch(url, { ...init, headers, redirect: KIMI_REDIRECT_MODE });
+    if (res.status === 0) throw kimiRedirectRefusal(url);
+    return res;
   };
 
   return async (url: string, init: RequestInit): Promise<MinimalResponse> => {

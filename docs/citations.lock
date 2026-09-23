@@ -81,29 +81,29 @@ apps/extension/lib/backfill/debt-store.ts:68-87  c2b9b363b155  lines=20
   <- docs/privacy.md:273  :: export const BACKFILL_DB_VERSION = 2;
 apps/extension/lib/backfill/engine.ts:89-92  fc50ac101905  lines=4
   <- docs/privacy.md:421, docs/threat-model.md:62  :: async function sendVia(http: HttpPort, url: string, init: B…
-apps/extension/lib/backfill/engine.ts:606  ed9623369ff0  lines=1
+apps/extension/lib/backfill/engine.ts:631  ed9623369ff0  lines=1
   <- docs/privacy.md:415  :: */
-apps/extension/lib/backfill/engine.ts:1273-1339  5c9e6555520b  lines=67
+apps/extension/lib/backfill/engine.ts:1298-1364  5c9e6555520b  lines=67
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: * So a scoped plan refuses it, with the same reason as "no …
-apps/extension/lib/backfill/engine.ts:1289-1301  026d25c05d0a  lines=13
+apps/extension/lib/backfill/engine.ts:1314-1326  026d25c05d0a  lines=13
   <- docs/privacy.md:347  :: if (plan.scopeInPath && (
-apps/extension/lib/backfill/engine.ts:1391-1438  7be628fb91f9  lines=48
+apps/extension/lib/backfill/engine.ts:1416-1463  7be628fb91f9  lines=48
   <- README.md:168, docs/privacy.md:546, docs/threat-model.md:302  :: */
-apps/extension/lib/backfill/engine.ts:1422-1438  72b5338c79fe  lines=17
+apps/extension/lib/backfill/engine.ts:1447-1463  72b5338c79fe  lines=17
   <- README.md:172  :: && state.enumCursor.truncated === undefined
-apps/extension/lib/backfill/engine.ts:1503-1548  f8405b040a2f  lines=46
+apps/extension/lib/backfill/engine.ts:1528-1573  f8405b040a2f  lines=46
   <- docs/install.md:725  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
-apps/extension/lib/backfill/engine.ts:1700-1722  defca7d5b6b2  lines=23
+apps/extension/lib/backfill/engine.ts:1725-1747  defca7d5b6b2  lines=23
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: /**
-apps/extension/lib/backfill/engine.ts:1865-1917  4b16348d7335  lines=53
+apps/extension/lib/backfill/engine.ts:1890-1942  8fdcef36c422  lines=53
   <- README.md:171, docs/privacy.md:441, docs/privacy.md:460, docs/privacy.md:527, docs/threat-model.md:302, docs/threat-model.md:603  :: }
-apps/extension/lib/backfill/engine.ts:1954-2006  bfb3e0202e80  lines=53
+apps/extension/lib/backfill/engine.ts:1979-2031  92b293f6abcd  lines=53
   <- docs/install.md:109  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:1969-2004  b2eac1699cda  lines=36
+apps/extension/lib/backfill/engine.ts:1994-2029  4aca5aa32ea9  lines=36
   <- README.md:169, docs/privacy.md:527, docs/privacy.md:541, docs/threat-model.md:302, docs/threat-model.md:597  :: 'shape-changed',
-apps/extension/lib/backfill/engine.ts:2040-2053  deaf6a14fee1  lines=14
+apps/extension/lib/backfill/engine.ts:2065-2078  deaf6a14fee1  lines=14
   <- docs/privacy.md:529  :: if (!matchesResponseShape(platformRow, deliveredText)) {
-apps/extension/lib/backfill/engine.ts:2076-2111  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:2101-2136  2cb492e06a56  lines=36
   <- docs/install.md:109, docs/install.md:728  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
 apps/extension/lib/backfill/enumerate.ts:1242-1310  9034b1d0c6c2  lines=69
   <- docs/install.md:724, docs/privacy.md:304  :: const SHAPE_DEPTH = 2;
@@ -293,9 +293,9 @@ apps/extension/lib/platform-auth.ts:61-71  5e4adeb00a65  lines=11
   <- docs/privacy.md:108  :: export function needsChatgptBearer(url: string, pageOrigin:…
 apps/extension/lib/platform-auth.ts:101-120  f67f01d9e4a4  lines=20
   <- docs/privacy.md:108, docs/threat-model.md:268  :: export function createAuthorizedFetch(pageOrigin: string, r…
-apps/extension/lib/platform-auth.ts:216-248  f714ed2af5c0  lines=33
+apps/extension/lib/platform-auth.ts:258-295  03784069e1a6  lines=38
   <- README.md:169, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:527, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:595  :: export function createKimiAuthorizedFetch(
-apps/extension/lib/platform-auth.ts:577-639  b4aa1f8f6f82  lines=63
+apps/extension/lib/platform-auth.ts:624-686  b4aa1f8f6f82  lines=63
   <- README.md:171, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:602  :: export function createGeminiAuthorizedFetch(
 apps/extension/lib/popup-view.ts:770-783  00dceceff078  lines=14
   <- README.md:173, docs/install.md:161  :: /**

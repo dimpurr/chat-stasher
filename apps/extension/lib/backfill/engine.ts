@@ -494,25 +494,46 @@ export async function recordBackfillHalt(
  *    reason class — a permanent record froze a platform across logins, and nothing
  *    in the product clears one.
  *
- * 🔴 **403 and 400 are deliberately left where they are**, and this is a decision
- *    rather than an omission. 403 stays `rate-limited`: 429/403/5xx-as-"not now" is
- *    the reading the ladder below was built on, the task that added this line
- *    forbids moving it without evidence, and there is still none — no platform this
- *    leg drives has been measured answering 403 for a credential reason. 400 stays
- *    `shape-changed`, because a 400 that is not an auth failure is a genuinely
- *    malformed request and there is no `.private` measurement to separate the two.
+ * 🔴 **403 is deliberately left where it is**, and this is a decision rather than an
+ *    omission. 403 stays `rate-limited`: 429/403/5xx-as-"not now" is the reading the
+ *    ladder below was built on, the task that added this line forbids moving it
+ *    without evidence, and there is still none — no platform this leg drives has been
+ *    measured answering 403 for a credential reason. 400 is no longer a blanket
+ *    `shape-changed`; see W64b below for the one platform where it is not one.
  *
- * 🔴 **The Gemini residual, named rather than left out.** Gemini's own wrapper
- *    documents its 400 as the shape of a missing or stale token
- *    (`createGeminiAuthorizedFetch`'s header, which retries on 400 and 401 for
- *    exactly that reason), so a Gemini 400 that survives that one retry is very
- *    likely the condition this function now handles for 401 — and it still lands on
- *    `shape-changed`, still permanent. It is not fixed here because the only
- *    evidence is a comment in our own file rather than a measurement, and a blanket
- *    `400 → auth-refused` would swallow every genuinely malformed request; choosing
- *    a reason by evidence is the rule this whole file follows. What would close it
- *    is one logged-in Gemini request with `at` blanked, its status read from the
- *    page's own context — the same shape of probe that produced W64's Kimi table.
+ * 🔴 🔴 W64b · **A 400 on Gemini is the same login refusal a 401 is, and Gemini is the
+ *    only platform for which that is claimed.**
+ *
+ *    Gemini's wrapper records the measurement this rests on (`createGeminiAuthorizedFetch`'s
+ *    header, from the 2026-09-14 logged-in probe): a `batchexecute` request whose `at`
+ *    is missing or stale is answered **HTTP 400** — "a real refusal, never data, never
+ *    an empty page" — and that is why the wrapper re-reads `at` and retries **on 400**
+ *    rather than only on 401. A retry keyed on a malformed-request status would be
+ *    pointless; it is keyed on that status because that status is what this platform
+ *    sends when the credential it was handed is not usable.
+ *
+ *    So a 400 that survives the wrapper's retry is the condition W64 handles for 401,
+ *    and until W64b it landed on `shape-changed` — **permanent**, so a user who was
+ *    signed out when the leg ran stayed stopped after signing back in, and nothing in
+ *    the product clears such a record. It is now the transient `auth-refused`: the leg
+ *    comes back on its own and picks up the `at` the page has since refreshed.
+ *
+ * 🔴 **Why the platform and not the status.** `platform` is the plan's own id, so the
+ *    rule is "a 400 from Gemini", not "a 400". Every other platform keeps 400 ⇒
+ *    `shape-changed`, because there is no measurement on them separating an auth
+ *    refusal from a genuinely malformed request, and a blanket `400 → auth-refused`
+ *    would swallow every malformed request into a message telling the user to sign in
+ *    — a remedy for something that is not wrong with their account. Choosing a reason
+ *    by evidence is the rule this whole function follows; this is what the evidence
+ *    covers and no more.
+ *
+ * 🔴 **The residual, stated rather than implied.** A Gemini 400 caused by a genuinely
+ *    malformed batch is now read as a login refusal too, because this build cannot
+ *    tell the two apart from the status — the same admission W64 makes above about a
+ *    401 with no `message`. The cost is bounded and it is the cheaper error: the
+ *    record is transient (30 min, then 2 h) rather than permanent, so the leg retries
+ *    and records the same 400 again with its status in the trace, where the old
+ *    behaviour would have stopped the platform for good on the first one.
  */
 
 /**
@@ -577,8 +598,12 @@ export async function markScopeRetried(
   return true;
 }
 
-function haltReasonForStatus(status: number): HaltReason {
+function haltReasonForStatus(status: number, platform: string): HaltReason {
   if (status === 401) return 'auth-refused';
+  // 🔴 W64b · Gemini's own measured shape of "the token was missing or stale" — see
+  //    this function's header. Scoped to the platform: on every other plan a 400 is
+  //    a malformed request, which is a wire fact and stays `shape-changed`.
+  if (status === 400 && platform === 'gemini') return 'auth-refused';
   if (status === 429 || status === 403 || status >= 500) return 'rate-limited';
   return 'shape-changed';
 }
@@ -1467,7 +1492,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     if (res.status < 200 || res.status > 299) {
       return halt(
-        haltReasonForStatus(res.status),
+        haltReasonForStatus(res.status, plan.platform),
         `${listWhere()} returned HTTP ${res.status}`,
       );
     }
@@ -1861,7 +1886,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
-      return halt(haltReasonForStatus(res.status), `detail returned HTTP ${res.status}`);
+      return halt(haltReasonForStatus(res.status, plan.platform), `detail returned HTTP ${res.status}`);
     }
 
     /**
@@ -1913,7 +1938,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         return halt('transport-error', `detail step 2: ${(err as Error).message}`);
       }
       if (res2.status < 200 || res2.status > 299) {
-        return halt(haltReasonForStatus(res2.status), `detail step 2 returned HTTP ${res2.status}`);
+        return halt(haltReasonForStatus(res2.status, plan.platform), `detail step 2 returned HTTP ${res2.status}`);
       }
       deliveredUrl = step2Url;
       deliveredMethod = 'POST';
@@ -1987,7 +2012,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           return halt('transport-error', `detail page: ${(err as Error).message}`);
         }
         if (next.status < 200 || next.status > 299) {
-          return halt(haltReasonForStatus(next.status), `detail page returned HTTP ${next.status}`);
+          return halt(haltReasonForStatus(next.status, plan.platform), `detail page returned HTTP ${next.status}`);
         }
         if (!matchesResponseShape(platformRow, next.text)) {
           return halt('shape-changed', `detail page does not match the ${platformRow.id} response shape`);
