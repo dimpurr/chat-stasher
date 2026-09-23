@@ -1081,6 +1081,17 @@ export interface BackfillEnumPlan {
    *    cannot pass a body on, and cannot make any existing check less strict: when
    *    it answers `null` — every non-DeepSeek plan, and every well-formed DeepSeek
    *    response — execution is byte-for-byte what it was.
+   *
+   * 🔴 W61b · What it **can** change, stated because it is not nothing: it decides
+   *    the *kind* of stop, and therefore when the leg comes back. A refusal it names
+   *    `rate-limited` or `refused-unknown` is transient and re-asked on its own
+   *    ladder; without the hook the same body would fall to `shape-changed`, which
+   *    is permanent and would stop the leg until a human looked. That is the
+   *    intended direction — the platform's own envelope is better evidence than our
+   *    parser's inability to read it — but it means this hook is the one place in
+   *    the plan table that can turn a permanent stop into a transient one, so a
+   *    plan that declares it is claiming the platform really does refuse in-band.
+   *    Exactly one plan declares it, and only because that was measured.
    */
   refusalOf?(text: string): DeepSeekEnvelopeRefusal | null;
   /** 7 · Provenance. Same standard as the credibility note in contract.ts. */
@@ -1329,8 +1340,11 @@ function sawShape(where: string, value: unknown): string {
  *    answers, so `haltReasonForStatus` (engine.ts) never ran.
  *
  * So a non-zero business code is checked **before** any shape judgement, on both
- * segments, and becomes `auth-refused` — the reason W61 added to `HaltReason`.
- * Three things about that ordering, all deliberate:
+ * segments, and becomes a refusal reason — `auth-refused` for a code measured to
+ * mean a credential failure (W61), and since W61b `rate-limited` or
+ * `refused-unknown` for one that was not. The ordering is what makes the refusal
+ * honest in every case; the classification is what makes it *specific*. Three
+ * things about the ordering, all deliberate:
  *
  *  · **Before, not after.** A refusal has nothing to shape-check, and checking the
  *    shape first is what produced the false `shape-changed`. Nothing is loosened
@@ -1352,16 +1366,84 @@ function sawShape(where: string, value: unknown): string {
  *
  * 🔴 What the reason claims, and what it does not. The two non-zero codes ever
  *    observed here are **both about credentials** (`Missing Token`,
- *    `INVALID_TOKEN`), which is why the reason is named `auth-refused` and its
- *    popup sentence names the login. It is not claimed that every future non-zero
- *    code will be about credentials: the code and the platform's own message are
- *    carried in the detail, so a code that means something else is still readable
- *    in the trace rather than rounded into a sentence about logging in.
+ *    `INVALID_TOKEN`), which is why `auth-refused` is named for them and its popup
+ *    sentence names the login. 🔴 W61b: that is now enforced rather than promised —
+ *    only those two codes reach it (`DEEPSEEK_AUTH_REFUSAL_CODES`), a code whose
+ *    message names a rate or busy condition is `rate-limited`, and any other
+ *    non-zero code is `refused-unknown`, which claims nothing about credentials and
+ *    carries the platform's own code and message for whoever reads the trace next.
  */
 export interface DeepSeekEnvelopeRefusal {
-  reason: 'auth-refused';
+  /**
+   * 🔴 W61b · **Three outcomes, not one.** The first version of W61 answered
+   * `'auth-refused'` for every finite non-zero code, so a `code: 1` whose message
+   * said `"server busy"` was recorded as "you are not logged in", never retried,
+   * and shown a popup naming the login — the same defect as the one W61 fixed,
+   * pointing the other way. Now:
+   *
+   *  · `'auth-refused'` — the code is one of `DEEPSEEK_AUTH_REFUSAL_CODES`, i.e.
+   *    one that was **measured** to mean a credential failure. Nothing else is
+   *    allowed to reach it, and in particular a *message* that mentions a token
+   *    does not: the code is the platform's own claim about the kind of failure,
+   *    the message is free text.
+   *  · `'rate-limited'` — the platform's own message names a rate or busy
+   *    condition (`DEEPSEEK_RATE_PHRASES`). Transient, on the ladder, and the
+   *    popup's sentence for it is the "waiting out its backoff" one, which is true.
+   *  · `'refused-unknown'` — a non-zero code this build cannot read. Recorded as
+   *    unreadable, with the code and message in the detail. 🔴 Not `'auth-refused'`
+   *    (that would guess a login problem) and not `null` (letting it fall through
+   *    to the shape checks would report `shape-changed` — "the API changed" — which
+   *    is the original defect for a different code).
+   */
+  reason: 'auth-refused' | 'rate-limited' | 'refused-unknown';
   detail: string;
 }
+
+/**
+ * 🔴 W61b · **The only codes this build will call an authentication refusal** —
+ * and the list is evidence, not inference.
+ *
+ * Both were measured from the page's own context on 2026-09-23 (the probe table is
+ * in the W61 report): `40002 "Missing Token"` on the list endpoint and
+ * `40003 "INVALID_TOKEN"` on the body endpoint, both with HTTP 200, both answered
+ * `code: 0` once the request carried `Bearer <userToken.value>`.
+ *
+ * 🔴 Why this is a closed set rather than a range or a "token-ish message" test:
+ *    `auth-refused` is the one reason whose popup sentence tells a user to go and
+ *    log in. Getting it wrong is not a cosmetic error — it is a user being sent to
+ *    re-authenticate an account that was never logged out, while the real condition
+ *    (busy, throttled, a code nobody has read yet) goes unmentioned. So a code is
+ *    added here only after it has been **observed** failing for a credential
+ *    reason, and everything else lands on a reason that does not claim to know.
+ */
+export const DEEPSEEK_AUTH_REFUSAL_CODES: readonly number[] = [40002, 40003];
+
+/**
+ * 🔴 W61b · **The platform's own words for "not now"** — matched against the
+ * `msg` / `biz_msg` of a non-zero code, case-insensitively.
+ *
+ * A message is weaker evidence than a code, so this list is deliberately short and
+ * literal, and every phrase in it says the same thing: the platform is up and is
+ * declining *this moment*. That is exactly `rate-limited` — the reason that is
+ * already transient, already on the backoff ladder, and whose popup sentence
+ * already promises a self-resuming wait — so recognising it here costs nothing and
+ * stops a busy platform from being reported as a login problem.
+ *
+ * 🔴 No *code* is mapped to `rate-limited`: not one has been measured on this
+ *    platform, and inventing a numeric mapping (429, say — plausible, unmeasured)
+ *    would be the same kind of guess this whole function exists to stop making.
+ */
+export const DEEPSEEK_RATE_PHRASES: readonly string[] = [
+  'too many requests',
+  'rate limit',
+  'rate-limit',
+  'ratelimit',
+  'server busy',
+  'busy',
+  'overloaded',
+  'try again later',
+  'temporarily unavailable',
+];
 
 /**
  * How much of the platform's own `msg` may enter a stored halt detail. 🔴 Bounded
@@ -1388,6 +1470,22 @@ function describeDeepSeekCode(label: string, code: number, rawMsg: unknown): str
 }
 
 /**
+ * Does the platform's own message name a rate or busy condition?
+ *
+ * 🔴 It reads the message **as it arrived** — this is a match against untrusted
+ *    text, not against the cleaned copy `describeDeepSeekCode` stores, so nothing
+ *    here depends on that cleanup order. The comparison is a case-insensitive
+ *    substring: the phrase list is lower case and the platform is free to shout.
+ *    A message that is not a string at all (a number, an object) is not a match —
+ *    "we could not read it" is not "it says rate-limited".
+ */
+function deepSeekRateMessage(msg: unknown): boolean {
+  if (typeof msg !== 'string' || msg.length === 0) return false;
+  const lower = msg.toLowerCase();
+  return DEEPSEEK_RATE_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+/**
  * The refusal DeepSeek names in its own envelope, or `null` when the body does not
  * name one.
  *
@@ -1396,6 +1494,14 @@ function describeDeepSeekCode(label: string, code: number, rawMsg: unknown): str
  * (a string `"0"`, say — reading that as "success" would be inventing agreement the
  * platform did not give, so it is left to the shape checks below, which is where a
  * type change belongs).
+ *
+ * 🔴 W61b · **Every non-zero code gets a reason, and the reason has to be one this
+ *    build can defend.** A code that was measured to mean a credential failure is
+ *    `auth-refused`; a code whose own message names a rate or busy condition is
+ *    `rate-limited`; everything else is `refused-unknown`, with the code and the
+ *    platform's message in the detail. None of the three is reached by guessing,
+ *    and — the point of the exercise — **an unknown is never guessed to be auth**,
+ *    because `auth-refused` is the one that tells a user to log in.
  */
 export function deepSeekEnvelopeRefusal(text: string): DeepSeekEnvelopeRefusal | null {
   let body: unknown;
@@ -1407,15 +1513,32 @@ export function deepSeekEnvelopeRefusal(text: string): DeepSeekEnvelopeRefusal |
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const record = body as Record<string, unknown>;
 
-  const refusal = (where: string, code: unknown, msg: unknown): DeepSeekEnvelopeRefusal | null =>
-    typeof code === 'number' && Number.isFinite(code) && code !== 0
-      ? {
-          reason: 'auth-refused',
-          detail:
-            `deepseek refused this request in-band: ${describeDeepSeekCode(where, code, msg)}`
-            + ' (HTTP status was not the signal — this platform answers 200 either way)',
-        }
-      : null;
+  const refusal = (where: string, code: unknown, msg: unknown): DeepSeekEnvelopeRefusal | null => {
+    if (typeof code !== 'number' || !Number.isFinite(code) || code === 0) return null;
+    const bounded = describeDeepSeekCode(where, code, msg);
+    // 🔴 The code is asked first and the message second, so a measured credential
+    //    code keeps its meaning even if the platform's wording for it changes.
+    const reason: DeepSeekEnvelopeRefusal['reason'] = DEEPSEEK_AUTH_REFUSAL_CODES.includes(code)
+      ? 'auth-refused'
+      : deepSeekRateMessage(msg)
+        ? 'rate-limited'
+        : 'refused-unknown';
+    const because = reason === 'auth-refused'
+      ? 'a credential failure, by the code: the login token was missing or rejected'
+      : reason === 'rate-limited'
+        // The message is the evidence, and it is quoted in the detail beside this.
+        ? 'the platform\'s own message names a rate or busy condition'
+        // 🔴 The honest sentence for a code nobody has read: it says what is not
+        //    known rather than assigning a cause, and it says the leg will look
+        //    again (this reason is on the gentle ladder, lib/backfill/types.ts).
+        : 'this build does not recognise this code, so what it means is not established';
+    return {
+      reason,
+      detail:
+        `deepseek refused this request in-band: ${bounded} (${because};`
+        + ' HTTP status was not the signal — this platform answers 200 either way)',
+    };
+  };
 
   const topLevel = refusal('code', record.code, record.msg);
   if (topLevel) return topLevel;

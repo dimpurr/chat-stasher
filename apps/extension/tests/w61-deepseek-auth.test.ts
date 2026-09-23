@@ -69,6 +69,7 @@ import {
   type MinimalResponse,
 } from '../lib/platform-auth';
 import { t } from '../lib/i18n';
+import { haltClassOf } from '../lib/backfill/types';
 import type { Clock } from '../lib/backfill/pace';
 
 const ORIGIN = 'https://chat.deepseek.com';
@@ -221,8 +222,10 @@ describe('W61-1 · a DeepSeek refusal halts auth-refused, on both segments', () 
 
     // 🔴 The assertion this file exists for. Before W61 this was 'shape-changed'
     //    with "no `data` object (envelope changed?)" — an accurate-sounding lie
-    //    about a platform that had said "Missing Token".
-    expect(report.stopped).toBe('halted');
+    //    about a platform that had said "Missing Token". 🔴 W61b: the stop is
+    //    transient, so the run reports 'waiting-retry' — it is a refusal the leg
+    //    comes back from, not a place it sits until a human clears storage.
+    expect(report.stopped).toBe('waiting-retry');
     expect(report.halted?.reason).toBe('auth-refused');
     expect(report.halted?.detail).toContain('code 40002');
     expect(report.halted?.detail).toContain('Missing Token');
@@ -248,7 +251,7 @@ describe('W61-1 · a DeepSeek refusal halts auth-refused, on both segments', () 
     //    `matchesResponseShape` BEFORE the plan's parser, so without the plan-level
     //    hook the body leg would report 'shape-changed' with "does not match the
     //    deepseek response shape" — while the platform had said "INVALID_TOKEN".
-    expect(report.stopped).toBe('halted');
+    expect(report.stopped).toBe('waiting-retry');
     expect(report.halted?.reason).toBe('auth-refused');
     expect(report.halted?.detail).toContain('detail body:');
     expect(report.halted?.detail).toContain('code 40003');
@@ -281,7 +284,7 @@ describe('W61-1 · a DeepSeek refusal halts auth-refused, on both segments', () 
     expect(report.state.pending).toEqual([]);
   });
 
-  it('the ledger keeps the refusal, and the next run does not re-ask it (permanent, not a backoff)', async () => {
+  it('the ledger keeps the refusal, and the leg comes back by itself (transient, not permanent)', async () => {
     const store = memoryStore();
     const clock = fakeClock();
     const be = backend(clock, { [DEEPSEEK_LIST_PATH]: LIST_REFUSAL });
@@ -289,13 +292,22 @@ describe('W61-1 · a DeepSeek refusal halts auth-refused, on both segments', () 
     const first = await run(store, be.http, 'default');
     expect(first.halted?.reason).toBe('auth-refused');
 
-    // 🔴 Permanent by haltClassOf's default, and deliberately NOT 'rate-limited':
-    //    a transient reason would be retried on a backoff ladder and the popup
-    //    would promise a resume that a missing token cannot deliver.
+    // 🔴 W61b · The first version of this test asserted the opposite, and the
+    //    reasoning it recorded ("a transient reason would promise a resume that a
+    //    missing token cannot deliver") was the defect the review found: the token
+    //    is re-read on every request, so a user who signs back in **is** the
+    //    resume — and a permanent record, which nothing in the product clears,
+    //    would have frozen this platform across logins and across updates. The
+    //    full lifecycle (not due / due / recovered) is in
+    //    tests/w61b-refusal-review.test.ts; what is pinned here is that the record
+    //    carries a retry moment and that a run before it is free.
+    expect(haltClassOf(first.halted!.reason)).toBe('transient');
+    expect(typeof first.halted?.retryAt).toBe('number');
+
+    // Before it is due: refused from the stored record, and the run sends nothing.
     const second = await run(store, be.http, 'default');
-    expect(second.stopped).toBe('halted');
+    expect(second.stopped).toBe('waiting-retry');
     expect(second.halted?.reason).toBe('auth-refused');
-    // Refused from the stored record: the second run sent nothing at all.
     expect(be.calls).toHaveLength(1);
   });
 });

@@ -364,13 +364,29 @@ export function needsDeepSeekBearer(url: string, pageOrigin: string): boolean {
  *    `'[]'` is valid JSON and is not the token, while `'{"value":'` is neither
  *    valid JSON nor a usable token, and reading either as a raw token would put a
  *    string no page ever sent into an HTTP header.
+ *
+ * 🔴 W61b · **The gates read a *trimmed* value, and that is a fix, not a tidy-up.**
+ *    A stored ` {"value":"<jwt>"}` — one leading space, or a BOM — did not start
+ *    with `{`, so the JSON gate was skipped and the whole string went into the
+ *    header as the bearer token: `Authorization: Bearer  {"value":"<jwt>"}`. That
+ *    is a request nobody made and a token nobody has, sent to the platform's own
+ *    endpoint — a login failure invented by this code, and one the user would read
+ *    as the platform refusing. So the value is trimmed once, here, before any of it
+ *    is read: leading and trailing whitespace is storage's, not the token's, and
+ *    JSON allows it inside the document anyway. 🔴 Trimming decides where the parse
+ *    **starts**, never whether it succeeds: `' {"value":'` still fails the gate and
+ *    still returns `null`. The token that survives is trimmed for the same reason —
+ *    HTTP strips leading and trailing whitespace from a field value, so a space
+ *    kept here would be the one thing sent that the value it came from does not say.
  */
 export function readDeepSeekUserToken(raw: string | null): string | null {
-  if (typeof raw !== 'string' || raw.length === 0) return null;
-  let value: unknown = raw;
-  if (raw[0] === '{' || raw[0] === '[' || raw[0] === '"') {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  let value: unknown = trimmed;
+  if (trimmed[0] === '{' || trimmed[0] === '[' || trimmed[0] === '"') {
     try {
-      value = JSON.parse(raw);
+      value = JSON.parse(trimmed);
     } catch {
       return null;
     }
@@ -387,6 +403,47 @@ export interface DeepSeekAuthOptions {
 }
 
 /**
+ * 🔴 W61b · **The one redirect policy a request carrying the page's own login token
+ * may have.**
+ *
+ * `fetch` defaults to `redirect: 'follow'`, and a redirect of a *same-origin* URL
+ * keeps the `Authorization` header (only a cross-origin hop drops it). So a 302
+ * from `/api/v0/chat_session/fetch_page` to any other path on
+ * `chat.deepseek.com` would be re-sent **with the page's own bearer token** — to a
+ * URL this extension never chose, on the strength of a decision `needsDeepSeekBearer`
+ * made about the *first* URL. The allowlist cannot help: it approved the request
+ * that was sent, not the one the platform redirected it to.
+ *
+ * So the two paths are fetched with `redirect: 'manual'`. The browser then does not
+ * follow, the header is never re-sent, and what comes back is an **opaque**
+ * response: `status 0`, no readable body. That is not a response this leg can read
+ * a conversation list out of, and it is not a shape either — a redirect is a
+ * transport fact, and it is said as one rather than passed on as `HTTP 0` for the
+ * engine's status branch to call a wire-shape change (which is permanent, and
+ * would stop the leg for good over a redirect that may be a login page today and
+ * absent tomorrow).
+ *
+ * 🔴 The throw is deliberate and its scope is exact: it covers the unfollowed
+ *    redirect only (status 0, which with `redirect: 'manual'` is what an
+ *    opaqueredirect response is). Every other response — 200, 401, 403, 500 — is
+ *    returned untouched, so no existing status handling moves.
+ */
+const DEEPSEEK_REDIRECT_MODE = 'manual' as const;
+
+/**
+ * The failure an unfollowed redirect becomes. It names the path rather than the
+ * URL — the query carries a conversation id on the body path, and a halt detail
+ * never carries one.
+ */
+function deepSeekRedirectRefusal(url: string): Error {
+  return new Error(
+    `deepseek answered ${new URL(url).pathname} with a redirect; this leg does not follow it,`
+    + ' because the page\'s own bearer token is attached to this request and would be re-sent'
+    + ' to wherever it points (status 0, body unreadable — the request was not read as a result)',
+  );
+}
+
+/**
  * A fetch that adds DeepSeek's bearer token to DeepSeek's two backfill paths and
  * leaves every other request untouched. One instance per content script (one page).
  */
@@ -395,12 +452,19 @@ export function createDeepSeekAuthorizedFetch(
   rawFetch: RawFetch,
   options: DeepSeekAuthOptions,
 ) {
-  const send = (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
-    if (token === null) return rawFetch(url, init);
-    return rawFetch(url, {
-      ...init,
-      headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` },
-    });
+  const send = async (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
+    // 🔴 `redirect: 'manual'` is set whether or not a token was found: the request
+    //    is built the same way either way, so a trace cannot read as two different
+    //    requests depending on whether the user happened to be logged in.
+    const guarded: RequestInit = { ...init, redirect: DEEPSEEK_REDIRECT_MODE };
+    const res = token === null
+      ? await rawFetch(url, guarded)
+      : await rawFetch(url, {
+        ...guarded,
+        headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` },
+      });
+    if (res.status === 0) throw deepSeekRedirectRefusal(url);
+    return res;
   };
 
   return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
