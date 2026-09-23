@@ -34,6 +34,21 @@ disagree are all left alone and reported, and the run exits non-zero: an edit
 made under any of those is a guess about which of several candidate claims a
 sentence was written about.
 
+**Which documents this rewrites** is not a list kept here: it is exactly
+`drift.doc_files()`, the scan set of scripts/check-citation-drift.py — README.md,
+SECURITY.md, CONTRIBUTING.md, docs/install.md, docs/privacy.md,
+docs/threat-model.md and every contracts/*.md. SECURITY.md, CONTRIBUTING.md and
+contracts/*.md are in that set deliberately: a citation left stale in one of
+them is the same stale anchor as one left stale in README.md, and they are the
+documents the drift check will fail on next. Source files, and
+docs/citations.lock itself, are never written.
+
+Each document is replaced in one step — a sibling temporary file and
+`os.replace` — and a document's own line endings and final-newline state are
+copied through untouched, so a CRLF file stays CRLF and a file without a final
+newline does not gain one. If any document cannot be written, every document
+already written in that run is put back, and the run reports failure.
+
 Usage:
     python3 scripts/relocate-citations.py --old <commit> [--old <commit> ...]
                                           [--dry-run] [--quiet]
@@ -48,8 +63,10 @@ import argparse
 import importlib.util
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -91,15 +108,17 @@ AMBIGUOUS = "ambiguous"    # found in several places
 MISSING = "missing"        # found nowhere
 UNKNOWN = "unknown"        # the file, or the range, is not readable at --old
 UNCLAIMED = "unclaimed"    # no declared side's own document writes this range
+BLANK = "blank"            # every cited line is whitespace, so it names nothing
 
 # Outcomes that rewrite a range. Everything else leaves the document alone.
 RELOCATED = (SHIFTED, GROWN)
 
 # The refusing outcomes, kept apart because they mean different things to
 # whoever has to fix them: several matches is "this sentence could be about any
-# of these", zero matches is "the text it was written about is gone", and
-# unclaimed is "these numbers are in nobody's coordinate system".
-REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED)
+# of these", zero matches is "the text it was written about is gone", blank is
+# "there is no text here to look for", and unclaimed is "these numbers are in
+# nobody's coordinate system".
+REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED, BLANK)
 
 
 class SourceIndex:
@@ -178,21 +197,33 @@ def working_tree_index(rel: str) -> SourceIndex:
 
 _RANGE_RE = re.compile(r":(\d+)(?:-(\d+))?(?![\d-])")
 
+# The path token the author wrote immediately before a `:N`. Used to tell one
+# file's citation from another file's citation of the same line numbers.
+_PATH_BEFORE_COLON_RE = re.compile(r"([A-Za-z0-9_./-]+)$")
 
-def ranges_written(text: str) -> set[tuple[int, int]]:
-    """Every line range a document writes as a citation.
+
+def ranges_written(text: str) -> set[tuple[str | None, int, int]]:
+    """Every (path token, start, end) a document writes as a citation.
 
     This reads the range text rather than re-parsing the document, because the
     only question it answers is "is this range in this side's coordinate
     system". A citation written as `a/b.ts:2-4`, as `b.ts:2-4` or as a bare
     `:2-4` continuation all carry the same `:2-4`, and the side that wrote it
-    owns that range however it spelled the path. The trailing guard is what
-    keeps `:2-4` from matching inside `:2-40`.
+    owns that range however it spelled the path **to that file**. The trailing
+    guard is what keeps `:2-4` from matching inside `:2-40`.
+
+    The path token is kept because the numbers alone are not a coordinate: two
+    files have a line 3, and a document that only ever wrote `alpha.ts:3-4` was
+    never a statement about `beta.ts:3-4`. A token of None is a bare `:2-4`,
+    which spells no path at all and so is not a statement about one file
+    specifically — see `Parent.claims()`.
     """
     spans = set()
     for m in _RANGE_RE.finditer(text):
+        named = _PATH_BEFORE_COLON_RE.search(text[: m.start()])
         start = int(m.group(1))
-        spans.add((start, int(m.group(2)) if m.group(2) else start))
+        spans.add((named.group(1) if named else None, start,
+                   int(m.group(2)) if m.group(2) else start))
     return spans
 
 
@@ -201,7 +232,7 @@ class Parent:
 
     def __init__(self, commit: str):
         self.commit = commit
-        self.spans: dict[str, set[tuple[int, int]]] = {}
+        self.spans: dict[str, set[tuple[str | None, int, int]]] = {}
         self.lines: dict[str, set[str]] = {}
         for doc in drift.doc_files():
             rc, out = git("show", f"{commit}:{doc}")
@@ -213,8 +244,31 @@ class Parent:
     def short(self) -> str:
         return self.commit[:12]
 
-    def claims(self, doc: str, start: int, end: int) -> bool:
-        return (start, end) in self.spans.get(doc, ())
+    def claims(self, doc: str, target: str, start: int, end: int) -> bool:
+        """Whether this side's own document writes a citation of `target` here.
+
+        The line numbers alone would answer a different question. `alpha.ts:3-4`
+        is not a claim about `beta.ts:3-4` even though it carries the same
+        numbers, and treating it as one lets a side vote on a citation it never
+        made — including voting to relocate it.
+
+        A token that spelled a full path has to be that path. A token that
+        spelled a bare file name (`main.rs:3-4` for crates/.../main.rs) matches
+        on the basename, which is how the citation parser resolves one too. A
+        token of None is a bare `:3-4` continuation: it names no path, so it is
+        a coordinate in this side's system for whichever path its own sentence
+        named, and it counts here. Erring towards ownership is the safe
+        direction, because an owner that cannot place the range vetoes the
+        relocation rather than authorising it.
+        """
+        for token, s, e in self.spans.get(doc, ()):
+            if (s, e) != (start, end):
+                continue
+            if token is None:
+                return True
+            if token == target or token == os.path.basename(target):
+                return True
+        return False
 
     def wrote_this_line(self, doc: str, line: str) -> bool:
         """Whether this side's version of the document carries this exact line.
@@ -259,6 +313,18 @@ def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision
     block = old.block(start, end)
     if end <= len(cur) and cur.block(start, end) == block:
         return Decision(RIGHT, start, end, start, end)
+    if not "".join(old.norm[start - 1 : end]).strip():
+        # Every line this range names is blank. Lines are compared with their
+        # surrounding whitespace removed, so a blank block is the empty string,
+        # and the empty string is "found" at every blank line in the file. The
+        # citation identifies nothing to search for, so any blank line would be
+        # taken as its answer — a real move in the document to a line that was
+        # never cited. There is nothing here to relocate.
+        return Decision(
+            BLANK, start, end, None, None,
+            f"every line in {start}-{end} is blank at --old, so the range names no "
+            f"text, and any blank line in the merged file would match it",
+        )
     hits = cur.windows(block)
     if len(hits) == 1:
         new_start = hits[0] + 1
@@ -274,6 +340,29 @@ def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision
         MISSING, start, end, None, None,
         "that text is not in the merged file at all — it was rewritten or removed",
     )
+
+
+def embedding(cur: SourceIndex, block: list[str]) -> "list[int] | None":
+    """The earliest line indices at which `block` embeds in `cur`, lines in order.
+
+    `block` is the cited lines in order. A merge edits the middle of a construct
+    a sentence cites, so the block's lines stay in the file in order but not
+    adjacent any more; an embedding picks one line of the file for each line of
+    the block, and the earliest one is the tightest window there is.
+
+    🔴 "Earliest" is a choice, and the choice is only trustworthy when each step
+    had no alternative — see `grown()`, which checks that before using this.
+    """
+    hits: list[int] = []
+    at = 0
+    for want in block:
+        while at < len(cur) and cur.norm[at] != want:
+            at += 1
+        if at >= len(cur):
+            return None
+        hits.append(at)
+        at += 1
+    return hits
 
 
 def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision | None":
@@ -292,6 +381,27 @@ def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision
     A block whose first line is not unique returns None too: four occurrences of
     `*/` at the top of four different comments is not an anchor.
 
+    "In order" is not enough on its own, because a file can offer the block more
+    than one alignment and only one of them is the construct the sentence was
+    written about. Two more things are required of the walk, and both are checks
+    on the alignment the greedy walk produced:
+
+      * every cited line except the first and the last must have had no
+        alternative at its step — the line must not occur again later in the
+        file. A cited block whose middle line also occurs further down has two
+        alignments, and the greedy walk silently takes the earlier one, which is
+        the alignment that stops short of the real text;
+      * no line skipped *between* two matched lines may be one of the block's
+        own lines. That means the "inserted" line is really a second copy of a
+        cited line: the walk has stepped over the block's own tail to reach a
+        later copy of it, and the window has run off the end of the cited
+        construct onto whatever repeats it further down the file.
+
+    Two identical cited lines with one of them deleted used to come back as a
+    *shrunk* one-line range, and a deleted line whose text still existed later
+    used to come back as a window covering two other constructs; both are
+    refusals now.
+
     🔴 The result can be longer than the old range, and how much longer is a
     judgement about whether the inserted lines belong to the cited claim. The
     caller prints both numbers and the count of inserted lines; read them before
@@ -302,16 +412,32 @@ def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision
     anchors = cur.windows(old.block(start, start))
     if len(anchors) != 1:
         return None
-    first = anchors[0]
-    at = first
-    for i in range(start + 1, end + 1):
-        want = old.norm[i - 1]
-        while at < len(cur) and cur.norm[at] != want:
-            at += 1
-        if at >= len(cur):
-            return None
-        at += 1
-    last = at - 1
+    block = old.norm[start - 1 : end]
+    matched = embedding(cur, block)
+    if matched is None:
+        # Not a refusal to report from here: the caller does not know either
+        # whether the block embeds, and "these lines are not in the file in this
+        # order at all" is the `missing` it reports.
+        return None
+    for i in range(1, len(block) - 1):
+        if cur.norm[matched[i - 1] + 1 :].count(block[i]) > 1:
+            return Decision(
+                AMBIGUOUS, start, end, None, None,
+                f"the cited lines are in the merged file, but in more than one "
+                f"alignment: `{block[i]}` is one of them and occurs again later, so "
+                f"which copy the citation was about cannot be told",
+            )
+    first, last = matched[0], matched[-1]
+    matched_at = set(matched)
+    cited = set(block)
+    for between in range(first, last + 1):
+        if between not in matched_at and cur.norm[between] in cited:
+            return Decision(
+                AMBIGUOUS, start, end, None, None,
+                f"the cited lines are in the merged file, but in more than one "
+                f"alignment: line {between + 1} is `{cur.norm[between]}`, one of them, "
+                f"and it sits between two of the others",
+            )
     if (first, last) == (start - 1, end - 1):
         # Every old line is still on its own line; only lines *between* them were
         # removed. The citation's range has not moved, which is this script's
@@ -334,7 +460,7 @@ def decide(
     end: int,
 ) -> Decision:
     """Decide one citation, using only the sides whose own document writes it."""
-    owners = [p for p in parents if p.claims(doc, start, end)]
+    owners = [p for p in parents if p.claims(doc, target, start, end)]
     if len(owners) > 1:
         # Both sides wrote this range, which means different code by it. The
         # surviving prose is the tie-break; if neither side's document has this
@@ -360,6 +486,7 @@ def decide(
         )
 
     candidates: list[tuple[str, Decision]] = []
+    rights: list[str] = []
     reasons: list[str] = []
     for p in owners:
         old = source_at(p.commit, target)
@@ -368,12 +495,39 @@ def decide(
             continue
         d = locate(old, cur, start, end)
         if d.status == RIGHT:
-            return Decision(RIGHT, start, end, start, end)
-        if d.status in RELOCATED:
+            rights.append(p.short)
+        elif d.status in RELOCATED:
             candidates.append((p.commit, d))
         else:
             reasons.append(f"{p.short}: {d.detail}")
 
+    # 🔴 A side that cannot place the range is a veto, not a footnote. It used to
+    # be collected and then dropped whenever some other side produced a move, so
+    # one side's "the text this sentence names is gone" was overruled by another
+    # side's "I found my text over there" — two different sentences' worth of
+    # evidence, and the run reported a relocation and exited 0. Sides that do not
+    # all agree leave the citation alone and say so.
+    if reasons and (candidates or rights):
+        return Decision(
+            AMBIGUOUS, start, end, None, None,
+            "the sides that write this range do not agree about it: "
+            + "; ".join(
+                reasons
+                + [f"{c[:12]}: its text is now at {d.new_start}-{d.new_end}"
+                   for c, d in candidates]
+                + [f"{s}: it is already right" for s in rights]
+            ),
+        )
+    if rights and candidates:
+        return Decision(
+            AMBIGUOUS, start, end, None, None,
+            "the sides that write this range disagree about where it went: "
+            + ", ".join(f"{s} says it is already right" for s in rights)
+            + ", "
+            + ", ".join(f"{c[:12]} says {d.new_start}-{d.new_end}" for c, d in candidates),
+        )
+    if rights:
+        return Decision(RIGHT, start, end, start, end)
     if not candidates:
         return Decision(MISSING, start, end, None, None, "; ".join(reasons))
     moves = {(d.new_start, d.new_end) for _, d in candidates}
@@ -402,6 +556,44 @@ def group_chunks(citations: list, index: int) -> tuple[list, int]:
     return citations[index : index + span_count], index + span_count
 
 
+# The characters a citation token is made of. A token matches only where these
+# are absent on both sides, so `pkg/src/a.ts:12` is never read as the
+# `src/a.ts:12` written inside it — different files whose citations share a
+# suffix — and a suffix is not silently rewritten in the longer token's place.
+_PATH_CHARS_RE = re.compile(r"[A-Za-z0-9_./-]")
+
+
+def find_token(line: str, token: str, pos: int) -> int:
+    """Where `token` occurs in `line` at or after `pos`, as a whole token.
+
+    The citation parser and this rewriter have to agree about which characters
+    are the citation. `str.find` alone does not: a citation of `src/a.ts:12` is
+    a substring of `pkg/src/a.ts:12`, so a line that cites both had the shorter
+    one rewritten inside the longer one, and the document then cited a line of a
+    file the sentence never mentioned. Returns -1 when no whole-token occurrence
+    is left.
+
+    The test is the character on each side of the match, and it is deliberately
+    the same on both sides even though it makes one shape unreachable: a bare
+    `:N` written directly after path characters that do not themselves name a
+    file (`HH:23`, inherited from the sentence's real citation) is refused as
+    "the parser reports a citation here and I cannot find it", because relaxing
+    it for `:` would also let a bare `:N` match the tail of `a.ts:N`. Refusing
+    costs a human one look; matching the wrong one costs the document a wrong
+    anchor that still validates. Every citation in this repository's own
+    documents is found by this rule.
+    """
+    at = line.find(token, pos)
+    while at >= 0:
+        before = at > 0 and _PATH_CHARS_RE.match(line[at - 1]) is not None
+        end = at + len(token)
+        after = end < len(line) and _PATH_CHARS_RE.match(line[end]) is not None
+        if not before and not after:
+            return at
+        at = line.find(token, at + 1)
+    return -1
+
+
 def rewrite_line(line: str, replacements: list[tuple[str, str]]) -> str | None:
     """Apply (old_token, new_token) pairs left to right within one line.
 
@@ -413,7 +605,7 @@ def rewrite_line(line: str, replacements: list[tuple[str, str]]) -> str | None:
     out: list[str] = []
     pos = 0
     for old_token, new_token in replacements:
-        at = line.find(old_token, pos)
+        at = find_token(line, old_token, pos)
         if at < 0:
             return None
         out.append(line[pos:at])
@@ -421,6 +613,74 @@ def rewrite_line(line: str, replacements: list[tuple[str, str]]) -> str | None:
         pos = at + len(old_token)
     out.append(line[pos:])
     return "".join(out)
+
+
+# A line boundary, as str.splitlines() defines one. Every boundary is copied
+# through untouched when a document is rewritten, so the file keeps the newline
+# style it had; a document rewritten with "\n".join() came back LF-only with a
+# final newline added, whatever it was before.
+_LINE_BREAK_RE = re.compile(r"(\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029])")
+
+
+def read_doc(doc: str) -> str:
+    """A document's text, exactly as it is on disk.
+
+    `newline=""` is the point: the default translates CRLF to LF on the way in,
+    and the translation cannot be undone on the way out. Line *content* is the
+    same either way — `.splitlines()` strips the terminator — which is why the
+    line numbers here still match the ones the citation parser counts with
+    (check-citation-drift.py reads the document the same way).
+    """
+    with open(os.path.join(REPO, doc), "r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def replace_lines(text: str, edits: list[tuple[int, str]]) -> str:
+    """`text` with each (1-based line number, new content) applied to its line.
+
+    The line boundaries are `str.splitlines()`'s, the ones the citation parser
+    counts lines with. Splitting into content and terminator and putting them
+    back unchanged means only the named lines' contents can differ: a CRLF
+    document stays CRLF, a document with no final newline does not gain one, and
+    a document with a mixture keeps the mixture.
+    """
+    parts = _LINE_BREAK_RE.split(text)
+    for lineno, new_line in edits:
+        at = 2 * (lineno - 1)
+        if at >= len(parts):
+            raise ValueError(f"line {lineno} is not in the document")
+        parts[at] = new_line
+    return "".join(parts)
+
+
+def write_atomic(doc: str, text: str) -> None:
+    """Replace one document with `text`, or leave it exactly as it was.
+
+    The write goes to a temporary file in the same directory and is then renamed
+    over the document, so the document is never the half-written one: either the
+    old bytes or the new ones are there. Writing in place with `open(..., "w")`
+    truncates first and holds the only copy of the original in memory, which is
+    how a kill or a full disk in that window leaves a truncated document behind.
+
+    The temporary file is a sibling, not a file in /tmp, because the rename has
+    to be within one filesystem to be atomic, and it is given the document's own
+    mode before the rename: mkstemp creates the file 0600, and a rewrite that
+    also changed a document's permissions would be a change nobody asked for.
+    """
+    abs_doc = os.path.join(REPO, doc)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(abs_doc),
+                               prefix=".relocate-citations.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.chmod(tmp, stat.S_IMODE(os.stat(abs_doc).st_mode))
+        os.replace(tmp, abs_doc)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def plan_doc(
@@ -437,8 +697,7 @@ def plan_doc(
     per_line: dict[int, list[tuple[str, str]]] = {}
     problems: list[str] = []
 
-    with open(os.path.join(REPO, doc), "r", encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
+    lines = read_doc(doc).splitlines()
 
     by_line: dict[int, list] = {}
     for cit in citations:
@@ -490,6 +749,17 @@ def plan_doc(
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Relocate documentation citations to where their cited text went.",
+        epilog="The documents this rewrites are the ones "
+               "scripts/check-citation-drift.py scans: README.md, SECURITY.md, "
+               "CONTRIBUTING.md, docs/install.md, docs/privacy.md, "
+               "docs/threat-model.md and contracts/*.md. SECURITY.md, "
+               "CONTRIBUTING.md and contracts/*.md are included deliberately — a "
+               "citation left stale in one of them fails the drift check exactly "
+               "as one left stale in README.md does. Source files and "
+               "docs/citations.lock are never written. Each document is replaced "
+               "in one step and keeps its own line endings and final-newline "
+               "state; if any document cannot be written, the documents already "
+               "written in that run are put back.",
     )
     ap.add_argument("--old", required=True, action="append", metavar="COMMIT",
                     help="a side of the merge whose line numbers the documents carry; "
@@ -542,7 +812,8 @@ def main() -> int:
             print(f"  - {p}", file=sys.stderr)
         return 1
 
-    counts = {s: 0 for s in (RIGHT, SHIFTED, GROWN, AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED)}
+    counts = {s: 0 for s in (RIGHT, SHIFTED, GROWN, AMBIGUOUS, MISSING, UNKNOWN,
+                             UNCLAIMED, BLANK)}
     for doc, d, target in all_decisions:
         counts[d.status] += 1
         if d.status == RIGHT:
@@ -574,41 +845,71 @@ def main() -> int:
               f"{len(rewritten)} document(s) would change; nothing was written")
         return 1 if refusals else 0
 
-    backups: dict[str, str] = {}
+    # Every document's new text is built before any of them is touched, so a
+    # document that cannot be read, or an edit that cannot be placed, stops the
+    # run with nothing written at all. The writes then go one document at a time
+    # through write_atomic(), and if one of them fails the ones already done are
+    # put back from `originals` — a run either lands whole or changes nothing.
+    originals: dict[str, str] = {}
+    new_text: dict[str, str] = {}
     for doc, edits in plans.items():
         if not edits:
             continue
-        abs_doc = os.path.join(REPO, doc)
-        with open(abs_doc, "r", encoding="utf-8") as fh:
-            original = fh.read()
-        backups[doc] = original
-        lines = original.splitlines()
-        for lineno, new_line in edits:
-            lines[lineno - 1] = new_line
-        with open(abs_doc, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+        original = read_doc(doc)
+        originals[doc] = original
+        try:
+            new_text[doc] = replace_lines(original, edits)
+        except ValueError as exc:
+            print(f"[citation-relocate] refusing to write anything: {doc}: {exc}",
+                  file=sys.stderr)
+            return 1
+
+    written: list[str] = []
+    try:
+        for doc, text in new_text.items():
+            write_atomic(doc, text)
+            written.append(doc)
+    except OSError as exc:
+        for doc in written:
+            try:
+                write_atomic(doc, originals[doc])
+            except OSError as undo:
+                print(f"[citation-relocate] {doc} could not be restored: {undo}",
+                      file=sys.stderr)
+        drift._file_cache.clear()
+        print(f"[citation-relocate] writing a document failed: {exc}; the "
+              f"{len(written)} document(s) already rewritten were put back, so "
+              f"nothing was changed", file=sys.stderr)
+        return 1
 
     if rewritten:
         print(f"[citation-relocate] rewrote {len(rewritten)} document(s): {', '.join(rewritten)}")
 
     # Read back what was just written, through the same parser the drift check
     # uses, and confirm every relocated citation is now exactly where the plan
-    # said. A parse that disagrees means the edit landed on the wrong token, and
-    # the documents go back to their previous bytes before anything is reported.
+    # said — the same *file*, at the same lines. The file is part of the check
+    # because the same numbers in another file are a different citation: a
+    # rewrite that landed on `pkg/src/a.ts:17` when the plan said `src/a.ts:17`
+    # satisfied a check that compared (document, start, end) alone, and the
+    # damaged document was reported as a clean run. A parse that disagrees means
+    # the edit landed on the wrong token, and the documents go back to their
+    # previous bytes before anything is reported.
     drift._file_cache.clear()
     after, after_problems = drift.parse_docs(basenames)
-    expected = {(doc, d.new_start, d.new_end)
-                for doc, d, _ in all_decisions if d.status in RELOCATED}
-    got = {(c.doc, c.start, c.end) for c in after if (c.doc, c.start, c.end) in expected}
-    if after_problems or got != expected:
-        for doc, original in backups.items():
-            with open(os.path.join(REPO, doc), "w", encoding="utf-8") as fh:
-                fh.write(original)
+    expected = {(doc, target, d.new_start, d.new_end)
+                for doc, d, target in all_decisions if d.status in RELOCATED}
+    got = {(c.doc, c.target, c.start, c.end) for c in after}
+    if after_problems or not expected <= got:
+        for doc, original in originals.items():
+            write_atomic(doc, original)
         drift._file_cache.clear()
         detail = "\n".join(f"  - {p}" for p in after_problems) if after_problems else ""
+        missing = "; ".join(f"{d} {t}:{s}-{e}" for d, t, s, e in sorted(expected - got))
         print("[citation-relocate] the rewritten documents do not parse back to the plan; "
               "all edits were reverted:\n"
-              f"  expected {len(expected)} relocated anchor(s), read back {len(got)}{detail}",
+              f"  expected {len(expected)} relocated anchor(s), {len(expected - got)} of "
+              f"them not read back where the plan put them"
+              + (f": {missing}" if missing else "") + detail,
               file=sys.stderr)
         return 1
 
