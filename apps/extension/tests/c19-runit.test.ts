@@ -401,6 +401,96 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
     console.log('[C19-1] switch persisted on + SW start -> alarms now:', [...alarmBook.keys()]);
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
   });
+
+  /**
+   * 🔴 W82 · **A sync that read the switch as off must not clear an alarm a later
+   *    enable armed.**
+   *
+   * `syncAlarmWithSwitch` is reachable from four places — `backgroundSetup`,
+   * `runtime.onStartup`, the `storage.onChanged` listener and the popup's own
+   * toggle — and each used to act on the value it read whenever its own `await`
+   * came back. So the **first** read of the switch could be the **last** write to
+   * an alarm. Measured in a real Chromium (e2e, `backfill-migration.spec.ts`): a
+   * startup read of `false` issued `alarms.clear` 63 ms later, after the enable had
+   * armed both alarms — the switch read as on, nothing was armed, and nothing
+   * re-arms them, so the leg stays silent until some unrelated service-worker wake.
+   * That is the "the chain can never stay broken" property W16 exists for.
+   *
+   * The switch read is held open by hand rather than left to the scheduler: with
+   * the two syncs simply raced, the shorter path happens to finish first and this
+   * passes for the wrong reason.
+   */
+  it('🔴 a sync that read the switch as off must not clear what a later enable armed', async () => {
+    const mod = await bootBackground();
+    // The startup sync is detached from `default()`; wait for it so the slow read
+    // installed below is the one this test means to hold.
+    await mod.backgroundSetupSettled();
+    alarmLog.length = 0;
+    alarmBook.clear();
+
+    const { BACKFILL_ALARM_NAME, BACKFILL_SAFETY_ALARM_NAME } = await import('../lib/backfill/alarm');
+    const { isBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+
+    // One switch read — the first one issued from here on — takes 25 ms to come
+    // back, and answers with the value the switch held when it was *issued*. That
+    // is the real storage semantics the race needs: the answer is decided at the
+    // request, not at the reply.
+    let slowNextSwitchRead = true;
+    const area = fakeBrowser.storage.local;
+    const realGet = area.get;
+    area.get = async (query: any) => {
+      const asksSwitch = Boolean(query) && !Array.isArray(query)
+        && 'cs_backfill_enabled_v1' in query;
+      const answer = await realGet(query);
+      if (asksSwitch && slowNextSwitchRead) {
+        slowNextSwitchRead = false;
+        await new Promise((resolve) => { setTimeout(resolve, 25); });
+      }
+      return answer;
+    };
+    try {
+      const stale = mod.syncAlarmWithSwitch();      // reads `false`, answers 25 ms later
+      // A macrotask, so that read has certainly been issued (and answered `false`)
+      // before the switch is turned on.
+      await new Promise((resolve) => { setTimeout(resolve, 0); });
+      await enableBackfill();                       // the user turns it on
+      const fresh = mod.syncAlarmWithSwitch();      // reads `true`
+
+      await Promise.all([stale, fresh]);
+
+      // The switch really did end up on, so the alarms being armed is the only
+      // correct end state and the assertion below cannot pass by accident.
+      expect(await isBackfillEnabled(browserLocalStore())).toBe(true);
+      console.log('[C19-1] switch on during a slow startup read -> alarm ops:', alarmLog, 'alarms now:', [...alarmBook.keys()]);
+      expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
+      expect(alarmBook.has(BACKFILL_SAFETY_ALARM_NAME)).toBe(true);
+    } finally {
+      area.get = realGet;
+    }
+  });
+
+  /**
+   * 🔴 W82 · **One switch-on arms once.** Two overlapping syncs both saw "not
+   *    armed", so both drew a delay and both called `create`: one of the two random
+   *    5-10 minute draws was silently thrown away, and which of the two survived was
+   *    decided by arrival order. The lifecycle has one writer at a time, so the
+   *    second sync observes the first one's alarm and leaves it alone.
+   */
+  it('🔴 two overlapping syncs with the switch on arm the tick once, not twice', async () => {
+    const mod = await bootBackground();
+    await mod.backgroundSetupSettled();
+    alarmLog.length = 0;
+
+    const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
+    await enableBackfill();
+
+    await Promise.all([mod.syncAlarmWithSwitch(), mod.syncAlarmWithSwitch()]);
+
+    const creates = alarmLog.filter((l) => l.startsWith(`create ${BACKFILL_ALARM_NAME} `));
+    console.log('[C19-1] two overlapping syncs -> tick creates:', creates.length, alarmLog);
+    expect(creates).toHaveLength(1);
+  });
 });
 
 describe('C19 task 2 · the http port: really injected in production code', () => {

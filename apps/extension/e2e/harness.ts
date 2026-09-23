@@ -434,12 +434,71 @@ export async function readStorage(
 }
 
 /**
+ * Wait until the extension has **armed** one of its own alarms.
+ *
+ * 🔴 W82 · `fireAlarm` below does not add a second alarm — `alarms.create` on a
+ *    name that already exists **replaces** it (`lib/backfill/alarm.ts`'s note on
+ *    the one-shot tick). So a fire that lands while the extension is still
+ *    deciding re-arms the very alarm the spec meant to bring forward, and the
+ *    spec's deadline is gone.
+ *
+ *    Measured in a real Chromium, in `backfill-migration.spec.ts`: the
+ *    extension's own `create` — a fresh 5-10 minute draw — and the spec's are
+ *    **2-4 ms apart**, so which of them lands second decides. Widening that
+ *    window by 40 ms (the same code, nothing else changed) made the extension's
+ *    draw land second and put the tick **6.29 minutes** out: no tick ran, and the
+ *    test failed **10 times out of 10**, 20 s later, with
+ *    `expect(tick).toBeTruthy()`.
+ *
+ *    What arms it is the switch going on (`syncBackfillAlarm`: "switch on ⇒ both
+ *    alarms exist"), and the switch is a `storage.local` write the extension
+ *    reacts to. So waiting for the alarm to exist *is* waiting for that reaction,
+ *    and after it the extension's own syncs observe the alarm and leave it alone
+ *    — the override below is then the last writer rather than one of two
+ *    racing. This is a synchronisation on a fact the extension publishes, not
+ *    patience: a longer timeout would leave the two writes racing for the whole
+ *    of it.
+ */
+export async function waitForAlarm(
+  extension: Extension,
+  name: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const worker = extension.context.serviceWorkers()[0];
+    if (!worker) throw new Error('alarm: no service worker is running, so arming was not observed');
+    const armed = await worker.evaluate(async (alarmName: string) => {
+      const alarms = (chrome as unknown as {
+        alarms: { get(n: string): Promise<unknown> };
+      }).alarms;
+      return Boolean(await alarms.get(alarmName));
+    }, name);
+    if (armed) return;
+    if (Date.now() >= deadline) {
+      // Reported as the precondition it is, not as the failure it would otherwise
+      // be mistaken for: "no tick ran" and "the arm this tick needed never
+      // happened" are different facts, and collapsing them is what W82 was.
+      throw new Error(
+        `alarm: ${name} was never armed, so it could not be brought forward —`
+        + ' the extension did not arm it, which is the thing the switch going on does',
+      );
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+  }
+}
+
+/**
  * Wake one of the extension's own alarms now.
  *
  * The alarm is a production event, not a test hook: `cs-backfill-tick` is the
  * one-shot the leg re-arms after every tick, and firing it here is the same wake
  * the browser would deliver — just without waiting out the jittered 5-10 minute
  * draw. It is also the only path that writes the tick trace the acceptance read.
+ *
+ * 🔴 W82 · It overrides the deadline of an alarm that is already armed, so a
+ *    caller that means to bring a tick forward must `waitForAlarm` first — see
+ *    the note there.
  */
 export async function fireAlarm(extension: Extension, name: string): Promise<void> {
   const worker = extension.context.serviceWorkers()[0];
