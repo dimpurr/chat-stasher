@@ -54,6 +54,7 @@ import { DAILY_CAP_MAX, DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import {
   BACKFILL_STATE_VERSION,
+  HALT_BUILD_UNSTAMPED,
   haltClassOf,
   isHeader,
   stateKey,
@@ -1159,6 +1160,22 @@ function capabilityWords(value: string): string {
   return key ? t(key) : t('popup.capability.other', { capability: value });
 }
 
+/**
+ * 🔴 W59 · **A build id in words.** A manifest version is already the right thing
+ * to print — it is what chrome://extensions shows — so only the one value that is
+ * *not* a build id gets words: `HALT_BUILD_UNSTAMPED`, whose whole meaning is "the
+ * record did not say". Printing the bare sentinel would read as a version.
+ *
+ * 🔴 It is never rounded into "an older build" or "an unknown build": the record
+ *    could have been written by a *newer* one (a downgrade, a second profile), and
+ *    "the record did not name the build" is the fact, not a guess about which.
+ */
+const BUILD_UNSTAMPED_WORD = 'popup.build.unstamped';
+
+function buildWords(value: string): string {
+  return value === HALT_BUILD_UNSTAMPED ? t(BUILD_UNSTAMPED_WORD) : value;
+}
+
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 Failure details come before every other note. If something was lost, say that first.
@@ -1210,6 +1227,48 @@ function notesFor(model: PopupModel): string[] {
       notes.push(t('popup.notes.halted.unsupportedPlatform', {
         platform: model.state.platform,
         detail: model.state.halted.detail,
+      }));
+    } else if (model.state.halted.reason === 'auth-refused') {
+      // 🔴 W61 · The platform refused the request **in its own answer**, with HTTP
+      //    200 — so no status line this popup prints could have shown it, and the
+      //    reason it must never read as is `other`. `other` would say "the platform
+      //    refused a request (auth-refused) — <detail>", which describes the record
+      //    instead of the two things a user needs: that nothing was read, and that
+      //    the fix is a login.
+      //
+      // 🔴 W61b · It carries the retry moment as well (the reason is transient now,
+      //    `haltClassOf`), and both halves have to be in one sentence: the login is
+      //    what makes the *next* round work, and the leg is what comes back to ask.
+      //    Leaving the retry out would describe a stop the record does not describe
+      //    — and, before the fix, a stop nothing in the product could clear.
+      //
+      // 🔴 W61b · And the sentence says nothing about *which* request was refused.
+      //    The same reason is raised on the list segment and on the body segment,
+      //    and the first version of it named the list: for a body refusal that
+      //    sentence was false in both directions (the list had been read, and its
+      //    ids were already pending — the review's third finding). The sentence a
+      //    user sees must be true of every state it is printed in; `{detail}` names
+      //    the segment for anyone who needs it.
+      notes.push(t('popup.notes.halted.authRefused', {
+        platform: model.state.platform,
+        detail: model.state.halted.detail,
+        attempts: model.state.halted.attempts ?? 1,
+        minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
+      }));
+    } else if (model.state.halted.reason === 'refused-unknown') {
+      // 🔴 W61b · The same in-band refusal, with a code this build cannot read. It
+      //    gets its own sentence rather than the generic `waitingRetry` one, and the
+      //    difference is the whole reason it exists: `waitingRetry` says the leg is
+      //    waiting out a backoff after the platform "refused or dropped a request",
+      //    which is a claim about *why* — true for a rate limit, and not established
+      //    here. This one says what is true: the platform named a code this build
+      //    does not know, the code and its message are in the detail, and the leg
+      //    will look again.
+      notes.push(t('popup.notes.halted.refusedUnknown', {
+        platform: model.state.platform,
+        detail: model.state.halted.detail,
+        attempts: model.state.halted.attempts ?? 1,
+        minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
       }));
     } else if (haltClassOf(model.state.halted.reason) === 'transient') {
       // 🔴 W13 · This is the sentence that did not exist, and its absence is why a
@@ -1266,13 +1325,39 @@ function notesFor(model: PopupModel): string[] {
   //      coat — a leg that starts again for no stated reason reads as a leg that
   //      fixed itself, which is not what happened either.
   if (model.state?.haltExpired) {
-    notes.push(t('popup.notes.haltExpired', {
-      reason: model.state.haltExpired.reason,
-      when: stampOf(model.state.haltExpired.recordedAt),
-      judgedAgainst: capabilityWords(model.state.haltExpired.judgedAgainst),
-      capability: capabilityWords(model.state.haltExpired.capability),
-      cleared: stampOf(model.state.haltExpired.clearedAt),
-    }));
+    const expired = model.state.haltExpired;
+    /**
+     * 🔴 W59 · **Two sentences, because there are two facts, and the discriminator
+     *    is the record's own `because`.**
+     *
+     * The capability sentence names a capability on both sides ("it recorded
+     * list-only; this build records full"). A build-class expiry has no capability
+     * on either side, and printing one would be a sentence about a judgement nobody
+     * made — the same defect as printing `unsupported-platform`'s sentence for an
+     * account halt, wearing a different coat.
+     *
+     * 🔴 A record written by W44 has no `because` and lands in the capability branch,
+     *    which is exactly the sentence W44 wrote for it: the absent field is read as
+     *    "this record predates the second kind", not as a third kind. That is the
+     *    same compatibility rule every optional field in this project follows.
+     */
+    notes.push(expired.because === 'build'
+      ? t('popup.notes.haltExpiredBuild', {
+        reason: expired.reason,
+        when: stampOf(expired.recordedAt),
+        // `build` is a version string or the `unstamped` sentinel; words for each,
+        // and an unrecognised value is printed rather than defaulted (see buildWords).
+        build: buildWords(expired.build),
+        currentBuild: buildWords(expired.currentBuild),
+        cleared: stampOf(expired.clearedAt),
+      })
+      : t('popup.notes.haltExpired', {
+        reason: expired.reason,
+        when: stampOf(expired.recordedAt),
+        judgedAgainst: capabilityWords(expired.judgedAgainst),
+        capability: capabilityWords(expired.capability),
+        cleared: stampOf(expired.clearedAt),
+      }));
   }
 
   // 🔴 W45 · **The durable half of the `ledger-mismatch` refusal.**
