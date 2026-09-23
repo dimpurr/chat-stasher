@@ -159,11 +159,36 @@ fn fixture_store(home: &Path) -> PathBuf {
     root
 }
 
-/// Run the registry-driven scan with the isolated HOME in place.
+/// Run the registry-driven scan with the isolated HOME in place. The fixture
+/// store lives under the isolated HOME's `.kimi-code`, so the scanner is given
+/// that exact location as an explicit kimi-code root.
+///
+/// Why the root is explicit rather than let the template resolve it: the
+/// shipped kimi-code cell is `unascertained` on every platform except macOS
+/// (there is no measured Linux/Windows install), and an `unascertained` cell
+/// is walked only when the *user* states the location — the contract the
+/// scanner itself pins in
+/// `configured_root_is_scanned_even_when_the_cell_is_unascertained`. These
+/// tests are about the session-dir layout, not about trusting a guessed path,
+/// so they hand the fixture location to the scanner as a stated root. Without
+/// this the file only ever ran on macOS, where the cell happens to be
+/// `source-confirmed`.
 fn scan_fixture(home: &Path) -> scanner::ScanReport {
     let registry_path = plant_shipped_kimi_cell(home);
     std::env::set_var(scanner::REGISTRY_ENV, &registry_path);
-    let report = scanner::scan_with_machine(&Config::default(), MACHINE)
+    let config = Config {
+        harness_roots: [(
+            "kimi-code".to_string(),
+            home.join(".kimi-code")
+                .join("sessions")
+                .to_string_lossy()
+                .into(),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let report = scanner::scan_with_machine(&config, MACHINE)
         .expect("scan must run with an explicit machine name");
     std::env::remove_var(scanner::REGISTRY_ENV);
     report
