@@ -27,6 +27,11 @@ import {
   type ChromeMessage,
 } from '@wxt-dev/i18n/build';
 
+// The composition itself, from the module that owns it: a fake manifest must report
+// the same identity a real one does, and a second spelling of `version + '+' + stamp`
+// here would be free to disagree with the product about it.
+import { composeBuildId } from '../lib/extension-build';
+
 export const TEST_LOCALES = ['en', 'zh_CN'] as const;
 export type TestLocale = (typeof TEST_LOCALES)[number];
 
@@ -93,7 +98,26 @@ export function i18nApi(locale: TestLocale = 'en'): { getMessage: (key: string, 
  * disables the cache the product runs with). Suites that want "cannot name
  * itself" delete this member on their own fake, which is a fact they then state.
  */
-export const TEST_BUILD_ID = '0.1.0.1';
+/**
+ * 🔴 W59b · **The two halves of the identity, and the identity itself.**
+ *
+ * `lib/extension-build.ts` composes the running build's id from the manifest version
+ * and the build stamp the bundler baked in (`__CS_BUILD_STAMP__`, defined in
+ * vitest.config.ts for this suite and in wxt.config.ts for a real build). A fake that
+ * reported only the version would be a fake of the configuration W59b exists to stop
+ * being ambiguous, so the harness reports both and names the composition once here.
+ *
+ * 🔴 These are three constants rather than one because a test that wants to prove the
+ *    *composition* has to be able to say which half moved. Nothing derives
+ *    `TEST_MANIFEST_VERSION` from `TEST_BUILD_ID` or the reverse — the value a fake
+ *    manifest returns and the string a halt record is stamped with are two different
+ *    observations, and a test asserting they are equal is asserting the composition.
+ */
+export const TEST_MANIFEST_VERSION = '0.1.0.1';
+/** The `__CS_BUILD_STAMP__` vitest.config.ts defines; the other half of one fact. */
+export const TEST_BUILD_STAMP = 'b-testsuite';
+/** What `runningBuildId()` answers in this suite: the two composed, as in a real build. */
+export const TEST_BUILD_ID = composeBuildId(TEST_MANIFEST_VERSION, TEST_BUILD_STAMP);
 
 /** The `runtime` bits the overlay needs to locate a catalog — plus the manifest, as in a real browser. */
 export function runtimeApi(origin: string = TEST_EXTENSION_ORIGIN): {
@@ -102,7 +126,7 @@ export function runtimeApi(origin: string = TEST_EXTENSION_ORIGIN): {
 } {
   return {
     getURL: (path: string) => `${origin}${path.startsWith('/') ? '' : '/'}${path}`,
-    getManifest: () => ({ version: TEST_BUILD_ID }),
+    getManifest: () => ({ version: TEST_MANIFEST_VERSION }),
   };
 }
 

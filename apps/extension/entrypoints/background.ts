@@ -46,7 +46,7 @@ import {
   tickBlockReason,
   type TickResult,
 } from '../lib/backfill/schedule';
-import { recordBackfillHalt, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
+import { markScopeRetried, recordBackfillHalt, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
 import type { LedgerRefusal } from '../lib/backfill/ledger';
 import {
   armBackfillTick,
@@ -70,7 +70,7 @@ import { systemRandom, type RandomFn } from '../lib/backfill/random';
 import { backfillCapabilityOf, backfillPlanFor } from '../lib/backfill/enumerate';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { haltClassOf, haltStillApplies, isHeader, stateKey } from '../lib/backfill/types';
+import { haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -814,6 +814,29 @@ export async function scopeRetryDue(
 ): Promise<boolean> {
   if (!store) return false;
   const raw = await store.load(stateKey(platform, scope));
+  const build = runningBuildId();
+  /**
+   * 🔴 W59b · **An attempt this build has already spent is not spent again.**
+   *
+   * Read off the raw record rather than off `isHeader(raw)`, and **checked before the
+   * "no record" line below** — that position is the whole point of the field. The case
+   * it exists for is a scope with no readable `halted` on disk yet, where
+   * `markScopeRetried` has recorded the attempt against a header that carries only the
+   * marker. Read after that line, every such scope would answer "ask" and the per-tick
+   * `GET /api/organizations` would survive the fix.
+   *
+   * 🔴 The marker is validated, not cast (`isHaltRetry`): a value of unknown shape at
+   *    that key is not an attempt, and reading one as if it were would refuse a
+   *    question on the strength of a field nobody wrote — the first invariant, one
+   *    layer down from where it usually bites.
+   *
+   * 🔴 The build comparison is what keeps this one attempt rather than a permanent
+   *    refusal: a marker naming another build is that build's attempt, not ours, so it
+   *    is asked again exactly as `haltRetrySpent` re-decides another build's record.
+   */
+  const marker = (raw as { haltRetried?: unknown } | null)?.haltRetried;
+  const retriedBy = isHaltRetry(marker) ? marker.build : undefined;
+  if (build !== null && retriedBy === build) return false;
   // No record, or one this build cannot read: nothing has been decided, so ask.
   // (An unreadable record already halted the engine by name; asking again is not
   // the thing that would make it worse, and refusing to ask would freeze a target
@@ -831,7 +854,15 @@ export async function scopeRetryDue(
   //    the same function the engine stamps its own records with, which is what keeps
   //    "ask again" (here) and "there is something to ask" (there) from disagreeing —
   //    the failure R44 already met once in this exact line.
-  const judgement = { capability: backfillCapabilityOf(platform), build: runningBuildId() };
+  //
+  // 🔴 W59b · And it is handed the third fact the engine hands it, from the same
+  //    header field: an attempt spent on this scope is spent for the record too, and
+  //    two readers of one bound is the rule this file already follows for the expiry.
+  const judgement = {
+    capability: backfillCapabilityOf(platform),
+    build,
+    retriedBy,
+  };
   if (!haltStillApplies(raw.halted, judgement)) return true;
   if (haltClassOf(raw.halted.reason) === 'permanent') return false;
   return raw.halted.retryAt === undefined || now >= raw.halted.retryAt;
@@ -1098,6 +1129,27 @@ async function resolveScopeForTick(
   const resolver = scopeResolverFor(target.platform);
   if (!resolver) return UNRESOLVED_SCOPE;
   if (!(await scopeRetryDue(store, target.platform, UNRESOLVED_SCOPE, Date.now()))) {
+    return UNRESOLVED_SCOPE;
+  }
+  /**
+   * 🔴 W59b · **The attempt is spent before the question is asked, and a stamp that
+   *    cannot be written means the question is not asked.**
+   *
+   * Everything above decides *whether* to ask; this is the one line that bounds how
+   * often. The refusal below is written by `recordBackfillHalt` **after** the resolver
+   * has run, so if that write throws, storage keeps the older record, `scopeRetryDue`
+   * reads it as due again, and the resolver asks the platform again — every tick, for
+   * as long as the writes keep failing. That is the `GET /api/organizations` per tick
+   * R59 measured on this path, and the fix has to be ordered before the request because
+   * nothing after it can undo the request having gone out.
+   *
+   * `markScopeRetried` returns false when it could not write, and the answer is to fail
+   * closed: returning the sentinel here issues nothing, and the leg is no worse off —
+   * the engine still stops this scope by name, and the popup still says why.
+   */
+  if (!(await markScopeRetried(store, {
+    platform: target.platform, scope: UNRESOLVED_SCOPE,
+  }))) {
     return UNRESOLVED_SCOPE;
   }
   const resolved = await resolver(null, target.origin);

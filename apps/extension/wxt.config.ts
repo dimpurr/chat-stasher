@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'wxt';
 
-import { buildVersion, parseBuildNumber } from './lib/build-version';
+import { buildStamp, buildVersion, parseBuildNumber } from './lib/build-version';
 
 export default defineConfig({
   // `@wxt-dev/i18n` (module source: node_modules/@wxt-dev/i18n/dist/module.mjs:10-93)
@@ -12,6 +12,32 @@ export default defineConfig({
   // unless `manifest.default_locale` is set (module.mjs:18-21), which is why the
   // two lines below are a pair.
   modules: ['@wxt-dev/i18n/module'],
+  /**
+   * 🔴 W59b · **The build stamp, folded into the bundle.**
+   *
+   * `runtime.getManifest().version` is not an identity on its own: it is `0.1.0` for
+   * every build that does not go through `scripts/dev/reload-extension.sh`, so two
+   * builds of different source share it and a halt record written by one is read by
+   * the other as its own (lib/extension-build.ts has the full account). This define
+   * is what makes the identity move with the build instead of with the version
+   * number, and it is read in exactly one place — `bakedBuildStamp()`.
+   *
+   * 🔴 Computed inside the function, not at module scope, so a config re-evaluated by
+   *    a fresh build produces a fresh stamp. `vitest.config.ts` defines the same key
+   *    with a fixed test value, for the same reason `tests/i18n-harness.ts` fakes a
+   *    manifest: a suite that ran without it would exercise the degraded
+   *    configuration (a build that cannot tell itself from another) rather than the
+   *    one a built extension runs with.
+   *
+   * 🔴 Nothing about the manifest changes here — `version` and `version_name` are
+   *    still `buildVersion`'s, so an unversioned build's manifest stays byte-identical
+   *    and `tests/build-version.test.ts` keeps meaning what it says.
+   */
+  vite: () => ({
+    define: {
+      __CS_BUILD_STAMP__: JSON.stringify(buildStamp(Date.now())),
+    },
+  }),
   // `manifest` is a function so the version can reflect `CS_BUILD_NUMBER`
   // (see lib/build-version.ts). Without that variable the produced manifest is
   // byte-identical to one built with `version` left to WXT's package.json

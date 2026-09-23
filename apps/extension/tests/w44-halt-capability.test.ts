@@ -404,17 +404,45 @@ describe('W44-3 · the record already on disk, written by an older build', () =>
     //    changed", and it is the visible difference the expiry makes here: before
     //    W44 the record stopped the run before a single request went out.
     expect(calls.length).toBeGreaterThan(0);
-    expect(r1.halted?.reason).toBe('detail-unsupported');
-    expect(r1.halted?.capability).toBe('list-only');
+    /**
+     * 🔴 W59b · **The re-decision reads ONE page, and the list still gets read to its
+     *    own end — the two facts are one change, so they are asserted together.**
+     *
+     * The tick that lifts a halt is the one tick in the product that asks the platform
+     * a question it was never asked, so it is capped at a single list page (engine.ts's
+     * `listPagesThisTick`). For a list-only plan the ordinary tick has no such cap, so
+     * this tick ends `budget-exhausted` rather than halting: a `detail-unsupported`
+     * record written one page in would be this build's own from the next tick on, and
+     * page 2 would never be read at all.
+     *
+     * What W44 pinned here has not moved — the wire is read, and the stop that comes
+     * back names `list-only` — and the assertions below are that, plus the tick split.
+     */
+    expect(r1.stopped).toBe('budget-exhausted');
+    expect(r1.halted).toBeNull();
     expect(r1.state.haltExpired).toMatchObject({ judgedAgainst: 'unmarked', capability: 'list-only' });
-    const afterFirst = calls.length;
+    // The one page this tick was allowed, and no more.
+    expect(calls.length).toBe(1);
+    expect(r1.state.enumCursor.offset).toBe(2);
+    expect(r1.state.enumCursor.complete).toBe(false);
 
-    // 🔴 The marked record matches this build, so it applies: the second run costs
-    //    nothing at all, exactly as a detail-unsupported stop did before W44.
+    // ---- the ordinary tick that follows: uncapped, so the list reaches its end and
+    //      the same stop is reached with the whole list on disk.
     const r2 = await runBackfill(pplx);
-    expect(r2.stopped).toBe('halted');
+    expect(r2.halted?.reason).toBe('detail-unsupported');
     expect(r2.halted?.capability).toBe('list-only');
-    expect(calls.length, 'a marked record that still applies must issue nothing').toBe(afterFirst);
+    // Perplexity has no termination field, so "the list ended" is the empty page — the
+    // named inference C27 records, not a `complete` this endpoint never said.
+    expect(r2.state.enumCursor.truncated, 'the empty page that ends the list was read').toBe('empty-page-inferred');
+    expect(calls.length, 'the second page was read on the tick that could read it').toBe(2);
+    const afterSecond = calls.length;
+
+    // 🔴 The marked record matches this build, so it applies: the third run costs
+    //    nothing at all, exactly as a detail-unsupported stop did before W44.
+    const r3 = await runBackfill(pplx);
+    expect(r3.stopped).toBe('halted');
+    expect(r3.halted?.capability).toBe('list-only');
+    expect(calls.length, 'a marked record that still applies must issue nothing').toBe(afterSecond);
   });
 });
 

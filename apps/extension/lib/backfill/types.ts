@@ -392,6 +392,50 @@ export function haltSubjectOf(reason: HaltReason): HaltSubject {
 }
 
 /**
+ * 🔴 W59b · **Is this a subject this build knows?** — asked of a value that came off
+ * disk rather than out of the type system.
+ *
+ * The switch above has no `default` and never will (see the comment on it), which is
+ * what makes `tsc` refuse a new reason until someone says what it is a judgement
+ * about. The cost of that choice is visible only at runtime: a stored record whose
+ * `reason` is a string this build has never heard of falls straight through the
+ * switch and comes back `undefined`, typed as `HaltSubject` because the compiler
+ * believes the switch is exhaustive. So the four values are named once, here, for the
+ * one caller that reads them back off the wire — and this is a list of *subjects*,
+ * not of reasons, so it cannot drift the way a second copy of `HaltReason` would.
+ */
+function isHaltSubject(value: unknown): value is HaltSubject {
+  return value === 'capability' || value === 'upstream' || value === 'account' || value === 'storage';
+}
+
+/**
+ * 🔴 W59b · **Can this stored record be classified at all?**
+ *
+ * Three ways a record stops being readable as a statement about *something*, and the
+ * answer the caller has to give is the same for all three — see `haltExpiredBecause`.
+ *
+ *  · **no `reason`**, or a reason this build does not know. A record with no reason is
+ *    not "a record that expired"; it is a record this build cannot read, and reading
+ *    an unknown as a known is the first invariant of this project. The same is true of
+ *    a string that was a reason in some build we have never seen — a *newer* build
+ *    could have written it, and its truth condition is not ours to judge;
+ *  · **a `build` that is not a string.** `build` is compared by value against
+ *    `runtime.getManifest().version`, and a non-string (a number, an object, `null`
+ *    written by hand) compares unequal to every string — so it would read as "another
+ *    build" and expire the record by accident. It is not a build stamp; it is a value
+ *    of unknown meaning, and unknown means hold.
+ *
+ * 🔴 A record with **no** `build` field at all is a *different* case and is classifiable:
+ *    that is exactly what a halt written before W59 looks like, and the one retry the
+ *    task exists to give is for it. "The field is absent" is knowable; "the field holds
+ *    something I cannot read" is not the same fact.
+ */
+export function isClassifiableHalt(record: HaltRecord): boolean {
+  if (!isHaltSubject(haltSubjectOf(record.reason))) return false;
+  return record.build === undefined || typeof record.build === 'string';
+}
+
+/**
  * 🔴 W44 · **How much of a platform this build can backfill.** The value a
  * capability-class halt is judged against, and the only thing it is judged against.
  *
@@ -475,6 +519,17 @@ export interface HaltJudgement {
   capability: BackfillCapability;
   /** Which extension build this is, or null when it cannot be named. */
   build: string | null;
+  /**
+   * 🔴 W59b · **Which build has already spent its one re-decision here**, as read from
+   * the header's `haltRetried` — or `undefined` when there is no spent attempt.
+   *
+   * It is part of the judgement rather than a third argument to `haltExpiredBecause`
+   * for the same reason `capability` is: the question "does this record still apply"
+   * has exactly one answer, and every caller that asks it must be handing over the
+   * same facts. Two readers with two argument lists is the drift this file's one
+   * shared function exists to make impossible.
+   */
+  retriedBy?: string;
 }
 
 /**
@@ -544,17 +599,45 @@ export type HaltExpiredBecause =
  *    only when we can prove it was another build's judgement, never on the
  *    strength of not being able to say which build this is. (The capability class
  *    is unaffected: its answer never depended on knowing the build.)
+ *
+ * 🔴 🔴 W59b · **A record this build cannot classify also answers "still applies",
+ *    and that is a separate answer from every one above.** A record with no
+ *    recognisable `reason`, or a `build` that is not a string, is not a record whose
+ *    truth condition can be compared with anything — so it is not expired, it is
+ *    *unreadable*, and this function's contract is the conservative half of the first
+ *    invariant: an unknown must not be rounded into a value. It is checked before
+ *    every class above, because every class above is a way of *reading* the record
+ *    and none of them can be asked of one that cannot be read. `isClassifiableHalt`
+ *    is where the three ways that happens are written down.
+ *
+ *    🔴 The failure this replaces is measured, not imagined: W59 as first written let
+ *    such a record fall through the classification switch, `haltClassOf` called every
+ *    string it did not recognise 'permanent', and the record was deleted and the leg
+ *    ran against a stop whose meaning nobody had established.
+ *
+ * 🔴 🔴 W59b · **A record whose one re-decision this build has already spent also
+ *    answers "still applies".** `haltRetrySpent` is what makes the re-decision a
+ *    **bounded** cost rather than a per-tick one: the attempt is written down in the
+ *    header before the platform is touched, so a run that then dies — or a halt it
+ *    cannot write back — leaves the record in force for the build that spent the
+ *    attempt, instead of re-asking the platform on every tick. It is checked *after*
+ *    the classification, so an unreadable record never reaches it, and it is
+ *    deliberately **not** applied to the capability class: that class's answer is
+ *    recomputed from the plan table without asking the platform anything, so there is
+ *    no attempt to bound and holding one would re-freeze exactly the leg W44 freed.
  */
 export function haltExpiredBecause(
   record: HaltRecord,
   judgement: HaltJudgement,
 ): HaltExpiredBecause | null {
+  if (!isClassifiableHalt(record)) return null;
   if (haltSubjectOf(record.reason) === 'capability') {
     const judgedAgainst = record.capability ?? CAPABILITY_UNMARKED;
     if (judgedAgainst === judgement.capability) return null;
     return { because: 'capability', judgedAgainst, capability: judgement.capability };
   }
   if (haltClassOf(record.reason) === 'transient') return null;
+  if (haltRetrySpent(record, judgement)) return null;
   if (judgement.build === null) return null;
   if (record.build === judgement.build) return null;
   return {
@@ -562,6 +645,39 @@ export function haltExpiredBecause(
     build: record.build ?? HALT_BUILD_UNSTAMPED,
     currentBuild: judgement.build,
   };
+}
+
+/**
+ * 🔴 W59b · **Has this build already spent its one re-decision on this record?**
+ *
+ * The bound W59 was missing. Its one re-decision was recorded by *replacing* the halt
+ * with one naming this build — a write that happens **after** the platform has been
+ * asked again. When that write does not land (a `storage.local` failure, or the
+ * service worker reclaimed mid-run) the stored record is still the older build's, the
+ * next tick finds it expired again, and the leg asks the platform again: for a Claude
+ * scope with no organization on the page, that is a `GET /api/organizations`
+ * **per tick**, forever.
+ *
+ * So the attempt is written down in the header (`HaltRetry`) *before* the question is
+ * asked, and every caller reads it back through the judgement it hands to
+ * `haltExpiredBecause` — the engine (which then holds the record instead of
+ * re-deciding) and `scopeRetryDue` (which then does not ask the page a second time).
+ * One answer, two readers, exactly as with the expiry rule itself.
+ *
+ * 🔴 **Why the capability class is exempt, and why that is not an oversight.** A
+ *    capability record's expiry is decided from the plan table, in this process, with
+ *    no request at all — there is no platform cost to bound. Holding such a record
+ *    because an attempt was "spent" would stop a leg the plan table says can run,
+ *    which is the W44 defect exactly. So the bound is applied only where the
+ *    re-decision's cost is a question asked of the platform.
+ *
+ * 🔴 A `null` judgement build has spent nothing: it cannot re-decide at all
+ *    (`haltExpiredBecause` refuses on that path), so it can have recorded nothing.
+ */
+export function haltRetrySpent(record: HaltRecord, judgement: HaltJudgement): boolean {
+  if (judgement.build === null) return false;
+  if (judgement.retriedBy === undefined || judgement.retriedBy !== judgement.build) return false;
+  return haltSubjectOf(record.reason) !== 'capability';
 }
 
 /**
@@ -740,11 +856,12 @@ export interface HaltRecord {
   capability?: BackfillCapability;
   /**
    * 🔴 W59 · **The extension build that wrote this record** —
-   * `runtime.getManifest().version`, which is the plain semver when
-   * `CS_BUILD_NUMBER` is unset and `<semver>.<n>` on every dev reload (W24,
-   * lib/build-version.ts). Present on **permanent** records only, and absent on a
-   * record written before W59 (read as `HALT_BUILD_UNSTAMPED`, i.e. a different
-   * build — see `haltExpiredBecause`).
+   * `runtime.getManifest().version` plus the build stamp `wxt.config.ts` bakes in
+   * (lib/extension-build.ts), which is the plain semver when `CS_BUILD_NUMBER` is
+   * unset and `<semver>.<n>` on every dev reload (W24, lib/build-version.ts).
+   * Present on **permanent** records only, and absent on a record written before W59
+   * (read as `HALT_BUILD_UNSTAMPED`, i.e. a different build — see
+   * `haltExpiredBecause`).
    *
    * Why the manifest version and not a number of our own: it is the identity the
    * browser itself holds, so "the build that wrote this" and "the build that is
@@ -764,6 +881,56 @@ export interface HaltRecord {
    *    rather than being rounded into "another build" here.
    */
   build?: string;
+}
+
+/**
+ * 🔴 W59b · **The one re-decision this build has already spent on a stored record.**
+ *
+ * The bound W59 was missing, and the reason it is a field of the **header** rather
+ * than of the halt record it is about: it has to be writable in the two states a
+ * scope can be in when the question is asked. A record this build cannot judge yet
+ * exists on disk, and `resolveScopeForTick` asks the page for an organization
+ * *before* any run has written a record for that scope at all — so a marker that
+ * lived inside `halted` would have nowhere to be written in exactly the case that
+ * costs a `GET /api/organizations` per tick.
+ *
+ * 🔴 It is written **before** the platform is touched, in the same `storage.local`
+ *    write that carries the expiry trace, and that ordering is the whole mechanism. A
+ *    marker written after the question would be no marker at all: the failure it
+ *    exists for is the write that does not land, and the next tick would then find an
+ *    un-retried record and ask again.
+ *
+ * 🔴 It names a **build**, so it is spent for that build only: the next build
+ *    re-decides as it would any other build's record (`haltRetrySpent`), which is what
+ *    keeps this one attempt and not a permanent refusal to look.
+ *
+ * 🔴 It is cleared by the two things that make it stale — a halt written back
+ *    (`halt()`, `recordBackfillHalt`) and a run that ended without one (`finish` in
+ *    engine.ts) — because in both cases the attempt has an answer on disk and there
+ *    is nothing left to bound.
+ */
+export interface HaltRetry {
+  /** The build that spent the attempt — `HaltJudgement.build`, never null. */
+  build: string;
+  /** When it was spent, on the run's own clock (diagnosis only; nothing reads it back). */
+  at: number;
+}
+
+/**
+ * 🔴 W59b · **Is this what `HaltRetry` says it is?**
+ *
+ * The marker is read off a `storage.local` record that any build of any age may have
+ * written, so it is validated rather than cast — the same rule `isClassifiableHalt`
+ * applies to the record next to it, and for the same reason. A value of unknown shape
+ * at this key must not be read as an attempt this build has spent: that would refuse a
+ * question to the platform on the strength of a field nobody wrote, which is a leg
+ * stopped by a guess. It is `false` ⇒ "no attempt", i.e. the question is asked, i.e.
+ * exactly the behaviour before this change.
+ */
+export function isHaltRetry(value: unknown): value is HaltRetry {
+  if (!value || typeof value !== 'object') return false;
+  const r = value as { build?: unknown; at?: unknown };
+  return typeof r.build === 'string' && r.build.length > 0 && typeof r.at === 'number';
 }
 
 /**
@@ -1032,6 +1199,19 @@ export interface BackfillState {
    * with no version bump and no progress invalidated.
    */
   haltExpired?: HaltExpiry;
+  /**
+   * 🔴 W59b · **The one re-decision this build has already spent on this scope's
+   * stored halt.** See `HaltRetry`, which is where the mechanism and its ordering are
+   * written down.
+   *
+   * Optional, and absent on every scope whose record has not been re-decided — which
+   * is every scope written before W59b, byte-identical to before, with no version bump
+   * and no progress invalidated. It is a transient marker rather than a durable trace:
+   * it is cleared by the halt written back over it (`halt()`, `recordBackfillHalt`) and
+   * by a run that ended without one (`finish` in engine.ts), because in both cases the
+   * attempt has an answer on disk.
+   */
+  haltRetried?: HaltRetry;
   /** Non-null means this leg has stopped and left a trace. */
   halted: HaltRecord | null;
 }
@@ -1097,6 +1277,8 @@ export interface BackfillHeader {
   relisted?: { at: number; recorded: number; held: number };
   /** W44 · Same meaning and same compatibility rule as `BackfillState.haltExpired`; spelled out here so a change to one is forced to be a change to the other. */
   haltExpired?: HaltExpiry;
+  /** W59b · Same meaning and same compatibility rule as `BackfillState.haltRetried`; spelled out here so a change to one is forced to be a change to the other. */
+  haltRetried?: HaltRetry;
   halted: HaltRecord | null;
 }
 
@@ -1131,6 +1313,7 @@ export function headerOf(state: BackfillState): BackfillHeader {
     failuresDropped: state.failuresDropped,
     relisted: state.relisted,
     haltExpired: state.haltExpired,
+    haltRetried: state.haltRetried,
     halted: state.halted,
   };
 }
@@ -1158,6 +1341,7 @@ export function stateFrom(header: BackfillHeader, pending: string[], archived: s
     failuresDropped: header.failuresDropped,
     relisted: header.relisted,
     haltExpired: header.haltExpired,
+    haltRetried: header.haltRetried,
     halted: header.halted,
   };
 }
