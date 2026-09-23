@@ -55,6 +55,13 @@ tempfile = "3"
 # the implementation against itself. Same version as the normal dependency, so
 # this adds no package to the build graph.
 sha2 = "0.11"
+# The stage tests assert that the config records the path *as TOML spells it*.
+# Rust's `{:?}` is a different spelling that coincides with TOML's on every
+# Unix path and on no Windows one, so building the expectation with it is what
+# let this file pass on macOS and Linux while failing on Windows.
+# Same version as the normal dependency, so this adds no package to the build
+# graph.
+toml = "0.8"
 
 [profile.release]
 lto = true
