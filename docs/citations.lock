@@ -23,31 +23,31 @@ SECURITY.md:9  381d717079a5  lines=1
   <- docs/privacy.md:718  :: **Contact: `work@team.iopho.com`.** Mail that address direc…
 SECURITY.md:29-35  02cf2eee45d3  lines=7
   <- docs/privacy.md:726  :: This is a personal project with a single maintainer. **We d…
-apps/extension/entrypoints/background.ts:137-165  30c84e84ef5b  lines=29
+apps/extension/entrypoints/background.ts:139-167  30c84e84ef5b  lines=29
   <- docs/privacy.md:240, docs/threat-model.md:111  :: function buildBundle(captured: CapturedFetch): InboxBundle {
-apps/extension/entrypoints/background.ts:152-154  36c85931504a  lines=3
+apps/extension/entrypoints/background.ts:154-156  36c85931504a  lines=3
   <- docs/threat-model.md:327  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
-apps/extension/entrypoints/background.ts:210-227  41d87a302a6d  lines=18
+apps/extension/entrypoints/background.ts:212-229  41d87a302a6d  lines=18
   <- README.md:214, docs/privacy.md:129, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
-apps/extension/entrypoints/background.ts:437-444  185eedd6b024  lines=8
+apps/extension/entrypoints/background.ts:439-446  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:675-705  e6c80301633c  lines=31
+apps/extension/entrypoints/background.ts:687-717  e6c80301633c  lines=31
   <- docs/privacy.md:372  :: /**
-apps/extension/entrypoints/background.ts:809-853  20a9a510a90a  lines=45
+apps/extension/entrypoints/background.ts:821-865  20a9a510a90a  lines=45
   <- docs/privacy.md:344, docs/threat-model.md:597  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:850-946  e1286e14c7ba  lines=97
+apps/extension/entrypoints/background.ts:862-958  e1286e14c7ba  lines=97
   <- docs/privacy.md:321  :: //
-apps/extension/entrypoints/background.ts:959-1002  fda982ba64df  lines=44
+apps/extension/entrypoints/background.ts:971-1014  fda982ba64df  lines=44
   <- docs/privacy.md:308  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1002  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1014  6539997ed831  lines=1
   <- docs/privacy.md:310  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1106-1167  e92b07871804  lines=62
+apps/extension/entrypoints/background.ts:1118-1179  e92b07871804  lines=62
   <- README.md:172, docs/install.md:635, docs/privacy.md:360, docs/privacy.md:376  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1364-1420  9dbc768d5407  lines=57
-  <- docs/privacy.md:276  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:1550-1566  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:1395-1466  3a57e749886b  lines=72
+  <- docs/privacy.md:276  :: /**
+apps/extension/entrypoints/background.ts:1597-1613  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:1593-1609  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:1640-1656  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -65,7 +65,7 @@ apps/extension/lib/backfill/alarm.ts:281-345  b7fe4ad6726e  lines=65
   <- docs/privacy.md:375  :: /**
 apps/extension/lib/backfill/alarm.ts:309-345  5c5f30daf7f9  lines=37
   <- docs/privacy.md:383  :: export async function rememberOrganizationScopedTarget(
-apps/extension/lib/backfill/alarm.ts:676-774  5293984ff763  lines=99
+apps/extension/lib/backfill/alarm.ts:676-779  fb4f574def1e  lines=104
   <- docs/privacy.md:276  :: /**
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs/privacy.md:325  :: * ## Why this module exists at all
@@ -297,9 +297,9 @@ apps/extension/lib/platform-auth.ts:258-295  03784069e1a6  lines=38
   <- README.md:169, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:533, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:599  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:669-769  9037a7e5f6b3  lines=101
   <- README.md:171, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:606  :: export function createGeminiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:770-783  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:796-809  00dceceff078  lines=14
   <- README.md:173, docs/install.md:161  :: /**
-apps/extension/lib/popup-view.ts:1449-1511  bfa880659cd6  lines=63
+apps/extension/lib/popup-view.ts:1475-1537  bfa880659cd6  lines=63
   <- docs/privacy.md:384  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:263  :: export function fixCommand(stage: string | null | undefined…
