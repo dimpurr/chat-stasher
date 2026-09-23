@@ -635,6 +635,9 @@ tick:
   reason:
     noTargets: there are no backfill targets yet, so it does not know which platform or which account's history to fetch
     noHttpPort: no usable fetch channel (no open supported-platform page at the time)
+    # 🔴 W76 · Not a channel problem and not an empty registry: there were targets,
+    # and none of them could run this time (held by a stop, or waiting out a backoff).
+    noRunnableTarget: there were targets, but none of them could run this time
     disabled: the switch was off at the time
     noStore: browser storage was unavailable at the time
     hostPaused: this machine's host is unreachable, so this leg paused until it answers

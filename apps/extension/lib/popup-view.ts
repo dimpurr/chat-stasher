@@ -803,6 +803,10 @@ export function describeTickReason(reason: string): string {
       return t('tick.reason.noTargets');
     case 'no-http-port':
       return t('tick.reason.noHttpPort');
+    case 'no-runnable-target':
+      // 🔴 W76 · The registry is not empty and the channel is not the problem: the
+      //    walk reached its end without finding a target it was allowed to run.
+      return t('tick.reason.noRunnableTarget');
     case 'disabled':
       return t('tick.reason.disabled');
     case 'no-store':

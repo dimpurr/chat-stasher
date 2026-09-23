@@ -211,6 +211,92 @@ export async function isBackfillChainArmed(alarms: AlarmsApi | null | undefined)
 export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1';
 export const MAX_TARGET_ENTRIES = 8;
 
+/**
+ * 🔴 W76 · **The fair-rotation cursor.**
+ *
+ * The alarm's loop used to walk `cs_backfill_targets_v1` from the head and
+ * `break` at the first target whose result was not `no-http-port` (W72 §1). The
+ * registry is ordered most-recently-captured-first, so the head platform with an
+ * open tab took **every** tick and every platform after it was never served
+ * while that held — and a head that was permanently halted, or waiting out a
+ * transient backoff, still returned a non-`no-http-port` result and consumed
+ * the tick too, blocking everyone else forever.
+ *
+ * The cursor records the index of the target that was served last. The next
+ * tick starts its walk at the target **after** it (round-robin over the
+ * registry, wrapping around), so no platform can be starved by a more-recently
+ * captured one. It is a single small `storage.local` value, in the same
+ * `cs_backfill_*` key family; it is not the header, and it survives an MV3
+ * service-worker reclaim exactly as the trace does.
+ *
+ * 🔴 Unreadable / absent ⇒ `null` ("no position has been served"): the walk
+ * starts at the registry head. That is the safe fallback — it is the old
+ * behaviour, it can never skip a platform forever, and a garbage byte at this
+ * key must not be turned into "serve nothing".
+ */
+export const BACKFILL_CURSOR_KEY = 'cs_backfill_cursor_v1';
+
+export interface TickCursor {
+  /** The index, in `cs_backfill_targets_v1` order, of the target served by the most recent tick. */
+  served: number;
+}
+
+function isTickCursor(v: unknown): v is TickCursor {
+  return typeof v === 'object' && v !== null
+    && typeof (v as { served?: unknown }).served === 'number'
+    && Number.isFinite((v as { served: number }).served)
+    && (v as { served: number }).served >= 0;
+}
+
+/** Read the cursor. Unreadable / absent ⇒ `null` ("start at the head"), never a fabricated position. */
+export async function loadTickCursor(store: BackfillStore | null): Promise<number | null> {
+  if (!store) return null;
+  const raw = await store.load(BACKFILL_CURSOR_KEY);
+  return isTickCursor(raw) ? raw.served : null;
+}
+
+/** Write the cursor. Best-effort, same rule as the trace: a failed write is logged, never a reason to fail the tick. */
+export async function saveTickCursor(
+  store: BackfillStore | null,
+  served: number,
+): Promise<void> {
+  if (!store) return;
+  try {
+    await store.save(BACKFILL_CURSOR_KEY, { served } satisfies TickCursor);
+  } catch (err) {
+    console.warn('[chat-stasher] backfill tick cursor write failed', (err as Error).message);
+  }
+}
+
+/**
+ * W76 · Why a target was passed over by a tick's fair rotation without running.
+ * A small closed set — each value is a different fact, and none of them is
+ * "it ran" (a target that ran consumes its tick and is reported as `served`).
+ */
+export type TickSkipReason = 'no-http-port' | 'halted' | 'waiting-retry';
+
+/**
+ * 🔴 W76 · **The fairness half of the tick trace.**
+ *
+ * `ran: true`/`reason` alone cannot say *which* platform got the tick and which
+ * were passed over and why — and the whole defect is that the answer used to be
+ * "always the head, and the rest were never looked at". So every tick that
+ * walks the registry records:
+ *  · `served` — the platform id that ran (or `null` when the whole rotation
+ *    found nothing that would run this tick);
+ *  · `skipped` — every platform examined this tick and passed over, with the
+ *    reason code. Platforms after the served one are not listed; the walk stops
+ *    at the first thing that runs.
+ *
+ * Platform ids and reason codes only — no origins, no scopes, no conversation
+ * text (CLAUDE.md privacy rule). Reason codes are counts/comparisons, never a
+ * body.
+ */
+export interface TickSchedule {
+  served: string | null;
+  skipped: Array<{ platform: string; reason: TickSkipReason }>;
+}
+
 export interface BackfillTarget {
   platform: string;
   origin: string;
@@ -849,6 +935,14 @@ export interface BackfillTickRecord {
    *    state *while it was still running*, not its result.
    */
   tabSweep?: TabSweepTrace | null;
+  /**
+   * 🔴 W76 · **The fairness half of the trace** — which platform was served and
+   *    which were passed over and why, for a tick that walked the registry. See
+   *    `TickSchedule`. Optional so a record written before this field existed
+   *    still parses (`isTickRecord` does not require it) — the same
+   *    compatibility rule the other optional fields follow.
+   */
+  schedule?: TickSchedule;
 }
 
 function isTickRecord(v: unknown): v is BackfillTickRecord {

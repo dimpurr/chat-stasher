@@ -95,6 +95,23 @@ export type TickReason =
   | 'no-targets'
   /** No http port injected ⇒ there will never be network activity (see the long note below). */
   | 'no-http-port'
+  /**
+   * 🔴 W76 · **The registry has targets and none of them may run right now.**
+   *
+   * The alarm's walk (see `runAlarmTickBody`) skips a target that has no live tab,
+   * a target held by a permanent halt that still applies, and a target still inside
+   * a transient backoff — and it must keep walking past all three, or the first
+   * platform in the registry takes every tick (W72 §1, the defect this names).
+   * When nothing along the whole walk was runnable, no run happened, so this is the
+   * tick's own outcome.
+   *
+   * Why it is not `no-http-port`: a live tab was found and deliberately not used,
+   * so the channel is fine. Why it is not `no-targets`: the registry is not empty.
+   * `schedule.skipped` in the same trace names the platform and the reason code for
+   * each one passed over, so this outcome is never the only thing on record.
+   * 📌 A wrong reason is harder to investigate than no reason.
+   */
+  | 'no-runnable-target'
   /** runBackfill really was called. */
   | 'ran';
 

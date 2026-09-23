@@ -56,16 +56,19 @@ import {
   findUnreadableState,
   isBackfillChainArmed,
   loadTargets,
+  loadTickCursor,
   migrateLegacyScopes,
   rememberOrganizationScopedTarget,
   rememberTarget,
   saveLastTick,
+  saveTickCursor,
   SWEEP_NOT_CONCLUDED,
   syncBackfillAlarm,
   type AlarmsApi,
   type BackfillTarget,
   type TabSweepNotConcluded,
   type TabSweepTrace,
+  type TickSchedule,
 } from '../lib/backfill/alarm';
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
@@ -73,7 +76,7 @@ import { systemRandom, type RandomFn } from '../lib/backfill/random';
 import { backfillCapabilityOf, backfillPlanFor } from '../lib/backfill/enumerate';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey } from '../lib/backfill/types';
+import { haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey, type HaltReason } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -935,6 +938,55 @@ export async function scopeRetryDue(
 }
 
 /**
+ * The clock the alarm's fair-rotation decisions use. A test injects a clock via
+ * `configureBackfillPace`, and the hold/backoff checks must see it or a test
+ * that advances the injected clock could never leave a backoff. Production falls
+ * back to `Date.now()`.
+ */
+function tickNow(): number {
+  return backfillPaceOverride?.clock?.now?.() ?? Date.now();
+}
+
+/**
+ * 🔴 W76 · **Would this scope's engine run *do work* right now, or is it a pure
+ * hold that must not consume a tick?**
+ *
+ * Design rule 2: a target that returns `no-http-port`, a permanent halt that
+ * still holds (not re-decidable at this instant), or a transient halt still
+ * inside its backoff must NOT consume the tick — record it and continue to the
+ * next target. Only a target that is genuinely runnable (which may then issue a
+ * request, a W59 re-decision request, or a retry) consumes it.
+ *
+ * The "is it runnable" question is the engine's own, borrowed rather than
+ * recopied: `scopeRetryDue` answers, from `haltExpiredBecause` + `haltRetrySpent`
+ * + the halogen clock, exactly "would this scope's run proceed instead of
+ * `finish('halted')` or `finish('waiting-retry')`". When it says no, this helper
+ * reads the persisted halt's class back out to choose the reason code the trace
+ * carries — the same two words the engine would have reported.
+ *
+ * Returns the `TickSkipReason` for a hold, or `null` when the run is due and the
+ * target is allowed to consume its tick.
+ */
+async function tickHoldReason(
+  store: ReturnType<typeof browserLocalStore>,
+  platform: string,
+  scope: string,
+  now: number,
+): Promise<'halted' | 'waiting-retry' | null> {
+  // 🔴 `scopeRetryDue` is *the* shared authority: it decides for the resolver
+  //    path (asking the page) and here (running the engine). One answer to "is
+  //    this scope due", exactly like the W59 note about `haltExpiredBecause`.
+  if (await scopeRetryDue(store, platform, scope, now)) return null;
+  const raw = store ? await store.load(stateKey(platform, scope)) : null;
+  const halted = raw && typeof raw === 'object' && (raw as { halted?: unknown }).halted
+    ? (raw as { halted: { reason: string } }).halted
+    : null;
+  return halted && haltClassOf(halted.reason as HaltReason) === 'transient'
+    ? 'waiting-retry'
+    : 'halted';
+}
+
+/**
  * 🔴 C33 · The registration entry point for **explicit informed consent**: the
  * user pressed "start backfilling this platform" in the popup.
  *
@@ -1300,6 +1352,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
   }
 
   let last: TickResult = { ran: false, reason: 'no-http-port', report: null };
+  const schedule: TickSchedule = { served: null, skipped: [] };
   /**
    * 🔴 W51 · The recovery sweep runs **at most once per tick**, and only when a
    *    registered target is about to concede `no-http-port`. A tick that already
@@ -1308,7 +1361,47 @@ async function runAlarmTickBody(): Promise<TickResult> {
    *    that looked and found nothing.
    */
   let tabSweep: TabSweepReport | null = null;
-  for (const target of targets) {
+  /**
+   * 🔴 W76 · **The tick-global gates, asked explicitly.**
+   *
+   * In the base revision the per-target call to `tickBackfill` was also what asked
+   * `no-store` / `disabled` / `host-paused` / `already-running`. Those are settled
+   * before the port is looked at, so a target with *no* tab could still come back
+   * with one of them — and a reason other than `no-http-port` stopped the whole
+   * tick. The fair rotation below decides "no tab" from `resolveHttpPort` itself,
+   * so unless those gates are asked here a tick taken while the switch is off would
+   * be recorded as a missing port **and** would run the recovery sweep, which is
+   * periodic tab work (it pings, prunes and registers rows) and must not happen
+   * without consent.
+   *
+   * The gates do not depend on *which* target they are asked about, so one answer
+   * serves the whole tick and it is asked lazily — only once a target actually has
+   * no tab. `tickOne(undefined)` is the identical call the base revision made for
+   * that target, so the authority for "why will this kick not move" is not
+   * recopied here; it is the same function.
+   */
+  let gateProbe: TickResult | null = null;
+
+  // 🔴 W76 · **The fair rotation.** Last tick served the target at `cursor`; this
+  //    tick the walk starts at the target **after** it and wraps around the
+  //    registry. A platform captured later (and so sitting higher in
+  //    `cs_backfill_targets_v1`) can no longer take every tick for itself. A
+  //    `null` cursor — never served, or an unreadable byte at that key — starts
+  //    at the head, which is the old behaviour and can never skip a platform
+  //    forever.
+  const n = targets.length;
+  const cursor = await loadTickCursor(store);
+  const orderStart = cursor === null ? 0 : ((cursor + 1) % n);
+  const order: number[] = [];
+  for (let k = 0; k < n; k += 1) order.push((orderStart + k) % n);
+
+  for (const idx of order) {
+    // 🔴 `noUncheckedIndexedAccess`: `idx` is in `[0, n)` by construction (above),
+    //    so a missing row means the registry shrank between the read above and this
+    //    step. Skip it rather than throw: a registry that lost a row mid-walk is a
+    //    reason to serve nothing, not a reason to lose the whole tick.
+    const target = targets[idx];
+    if (!target) continue;
     const scope = await resolveScopeForTick(store, target);
     const tickOne = (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
       tickBackfill({
@@ -1322,59 +1415,129 @@ async function runAlarmTickBody(): Promise<TickResult> {
         sink: (c) => deliverBackfillItem(c),
         ...(backfillPaceOverride ?? {}),
       });
-    let result = await tickOne(await resolveHttpPort(target.origin));
-    if (result.reason === 'no-http-port' && tabSweep === null) {
-      // 🔴 W62 · **Record the migration + gate decision *before* the recovery
-      //    sweep, so a no-tab tick is never held open by the sweep's liveness
-      //    pings.** The trace that W36/W47's acceptance reads — that the storage
-      //    layout moved and the tick was blocked at `no-http-port`, with no
-      //    refusal — is knowable the moment `resolveHttpPort` concedes. W51's
-      //    sweep then runs to give a closed-unregistered platform tab one more
-      //    chance to fetch *this* tick; in the true no-tab case it can only ping
-      //    tabs of another origin (there is no `tabs` permission to filter by),
-      //    so it cannot change this result, yet each silent unknown tab can cost
-      //    `BACKFILL_PING_TIMEOUT_MS` of stall. Writing the trace first means the
-      //    migration is reported even while the sweep is still pinging, and the
-      //    final write below replaces it with the run's own outcome and the
-      //    sweep's counts when a recovery did happen (W47 / W51 semantics).
+    let http = await resolveHttpPort(target.origin);
+    if (http === undefined) {
+      // 🔴 W76 · A target with no live tab is a **skip**, not a run: it must not
+      //    consume the tick, exactly as before. The recovery sweep below still
+      //    runs at most once per tick so a closed-unregistered tab can get one
+      //    more chance to fetch *this* tick (W51 semantics unchanged).
       //
-      // 🔴 W62b · **And the provisional record says it is provisional.** This
-      //    write happens before the sweep, so `null` here would be a claim that
-      //    this tick never swept — a false statement about a tick that is about
-      //    to sweep. It is not a harmless one either: this is the record that
-      //    *stays* if the worker is reclaimed mid-sweep, if the sweep throws
-      //    after `tabs.query` has already pruned or registered rows, or if the
-      //    tick's final save fails. W51's three values are all *conclusions*,
-      //    so the fourth fact — "no outcome yet" — is written as
-      //    `SWEEP_NOT_CONCLUDED` and rendered as a tick still in flight rather
-      //    than as a finished skip (`isSweepNotConcluded`, `lastTickNote`).
-      //
-      //    Cost, stated: one extra `storage.local` write per sweeping tick. It
-      //    is the write W62 already added — W62b only changes *what* it says, it
-      //    adds no third write — and it buys the property that no reader can
-      //    mistake an interrupted tick for one that decided not to look.
-      await recordAlarmTick(store, result, targets.length, preflightRefusal, SWEEP_NOT_CONCLUDED);
-      tabSweep = await recoverUnregisteredTabs();
-      // Retry this target only by aiming at a row the sweep just registered
-      // of *this* origin. Walking pickLiveTab again would re-strike the
-      // silent tab this tick already counted (and, if the recovered tab's
-      // re-ping failed, spend both TAB_PING_MISSES_BEFORE_FORGET strikes in
-      // one wake). Rows the sweep did not touch keep the miss they already
-      // took; pickLiveTab's order and two-strike rule are unchanged.
-      if (tabSweep.looked) {
-        const recoveredId = tabSweep.recovered.find((row) => row.origin === target.origin)?.tabId;
-        if (recoveredId !== undefined) {
-          result = await tickOne(await resolveHttpPort(target.origin, recoveredId));
+      // 🔴 But the tick-global gates are asked first, and a gate answer still
+      //    stops the tick rather than skipping on: it is a conclusion about the
+      //    whole kick, not about this target, so walking to the next one would
+      //    reach the same one (that is the base revision's behaviour, kept).
+      gateProbe ??= await tickOne(undefined);
+      if (gateProbe.reason !== 'no-http-port') {
+        last = gateProbe;
+        break;
+      }
+      if (tabSweep === null) {
+        // 🔴 W62 · **Record the migration + gate decision *before* the recovery
+        //    sweep, so a no-tab tick is never held open by the sweep's liveness
+        //    pings.** The trace that W36/W47's acceptance reads — that the storage
+        //    layout moved and the tick was blocked at `no-http-port`, with no
+        //    refusal — is knowable the moment `resolveHttpPort` concedes. W51's
+        //    sweep then runs to give a closed-unregistered platform tab one more
+        //    chance to fetch *this* tick; in the true no-tab case it can only ping
+        //    tabs of another origin (there is no `tabs` permission to filter by),
+        //    so it cannot change this result, yet each silent unknown tab can cost
+        //    `BACKFILL_PING_TIMEOUT_MS` of stall. Writing the trace first means the
+        //    migration is reported even while the sweep is still pinging, and the
+        //    final write below replaces it with the run's own outcome and the
+        //    sweep's counts when a recovery did happen (W47 / W51 semantics).
+        //
+        // 🔴 W62b · **And the provisional record says it is provisional.** This
+        //    write happens before the sweep, so `null` here would be a claim that
+        //    this tick never swept — a false statement about a tick that is about
+        //    to sweep. It is not a harmless one either: this is the record that
+        //    *stays* if the worker is reclaimed mid-sweep, if the sweep throws
+        //    after `tabs.query` has already pruned or registered rows, or if the
+        //    tick's final save fails. W51's three values are all *conclusions*,
+        //    so the fourth fact — "no outcome yet" — is written as
+        //    `SWEEP_NOT_CONCLUDED` and rendered as a tick still in flight rather
+        //    than as a finished skip (`isSweepNotConcluded`, `lastTickNote`).
+        //
+        //    Cost, stated: one extra `storage.local` write per sweeping tick. It
+        //    is the write W62 already added — W62b only changes *what* it says, it
+        //    adds no third write — and it buys the property that no reader can
+        //    mistake an interrupted tick for one that decided not to look.
+        await recordAlarmTick(store, last, targets.length, preflightRefusal, SWEEP_NOT_CONCLUDED, schedule);
+        tabSweep = await recoverUnregisteredTabs();
+        // Retry this target only by aiming at a row the sweep just registered
+        // of *this* origin. Walking pickLiveTab again would re-strike the
+        // silent tab this tick already counted (and, if the recovered tab's
+        // re-ping failed, spend both TAB_PING_MISSES_BEFORE_FORGET strikes in
+        // one wake). Rows the sweep did not touch keep the miss they already
+        // took; pickLiveTab's order and two-strike rule are unchanged.
+        if (tabSweep.looked) {
+          const recoveredId = tabSweep.recovered.find((row) => row.origin === target.origin)?.tabId;
+          if (recoveredId !== undefined) {
+            http = await resolveHttpPort(target.origin, recoveredId);
+          }
         }
       }
+      if (http === undefined) {
+        schedule.skipped.push({ platform: target.platform, reason: 'no-http-port' });
+        continue;
+      }
     }
+    // 🔴 W76 · **Only real work consumes this tick.** A target with a live tab
+    //    but a permanent halt that still applies, or a transient halt still
+    //    inside its backoff, will issue no request at all — `finish('halted')` /
+    //    `finish('waiting-retry')` before the first fetch. It is recorded and the
+    //    walk continues; it must not eat the slot a runnable platform is owed.
+    const hold = await tickHoldReason(store, target.platform, scope, tickNow());
+    if (hold !== null) {
+      schedule.skipped.push({ platform: target.platform, reason: hold });
+      continue;
+    }
+    // Genuinely runnable now: it may issue a request (a normal run, a W59
+    // re-decision attempt, or a backoff that has just expired). It serves this
+    // tick, the cursor advances past it, and no other platform runs this tick.
+    const result = await tickOne(http);
+    if (!result.ran) {
+      // 🔴 W76 · **The third way a tick ends without serving anyone.** A target
+      //    that passed the port and the hold checks still meets the tick-global
+      //    gates (`disabled`, `host-paused`, `no-store`, `already-running`), which
+      //    are settled before the first request. The base revision stopped the
+      //    whole tick here and so does this one: the conclusion is about the kick,
+      //    not about this target. Nothing is served, so the cursor does not move.
+      last = result;
+      break;
+    }
+    await saveTickCursor(store, idx);
+    schedule.served = target.platform;
     last = result;
-    lastTick = result;
-    // If it ran, stop. If it was blocked by the switch / storage / a host pause,
-    // there is no point trying another target — the conclusion would be the same.
-    if (result.reason !== 'no-http-port') break;
+    break;
   }
-  await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep);
+  /**
+   * 🔴 W76 · **What the tick says when the fair rotation served nobody.**
+   *
+   * `last` is still the base revision's `no-http-port` — and that is true only when
+   * every target that could not run could not run *for want of a tab*. A walk that
+   * found a live tab and then declined to use it, because the target is held by a
+   * permanent halt or is still inside a transient backoff, did **not** stop at the
+   * port: the channel is fine. Saying otherwise sends whoever reads the trace after
+   * a channel that was never broken (and the two outcomes have to stay two, the
+   * same rule C30 applied to `no-targets`). The per-platform detail is not lost —
+   * `schedule.skipped` names each platform and its reason code in this same record.
+   *
+   * A gate answer outranks this: `disabled` / `host-paused` are *why* the kick
+   * moved nothing, and they are what the base revision reported.
+   */
+  if (
+    schedule.served === null
+    && last.reason === 'no-http-port'
+    && schedule.skipped.some((skip) => skip.reason !== 'no-http-port')
+  ) {
+    last = { ran: false, reason: 'no-runnable-target', report: null };
+  }
+  // 🔴 Keep the in-memory probe (`backfillRuntimeStatus().lastTickReason`) honest
+  //    on a tick that served nothing: it reads the module `lastTick`, so it must
+  //    reflect "this tick ran nothing" (the resolved `last`) rather than the stale
+  //    module default (`null`). The per-platform truth is in `schedule.skipped`.
+  lastTick = last;
+  await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep, schedule);
   return last;
 }
 
@@ -1481,6 +1644,13 @@ async function recordAlarmTick(
    *    outcomes and must never stand in for one (see `TabSweepNotConcluded`).
    */
   tabSweep: TabSweepReport | TabSweepNotConcluded | null = null,
+  /**
+   * 🔴 W76 · **Which platform was served and which were passed over and why.**
+   *    Only a tick that actually walked the registry sets it; the no-targets
+   *    branch and a tick blocked before the loop leave it `undefined` (the same
+   *    "no such record" rule the other optional fields follow).
+   */
+  schedule?: TickSchedule,
 ): Promise<void> {
   const halt = result.report?.halted ?? null;
   await saveLastTick(store, {
@@ -1517,6 +1687,7 @@ async function recordAlarmTick(
     halted: halt?.reason ?? (result.ran ? null : preflightRefusal?.reason) ?? null,
     detail: halt?.detail ?? (result.ran ? null : preflightRefusal?.detail) ?? null,
     tabSweep: persistSweep(tabSweep),
+    schedule,
   });
 }
 

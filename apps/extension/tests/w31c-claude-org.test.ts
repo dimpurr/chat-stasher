@@ -620,7 +620,25 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     await rememberTarget(s, { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
 
     const result = await mod.runAlarmTick();
-    expect(result.report?.stopped).toBe('halted');
+    /**
+     * 🔴 W76 · **What changed here, and why this assertion moved rather than went
+     *    away.** The tick no longer *runs* a target it already knows is held: that
+     *    is the fix, because a held platform must not eat the slot a runnable one
+     *    is owed (W72 §1). With no run there is no run report, so `report?.stopped`
+     *    has nothing to read — but the fact it stood on is not dropped, it is
+     *    asserted one layer over and **more** precisely: the tick's own outcome is
+     *    `no-runnable-target`, and the trace's `schedule` names the platform and the
+     *    class of stop. `stopped: 'halted'` did not name a platform at all.
+     */
+    expect(result.ran).toBe(false);
+    expect(result.reason).toBe('no-runnable-target');
+    const { loadLastTick } = await import('../lib/backfill/alarm');
+    const rec = await loadLastTick(s);
+    expect(rec?.reason).toBe('no-runnable-target');
+    expect(rec?.schedule).toMatchObject({
+      served: null,
+      skipped: [{ platform: 'claude', reason: 'halted' }],
+    });
     expect(pageCalls).toEqual([]);
     expect(conversationRequests()).toEqual([]);
   });
