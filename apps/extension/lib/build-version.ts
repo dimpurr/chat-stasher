@@ -59,3 +59,29 @@ export function buildVersion(semver: string, buildNumber: number | undefined): V
     versionName: `${semver}+build.${buildNumber}`,
   };
 }
+
+/**
+ * 🔴 W59b · **The stamp that tells one build from another when the manifest version
+ * cannot.**
+ *
+ * Why this exists next to `buildVersion` rather than inside it: the two answer
+ * different questions, and W59 needed the second one. `buildVersion` produces the
+ * *manifest* version, which is what Chrome compares to decide whether to re-inject
+ * content scripts — so it has to be a value a human can plan a release around, and it
+ * is bumped only when someone runs the dev reload script. That leaves every other
+ * build of the extension wearing the same `0.1.0`, and a halt record stamped `0.1.0`
+ * by one build was read by the next as its own judgement (lib/extension-build.ts).
+ *
+ * This stamp is not a release number and claims nothing about compatibility; it is
+ * "which build is this", baked into the bundle by the bundler
+ * (`vite.define` in wxt.config.ts). Two builds produced from different source cannot
+ * share it. The `b` prefix and base-36 body make it impossible to read as a semver —
+ * or as the `<semver>.<n>` form above — which is what keeps a reader (and the popup's
+ * wording) able to tell the two halves of an identity apart.
+ *
+ * 🔴 Takes `now` rather than reading the clock, so the one property that matters here
+ *    — distinct milliseconds give distinct stamps — can be asserted without waiting.
+ */
+export function buildStamp(nowMs: number): string {
+  return `b${Math.trunc(nowMs).toString(36)}`;
+}

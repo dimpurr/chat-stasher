@@ -54,6 +54,7 @@ import { DAILY_CAP_MAX, DEFAULT_DETAIL_PACE } from './backfill/pace';
 import type { TickBlockReason } from './backfill/schedule';
 import {
   BACKFILL_STATE_VERSION,
+  HALT_BUILD_UNSTAMPED,
   haltClassOf,
   isHeader,
   stateKey,
@@ -1159,6 +1160,22 @@ function capabilityWords(value: string): string {
   return key ? t(key) : t('popup.capability.other', { capability: value });
 }
 
+/**
+ * 🔴 W59 · **A build id in words.** A manifest version is already the right thing
+ * to print — it is what chrome://extensions shows — so only the one value that is
+ * *not* a build id gets words: `HALT_BUILD_UNSTAMPED`, whose whole meaning is "the
+ * record did not say". Printing the bare sentinel would read as a version.
+ *
+ * 🔴 It is never rounded into "an older build" or "an unknown build": the record
+ *    could have been written by a *newer* one (a downgrade, a second profile), and
+ *    "the record did not name the build" is the fact, not a guess about which.
+ */
+const BUILD_UNSTAMPED_WORD = 'popup.build.unstamped';
+
+function buildWords(value: string): string {
+  return value === HALT_BUILD_UNSTAMPED ? t(BUILD_UNSTAMPED_WORD) : value;
+}
+
 function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 Failure details come before every other note. If something was lost, say that first.
@@ -1308,13 +1325,39 @@ function notesFor(model: PopupModel): string[] {
   //      coat — a leg that starts again for no stated reason reads as a leg that
   //      fixed itself, which is not what happened either.
   if (model.state?.haltExpired) {
-    notes.push(t('popup.notes.haltExpired', {
-      reason: model.state.haltExpired.reason,
-      when: stampOf(model.state.haltExpired.recordedAt),
-      judgedAgainst: capabilityWords(model.state.haltExpired.judgedAgainst),
-      capability: capabilityWords(model.state.haltExpired.capability),
-      cleared: stampOf(model.state.haltExpired.clearedAt),
-    }));
+    const expired = model.state.haltExpired;
+    /**
+     * 🔴 W59 · **Two sentences, because there are two facts, and the discriminator
+     *    is the record's own `because`.**
+     *
+     * The capability sentence names a capability on both sides ("it recorded
+     * list-only; this build records full"). A build-class expiry has no capability
+     * on either side, and printing one would be a sentence about a judgement nobody
+     * made — the same defect as printing `unsupported-platform`'s sentence for an
+     * account halt, wearing a different coat.
+     *
+     * 🔴 A record written by W44 has no `because` and lands in the capability branch,
+     *    which is exactly the sentence W44 wrote for it: the absent field is read as
+     *    "this record predates the second kind", not as a third kind. That is the
+     *    same compatibility rule every optional field in this project follows.
+     */
+    notes.push(expired.because === 'build'
+      ? t('popup.notes.haltExpiredBuild', {
+        reason: expired.reason,
+        when: stampOf(expired.recordedAt),
+        // `build` is a version string or the `unstamped` sentinel; words for each,
+        // and an unrecognised value is printed rather than defaulted (see buildWords).
+        build: buildWords(expired.build),
+        currentBuild: buildWords(expired.currentBuild),
+        cleared: stampOf(expired.clearedAt),
+      })
+      : t('popup.notes.haltExpired', {
+        reason: expired.reason,
+        when: stampOf(expired.recordedAt),
+        judgedAgainst: capabilityWords(expired.judgedAgainst),
+        capability: capabilityWords(expired.capability),
+        cleared: stampOf(expired.clearedAt),
+      }));
   }
 
   // 🔴 W45 · **The durable half of the `ledger-mismatch` refusal.**

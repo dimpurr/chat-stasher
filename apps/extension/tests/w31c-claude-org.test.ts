@@ -636,10 +636,11 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
   //    produce a record that matches. The shape below is the one measured on a
   //    real machine on 2026-09-19: a judgement left behind by a build that had
   //    no plan for this platform.
-  it('🔴 a capability halt from another build is re-asked; an account halt is not', async () => {
+  it('🔴 a halt another build wrote is re-asked, whatever its reason; one this build wrote is not', async () => {
     const { scopeRetryDue, UNRESOLVED_SCOPE } = await import('../entrypoints/background');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { headerOf, initialState, stateKey } = await import('../lib/backfill/types');
+    const { TEST_BUILD_ID } = await import('./i18n-harness');
 
     const s = browserLocalStore();
     const now = Date.now();
@@ -667,14 +668,92 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     });
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(true);
 
-    // 3 · 🔴 An account-class judgement is untouched: it is a fact about the
-    //     account, not about the build, so it stays permanent. Otherwise this
-    //     fix would turn "wait for a human" into a slow poll of the account.
+    // 3 · 🔴 W59 · An **account** judgement with no build stamp is re-asked too,
+    //     and this is the case W44 deliberately answered the other way: it read
+    //     "unmarked" as "keeps its full force" for the account class, because
+    //     clearing a real account halt is worse than the defect W44 fixed. W59
+    //     reads unstamped as *a different build* for every permanent reason, and
+    //     the thing that makes that safe is that the answer is written back — a
+    //     refusal that repeats comes back naming this build (state 4 below). The
+    //     resolver is also the clearest case for the rule: W31 is the build that
+    //     gave it one, and a build without one could only say 'org-unresolved'.
     store[key] = withHalt({
       reason: 'org-unresolved',
       at: now - 3_600_000,
       detail: 'synthetic: no organization could be named',
     });
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(true);
+
+    // 4 · 🔴 And the same account judgement, written by **this** build, keeps its
+    //     full force: it is an answer this build already heard, so re-asking every
+    //     tick would turn "wait for a human" into a slow poll of the account.
+    store[key] = withHalt({
+      reason: 'org-unresolved',
+      at: now - 3_600_000,
+      detail: 'synthetic: no organization could be named',
+      build: TEST_BUILD_ID,
+    });
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
+  });
+
+  /**
+   * 🔴 W59b · **States 3 and 4 above are two halves of one claim, and what was
+   *    missing between them is the write.**
+   *
+   * Both are built by hand: state 4 pastes `build: TEST_BUILD_ID` into a fixture, so
+   * it asserts that `scopeRetryDue` *reads* a stamp — not that anything writes the
+   * stamp it reads. If `recordBackfillHalt` stamped the wrong identity, or stamped
+   * nothing, this suite would stay green while every real scope was re-asked on every
+   * tick. So the same guarantee is asserted here as a **round trip through the
+   * production writer**, which is what background.ts's resolver path actually calls.
+   *
+   * 🔴 And the bound on the *asking* is not the record at all. The refusal is written
+   *    after the resolver has run, so a write that does not land would leave the
+   *    question unbounded however well the record is read — which is why
+   *    `markScopeRetried` exists, is written before the request, and is read here from
+   *    the header rather than from `halted`.
+   */
+  it('🔴 the refusal this build writes is the refusal this build does not re-ask', async () => {
+    const { recordBackfillHalt, markScopeRetried } = await import('../lib/backfill/engine');
+    const { scopeRetryDue, UNRESOLVED_SCOPE } = await import('../entrypoints/background');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { headerOf, initialState, stateKey } = await import('../lib/backfill/types');
+    const { TEST_BUILD_ID: build } = await import('./i18n-harness');
+
+    const s = browserLocalStore();
+    const now = Date.now();
+
+    // ---- the write-back: a refusal, through the writer that makes them.
+    expect(await recordBackfillHalt(s, {
+      platform: 'claude',
+      scope: UNRESOLVED_SCOPE,
+      reason: 'org-unresolved',
+      detail: 'synthetic: no organization could be named',
+      clock: { now: () => now, sleep: async () => {} },
+    })).toBe(true);
+    const written = await headerFor(UNRESOLVED_SCOPE);
+    expect(written.halted.build, 'the writer stamps the build that made the refusal').toBe(build);
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
+
+    // ---- the bound, on a header with no record at all: the scope the resolver asks
+    //      about before any run has written anything for it.
+    store[stateKey('claude', UNRESOLVED_SCOPE)] = headerOf(initialState('claude', UNRESOLVED_SCOPE));
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now), 'nothing decided yet ⇒ ask').toBe(true);
+    expect(await markScopeRetried(s, { platform: 'claude', scope: UNRESOLVED_SCOPE, build })).toBe(true);
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now), 'the attempt is spent ⇒ do not ask').toBe(false);
+
+    // ---- and the marker does not outlive the record it bounded: a refusal written
+    //      over it is the answer, and that answer applies on its own.
+    expect(await recordBackfillHalt(s, {
+      platform: 'claude',
+      scope: UNRESOLVED_SCOPE,
+      reason: 'org-unresolved',
+      detail: 'synthetic: still no organization',
+      clock: { now: () => now, sleep: async () => {} },
+    })).toBe(true);
+    const after = await headerFor(UNRESOLVED_SCOPE);
+    expect(after.haltRetried, 'a written refusal is the verdict on the attempt it replaced').toBeUndefined();
+    expect(after.halted.build).toBe(build);
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
   });
 });
