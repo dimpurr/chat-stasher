@@ -28,11 +28,19 @@ function fakeClock(): Clock {
   return { now: () => t, async sleep(ms: number) { t += ms; } };
 }
 
-function thread(n: number): { thread_id: string } {
-  return { thread_id: `pplx-${String(n).padStart(4, '0')}-aaaaaaaa` };
+/**
+ * One record of the list response, keyed the way the live endpoint keys it.
+ *
+ * 🔴 W65: the field is `slug`. C27 wrote `thread_id` here, and a live probe
+ * (2026-09-23) found the endpoint's items carry 36 keys with no `thread_id`
+ * among them and `slug` / `uuid` / `context_uuid` as three separate strings. The
+ * probe and the reasoning are in `w65-pplx-list-shape.test.ts`.
+ */
+function thread(n: number): { slug: string } {
+  return { slug: `pplx-${String(n).padStart(4, '0')}-aaaaaaaa` };
 }
 
-function pageBody(items: Array<{ thread_id: string }>): string {
+function pageBody(items: Array<{ slug: string }>): string {
   // R26's list outcome depends only on the returned array's length; there is no total / has_more / count.
   return JSON.stringify(items);
 }
@@ -170,7 +178,7 @@ describe('C27-3 · shape drift and "no conversations" must be distinguishable', 
     expect(report.state.enumCursor.complete).toBe(false);
   });
 
-  it('the parser recognises only the list array and thread_id, and reads no unverified time field', () => {
+  it('the parser recognises only the list array and the `slug`, and reads no unverified time field', () => {
     expect(parsePerplexityListPage(pageBody([thread(1)]) )).toEqual({
       ok: true,
       page: { ids: ['pplx-0001-aaaaaaaa'], total: null },
