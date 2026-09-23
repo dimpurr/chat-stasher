@@ -151,10 +151,10 @@ thing it does not.
 - **The tag's shape.** Before the gates and before the build, the tag must be
   exactly `vX.Y.Z` or `vX.Y.Z-rc.N`. The workflow is triggered by `v*`, which is
   wider than that, and each of the other shapes is a plausible typo:
-  `v0.3.0rc1` and `v0.3.0-beta.1` would otherwise have published as a normal
-  release and taken the "latest" slot, and `v0.3.0-rc` would have published as a
-  prerelease under a rule that only asked whether the version contained a
-  hyphen. None of them is built now; the run ends first.
+  under the earlier rule, which only asked whether the version contained a
+  hyphen, `v0.3.0rc1` would have published as a normal release and taken the
+  "latest" slot, while `v0.3.0-rc` and `v0.3.0-beta.1` would have published as
+  prereleases. None of them is built now; the run ends first.
 - **The version's agreement with `Cargo.toml`.** The same gate reads the
   `[package]` version and requires it to equal the tag minus `v`, character for
   character, for both shapes.

@@ -74,11 +74,12 @@ The comparison point for the entry below is `v0.2.0`, tagged 2026-09-12.
   own conversation interval, and they are deprecated in favour of `--day`,
   `--since` and `--until` (local calendar days), which mean the same thing. A
   saved command that passed a snapshot time therefore selects a different set of
-  sessions: among sessions whose time is known the new selection is a subset of
-  the old one — messages are written before the snapshot that archives them, so
-  a bound the snapshot satisfied may no longer be satisfied by the conversation
-  — and a session whose time cannot be read is no longer compared at all but
-  listed as unplaced, which makes the exit code `3` rather than `0`/`1`.
+  sessions, and it can both gain and lose sessions: the old test asked whether
+  the snapshot time fell inside the window, the new one whether the
+  conversation's own interval overlaps it, so a conversation written before a
+  later snapshot can now match a window the snapshot missed, and the reverse. A
+  session whose time cannot be read is no longer compared at all but listed as
+  unplaced, which makes the exit code `3` rather than `0`/`1`.
   **What to do:** re-run the command, read the hits, and move the bounds to
   `--day`/`--since`/`--until`. The flags print a deprecation notice on stderr and
   are removed in the next release.

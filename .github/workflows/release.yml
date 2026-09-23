@@ -54,9 +54,9 @@ jobs:
       # The trigger above is `v*`, which is wider: `v0.3.0rc1`, `v0.3.0-rc` and
       # `v0.3.0-beta.1` all match it too. Each is a plausible typo for a tag
       # someone meant, and under the previous "does the version contain a
-      # hyphen?" rule the first and third published as a *normal* release and
-      # took the "latest" slot — which is what a reader of the Releases page
-      # means by stable. So the shape is asserted here, before the gates and
+      # hyphen?" rule the first published as a *normal* release and took the
+      # "latest" slot — which is what a reader of the Releases page means by
+      # stable — and the other two published as prereleases. So the shape is asserted here, before the gates and
       # before the build, and a tag that is not one of the two ends the run.
       #
       # The tag must also name the exact version Cargo.toml carries, for both
