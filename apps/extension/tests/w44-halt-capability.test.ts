@@ -42,14 +42,18 @@
 import { describe, it, expect } from 'vitest';
 import { runBackfill, loadState, type HttpResponse, type HttpPort } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
+import { backfillPlanFor } from '../lib/backfill/enumerate';
 import { stateKey, type BackfillHeader, type HaltReason } from '../lib/backfill/types';
 import { renderPopup, popupText, NO_FAILURES } from '../lib/popup-view';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
+import { TEST_BUILD_ID } from './i18n-harness';
 
 const ORIGIN = 'https://chatgpt.com';
 const PPLX_ORIGIN = 'https://www.perplexity.ai';
 const CLAUDE_ORIGIN = 'https://claude.ai';
 const T0 = Date.parse('2026-09-19T15:56:00.000Z');
+/** A build that is not this one — the marker every W59 record carries instead of this build's. */
+const OLDER_BUILD_ID = '0.1.0.9';
 
 /** A clock whose time only moves when a test says so. `sleep` advances it, so the Pacers stay virtual. */
 function stepClock(start: number): Clock & { at: (ms: number) => void } {
@@ -171,7 +175,7 @@ describe('W44-1 · a capability halt stops applying once the capability exists',
     // ---- round 3: the expiry is persisted, and the record does not come back.
     const reloaded = await loadState(store, 'chatgpt', 'w44-capability');
     expect(reloaded.halted).toBeNull();
-    expect(reloaded.haltExpired?.capability).toBe('full');
+    expect(reloaded.haltExpired).toMatchObject({ because: 'capability', capability: 'full' });
     const r3 = await runBackfill({ ...opts(store, be.http, clock), scope: 'w44-capability', maxDetails: 1 });
     expect(r3.halted).toBeNull();
     expect(r3.archivedThisRun).toEqual([all[1]]);
@@ -202,19 +206,42 @@ describe('W44-1 · a capability halt stops applying once the capability exists',
   });
 });
 
-describe('W44-2 · the halts that must persist are untouched', () => {
+describe('W44-2 · a record THIS build wrote is what must go on persisting', () => {
   /**
-   * Every permanent reason that is **not** a statement about this build, seeded as
-   * an unmarked record — the same shape as the measured capability records — and
-   * run against an http port that must not be reached.
+   * Every permanent reason that is **not** a capability judgement, in the two
+   * states a stored record can be in: written by another build (unstamped, which
+   * W59 reads as a different build) and written by this one.
    *
-   * 🔴 What this table is for: the migration rule in W44-4 has to read "unmarked"
-   *    differently per class. If it read it as "expired" everywhere, every one of
-   *    these would be cleared — the account's real conditions, the platform's real
-   *    wire change — and the leg would run against them. That is worse than the
-   *    defect this task fixes, so it is a table and not a sentence.
+   * 🔴 **What this table used to assert, and why it changed.** W44 seeded all seven
+   *    unmarked and required that *none* of them be re-decided, on the grounds that
+   *    clearing a real halt — a platform whose wire changed, an account whose
+   *    organization could not be named — is worse than the defect W44 fixed. W59
+   *    generalises the same reasoning W44 used for the capability class to every
+   *    permanent record, and the answer to that objection is what W44 itself relied
+   *    on there: the record is **re-decided**, not cleared. The run that follows
+   *    re-observes the condition, and a condition that is still there is written
+   *    back **naming the build that saw it** — which is why the second half of every
+   *    case below is "and now it sticks". Nothing is written off on either path.
+   *
+   * The reasons are the same seven W44 chose; what changed is what a record in each
+   * state means, and the two halves below are the whole of it.
+   *
+   * 🔴 🔴 W59c · **And what the rewrite of this table left out, which is now back.**
+   *    W59's version replaced "seed a record and require `mustNotFetch`" with "seed a
+   *    record and require the leg to run", and for **four of the seven** the run
+   *    cannot re-observe the condition it suspended: `storage-unavailable`,
+   *    `state-unreadable` and `ledger-mismatch` are raised *before* the halt funnel
+   *    (they are `openLedger`'s refusals, and reaching the funnel at all is what
+   *    proves the store now works), and `detail-empty-unverified` is raised only for a
+   *    conversation the body loop actually reaches. So their row ended on
+   *    `persisted.halted === null` — an assertion for which "the run re-decided the
+   *    condition and found it gone" and "the record was simply deleted" are the same
+   *    observation. The first half below is the guarantee that was dropped (a record
+   *    this build wrote refuses the fetch, run after run), the second is those four
+   *    with their conditions still holding, and the third — in W44-2b — is the
+   *    cross-build behaviour on its own terms, one test per reason.
    */
-  const accountAndUpstream: HaltReason[] = [
+  const permanentNotCapability: HaltReason[] = [
     'org-ambiguous',
     'org-unresolved',
     'shape-changed',
@@ -224,37 +251,180 @@ describe('W44-2 · the halts that must persist are untouched', () => {
     'ledger-mismatch',
   ];
 
-  for (const reason of accountAndUpstream) {
-    it(`an unmarked ${reason} record keeps stopping the leg, and is never treated as expired`, async () => {
+  for (const reason of permanentNotCapability) {
+    it(`a ${reason} record stamped with this build keeps stopping the leg, run after run`, async () => {
       const store = memoryStore();
       const clock = stepClock(T0);
-      const scope = `w44-keep-${reason}`;
+      const scope = `w59-keeps-twice-${reason}`;
       await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
-        halted: { reason, at: T0 - 3_600_000, detail: 'synthetic-fixture detail' },
+        halted: {
+          reason,
+          at: T0 - 3_600_000,
+          detail: 'synthetic-fixture detail',
+          build: TEST_BUILD_ID,
+        },
       }));
 
       clock.at(T0 + 100 * 24 * 3600_000);
-      const run = await runBackfill({ ...opts(store, mustNotFetch, clock), scope });
+      /**
+       * 🔴 **Run twice, and this is the half R59b found missing.** One run proves the
+       *    reader; a second proves the record is still there to be read — a hold that
+       *    the first run's own write quietly erased would pass the first and fail the
+       *    second. Nothing is asked of the platform on either run, the record is not
+       *    expired, and it is left exactly as it was found.
+       */
+      for (const round of [1, 2]) {
+        const run = await runBackfill({ ...opts(store, mustNotFetch, clock), scope });
+        expect(run.stopped, `round ${round}`).toBe('halted');
+        expect(run.halted?.reason).toBe(reason);
+        expect(run.state.haltExpired).toBeUndefined();
+        expect(run.halted?.capability).toBeUndefined();
+        expect(run.halted?.build).toBe(TEST_BUILD_ID);
 
-      expect(run.stopped).toBe('halted');
-      expect(run.halted?.reason).toBe(reason);
-      // 🔴 Not expired, and not marked as a capability judgement either: the record
-      //    was left exactly as it was found.
-      expect(run.state.haltExpired).toBeUndefined();
-      expect(run.halted?.capability).toBeUndefined();
-
-      const persisted = await loadState(store, 'chatgpt', scope);
-      expect(persisted.halted?.reason).toBe(reason);
-      expect(persisted.halted?.at).toBe(T0 - 3_600_000);
+        const persisted = await loadState(store, 'chatgpt', scope);
+        expect(persisted.halted?.reason, `round ${round}: the record is still the record`).toBe(reason);
+        expect(persisted.halted?.at).toBe(T0 - 3_600_000);
+      }
     });
   }
 
-  it('the organization halts are not capability judgements, and the popup still says their own sentence', () => {
+  /**
+   * 🔴 The four reasons whose condition a run cannot certify as gone by finishing,
+   *    with the condition **still holding** — the state in which "the leg refuses"
+   *    and "the record was deleted" are finally different observations.
+   *
+   * For the three storage-class ones the condition is not a stored record at all: it
+   * is `openLedger`'s refusal, which fires before the halt funnel, so the record on
+   * disk is never reached, never judged and never written. That is the property: a
+   * build-stamp expiry **cannot** clear these while they are true, because the run
+   * refuses before it gets a chance to ask.
+   */
+  it('🔴 a storage-unavailable record whose condition still holds refuses, and is left untouched', async () => {
+    const store = memoryStore();
+    const clock = stepClock(T0);
+    const scope = 'w59c-holds-storage-unavailable';
+    const key = stateKey('chatgpt', scope);
+    await store.save(key, headerWith('chatgpt', scope, {
+      enumCursor: { offset: 0, complete: false },
+      halted: {
+        reason: 'storage-unavailable',
+        at: T0 - 3_600_000,
+        detail: 'synthetic-fixture detail',
+        build: TEST_BUILD_ID,
+      },
+    }));
+
+    // The debt set's store is gone: `openLedger` refuses, and the header — where the
+    // record lives — is still readable, so the record really is there to be missed.
+    const indexedDb = (globalThis as { indexedDB?: unknown }).indexedDB;
+    delete (globalThis as { indexedDB?: unknown }).indexedDB;
+    try {
+      for (const round of [1, 2]) {
+        const run = await runBackfill({ ...opts(store, mustNotFetch, clock), scope });
+        expect(run.stopped, `round ${round}`).toBe('halted');
+        expect(run.halted?.reason).toBe('storage-unavailable');
+        expect(run.enumeratedPages, 'not one request').toBe(0);
+        // 🔴 The record on disk is not the refusal's, and not rewritten: it is the one
+        //    that was there before, still naming the build that wrote it.
+        // 🔴 The record on disk, read raw — not through `loadState`, which for a
+        //    refusal reports the refusal's own record instead (it is what the popup
+        //    needs, and it is built fresh, so it cannot answer "was anything written").
+        const persisted = (await store.load(key)) as { halted?: { at?: number; build?: string; detail?: string } };
+        expect(persisted.halted?.at, `round ${round}: the record is the one that was there`).toBe(T0 - 3_600_000);
+        expect(persisted.halted?.build).toBe(TEST_BUILD_ID);
+        expect(persisted.halted?.detail).toBe('synthetic-fixture detail');
+      }
+    } finally {
+      (globalThis as { indexedDB?: unknown }).indexedDB = indexedDb;
+    }
+  });
+
+  it('🔴 a ledger-mismatch record whose condition still holds refuses, and is left untouched', async () => {
+    const store = memoryStore();
+    const clock = stepClock(T0);
+    const scope = 'w59c-holds-ledger-mismatch';
+    await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
+      // The measured shape of a provable loss: a header recording debts the store
+      // does not hold. W45's refusal, and it fires before the halt funnel.
+      pendingCount: 2,
+      enumCursor: { offset: 2, complete: false },
+      halted: {
+        reason: 'ledger-mismatch',
+        at: T0 - 3_600_000,
+        detail: 'synthetic-fixture detail',
+        build: TEST_BUILD_ID,
+      },
+    }));
+
+    for (const round of [1, 2]) {
+      const run = await runBackfill({ ...opts(store, mustNotFetch, clock), scope });
+      expect(run.stopped, `round ${round}`).toBe('halted');
+      expect(run.halted?.reason).toBe('ledger-mismatch');
+      expect(run.enumeratedPages, 'not one request').toBe(0);
+      // Same raw read, same reason: a refusal is reported, and nothing is written over
+      // the record the run never got to judge.
+      const persisted = (await store.load(stateKey('chatgpt', scope))) as { halted?: { at?: number; build?: string; detail?: string } };
+      expect(persisted.halted?.at, `round ${round}: the record is the one that was there`).toBe(T0 - 3_600_000);
+      expect(persisted.halted?.build).toBe(TEST_BUILD_ID);
+      expect(persisted.halted?.detail).toBe('synthetic-fixture detail');
+    }
+  });
+
+  it('🔴 a detail-empty-unverified record whose condition recurs names this build, and the next run refuses', async () => {
+    // The fourth of the four, and the one whose condition a run **can** re-observe:
+    // the body loop reaches the conversation (it is still a debt) and the body comes
+    // back empty again. So this is a round trip through production code rather than a
+    // hand-written record — the write-back is what the next run meets.
+    const store = memoryStore();
+    const clock = stepClock(T0);
+    const scope = 'w59c-recurs-detail-empty';
+    const all = ids(1);
+    const be = backend(all);
+    // The structure is good and the content is empty: C28's case, and the only one
+    // that returns this outcome. Injected the same way tests/c28-emptyguard.test.ts
+    // injects it — the plan is the real chatgpt plan with that one answer.
+    const plan = { ...backfillPlanFor('chatgpt')!, parseDetailPage: () => ({ ok: true, outcome: 'detail-empty-unverified' } as const) };
+    await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
+      enumCursor: { offset: 0, complete: false },
+      halted: {
+        reason: 'detail-empty-unverified',
+        at: T0 - 3_600_000,
+        detail: 'synthetic-fixture detail',
+        build: OLDER_BUILD_ID,
+      },
+    }));
+
+    clock.at(T0 + 100 * 24 * 3600_000);
+    const r1 = await runBackfill({ ...opts(store, be.http, clock), scope, maxDetails: 1, plans: () => plan });
+    expect(r1.state.haltExpired, 'another build’s record, so this build re-decides it').toMatchObject({
+      because: 'build',
+      reason: 'detail-empty-unverified',
+    });
+    // The condition recurred, so the same stop comes back — naming the build that saw it.
+    expect(r1.halted?.reason).toBe('detail-empty-unverified');
+    expect(r1.halted?.build).toBe(TEST_BUILD_ID);
+    expect(be.calls.length, 'the run reached the body it was told had come back empty').toBeGreaterThan(1);
+
+    // ---- and the second run is the first one's equal: it refuses, and asks nothing.
+    const after = be.calls.length;
+    const r2 = await runBackfill({
+      ...opts(store, mustNotFetch, clock),
+      scope,
+      maxDetails: 1,
+      plans: () => plan,
+    });
+    expect(r2.stopped).toBe('halted');
+    expect(r2.halted?.reason).toBe('detail-empty-unverified');
+    expect(r2.halted?.at, 'the record was not rewritten: this run wrote no verdict').toBe(r1.halted?.at);
+    expect(be.calls.length, 'a record this build wrote issues nothing').toBe(after);
+  });
+
+  it('an account halt still gets its own sentence, and not the expiry one', () => {
     const view = renderPopup({
       enabled: true,
       block: null,
       state: headerWith('claude', 'w44-org-popup', {
-        halted: { reason: 'org-unresolved', at: T0, detail: 'none could be named' },
+        halted: { reason: 'org-unresolved', at: T0, detail: 'none could be named', build: TEST_BUILD_ID },
       }),
       target: { platform: 'claude', scope: 'w44-org-popup' },
       failures: NO_FAILURES,
@@ -263,6 +433,68 @@ describe('W44-2 · the halts that must persist are untouched', () => {
     expect(out).toContain('could not tell which Claude organization');
     expect(out).not.toContain('no longer applies');
   });
+});
+
+describe('W44-2b · the cross-build re-decision, one test per reason', () => {
+  for (const reason of [
+    'org-ambiguous',
+    'org-unresolved',
+    'shape-changed',
+    'storage-unavailable',
+    'state-unreadable',
+    'detail-empty-unverified',
+    'ledger-mismatch',
+  ] as HaltReason[]) {
+    it(`an unmarked ${reason} record names no build, so this build re-decides it once`, async () => {
+      const store = memoryStore();
+      const all = ids(1);
+      const be = backend(all);
+      const clock = stepClock(T0);
+      const scope = `w44-keep-${reason}`;
+      await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
+        // The list has not been read to its end, so the re-decision has a list to
+        // fetch: with `complete: true` the leg would have nothing to enumerate and
+        // "it ran" would prove nothing about the record that used to stop it.
+        enumCursor: { offset: 0, complete: false },
+        halted: { reason, at: T0 - 3_600_000, detail: 'synthetic-fixture detail' },
+      }));
+
+      clock.at(T0 + 100 * 24 * 3600_000);
+      const run = await runBackfill({ ...opts(store, be.http, clock), scope, maxDetails: 1 });
+
+      // 🔴 The stored record did not decide this run: the leg ran, and the fetch
+      //    that proves it is the one the old build's record forbade.
+      expect(run.stopped).not.toBe('halted');
+      expect(run.halted).toBeNull();
+      expect(be.calls.length).toBeGreaterThan(0);
+      // 🔴 And it is not silent: the expiry names what the record did not say, and
+      //    the build that has just re-decided.
+      expect(run.state.haltExpired).toMatchObject({
+        because: 'build',
+        reason,
+        build: 'unstamped',
+        currentBuild: TEST_BUILD_ID,
+      });
+      // Nothing of the user's was written off by the expiry itself.
+      expect(run.archivedThisRun).toEqual([all[0]]);
+      expect(run.state.pending).toEqual([]);
+
+      /**
+       * 🔴 🔴 W59c · **What "the record is gone" means here, per reason.**
+       *
+       * For `org-*`, `shape-changed` and `detail-empty-unverified` the run reached the
+       * thing the record was about (the resolver's question, the wire, a body), so its
+       * verdict is an observation: the record is cleared because the condition was
+       * looked at. For the three storage-class ones the run's `openLedger` **is** the
+       * observation — reaching the halt funnel at all is what proves a store that
+       * once refused now works — and the half where it does *not* work is asserted
+       * above, in "whose condition still holds refuses, and is left untouched". The two
+       * halves are one property, and neither is the other's fallback.
+       */
+      const persisted = await loadState(store, 'chatgpt', scope);
+      expect(persisted.halted).toBeNull();
+    });
+  }
 });
 
 describe('W44-3 · the record already on disk, written by an older build', () => {
@@ -350,17 +582,45 @@ describe('W44-3 · the record already on disk, written by an older build', () =>
     //    changed", and it is the visible difference the expiry makes here: before
     //    W44 the record stopped the run before a single request went out.
     expect(calls.length).toBeGreaterThan(0);
-    expect(r1.halted?.reason).toBe('detail-unsupported');
-    expect(r1.halted?.capability).toBe('list-only');
+    /**
+     * 🔴 W59b · **The re-decision reads ONE page, and the list still gets read to its
+     *    own end — the two facts are one change, so they are asserted together.**
+     *
+     * The tick that lifts a halt is the one tick in the product that asks the platform
+     * a question it was never asked, so it is capped at a single list page (engine.ts's
+     * `listPagesThisTick`). For a list-only plan the ordinary tick has no such cap, so
+     * this tick ends `budget-exhausted` rather than halting: a `detail-unsupported`
+     * record written one page in would be this build's own from the next tick on, and
+     * page 2 would never be read at all.
+     *
+     * What W44 pinned here has not moved — the wire is read, and the stop that comes
+     * back names `list-only` — and the assertions below are that, plus the tick split.
+     */
+    expect(r1.stopped).toBe('budget-exhausted');
+    expect(r1.halted).toBeNull();
     expect(r1.state.haltExpired).toMatchObject({ judgedAgainst: 'unmarked', capability: 'list-only' });
-    const afterFirst = calls.length;
+    // The one page this tick was allowed, and no more.
+    expect(calls.length).toBe(1);
+    expect(r1.state.enumCursor.offset).toBe(2);
+    expect(r1.state.enumCursor.complete).toBe(false);
 
-    // 🔴 The marked record matches this build, so it applies: the second run costs
-    //    nothing at all, exactly as a detail-unsupported stop did before W44.
+    // ---- the ordinary tick that follows: uncapped, so the list reaches its end and
+    //      the same stop is reached with the whole list on disk.
     const r2 = await runBackfill(pplx);
-    expect(r2.stopped).toBe('halted');
+    expect(r2.halted?.reason).toBe('detail-unsupported');
     expect(r2.halted?.capability).toBe('list-only');
-    expect(calls.length, 'a marked record that still applies must issue nothing').toBe(afterFirst);
+    // Perplexity has no termination field, so "the list ended" is the empty page — the
+    // named inference C27 records, not a `complete` this endpoint never said.
+    expect(r2.state.enumCursor.truncated, 'the empty page that ends the list was read').toBe('empty-page-inferred');
+    expect(calls.length, 'the second page was read on the tick that could read it').toBe(2);
+    const afterSecond = calls.length;
+
+    // 🔴 The marked record matches this build, so it applies: the third run costs
+    //    nothing at all, exactly as a detail-unsupported stop did before W44.
+    const r3 = await runBackfill(pplx);
+    expect(r3.stopped).toBe('halted');
+    expect(r3.halted?.capability).toBe('list-only');
+    expect(calls.length, 'a marked record that still applies must issue nothing').toBe(afterSecond);
   });
 });
 
@@ -372,6 +632,7 @@ describe('W44-4 · the popup can say that a stop stopped applying', () => {
       state: headerWith('gemini', 'w44-popup', {
         halted: null,
         haltExpired: {
+          because: 'capability',
           reason: 'unsupported-platform',
           recordedAt: T0 - 3_420_000,
           judgedAgainst: 'unmarked',

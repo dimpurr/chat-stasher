@@ -36,6 +36,7 @@ import {
 import { retryMinutesLeft } from '../lib/backfill/progress';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
 import { BACKFILL_TICK_DELAY_MIN_MINUTES } from '../lib/backfill/alarm';
+import { TEST_BUILD_ID } from './i18n-harness';
 import { forgetTab, loadTabs, pickLiveTab, rememberTab, TAB_PING_MISSES_BEFORE_FORGET } from '../lib/backfill/tab-port';
 
 const ORIGIN = 'https://chatgpt.com';
@@ -401,19 +402,50 @@ describe('W13-4 · the record already sitting in a real user storage', () => {
     expect(run.state.enumCursor.offset).toBe(3);
   });
 
-  it('a legacy permanent record stays stopped, exactly as before', async () => {
+  /**
+   * 🔴 W59 · **This case used to assert the opposite, and the change is the point
+   *    of W59.** A pre-W18 `shape-changed` record is a judgement an earlier build
+   *    made about a response an earlier build saw; the build running now has seen
+   *    nothing, and a wire change is exactly the kind of fact a new build's parser
+   *    can have fixed. So it is re-decided **once**: the leg reads the wire again,
+   *    and because the condition really is still there it writes the identical stop
+   *    back — now naming the build that saw it, which is what stops this from being
+   *    a retry. A third run issues nothing.
+   */
+  it('a legacy permanent record is re-decided once, and a condition that repeats is written back naming this build', async () => {
     const store = memoryStore();
     const clock = stepClock(T0);
     await store.save(legacyStateKey('chatgpt', 'w13-legacy-shape'), legacyState('w13-legacy-shape', 'shape-changed'));
 
-    const run = await runBackfill({
-      ...opts(store, async () => {
-        throw new Error('MUST NOT be called');
-      }, clock),
-      scope: 'w13-legacy-shape',
+    // The same unrecognised shape the older build saw: `{}` is not a list this
+    // build reads, so the re-decision reaches the same conclusion by itself.
+    let calls = 0;
+    const unknownShape = async (): Promise<HttpResponse> => {
+      calls += 1;
+      return { status: 200, text: '{}' };
+    };
+
+    const r1 = await runBackfill({ ...opts(store, unknownShape, clock), scope: 'w13-legacy-shape' });
+
+    // 🔴 The stored record did not decide this run: the wire was looked at.
+    expect(calls).toBeGreaterThan(0);
+    expect(r1.halted?.reason).toBe('shape-changed');
+    // 🔴 And the stop that comes back is this build's own judgement, written down
+    //    as such — the reason the expiry can only ever happen once.
+    expect(r1.halted?.build).toBe(TEST_BUILD_ID);
+    expect(r1.state.haltExpired).toMatchObject({
+      because: 'build',
+      reason: 'shape-changed',
+      build: 'unstamped',
+      currentBuild: TEST_BUILD_ID,
     });
-    expect(run.stopped).toBe('halted');
-    expect(run.halted?.reason).toBe('shape-changed');
+
+    // ---- from here it is a record this build wrote, and it stands.
+    const after = calls;
+    const r2 = await runBackfill({ ...opts(store, unknownShape, clock), scope: 'w13-legacy-shape' });
+    expect(r2.stopped).toBe('halted');
+    expect(r2.halted?.reason).toBe('shape-changed');
+    expect(calls, 'a record this build wrote must issue nothing').toBe(after);
   });
 
   it('the resume is persisted: a restart in the middle sees the stop cleared, not re-armed', async () => {
