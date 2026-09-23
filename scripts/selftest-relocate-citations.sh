@@ -54,6 +54,14 @@
 #      written inside a `// }` comment, and a bare name whose file the merge
 #      deleted while another file with that name remained
 #   P  a read-back restore that cannot be written
+#   Q  the four constructions R66d built where a bare name now names a
+#      different file and the citation is no longer on the document line it sat
+#      on at --old, so the line-keyed comparison saw nothing: one parent with a
+#      second citation of the file supplying the ownership, two parents with
+#      side B supplying it, the file that never moved (reported `right`), and a
+#      bare name that resolved to nothing at --old — plus a continuation whose
+#      sentence named one file at --old and another after the merge, and a path
+#      the parent's own document writes and its own tree does not have
 #
 # 🔴 Probes 4, 5 and 6 are the point of the tool, not decoration. A relocation
 #    that guesses when the answer is not unique is worse than the hand work it
@@ -2046,10 +2054,463 @@ absent "$TMP/run19.out" 'Traceback' \
 
 echo
 echo "=============================================================="
+echo "Fixture Q: the four constructions R66d built where the"
+echo "  citation is no longer on the document line it sat on at"
+echo "  --old, so a lookup keyed by (document, line) sees nothing,"
+echo "  while the token now names a different file than it did"
+echo "  The token is a bare name in all four, and which file a bare"
+echo "  name means is a fact about a tree, not about the token: the"
+echo "  merge changed the tree and left the token. Each one below"
+echo "  rewrote — or called \"right\" — a range against a file the"
+echo "  sentence never named, and exited 0."
+echo "    Q1 one parent, and a second citation of the newly resolved"
+echo "       file supplies the ownership the old run used:"
+echo "       \`a.ts:1-2\` became \`a.ts:2-3\`, which is pkg/a.ts's old"
+echo "       first two lines."
+echo "    Q2 two parents, and it is side B's document that supplies"
+echo "       it, so the run reports a relocation via B."
+echo "    Q3 no second citation and the file never moved: the run"
+echo "       reported the citation \`right\` for pkg/a.ts:1-2 — a file"
+echo "       the token does not name — and exited 0."
+echo "    Q4 the bare name resolved to nothing at --old (two files"
+echo "       shared it), so no citation of it was in that side's"
+echo "       coordinates at all, and it was still moved."
+echo "  Every one must be refused by name, the range the old run"
+echo "  invented must not be in the document, and each fixture"
+echo "  carries one certain shift that must still be relocated:"
+echo "  refusing everything is not a way to pass this fixture."
+echo "=============================================================="
+FIXQ1="$TMP/q1"
+seed_repo "$FIXQ1"
+cat > "$FIXQ1/docs/install.md" <<'MD'
+# Install
+
+This document cites nothing.
+MD
+cat > "$FIXQ1/docs/privacy.md" <<'MD'
+# Privacy
+
+This document cites nothing.
+MD
+mkdir -p "$FIXQ1/pkg"
+printf 'R1\nR2\n' > "$FIXQ1/a.ts"
+printf 'T1\nT2\n' > "$FIXQ1/pkg/a.ts"
+printf 'm1\nm2\nm3\n' > "$FIXQ1/src/moved.ts"
+cat > "$FIXQ1/README.md" <<'MD'
+# Q1
+
+See root `a.ts:1-2`.
+
+See package `pkg/a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ1" || exit 2
+  git add -A
+  git commit -qm "fixture Q1: the tree and the numbers the document describes"
+)
+OLDQ1="$(cd "$FIXQ1" && git rev-parse HEAD)"
+# The merge: a NOTE line above the sentence, so it is not on the line it sat on
+# at --old; the root a.ts gone; pkg/a.ts carrying the cited block one line down;
+# and the control file moved down as well.
+cat > "$FIXQ1/README.md" <<'MD'
+# Q1
+
+NOTE
+
+See root `a.ts:1-2`.
+
+See package `pkg/a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(cd "$FIXQ1" && git rm -q a.ts)
+printf 'INSERTED\nT1\nT2\n' > "$FIXQ1/pkg/a.ts"
+printf 'X\nm1\nm2\nm3\n' > "$FIXQ1/src/moved.ts"
+if [ -e "$FIXQ1/a.ts" ] || ! grep -q 'INSERTED' "$FIXQ1/pkg/a.ts"; then
+  echo "  ✘ fixture Q1's merged tree is not what this selftest means to write; it is void"
+  FAILED=1
+fi
+
+FIXQ2="$TMP/q2"
+seed_repo "$FIXQ2"
+cat > "$FIXQ2/docs/install.md" <<'MD'
+# Install
+
+This document cites nothing.
+MD
+cat > "$FIXQ2/docs/privacy.md" <<'MD'
+# Privacy
+
+This document cites nothing.
+MD
+mkdir -p "$FIXQ2/pkg"
+printf 'R1\nR2\n' > "$FIXQ2/a.ts"
+printf 'T1\nT2\n' > "$FIXQ2/pkg/a.ts"
+printf 'm1\nm2\nm3\n' > "$FIXQ2/src/moved.ts"
+cat > "$FIXQ2/README.md" <<'MD'
+# Q2 base
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ2" || exit 2
+  git add -A
+  git commit -qm "fixture Q2: the common ancestor"
+  git checkout -q -b side-a
+)
+OLDQ2_BASE="$(cd "$FIXQ2" && git rev-parse HEAD)"
+cat > "$FIXQ2/README.md" <<'MD'
+# Q2 side A
+
+See root `a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ2" || exit 2
+  git add -A
+  git commit -qm "fixture Q2 side A: the sentence about the root file"
+)
+OLDQ2_A="$(cd "$FIXQ2" && git rev-parse HEAD)"
+(
+  cd "$FIXQ2" || exit 2
+  git checkout -q "$OLDQ2_BASE"
+  git checkout -q -b side-b
+)
+cat > "$FIXQ2/README.md" <<'MD'
+# Q2 side B
+
+See package `pkg/a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ2" || exit 2
+  git add -A
+  git commit -qm "fixture Q2 side B: the sentence about the package file"
+)
+OLDQ2_B="$(cd "$FIXQ2" && git rev-parse HEAD)"
+# The merge: side A's sentence, under a NOTE line that is in neither side's
+# document, with the root a.ts deleted.
+(
+  cd "$FIXQ2" || exit 2
+  git checkout -q side-a
+)
+cat > "$FIXQ2/README.md" <<'MD'
+# Q2 merged
+
+NOTE
+
+See root `a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(cd "$FIXQ2" && git rm -q a.ts)
+printf 'INSERTED\nT1\nT2\n' > "$FIXQ2/pkg/a.ts"
+printf 'X\nm1\nm2\nm3\n' > "$FIXQ2/src/moved.ts"
+echo "  Q2 side A ${OLDQ2_A:0:7}, side B ${OLDQ2_B:0:7}"
+
+FIXQ3="$TMP/q3"
+seed_repo "$FIXQ3"
+cat > "$FIXQ3/docs/install.md" <<'MD'
+# Install
+
+This document cites nothing.
+MD
+cat > "$FIXQ3/docs/privacy.md" <<'MD'
+# Privacy
+
+This document cites nothing.
+MD
+mkdir -p "$FIXQ3/pkg"
+printf 'R1\nR2\n' > "$FIXQ3/a.ts"
+printf 'T1\nT2\n' > "$FIXQ3/pkg/a.ts"
+printf 'm1\nm2\nm3\n' > "$FIXQ3/src/moved.ts"
+cat > "$FIXQ3/README.md" <<'MD'
+# Q3
+
+See root `a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ3" || exit 2
+  git add -A
+  git commit -qm "fixture Q3: the tree and the numbers the document describes"
+)
+OLDQ3="$(cd "$FIXQ3" && git rev-parse HEAD)"
+# The merge: the same NOTE line, the root a.ts gone — and pkg/a.ts left exactly
+# where it was, so there is nothing to relocate and nothing to refuse either,
+# unless the token is asked which file it names.
+cat > "$FIXQ3/README.md" <<'MD'
+# Q3
+
+NOTE
+
+See root `a.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(cd "$FIXQ3" && git rm -q a.ts)
+printf 'X\nm1\nm2\nm3\n' > "$FIXQ3/src/moved.ts"
+
+FIXQ4="$TMP/q4"
+seed_repo "$FIXQ4"
+cat > "$FIXQ4/docs/install.md" <<'MD'
+# Install
+
+This document cites nothing.
+MD
+cat > "$FIXQ4/docs/privacy.md" <<'MD'
+# Privacy
+
+This document cites nothing.
+MD
+mkdir -p "$FIXQ4/a" "$FIXQ4/b"
+printf 'A1\nA2\n' > "$FIXQ4/a/foo.ts"
+printf 'B1\nB2\n' > "$FIXQ4/b/foo.ts"
+printf 'm1\nm2\nm3\n' > "$FIXQ4/src/moved.ts"
+cat > "$FIXQ4/README.md" <<'MD'
+# Q4
+
+The bare name is `foo.ts:1-2`.
+
+The path is `a/foo.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ4" || exit 2
+  git add -A
+  git commit -qm "fixture Q4: two files share the name, so the bare one names neither"
+)
+OLDQ4="$(cd "$FIXQ4" && git rev-parse HEAD)"
+# The merge: b/foo.ts deleted, so the bare name resolves to a/foo.ts in the
+# merged tree and to nothing at all at --old; a/foo.ts carries its cited block
+# one line down.
+(cd "$FIXQ4" && git rm -q b/foo.ts)
+printf 'INSERTED\nA1\nA2\n' > "$FIXQ4/a/foo.ts"
+printf 'X\nm1\nm2\nm3\n' > "$FIXQ4/src/moved.ts"
+
+FIXQ5="$TMP/q5"
+seed_repo "$FIXQ5"
+cat > "$FIXQ5/docs/install.md" <<'MD'
+# Install
+
+This document cites nothing.
+MD
+cat > "$FIXQ5/docs/privacy.md" <<'MD'
+# Privacy
+
+This document cites nothing.
+MD
+printf 'k1\nk2\nk3\nk4\nk5\nk6\n' > "$FIXQ5/src/alpha.ts"
+printf 'c1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXQ5/src/cross.ts"
+printf 'm1\nm2\nm3\n' > "$FIXQ5/src/moved.ts"
+cat > "$FIXQ5/README.md" <<'MD'
+# Q5
+
+Alpha is `src/alpha.ts:1-2`, and more of it is `:3-4`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ5" || exit 2
+  git add -A
+  git commit -qm "fixture Q5: a continuation whose sentence names alpha"
+)
+OLDQ5="$(cd "$FIXQ5" && git rev-parse HEAD)"
+# The merge: the sentence's own token now names cross.ts and the continuation
+# still inherits whatever that sentence names. A continuation writes no name of
+# its own, so the token-shape rule has nothing to say about it; its file is the
+# one its two sides' parses have to agree on. As in fixture Q, the sentence is
+# not left on the line it sat on at --old.
+cat > "$FIXQ5/README.md" <<'MD'
+# Q5
+
+NOTE
+
+Alpha is `src/cross.ts:1-2`, and more of it is `:3-4`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+printf 'ZZ\nk1\nk2\nk3\nk4\nk5\nk6\n' > "$FIXQ5/src/alpha.ts"
+printf 'QQ\nc1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXQ5/src/cross.ts"
+printf 'X\nm1\nm2\nm3\n' > "$FIXQ5/src/moved.ts"
+
+FIXQ6="$TMP/q6"
+seed_repo "$FIXQ6"
+cat > "$FIXQ6/docs/install.md" <<'MD'
+# Install
+
+This document cites nothing.
+MD
+cat > "$FIXQ6/docs/privacy.md" <<'MD'
+# Privacy
+
+This document cites nothing.
+MD
+printf 'm1\nm2\nm3\n' > "$FIXQ6/src/moved.ts"
+cat > "$FIXQ6/README.md" <<'MD'
+# Q6
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ6" || exit 2
+  git add -A
+  git commit -qm "fixture Q6: the document before the sentence is written"
+)
+OLDQ6="$(cd "$FIXQ6" && git rev-parse HEAD)"
+# The state a side is left in when a file it cites is removed on that side and
+# the sentence citing it stays: its own document writes a path its own tree does
+# not have. The merge brings the file back, so the merged tree can resolve the
+# token — and the numbers in that sentence were never read against any file.
+cat > "$FIXQ6/README.md" <<'MD'
+# Q6
+
+Added later is `src/new.ts:1-2`.
+
+Moved is `src/moved.ts:1-2`.
+MD
+(
+  cd "$FIXQ6" || exit 2
+  git add -A
+  git commit -qm "fixture Q6: this side's document cites a path this side's tree lacks"
+)
+OLDQ6_BAD="$(cd "$FIXQ6" && git rev-parse HEAD)"
+printf 'n1\nn2\n' > "$FIXQ6/src/new.ts"
+printf 'X\nm1\nm2\nm3\n' > "$FIXQ6/src/moved.ts"
+echo "  Q6 parent ${OLDQ6_BAD:0:7}, the sound one before it ${OLDQ6:0:7}"
+
+echo
+echo "=============================================================="
+echo "Probe 41: the one-parent move is refused, and the file the"
+echo "  token does name is not the file the range is read against"
+echo "  \`a.ts:1-2\` named the root a.ts at --old and names pkg/a.ts"
+echo "  in the merged tree. A second citation of pkg/a.ts makes the"
+echo "  old run an owner of it and it wrote \`a.ts:2-3\` — pkg/a.ts's"
+echo "  old first two lines, which are not what the sentence named."
+echo "=============================================================="
+cd "$FIXQ1" || exit 2
+cp README.md "$TMP/q1-readme.before"
+python3 scripts/relocate-citations.py --old "$OLDQ1" >"$TMP/run20.out" 2>&1
+rc=$?
+expect 1 "$rc" "a token that names a different file on each side is an error"
+refused "$TMP/run20.out" 'REFUSE.*pkg/a\.ts:1-2 .*bare name' \
+  "the citation whose token re-resolved is refused, and named by the file it resolved to"
+absent README.md '`a.ts:2-3`' "the range the old run invented is not in the document"
+contains README.md '`a.ts:1-2`' "and the citation keeps the text it had"
+contains README.md '`pkg/a.ts:2-3`' "the path token beside it still relocated"
+
+echo
+echo "=============================================================="
+echo "Probe 42: the two-parent move is refused, and no side's"
+echo "  numbers are used to write it"
+echo "  Side A wrote the sentence about the root file; side B's"
+echo "  document is the second citation of pkg/a.ts, and the old run"
+echo "  relocated A's sentence in B's numbers and reported [via B]."
+echo "=============================================================="
+cd "$FIXQ2" || exit 2
+python3 scripts/relocate-citations.py --old "$OLDQ2_A" --old "$OLDQ2_B" >"$TMP/run21.out" 2>&1
+rc=$?
+expect 1 "$rc" "a bare name that changed files is an error on both sides' evidence"
+refused "$TMP/run21.out" 'REFUSE.*pkg/a\.ts:1-2 .*resolves to a different file on each side.*--old' \
+  "the refusal names the side whose parse put the token on another file"
+absent README.md '`a.ts:2-3`' "the range the old run invented is not in the document"
+contains README.md '`src/moved.ts:2-3`' "the control shift beside it still relocated"
+absent "$TMP/run21.out" 'shifted  README.md:  pkg/a.ts:1-2' \
+  "and nothing was relocated onto the file the token re-resolved to"
+
+echo
+echo "=============================================================="
+echo "Probe 43: the citation reported \`right\` against a file the"
+echo "  token does not name is refused, not accepted"
+echo "  pkg/a.ts never moved, so the numbers happen to be correct —"
+echo "  for pkg/a.ts. The sentence says \`a.ts\`, and there is no"
+echo "  a.ts in the merged tree: a run that reports this as right is"
+echo "  reporting a file the citation does not name as correct."
+echo "=============================================================="
+cd "$FIXQ3" || exit 2
+python3 scripts/relocate-citations.py --old "$OLDQ3" >"$TMP/run22.out" 2>&1
+rc=$?
+expect 1 "$rc" "an already-right range is still not a citation of the file it names"
+refused "$TMP/run22.out" 'REFUSE.*pkg/a\.ts:1-2 .*bare name' \
+  "the citation is refused by name rather than reported"
+absent "$TMP/run22.out" 'right    README.md:  pkg/a.ts:1-2' \
+  "and it is not listed among the citations that are already right"
+contains README.md '`a.ts:1-2`' "the citation keeps the text it had"
+contains README.md '`src/moved.ts:2-3`' "the control shift beside it still relocated"
+
+echo
+echo "=============================================================="
+echo "Probe 44: the bare name that resolved to nothing at --old is"
+echo "  refused too, and the path token in the same sentence is not"
+echo "  \`foo.ts\` was shared by a/foo.ts and b/foo.ts at --old, so"
+echo "  it resolved to neither and no side ever claimed the citation"
+echo "  of a/foo.ts it now reads as. The old run moved it anyway —"
+echo "  a/foo.ts's old first two lines were one line down, in the"
+echo "  coordinates of the path token beside it."
+echo "=============================================================="
+cd "$FIXQ4" || exit 2
+python3 scripts/relocate-citations.py --old "$OLDQ4" >"$TMP/run23.out" 2>&1
+rc=$?
+expect 1 "$rc" "a token that resolved to no file at --old is an error"
+refused "$TMP/run23.out" 'REFUSE.*a/foo\.ts:1-2 .*bare name' \
+  "the citation whose token never resolved at --old is refused"
+absent README.md '`foo.ts:2-3`' "the range the old run invented is not in the document"
+contains README.md '`a/foo.ts:2-3`' "the path token beside it still relocated"
+
+echo
+echo "=============================================================="
+echo "Probe 45: a continuation is refused when the two sides'"
+echo "  sentences name different files"
+echo "  A continuation writes no name, so the token-shape rule has"
+echo "  nothing to say about it — and it must not be relocated on"
+echo "  numbers that were read against the file its sentence named"
+echo "  at --old. Both sides' parses have to agree on the file."
+echo "  The old run refused this one too, but only because the"
+echo "  sentence happened to be on the line it sat on at --old;"
+echo "  with a NOTE above it the refusal came back as \"no --old"
+echo "  document writes this range\", which sends the reader to"
+echo "  the wrong repair."
+echo "=============================================================="
+cd "$FIXQ5" || exit 2
+python3 scripts/relocate-citations.py --old "$OLDQ5" >"$TMP/run24.out" 2>&1
+rc=$?
+expect 1 "$rc" "a continuation whose file changed is an error"
+refused "$TMP/run24.out" 'REFUSE.*src/cross\.ts:3-4 .*resolves to a different file on each side' \
+  "the continuation is refused by name, not left unclaimed"
+absent README.md '`:2-3`' "no range was read against the file the sentence named at --old"
+contains README.md '`src/moved.ts:2-3`' "the control shift beside it still relocated"
+
+echo
+echo "=============================================================="
+echo "Probe 46: a path the parent's own document writes and its own"
+echo "  tree does not have is refused by name"
+echo "  The refusal says which side and which path, rather than"
+echo "  leaving the reader with \"these numbers are in nobody's"
+echo "  coordinate system\" — the repairs are not the same one."
+echo "=============================================================="
+cd "$FIXQ6" || exit 2
+python3 scripts/relocate-citations.py --old "$OLDQ6_BAD" >"$TMP/run25.out" 2>&1
+rc=$?
+expect 1 "$rc" "a token that does not resolve at --old is an error"
+refused "$TMP/run25.out" 'REFUSE.*src/new\.ts:1-2 .*does not resolve at --old' \
+  "the refusal names the side whose tree has no such path"
+absent "$TMP/run25.out" 'no --old document writes this range' \
+  "it is not reported as a range in nobody's coordinate system"
+contains README.md '`src/moved.ts:2-3`' "the control shift beside it still relocated"
+
+echo
+echo "=============================================================="
 echo "After: each fixture's own git status"
 echo "=============================================================="
 for d in "$FIXA" "$FIXB" "$FIXC" "$FIXD" "$FIXF" "$FIXG" "$FIXH" \
-         "$FIXI" "$FIXI_OTHER" "$FIXJ" "$FIXK" "$FIXL" "$FIXM" "$FIXO"; do
+         "$FIXI" "$FIXI_OTHER" "$FIXJ" "$FIXK" "$FIXL" "$FIXM" "$FIXO" \
+         "$FIXQ1" "$FIXQ2" "$FIXQ3" "$FIXQ4" "$FIXQ5" "$FIXQ6"; do
   echo "  $(basename "$d"):"
   (cd "$d" && git status --porcelain | sed 's/^/    /')
 done

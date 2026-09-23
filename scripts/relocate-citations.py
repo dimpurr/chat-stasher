@@ -41,7 +41,8 @@ git repository at all and it refuses rather than guessing which tree was meant.
 Pass every parent of the merge, in one run, after resolving the prose conflicts
 by hand. A resolved document keeps citations from both sides, and which side a
 given citation came from is not a guess this script makes: **a citation is read
-in the numbers of the side whose own document writes that same range.** The
+in the numbers of the side whose own document writes that same token, at that
+same range.** The
 document at the parent commit is the authority on that parent's coordinates, so
 `--old B` cannot touch a citation that only A's document ever wrote down. A
 citation no declared side's document writes is reported, not relocated — after a
@@ -59,13 +60,20 @@ several matches, and sides that disagree are all left alone and reported, and
 the run exits non-zero: an edit made under any of those is a guess about which
 of several candidate claims a sentence was written about.
 
-🔴 A token must also name the same *file* on both sides. Which file `a.ts`
-refers to is a fact about a tree, and a merge can change it — delete the root
-`a.ts` and leave `pkg/a.ts`, and a sentence about the root file reads as a
-citation of the other one. Each side's document is therefore parsed in that
-side's own tree (`git ls-tree` at the commit), and a citation whose token
-resolved to a different file there than in the merged tree is refused by name,
-even when the merged file offers a perfectly clean range for it.
+🔴 A token must also name the same *file* on both sides, and only a token that
+writes the file's path can be shown to. Which file `a.ts` refers to is a fact
+about a tree, and a merge can change it — delete the root `a.ts` and leave
+`pkg/a.ts`, and a sentence about the root file reads as a citation of the other
+one, with every number in it meaning something else. Each side's document is
+therefore parsed in that side's own tree (`git ls-tree` at the commit), and a
+citation whose token is a bare name, or whose token resolved to a different file
+there than in the merged tree, or whose token that side's own document writes and
+that side's tree cannot resolve, is refused by name — even when the merged file
+offers a clean range, and even when the range it carries is still correct, since
+"correct" is a question about a file the token no longer names. A citation is
+identified by the token it writes and the range it writes it with, never by the
+document line it sits on: a merge moves lines, so the line number is the one
+thing about a citation that the merge is allowed to change.
 
 **Which documents this rewrites** is not a list kept here: it is exactly
 `drift.doc_files()`, the scan set of scripts/check-citation-drift.py — README.md,
@@ -184,7 +192,7 @@ MISSING = "missing"        # the block's text is not there as one run of lines
 UNKNOWN = "unknown"        # the file, or the range, is not readable at --old
 UNCLAIMED = "unclaimed"    # no declared side's own document writes this range
 BLANK = "blank"            # every cited line is whitespace, so it names nothing
-ELSEWHERE = "elsewhere"    # the same token names a different file on each side
+ELSEWHERE = "elsewhere"    # the token does not name one file on both sides
 
 # Outcomes that rewrite a range. 🔴 Exactly one, and it has to be: the cited
 # block's text must still sit in the merged file as the same run of lines, in
@@ -207,9 +215,9 @@ RELOCATED = (SHIFTED,)
 # whoever has to fix them: several matches is "this sentence could be about any
 # of these", zero matches is "the block is not in the merged file unchanged",
 # blank is "there is no text here to look for", unclaimed is "these numbers are
-# in nobody's coordinate system", and elsewhere is "this token names a different
-# file here than it did at --old". All five need a human, and none of them is
-# another.
+# in nobody's coordinate system", and elsewhere is "the token does not name one
+# file on both sides — it is a bare name, or that side's parse of it did not land
+# on the merged file". All six need a human, and none of them is another.
 REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED, BLANK, ELSEWHERE)
 
 
@@ -303,19 +311,24 @@ class Parent:
 
     def __init__(self, commit: str):
         self.commit = commit
-        # Every citation this side's own documents write, already resolved to
-        # the file it names. A parsed citation, not a raw range scan: the
-        # question "does this side's document claim this range of this file" is
-        # the same question the merged tree's citations are read with, and a
-        # second, rougher reader here answered it differently — see claims().
-        self.spans: dict[str, set[tuple[str, int, int]]] = {}
+        # 🔴 (doc, token, start, end) -> the files this side's own document
+        # resolves that written token and range to. A parsed citation, not a raw
+        # range scan, and keyed by the token rather than by the file it went on
+        # to name or the line it sat on: a merge moves lines, and the merge can
+        # equally change which file a name means, so the token and its range are
+        # the only two things about a citation that the author actually wrote
+        # down. Two entries under one key are two occurrences of one token that
+        # resolved differently; a set, so the caller can refuse a doubt instead
+        # of picking one. See claims().
+        self.tokens: dict[tuple[str, str, int, int], set[str]] = {}
+        # doc -> every token text this side's document writes before a colon,
+        # resolved or not. `is_file` is the resolver's first question about any
+        # token, so this is the set of citation tokens the side wrote — and the
+        # difference between "this side's document writes `pkg/a.ts`" and "this
+        # side's tree has a `pkg/a.ts`" is the whole of "did this token resolve
+        # on that side". See identity_refusal().
+        self.written: dict[str, set[str]] = {}
         self.lines: dict[str, set[str]] = {}
-        # (doc, doc line) -> the tokens written there, as (raw, target, start,
-        # end). Kept so that a citation whose token resolves to a different file
-        # here than in the merged tree can be *told apart* from one this side
-        # never wrote: the first is a hazard to name, the second is ordinary
-        # unclaimed numbers. See decide().
-        self.resolved: dict[tuple[str, int], list[tuple[str, str, int, int]]] = {}
 
         files = self._tree_files()
         self._files = set(files)
@@ -327,13 +340,23 @@ class Parent:
             rc, out = git("show", f"{commit}:{doc}")
             if rc != 0:
                 continue
-            citations, _ = drift.parse_text(doc, out.splitlines(), basenames, self._exists)
-            self.spans[doc] = {(c.target, c.start, c.end) for c in citations}
+            written: set[str] = set()
+
+            def exists(rel: str, _written: set[str] = written) -> bool:
+                # 🔴 Recorded from the resolver's own question rather than by
+                # scanning the document for token-shaped text. A scan is a second
+                # answer to "what does this document cite", and it answers both
+                # ways wrongly: it would pick up a token inside prose the parser
+                # has already discarded as not a citation, and it would miss
+                # nothing only if it repeated the parser's whole grammar.
+                _written.add(rel)
+                return rel in self._files
+
+            citations, _ = drift.parse_text(doc, out.splitlines(), basenames, exists)
+            self.written[doc] = written
             self.lines[doc] = set(out.splitlines())
             for c in citations:
-                self.resolved.setdefault((doc, c.doc_line), []).append(
-                    (c.raw, c.target, c.start, c.end)
-                )
+                self.tokens.setdefault((doc, c.raw, c.start, c.end), set()).add(c.target)
 
     def _tree_files(self) -> list[str]:
         """This commit's tracked files, repo-relative.
@@ -347,39 +370,44 @@ class Parent:
             die(f"cannot list the files of --old {self.commit[:12]}")
         return [line for line in out.splitlines() if line]
 
-    def _exists(self, rel: str) -> bool:
+    def carries(self, rel: str) -> bool:
+        """Whether this commit's tree has a file at the repo-relative `rel`.
+
+        The same test `resolve_target` is handed as its `exists` callback, but
+        asked afterwards and about one particular path: "did this side's parse
+        of the token land on a file" and "does this side's tree have that path"
+        are different questions, and the difference between them is exactly
+        "this token did not resolve on that side".
+        """
         return rel in self._files
 
     @property
     def short(self) -> str:
         return self.commit[:12]
 
-    def claims(self, doc: str, target: str, start: int, end: int) -> bool:
-        """Whether this side's own document writes a citation of `target` here.
+    def claims(self, doc: str, cit) -> bool:
+        """Whether this side's own document writes *this token, at this range*.
 
-        The line numbers alone would answer a different question. `alpha.ts:3-4`
-        is not a claim about `beta.ts:3-4` even though it carries the same
-        numbers, and treating it as one lets a side vote on a citation it never
-        made — including voting to relocate it.
+        The token, not only the numbers and not the file they resolved to.
+        `alpha.ts:3-4` is not a claim about `beta.ts:3-4` even though it carries
+        the same numbers — and, less obviously, it is not a claim about the
+        citation that says `a.ts:3-4` either, even when both sentences are about
+        one file. Reading a claim as "this file, these lines" made a side the
+        owner of any citation in the document that happened to share them, so a
+        sentence about `pkg/a.ts` supplied the ownership for a citation of the
+        root `a.ts` — which, once the merge had deleted the root file, resolved
+        to `pkg/a.ts` and was relocated on the strength of a sentence the side
+        never wrote. What the author wrote is the token; the numbers are four
+        characters a dozen citations can share.
 
-        The side's document is read by the same parser that reads the merged
-        tree, so a claim is the *file the citation resolves to*, never the shape
-        of the token that was written:
-
-          * a bare `:3-4` continuation belongs to the file its own sentence
-            named. Reading it as a token of "no path" made it a claim about
-            every file with those line numbers, and a document that only ever
-            wrote `alpha.ts:1-2`, `:3-4` then voted to move a `cross.ts:3-4` it
-            had never heard of;
-          * a basename belongs to the one file it resolves to. Matching on
-            `os.path.basename(target)` made `a.ts:1-2` a claim about every
-            `a.ts` in the repository, so a document about `pkg/one/a.ts` moved
-            the citation of `pkg/two/a.ts`. A name shared by several files does
-            not resolve at all, and a name that does not resolve claims nothing
-            — the safe direction, because a citation with no owner is refused
-            rather than relocated.
+        A bare `:3-4` continuation claims only another `:3-4` with the same
+        numbers, and a bare name claims only the same bare name. Both then have
+        to agree about the file as well, which is identity_refusal()'s job:
+        nothing here has to know how a token resolved, only whether it was
+        written. A token that does not resolve at all claims nothing, which is
+        the safe direction — a citation with no owner is refused, not relocated.
         """
-        return (target, start, end) in self.spans.get(doc, ())
+        return (doc, cit.raw, cit.start, cit.end) in self.tokens
 
     def wrote_this_line(self, doc: str, line: str) -> bool:
         """Whether this side's version of the document carries this exact line.
@@ -472,6 +500,82 @@ def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision
 
 
 
+def identity_refusal(parents: list[Parent], doc: str, cit) -> str | None:
+    """Why this citation's token does not name one file on both sides, or None.
+
+    🔴 A citation is relocatable only when its token writes the file's **path**.
+    `a.ts:1-2` does not: a token without a path is resolved by lookup — the
+    repository root, then the file the previous citation used, then a name that
+    is unique in the tree — so which file it names is a fact about the tree it
+    is read in. The merge can change the tree, and then the token names a file
+    the sentence never named: delete the root `a.ts`, leave `pkg/a.ts`, and
+    `a.ts:1-2` is now about `pkg/a.ts`, whose first two lines may still be the
+    ones the sentence was written about. The numbers are unchanged and mean
+    something else.
+
+    That is refused before the range is looked at at all, which is the case a
+    per-line comparison cannot reach: a citation whose file did not move comes
+    back "already right" from a run that never asked which file the token named
+    — see fixture Q3, where the citation is reported `right` against a file it
+    never mentioned. A refusal here is about the token, not about the range.
+
+    The two side-dependent refusals are kept apart from it because their repairs
+    differ, and both are asked of the parent's own parse, never of a document
+    line: the token and its range are what the author wrote, and a merge moves
+    lines.
+
+      * the same token, at the same range, resolved to a different file on that
+        side: the citation means different code on the two sides;
+      * the token writes a path that side's document also writes and that side's
+        tree does not have: the numbers were never about a file that existed
+        there, so there is nothing to look for at --old at all.
+
+    A bare `:3-4` continuation writes no name, so it is not a bare name and is
+    not refused here: the file it means comes from the sentence that carries it,
+    and both sides' parses have to agree about that file for it to be relocated.
+    That agreement is the first check below, so a continuation whose sentence
+    named one file at --old and another in the merged tree is refused like any
+    other token that changed files.
+    """
+    target, start, end = cit.target, cit.start, cit.end
+    path = cit.raw.rpartition(":")[0]
+    bare = bool(path) and "/" not in path
+
+    for p in parents:
+        for other in sorted(p.tokens.get((doc, cit.raw, start, end), ())):
+            if other != target:
+                return (
+                    f"the token `{cit.raw}` resolves to a different file on each side: "
+                    f"`{target}` in the merged tree, `{other}` at --old {p.short}"
+                    + (
+                        ", and it names its file by bare name, which is resolved by "
+                        "lookup in each tree rather than by the token"
+                        if bare else ""
+                    )
+                    + ". The same citation means different code on the two sides, so "
+                      "its numbers are not in one coordinate system and no range is "
+                      "forced. Needs a human"
+                )
+        if "/" in path and path in p.written.get(doc, ()) and not p.carries(path):
+            return (
+                f"the token `{cit.raw}` does not resolve at --old {p.short}: that "
+                f"side's document writes `{path}` and that side's tree has no file at "
+                f"that path, so these numbers were never about a file that existed "
+                f"there and there is nothing at --old to read them against. Needs a human"
+            )
+
+    if bare:
+        return (
+            f"the token `{cit.raw}` names its file by bare name: `{path}` is resolved "
+            f"by lookup — the repository root, then the file the previous citation "
+            f"used, then a name that is unique in the tree — so which file it names is "
+            f"a fact about each tree and not about the token, and a merge can change "
+            f"the answer without changing the token. Only a token that writes the "
+            f"file's path can be relocated. Needs a human"
+        )
+    return None
+
+
 def decide(
     parents: list[Parent],
     cur: SourceIndex,
@@ -482,31 +586,15 @@ def decide(
     """Decide one citation, using only the sides whose own document writes it."""
     target, start, end = cit.target, cit.start, cit.end
 
-    # 🔴 Before anything else: the token has to name the same file on both
-    # sides. `a.ts:1-2` is a claim about whatever file the tree it was written
-    # in called `a.ts`, and the two trees need not agree — delete the root
-    # `a.ts` in the merge and leave `pkg/a.ts`, and the sentence that was about
-    # the root file now reads as a citation of a file it never named. Every
-    # number in it means something different, so no range is forced, however
-    # cleanly the merged file offers one. Checked here rather than left to the
+    # 🔴 Before anything else: the token has to name the same file on both sides,
+    # and a bare name cannot be shown to. Checked here rather than left to the
     # ownership test below, because an unclaimed range can still come back
     # "already right" against the wrong file and be reported as a clean run.
-    for p in parents:
-        for p_raw, p_target, p_start, p_end in p.resolved.get((doc, cit.doc_line), ()):
-            if (
-                p_target != target
-                and p_raw == cit.raw
-                and (p_start, p_end) == (start, end)
-            ):
-                return Decision(
-                    ELSEWHERE, start, end, None, None,
-                    f"the token `{cit.raw}` on this line names `{target}` in the merged "
-                    f"tree but named `{p_target}` at --old {p.short}: the same citation "
-                    f"resolves to a different file on each side, so its numbers mean "
-                    f"different things and no range is forced. Needs a human",
-                )
+    refusal = identity_refusal(parents, doc, cit)
+    if refusal is not None:
+        return Decision(ELSEWHERE, start, end, None, None, refusal)
 
-    owners = [p for p in parents if p.claims(doc, target, start, end)]
+    owners = [p for p in parents if p.claims(doc, cit)]
     if len(owners) > 1:
         # Both sides wrote this range, which means different code by it. The
         # surviving prose is the tie-break; if neither side's document has this
