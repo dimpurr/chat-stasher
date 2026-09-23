@@ -95,6 +95,7 @@ import {
 import {
   POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
+  POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
 } from '../lib/popup-view';
 import { initUiLocale } from '../lib/i18n';
@@ -2005,15 +2006,15 @@ function cancelledIdLike(id: string | null): boolean {
  *
  * 🔴 W82 · **One sync at a time, so the newest decision is the one that is
  *    applied.** There are four callers — `backgroundSetup`, `runtime.onStartup`,
- *    the `storage.onChanged` listener below, and the popup's own toggle, which
- *    writes the switch and then calls `syncBackfillAlarm` from its own context.
- *    They used to be free to overlap, and each acted on the value it had read
- *    when its own `await` came back, so **the first read of the switch could be
- *    the last write to an alarm**. Measured in a real Chromium: a startup read of
- *    `false` issued `alarms.clear` 63 ms later, after the enable had armed both
- *    alarms, and deleted them — the switch said on, nothing was armed, and nothing
- *    re-arms them, so the leg stays silent until some unrelated wake. That is
- *    exactly the "the chain can never stay broken" property W16 is for.
+ *    the `storage.onChanged` listener below, and the popup's toggle, which
+ *    writes the switch and then asks this context to sync (W87). They used to be
+ *    free to overlap, and each acted on the value it had read when its own
+ *    `await` came back, so **the first read of the switch could be the last write
+ *    to an alarm**. Measured in a real Chromium: a startup read of `false` issued
+ *    `alarms.clear` 63 ms later, after the enable had armed both alarms, and
+ *    deleted them — the switch said on, nothing was armed, and nothing re-arms
+ *    them, so the leg stays silent until some unrelated wake. That is exactly the
+ *    "the chain can never stay broken" property W16 is for.
  *
  *    The fix is ordering rather than re-reading, which would only shrink the
  *    window. Every change to the switch is a `storage.local` write, every such
@@ -2021,9 +2022,15 @@ function cancelledIdLike(id: string | null): boolean {
  *    is queued here behind whatever is running. So the last sync to run is always
  *    the one the newest switch value scheduled, and it reads that value — the end
  *    state is a function of the last write, whatever the interleaving was. No
- *    timeout, no retry, and no attempt to guess a value. (The popup's own call is
- *    covered by the same argument: the write it makes is what queues this
- *    context's sync, and that one runs last.)
+ *    timeout, no retry, and no attempt to guess a value.
+ *
+ *    🔴 The popup is a caller of this queue, not a fifth writer beside it: W82
+ *    left it calling `syncBackfillAlarm` in its own realm, and that call was
+ *    ordered by nothing — so the popup was still a last writer outside the chain
+ *    in both directions. W87 replaced it with `POPUP_SYNC_ALARM_MESSAGE`, which
+ *    enters here. **Every writer to these alarms is now this one chain**, and the
+ *    argument above covers the popup because the popup no longer has a path that
+ *    bypasses it.
  *
  *    It also removes a duplicate the old shape produced on every switch-on: two
  *    syncs both saw "not armed", both drew a delay and both called `create`, so
@@ -2123,6 +2130,44 @@ export default defineBackground(() => {
           .catch((err: Error) => {
             console.warn('[chat-stasher] backfill start-here failed', err.message);
             sendResponse({ ok: false, reason: 'no-store' });
+          });
+        return true;
+      }
+      /**
+       * 🔴 W87 · **The popup's toggle asks this context to sync the alarms, and
+       *    this context is the only place the sync runs.**
+       *
+       * `onToggle` used to write the switch and then call `syncBackfillAlarm` in
+       * the popup's own realm. `alarmSyncQueue` above orders only the syncs that
+       * run *here*, so that call had no ordering relationship with the chain
+       * whatsoever — whichever settled last won, and the popup's could settle
+       * last in both directions:
+       *
+       *   · off: the chain (queued by the write's `storage.onChanged`) cleared
+       *     both alarms while an earlier popup on-sync was still in flight, and
+       *     that sync then re-created them. The switch was off and the alarms
+       *     were armed; ticks refuse at the `disabled` gate, so no requests were
+       *     made, but the worker kept waking for the rest of the day.
+       *   · on: the chain armed both alarms while an earlier popup off-sync was
+       *     awaiting `alarms.clear`, and that clear then landed — switch on,
+       *     nothing armed, and nothing re-arms it until some unrelated wake.
+       *
+       * Both are one defect: **a writer outside the queue**. So the popup sends
+       * this message instead, and the reply is the outcome of a sync that entered
+       * the queue and re-read the stored switch when it ran.
+       *
+       * The popup's own write is what the `storage.onChanged` listener reacts to,
+       * so this message is a second, ordered request rather than the only one.
+       * The two are idempotent — a second sync with the switch on observes the
+       * first one's alarm and takes the `kept` path — and "on ends armed / off
+       * ends cleared" does not depend on which of them arrives first.
+       */
+      if (message?.type === POPUP_SYNC_ALARM_MESSAGE) {
+        syncAlarmWithSwitch()
+          .then((result) => sendResponse({ ok: true, result }))
+          .catch((err: Error) => {
+            console.warn('[chat-stasher] backfill alarm sync requested by the popup failed', err.message);
+            sendResponse({ ok: false, reason: 'sync-failed' });
           });
         return true;
       }

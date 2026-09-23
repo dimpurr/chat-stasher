@@ -115,6 +115,25 @@ export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
  */
 export const POPUP_START_BACKFILL_MESSAGE = 'cs-backfill-start-here';
 
+/**
+ * 🔴 W87 · Popup → background: "the switch has just changed; bring the alarms in
+ * step with it".
+ *
+ * The popup does **not** call `syncBackfillAlarm` itself any more. That call put
+ * a second alarm writer outside background's `alarmSyncQueue`, with no ordering
+ * relationship to the queue at all, so whichever of the two settled last won —
+ * and in both directions the popup's own call could be that one. This message
+ * puts the popup's request **into** the queue instead: background runs
+ * `syncAlarmWithSwitch`, which re-reads the stored switch when the sync actually
+ * runs, and the reply the popup gets describes that run.
+ *
+ * The write is still the authority — the handler reads the stored value, not a
+ * value carried in this message, so a failed write falls back and the alarms
+ * fall back with it. The message carries no payload for the same reason: there
+ * is nothing here for a caller to state that could disagree with storage.
+ */
+export const POPUP_SYNC_ALARM_MESSAGE = 'cs-backfill-sync-alarm';
+
 /** The runtime facts background hands back to the popup. */
 export interface BackfillRuntimeStatus {
   /**
