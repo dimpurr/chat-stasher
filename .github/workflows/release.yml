@@ -1,7 +1,10 @@
 # Release — build the installable binary and attach it to the tagged Release.
 #
 # Runs ONLY when a version tag (`v*`) is pushed. A release is an event — the
-# tag — not a manual toggle, so there is no workflow_dispatch here.
+# tag — not a manual toggle, so there is no workflow_dispatch here. `v*` is
+# wider than "a release tag", so the tag's shape is the first thing checked
+# below: a tag that is not `vX.Y.Z` or `vX.Y.Z-rc.N` fails the run before
+# anything is built.
 #
 # The workflow builds prebuilt binaries for supported macOS platforms
 # (darwin-arm64 and darwin-x86_64) and bundles a single SHA256SUMS covering both.
@@ -38,6 +41,92 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      # -----------------------------------------------------------------------
+      # FIRST gate, because the tag is the release's whole identity and because
+      # a wrong tag is the one failure nothing downstream can notice.
+      #
+      # Exactly two tag shapes are release tags (RELEASING.md, "Channels"):
+      #
+      #   v0.3.0        a stable release  -> published as the repository's "latest"
+      #   v0.3.0-rc.1   a candidate       -> published as a GitHub *prerelease*
+      #
+      # The trigger above is `v*`, which is wider: `v0.3.0rc1`, `v0.3.0-rc` and
+      # `v0.3.0-beta.1` all match it too. Each is a plausible typo for a tag
+      # someone meant, and under the previous "does the version contain a
+      # hyphen?" rule the first published as a *normal* release and took the
+      # "latest" slot — which is what a reader of the Releases page means by
+      # stable — and the other two published as prereleases. So the shape is asserted here, before the gates and
+      # before the build, and a tag that is not one of the two ends the run.
+      #
+      # The tag must also name the exact version Cargo.toml carries, for both
+      # shapes. The binary embeds CARGO_PKG_VERSION (built below; RELEASING.md
+      # step 7 checks `chat-stasher --version`), so a tag that disagrees with
+      # Cargo.toml ships a Release titled after the tag whose binary reports the
+      # other string. For an rc the disagreement is worse than cosmetic: an rc
+      # and the stable it is a candidate for would then print the same version,
+      # which is why the rc carries its `-rc.N` suffix in Cargo.toml too.
+      - name: Gate — tag shape and version agreement
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            KIND="stable"
+            PRERELEASE=0
+          elif printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then
+            KIND="release candidate"
+            PRERELEASE=1
+          else
+            {
+              echo "error: '${TAG}' is not a release tag."
+              echo "       a release tag is exactly one of:"
+              echo "         vMAJOR.MINOR.PATCH        a stable release"
+              echo "         vMAJOR.MINOR.PATCH-rc.N   a release candidate"
+              echo "       Nothing was built and nothing was published by this run."
+            } >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+
+          # The `[package]` version, which is the string CARGO_PKG_VERSION gets.
+          # Scoped to the `[package]` table so a `version =` under
+          # `[dependencies]` can never be the one that answers.
+          CARGO_VERSION="$(awk '
+            /^\[/ { section = $0 }
+            section == "[package]" && /^version[ ]*=/ {
+              line = $0
+              sub(/^[^"]*"/, "", line)
+              sub(/".*$/, "", line)
+              print line
+              exit
+            }
+          ' crates/chat-stasher/Cargo.toml)"
+
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "error: no version found under [package] in crates/chat-stasher/Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            {
+              echo "error: the tag and Cargo.toml disagree."
+              echo "       tag:                             ${TAG} -> ${VERSION} (${KIND})"
+              echo "       crates/chat-stasher/Cargo.toml:  ${CARGO_VERSION}"
+              echo "       The binary embeds the Cargo.toml version, so this Release"
+              echo "       would ship a binary reporting '${CARGO_VERSION}'."
+              echo "       Set Cargo.toml (and Cargo.lock) on main first — RELEASING.md."
+            } >&2
+            exit 1
+          fi
+
+          echo "tag OK: ${TAG} — ${KIND}; Cargo.toml agrees at ${CARGO_VERSION}"
+
+          # Read by the create step, so the two places that need to know the
+          # shape cannot disagree about what the shapes are.
+          echo "RELEASE_PRERELEASE=${PRERELEASE}" >> "$GITHUB_ENV"
 
       # -----------------------------------------------------------------------
       # Verify BEFORE building anything that could be published.
@@ -125,6 +214,23 @@ jobs:
           ls -l dist
           cat dist/SHA256SUMS
 
+          # 🔴 The release ships the CLI only. The browser extension is NOT an
+          # asset — it is distributed as an unpacked development build until at
+          # least four platforms deliver data to the CLI (RELEASING.md). Nothing
+          # above can produce an extension file today; this assertion is what
+          # keeps that true if someone later adds a build step to this workflow,
+          # because "the asset list looks right" is not something a reviewer
+          # checks on a diff that only adds a step.
+          expected="$(printf '%s\n' "$ARTIFACT_ARM64" "$ARTIFACT_X86" SHA256SUMS | sort)"
+          actual="$(ls dist | sort)"
+          if [ "$expected" != "$actual" ]; then
+            echo "error: unexpected release assets in dist/ — expected exactly:" >&2
+            printf '%s\n' "$expected" >&2
+            echo "got:" >&2
+            printf '%s\n' "$actual" >&2
+            exit 1
+          fi
+          echo "asset set OK: CLI binaries + SHA256SUMS only (no extension)"
       - name: Create Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -135,15 +241,46 @@ jobs:
           # https://github.com/dimpurr/chat-stasher/releases/download/v${VERSION}
           # (install.sh:22), so the Release tag and asset names must match the
           # tag exactly — nothing is renamed here.
-          TAG="$GITHUB_REF_NAME"    # e.g. v0.1.0
-          VERSION="${TAG#v}"        # e.g. 0.1.0
+          TAG="$GITHUB_REF_NAME"    # e.g. v0.2.0 | v0.3.0-rc.1
+          VERSION="${TAG#v}"        # e.g. 0.2.0 | 0.3.0-rc.1
+
+          # --- stable vs release candidate ----------------------------------
+          # The shape was decided once, by the "Gate — tag shape and version
+          # agreement" step, which is the only place that knows what the two
+          # shapes are; this step reads its answer rather than re-deriving it
+          # from the string, so the two steps cannot drift apart.
+          #
+          # The prerelease flag is the whole mechanism that keeps an rc from
+          # becoming the repository's "latest" release, and "latest" is what a
+          # reader of the Releases page means by stable. Without it an rc would
+          # take the latest slot and quietly become what people install.
+          # "Drafts and prereleases cannot be set as latest." —
+          # https://docs.github.com/en/rest/releases/releases (read 2026-09-23)
+          #
+          # An unset value is NOT read as "stable": that would be the gate
+          # failing open, publishing an unverified tag as the latest release.
+          # It means this job reached here without the gate, and the tag was
+          # never checked.
+          #
+          # `${RC_FLAG:+--prerelease}` rather than a bare `$RC_FLAG`: it expands
+          # to nothing when the variable is empty, so a stable tag runs the
+          # exact command a stable tag ran before this branch existed.
+          case "${RELEASE_PRERELEASE:-}" in
+            0) RC_FLAG="" ;;
+            1) RC_FLAG=1 ;;
+            *)
+              echo "error: RELEASE_PRERELEASE is '${RELEASE_PRERELEASE:-<unset>}', not 0 or 1 — the tag-shape gate did not run, so '${TAG}' was never verified. Refusing to publish." >&2
+              exit 1
+              ;;
+          esac
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; uploading assets (--clobber)."
             gh release upload "$TAG" dist/* --clobber
           else
-            echo "Creating Release ${TAG}."
+            echo "Creating Release ${TAG}${RC_FLAG:+ (prerelease)}."
             gh release create "$TAG" dist/* \
+              ${RC_FLAG:+--prerelease} \
               --title "chat-stasher v${VERSION}" \
               --notes "Prebuilt binaries for macOS (aarch64-apple-darwin and x86_64-apple-darwin) plus SHA256SUMS. See docs/install.md for installation."
           fi
