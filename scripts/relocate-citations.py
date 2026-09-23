@@ -13,6 +13,13 @@ several extra rounds (W46b, W59d, W65m, W64c). This script does that one step.
     python3 scripts/check-citation-drift.py        # then read every failure
     python3 scripts/check-citation-drift.py --update   # only once they are clean
 
+🔴 The repository it rewrites is the one the **working directory** is in
+(`git rev-parse --show-toplevel`), never the one this file happens to sit in. A
+copy left in another worktree used to read and write *that* worktree's
+documents, and to run `git` there: the invocation below would have edited the
+wrong tree and printed an ordinary-looking plan while doing it. Run outside a
+git repository at all and it refuses rather than guessing which tree was meant.
+
 Pass every parent of the merge, in one run, after resolving the prose conflicts
 by hand. A resolved document keeps citations from both sides, and which side a
 given citation came from is not a guess this script makes: **a citation is read
@@ -47,14 +54,20 @@ Each document is replaced in one step — a sibling temporary file and
 `os.replace` — and a document's own line endings and final-newline state are
 copied through untouched, so a CRLF file stays CRLF and a file without a final
 newline does not gain one. If any document cannot be written, every document
-already written in that run is put back, and the run reports failure.
+already written in that run is put back; a document that could not be put back
+is named as a document left rewritten, not folded into the claim that nothing
+changed, and the run exits non-zero either way.
+
+A comma list is rewritten all at once or not at all: `path:12,15` whose span 15
+cannot be placed keeps the text it had, because a token half in the old numbers
+and half in the new ones reads as a citation of a range nobody wrote.
 
 Usage:
     python3 scripts/relocate-citations.py --old <commit> [--old <commit> ...]
                                           [--dry-run] [--quiet]
 
 Exit codes: 0 = every citation is now right · 1 = at least one needs a human ·
-            2 = usage error.
+            2 = usage error, or not run from inside a git repository.
 """
 
 from __future__ import annotations
@@ -68,29 +81,66 @@ import subprocess
 import sys
 import tempfile
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HERE = os.path.dirname(os.path.abspath(__file__))
+# The repository this run rewrites, resolved from the working directory by
+# resolve_repo() before anything is read. Deliberately not derived from
+# __file__: see the note above.
+REPO = ""
+
+# The target repository's citation parser, loaded by load_drift_module() once
+# REPO is known. The parser and the tree it parses travel together.
+drift = None  # type: ignore[assignment]
+
+
+def resolve_repo() -> str:
+    """The repository the working directory is in, or refuse.
+
+    🔴 `os.path.dirname(__file__)` answers "where does this copy of the script
+    live", which is not the question. Running another worktree's copy of this
+    file from the worktree being merged read and wrote the *other* worktree's
+    documents and ran every `git` command with the other worktree as its cwd,
+    so the whole run was about the wrong tree while looking entirely normal.
+    """
+    proc = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=os.getcwd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+    root = proc.stdout.strip()
+    if proc.returncode != 0 or not root:
+        detail = proc.stderr.strip() or "git said nothing"
+        die(f"the working directory is not inside a git repository ({detail}); "
+            f"run this from the worktree whose documents it should rewrite", 2)
+    return root
 
 
 def load_drift_module():
-    """Import scripts/check-citation-drift.py as a module.
+    """Import the target repository's scripts/check-citation-drift.py.
 
     The citation parser lives there and is the authority on what a citation is;
     a second copy of that regex here is a second answer to "what does the doc
     cite", and the two would drift. The selftest of the drift checker imports it
     the same way (probe 5).
+
+    It is loaded from the repository being rewritten, not from beside this file:
+    the parser's own doc set, lockfile and file lookups are all relative to that
+    repository, and taking them from wherever this copy of the tool happens to
+    sit is the same wrong-tree mistake resolve_repo() exists to prevent.
     """
-    path = os.path.join(HERE, "check-citation-drift.py")
+    path = os.path.join(REPO, "scripts", "check-citation-drift.py")
+    if not os.path.exists(path):
+        die(f"{path} does not exist: the repository being rewritten has no citation "
+            f"parser for this tool to use", 2)
     spec = importlib.util.spec_from_file_location("citation_drift", path)
     if spec is None or spec.loader is None:  # pragma: no cover - unreachable in a checkout
         die(f"cannot load {path}", 2)
     module = importlib.util.module_from_spec(spec)
     sys.modules["citation_drift"] = module
     spec.loader.exec_module(module)
+    module.REPO = REPO
     return module
-
-
-drift = load_drift_module()
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -195,49 +245,23 @@ def working_tree_index(rel: str) -> SourceIndex:
     return _cur_cache[rel]
 
 
-_RANGE_RE = re.compile(r":(\d+)(?:-(\d+))?(?![\d-])")
-
-# The path token the author wrote immediately before a `:N`. Used to tell one
-# file's citation from another file's citation of the same line numbers.
-_PATH_BEFORE_COLON_RE = re.compile(r"([A-Za-z0-9_./-]+)$")
-
-
-def ranges_written(text: str) -> set[tuple[str | None, int, int]]:
-    """Every (path token, start, end) a document writes as a citation.
-
-    This reads the range text rather than re-parsing the document, because the
-    only question it answers is "is this range in this side's coordinate
-    system". A citation written as `a/b.ts:2-4`, as `b.ts:2-4` or as a bare
-    `:2-4` continuation all carry the same `:2-4`, and the side that wrote it
-    owns that range however it spelled the path **to that file**. The trailing
-    guard is what keeps `:2-4` from matching inside `:2-40`.
-
-    The path token is kept because the numbers alone are not a coordinate: two
-    files have a line 3, and a document that only ever wrote `alpha.ts:3-4` was
-    never a statement about `beta.ts:3-4`. A token of None is a bare `:2-4`,
-    which spells no path at all and so is not a statement about one file
-    specifically — see `Parent.claims()`.
-    """
-    spans = set()
-    for m in _RANGE_RE.finditer(text):
-        named = _PATH_BEFORE_COLON_RE.search(text[: m.start()])
-        start = int(m.group(1))
-        spans.add((named.group(1) if named else None, start,
-                   int(m.group(2)) if m.group(2) else start))
-    return spans
-
-
 class Parent:
     """One side of the merge: a commit, and the documents as that side wrote them."""
 
-    def __init__(self, commit: str):
+    def __init__(self, commit: str, basenames: dict[str, list[str]]):
         self.commit = commit
-        self.spans: dict[str, set[tuple[str | None, int, int]]] = {}
+        # Every citation this side's own documents write, already resolved to
+        # the file it names. A parsed citation, not a raw range scan: the
+        # question "does this side's document claim this range of this file" is
+        # the same question the merged tree's citations are read with, and a
+        # second, rougher reader here answered it differently — see claims().
+        self.spans: dict[str, set[tuple[str, int, int]]] = {}
         self.lines: dict[str, set[str]] = {}
         for doc in drift.doc_files():
             rc, out = git("show", f"{commit}:{doc}")
             if rc == 0:
-                self.spans[doc] = ranges_written(out)
+                citations, _ = drift.parse_text(doc, out.splitlines(), basenames)
+                self.spans[doc] = {(c.target, c.start, c.end) for c in citations}
                 self.lines[doc] = set(out.splitlines())
 
     @property
@@ -252,23 +276,24 @@ class Parent:
         numbers, and treating it as one lets a side vote on a citation it never
         made — including voting to relocate it.
 
-        A token that spelled a full path has to be that path. A token that
-        spelled a bare file name (`main.rs:3-4` for crates/.../main.rs) matches
-        on the basename, which is how the citation parser resolves one too. A
-        token of None is a bare `:3-4` continuation: it names no path, so it is
-        a coordinate in this side's system for whichever path its own sentence
-        named, and it counts here. Erring towards ownership is the safe
-        direction, because an owner that cannot place the range vetoes the
-        relocation rather than authorising it.
+        The side's document is read by the same parser that reads the merged
+        tree, so a claim is the *file the citation resolves to*, never the shape
+        of the token that was written:
+
+          * a bare `:3-4` continuation belongs to the file its own sentence
+            named. Reading it as a token of "no path" made it a claim about
+            every file with those line numbers, and a document that only ever
+            wrote `alpha.ts:1-2`, `:3-4` then voted to move a `cross.ts:3-4` it
+            had never heard of;
+          * a basename belongs to the one file it resolves to. Matching on
+            `os.path.basename(target)` made `a.ts:1-2` a claim about every
+            `a.ts` in the repository, so a document about `pkg/one/a.ts` moved
+            the citation of `pkg/two/a.ts`. A name shared by several files does
+            not resolve at all, and a name that does not resolve claims nothing
+            — the safe direction, because a citation with no owner is refused
+            rather than relocated.
         """
-        for token, s, e in self.spans.get(doc, ()):
-            if (s, e) != (start, end):
-                continue
-            if token is None:
-                return True
-            if token == target or token == os.path.basename(target):
-                return True
-        return False
+        return (target, start, end) in self.spans.get(doc, ())
 
     def wrote_this_line(self, doc: str, line: str) -> bool:
         """Whether this side's version of the document carries this exact line.
@@ -365,6 +390,47 @@ def embedding(cur: SourceIndex, block: list[str]) -> "list[int] | None":
     return hits
 
 
+def brace_balance(lines: list[str]) -> int:
+    """How many more `{` than `}` these lines hold."""
+    return sum(ln.count("{") - ln.count("}") for ln in lines)
+
+
+def end_is_forced(cur: SourceIndex, block: list[str], matched: list[int]) -> bool:
+    """Whether the walk's last line is the only candidate for the block's end.
+
+    🔴 The walk takes the earliest line that fits each step, and the last step is
+    where "earliest" can still be wrong. A cited `fn unique_name() {` /
+    `step();` / `helper();` / `}` whose merge inserted an `if` was rewritten to
+    `src/a.ts:1-5` — stopping on the `}` of the inserted `if` while the
+    function's own `}` was on line 7 — and the run exited 0, with the document
+    now citing a range that ends inside the function. The two-line
+    `fn unique_only_here() {` / `}` has no interior line for the check in
+    `grown()` to look at and fails the same way.
+
+    The last line cannot be checked the way the interior ones are ("does it
+    occur again later"). A closing brace legitimately repeats all over a source
+    file: in `export function beta(): number { … }` followed by another
+    function, the cited `}` occurs three times, and refusing every repeat would
+    refuse almost every citation that names a whole function — the control cases
+    in this tool's own selftest among them.
+
+    So the end is checked against the window it is the end of. Count the braces
+    of the cited lines from the first matched line to the last, and require the
+    last line to close the window — the balance at the end must be the balance
+    the cited block itself has. When it is not, the last line closed something
+    *inside* the window rather than the construct the window started: the merge
+    inserted an opening brace and the walk took the `}` that closes it, so every
+    later line with that same text is an equally good end and which one the
+    citation was about cannot be told.
+
+    A block that opens nothing (`return c;`, a Markdown paragraph) balances at
+    zero on both sides and is unaffected. Braces inside a string or a comment
+    are counted as if they were code, which can only refuse a window that is not
+    in doubt — the direction a wrong answer here has to fall.
+    """
+    return brace_balance(cur.norm[matched[0] : matched[-1] + 1]) == brace_balance(block)
+
+
 def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision | None":
     """The block with lines inserted inside it, so it is no longer one run.
 
@@ -395,7 +461,11 @@ def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision
         own lines. That means the "inserted" line is really a second copy of a
         cited line: the walk has stepped over the block's own tail to reach a
         later copy of it, and the window has run off the end of the cited
-        construct onto whatever repeats it further down the file.
+        construct onto whatever repeats it further down the file;
+      * the last line must be the only candidate for the block's end — see
+        `end_is_forced()`. The interior check above cannot see the last step,
+        which is why a window that stops on an inner `}` used to be written
+        into the document as a growth.
 
     Two identical cited lines with one of them deleted used to come back as a
     *shrunk* one-line range, and a deleted line whose text still existed later
@@ -420,7 +490,15 @@ def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision
         # order at all" is the `missing` it reports.
         return None
     for i in range(1, len(block) - 1):
-        if cur.norm[matched[i - 1] + 1 :].count(block[i]) > 1:
+        # Occurrences of this line later in the same block are the block's own
+        # content, not a competing alignment. A cited block whose two middle
+        # lines read the same (`step();` twice, say) had the second copy counted
+        # as an alternative and was refused, though the walk had placed it
+        # exactly; the range stayed stale and a human had to redo a relocation
+        # that was never in doubt. `own` is what the block itself contributes
+        # after step i, and the walk matched those copies in order.
+        own = sum(1 for j in range(i + 1, len(block)) if block[j] == block[i])
+        if cur.norm[matched[i] + 1 :].count(block[i]) > own:
             return Decision(
                 AMBIGUOUS, start, end, None, None,
                 f"the cited lines are in the merged file, but in more than one "
@@ -438,6 +516,14 @@ def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision
                 f"alignment: line {between + 1} is `{cur.norm[between]}`, one of them, "
                 f"and it sits between two of the others",
             )
+    if not end_is_forced(cur, block, matched):
+        return Decision(
+            AMBIGUOUS, start, end, None, None,
+            f"the cited lines are in the merged file, but the walk's last line "
+            f"`{block[-1]}` is not the only candidate for the block's end: the lines "
+            f"it spans open a construct the last one does not close, so a later line "
+            f"with the same text is just as good an end",
+        )
     if (first, last) == (start - 1, end - 1):
         # Every old line is still on its own line; only lines *between* them were
         # removed. The citation's range has not moved, which is this script's
@@ -714,10 +800,12 @@ def plan_doc(
             # that did not move must keep exactly the text it already had.
             written = group[0].raw.rpartition(":")[2].split(",")
             new_spans: list[str] = []
+            group_decisions: list[Decision] = []
             moved = False
+            stuck: Decision | None = None
             for j, cit in enumerate(group):
                 d = decide(parents, cur, doc, lines[lineno - 1], cit.target, cit.start, cit.end)
-                decisions.append(d)
+                group_decisions.append(d)
                 if d.status in RELOCATED:
                     moved = True
                     new_spans.append(
@@ -726,6 +814,29 @@ def plan_doc(
                     )
                 else:
                     new_spans.append(written[j])
+                    if d.status != RIGHT and stuck is None:
+                        stuck = d
+            if stuck is not None and moved:
+                # 🔴 One token, N citations out of the parser, and one of them
+                # cannot be placed. Rewriting the token with that span left in
+                # the old numbers produced `src/a.ts:17,15` — half the token in
+                # the merged file's coordinates and half in the parent's, with
+                # nothing in the document saying which half is which, and the
+                # summary counting the placed half as a relocation. The token
+                # keeps the text it had, and *every* span of it is reported as
+                # needing a human: a reader cannot act on half a token either.
+                for d in group_decisions:
+                    if d.status in RELOCATED:
+                        d.status = AMBIGUOUS
+                        d.new_start = d.new_end = None
+                        d.detail = (
+                            f"this token is left whole: its span "
+                            f"{stuck.old_start}-{stuck.old_end} could not be placed — "
+                            f"{stuck.detail}"
+                        )
+                decisions.extend(group_decisions)
+                continue
+            decisions.extend(group_decisions)
             if not moved:
                 continue
             prefix = group[0].raw.rpartition(":")[0]
@@ -759,7 +870,9 @@ def main() -> int:
                "docs/citations.lock are never written. Each document is replaced "
                "in one step and keeps its own line endings and final-newline "
                "state; if any document cannot be written, the documents already "
-               "written in that run are put back.",
+               "written in that run are put back, and a document that could not "
+               "be put back is named as one left rewritten. A comma list is "
+               "rewritten whole or not at all.",
     )
     ap.add_argument("--old", required=True, action="append", metavar="COMMIT",
                     help="a side of the merge whose line numbers the documents carry; "
@@ -770,17 +883,25 @@ def main() -> int:
                     help="print only the relocations, the refusals and the summary")
     args = ap.parse_args()
 
+    # After the arguments, so `--help` still works from anywhere. Everything
+    # below is relative to the working directory's repository: the documents,
+    # the citation parser, and every `git` call.
+    global REPO, drift
+    REPO = resolve_repo()
+    drift = load_drift_module()
+
     if len(set(args.old)) != len(args.old):
         die("the same --old was given twice; each side is one coordinate system")
+
+    basenames = drift.build_basename_index()
 
     parents: list[Parent] = []
     for rev in args.old:
         rc, out = git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
         if rc != 0:
             die(f"--old {rev} is not a commit in this repository")
-        parents.append(Parent(out.strip()))
+        parents.append(Parent(out.strip(), basenames))
 
-    basenames = drift.build_basename_index()
     citations, parse_problems = drift.parse_docs(basenames)
     if parse_problems:
         die(
@@ -870,16 +991,34 @@ def main() -> int:
             write_atomic(doc, text)
             written.append(doc)
     except OSError as exc:
+        stranded: list[str] = []
         for doc in written:
             try:
                 write_atomic(doc, originals[doc])
             except OSError as undo:
+                # 🔴 A document that could not be put back is *still rewritten*
+                # in the tree. Saying "the documents already rewritten were put
+                # back, so nothing was changed" over an unrestored one reports a
+                # document that is in the wrong state as untouched, which is the
+                # one sentence the reader must not be given here. It is named,
+                # and it is named in the summary rather than only in the error
+                # line above it.
+                stranded.append(f"{doc} ({undo})")
                 print(f"[citation-relocate] {doc} could not be restored: {undo}",
                       file=sys.stderr)
         drift._file_cache.clear()
-        print(f"[citation-relocate] writing a document failed: {exc}; the "
-              f"{len(written)} document(s) already rewritten were put back, so "
-              f"nothing was changed", file=sys.stderr)
+        if stranded:
+            print(f"[citation-relocate] writing a document failed: {exc}; "
+                  f"{len(written) - len(stranded)} of the {len(written)} document(s) "
+                  f"already rewritten were put back. COULD NOT RESTORE: "
+                  + "; ".join(stranded)
+                  + " — these documents are left carrying the rewrite and the tree "
+                    "is NOT as the run found it. Fix them before anything else.",
+                  file=sys.stderr)
+        else:
+            print(f"[citation-relocate] writing a document failed: {exc}; the "
+                  f"{len(written)} document(s) already rewritten were put back, so "
+                  f"nothing was changed", file=sys.stderr)
         return 1
 
     if rewritten:

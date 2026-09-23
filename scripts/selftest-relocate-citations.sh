@@ -28,6 +28,17 @@
 #   G  a citation that is the suffix of a longer token, in a document that is
 #      CRLF and has no final newline
 #   H  a document that cannot be written, after an earlier one has been
+#   I  another worktree's copy of the tool, run from this worktree, and a
+#      directory that is in no git repository at all
+#   J  a grown range whose last line is an inner `}` the merge inserted, the
+#      two-line block that has no interior line to check, and one that really
+#      does grow
+#   K  a bare `:N` continuation and a bare file name that resolves to neither
+#      of the two files sharing it
+#   L  a comma list one of whose spans cannot be placed
+#   M  a block whose two middle lines read the same, so the block's own second
+#      copy is not an alternative alignment
+#   N  a document that cannot be put back after a later write failed
 #
 # 🔴 Probes 4, 5 and 6 are the point of the tool, not decoration. A relocation
 #    that guesses when the answer is not unique is worse than the hand work it
@@ -1148,10 +1159,563 @@ same_bytes "$TMP/h-readme.before" README.md \
   "README.md is exactly as the run found it"
 
 echo
+echo
+echo "=============================================================="
+echo "Fixture I: the repository is the working directory's"
+echo "  The tool left in another worktree is invoked from this"
+echo "  one. Its own copy of the script sits in a tree that is a"
+echo "  whole other repository, with the same commits, so a run"
+echo "  that resolves the repo from __file__ edits *that* tree —"
+echo "  and prints an ordinary-looking plan while doing it."
+echo "=============================================================="
+FIXI="$TMP/i"
+seed_repo "$FIXI"
+cat > "$FIXI/docs/install.md" <<'MD'
+# Fixture I
+
+Alpha is `src/a.ts:2-3`.
+MD
+cat > "$FIXI/docs/privacy.md" <<'MD'
+# Fixture I
+
+Privacy cites nothing.
+MD
+printf 'A1\nA2\nA3\nA4\n' > "$FIXI/src/a.ts"
+(
+  cd "$FIXI" || exit 2
+  git add -A
+  git commit -qm "fixture I: the state the document's line numbers describe"
+)
+OLDI="$(cd "$FIXI" && git rev-parse HEAD)"
+echo "  fixture I at ${OLDI:0:7}"
+# The merge moves the cited pair down two lines.
+printf 'NEW1\nNEW2\nA1\nA2\nA3\nA4\n' > "$FIXI/src/a.ts"
+# The other worktree: the same commits, so the same --old resolves there too —
+# which is what makes the wrong tree answer the question instead of erroring.
+FIXI_OTHER="$TMP/i-other"
+cp -R "$FIXI" "$FIXI_OTHER"
+cp "$FIXI_OTHER/docs/install.md" "$TMP/i-other-install.before"
+
+echo
+echo "=============================================================="
+echo "Probe 25: the run rewrites the tree it was run in, not the"
+echo "  one its script file lives in"
+echo "=============================================================="
+(
+  cd "$FIXI" || exit 2
+  python3 "$FIXI_OTHER/scripts/relocate-citations.py" --old "$OLDI"
+) >"$TMP/run11.out" 2>&1
+rc=$?
+expect 0 "$rc" "another worktree's copy can still relocate in this one"
+contains "$FIXI/docs/install.md" '`src/a.ts:4-5`' "this worktree's document was the one rewritten"
+same_bytes "$TMP/i-other-install.before" "$FIXI_OTHER/docs/install.md" \
+  "the worktree the script file lives in was not touched"
+
+echo
+echo "=============================================================="
+echo "Probe 26: outside a git repository it refuses"
+echo "  --dry-run so that a wrong answer cannot edit a document on"
+echo "  the way to failing this probe."
+echo "=============================================================="
+mkdir -p "$TMP/not-a-repo"
+(
+  cd "$TMP/not-a-repo" || exit 2
+  python3 "$FIXI/scripts/relocate-citations.py" --old "$OLDI" --dry-run
+) >"$TMP/run12.out" 2>&1
+rc=$?
+expect 2 "$rc" "a directory that is in no repository is a usage error, not a guess"
+contains "$TMP/run12.out" 'not inside a git repository' \
+  "and it says which question it could not answer"
+
+echo
+echo "=============================================================="
+echo "Fixture J: a grown range that ends on the wrong line"
+echo "  The cited block's last line is a closing brace. The merge"
+echo "  inserts a construct *inside* the block, and the walk takes"
+echo "  the brace that closes the insertion — an earlier copy than"
+echo "  the one the citation named — so the range it writes ends"
+echo "  inside the cited construct and still points at real lines."
+echo "  Fixture D's alignments are caught by the interior lines;"
+echo "  these two are the shapes where the last step is the only"
+echo "  wrong one, including the two-line block that has no"
+echo "  interior line at all. The control beside them really does"
+echo "  grow, so a run that refuses everything cannot pass."
+echo "=============================================================="
+FIXJ="$TMP/j"
+seed_repo "$FIXJ"
+cat > "$FIXJ/docs/install.md" <<'MD'
+# The grown ranges that end on the wrong line
+
+The inner brace is `src/inner.ts:1-4`.
+
+The pair is `src/pair.ts:1-2`.
+MD
+cat > "$FIXJ/docs/privacy.md" <<'MD'
+# The one that really does grow
+
+The function is `src/control.ts:1-4`.
+MD
+cat > "$FIXJ/src/inner.ts" <<'TS'
+fn unique_name() {
+  step();
+  helper();
+}
+TS
+cat > "$FIXJ/src/pair.ts" <<'TS'
+fn unique_only_here() {
+}
+TS
+cat > "$FIXJ/src/control.ts" <<'TS'
+export function beta(): number {
+  const c = 3;
+  return c;
+}
+TS
+(
+  cd "$FIXJ" || exit 2
+  git add -A
+  git commit -qm "fixture J: the state the document's line numbers describe"
+)
+OLDJ="$(cd "$FIXJ" && git rev-parse HEAD)"
+echo "  fixture J at ${OLDJ:0:7}"
+cat > "$FIXJ/src/inner.ts" <<'TS'
+fn unique_name() {
+  step();
+  if (guard) {
+    helper();
+  }
+  tail();
+}
+TS
+cat > "$FIXJ/src/pair.ts" <<'TS'
+fn unique_only_here() {
+  if (guard) {
+  }
+  tail();
+}
+TS
+cat > "$FIXJ/src/control.ts" <<'TS'
+export function beta(): number {
+  const c = 3;
+  // merged: one new line inside beta
+  return c;
+}
+TS
+if ! grep -q 'guard' "$FIXJ/src/inner.ts" || ! grep -q 'tail();' "$FIXJ/src/inner.ts" \
+  || [ "$(wc -l < "$FIXJ/src/inner.ts")" -ne 7 ]; then
+  echo "  ✘ fixture J's merged file is not what this selftest means to write; it is void"
+  FAILED=1
+fi
+
+cd "$FIXJ" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 27: a window that stops on an inner brace is refused"
+echo "  src/inner.ts:1-4 is the whole of fn unique_name. The merge"
+echo "  put an \`if\` inside it, and the walk's last step lands on"
+echo "  the \`}\` that closes the \`if\` — line 5 — while the"
+echo "  function's own \`}\` is line 7."
+echo "=============================================================="
+cp docs/install.md "$TMP/j-install.before"
+python3 scripts/relocate-citations.py --old "$OLDJ" >"$TMP/run13.out" 2>&1
+rc=$?
+expect 1 "$rc" "a window whose end is not forced is an error, not a relocation"
+refused "$TMP/run13.out" 'REFUSE.*src/inner\.ts:1-4 .*is not the only candidate' \
+  "the inner-brace window is refused, naming the end line"
+absent docs/install.md 'src/inner.ts:1-5' "the range that ends inside the function was not written"
+
+echo
+echo "=============================================================="
+echo "Probe 28: a two-line block has no interior check to fall back on"
+echo "  src/pair.ts:1-2 is fn unique_only_here and its \`}\`. Both"
+echo "  lines are cited, so the interior rule has nothing to test,"
+echo "  and the walk takes the \`}\` of an inserted \`if\` on line 3"
+echo "  as the end — with the function's own \`}\` still on line 5."
+echo "=============================================================="
+refused "$TMP/run13.out" 'REFUSE.*src/pair\.ts:1-2 .*is not the only candidate' \
+  "the two-line window is refused by the same rule"
+absent docs/install.md 'src/pair.ts:1-3' "the range that ends on the inserted brace was not written"
+
+echo
+echo "=============================================================="
+echo "Probe 29: the block that really grows still relocates"
+echo "  lines inserted inside a cited block that opens and closes"
+echo "  its own construct leave the window's balance where the"
+echo "  block's was, so this is still a relocation and the run"
+echo "  still exits non-zero for the two refusals beside it."
+echo "=============================================================="
+contains docs/privacy.md '`src/control.ts:1-5`' "the genuine grown range relocated"
+same_bytes "$TMP/j-install.before" docs/install.md \
+  "docs/install.md is exactly as the run found it"
+
+echo
+echo "=============================================================="
+echo "Fixture K: a continuation and a bare file name"
+echo "  A bare \`:3-4\` continues the file its own sentence named —"
+echo "  src/alpha.ts — and not every file with those line numbers."
+echo "  A token of \`a.ts\` names one file, and this repository has"
+echo "  two; a name that resolves to neither claims neither. Both"
+echo "  shapes used to make a side an owner of a citation it never"
+echo "  wrote, and both times the cited file's old bytes were still"
+echo "  in the merged tree, so the run moved the citation and"
+echo "  exited 0."
+echo "=============================================================="
+FIXK="$TMP/k"
+seed_repo "$FIXK"
+mkdir -p "$FIXK/pkg/one" "$FIXK/pkg/two"
+printf 'k1\nk2\nk3\nk4\nk5\nk6\n' > "$FIXK/src/alpha.ts"
+printf 'c1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXK/src/cross.ts"
+printf 'g1\ng2\ng3\ng4\n' > "$FIXK/src/gamma.ts"
+printf 'o1\no2\no3\no4\n' > "$FIXK/pkg/one/a.ts"
+printf 't1\nt2\nt3\nt4\n' > "$FIXK/pkg/two/a.ts"
+cat > "$FIXK/docs/install.md" <<'MD'
+# Side A
+
+Alpha is `src/alpha.ts:1-2`, and more of it is `:3-4`.
+
+The basename is `a.ts:1-2`.
+
+Gamma is `src/gamma.ts:1-2`.
+MD
+cat > "$FIXK/docs/privacy.md" <<'MD'
+# Fixture K
+
+Privacy cites nothing.
+MD
+(
+  cd "$FIXK" || exit 2
+  git add -A
+  git commit -qm "fixture K: the side that wrote the continuation and the bare name"
+)
+OLDK="$(cd "$FIXK" && git rev-parse HEAD)"
+echo "  fixture K at ${OLDK:0:7}"
+# The merge: the sentence that was about alpha now names cross, the bare name
+# now names one of the two files it could mean, and each cited file gained a
+# line at the top so the old bytes are still there, one line down.
+printf 'ZZ\nk1\nk2\nk3\nk4\nk5\nk6\n' > "$FIXK/src/alpha.ts"
+printf 'QQ\nc1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXK/src/cross.ts"
+printf 'ZZ\ng1\ng2\ng3\ng4\n' > "$FIXK/src/gamma.ts"
+printf 'YY\nt1\nt2\nt3\nt4\n' > "$FIXK/pkg/two/a.ts"
+cat > "$FIXK/docs/install.md" <<'MD'
+# Merged
+
+Alpha is `src/cross.ts:3-4`.
+
+The basename is `pkg/two/a.ts:1-2`.
+
+Gamma is `src/gamma.ts:1-2`.
+MD
+
+cd "$FIXK" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 30: a bare continuation does not own another file"
+echo "  Side A's document writes src/alpha.ts:1-2 and then a bare"
+echo "  \`:3-4\` continuing it. src/cross.ts:3-4 is a citation no"
+echo "  declared side's document ever wrote: the continuation is a"
+echo "  claim about alpha, not about everything with a line 3."
+echo "=============================================================="
+cp docs/install.md "$TMP/k-install.before"
+python3 scripts/relocate-citations.py --old "$OLDK" >"$TMP/run14.out" 2>&1
+rc=$?
+expect 1 "$rc" "an unclaimed range is an error, not a relocation"
+refused "$TMP/run14.out" 'REFUSE.*src/cross\.ts:3-4 .*no --old document writes this range' \
+  "the file the continuation never named is unclaimed"
+absent docs/install.md 'src/cross.ts:4-5' "and the citation was left where it was"
+
+echo
+echo "=============================================================="
+echo "Probe 31: a bare file name does not own every file with that"
+echo "  name"
+echo "  \`a.ts:1-2\` in side A's document resolves to no single file"
+echo "  here — pkg/one/a.ts and pkg/two/a.ts share the name — so it"
+echo "  is a claim about neither, and the citation of pkg/two/a.ts"
+echo "  cannot be moved on the strength of it."
+echo "=============================================================="
+refused "$TMP/run14.out" 'REFUSE.*pkg/two/a\.ts:1-2 .*no --old document writes this range' \
+  "the same-named file the bare token never resolved to is unclaimed"
+absent docs/install.md 'pkg/two/a.ts:2-3' "and its citation was left where it was"
+
+echo
+echo "=============================================================="
+echo "Probe 32: the citation the side did name is still relocated"
+echo "  The refusals above must not turn the run into one that"
+echo "  refuses everything: side A's document writes"
+echo "  src/gamma.ts:1-2 outright, and gamma's lines moved down one."
+echo "=============================================================="
+contains docs/install.md '`src/gamma.ts:2-3`' "the named citation was relocated"
+
+echo
+echo "=============================================================="
+echo "Fixture L: one span of a comma list cannot be placed"
+echo "  A comma list is one token in the document and N citations"
+echo "  out of the parser. Rewriting it with the spans that could"
+echo "  be placed and the ones that could not left as they were"
+echo "  produced \`src/a.ts:6-8,15-17\`: half the token in the"
+echo "  merged tree's numbers and half in the parent's, pointing"
+echo "  at a range nobody wrote. The token stays as it was, and"
+echo "  every span of it is reported, because half a token is not"
+echo "  something a reader can act on."
+echo "=============================================================="
+FIXL="$TMP/l"
+seed_repo "$FIXL"
+cat > "$FIXL/docs/install.md" <<'MD'
+# The comma list
+
+The spans are `src/a.ts:2-4,15-17`.
+MD
+cat > "$FIXL/docs/privacy.md" <<'MD'
+# Fixture L
+
+Privacy cites nothing.
+MD
+cat > "$FIXL/src/a.ts" <<'TS'
+export function alpha(): number {
+  const a = 1;
+  const b = 2;
+  return a + b;
+}
+
+export function beta(): number {
+  const c = 3;
+  return c;
+}
+
+export function gamma(): number {
+  return 0;
+}
+// DELETED-HEAD
+export const doomed = 1;
+export const doomedToo = 2;
+
+export function removed(): number {
+  return -1;
+}
+TS
+(
+  cd "$FIXL" || exit 2
+  git add -A
+  git commit -qm "fixture L: the two spans the one token names"
+)
+OLDL="$(cd "$FIXL" && git rev-parse HEAD)"
+echo "  fixture L at ${OLDL:0:7}"
+cat > "$FIXL/src/a.ts" <<'TS'
+// merged: three new lines at the top
+import type { X } from "./x";
+const initialised = true;
+
+export function alpha(): number {
+  const a = 1;
+  const b = 2;
+  return a + b;
+}
+
+export function beta(): number {
+  const c = 3;
+  return c;
+}
+
+export function gamma(): number {
+  return 0;
+}
+
+export function removed(): number {
+  return -1;
+}
+TS
+cd "$FIXL" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 33: the token is left whole, and is still the token"
+echo "  The first span moved with the file; the second names three"
+echo "  lines the merge deleted. There is no rewrite of this token"
+echo "  that is not half old and half new."
+echo "=============================================================="
+cp docs/install.md "$TMP/l-install.before"
+python3 scripts/relocate-citations.py --old "$OLDL" >"$TMP/run15.out" 2>&1
+rc=$?
+expect 1 "$rc" "a token only half of which can be placed is an error"
+contains docs/install.md '`src/a.ts:2-4,15-17`' "the token is still the one the document had"
+absent docs/install.md 'src/a.ts:6-8,15-17' "no half-rewritten token was written"
+same_bytes "$TMP/l-install.before" docs/install.md \
+  "docs/install.md is exactly as the run found it"
+
+echo
+echo "=============================================================="
+echo "Probe 34: and both spans of it are reported"
+echo "  The span that could be placed is a refusal too: it is not"
+echo "  being relocated, and a summary that counted it as one would"
+echo "  describe a document that is not on disk."
+echo "=============================================================="
+refused "$TMP/run15.out" 'REFUSE.*src/a\.ts:2-4 .*left whole' \
+  "the placeable span is reported as part of a token left whole"
+refused "$TMP/run15.out" 'REFUSE.*src/a\.ts:15-17 .*not in the merged file at all' \
+  "and the unplaceable span is reported as the text that is gone"
+
+echo
+echo "=============================================================="
+echo "Fixture M: a block whose two middle lines read the same"
+echo "  The citation names fn unique_name, \`step();\`, \`step();\`"
+echo "  and the closing brace. The two identical lines are the"
+echo "  block's own content, not two alignments to choose between —"
+echo "  the walk placed both, and the range it produced is the one"
+echo "  the sentence is about. Counting the block's own second copy"
+echo "  as an alternative refused it and left the citation stale."
+echo "=============================================================="
+FIXM="$TMP/m"
+seed_repo "$FIXM"
+cat > "$FIXM/docs/install.md" <<'MD'
+# The repeated line inside the block
+
+The function is `src/a.ts:1-4`.
+MD
+cat > "$FIXM/docs/privacy.md" <<'MD'
+# Fixture M
+
+Privacy cites nothing.
+MD
+cat > "$FIXM/src/a.ts" <<'TS'
+fn unique_name() {
+  step();
+  step();
+}
+TS
+(
+  cd "$FIXM" || exit 2
+  git add -A
+  git commit -qm "fixture M: the state the document's line numbers describe"
+)
+OLDM="$(cd "$FIXM" && git rev-parse HEAD)"
+echo "  fixture M at ${OLDM:0:7}"
+cat > "$FIXM/src/a.ts" <<'TS'
+fn unique_name() {
+  step();
+  step();
+  extra();
+}
+TS
+cd "$FIXM" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 35: the range relocates, and is reported as grown"
+echo "=============================================================="
+python3 scripts/relocate-citations.py --old "$OLDM" >"$TMP/run16.out" 2>&1
+rc=$?
+expect 0 "$rc" "a block whose embedding is unique is a relocation, not a refusal"
+contains docs/install.md '`src/a.ts:1-5`' "the function's range grew to the whole construct"
+absent docs/install.md '`src/a.ts:1-4`' "no stale range survived"
+if grep -q -F 'GROWN' "$TMP/run16.out"; then
+  echo "  ✔ and the growth is reported as GROWN"
+else
+  echo "  ✘ the growth was not reported as GROWN:"
+  sed 's/^/      /' "$TMP/run16.out"
+  FAILED=1
+fi
+
+echo
+echo "=============================================================="
+echo "Fixture N: a document that cannot be put back"
+echo "  The write that fails is real, exactly as in fixture H:"
+echo "  contracts/ is made unwritable, so contracts/api.md fails"
+echo "  after README.md has been written. The failing *restore*"
+echo "  cannot be staged from outside — the same mode that would"
+echo "  refuse the restore refuses the original write first — so"
+echo "  it is injected, and only it: the first write of README.md"
+echo "  is the real one, and the second call is the run putting it"
+echo "  back. A summary that says every document was put back"
+echo "  reports a document that is in the wrong state as untouched."
+echo "=============================================================="
+FIXN="$TMP/n"
+seed_repo "$FIXN"
+mkdir -p "$FIXN/contracts"
+cat > "$FIXN/docs/install.md" <<'MD'
+# Fixture N
+
+Install cites nothing.
+MD
+cat > "$FIXN/README.md" <<'MD'
+# Fixture N
+
+Readme cites `src/a.ts:2-3`.
+MD
+cat > "$FIXN/contracts/api.md" <<'MD'
+# Contract
+
+Contract cites `src/a.ts:2-3`.
+MD
+printf '# Fixture N\n\nPrivacy cites nothing.\n' > "$FIXN/docs/privacy.md"
+printf 'AA\nBB\nCC\nDD\n' > "$FIXN/src/a.ts"
+(
+  cd "$FIXN" || exit 2
+  git add -A
+  git commit -qm "fixture N: two documents that relocate"
+)
+OLDN="$(cd "$FIXN" && git rev-parse HEAD)"
+echo "  fixture N at ${OLDN:0:7}"
+printf 'PP\nQQ\nAA\nBB\nCC\nDD\n' > "$FIXN/src/a.ts"
+chmod 500 "$FIXN/contracts"
+chmod 400 "$FIXN/contracts/api.md"
+
+echo
+echo "=============================================================="
+echo "Probe 36: a restore that fails is reported as a failure"
+echo "=============================================================="
+python3 - "$FIXN" "$OLDN" >"$TMP/run17.out" 2>&1 <<'PY'
+import importlib.util
+import os
+import sys
+
+fixture, old = sys.argv[1], sys.argv[2]
+os.chdir(fixture)
+spec = importlib.util.spec_from_file_location(
+    "relocate_citations_under_test",
+    os.path.join(fixture, "scripts", "relocate-citations.py"),
+)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["relocate_citations_under_test"] = mod
+spec.loader.exec_module(mod)
+
+real_write_atomic = mod.write_atomic
+seen = {"README.md": 0}
+
+
+def write_atomic_whose_restore_fails(doc, text):
+    if doc == "README.md":
+        seen[doc] += 1
+        if seen[doc] > 1:
+            # The second call for this document is the run putting it back.
+            raise OSError(13, "injected: the restore cannot be written")
+    real_write_atomic(doc, text)
+
+
+mod.write_atomic = write_atomic_whose_restore_fails
+sys.argv = ["relocate-citations.py", "--old", old]
+sys.exit(mod.main())
+PY
+rc=$?
+chmod 700 "$FIXN/contracts"
+chmod 600 "$FIXN/contracts/api.md"
+expect 1 "$rc" "a document left rewritten must not be reported as a clean run"
+if grep -q -F 'COULD NOT RESTORE: README.md' "$TMP/run17.out"; then
+  echo "  ✔ the summary names the document it could not put back"
+else
+  echo "  ✘ the summary does not name the unrestored document:"
+  sed 's/^/      /' "$TMP/run17.out"
+  FAILED=1
+fi
+absent "$TMP/run17.out" 'nothing was changed' \
+  "and it does not claim the tree is as the run found it"
+
+echo
 echo "=============================================================="
 echo "After: each fixture's own git status"
 echo "=============================================================="
-for d in "$FIXA" "$FIXB" "$FIXC" "$FIXD" "$FIXF" "$FIXG" "$FIXH"; do
+for d in "$FIXA" "$FIXB" "$FIXC" "$FIXD" "$FIXF" "$FIXG" "$FIXH" \
+         "$FIXI" "$FIXI_OTHER" "$FIXJ" "$FIXK" "$FIXL" "$FIXM"; do
   echo "  $(basename "$d"):"
   (cd "$d" && git status --porcelain | sed 's/^/    /')
 done
