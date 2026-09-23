@@ -58,6 +58,7 @@ python3 scripts/check-citation-drift.py
 python3 scripts/output-inventory.py --check
 python3 scripts/check-commit-messages.py --selftest
 bash scripts/dev/test-reload-extension.sh
+bash scripts/selftest-relocate-citations.sh
 bash scripts/release-gate.sh
 ```
 
@@ -130,6 +131,42 @@ bash scripts/release-gate.sh --selftest
 This command intentionally corrupts a temporary staging shard. Its expected
 result is `GATE: FAIL` with a non-zero exit status; that is a successful
 self-test, not a successful release gate.
+
+### Resolving a merge
+
+A branch that touches code moves line numbers, so a merge conflicts on README.md,
+the documents under `docs/`, and `docs/citations.lock`. Only the prose is a
+judgement call; the citation numbers are mechanical and `scripts/relocate-citations.py`
+does them. Take both sides' prose, then:
+
+```sh
+python3 scripts/relocate-citations.py --old <parentA> --old <parentB> --dry-run
+python3 scripts/relocate-citations.py --old <parentA> --old <parentB>
+python3 scripts/check-citation-drift.py
+python3 scripts/check-citation-drift.py --update
+```
+
+Pass **every** parent of the merge, in one invocation. A resolved document keeps
+citations from both sides, and a citation is read in the numbers of the side whose
+own document writes that same range — so `--old <parentB>` cannot move a citation
+that only A ever wrote down. A range no declared side writes is reported, not
+relocated.
+
+Run it **once**, on the freshly resolved document. Afterwards the documents carry
+the working tree's numbers, so "these numbers are side A's" is no longer true of
+them and the next run refuses rather than relocating a second time. That refusal is
+the tool working: re-reading a relocated citation in a parent's line numbers is how
+a correct anchor gets moved onto an unrelated range.
+
+A range is moved only when its old text is found in exactly one place, so a run that
+reports `REFUSE` needs a human — the cited text was rewritten, or it now occurs more
+than once, and either way the sentence has to be re-read against the code. A range
+reported `GROWN` was relocated with lines inserted inside it: read those lines
+before `--update` and confirm they belong to the claim.
+
+`--update` locks in whatever the documents now say. Running it without reading the
+failures defeats the check; the whole point of the sequence above is that the drift
+check gets a chance to be red first.
 
 ## Reloading the extension during development
 
