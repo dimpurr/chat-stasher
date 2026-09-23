@@ -222,7 +222,9 @@ or services are unavailable; they must not make the local, credential-free
 checks depend on a remote account.
 
 Do not add a new release or publication action to a pull request. Repository
-visibility and licensing remain owner decisions.
+visibility and licensing remain owner decisions. The release model — the dev and
+stable channels, who approves, and the exact steps to cut a release — is in
+[`RELEASING.md`](RELEASING.md).
 
 ## Pull requests
 

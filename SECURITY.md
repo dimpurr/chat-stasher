@@ -44,12 +44,15 @@ leave the report open indefinitely.
 
 | Version | Supported |
 |---|---|
-| `main` (unreleased) | Yes — this is the only line that receives fixes |
-| `0.2.0` (`crates/chat-stasher/Cargo.toml:3`) | Current version. `v0.1.0` was tagged and released on 2026-08-28; `0.2.0` is unreleased until a `v0.2.0` tag exists |
+| `main` — the dev channel, versioned `0.3.0-dev` (`crates/chat-stasher/Cargo.toml:3`) | Yes — this is the only line that receives fixes |
+| `0.2.0` — the current stable release (`v0.2.0`, tagged 2026-09-12) | No — fixes land on `main` and ship in the next stable release |
 
-There are no git tags and no published releases at the time of writing, so there
-are no older versions to backport to. If you are running this, you are running a
-checkout of `main`, and the fix path is "pull and rebuild".
+Stable releases are the git tags `vX.Y.Z`; the newest is `v0.2.0`, tagged and
+released on 2026-09-12 (`v0.1.0` on 2026-08-28). There is no maintained older
+line and therefore nothing to backport to: `main` carries a `-dev` version and
+is never published, and a fix reaches users in the next stable tag. If you are
+running this, you are running either a checkout of `main` or one of those
+tagged releases, and the fix path for both is to update.
 
 ## Scope
 

@@ -180,7 +180,7 @@ apps/extension/lib/contract.ts:39-100  8137d0d1ef2d  lines=62
 apps/extension/lib/contract.ts:102-104  212496897aef  lines=3
   <- docs/threat-model.md:343  :: export const PAGE_HOOK_VERSION = 'v1';
 apps/extension/lib/contract.ts:246-271  efcfd4acfdd7  lines=26
-  <- SECURITY.md:62, docs/threat-model.md:26  :: export interface ChatPlatform {
+  <- SECURITY.md:65, docs/threat-model.md:26  :: export interface ChatPlatform {
 apps/extension/lib/contract.ts:272-718  2b1f9c976fef  lines=447
   <- README.md:173, docs/install.md:83, docs/install.md:165, docs/privacy.md:96  :: export const PLATFORMS: readonly ChatPlatform[] = [
 apps/extension/lib/contract.ts:275  65cef6a544ee  lines=1
@@ -218,7 +218,7 @@ apps/extension/lib/contract.ts:636  23c99a148fbc  lines=1
 apps/extension/lib/contract.ts:716  2e5f6f960ad0  lines=1
   <- docs/install.md:32, docs/privacy.md:506  :: webSocketCapture: false,
 apps/extension/lib/contract.ts:721-723  748a234ceca6  lines=3
-  <- SECURITY.md:62, docs/privacy.md:490, docs/threat-model.md:26  :: export const CONTENT_MATCHES: string[] = Array.from(
+  <- SECURITY.md:65, docs/privacy.md:490, docs/threat-model.md:26  :: export const CONTENT_MATCHES: string[] = Array.from(
 apps/extension/lib/contract.ts:743  93f15da49cac  lines=1
   <- docs/privacy.md:503  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
 apps/extension/lib/contract.ts:821-840  9e2aaed71d47  lines=20
@@ -343,10 +343,10 @@ apps/extension/wxt.config.ts:114-120  2a2b23999f5f  lines=7
   <- docs/threat-model.md:380  :: // 🔴 ADR-014: this pins the Chrome extension ID to
 apps/extension/wxt.config.ts:136  84787b717b3c  lines=1
   <- docs/privacy.md:221  :: data_collection_permissions: { required: ['none'] },
-crates/chat-stasher/Cargo.toml:1-6  67c6d5782580  lines=6
+crates/chat-stasher/Cargo.toml:1-6  4ae83d353de7  lines=6
   <- docs/install.md:183  :: [package]
-crates/chat-stasher/Cargo.toml:3  608a3132dc6f  lines=1
-  <- SECURITY.md:48  :: version = "0.2.0"
+crates/chat-stasher/Cargo.toml:3  3551ee15db6b  lines=1
+  <- SECURITY.md:47  :: version = "0.3.0-dev"
 crates/chat-stasher/Cargo.toml:5  53a903362b38  lines=1
   <- README.md:177  :: description = "Append-only archive for every LLM conversati…
 crates/chat-stasher/Cargo.toml:14-27  096bce56001a  lines=14
@@ -488,7 +488,7 @@ crates/chat-stasher/src/main.rs:4626-4633  f369ca3fd940  lines=8
 crates/chat-stasher/src/main.rs:4654-4747  f4b26b9e403e  lines=94
   <- docs/threat-model.md:478  :: eprintln!("option: {e}");
 crates/chat-stasher/src/main.rs:4737-4746  fae6f081f82c  lines=10
-  <- SECURITY.md:67  :: keep_ssh_masters: bool,
+  <- SECURITY.md:70  :: keep_ssh_masters: bool,
 crates/chat-stasher/src/main.rs:4979-5097  6179727696b7  lines=119
   <- README.md:155, README.md:206, docs/threat-model.md:538  :: fn cmd_read(
 crates/chat-stasher/src/main.rs:6024-6025  a70af44131aa  lines=2
@@ -544,9 +544,9 @@ crates/chat-stasher/src/search.rs:16-34  4c5924e38beb  lines=19
 crates/chat-stasher/src/selector.rs:1-247  c9ab719fa3b6  lines=247
   <- README.md:132  :: //! selector — the one filter vocabulary that `search` and …
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
-  <- SECURITY.md:64, docs/threat-model.md:452  :: //! Read-only guarantee: every connection opens with `mode=…
+  <- SECURITY.md:67, docs/threat-model.md:452  :: //! Read-only guarantee: every connection opens with `mode=…
 crates/chat-stasher/src/sqlite_probe.rs:1373-1376  b250c934a6e3  lines=4
-  <- SECURITY.md:65, docs/threat-model.md:450  :: let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::S…
+  <- SECURITY.md:68, docs/threat-model.md:450  :: let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::S…
 crates/chat-stasher/src/sqlite_probe.rs:2010-2056  79eecb3f0cca  lines=47
   <- docs/threat-model.md:453  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:153-156  f2781c197162  lines=4

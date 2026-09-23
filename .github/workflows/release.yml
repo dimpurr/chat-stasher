@@ -125,6 +125,23 @@ jobs:
           ls -l dist
           cat dist/SHA256SUMS
 
+          # 🔴 The release ships the CLI only. The browser extension is NOT an
+          # asset — it is distributed as an unpacked development build until at
+          # least four platforms deliver data to the CLI (RELEASING.md). Nothing
+          # above can produce an extension file today; this assertion is what
+          # keeps that true if someone later adds a build step to this workflow,
+          # because "the asset list looks right" is not something a reviewer
+          # checks on a diff that only adds a step.
+          expected="$(printf '%s\n' "$ARTIFACT_ARM64" "$ARTIFACT_X86" SHA256SUMS | sort)"
+          actual="$(ls dist | sort)"
+          if [ "$expected" != "$actual" ]; then
+            echo "error: unexpected release assets in dist/ — expected exactly:" >&2
+            printf '%s\n' "$expected" >&2
+            echo "got:" >&2
+            printf '%s\n' "$actual" >&2
+            exit 1
+          fi
+          echo "asset set OK: CLI binaries + SHA256SUMS only (no extension)"
       - name: Create Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -138,12 +155,34 @@ jobs:
           TAG="$GITHUB_REF_NAME"    # e.g. v0.1.0
           VERSION="${TAG#v}"        # e.g. 0.1.0
 
+          # --- stable vs release candidate ----------------------------------
+          # The workflow triggers on `v*`, which covers two shapes of tag:
+          #
+          #   v0.3.0        a stable release  -> published as-is
+          #   v0.3.0-rc.1   a candidate       -> published as a GitHub *prerelease*
+          #
+          # The prerelease flag is the whole mechanism that keeps an rc from
+          # becoming the repository's "latest" release, and "latest" is what a
+          # reader of the Releases page means by stable. Without it an rc would
+          # take the latest slot and quietly become what people install.
+          # "Drafts and prereleases cannot be set as latest." —
+          # https://docs.github.com/en/rest/releases/releases (read 2026-09-23)
+          #
+          # `${RC_FLAG:+--prerelease}` rather than a bare `$RC_FLAG`: it expands
+          # to nothing when the variable is empty, so a stable tag runs the
+          # exact command it ran before this branch existed.
+          RC_FLAG=""
+          case "$VERSION" in
+            *-*) RC_FLAG=1 ;;
+          esac
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; uploading assets (--clobber)."
             gh release upload "$TAG" dist/* --clobber
           else
-            echo "Creating Release ${TAG}."
+            echo "Creating Release ${TAG}${RC_FLAG:+ (prerelease)}."
             gh release create "$TAG" dist/* \
+              ${RC_FLAG:+--prerelease} \
               --title "chat-stasher v${VERSION}" \
               --notes "Prebuilt binaries for macOS (aarch64-apple-darwin and x86_64-apple-darwin) plus SHA256SUMS. See docs/install.md for installation."
           fi
