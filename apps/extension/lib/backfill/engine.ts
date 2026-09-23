@@ -75,8 +75,8 @@ export interface HttpResponse {
    * and an older content script all produce — and the classifier reads it as "no
    * evidence about the credential", not as a denial.
    *
-   * See `lib/platform-auth.ts`'s `MinimalResponse` for what each wrapper is allowed to
-   * set, and `haltReasonForStatus` for who reads it.
+   * See `lib/platform-auth.ts`'s `GeminiAuthorizedResponse` for what a wrapper is
+   * allowed to set, and `haltReasonForStatus` for who reads it.
    */
   survivedCredentialReread?: boolean;
 }

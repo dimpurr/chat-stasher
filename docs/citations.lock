@@ -51,7 +51,7 @@ apps/extension/entrypoints/background.ts:1593-1609  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
-apps/extension/entrypoints/dw-bridge.content.ts:604-630  c4f63f6e72e7  lines=27
+apps/extension/entrypoints/dw-bridge.content.ts:608-634  c4f63f6e72e7  lines=27
   <- docs/privacy.md:102, docs/threat-model.md:267  :: const seenGate = createSeenGate(15_000);
 apps/extension/entrypoints/dw-fetch-main.content.ts:13-15  0a41796be631  lines=3
   <- docs/threat-model.md:233  :: matches: CONTENT_MATCHES,
@@ -291,11 +291,11 @@ apps/extension/lib/page-hook.ts:705-730  cc9a7f2cab03  lines=26
   <- docs/threat-model.md:27, docs/threat-model.md:233  :: const hookedFetch: typeof window.fetch = async (input, init…
 apps/extension/lib/platform-auth.ts:61-71  5e4adeb00a65  lines=11
   <- docs/privacy.md:108  :: export function needsChatgptBearer(url: string, pageOrigin:…
-apps/extension/lib/platform-auth.ts:124-143  f67f01d9e4a4  lines=20
+apps/extension/lib/platform-auth.ts:101-120  f67f01d9e4a4  lines=20
   <- docs/privacy.md:108, docs/threat-model.md:268  :: export function createAuthorizedFetch(pageOrigin: string, r…
-apps/extension/lib/platform-auth.ts:281-318  03784069e1a6  lines=38
+apps/extension/lib/platform-auth.ts:258-295  03784069e1a6  lines=38
   <- README.md:169, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:533, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:599  :: export function createKimiAuthorizedFetch(
-apps/extension/lib/platform-auth.ts:647-742  331fd13b94ca  lines=96
+apps/extension/lib/platform-auth.ts:669-769  9037a7e5f6b3  lines=101
   <- README.md:171, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:606  :: export function createGeminiAuthorizedFetch(
 apps/extension/lib/popup-view.ts:770-783  00dceceff078  lines=14
   <- README.md:173, docs/install.md:161  :: /**

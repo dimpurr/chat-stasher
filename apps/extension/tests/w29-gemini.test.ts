@@ -633,10 +633,10 @@ describe('W29-5 · the page’s own bootstrap tokens', () => {
       },
       { readTokens: async () => tokens({ at: null }), language: null },
     );
-    const res = await authorized(listUrl, { method: 'POST', body: listRequestInit(GEMINI_PLAN, ORIGIN, 0, GEMINI_LIST_PAGE_SIZE).body! });
+    const answer = await authorized(listUrl, { method: 'POST', body: listRequestInit(GEMINI_PLAN, ORIGIN, 0, GEMINI_LIST_PAGE_SIZE).body! });
     // 🔴 A refusal, passed through. Never an empty page, and no second request for
     //    a user who is simply logged out.
-    expect(res.status).toBe(400);
+    expect(answer.response.status).toBe(400);
     expect(sent).toEqual(['']);
   });
 
@@ -651,8 +651,8 @@ describe('W29-5 · the page’s own bootstrap tokens', () => {
       },
       { readTokens: async () => tokens(), language: null },
     );
-    const res = await authorized(listUrl, { method: 'POST', body: listRequestInit(GEMINI_PLAN, ORIGIN, 0, GEMINI_LIST_PAGE_SIZE).body! });
-    expect(res.status).toBe(200);
+    const answer = await authorized(listUrl, { method: 'POST', body: listRequestInit(GEMINI_PLAN, ORIGIN, 0, GEMINI_LIST_PAGE_SIZE).body! });
+    expect(answer.response.status).toBe(200);
     expect(seen).toEqual([AT_TOKEN, AT_TOKEN]);
 
     // And a second refusal is the platform's answer: two attempts, then stop.
@@ -666,7 +666,7 @@ describe('W29-5 · the page’s own bootstrap tokens', () => {
       { readTokens: async () => tokens(), language: null },
     );
     const again = await refused(listUrl, { method: 'POST', body: listRequestInit(GEMINI_PLAN, ORIGIN, 0, GEMINI_LIST_PAGE_SIZE).body! });
-    expect(again.status).toBe(400);
+    expect(again.response.status).toBe(400);
     expect(twice).toHaveLength(2);
   });
 

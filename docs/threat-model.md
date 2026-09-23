@@ -264,19 +264,19 @@ while holding only the oldest turns. **On ChatGPT it does add traffic:** when yo
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
 `/api/auth/session` (`apps/extension/lib/page-hook.ts:679-684`;
-`apps/extension/entrypoints/dw-bridge.content.ts:604-630`;
-`apps/extension/lib/platform-auth.ts:124-143`). That is one extra request per
+`apps/extension/entrypoints/dw-bridge.content.ts:608-634`;
+`apps/extension/lib/platform-auth.ts:101-120`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
 read the same token, so this adds no new party who can see it. **Two other
 platforms are places where the extension sends a credential rather than only
 cookies** (backfill requests, and on Gemini the live leg too): Kimi reads the page
 origin's own `localStorage.access_token` at request time, sends it to Kimi's two
-backfill paths and nothing else, and holds no copy (`apps/extension/lib/platform-auth.ts:281-318`);
+backfill paths and nothing else, and holds no copy (`apps/extension/lib/platform-auth.ts:258-295`);
 Gemini reads three values out of the page's own `WIZ_global_data` — the XSRF token
 that goes in the request body, and two identifiers that go in the query — through
 a page-world pull, per request, holding no copy, and attaches them to its two RPCs
-and nothing else (`apps/extension/lib/platform-auth.ts:647-742`;
+and nothing else (`apps/extension/lib/platform-auth.ts:669-769`;
 `apps/extension/lib/contract.ts:39-100`). By the same argument that applies on
 ChatGPT, neither adds a party who could not already see it — any script on those
 origins, and the pages' own requests, carry those same values. Gemini's borrow
@@ -299,7 +299,7 @@ it bounds what you may safely assume is archived:
 
 | Platform | Requests the platform sees | What lands in your archive |
 |---|---|---|
-| **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek, Kimi and Claude, **one per page** on Gemini (a long conversation is several requests), **two** on Grok (a skeleton call, then a content call), plus **one** resolution request on Claude when neither the page's own requests nor its cookie names the organization | The conversation text (`apps/extension/lib/backfill/enumerate.ts:4220-4247`). On all six this is **implemented but not yet observed completing in a real browser**; on Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page those endpoints. On DeepSeek it is unverified too and the endpoint is not paged either — but the body is **checked before it is stored**: the response is a tree, the extension walks it from its newest message back to a root, and a walk that leaves the messages the response carries means that conversation is not archived (`apps/extension/lib/backfill/enumerate.ts:2560-2587`). Gemini **is** paged, to the end of the continuation token, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/engine.ts:1949-2001`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:2869-2930`; `apps/extension/lib/backfill/engine.ts:1475-1522`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:281-318`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:2053-2088`) |
+| **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek, Kimi and Claude, **one per page** on Gemini (a long conversation is several requests), **two** on Grok (a skeleton call, then a content call), plus **one** resolution request on Claude when neither the page's own requests nor its cookie names the organization | The conversation text (`apps/extension/lib/backfill/enumerate.ts:4220-4247`). On all six this is **implemented but not yet observed completing in a real browser**; on Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page those endpoints. On DeepSeek it is unverified too and the endpoint is not paged either — but the body is **checked before it is stored**: the response is a tree, the extension walks it from its newest message back to a root, and a walk that leaves the messages the response carries means that conversation is not archived (`apps/extension/lib/backfill/enumerate.ts:2560-2587`). Gemini **is** paged, to the end of the continuation token, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/engine.ts:1949-2001`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:2869-2930`; `apps/extension/lib/backfill/engine.ts:1475-1522`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:258-295`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:2053-2088`) |
 | **Perplexity** | Conversation-list requests **only** | **Nothing.** Not one conversation body is requested or delivered (`apps/extension/lib/backfill/enumerate.ts:4220-4247`) |
 | **Claude** | Conversation-list requests **and** requests per conversation, each addressed by an account-scoped organization; plus **one** organization-list request when the page's own requests and the cookie both answered nothing | The conversation text, on the condition its own parent links hold the whole branch — a body whose walk back from its newest message reaches a message the response does not carry is refused and listed as a failure rather than archived (`apps/extension/lib/backfill/enumerate.ts:3675-3731`). Every request path carries the organization, which the page URL does not; it is resolved from evidence in a fixed order and the leg **stops** rather than choosing when an account has several (`apps/extension/lib/backfill/claude-org.ts:211-265`), so the request that is sent is always one the extension itself built for one resolved organization (`apps/extension/lib/backfill/tab-port.ts:456-472`) |
 
@@ -596,14 +596,14 @@ a real limitation of the current code.
    (`apps/extension/lib/backfill/claude-page.ts:62-136`;
    `apps/extension/entrypoints/background.ts:809-853`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
-   held in memory only (`apps/extension/lib/platform-auth.ts:281-318`); a body
+   held in memory only (`apps/extension/lib/platform-auth.ts:258-295`); a body
    response that admits it is incomplete is refused and listed as a failure
    rather than archived (`apps/extension/lib/backfill/engine.ts:2053-2088`).
    Gemini's routes were measured in a logged-in session as well, its requests
    carry three values read out of the page's own bootstrap blob at request time
    and held in memory only, and its body is paged: more than 20 pages and the
    conversation is refused and listed as a failure rather than archived in part
-   (`apps/extension/lib/platform-auth.ts:647-742`;
+   (`apps/extension/lib/platform-auth.ts:669-769`;
    `apps/extension/lib/backfill/engine.ts:1949-2001`). On
    **Perplexity** it enumerates your conversations and archives
    **none of them** (`apps/extension/lib/backfill/enumerate.ts:4220-4247`). The user-visible symptom of

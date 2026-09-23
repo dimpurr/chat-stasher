@@ -13,7 +13,7 @@
  * So the fact is now **carried** rather than inferred. Gemini's wrapper is the only
  * code that knows whether a refusal came back from its credential path (it read the
  * page's `at`, and re-read it once before accepting the refusal as the answer), and
- * it marks the response it returns. The mark travels the whole transport — wrapper →
+ * it marks the answer it returns. The mark travels the whole transport — wrapper →
  * content script → message → `tabHttpPort` → engine — and the classifier requires it:
  *
  *   · a Gemini 400 **with** the mark ⇒ `auth-refused` (transient, as W64b intended);
@@ -23,6 +23,12 @@
  * The mark is a fact about **evidence**, not about the status: `401` is still an auth
  * refusal on every platform without any mark, because a 401 states the credential
  * itself.
+ *
+ * 🔴 W64d · The wrapper’s answer is `{ response, survivedCredentialReread }` — two
+ *    things side by side — and these cases read the fact and the status off it. Their
+ *    stubs are plain objects, which is enough for a rule about *classification*; the
+ *    response that carries a real `Response` through this path is
+ *    `w64d-gemini-response-identity.test.ts`.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -153,11 +159,11 @@ describe('W64c-2 · Gemini’s wrapper marks the refusals its credential path pr
       },
       { readTokens: async () => tokens(), language: null },
     );
-    const res = await authorized(listUrl, { method: 'POST', body: listBody });
-    expect(res.status).toBe(400);
+    const answer = await authorized(listUrl, { method: 'POST', body: listBody });
+    expect(answer.response.status).toBe(400);
     // Two attempts: the credential was re-read and the refusal is the retried request's.
     expect(seen).toHaveLength(2);
-    expect(res.survivedCredentialReread).toBe(true);
+    expect(answer.survivedCredentialReread).toBe(true);
   });
 
   it('🔴 a 400 with no credential at all is marked too, and still costs one request', async () => {
@@ -175,11 +181,11 @@ describe('W64c-2 · Gemini’s wrapper marks the refusals its credential path pr
       },
       { readTokens: async () => { reads += 1; return tokens({ at: null }); }, language: null },
     );
-    const res = await authorized(listUrl, { method: 'POST', body: listBody });
-    expect(res.status).toBe(400);
+    const answer = await authorized(listUrl, { method: 'POST', body: listBody });
+    expect(answer.response.status).toBe(400);
     expect(seen).toHaveLength(1);
     expect(reads).toBe(2);
-    expect(res.survivedCredentialReread).toBe(true);
+    expect(answer.survivedCredentialReread).toBe(true);
   });
 
   it('a signed-in page whose re-read turns up a token is retried, not refused', async () => {
@@ -198,10 +204,10 @@ describe('W64c-2 · Gemini’s wrapper marks the refusals its credential path pr
         language: null,
       },
     );
-    const res = await authorized(listUrl, { method: 'POST', body: listBody });
-    expect(res.status).toBe(200);
+    const answer = await authorized(listUrl, { method: 'POST', body: listBody });
+    expect(answer.response.status).toBe(200);
     expect(sent).toEqual(['', AT_TOKEN]);
-    expect(res.survivedCredentialReread).toBe(true);
+    expect(answer.survivedCredentialReread).toBe(true);
   });
 
   it('a request the wrapper does not credential is never marked', async () => {
@@ -229,9 +235,9 @@ describe('W64c-2 · Gemini’s wrapper marks the refusals its credential path pr
       async (): Promise<MinimalResponse> => ({ status: 401, text: async () => 'synthetic refusal' }),
       { readTokens: async () => tokens(), language: null },
     );
-    const res = await authorized(listUrl, { method: 'POST', body: listBody });
-    expect(res.status).toBe(401);
-    expect(res.survivedCredentialReread).toBe(true);
+    const answer = await authorized(listUrl, { method: 'POST', body: listBody });
+    expect(answer.response.status).toBe(401);
+    expect(answer.survivedCredentialReread).toBe(true);
   });
 });
 
