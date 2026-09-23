@@ -1183,6 +1183,20 @@ async function runAlarmTickBody(): Promise<TickResult> {
       });
     let result = await tickOne(await resolveHttpPort(target.origin));
     if (result.reason === 'no-http-port' && tabSweep === null) {
+      // 🔴 W62 · **Record the migration + gate decision *before* the recovery
+      //    sweep, so a no-tab tick is never held open by the sweep's liveness
+      //    pings.** The trace that W36/W47's acceptance reads — that the storage
+      //    layout moved and the tick was blocked at `no-http-port`, with no
+      //    refusal — is knowable the moment `resolveHttpPort` concedes. W51's
+      //    sweep then runs to give a closed-unregistered platform tab one more
+      //    chance to fetch *this* tick; in the true no-tab case it can only ping
+      //    tabs of another origin (there is no `tabs` permission to filter by),
+      //    so it cannot change this result, yet each silent unknown tab can cost
+      //    `BACKFILL_PING_TIMEOUT_MS` of stall. Writing the trace first means the
+      //    migration is reported even while the sweep is still pinging, and the
+      //    final write below replaces it with the run's own outcome and the
+      //    sweep's counts when a recovery did happen (W47 / W51 semantics).
+      await recordAlarmTick(store, result, targets.length, preflightRefusal, null);
       tabSweep = await recoverUnregisteredTabs();
       // Retry this target only by aiming at a row the sweep just registered
       // of *this* origin. Walking pickLiveTab again would re-strike the

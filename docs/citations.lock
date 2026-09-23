@@ -43,11 +43,11 @@ apps/extension/entrypoints/background.ts:948  6539997ed831  lines=1
   <- docs/privacy.md:310  :: return { platform: row.id, origin, scope: identity.value ||…
 apps/extension/entrypoints/background.ts:1052-1092  5bb00a167a1e  lines=41
   <- README.md:172, docs/install.md:635, docs/privacy.md:354, docs/privacy.md:370  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1289-1345  9dbc768d5407  lines=57
+apps/extension/entrypoints/background.ts:1303-1359  9dbc768d5407  lines=57
   <- docs/privacy.md:276  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:1475-1491  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:1489-1505  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:1518-1534  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:1532-1548  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:446-452  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
