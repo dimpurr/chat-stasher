@@ -68,6 +68,7 @@ import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
 //    captured URL, and the plan table is asked whether this platform is one of them.
 import { backfillCapabilityOf, backfillPlanFor } from '../lib/backfill/enumerate';
+import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
 import { haltClassOf, haltStillApplies, isHeader, stateKey } from '../lib/backfill/types';
 import {
@@ -765,12 +766,18 @@ async function claudeScopeFromTab(tabId: number | null, origin: string): Promise
  * the popup's start button is hidden once a target exists, so nothing else will).
  * Two records say "do not spend a question on this yet":
  *
- *  · **a permanent halt** for that scope. Its reason is already the answer the
- *    resolver would reach again — several organizations and no signal, or none at
- *    all — and re-asking every tick would turn "stop and wait for a human" into a
- *    slow poll of the account. The remedy the popup names is a human action
- *    (opening a conversation), and that arrives as a real capture, which
- *    registers the organization's own target and clears the path by itself;
+ *  · **a permanent halt for that scope that *this* build wrote**. Its reason is
+ *    already the answer the resolver would reach again — several organizations and
+ *    no signal, or none at all — and re-asking every tick would turn "stop and wait
+ *    for a human" into a slow poll of the account. The remedy the popup names is a
+ *    human action (opening a conversation), and that arrives as a real capture,
+ *    which registers the organization's own target and clears the path by itself.
+ *    🔴 W59 narrowed this from "a permanent halt" to "one this build wrote": a
+ *    record stamped with a **different** build is not an answer this build has
+ *    heard, and the resolver has changed since — W31's own resolver is the example,
+ *    one build can name an organization where an earlier one could only refuse.
+ *    That record is re-decided once, by the same rule the engine applies to it, and
+ *    a refusal that repeats is written back naming this build;
  *  · **a transient halt whose backoff has not elapsed**. This is the engine's own
  *    rule (engine.ts: a waiting round issues no request and writes nothing), and
  *    re-asking before `retryAt` would both spend the question early and push the
@@ -786,6 +793,14 @@ async function claudeScopeFromTab(tabId: number | null, origin: string): Promise
  *    about a *capability* says the leg is stopped. So the record is asked the same
  *    question the engine asks (`haltStillApplies`), and a record that no longer
  *    applies does not stand in the way.
+ *
+ * 🔴 W59 · **Both of the first two are now one rule, borrowed rather than copied:**
+ *    "does this record still apply" is answered by `haltExpiredBecause` — the
+ *    engine's own function — so the layer that decides whether to *ask* and the
+ *    layer that decides whether to *run* cannot drift apart. What replaced the
+ *    hand-written `haltClassOf(...) === 'permanent'` test is not a looser rule; it
+ *    is the same rule the run applies, which is the property R44 already had to fix
+ *    once in this function.
  *
  * 🔴 `now` is a parameter rather than a call to `Date.now()` here: this is a
  *    decision about a clock, and a decision about a clock that cannot be handed a
@@ -809,7 +824,15 @@ export async function scopeRetryDue(
   //    question it once answered has to be asked again. Returning false here made
   //    this layer a no-op — capability reasons are permanent, so the next line
   //    returned false anyway, and the target stayed frozen exactly as before.
-  if (!haltStillApplies(raw.halted, backfillCapabilityOf(platform))) return true;
+  //
+  // 🔴 W59 · And the question is now `haltExpiredBecause`, not a capability-only
+  //    test, so this layer stays the same *one* opinion the engine holds: a record
+  //    written by a different build is re-decided here too. `runningBuildId()` is
+  //    the same function the engine stamps its own records with, which is what keeps
+  //    "ask again" (here) and "there is something to ask" (there) from disagreeing —
+  //    the failure R44 already met once in this exact line.
+  const judgement = { capability: backfillCapabilityOf(platform), build: runningBuildId() };
+  if (!haltStillApplies(raw.halted, judgement)) return true;
   if (haltClassOf(raw.halted.reason) === 'permanent') return false;
   return raw.halted.retryAt === undefined || now >= raw.halted.retryAt;
 }

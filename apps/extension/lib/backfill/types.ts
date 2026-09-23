@@ -417,26 +417,105 @@ export type BackfillCapability = 'none' | 'list-only' | 'full';
  * not be rounded into each other.
  *
  * A record with no marker cannot be checked against anything: whichever build
- * wrote it, it was written in a world where nothing asked the question. So the
- * migration rule is per **class**, not per value (see `haltStillApplies`):
+ * wrote it, it was written in a world where nothing asked the question. So an
+ * unmarked record is treated as stale, and the leg re-decides. The cost is
+ * bounded and is stated where it is paid (`engine.ts`'s expiry branch): at most
+ * one run per legacy record, which re-asks the plan table and, if the answer is
+ * still no, writes the same halt back — now marked, so it cannot happen twice.
+ * Both reasons fire before the request they are about, so the re-decision sends
+ * nothing in the 'none' case and only reads the list it can already read in the
+ * 'list-only' case.
  *
- *   · a **capability**-class record without a marker is treated as stale, and the
- *     leg re-decides. The cost is bounded and is stated where it is paid
- *     (`engine.ts`'s expiry branch): at most one run per legacy record, which
- *     re-asks the plan table and, if the answer is still no, writes the same halt
- *     back — now marked, so it cannot happen twice. Both reasons fire before the
- *     request they are about, so the re-decision sends nothing in the 'none' case
- *     and only reads the list it can already read in the 'list-only' case;
- *   · an **account**, **upstream** or **storage** record without a marker keeps
- *     its full force. Reading "unmarked" as "expired" for those would clear real
- *     halts — a platform whose wire changed, an account whose organization could
- *     not be named — and that is worse than the defect this task exists to fix.
+ * 🔴 W59 · **This reason's reach used to stop at the capability class.** W44 left
+ *    an account / upstream / storage record unmarked by design, and said why:
+ *    reading "unmarked" as "expired" for those would clear real halts — a platform
+ *    whose wire changed, an account whose organization could not be named. W59
+ *    does make the `build` field those records now carry do that, and the answer
+ *    to W44's objection is the one W44 itself used for the capability class: the
+ *    record is **re-decided**, not cleared. A condition that still holds is
+ *    re-observed by the run that follows and written back stamped with this build,
+ *    which is the first build that has actually seen it — so it sticks from the
+ *    very next tick, and the run in between is the one attempt W44's bounded cost
+ *    already priced. What W44 was right to forbid is the version of this that is
+ *    not bounded: an expiry with nothing writing the judgement back.
  */
 export const CAPABILITY_UNMARKED = 'unmarked';
 
 /**
- * 🔴 W44 · **Does a stored record still apply to a build whose capability is
- * `capability`?**
+ * 🔴 W59 · **The value a permanent record carries when it does not name the build
+ * that wrote it.** Same kind of statement as `CAPABILITY_UNMARKED`, for the same
+ * reason: "this record never said" is not a value of the thing it describes.
+ *
+ * It is what a record written before this field existed reads as, and the task
+ * that added the field says what that means: **a different build**. A record that
+ * predates the question was written in a world where nothing asked it, so the
+ * build running now has not made the judgement it carries. See
+ * `haltExpiredBecause`.
+ *
+ * 🔴 It is spelled as a word no manifest version can be: `runtime.getManifest()
+ *    .version` is digits and dots, so the sentinel can never collide with a real
+ *    build id and be read as one.
+ */
+export const HALT_BUILD_UNSTAMPED = 'unstamped';
+
+/**
+ * 🔴 W59 · **Everything a stored record has to be judged against**, in one value.
+ *
+ * Two facts rather than one, and they are not interchangeable: `capability` is
+ * what this build can do (checked against the plan table — W44's positive check),
+ * `build` is *which build this is* (`runtime.getManifest().version`).
+ *
+ * 🔴 `build` may be **null**, and null is not "no build": it is "this build cannot
+ *    name itself" (no manifest, an API shape we do not recognise). The two are
+ *    kept apart all the way to the answer below, because they lead to opposite
+ *    actions — a record we cannot judge is one we must not clear.
+ */
+export interface HaltJudgement {
+  /** What this build can do: `capabilityOf(plan)`, from the same lookup that raised the halt. */
+  capability: BackfillCapability;
+  /** Which extension build this is, or null when it cannot be named. */
+  build: string | null;
+}
+
+/**
+ * 🔴 W59 · **Why a stored record is not this build's judgement any more.**
+ *
+ * Two different facts, and a reader needs to know which one it is looking at:
+ *
+ *  · `capability` — the record said what the build could do, and this build can do
+ *    something else. W44's answer: the plan table moved. The record's own marker
+ *    is carried so the sentence can name both sides.
+ *  · `build` — the record says (or does not say) which build wrote it, and it is
+ *    not this one. This is W59's answer, and it is the more general of the two:
+ *    a permanent stop of *any* reason is a judgement **one build** made — about
+ *    the wire, about the account, about our own stored record — and a build that
+ *    has not made it has no business enforcing it. What that buys is exactly one
+ *    fresh attempt, not a retry: the run that follows re-decides, and a condition
+ *    that still holds is written back **stamped with the build that just saw it**,
+ *    so the second run is the first one's equal and stops again.
+ *
+ * `build` is `HALT_BUILD_UNSTAMPED` when the record did not name one, and that is
+ * not a third kind of reason — it is the `build` kind, with the honest value.
+ */
+export type HaltExpiredBecause =
+  | {
+      because: 'capability';
+      /** What the record said the build could do, or `CAPABILITY_UNMARKED`. */
+      judgedAgainst: BackfillCapability | typeof CAPABILITY_UNMARKED;
+      /** What this build can do — the value that made the record stop applying. */
+      capability: BackfillCapability;
+    }
+  | {
+      because: 'build';
+      /** The build the record named, or `HALT_BUILD_UNSTAMPED` when it named none. */
+      build: string | typeof HALT_BUILD_UNSTAMPED;
+      /** The build that just re-decided — always a real id, because a null one never gets here. */
+      currentBuild: string;
+    };
+
+/**
+ * 🔴 W44/W59 · **Is a stored record still this build's judgement — and if not, why
+ * not?**
  *
  * One function, in one place, because two callers ask this question and the
  * failure mode of two answers is the one this project keeps meeting: two lists
@@ -446,14 +525,52 @@ export const CAPABILITY_UNMARKED = 'unmarked';
  * `haltExpired` record the engine already wrote, so there is no second judgement
  * for it to get wrong.
  *
- * A record for any other subject **always applies** — this function is not a
- * second expiry mechanism, and it deliberately answers `true` for the account,
- * upstream and storage classes so that a caller cannot accidentally treat one of
- * them as capability-class by forgetting to check the subject first.
+ * The three classes answer it three ways, and the order matters:
+ *
+ *  · **capability** (`unsupported-platform`, `detail-unsupported`) — W44's check,
+ *    and it comes first because it is the *stronger* one. Its whole truth
+ *    condition is the plan table, so it can be re-asked positively and expires
+ *    even a record this very build wrote. A capability stop that is still true
+ *    stays permanent even when an older build wrote it: the answer does not
+ *    depend on who is asking.
+ *  · **transient** — always still applies. A backoff is re-decided by the clock
+ *    (`retryAt`), not by a build, and W13's ladder is unchanged by this file.
+ *  · **permanent and not a capability** — W59's check. It applies **iff the record
+ *    names this build**. A record naming another build, or naming none, is
+ *    re-decided once.
+ *
+ * 🔴 A null `judgement.build` answers `true` — "still applies" — for the last
+ *    class, and that is the direction the invariant demands: we may clear a halt
+ *    only when we can prove it was another build's judgement, never on the
+ *    strength of not being able to say which build this is. (The capability class
+ *    is unaffected: its answer never depended on knowing the build.)
  */
-export function haltStillApplies(record: HaltRecord, capability: BackfillCapability): boolean {
-  if (haltSubjectOf(record.reason) !== 'capability') return true;
-  return (record.capability ?? CAPABILITY_UNMARKED) === capability;
+export function haltExpiredBecause(
+  record: HaltRecord,
+  judgement: HaltJudgement,
+): HaltExpiredBecause | null {
+  if (haltSubjectOf(record.reason) === 'capability') {
+    const judgedAgainst = record.capability ?? CAPABILITY_UNMARKED;
+    if (judgedAgainst === judgement.capability) return null;
+    return { because: 'capability', judgedAgainst, capability: judgement.capability };
+  }
+  if (haltClassOf(record.reason) === 'transient') return null;
+  if (judgement.build === null) return null;
+  if (record.build === judgement.build) return null;
+  return {
+    because: 'build',
+    build: record.build ?? HALT_BUILD_UNSTAMPED,
+    currentBuild: judgement.build,
+  };
+}
+
+/**
+ * The yes/no form of the same answer, for callers that only need the verdict
+ * (`scopeRetryDue`). Deliberately thin: it is `haltExpiredBecause` with the "why"
+ * dropped, not a second opinion about it.
+ */
+export function haltStillApplies(record: HaltRecord, judgement: HaltJudgement): boolean {
+  return haltExpiredBecause(record, judgement) === null;
 }
 
 /**
@@ -621,6 +738,32 @@ export interface HaltRecord {
    *    the same statement for that reason.
    */
   capability?: BackfillCapability;
+  /**
+   * 🔴 W59 · **The extension build that wrote this record** —
+   * `runtime.getManifest().version`, which is the plain semver when
+   * `CS_BUILD_NUMBER` is unset and `<semver>.<n>` on every dev reload (W24,
+   * lib/build-version.ts). Present on **permanent** records only, and absent on a
+   * record written before W59 (read as `HALT_BUILD_UNSTAMPED`, i.e. a different
+   * build — see `haltExpiredBecause`).
+   *
+   * Why the manifest version and not a number of our own: it is the identity the
+   * browser itself holds, so "the build that wrote this" and "the build that is
+   * running" are read from the same place and cannot drift. A constant someone
+   * remembered to bump is precisely the mechanism W44 refused for the capability
+   * marker, and it fails the same way — silently, in the direction of a record
+   * that outlives its truth.
+   *
+   * 🔴 Why transient records are **not** stamped: their re-decision is the clock's
+   *    (`retryAt`), not a build's, so a build stamp on one would be a second,
+   *    irrelevant answer to a question W13 already answers. Leaving them unstamped
+   *    also keeps their written shape byte-identical, which is what "the transient
+   *    classes are unchanged" has to mean on disk and not only in prose.
+   *
+   * 🔴 Omitted (not written as `undefined`) when the build cannot be named: see
+   *    `HaltJudgement.build`, whose null is answered conservatively by the reader
+   *    rather than being rounded into "another build" here.
+   */
+  build?: string;
 }
 
 /**
@@ -628,12 +771,12 @@ export interface HaltRecord {
  * that says so.**
  *
  * Why this has to exist, and has to outlive the record it replaces: the moment a
- * capability-class halt expires the engine clears it, and a cleared record is
- * *silence*. A user who saw "this platform's history cannot be backfilled yet"
- * and later sees the platform backfilling has been told nothing about why the
- * sentence disappeared — and silence in that direction is the same defect as the
- * one this task fixes, wearing a different coat (a leg that appears to start by
- * itself for no reason). So the expiry leaves a record the popup can read.
+ * halt expires the engine clears it, and a cleared record is *silence*. A user
+ * who saw "this platform's history cannot be backfilled yet" and later sees the
+ * platform backfilling has been told nothing about why the sentence disappeared —
+ * and silence in that direction is the same defect as the one this task fixes,
+ * wearing a different coat (a leg that appears to start by itself for no reason).
+ * So the expiry leaves a record the popup can read.
  *
  * 🔴 It is **durable**, on the header rather than in a run report, for the same
  *    reason W45's `relisted` is: the run that clears the record is gone from
@@ -641,24 +784,31 @@ export interface HaltRecord {
  *    that it ever happened. It is overwritten by the next expiry for the same
  *    scope, so a scope can hold one of these at a time.
  *
- * The four values are observations, not estimates: which reason the record named,
- * when the build that wrote it recorded that (`recordedAt`), what it said its
- * capability was — or `CAPABILITY_UNMARKED` when it did not say — and what this
- * build's capability is (`capability`), which is the whole reason the record no
- * longer applies.
+ * The values are observations, not estimates: which reason the record named, when
+ * the build that wrote it recorded that (`recordedAt`), when this build stopped
+ * applying it (`clearedAt`), and the pair that made it stop — carried by
+ * `HaltExpiredBecause`, which is where the two kinds and their wording live.
+ *
+ * 🔴 W59 · **A union, and the `because` discriminator is not decoration.** W44's
+ *    single shape named a capability on both sides, and the popup's sentence for
+ *    it says "it recorded list-only; this build records full". A build-class
+ *    expiry has no capability on either side — printing one would be a sentence
+ *    about a judgement nobody made, which is the same defect as printing
+ *    `unsupported-platform`'s sentence for an account halt. The union makes the
+ *    wrong sentence unrepresentable rather than merely discouraged.
+ *
+ * A record written by W44 has no `because` and reads back with `undefined`; the
+ * popup treats anything that is not `build` as its capability sentence, which is
+ * exactly what W44 wrote for it.
  */
-export interface HaltExpiry {
+export type HaltExpiry = HaltExpiredBecause & {
   /** The reason the expired record named. */
   reason: HaltReason;
   /** When that record was written, by the build that judged it. */
   recordedAt: number;
-  /** What the record said the build could do, or `CAPABILITY_UNMARKED` when it did not say. */
-  judgedAgainst: BackfillCapability | typeof CAPABILITY_UNMARKED;
-  /** What this build can do — the value that made the record stop applying. */
-  capability: BackfillCapability;
   /** When this build stopped applying it. */
   clearedAt: number;
-}
+};
 
 /** Why one run ended. Everything other than `halted` is a normal "gentle pause". */
 export type StopReason =

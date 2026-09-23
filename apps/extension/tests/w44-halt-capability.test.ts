@@ -45,6 +45,7 @@ import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillHeader, type HaltReason } from '../lib/backfill/types';
 import { renderPopup, popupText, NO_FAILURES } from '../lib/popup-view';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
+import { TEST_BUILD_ID } from './i18n-harness';
 
 const ORIGIN = 'https://chatgpt.com';
 const PPLX_ORIGIN = 'https://www.perplexity.ai';
@@ -171,7 +172,7 @@ describe('W44-1 · a capability halt stops applying once the capability exists',
     // ---- round 3: the expiry is persisted, and the record does not come back.
     const reloaded = await loadState(store, 'chatgpt', 'w44-capability');
     expect(reloaded.halted).toBeNull();
-    expect(reloaded.haltExpired?.capability).toBe('full');
+    expect(reloaded.haltExpired).toMatchObject({ because: 'capability', capability: 'full' });
     const r3 = await runBackfill({ ...opts(store, be.http, clock), scope: 'w44-capability', maxDetails: 1 });
     expect(r3.halted).toBeNull();
     expect(r3.archivedThisRun).toEqual([all[1]]);
@@ -202,19 +203,27 @@ describe('W44-1 · a capability halt stops applying once the capability exists',
   });
 });
 
-describe('W44-2 · the halts that must persist are untouched', () => {
+describe('W44-2 · a record THIS build wrote is what must go on persisting', () => {
   /**
-   * Every permanent reason that is **not** a statement about this build, seeded as
-   * an unmarked record — the same shape as the measured capability records — and
-   * run against an http port that must not be reached.
+   * Every permanent reason that is **not** a capability judgement, in the two
+   * states a stored record can be in: written by another build (unstamped, which
+   * W59 reads as a different build) and written by this one.
    *
-   * 🔴 What this table is for: the migration rule in W44-4 has to read "unmarked"
-   *    differently per class. If it read it as "expired" everywhere, every one of
-   *    these would be cleared — the account's real conditions, the platform's real
-   *    wire change — and the leg would run against them. That is worse than the
-   *    defect this task fixes, so it is a table and not a sentence.
+   * 🔴 **What this table used to assert, and why it changed.** W44 seeded all seven
+   *    unmarked and required that *none* of them be re-decided, on the grounds that
+   *    clearing a real halt — a platform whose wire changed, an account whose
+   *    organization could not be named — is worse than the defect W44 fixed. W59
+   *    generalises the same reasoning W44 used for the capability class to every
+   *    permanent record, and the answer to that objection is what W44 itself relied
+   *    on there: the record is **re-decided**, not cleared. The run that follows
+   *    re-observes the condition, and a condition that is still there is written
+   *    back **naming the build that saw it** — which is why the second half of every
+   *    case below is "and now it sticks". Nothing is written off on either path.
+   *
+   * The reasons are the same seven W44 chose; what changed is what a record in each
+   * state means, and the two halves below are the whole of it.
    */
-  const accountAndUpstream: HaltReason[] = [
+  const permanentNotCapability: HaltReason[] = [
     'org-ambiguous',
     'org-unresolved',
     'shape-changed',
@@ -224,24 +233,69 @@ describe('W44-2 · the halts that must persist are untouched', () => {
     'ledger-mismatch',
   ];
 
-  for (const reason of accountAndUpstream) {
-    it(`an unmarked ${reason} record keeps stopping the leg, and is never treated as expired`, async () => {
+  for (const reason of permanentNotCapability) {
+    it(`an unmarked ${reason} record names no build, so this build re-decides it once`, async () => {
       const store = memoryStore();
+      const all = ids(1);
+      const be = backend(all);
       const clock = stepClock(T0);
       const scope = `w44-keep-${reason}`;
       await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
+        // The list has not been read to its end, so the re-decision has a list to
+        // fetch: with `complete: true` the leg would have nothing to enumerate and
+        // "it ran" would prove nothing about the record that used to stop it.
+        enumCursor: { offset: 0, complete: false },
         halted: { reason, at: T0 - 3_600_000, detail: 'synthetic-fixture detail' },
+      }));
+
+      clock.at(T0 + 100 * 24 * 3600_000);
+      const run = await runBackfill({ ...opts(store, be.http, clock), scope, maxDetails: 1 });
+
+      // 🔴 The stored record did not decide this run: the leg ran, and the fetch
+      //    that proves it is the one the old build's record forbade.
+      expect(run.stopped).not.toBe('halted');
+      expect(run.halted).toBeNull();
+      expect(be.calls.length).toBeGreaterThan(0);
+      // 🔴 And it is not silent: the expiry names what the record did not say, and
+      //    the build that has just re-decided.
+      expect(run.state.haltExpired).toMatchObject({
+        because: 'build',
+        reason,
+        build: 'unstamped',
+        currentBuild: TEST_BUILD_ID,
+      });
+      // Nothing of the user's was written off by the expiry itself.
+      expect(run.archivedThisRun).toEqual([all[0]]);
+      expect(run.state.pending).toEqual([]);
+
+      // ---- and the re-decision is stamped, so nothing here can happen twice.
+      const persisted = await loadState(store, 'chatgpt', scope);
+      expect(persisted.halted).toBeNull();
+    });
+
+    it(`a ${reason} record stamped with this build keeps stopping the leg, and issues nothing`, async () => {
+      const store = memoryStore();
+      const clock = stepClock(T0);
+      const scope = `w59-keeps-${reason}`;
+      await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
+        halted: {
+          reason,
+          at: T0 - 3_600_000,
+          detail: 'synthetic-fixture detail',
+          build: TEST_BUILD_ID,
+        },
       }));
 
       clock.at(T0 + 100 * 24 * 3600_000);
       const run = await runBackfill({ ...opts(store, mustNotFetch, clock), scope });
 
+      // 🔴 This build's own judgement, so it stands: no request, no expiry, and the
+      //    record is left exactly as it was found.
       expect(run.stopped).toBe('halted');
       expect(run.halted?.reason).toBe(reason);
-      // 🔴 Not expired, and not marked as a capability judgement either: the record
-      //    was left exactly as it was found.
       expect(run.state.haltExpired).toBeUndefined();
       expect(run.halted?.capability).toBeUndefined();
+      expect(run.halted?.build).toBe(TEST_BUILD_ID);
 
       const persisted = await loadState(store, 'chatgpt', scope);
       expect(persisted.halted?.reason).toBe(reason);
@@ -249,12 +303,12 @@ describe('W44-2 · the halts that must persist are untouched', () => {
     });
   }
 
-  it('the organization halts are not capability judgements, and the popup still says their own sentence', () => {
+  it('an account halt still gets its own sentence, and not the expiry one', () => {
     const view = renderPopup({
       enabled: true,
       block: null,
       state: headerWith('claude', 'w44-org-popup', {
-        halted: { reason: 'org-unresolved', at: T0, detail: 'none could be named' },
+        halted: { reason: 'org-unresolved', at: T0, detail: 'none could be named', build: TEST_BUILD_ID },
       }),
       target: { platform: 'claude', scope: 'w44-org-popup' },
       failures: NO_FAILURES,
@@ -372,6 +426,7 @@ describe('W44-4 · the popup can say that a stop stopped applying', () => {
       state: headerWith('gemini', 'w44-popup', {
         halted: null,
         haltExpired: {
+          because: 'capability',
           reason: 'unsupported-platform',
           recordedAt: T0 - 3_420_000,
           judgedAgainst: 'unmarked',

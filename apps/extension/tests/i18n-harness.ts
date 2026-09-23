@@ -81,9 +81,29 @@ export function i18nApi(locale: TestLocale = 'en'): { getMessage: (key: string, 
   };
 }
 
-/** The `runtime` bits the overlay needs to locate a catalog. */
-export function runtimeApi(origin: string = TEST_EXTENSION_ORIGIN): { getURL: (path: string) => string } {
-  return { getURL: (path: string) => `${origin}${path.startsWith('/') ? '' : '/'}${path}` };
+/**
+ * 🔴 W59 · The version every fake extension API in this suite reports, i.e. "the
+ * build running now" for a test that does not say otherwise.
+ *
+ * Why the harness has one at all: in a real browser `runtime.getManifest()`
+ * always answers, and a halt record's build stamp is read from it. A harness
+ * without one would make every suite run the *degraded* configuration — a build
+ * that cannot name itself — and the W59 rule would then be inert in exactly the
+ * place it is supposed to be exercised (the same shape of hole as a test that
+ * disables the cache the product runs with). Suites that want "cannot name
+ * itself" delete this member on their own fake, which is a fact they then state.
+ */
+export const TEST_BUILD_ID = '0.1.0.1';
+
+/** The `runtime` bits the overlay needs to locate a catalog — plus the manifest, as in a real browser. */
+export function runtimeApi(origin: string = TEST_EXTENSION_ORIGIN): {
+  getURL: (path: string) => string;
+  getManifest: () => { version: string };
+} {
+  return {
+    getURL: (path: string) => `${origin}${path.startsWith('/') ? '' : '/'}${path}`,
+    getManifest: () => ({ version: TEST_BUILD_ID }),
+  };
 }
 
 export interface CatalogFetchOptions {

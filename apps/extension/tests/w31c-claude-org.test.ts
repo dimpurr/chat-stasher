@@ -636,10 +636,11 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
   //    produce a record that matches. The shape below is the one measured on a
   //    real machine on 2026-09-19: a judgement left behind by a build that had
   //    no plan for this platform.
-  it('🔴 a capability halt from another build is re-asked; an account halt is not', async () => {
+  it('🔴 a halt another build wrote is re-asked, whatever its reason; one this build wrote is not', async () => {
     const { scopeRetryDue, UNRESOLVED_SCOPE } = await import('../entrypoints/background');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const { headerOf, initialState, stateKey } = await import('../lib/backfill/types');
+    const { TEST_BUILD_ID } = await import('./i18n-harness');
 
     const s = browserLocalStore();
     const now = Date.now();
@@ -667,13 +668,30 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     });
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(true);
 
-    // 3 · 🔴 An account-class judgement is untouched: it is a fact about the
-    //     account, not about the build, so it stays permanent. Otherwise this
-    //     fix would turn "wait for a human" into a slow poll of the account.
+    // 3 · 🔴 W59 · An **account** judgement with no build stamp is re-asked too,
+    //     and this is the case W44 deliberately answered the other way: it read
+    //     "unmarked" as "keeps its full force" for the account class, because
+    //     clearing a real account halt is worse than the defect W44 fixed. W59
+    //     reads unstamped as *a different build* for every permanent reason, and
+    //     the thing that makes that safe is that the answer is written back — a
+    //     refusal that repeats comes back naming this build (state 4 below). The
+    //     resolver is also the clearest case for the rule: W31 is the build that
+    //     gave it one, and a build without one could only say 'org-unresolved'.
     store[key] = withHalt({
       reason: 'org-unresolved',
       at: now - 3_600_000,
       detail: 'synthetic: no organization could be named',
+    });
+    expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(true);
+
+    // 4 · 🔴 And the same account judgement, written by **this** build, keeps its
+    //     full force: it is an answer this build already heard, so re-asking every
+    //     tick would turn "wait for a human" into a slow poll of the account.
+    store[key] = withHalt({
+      reason: 'org-unresolved',
+      at: now - 3_600_000,
+      detail: 'synthetic: no organization could be named',
+      build: TEST_BUILD_ID,
     });
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
   });

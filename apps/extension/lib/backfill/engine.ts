@@ -22,6 +22,7 @@
  */
 
 import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
+import { runningBuildId } from '../extension-build';
 import { isClaudeOrgId } from './claude-org';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
@@ -44,10 +45,9 @@ import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
 import { openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
 import {
-  CAPABILITY_UNMARKED,
   dayKeyOf,
   haltClassOf,
-  haltStillApplies,
+  haltExpiredBecause,
   haltSubjectOf,
   initialState,
   isTransientReason,
@@ -55,6 +55,7 @@ import {
   type BackfillState,
   type DetailOutcomeRecord,
   type EnumTruncation,
+  type HaltJudgement,
   type HaltReason,
   type HaltRecord,
   type StopReason,
@@ -206,6 +207,19 @@ export interface BackfillOptions {
    * ship, not a way to reach POST at all.
    */
   plans?: (platform: string) => import('./enumerate').BackfillEnumPlan | null;
+  /**
+   * 🔴 W59 · **Which extension build this run is**, for the halts it writes and for
+   * judging the ones already stored. Omitted ⇒ `runningBuildId()` — the manifest
+   * version the browser itself holds — so **production sets nothing** and the
+   * stamp cannot drift from what is installed.
+   *
+   * A seam in the same family as `plans`: a test that wants to be "a different
+   * build" or "a build that cannot name itself" says so here rather than by
+   * editing the manifest. `null` means "this build cannot be named", which the
+   * reader answers conservatively (see `HaltJudgement`) — it is a value, not a
+   * missing one, and it is why this is `string | null` rather than `string`.
+   */
+  build?: string | null;
   clock?: Clock;
   pace?: BackfillPace;
   /**
@@ -339,6 +353,8 @@ export async function recordBackfillHalt(
     /** Test seams, in the same family as runBackfill's: omitted ⇒ the real clock and Math.random. */
     clock?: Clock;
     random?: RandomFn;
+    /** 🔴 W59 · Same meaning and same default as `BackfillOptions.build`: omitted ⇒ the running build. */
+    build?: string | null;
   },
 ): Promise<boolean> {
   if (!store) return false;
@@ -360,6 +376,18 @@ export async function recordBackfillHalt(
   const capabilityMark = haltSubjectOf(opts.reason) === 'capability'
     ? { capability: backfillCapabilityOf(opts.platform) }
     : {};
+  /**
+   * 🔴 W59 · And the same build-stamp rule, for a sharper reason than symmetry: the
+   *    two organization halts are written **here**, not in a run, and one of them
+   *    (`org-ambiguous`) is exactly the kind whose truth condition can change
+   *    without this build doing anything — the user opens a conversation in the
+   *    organization they meant, the page shows it, and the resolver that refused
+   *    yesterday would answer today. Without a stamp this record could not be told
+   *    from this build's own, and the popup's instruction ("open a conversation
+   *    once") would be advice the leg never acts on.
+   */
+  const build = opts.build !== undefined ? opts.build : runningBuildId();
+  const buildMark = build === null ? {} : { build };
   if (haltClassOf(opts.reason) === 'transient' && isTransientReason(opts.reason)) {
     const previous = state.halted;
     const streak = (previous?.reason === opts.reason ? (previous.attempts ?? 0) : 0) + 1;
@@ -371,7 +399,7 @@ export async function recordBackfillHalt(
       retryAt: at + transientRetryDelayMs(opts.reason, streak, opts.random ?? systemRandom),
     };
   } else {
-    state.halted = { reason: opts.reason, at, detail: opts.detail, ...capabilityMark };
+    state.halted = { reason: opts.reason, at, detail: opts.detail, ...capabilityMark, ...buildMark };
   }
   await saveHeader(store, state);
   return true;
@@ -599,6 +627,32 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    */
   const currentCapability = () => capabilityOf((opts.plans ?? backfillPlanFor)(state.platform));
 
+  /**
+   * 🔴 W59 · **Which build this is** — read once per run, from the manifest the
+   * browser holds, so every record this run writes carries the same identity and
+   * the record that judged a stored halt is the one that will be written back.
+   *
+   * 🔴 `null` is a real answer ("this build cannot name itself") and it is *not*
+   *    turned into a string here. What a null stamp means to a reader is decided in
+   *    `HaltJudgement`/`haltExpiredBecause`, in one place, rather than twice.
+   */
+  const currentBuild = opts.build !== undefined ? opts.build : runningBuildId();
+
+  /**
+   * 🔴 W44/W59 · **Everything a stored record is judged against**, as one value.
+   * `opts.plans` is the injected plan table (production never sets it), so a record
+   * written through the seam is judged against the very table the seam answered
+   * with — the marker and the halt cannot be computed from two different tables,
+   * which is what makes the capability check sound rather than merely plausible.
+   * The platform is `state.platform`: the one this record is **stored under**, so
+   * the answer belongs to the same key as the record, whichever origin this run
+   * was handed.
+   */
+  const currentJudgement = (): HaltJudgement => ({
+    capability: currentCapability(),
+    build: currentBuild,
+  });
+
   const halt = async (reason: HaltReason, detail: string): Promise<RunReport> => {
     const at = clock.now();
     /**
@@ -623,7 +677,18 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         retryAt: at + transientRetryDelayMs(reason, transientStreak, random),
       };
     } else {
-      state.halted = { reason, at, detail, ...capabilityMark };
+      /**
+       * 🔴 W59 · **The permanent record names the build that wrote it.** This is the
+       *    statement that makes the next build's re-decision possible at all: a
+       *    permanent halt is a judgement one build made, and without this field the
+       *    next build cannot tell its own judgement from an inherited one — which is
+       *    how the three measured records held two backfillable platforms down.
+       *
+       * 🔴 Transient records get no stamp (see `HaltRecord.build`), and a build that
+       *    cannot name itself writes the field **omitted** rather than empty.
+       */
+      const buildMark = currentBuild === null ? {} : { build: currentBuild };
+      state.halted = { reason, at, detail, ...capabilityMark, ...buildMark };
     }
     await persist(state);
     // Only the technical detail is logged, never a conversation body.
@@ -670,53 +735,64 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   //      and `archived` are not touched on any path through this branch.
   if (state.halted) {
     /**
-     * 🔴 W44 · **A record that is a judgement about the build stops applying when
-     *    the build changes.** This branch is the fix for the defect measured on
-     *    2026-09-19, and it is deliberately placed *before* the permanent stop below:
-     *    a capability-class record is permanent in the `HaltClass` sense — no
-     *    amount of waiting makes a plan appear — and it was exactly that permanence,
-     *    with no way to notice that the plan **had** appeared, that held down two
-     *    platforms this build can backfill.
+     * 🔴 W44/W59 · **A record stops applying when it stops being *this build's*
+     *    judgement.**
      *
-     * The test is `haltStillApplies`, one function shared with the alarm's
-     * preflight and the record's own writer, so no third opinion about "is this
-     * record still in force" exists. It compares the marker against
-     * `currentCapability()` — the same lookup the halt itself was raised from.
+     * W44 asked that question of the capability class only, and the defect it fixed
+     * is the one measured on 2026-09-19: a record saying "this platform has no
+     * backfill enumeration yet" is a statement about the build, it stopped being
+     * true the moment `PLANS` gained that platform, and the permanence that was
+     * supposed to protect it is exactly what made it unable to notice.
+     *
+     * W59 asks the same question of **every permanent record**, because the same
+     * reasoning holds for the rest of them: "the bytes are not a shape we know",
+     * "the account has more than one organization and none was named", "our stored
+     * record disagrees with itself" are all judgements *a build* made about
+     * something it saw, and the build that replaced it has not seen anything. That
+     * is what `HaltRecord.build` records and what `haltExpiredBecause` decides.
+     *
+     * The test is `haltExpiredBecause`, one function shared with the alarm's
+     * preflight (`scopeRetryDue`), so no third opinion about "is this record still
+     * in force" exists. It compares the record's marker against `currentJudgement()`
+     * — the same lookup the halt itself was raised from.
      *
      * What happens when it does not apply:
      *   · the record is **cleared**, and only the record. `pending`, `archived`,
      *     the cursor and every counter are untouched — a capability halt fires
-     *     before the request it is about, so there was never anything of the user's
-     *     in flight to undo;
+     *     before the request it is about, and for the other permanent reasons the
+     *     run's own re-decision is what decides everything from here on;
      *   · the expiry is written down (`state.haltExpired`) **before** the run
      *     continues, because the run may halt again with a different reason and
      *     would then overwrite the only trace that this one ever existed;
-     *   · the run carries on into the ordinary path below, where the plan lookup
-     *     either answers — and the leg works — or refuses again, writing the same
-     *     halt back, now marked. Nothing is decided here that the rest of the run
-     *     does not decide for itself.
+     *   · the run carries on into the ordinary path below, where it re-decides:
+     *     either the condition is gone — and the leg works — or it is met again and
+     *     the same halt is written back, now **stamped with this build**. That is
+     *     what makes this one fresh attempt and not a retry: the record the second
+     *     run meets names the build that saw the condition, so it applies.
      */
-    if (haltSubjectOf(state.halted.reason) === 'capability') {
-      const judged = state.halted;
-      const capability = currentCapability();
-      if (haltStillApplies(judged, capability)) return report('halted');
+    const judged = state.halted;
+    const expired = haltExpiredBecause(judged, currentJudgement());
+    if (haltClassOf(judged.reason) === 'permanent') {
+      if (expired === null) return report('halted');
 
       state.haltExpired = {
+        ...expired,
         reason: judged.reason,
         recordedAt: judged.at,
-        judgedAgainst: judged.capability ?? CAPABILITY_UNMARKED,
-        capability,
         clearedAt: clock.now(),
       };
       state.halted = null;
       await persist(state);
       console.warn(
-        `[chat-stasher] backfill resuming: the stored ${judged.reason} stop was a judgement about`
-        + ` this build's own capability (${judged.capability ?? CAPABILITY_UNMARKED}), which is now`
-        + ` ${capability}; the record no longer applies and nothing was written off while it stood`,
+        expired.because === 'capability'
+          ? `[chat-stasher] backfill resuming: the stored ${judged.reason} stop was a judgement about`
+            + ` this build's own capability (${expired.judgedAgainst}), which is now`
+            + ` ${expired.capability}; the record no longer applies and nothing was written off while it stood`
+          : `[chat-stasher] backfill resuming: the stored ${judged.reason} stop was written by`
+            + ` ${expired.build}, and this build is ${expired.currentBuild}; a different build's`
+            + ` judgement is re-decided once, and if the condition is still there the same stop is`
+            + ` written back naming this build`,
       );
-    } else if (haltClassOf(state.halted.reason) === 'permanent') {
-      return report('halted');
     } else {
       // 🔴 A record written before W13 has no `retryAt` and is read as **due now** —
       //    "no delay was ever decided" is not "wait forever". That is precisely the

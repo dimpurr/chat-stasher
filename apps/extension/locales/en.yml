@@ -448,6 +448,29 @@ popup:
       Nothing was written off while it stood: a stop like this happens before the
       request it is about, so no conversation was passed over in the meantime.
 
+    # 🔴 W59 · **A stop that stopped applying, because a different build wrote it.**
+    #
+    # Every permanent stop is one build's judgement about something it saw — the
+    # platform's reply, your account, or this extension's own record of your
+    # progress. A build that has not seen anything has not made that judgement, so
+    # the record is re-decided once: the leg runs, and if the same thing stops it
+    # again the new record names the build that saw it and is kept.
+    #
+    # 🔴 It must never be the capability sentence above, which talks about what the
+    #    extension can do. Here nothing about the extension's ability changed; what
+    #    changed is which build is asking. Both sentences may only be printed for
+    #    the kind of record that earned them.
+    haltExpiredBuild: >-
+      Backfill history for this platform: on {when} it was stopped by a record
+      that said {reason}. That record was written by {build}, and this build is
+      {currentBuild}. A stop is a judgement one build made about what it saw —
+      this platform's reply, your account, or this extension's own record of your
+      progress — and a build that has not seen anything has not made it. So the
+      record was re-checked once and the leg started again on {cleared}, from the
+      same place: the same conversations still owed, the same cursor, nothing
+      written off. If the same thing stops it again, that new record names this
+      build and is kept.
+
   # 🔴 W44 · One capability value in words, for the sentence above. Both sides of
   # an expiry are named with these, because "judged against list-only, now full"
   # tells a reader nothing. Every value is a noun phrase: the sentence around them
@@ -463,6 +486,15 @@ popup:
     unmarked: nothing — that record was written before a stop said what it was judged against
     # A value this build does not recognise is printed as-is; never rounded into one of the above.
     other: "an unrecognised value ({capability})"
+
+  # 🔴 W59 · The one value of a build id that is not a build id, in words. A real
+  # one is a version and is printed as-is (that is what chrome://extensions shows),
+  # so only the sentinel needs a sentence.
+  build:
+    # 🔴 It must NOT read as "an older build" or "an unknown build": a record can
+    # be written by a newer one (a downgrade, a second profile), and what is known
+    # is that the record did not name the build — not which build that was.
+    unstamped: a build that record did not name (it was written before stops named the build that made them)
 
 # ---------------------------------------------------------------------------
 # The alarm's last tick — why it did nothing
