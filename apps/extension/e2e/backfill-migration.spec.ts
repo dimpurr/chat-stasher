@@ -40,6 +40,7 @@ import {
   readDebtRows,
   readStorage,
   test,
+  waitForAlarm,
   waitForOutbox,
   writeStorage,
   BACKFILL_DB_NAME,
@@ -257,6 +258,13 @@ test('a record this build cannot read is left untouched, and the alarm tick says
   // by 'no-http-port', which is the state the acceptance's ticks were stuck in.
   await loadFixturePage(ext);
 
+  // 🔴 W82 · The extension arms this alarm in response to the switch going on
+  //    above, and `fireAlarm` below overrides the deadline of an alarm that is
+  //    already there. Waiting for its own arm is what makes this the last write to
+  //    the alarm instead of a race with it (see `waitForAlarm`). This case is the
+  //    one that never flaked, and only because the page load above is slow enough
+  //    to outlast the extension's arm — luck, not ordering.
+  await waitForAlarm(ext, TICK_ALARM);
   await fireAlarm(ext, TICK_ALARM);
   const all = await waitForTickRecord(ext);
   const tick = all['cs_backfill_lasttick_v1'] as Record<string, unknown>;
@@ -294,6 +302,13 @@ test('with no platform tab open at all, the layout still moves: the migration do
     ],
   });
 
+  // 🔴 W82 · The case that flaked, and the reason it did: nothing between the
+  //    switch going on above and this fire, so the extension's own `create` and
+  //    the one below are two writes to one alarm 2-4 ms apart. The extension's
+  //    draw is 5-10 minutes out, so when it lands second the 100 ms deadline is
+  //    gone, no tick runs, and `waitForTickRecord` returns nothing 20 s later.
+  //    Fire only once the extension has armed it itself.
+  await waitForAlarm(ext, TICK_ALARM);
   await fireAlarm(ext, TICK_ALARM);
   // Wait for the complete tick record, not just the header. The header is
   // written by the migration before any gate; the trace that names how the tick

@@ -55,9 +55,9 @@ apps/extension/entrypoints/background.ts:1894-1928  117bbd69b73e  lines=35
   <- docs/privacy.md:276  :: /**
 apps/extension/entrypoints/background.ts:1936-1973  64b51e737fa5  lines=38
   <- docs/privacy.md:276  :: ): Promise<void> {
-apps/extension/entrypoints/background.ts:2104-2120  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:2158-2174  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:2147-2163  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:2201-2217  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {

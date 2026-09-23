@@ -2002,8 +2002,62 @@ function cancelledIdLike(id: string | null): boolean {
  *    broken chain is repaired by the next ordinary wake, long before the
  *    watchdog's one hour is up; the watchdog covers the case where nothing else
  *    wakes the worker at all.
+ *
+ * 🔴 W82 · **One sync at a time, so the newest decision is the one that is
+ *    applied.** There are four callers — `backgroundSetup`, `runtime.onStartup`,
+ *    the `storage.onChanged` listener below, and the popup's own toggle, which
+ *    writes the switch and then calls `syncBackfillAlarm` from its own context.
+ *    They used to be free to overlap, and each acted on the value it had read
+ *    when its own `await` came back, so **the first read of the switch could be
+ *    the last write to an alarm**. Measured in a real Chromium: a startup read of
+ *    `false` issued `alarms.clear` 63 ms later, after the enable had armed both
+ *    alarms, and deleted them — the switch said on, nothing was armed, and nothing
+ *    re-arms them, so the leg stays silent until some unrelated wake. That is
+ *    exactly the "the chain can never stay broken" property W16 is for.
+ *
+ *    The fix is ordering rather than re-reading, which would only shrink the
+ *    window. Every change to the switch is a `storage.local` write, every such
+ *    write delivers `storage.onChanged` to this context, and each listener call
+ *    is queued here behind whatever is running. So the last sync to run is always
+ *    the one the newest switch value scheduled, and it reads that value — the end
+ *    state is a function of the last write, whatever the interleaving was. No
+ *    timeout, no retry, and no attempt to guess a value. (The popup's own call is
+ *    covered by the same argument: the write it makes is what queues this
+ *    context's sync, and that one runs last.)
+ *
+ *    It also removes a duplicate the old shape produced on every switch-on: two
+ *    syncs both saw "not armed", both drew a delay and both called `create`, so
+ *    one of the two random 5-10 minute draws was thrown away and which survived
+ *    was decided by arrival order.
+ *
+ *    Deliberately **not** extended to the re-arm at the end of a tick
+ *    (`rearmBackfillTick`), which stays outside the queue: it runs from the tick
+ *    that already holds the single-flight lock, so it is ordered by that rather
+ *    than by this, and queueing it would let a slow sync hold the tick's own
+ *    promise open.
+ *
+ *    The trade, stated: a serial queue is head-of-line ordered, so a sync whose
+ *    `alarms` call never settles would hold the ones behind it. That is not a new
+ *    way for the alarm to stay unarmed — a call that never comes back has not
+ *    armed anything either — but it does mean a later sync cannot repair *that*
+ *    one. No timeout is put on it: the calls here are IPC to the browser process
+ *    and settle unless the process is gone, and if it is gone this queue died
+ *    with it.
  */
-export async function syncAlarmWithSwitch(): Promise<string> {
+let alarmSyncQueue: Promise<unknown> = Promise.resolve();
+
+export function syncAlarmWithSwitch(): Promise<string> {
+  // The chain carries on past a failed sync, so one failure cannot wedge every
+  // later one: the property is "in order", not "only if the previous succeeded".
+  const run = alarmSyncQueue.then(
+    () => syncAlarmWithSwitchNow(),
+    () => syncAlarmWithSwitchNow(),
+  );
+  alarmSyncQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function syncAlarmWithSwitchNow(): Promise<string> {
   const enabled = await isBackfillEnabled(browserLocalStore());
   return syncBackfillAlarm(alarmsApi(), enabled, backfillRandom());
 }
