@@ -582,17 +582,33 @@ export type HaltExpiredBecause =
  *
  * The three classes answer it three ways, and the order matters:
  *
- *  · **capability** (`unsupported-platform`, `detail-unsupported`) — W44's check,
- *    and it comes first because it is the *stronger* one. Its whole truth
- *    condition is the plan table, so it can be re-asked positively and expires
- *    even a record this very build wrote. A capability stop that is still true
- *    stays permanent even when an older build wrote it: the answer does not
- *    depend on who is asking.
+ *  · **capability** (`unsupported-platform`, `detail-unsupported`) — W44's check.
+ *    Its whole truth condition is the plan table, so it can be re-asked
+ *    positively and expires even a record this very build wrote. A capability stop
+ *    that is still true stays permanent even when an older build wrote it: the
+ *    answer does not depend on who is asking.
  *  · **transient** — always still applies. A backoff is re-decided by the clock
  *    (`retryAt`), not by a build, and W13's ladder is unchanged by this file.
  *  · **permanent and not a capability** — W59's check. It applies **iff the record
  *    names this build**. A record naming another build, or naming none, is
  *    re-decided once.
+ *
+ * 🔴 🔴 W59c · **The spent attempt is asked of every class, including capabilities,
+ *    and it is asked first.** W59b exempted the capability class from
+ *    `haltRetrySpent` on the grounds that its re-decision costs no request. That
+ *    premise is false for the thing the bound is actually about: the *run* that
+ *    follows the expiry is where the requests happen, and it is exactly the leg the
+ *    capability record was holding back. So a build that lifts a capability record
+ *    and then does not get to write its verdict — a `storage.local` write that
+ *    throws, an MV3 reclaim — must be read on the next tick as "this build has
+ *    already had its answer", not as a fresh record to lift again. Without that, the
+ *    very first tick after the lift asks the platform again, and every tick after
+ *    it, forever (measured: the list request the old record forbade, re-issued on
+ *    the alarm's cadence).
+ *
+ *    What keeps W44 intact is the *build* comparison inside `haltRetrySpent`: the
+ *    hold is one build's, only ever the build that spent the attempt, and a record
+ *    written by any other build is re-decided exactly as before.
  *
  * 🔴 A null `judgement.build` answers `true` — "still applies" — for the last
  *    class, and that is the direction the invariant demands: we may clear a halt
@@ -631,13 +647,13 @@ export function haltExpiredBecause(
   judgement: HaltJudgement,
 ): HaltExpiredBecause | null {
   if (!isClassifiableHalt(record)) return null;
+  if (haltClassOf(record.reason) === 'transient') return null;
+  if (haltRetrySpent(judgement)) return null;
   if (haltSubjectOf(record.reason) === 'capability') {
     const judgedAgainst = record.capability ?? CAPABILITY_UNMARKED;
     if (judgedAgainst === judgement.capability) return null;
     return { because: 'capability', judgedAgainst, capability: judgement.capability };
   }
-  if (haltClassOf(record.reason) === 'transient') return null;
-  if (haltRetrySpent(record, judgement)) return null;
   if (judgement.build === null) return null;
   if (record.build === judgement.build) return null;
   return {
@@ -664,20 +680,36 @@ export function haltExpiredBecause(
  * re-deciding) and `scopeRetryDue` (which then does not ask the page a second time).
  * One answer, two readers, exactly as with the expiry rule itself.
  *
- * 🔴 **Why the capability class is exempt, and why that is not an oversight.** A
- *    capability record's expiry is decided from the plan table, in this process, with
- *    no request at all — there is no platform cost to bound. Holding such a record
- *    because an attempt was "spent" would stop a leg the plan table says can run,
- *    which is the W44 defect exactly. So the bound is applied only where the
- *    re-decision's cost is a question asked of the platform.
+ * 🔴 🔴 W59c · **Every class spends an attempt, and the capability class is why.**
+ *
+ *    W59b applied this bound only where the re-decision's cost is "a question asked
+ *    of the platform", and exempted the capability class because its expiry is
+ *    recomputed from the plan table with no request at all. The exemption looked at
+ *    the wrong step. The requests a capability record was holding back are in the
+ *    *run that follows* the expiry — the leg the record stopped now enumerates, which
+ *    is the whole point of lifting it — so an expiry whose run never writes a verdict
+ *    leaves a leg that fetches on every tick, which is the defect this bound exists
+ *    to remove, one class over. The engine therefore writes the marker for both
+ *    classes at the expiry, and this function spends it for both.
+ *
+ *    The hold W44 forbade is still not what this does: the marker is compared against
+ *    the *running* build, so a record from any other build is re-decided exactly as
+ *    W44 requires, and only the build that already had its answer is held to it.
  *
  * 🔴 A `null` judgement build has spent nothing: it cannot re-decide at all
  *    (`haltExpiredBecause` refuses on that path), so it can have recorded nothing.
+ *
+ * 🔴 **The record is deliberately not an argument any more (W59c).** The bound is a
+ *    fact about *this build's attempt on this scope*, and it is the same fact for
+ *    every reason and every class — which is why the capability exemption W59b wrote
+ *    here could not be right in principle, and stopped being right in practice the
+ *    moment the exempted class's expiry started costing a run. A reader that wants to
+ *    know whether a *record* still applies asks `haltExpiredBecause`, which asks this
+ *    only after it has established that the record is one it can classify at all.
  */
-export function haltRetrySpent(record: HaltRecord, judgement: HaltJudgement): boolean {
+export function haltRetrySpent(judgement: HaltJudgement): boolean {
   if (judgement.build === null) return false;
-  if (judgement.retriedBy === undefined || judgement.retriedBy !== judgement.build) return false;
-  return haltSubjectOf(record.reason) !== 'capability';
+  return judgement.retriedBy !== undefined && judgement.retriedBy === judgement.build;
 }
 
 /**

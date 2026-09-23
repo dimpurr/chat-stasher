@@ -26,6 +26,15 @@
  *      in the product that could read 74 pages — and a `detail-unsupported` stop
  *      written part-way through that list would have cut it off at page one forever.
  *
+ * 🔴 W59c · **And one case in here is now pinned the other way round.** The last case
+ *    of section 5 read "a capability re-decision is not held by a spent attempt" — the
+ *    exemption `haltRetrySpent` granted that class, which round 3 removed: the requests
+ *    a capability record holds back are in the run that follows its expiry, so a lift
+ *    without a verdict is a per-tick fetch. It now reads "a capability re-decision is
+ *    held by an attempt THIS build spent", with the W44 property it was protecting —
+ *    another build's attempt holds nothing — as its own case beside it. See
+ *    tests/w59c-halt-retry-bounds.test.ts.
+ *
  * 🔴 Everything here is synthetic: fixture ids, fixture responses, an injected clock,
  *    an injected build id. No network, no real account, no conversation text.
  */
@@ -33,6 +42,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  loadState,
   markScopeRetried,
   recordBackfillHalt,
   runBackfill,
@@ -505,18 +515,55 @@ describe('W59b-5 · the tick that lifts a halt reads one page, whatever the plan
     expect(r1.archivedThisRun).toEqual(all);
   });
 
-  it('🔴 a capability re-decision is not held by a spent attempt', async () => {
-    // The exemption, pinned rather than left to prose: holding these would re-freeze
-    // the leg W44 freed, and there is nothing to bound — the answer comes from the
-    // plan table with no request at all.
+  it('🔴 a capability re-decision is held by an attempt THIS build spent', async () => {
+    // 🔴 W59c · **What this test used to assert, and why it is the other way round.**
+    //
+    // W59b exempted the capability class from the spent-attempt bound, and this case
+    // pinned the exemption: a capability record plus a marker naming this build was
+    // required to be re-decided anyway, on the grounds that the answer comes from the
+    // plan table with no request at all. The premise was about the wrong step. The
+    // requests a capability record is holding back are in the run that follows its
+    // expiry — the leg now enumerates because the plan table changed — so a build that
+    // lifted the record and never wrote a verdict must not lift it again on the next
+    // tick, or the leg fetches on every tick until the extension is reloaded.
+    //
+    // The W44 property this might look like it re-freezes is not touched, and the next
+    // case is where that is asserted: the marker is compared against the **running**
+    // build, so a record from any other build is re-decided exactly as before.
     const store = memoryStore();
     const clock = stepClock(T0);
-    const scope = 'w59b-capability-not-held';
+    const scope = 'w59b-capability-held';
     await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
       enumCursor: { offset: 0, complete: false },
       halted: { reason: 'unsupported-platform', at: T0 - 3_600_000, detail: 'synthetic: written with no plan' },
-      // A marker naming this build, which would hold every non-capability reason.
+      // The marker the expiry of this very record writes, before the run it lifted can
+      // ask for anything. Present here means: that run did not get to write a verdict.
       haltRetried: { build: TEST_BUILD_ID, at: T0 - 3_600_000 },
+    }));
+
+    const r = await runBackfill({ ...opts(store, mustNotFetch, clock), scope, maxDetails: 1 });
+
+    // This build already had its one answer here, so the record stands and nothing is
+    // asked: not the platform, and not the plan table either.
+    expect(r.stopped).toBe('halted');
+    expect(r.state.haltExpired, 'this build has already re-decided this record once').toBeUndefined();
+    const persisted = await loadState(store, 'chatgpt', scope);
+    expect(persisted.halted?.reason).toBe('unsupported-platform');
+    expect(persisted.haltRetried?.build, 'the attempt stays spent, so the next tick is free too').toBe(TEST_BUILD_ID);
+  });
+
+  it('🔴 and a capability record another build’s attempt was spent on is still lifted', async () => {
+    // The control, and the W44 property in this file: the hold above belongs to the
+    // build that spent the attempt, and to nobody else. Same fixture, marker naming a
+    // different build — which is what a record written before this change looks like,
+    // and what a build that is not the one running looks like.
+    const store = memoryStore();
+    const clock = stepClock(T0);
+    const scope = 'w59b-capability-other-build-holds';
+    await store.save(stateKey('chatgpt', scope), headerWith('chatgpt', scope, {
+      enumCursor: { offset: 0, complete: false },
+      halted: { reason: 'unsupported-platform', at: T0 - 3_600_000, detail: 'synthetic: written with no plan' },
+      haltRetried: { build: OLDER_BUILD, at: T0 - 3_600_000 },
     }));
 
     const all = ids(1);
@@ -528,8 +575,9 @@ describe('W59b-5 · the tick that lifts a halt reads one page, whatever the plan
       return { status: 200, text: detailBody(id) };
     };
     const r = await runBackfill({ ...opts(store, http, clock), scope, maxDetails: 1 });
+
     expect(r.state.haltExpired, 'the plan table says this build can run').toMatchObject({ because: 'capability' });
-    expect(r.halted, 'the marker must not hold it, and the run itself then succeeds').toBeNull();
+    expect(r.halted, 'another build’s attempt must not hold this one').toBeNull();
     expect(r.archivedThisRun).toEqual(all);
   });
 });

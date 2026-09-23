@@ -97,6 +97,44 @@ export const notWiredHttp: HttpPort = async (url: string) => {
 };
 
 /**
+ * 🔴 🔴 W59c · **How many list pages one alarm tick may read, for a plan with no
+ * body segment.**
+ *
+ * This is the number that was `Infinity`, and `Infinity` is not a budget. W10 capped
+ * the list segment at one page per tick *for plans that can fetch bodies*, so the
+ * first body would not wait for the whole list — and deliberately left the list-only
+ * plans uncapped, because their tick ends in `halt('detail-unsupported')`, and capping
+ * them would cut the list off at page one while the halt held every later tick. The
+ * reasoning behind that exception was sound and its conclusion was wrong: it read
+ * "capping this plan is not free" as "this plan needs no cap", when what it needed was
+ * a cap that does not truncate (the `budget-exhausted` ending below, which W59b added
+ * for the re-decision tick and which is now the ending whenever a cap is what stopped
+ * the loop). What was left was a leg whose tick reads the **entire** list in one
+ * alarm wake: measured on the account W10 worked from, 74 pages — 74 requests in a
+ * burst, from a page event, with the debts of the last 73 pages not even recorded
+ * until their page arrives.
+ *
+ * 🔴 **Why 8.** Two existing numbers, from the two budgets this run already has:
+ *   · the tick's **body** budget is `DEFAULT_TICK_DETAILS = 1` (lib/backfill/
+ *     schedule.ts), one body per wake at a 20-45 s paced gap (pace.ts);
+ *   · one list page at the enumeration pace is 2-6 s (pace.ts), so eight pages is
+ *     16-48 s of paced list traffic — the same order of magnitude as the single body
+ *     this tick already pays for, and nine requests in total against the gentlest
+ *     reference implementation's ≤50 per run.
+ *   Eight also makes a whole account's list a bounded number of ticks rather than a
+ *   burst: ChatGPT's 1,000 conversations ≈ 10 pages ⇒ two ticks; the 74-page account
+ *   above ⇒ ten ticks, about an hour of the 5-10 minute jittered cadence, against
+ *   7,391 bodies it can only fetch 200 of a day. Enumeration is never the constraint
+ *   on this leg; a burst is the one thing it must not be.
+ *
+ * 🔴 The cursor is persisted at the end of every page (see the loop), so a capped tick
+ *    loses nothing: the next tick continues from the same page boundary, and
+ *    `enumCursor.complete` keeps exactly the meaning it had — set only by a page that
+ *    is the last one, never by the cap.
+ */
+export const LIST_PAGES_PER_TICK = 8;
+
+/**
  * 🔴 C20 · The one thing the sink answers: **was it actually stored?**
  * Structurally compatible with entrypoints/background.ts's HandledResult (which is
  * returned as-is from there).
@@ -743,7 +781,59 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    */
   let redecting = false;
 
-  const halt = async (reason: HaltReason, detail: string): Promise<RunReport> => {
+  /**
+   * 🔴 🔴 W59c · **Has this build already spent an attempt on this scope without a
+   * verdict landing?**
+   *
+   * The marker (`haltRetried`) is written before the question is asked — by
+   * `markScopeRetried` on the resolver's path, and by the expiry branch below for a
+   * record this build lifted — precisely so that a worker killed mid-question cannot
+   * leave the question unbounded. Its cost is that the marker cannot, by itself, say
+   * whether the question was ever *answered*: the write that records the answer is a
+   * later, separate `storage.local` call.
+   *
+   * So the one thing that may not be concluded from it is a **verdict about the
+   * account**. A run handed no scope stops, and the record it writes is read by the
+   * popup as "the leg could not tell which organization this account uses" — a
+   * statement about the account. When the marker says this build's question is still
+   * unanswered, this run has heard nothing about the account: it is stopping because
+   * of what it was *handed*, not because of anything it observed. Writing that
+   * record stamped with this build would convert "never asked" into a judgement, and
+   * `haltExpiredBecause` would then keep it for the rest of this build's life — the
+   * page never asked again, and the halt asserting a fact nobody established.
+   *
+   * So such a stop is written **un-stamped** (a later build re-decides it, and asks
+   * the page) and the attempt is left unspent (this build does not ask again either).
+   * See `halt`'s `verdict` option, and `HaltRetry` in types.ts.
+   */
+  const attemptUnanswered = (): boolean => haltRetrySpent(currentJudgement());
+
+  /**
+   * The same answer, in the shape `halt` takes: `{verdict: false}` when what this
+   * run is about to write must not be read as its judgement, and nothing at all when
+   * it may be. Spelled once so the two scope-less stops below cannot disagree about
+   * which of them is allowed to claim a verdict.
+   */
+  const unjudged = (): { verdict?: false } => (attemptUnanswered() ? { verdict: false } : {});
+
+  const halt = async (
+    reason: HaltReason,
+    detail: string,
+    opts2: {
+      /**
+       * 🔴 W59c · `false` = **this run is stopping without having observed anything
+       * about the account**, so what it writes is not this build's judgement: no
+       * build stamp, and the attempt it was reached under stays unspent.
+       *
+       * Only the scope-less stops pass it (see `attemptUnanswered`), and it is
+       * deliberately not a general escape hatch: every other halt in this file is
+       * this run's own observation — a request it sent, a table it read, a record it
+       * could not open — and those are exactly the judgements the build stamp exists
+       * to name.
+       */
+      verdict?: false;
+    } = {},
+  ): Promise<RunReport> => {
     const at = clock.now();
     /**
      * 🔴 W44 · A capability-class record carries what it was a judgement about;
@@ -776,8 +866,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
        *
        * 🔴 Transient records get no stamp (see `HaltRecord.build`), and a build that
        *    cannot name itself writes the field **omitted** rather than empty.
+       *
+       * 🔴 W59c · And neither does a stop that is not this run's judgement at all
+       *    (`verdict: false`): see `attemptUnanswered`.
        */
-      const buildMark = currentBuild === null ? {} : { build: currentBuild };
+      const buildMark = currentBuild === null || opts2.verdict === false ? {} : { build: currentBuild };
       state.halted = { reason, at, detail, ...capabilityMark, ...buildMark };
     }
     /**
@@ -787,8 +880,15 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * for it". This statement is that something, so the marker is spent and goes — and
      * `redecting` goes with it, because the record just written is the whole answer
      * the run owed and `finish` must not go on to clear it.
+     *
+     * 🔴 W59c · **Except when the statement is not a verdict** (`verdict: false`).
+     *    There the attempt is left exactly as it was found, because what it was
+     *    spent on has still not been answered: this build has not asked the page and
+     *    must not ask it again, and it must not leave a record that reads as if it
+     *    had. Clearing the marker here would hand the next tick a free question — the
+     *    per-tick ask W59b removed, one layer out.
      */
-    state.haltRetried = undefined;
+    if (opts2.verdict !== false) state.haltRetried = undefined;
     redecting = false;
     await persist(state);
     // Only the technical detail is logged, never a conversation body.
@@ -841,10 +941,16 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    the record instead means the worst case is a leg that stays stopped until the
    *    next build: bounded, and in the direction this project always chooses.
    *
-   * 🔴 A write is only made when there is something to clear. A capability expiry
-   *    clears its own record at the expiry (see the funnel), so a successful run of
-   *    one reaches here with nothing owed and writes nothing — the extra write is paid
-   *    only by the class that needs the bound.
+   * 🔴 A write is only made when there is something to clear. A run that never
+   *    suspended anything — the ordinary one, and every run whose halt block found no
+   *    record — reaches here with `redecting` false and writes nothing.
+   *
+   * 🔴 W59c · **Both classes reach here owing a verdict, which is why the write is no
+   *    longer the capability class's alone.** W59 cleared a capability record at the
+   *    expiry itself, so only the other class had something to clear by this point;
+   *    W59c suspends both (see the expiry branch), and this is the write that clears
+   *    either one — with the marker, in the same `storage.local` call, so the record
+   *    and the attempt that bounded it cannot come apart.
    */
   const finish = async (stopped: StopReason): Promise<RunReport> => {
     if (redecting && (state.halted !== null || state.haltRetried !== undefined)) {
@@ -908,31 +1014,40 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    re-decision's one write used to happen *after* the platform was asked, so a
      *    write that did not land left the older build's record looking untouched and
      *    the next tick asked again — a `GET /api/organizations` per tick for a Claude
-     *    scope. The two classes are bounded differently, and the difference is what
-     *    each one's re-decision costs:
-     *
-     *    · **capability** — the answer is recomputed from the plan table in this
-     *      process, with no request at all, so there is nothing to bound and the
-     *      record is cleared here as W59 did. Holding it would stop a leg the plan
-     *      table says can run, which is the W44 defect exactly.
-     *    · **everything else** — the answer costs a question asked of the platform, so
-     *      the attempt is written into the header (`haltRetried`) **before** the run
-     *      is allowed to ask it, in this same write. The record itself is left exactly
-     *      as it was found: nothing is claimed on its behalf, and if this run never
-     *      gets to write its verdict — a storage failure, an MV3 reclaim — the record
-     *      is still there, still says what the older build said, and still stands for
-     *      this build. `finish` is what clears it once the run does have an answer.
+     *    scope. So the attempt is written into the header (`haltRetried`) **before**
+     *    the run is allowed to ask anything, in this same write, and the record itself
+     *    is left exactly as it was found: nothing is claimed on its behalf, and if this
+     *    run never gets to write its verdict — a storage failure, an MV3 reclaim — the
+     *    record is still there, still says what the older build said, and still stands
+     *    for this build. `finish` is what clears it once the run does have an answer.
      *
      *    A record whose attempt is already spent cannot reach this branch at all:
      *    `haltExpiredBecause` answers "still applies" for it (see `haltRetrySpent`),
      *    so the run holds instead of asking. That is what makes this one attempt per
      *    build per platform per scope even when every write in it fails.
+     *
+     * 🔴 🔴 W59c · **And it is one rule for both classes, not two bounded differently.**
+     *    W59b bounded "everything else" this way and left the capability class
+     *    exempt, on the grounds that its answer is recomputed from the plan table with
+     *    no request at all — so there was nothing to bound and the record was cleared
+     *    here, as W59 did. The exemption measured the wrong step: the requests a
+     *    capability record is holding back are in the *run that follows*, which is the
+     *    leg the record stopped, so a lift whose verdict never landed left `halted:
+     *    null` on disk and the platform was asked again on every later tick — the
+     *    per-tick question this whole funnel exists to bound, one class over. The
+     *    exemption in `haltRetrySpent` is gone with it; what remains of `HaltClass`
+     *    here is the transient branch, which the clock (not a build) re-decides.
+     *
+     *    W44 is untouched by that, and the reason is the marker's *content*: it is
+     *    compared against the running build, so a record from any other build is
+     *    re-decided exactly as W44 requires. Only the build that already lifted the
+     *    record — and has nothing on disk to show for it — holds it.
      */
     const judged = state.halted;
     const expired = haltExpiredBecause(judged, currentJudgement());
     if (haltClassOf(judged.reason) === 'permanent') {
       if (expired === null) {
-        if (haltRetrySpent(judged, currentJudgement())) {
+        if (haltRetrySpent(currentJudgement())) {
           // Held, not re-decided: say so, because the alternative is a leg that looks
           // frozen holding a record another build's name is on.
           console.warn(
@@ -950,8 +1065,37 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         recordedAt: judged.at,
         clearedAt: clock.now(),
       };
-      if (expired.because === 'build') state.haltRetried = { build: expired.currentBuild, at: clock.now() };
-      else state.halted = null;
+      /**
+       * 🔴 🔴 W59c · **Both classes suspend the record and spend the attempt, and the
+       *    capability class is the reason this is one line rather than two.**
+       *
+       *    W59 (and W59b for the other class) wrote two different things here: a
+       *    capability expiry **deleted** the record and wrote no marker, on the
+       *    grounds that the lift costs nothing — the new answer is recomputed from
+       *    the plan table in this process. What that missed is the step after it:
+       *    deleting the record is what lets this run fetch, and this run's requests
+       *    are exactly what the record was holding back. If anything between here and
+       *    its verdict goes wrong (a `storage.local` write that throws, an MV3
+       *    reclaim of the worker — routine) the disk holds `halted: null`, the next
+       *    tick has no record to judge, so it asks the platform again, and the one
+       *    after that, forever. Measured shape: the list request the stale record
+       *    forbade, re-issued on every alarm wake.
+       *
+       *    So the record is **suspended** for both classes — left exactly as it was
+       *    found, saying what the older build said about a capability or a condition
+       *    this build has not yet seen for itself — and the attempt is written into
+       *    the header first. `haltRetrySpent` is then what a later tick reads: this
+       *    build has already had its one answer here, so the record stands until a
+       *    new build. The run that does finish owes a verdict either way — `halt()`
+       *    writes the new record and turns `redecting` off, `finish` clears the
+       *    suspended one — so nothing is left suspended by a run that succeeds.
+       *
+       *    🔴 A build that cannot name itself has nothing to spend
+       *       (`haltRetrySpent` answers "not spent" for a null build), so no marker is
+       *       written for it: that environment keeps the pre-W59c behaviour rather
+       *       than gaining a hold nothing can read.
+       */
+      if (currentBuild !== null) state.haltRetried = { build: currentBuild, at: clock.now() };
       await persist(state);
       redecting = true;
       console.warn(
@@ -1042,6 +1186,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt(
       'org-unresolved',
       `platform ${plan.platform} addresses conversations by account scope, and this run has none`,
+      // 🔴 W59c · Neither of these two stops has heard anything about the account —
+      //    they are facts about what this run was handed. See `attemptUnanswered`:
+      //    when this build's question is still unanswered on disk, the record must
+      //    not claim to be its judgement, and the attempt stays unspent.
+      unjudged(),
     );
   }
   /**
@@ -1081,6 +1230,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         ? `platform ${plan.platform} addresses conversations by account scope, and 'default'`
           + ' means the identifier could not be told — it is not an organization'
         : `platform ${plan.platform} addresses conversations by account scope, and this run's scope is not an organization`,
+      unjudged(),
     );
   }
 
@@ -1142,16 +1292,18 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    halt('detail-unsupported'), and a persisted halt stops every later tick
    *    from reading page 2 at all — the list would be cut off at the first page
    *    and the halt could never be reached with more than one page on disk.
-   *    So for list-only plans the list segment keeps running to the end of the
-   *    list, byte-for-byte as before (tests/c27-pplx.test.ts pins that path).
+   *    So a list-only plan gets its **own** cap (`LIST_PAGES_PER_TICK`) rather
+   *    than the body-bearing plans' one — a bound it did not have at all until
+   *    W59c, which is the change the note below records, and one that no longer
+   *    truncates the list because the loop's ending changed with it.
    *
    * 🔴 🔴 W59b · **A re-decision tick reads one page, whatever the plan can do.**
    *    This is the one run in the product where the platform is being asked a
    *    question it was never asked — the halt came off, and the leg finds out what
    *    the wire says now. "A retry must never be a burst" is the reason it is bounded,
    *    and the reason it is bounded *here* rather than by the ordinary budget is that
-   *    for a list-only plan the ordinary budget is the whole list (74 pages on the
-   *    account W10 measured).
+   *    the ordinary budget for a list-only plan used to be the whole list (74 pages on
+   *    the account W10 measured).
    *
    *    🔴 The cap cannot truncate the list, and that took a second change to be true:
    *       stopping the loop early on a list-only plan would reach
@@ -1159,13 +1311,21 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *       halt is written back stamped with this build, page 2 would never be read at
    *       all. That is precisely the loss the paragraph above forbids. So the
    *       list-only branch *below* returns `budget-exhausted` instead of halting when
-   *       the cap is what stopped it (see there): this tick reads one page and ends
-   *       gently, and the next tick — no longer a re-decision, so uncapped — reads the
-   *       rest and reaches the same stop with the whole list on disk.
+   *       the cap is what stopped it (see there).
+   *
+   * 🔴 🔴 W59c · **And that same ending is what lets the ordinary tick be capped too.**
+   *    W59b's cap applied to the re-decision; the tick *after* it was `Infinity` again,
+   *    so a stale stop on a 74-page list was one page and then 73 requests in the next
+   *    alarm wake (`LIST_PAGES_PER_TICK`'s note has the arithmetic). Nothing about that
+   *    ending was specific to a re-decision — "the cap is what stopped this loop" is
+   *    the same fact on any tick — so the branch below now asks that question instead
+   *    of asking "was this the re-decision". A capped list-only tick ends
+   *    `budget-exhausted`, the cursor carries to the next tick, and the halt is reached
+   *    once the list really is on disk.
    */
   const listPagesThisTick = redecting
     ? 1
-    : canBackfillDetail(plan) ? 1 : Number.POSITIVE_INFINITY;
+    : canBackfillDetail(plan) ? 1 : LIST_PAGES_PER_TICK;
   let listPagesFetched = 0;
   // The trace has to say which page it stopped on. Under cursor mode `offset` is the
   // **number enumerated so far**, not a request parameter, so the two modes must be
@@ -1497,8 +1657,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   if (!plan.detailUrl || !plan.detailPath) {
     if (state.pending.length === 0) return finish('queue-empty');
     /**
-     * 🔴 W59b · **A list-only plan must not be halted while its list is still being
-     *    read**, and the re-decision cap above is the one thing that can put it there.
+     * 🔴 W59b / W59c · **A list-only plan must not be halted while its list is still
+     *    being read**, and the page cap above is what can put it there.
      *
      * The halt below is a statement about this build's **body segment**. It is the
      * right answer once the enumeration has finished, and a wrong one one page in: it
@@ -1511,14 +1671,26 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * So when the *cap* is what ended the loop — not the list ending, and not one of
      * the named truncations the loop records — the tick ends gently instead. Nothing
      * is claimed: `budget-exhausted` says this run's budget ran out, which is exactly
-     * what happened, and the next tick is an ordinary one (uncapped, because the
-     * record is no longer being re-decided) that reads the rest and reaches this same
-     * stop with the whole list on disk.
+     * what happened, and the next tick reads the rest and reaches this same stop with
+     * the whole list on disk.
+     *
+     * 🔴 W59c · **The condition is the cap, not the re-decision.** W59b wrote it as
+     *    `redecting && …`, because the re-decision was the only capped tick then. Now
+     *    that every tick of this plan is capped at `LIST_PAGES_PER_TICK`, `redecting`
+     *    is not part of the fact: "the loop ended with pages still to read" is, and it
+     *    is the same fact on an ordinary tick. Keeping the old condition would have
+     *    made a capped ordinary tick reach the halt below with page 1 of 74 on disk —
+     *    the truncation this paragraph exists to forbid, reintroduced by the cap that
+     *    was supposed to remove only the burst.
+     *
+     *    Nothing is lost in the ending's own direction: `finish('budget-exhausted')`
+     *    does not write a halt, so the plan stays halt-free until its list is really
+     *    read out, and `enumCursor.complete`/`truncated` are untouched (they are set
+     *    only inside the loop, by a page that ends the list or by a named truncation).
      */
-    const cappedByRedecision = redecting
-      && !state.enumCursor.complete
+    const cappedByPageCap = !state.enumCursor.complete
       && state.enumCursor.truncated === undefined;
-    if (cappedByRedecision) return finish('budget-exhausted');
+    if (cappedByPageCap) return finish('budget-exhausted');
     const gap = plan.partial?.missing.join(' | ') ?? 'detailPath / detailUrl';
     return halt(
       'detail-unsupported',
