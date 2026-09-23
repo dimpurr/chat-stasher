@@ -36,8 +36,6 @@ import {
   loadLastTick,
   loadTargets,
   migrateLegacyScopes,
-  syncBackfillAlarm,
-  type AlarmsApi,
   type LegacyMigration,
 } from '../../lib/backfill/alarm';
 import {
@@ -49,6 +47,7 @@ import {
   summarizeOutbox,
   POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
+  POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
   type PopupModel,
   type PopupView,
@@ -500,20 +499,55 @@ async function onOpenDashboard(): Promise<void> {
   setDashboardNote(outcome.message);
 }
 
+/**
+ * 🔴 W87 · **Ask the service worker to bring the alarms in step with the switch.**
+ *
+ * The popup does not touch `browser.alarms` — not here, not anywhere. It used to:
+ * `onToggle` wrote the switch and then called `syncBackfillAlarm` in this realm,
+ * which made it a second alarm writer with no ordering relationship to
+ * background's `alarmSyncQueue`. Whichever of the two settled last won, and the
+ * popup's could be that one:
+ *
+ *   · turning **off** while an earlier on-sync was still in flight — the worker
+ *     cleared both alarms, then this realm's in-flight sync re-created them;
+ *   · turning **on** while an earlier off-sync was awaiting `alarms.clear` — the
+ *     worker armed both alarms, then this realm's clear landed, and the leg sat
+ *     idle with the switch on until some unrelated wake.
+ *
+ * So the popup writes the switch and asks. The sync that answers re-read the
+ * **stored** value when it ran, so the stored switch is still the authority — a
+ * write that failed falls back and the alarms fall back with it, exactly as
+ * before.
+ *
+ * The answer is only ever a log line (`'created'` / `'kept'` / `'cleared'` /
+ * `'unavailable'`), so `'unknown'` is returned when the worker did not answer —
+ * "this popup did not learn the outcome". It is **not** `'cleared'`: the two are
+ * different states and the popup must not print a measurement it did not make.
+ * The sync is not lost in that case either — the worker wakes for the write's
+ * own `storage.onChanged`, which is why this message is a second request rather
+ * than the only one.
+ */
+async function askAlarmSync(): Promise<string> {
+  try {
+    const reply = await browser.runtime.sendMessage({ type: POPUP_SYNC_ALARM_MESSAGE });
+    const result = (reply as { result?: unknown } | undefined)?.result;
+    if (typeof result === 'string') return result;
+    return 'unknown';
+  } catch (err) {
+    console.warn('[chat-stasher] popup alarm sync request failed', (err as Error).message);
+    return 'unknown';
+  }
+}
+
 async function onToggle(on: boolean): Promise<void> {
   const store = browserLocalStore();
   // If it cannot be saved, do not pretend the flip worked: repaint at once and
   // the UI falls back to the real value.
   await setBackfillEnabled(store, on);
-  // 🔴 C19: the switch and the alarm must change together. The **stored value**
-  //    is authoritative, not `on` — if the storage write failed the switch falls
-  //    back, and the alarm has to fall back with it, so that "switch is off but
-  //    the alarm is still firing" cannot happen.
-  const persisted = await isBackfillEnabled(store);
-  const result = await syncBackfillAlarm(
-    (browser as unknown as { alarms?: AlarmsApi }).alarms ?? null,
-    persisted,
-  );
+  // 🔴 C19 + W87: the switch and the alarm must change together, and the worker
+  //    is the only thing that changes an alarm. `setBackfillEnabled` has already
+  //    returned, so the value the worker will read is committed.
+  const result = await askAlarmSync();
   console.log('[chat-stasher] backfill alarm ->', result);
   await refresh();
 }
