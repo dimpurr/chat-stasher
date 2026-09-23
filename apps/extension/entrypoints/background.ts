@@ -792,7 +792,35 @@ async function rememberScopedTarget(
  *    having some other platform's resolver run against its page. A second scoped
  *    platform gets its own entry, and this table is where that decision is made.
  */
-export type ScopeResolver = (tabId: number | null, origin: string) => Promise<OrgResolution>;
+export type ScopeResolver = (tabId: number | null, origin: string) => Promise<ScopeAnswer>;
+
+/**
+ * 🔴 W76c · **What a resolver answered, and the one fact the walk needs about how.**
+ *
+ * `resolved` is the resolver's own answer, passed back unchanged — this type adds
+ * nothing to it. What it adds is `reachedPage`, because *whether the question ever
+ * got to a page* is a fact about the channel and not about the account, and only
+ * the resolver can report it: `claudeScopeFromTab` is the one that goes looking for
+ * the page. W76b left the walk to infer it from a port check taken a moment later,
+ * and that inference is wrong exactly when the page dies in between — the walk then
+ * read "the page asked the endpoint" as "nothing was issued" and handed the same
+ * wake to the platform behind (W76c).
+ */
+export interface ScopeAnswer {
+  /** The resolver's answer, unchanged. */
+  resolved: OrgResolution;
+  /**
+   * 🔴 Whether the question reached a page of that platform at all.
+   *
+   * `false` means no page was found to ask, so **nothing was issued** on this
+   * target's behalf and the tick is not spent on it. `true` means a page was found
+   * (and, on the alarm's path, that it answered a liveness ping first) — the
+   * question was handed to it, so a request may have gone out on this target and
+   * the walk stops there. A one-way report, not an inference: only the resolver
+   * knows, and the walk never re-derives it from a later observation.
+   */
+  reachedPage: boolean;
+}
 
 export function scopeResolverFor(platform: string): ScopeResolver | null {
   return platform === 'claude' ? claudeScopeFromTab : null;
@@ -811,24 +839,38 @@ export function scopeResolverFor(platform: string): ScopeResolver | null {
  *    closed tab, a reloaded extension and a wedged renderer are facts about the
  *    channel, and the account is not implicated by any of them.
  */
-async function claudeScopeFromTab(tabId: number | null, origin: string): Promise<OrgResolution> {
+async function claudeScopeFromTab(tabId: number | null, origin: string): Promise<ScopeAnswer> {
   const tabs = tabsApi();
   if (!tabs) {
-    return { ok: false, halt: 'transport-error', detail: 'the tabs API is not available, so the page cannot be asked' };
+    return {
+      resolved: { ok: false, halt: 'transport-error', detail: 'the tabs API is not available, so the page cannot be asked' },
+      reachedPage: false,
+    };
   }
   if (tabId === null) {
     const live = await pickLiveTab(browserLocalStore(), origin, (id) =>
       tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
     if (!live) {
       return {
-        ok: false,
-        halt: 'transport-error',
-        detail: 'no open page of that platform answered, so its organization could not be asked for',
+        resolved: {
+          ok: false,
+          halt: 'transport-error',
+          detail: 'no open page of that platform answered, so its organization could not be asked for',
+        },
+        // 🔴 The two paths that concede before a page is ever found. They are the
+        //    `transport-error` cases where **nothing was issued**, and they are
+        //    reported as such rather than left for the walk to guess at: a channel
+        //    that never found a page is the same fact as "no request went out", and
+        //    the walk must not spend a tick on it.
+        reachedPage: false,
       };
     }
-    return askTabForClaudeOrg(live.tabId, tabs.sendMessage);
+    return { resolved: await askTabForClaudeOrg(live.tabId, tabs.sendMessage), reachedPage: true };
   }
-  return askTabForClaudeOrg(tabId, tabs.sendMessage);
+  return {
+    resolved: await askTabForClaudeOrg(tabId, tabs.sendMessage),
+    reachedPage: true,
+  };
 }
 
 /**
@@ -1135,7 +1177,7 @@ export async function registerBackfillTargetHere(): Promise<
   let scope = UNRESOLVED_SCOPE;
   const resolver = scopeResolverFor(platform);
   if (resolver) {
-    const resolved = await resolver(live.tabId, origin);
+    const resolved = (await resolver(live.tabId, origin)).resolved;
     if (resolved.ok) {
       scope = resolved.org;
     } else {
@@ -1313,30 +1355,38 @@ async function rearmBackfillTick(): Promise<void> {
  * own requests and the cookie name nothing**. So the answer's shape says which of
  * three facts happened:
  *
- *  · `none`     — the question never left us, or the answer came from the page or
- *                 the cookie. Nothing was issued; the walk is free to carry on.
+ *  · `none`     — nothing was issued on this target's behalf. That is the answer
+ *                 from the page or the cookie, the question that was never put
+ *                 because nothing needed asking, and — W76c — the question that
+ *                 reached no page to be put to (`ScopeAnswer.reachedPage`). The
+ *                 walk is free to carry on in all three.
  *  · `proven`   — a request to the platform itself went out. `source: 'endpoint'`
  *                 is the endpoint's answer; `org-ambiguous` and `org-unresolved`
  *                 are read off the endpoint's **body** (the page-side resolver
  *                 asks the endpoint whenever the free sources answer nothing, so it
  *                 can never report the `not-asked` refusal), so both of those are
  *                 also proof that a body came back.
- *  · `possible` — `transport-error`, and it is the same value for two different
- *                 facts *by design* ("we could not ask" has one meaning on every
- *                 path — see `askTabForClaudeOrg`): the page may have made the
- *                 request and had it fail (a 5xx on the endpoint, the review's own
- *                 scenario), **or** the channel may have failed before any page was
- *                 ever reached (a closed tab, a wedged renderer, a timeout), in
- *                 which case nothing was issued at all. Nothing on the background
- *                 side can tell those apart, so the walk uses the one fact that
- *                 separates them in practice: whether a live page of that platform
- *                 answered the port check (see `runAlarmTickBody`).
+ *  · `possible` — a `transport-error` whose question *did* reach a page: the page
+ *                 may have made the request and had it fail (a 5xx on the endpoint,
+ *                 the review's own scenario), or the channel may have died between
+ *                 the ping that found the page and the message handed to it. Either
+ *                 way a request may have gone out, and the walk stops there.
+ *                 🔴 W76c · **The ambiguity is resolved at the source, not by a
+ *                 later guess.** W76b read this value for both the page-that-failed
+ *                 and the channel-that-never-found-a-page, and then separated them
+ *                 by asking the port check a moment later. That inference is wrong
+ *                 when the page dies in between, and it is unnecessary: the resolver
+ *                 already knew which one it was (`ScopeAnswer.reachedPage`), so
+ *                 "never found a page" is now `none` — nothing was issued — and the
+ *                 walk spends the tick on every `possible` it is given.
  */
 type ScopeRequest = 'none' | 'proven' | 'possible';
 
-function scopeRequestSpend(resolved: OrgResolution): ScopeRequest {
+function scopeRequestSpend(answer: ScopeAnswer): ScopeRequest {
+  const { resolved, reachedPage } = answer;
   if (resolved.ok) return resolved.source === 'endpoint' ? 'proven' : 'none';
-  return resolved.halt === 'transport-error' ? 'possible' : 'proven';
+  if (resolved.halt !== 'transport-error') return 'proven';
+  return reachedPage ? 'possible' : 'none';
 }
 
 async function resolveScopeForTick(
@@ -1390,18 +1440,19 @@ async function resolveScopeForTick(
   }))) {
     return { scope: UNRESOLVED_SCOPE, request: 'none' };
   }
-  const resolved = await resolver(null, target.origin);
+  const answer = await resolver(null, target.origin);
+  const resolved = answer.resolved;
   if (!resolved.ok) {
     await recordBackfillHalt(store, {
       platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
     // The engine now finds the halt record and stops by name, issuing nothing.
-    return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(resolved) };
+    return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(answer) };
   }
   await rememberScopedTarget(store, {
     platform: target.platform, origin: target.origin, scope: resolved.org, at: Date.now(),
   });
-  return { scope: resolved.org, request: scopeRequestSpend(resolved) };
+  return { scope: resolved.org, request: scopeRequestSpend(answer) };
 }
 
 async function runAlarmTickBody(): Promise<TickResult> {
@@ -1580,23 +1631,19 @@ async function runAlarmTickBody(): Promise<TickResult> {
      * for one platform *and* a list plus a detail for another would be two sites
      * fetching in one tick, which is the rule the whole walk exists to keep.
      *
-     * 🔴 `proven` and `possible` are treated differently, and the difference is the
-     *    port check (`pageAnswered`): a resolution that came back from the
-     *    endpoint, or as one of the two organization refusals, is proof the page
-     *    asked the platform even if that page is gone by now. A `transport-error`
-     *    is not proof — it is the same value for the page's own failed request and
-     *    for a channel that never reached a page at all — so it ends the walk only
-     *    when a live page of that platform answered the port check a moment later,
-     *    which is the only reading of "the question reached a page" available here.
-     *    The one case that can slip through is a page that died inside the two
-     *    awaits; reading it the other way round would let a *closed* tab starve
-     *    every other platform for as long as the retry ladder lasts, which is the
-     *    defect W76 exists to remove.
-     */
-    const spentRequest = (pageAnswered: boolean): boolean =>
-      scopeResolution.request === 'proven'
-      || (scopeResolution.request === 'possible' && pageAnswered);
-    /**
+     * 🔴 W76c · **A resolution that issued nothing is `none`, and everything else
+     *    ends the walk — on every way out of this loop, not only on the two that
+     *    were thought of first.** `ScopeRequest` is already the whole answer to
+     *    "was anything issued": `none` says no, `proven` and `possible` both say
+     *    something may have gone out. So the rule below reads that value and
+     *    nothing else — no `pageAnswered` argument, no port check, no re-derivation
+     *    of a fact the resolver already reported. W76b applied it at the port exit
+     *    and the hold exit and missed the idle skip (`tickIdleReason`), so a proven
+     *    organization GET followed by a `daily-cap` or `state-unreadable` skip
+     *    handed the same wake to the platform behind. There is now exactly one
+     *    `continue` in this loop that does not go through the guard, and it is the
+     *    one above the resolution, where there is no request to spend yet.
+     *
      * Charge this tick to the target the question was put to, and end the walk.
      *
      * `schedule.served` names it because it *was* served in the sense the rotation
@@ -1604,11 +1651,17 @@ async function runAlarmTickBody(): Promise<TickResult> {
      * the next wake starts at the platform behind it. It is not the same fact as
      * "it ran", which is what `last.ran` and the tick's own `scope-asked` reason
      * say.
+     *
+     * Returns whether it ended the walk, so a caller reads as
+     * `if (await endWalkIfAsked()) break;` — one line at each exit, and no way to
+     * reach the `continue` without having asked.
      */
-    const serveAsked = async (): Promise<void> => {
+    const endWalkIfAsked = async (): Promise<boolean> => {
+      if (scopeResolution.request === 'none') return false;
       await saveTickCursor(store, idx);
       schedule.served = target.platform;
       last = { ran: false, reason: 'scope-asked', report: null };
+      return true;
     };
     const tickOne = (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
       tickBackfill({
@@ -1681,13 +1734,12 @@ async function runAlarmTickBody(): Promise<TickResult> {
       }
       if (http === undefined) {
         schedule.skipped.push({ platform: target.platform, reason: 'no-http-port' });
-        // No live page answered, so the question cannot have been put to one. Only
-        // a resolution that *proves* the page asked the platform ends the walk
-        // here; a `possible` one did not reach a page at all.
-        if (spentRequest(false)) {
-          await serveAsked();
-          break;
-        }
+        // The page this target would have run against is gone — but a `proven` or
+        // `possible` resolution means a request did go out earlier in this wake, and
+        // a `possible` one is only reachable when the resolver found a page to ask
+        // (`ScopeAnswer.reachedPage`), so the page dying *after* that does not undo
+        // the question. Either way, nothing else runs this tick.
+        if (await endWalkIfAsked()) break;
         continue;
       }
     }
@@ -1703,10 +1755,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
       //    target's behalf: then this hold is the *end* of the tick, not a reason
       //    to hand it to someone else. A live page answered the port check, so the
       //    question reached one.
-      if (spentRequest(true)) {
-        await serveAsked();
-        break;
-      }
+      if (await endWalkIfAsked()) break;
       continue;
     }
     // 🔴 W76b · **A run that would fetch nothing does not get the tick either.**
@@ -1715,9 +1764,19 @@ async function runAlarmTickBody(): Promise<TickResult> {
     //    `tickIdleReason` decides those two from this scope's stored header, with
     //    no request and no debt-store open, and the walk moves on to a platform
     //    that can actually be served.
+    //
+    // 🔴 W76c · **Unless the resolution already spent one.** "This run would fetch
+    //    nothing" is a statement about the *engine's* next run, and it says nothing
+    //    about `GET /api/organizations` having gone out moments ago for the same
+    //    target. W76b's idle skip moved to the next target regardless, so a proven
+    //    organization request plus the platform behind it's list and detail could
+    //    share one wake — the exact overlap the three other exits exist to prevent.
+    //    The guard is asked here like anywhere else; when the resolution issued
+    //    nothing (`none`) the skip still costs nobody their turn.
     const idle = await tickIdleReason(store, target.platform, scope, tickNow());
     if (idle !== null) {
       schedule.skipped.push({ platform: target.platform, reason: idle });
+      if (await endWalkIfAsked()) break;
       continue;
     }
     // Genuinely runnable now: it may issue a request (a normal run, a W59

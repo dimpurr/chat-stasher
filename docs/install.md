@@ -632,7 +632,7 @@ confirmed in the code, not a temporary disclaimer.
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two
   then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:1342-1405`). Perplexity **only lists
+  (`apps/extension/entrypoints/background.ts:1392-1456`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
   `apps/extension/lib/backfill/enumerate.ts:4220-4247`). The

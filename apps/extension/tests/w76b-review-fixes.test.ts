@@ -619,3 +619,117 @@ describe('W76b-4 · a scope whose next run would fetch nothing does not spend th
     expect(rec?.schedule?.skipped).toContainEqual({ platform: CHATGPT, reason: 'daily-cap' });
   });
 });
+
+// ===========================================================================
+// W76c · the idle skip is not an exit from the one-wake-one-site rule
+// ===========================================================================
+//
+// The R76 re-review (`nm/R76b-grok.log`) found finding 1 only *partly* closed: the
+// idle skip added by W76b for a run that would fetch nothing was the one `continue`
+// in the walk that did not ask whether this target's turn had already put a request
+// to the platform. A proven `GET /api/organizations` followed by a `daily-cap` skip
+// therefore handed the same wake to the platform behind — the overlap every other
+// exit exists to prevent.
+//
+// Why this block lives in this file rather than a file of its own: the fixture it
+// needs is the whole of the one above it — the booted background, the real tab
+// channel, the real page-side resolver and the real engine — and a second copy of
+// those would be a second answer to "what is real here", which is the thing this
+// file's header is written to pin. The new observation is a request count.
+
+describe('W76c · an idle skip after a scope question still ends the wake', () => {
+  /**
+   * The header that makes `tickIdleReason` answer `daily-cap`: the list read to its
+   * end, and today's drawn quota already spent (`cap: 0` ⇒ the engine's own
+   * `min(cap ?? maxPerDay, maxPerDay)` is 0). The first assertion below is what makes
+   * the fixture answerable — the engine's own run on this exact state is what says
+   * the state is a capped one.
+   */
+  async function writeCappedHeader(platform: string, scope: string): Promise<void> {
+    const { initialState, dayKeyOf } = await import('../lib/backfill/types');
+    const { saveHeader } = await import('../lib/backfill/ledger');
+    const { applyDebtDiff } = await import('../lib/backfill/debt-store');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const owed = IDS.slice(0, 3);
+    // The debt set through the store's own write path and the header through the
+    // ledger's, exactly as the test above builds them: the two records have to agree
+    // about what is owed, or `openLedger` refuses the pair as a `ledger-mismatch`
+    // before either cap fact is read.
+    await applyDebtDiff(platform, scope, { enqueue: owed, settle: [], drop: [] }, 1);
+    await saveHeader(browserLocalStore()!, {
+      ...initialState(platform, scope),
+      enumCursor: { offset: owed.length, complete: true },
+      pending: owed,
+      detailToday: { day: dayKeyOf(runtimeNow), count: 0, cap: 0 },
+    });
+  }
+
+  it('🔴 a resolved organization at its daily quota does not hand the wake to the platform behind', async () => {
+    const rows = [claude('default'), chatgpt(A)];
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(1, CLAUDE_ORIGIN, claudePageScope());
+    await openTab(2, ORIGIN);
+    await unresolvedClaudeRowWithRetryDue();
+    // The endpoint names exactly one organization, so the resolution succeeds and
+    // `GET /api/organizations` really did go out on this wake's behalf.
+    routes[RESOLVE_PATH] = jsonRoute(() => JSON.stringify([{ uuid: ORG, name: 'synthetic' }]));
+    // …and the organization it names is at today's body quota with its list
+    // finished, so the run the walk would hand it issues no request at all.
+    await writeCappedHeader(CLAUDE, ORG);
+
+    // 🔴 The premise, checked against the engine itself rather than assumed: this
+    //    scope's next run stops at `daily-cap` without fetching. The port it is
+    //    handed throws, so a run that fetched anything would fail here instead.
+    const { runBackfill } = await import('../lib/backfill/engine');
+    const report = await runBackfill({
+      platform: CLAUDE, origin: CLAUDE_ORIGIN, scope: ORG, store: (await import('../lib/backfill/store')).browserLocalStore()!,
+      clock: runtimeClock,
+      http: async () => { throw new Error('a capped run must not fetch'); },
+    });
+    console.log('[W76c-1a] direct run on the capped organization:', report.stopped);
+    expect(report.stopped).toBe('daily-cap');
+    pageCalls.length = 0;
+
+    const mod = await bootBackground();
+    await tick(mod);
+
+    console.log('[W76c-1a] claude calls:', JSON.stringify(callsTo(CLAUDE_ORIGIN)));
+    console.log('[W76c-1a] chatgpt calls:', JSON.stringify(callsTo(ORIGIN)));
+    // 🔴 The measured fact first: the organization request went out, and the
+    //    platform behind it received nothing — not a list, not a detail.
+    expect(callsTo(CLAUDE_ORIGIN)).toEqual([RESOLVE_URL]);
+    expect(callsTo(ORIGIN)).toEqual([]);
+    expect(await archived(rows[1]!)).toBe(0);
+
+    // And the trace says which of the two it was, with the idle reason kept.
+    const rec = await trace();
+    console.log('[W76c-1a] trace:', JSON.stringify(rec?.schedule), 'reason:', rec?.reason);
+    expect(rec?.reason).toBe('scope-asked');
+    expect(rec?.schedule).toEqual({
+      served: CLAUDE,
+      skipped: [{ platform: CLAUDE, reason: 'daily-cap' }],
+    });
+  });
+
+  it('guard · an idle skip with no scope question behind it still lets the platform behind run', async () => {
+    const rows = [chatgpt(A), chatgpt(B)];
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(11, ORIGIN);
+    // 🔴 The other side of the same rule, and the reason this is not "an idle skip
+    //    ends the wake": no plan of chatgpt's asks the platform anything before its
+    //    run, so nothing was issued and the tick is the platform behind's to take.
+    await writeCappedHeader(CHATGPT, A);
+
+    const mod = await bootBackground();
+    const served = await servedByOneTick(mod, rows);
+    console.log('[W76c-1b] served:', served, '· calls:', JSON.stringify(pageCalls));
+    expect(served).toBe(B);
+    expect(await archived(rows[1]!)).toBe(1);
+
+    const rec = await trace();
+    console.log('[W76c-1b] schedule:', JSON.stringify(rec?.schedule));
+    expect(rec?.schedule?.skipped).toContainEqual({ platform: CHATGPT, reason: 'daily-cap' });
+  });
+});

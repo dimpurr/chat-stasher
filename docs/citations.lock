@@ -39,25 +39,25 @@ apps/extension/entrypoints/background.ts:500-507  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
 apps/extension/entrypoints/background.ts:748-778  e6c80301633c  lines=31
   <- docs/privacy.md:373  :: /**
-apps/extension/entrypoints/background.ts:882-926  20a9a510a90a  lines=45
+apps/extension/entrypoints/background.ts:924-968  20a9a510a90a  lines=45
   <- docs/privacy.md:345, docs/threat-model.md:597  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:923-944  4e91a0385326  lines=22
+apps/extension/entrypoints/background.ts:965-986  4e91a0385326  lines=22
   <- docs/privacy.md:322  :: //
-apps/extension/entrypoints/background.ts:1073-1147  a21279aaeebb  lines=75
+apps/extension/entrypoints/background.ts:1115-1189  dc1702283c38  lines=75
   <- docs/privacy.md:322  :: * 🔴 C33 · The registration entry point for **explicit infor…
-apps/extension/entrypoints/background.ts:1160-1203  fda982ba64df  lines=44
+apps/extension/entrypoints/background.ts:1202-1245  fda982ba64df  lines=44
   <- docs/privacy.md:309  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1203  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1245  6539997ed831  lines=1
   <- docs/privacy.md:311  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1342-1405  f773a3ccb828  lines=64
+apps/extension/entrypoints/background.ts:1392-1456  c394f5bf25c3  lines=65
   <- README.md:172, docs/install.md:635, docs/privacy.md:361, docs/privacy.md:377  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1835-1869  117bbd69b73e  lines=35
+apps/extension/entrypoints/background.ts:1894-1928  117bbd69b73e  lines=35
   <- docs/privacy.md:276  :: /**
-apps/extension/entrypoints/background.ts:1877-1914  64b51e737fa5  lines=38
+apps/extension/entrypoints/background.ts:1936-1973  64b51e737fa5  lines=38
   <- docs/privacy.md:276  :: ): Promise<void> {
-apps/extension/entrypoints/background.ts:2045-2061  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:2104-2120  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:2088-2104  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:2147-2163  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
