@@ -567,7 +567,12 @@ describe('W44-3 · the record already on disk, written by an older build', () =>
     const http: HttpPort = async (url: string) => {
       calls.push(url);
       // Two rows, then an empty page: the list is read to its own end.
-      return { status: 200, text: calls.length === 1 ? JSON.stringify([{ thread_id: 'pplx-0001-aaaaaaaa' }, { thread_id: 'pplx-0002-aaaaaaaa' }]) : '[]' };
+      // 🔴 W65: the list item's id field is `slug`, not the `thread_id` C27
+      //    invented — the live endpoint has no `thread_id` key (see
+      //    w65-pplx-list-shape.test.ts). A stub keyed `thread_id` no longer
+      //    parses, which would make this test stop on `shape-changed` before it
+      //    ever reached the capability question it exists to ask.
+      return { status: 200, text: calls.length === 1 ? JSON.stringify([{ slug: 'pplx-0001-aaaaaaaa' }, { slug: 'pplx-0002-aaaaaaaa' }]) : '[]' };
     };
     const pplx = {
       ...opts(store, http, clock),

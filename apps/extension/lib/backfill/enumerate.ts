@@ -2027,16 +2027,65 @@ export function parseDeepSeekDetailPage(text: string): DetailParseResult {
  * Parse one page of a Perplexity conversation list.
  *
  * 🔴 All three independent sources in R26 consume this endpoint as "returns a
- * list"; this parser recognises only a top-level array and the `thread_id`
- * inside each element. No array or no conversation id ⇒ `shape-changed`; an
- * unknown response is never folded into an empty list. total / has_more / count
- * have no source, so they are not read here.
+ * list"; this parser recognises only a top-level array and the id inside each
+ * element. No array or no conversation id ⇒ `shape-changed`; an unknown response
+ * is never folded into an empty list. total / has_more / count are not read
+ * here (see the note below).
+ *
+ * ## 🔴 W65 · the id field is `slug`, not the `thread_id` C27 invented
+ *
+ * C27 read `thread_id` and W28's fixture asserted that name and `slug` held the
+ * same string. **`thread_id` does not exist.** A live probe on 2026-09-23 (4
+ * read-only requests from the logged-in page's own context, scripts in
+ * `~/scratch/DimLifeS/chat-stasher/nm/drive/w65-probe{,2}.mjs`) got HTTP 200 and
+ * a top-level array whose items carry **36 keys, `thread_id` among neither of
+ * them**, and `slug`/`uuid`/`context_uuid` as three separate strings. Every
+ * earlier Perplexity list run halted on the missing key, which is what a strict
+ * parser is for — it stayed a halt and never became "this account has no
+ * conversations".
+ *
+ * 🔴 Why `slug` and not the `uuid`, which is also a non-empty string on every
+ * item. The two are distinct keys in the reference, and the reference builds
+ * **both** the conversation URL and the content route as `slug || uuid`
+ * (`perplexity.ts:getChatUrl` → `` `${A}/search/${t?.perplexitySlug || e}` ``;
+ * `perplexity.ts:fetchContent` → `` `${p}/thread/${e.perplexitySlug || e.id}` ``,
+ * Echoes 8.3.1 in `nm/w5-competitors/crx/echoes_x/`). The live leg names a file
+ * after what the page URL's `/search/<segment>` carries — that is the W28
+ * invariant, "one thread, one id, both legs" — so when the two keys ever hold
+ * different strings the segment is the slug, and reading `uuid` here would file
+ * one conversation under two names and leave its debt unsettled. On the probed
+ * account the two happen to coincide (the `/search/` segments are UUID-shaped
+ * and contain both), so the live data cannot separate them; the choice follows
+ * the reference. No `uuid` fallback is added on purpose: a missing id is a halt,
+ * and a fallback would silently produce the *other* id.
+ *
+ * ## 🔴 Not read here, and why that is now a decision rather than a gap
+ *
+ * The probe found `has_next_page` (a boolean, `false` on every item) — a real
+ * termination field that no R26 source and not even the reference reads, and
+ * exactly the contingency this plan's own doc block pre-authorises: "if it is
+ * ever confirmed that the response does carry a termination field ... read that
+ * field, and set `state.enumCursor.complete` to true only when it is explicitly
+ * false". Doing that changes the engine's enumeration branch for the offset-mode
+ * plans, not this parser, so it is **not** bundled into an id-name fix; the
+ * ledger keeps its `empty-page-inferred` / `short-page-inferred` wording until
+ * it is done deliberately.
+ *
+ * `total_threads` **must not** be read even though it is a number on every item:
+ * the probe saw it return **99 against a list of 4**, identical on every row —
+ * a placeholder, not a count. The reference reads it and then logs it away
+ * ("API total < fetched | assuming more pages exist") and still terminates on
+ * the page length. Writing it as a denominator would be inventing one, which is
+ * why `total` stays null.
  *
  * 🔴 No time field is read here, deliberately. R26's three sources conflict on
  * the time field's name: `last_query_datetime` has a single source,
  * `inserted_at || created_at || new Date()` is the author's own three-way guess,
  * and the third source does not read a time at all; no name reaches two
- * independent sources, so not one of them is written into the parser.
+ * independent sources, so not one of them is written into the parser. (The probe
+ * did observe `last_query_datetime` as a parseable date string on all 4 items —
+ * recorded as an observation, still not read: one live account is not the second
+ * source the rule above asks for.)
  */
 export function parsePerplexityListPage(text: string): ParseResult {
   let body: unknown;
@@ -2054,11 +2103,11 @@ export function parsePerplexityListPage(text: string): ParseResult {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       return { ok: false, detail: 'perplexity thread item is not an object' };
     }
-    const threadId = (item as Record<string, unknown>).thread_id;
-    if (typeof threadId !== 'string' || threadId.length === 0) {
-      return { ok: false, detail: 'perplexity thread item has no string `thread_id`' };
+    const slug = (item as Record<string, unknown>).slug;
+    if (typeof slug !== 'string' || slug.length === 0) {
+      return { ok: false, detail: 'perplexity thread item has no string `slug`' };
     }
-    ids.push(threadId);
+    ids.push(slug);
   }
   return { ok: true, page: { ids, total: null } };
 }

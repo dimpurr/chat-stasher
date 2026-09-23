@@ -347,8 +347,8 @@ describe('W59c-4 · a list-only plan reads a bounded number of pages per tick', 
 
   function onlyPage(from: number): string {
     return JSON.stringify([
-      { thread_id: `pplx-${String(from).padStart(4, '0')}-aaaaaaaa` },
-      { thread_id: `pplx-${String(from + 1).padStart(4, '0')}-aaaaaaaa` },
+      { slug: `pplx-${String(from).padStart(4, '0')}-aaaaaaaa` },
+      { slug: `pplx-${String(from + 1).padStart(4, '0')}-aaaaaaaa` },
     ]);
   }
 
