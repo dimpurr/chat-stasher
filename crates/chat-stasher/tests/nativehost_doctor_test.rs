@@ -351,3 +351,90 @@ fn the_probe_reads_only_under_the_root_it_is_given() {
         "a manifest outside the probed root must not be counted: {json}"
     );
 }
+
+/// Two homes never name one browser registration.
+///
+/// The other half of the regression above, and the half the four reds of
+/// 2026-09-14 onward actually came from: the root [`default_root`] answers with
+/// has to be a fact about the home it was handed. On `windows-latest` it was
+/// not — the root came from `%LOCALAPPDATA%` in the process environment instead
+/// — so the two homes below both answered with one directory, every test in
+/// this binary planted its manifest in the same file, and whichever test ran
+/// last decided what the others read.
+///
+/// `%LOCALAPPDATA%` is pointed at a third directory for the duration of the
+/// reads, and that is the whole point of the test. `nativehost.rs`'s
+/// `the_root_is_derived_from_the_home_it_is_given` pins the same shape, but it
+/// cannot go red on macOS or Linux: the variable is unset there, so the code
+/// that was red on Windows answers exactly as the fixed code does. This one is
+/// red on every platform against the code that was red on one — which is what
+/// makes it usable by the grids that run every day rather than by the nightly
+/// that went unread for five nights.
+///
+/// The variable is restored before any assertion runs, so a failing assertion
+/// here cannot leave a process-global set for the rest of this binary.
+#[test]
+fn two_homes_never_share_a_browser_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    // A profile can redirect the `LocalAppData` known folder — `machine_root`
+    // exists to honour that for callers that mean *this machine*. A caller that
+    // named a home is not such a caller, and that is the distinction under test.
+    let decoy = dir.path().join("redirected-local-appdata");
+
+    fn manifest_for(platform: nativehost::Platform, root: &Path) -> PathBuf {
+        nativehost::target(
+            platform,
+            root,
+            nativehost::Browser::Chrome,
+            nativehost::HOST_NAME,
+        )
+        .expect("this build knows a Chrome path")
+        .manifest
+    }
+
+    let previous = std::env::var_os("LOCALAPPDATA");
+    std::env::set_var("LOCALAPPDATA", &decoy);
+    let observed: Vec<(nativehost::Platform, PathBuf, PathBuf, PathBuf, PathBuf)> = [
+        nativehost::Platform::Macos,
+        nativehost::Platform::Linux,
+        nativehost::Platform::Windows,
+    ]
+    .into_iter()
+    .map(|platform| {
+        let left = nativehost::default_root(platform, &first);
+        let right = nativehost::default_root(platform, &second);
+        let left_manifest = manifest_for(platform, &left);
+        let right_manifest = manifest_for(platform, &right);
+        (platform, left, right, left_manifest, right_manifest)
+    })
+    .collect();
+    match &previous {
+        Some(value) => std::env::set_var("LOCALAPPDATA", value),
+        None => std::env::remove_var("LOCALAPPDATA"),
+    }
+
+    for (platform, left, right, left_manifest, right_manifest) in observed {
+        assert_ne!(
+            left,
+            right,
+            "{}: two homes, one discovery root",
+            platform.id()
+        );
+        assert_ne!(
+            left,
+            decoy,
+            "{}: the root came from `%LOCALAPPDATA%` rather than from the home this \
+             call named",
+            platform.id()
+        );
+        assert_ne!(
+            left_manifest,
+            right_manifest,
+            "{}: two homes, one browser registration — a fixture asking about one home \
+             would be answered about another",
+            platform.id()
+        );
+    }
+}
