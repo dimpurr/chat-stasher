@@ -756,7 +756,16 @@ describe('W22-6 · enumerating with the cursor inside the request body', () => {
     };
     const report = await run(memoryStore(), http as never, 'w22-auth', { clock });
 
-    expect(report.stopped).toBe('halted');
+    // 🔴 W64 · This assertion used to read `'halted'`, and that premise was the defect
+    //    this test was named for rather than a fact about Kimi: `'halted'` is the
+    //    **permanent** stop, so a 401 — which this test's own title calls an auth halt
+    //    — was recorded as a permanent one and the leg never asked again. A 401 is a
+    //    credential refusal, it is transient, and `'waiting-retry'` is what says so.
+    //    Nothing else in this test moved: the detail still names the status, the two
+    //    mistakes it forbids are still forbidden, and the reason is now pinned beside
+    //    them instead of being left to the generic sentence.
+    expect(report.stopped).toBe('waiting-retry');
+    expect(report.halted?.reason).toBe('auth-refused');
     expect(report.halted?.detail).toContain('401');
     // 🔴 The two mistakes this forbids: an empty list recorded (nothing pending, complete
     //    true) and a refusal rounded into progress (a body fetched anyway).

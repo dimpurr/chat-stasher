@@ -377,8 +377,73 @@ export async function recordBackfillHalt(
   return true;
 }
 
-/** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
+/**
+ * Classify a non-2xx for any backfill segment: credential refusal, rate-limit
+ * family, or everything else. All three stop, but they leave different traces and
+ * they promise different things.
+ *
+ * 🔴 W64 · **A 401 is its own answer, and it is not "the shape changed".**
+ *
+ * Measured 2026-09-23 from the page's own context in a logged-in Chrome: the list
+ * request `KIMI_PLAN` builds — the plan's own body, every header
+ * `createKimiAuthorizedFetch` produces, `authorization: Bearer <the page's
+ * localStorage access_token>` — answered **HTTP 401** with
+ * `{ code: "unauthenticated", message: "invalid user token: token has invalid claims:
+ * token is expired" }`. The stored token had **expired about 15 hours earlier**; the
+ * key name had not moved and no header was missing (the W64 probe table is in that
+ * task's report). The cookie-only form of the same request answered 401 too, with
+ * `code: "unauthenticated"` and no `message`.
+ *
+ * What a user was told before this line existed: `shape-changed` — "the API changed,
+ * wait for a fix". That is a **permanent** record, so the leg never asked again, and
+ * nothing in the product clears one. The platform had said, in as many words, that
+ * the credential it was handed is expired.
+ *
+ * 🔴 **Why every 401, and not only the platforms that have an auth wrapper.**
+ *    `lib/platform-auth.ts` is the only thing that knows which platforms send a
+ *    credential, and a second list of them living here is a list that can disagree
+ *    with it — silently, and in the direction that keeps this bug, because the wrong
+ *    answer is still a *permanent* record. The reason itself needs no such list: a
+ *    401 says a credential was required and what was presented was not accepted, and
+ *    there is no platform anywhere for which that is a statement about the wire
+ *    format. That is also why 401 may not fall to `shape-changed` on the one plan
+ *    that declares no credential — the sentence would be false there too.
+ *
+ * 🔴 **Why not `rate-limited`.** It is a different fact about why the platform said
+ *    no, its sentence promises a wait rather than a login, and it sits on its own
+ *    rung. `auth-refused` is the existing reason for a refused credential; it is
+ *    transient (`haltClassOf`), which is what makes the leg come back on its own and
+ *    pick up a token the page has since refreshed — and refreshing is the whole
+ *    remedy, since the token is re-read on every request (`lib/platform-auth.ts`).
+ *    Its popup sentence names the login, which is the correct action for a 401.
+ *    🔴 The cost, stated rather than implied: an account that is logged out for good
+ *    now costs one request per rung (30 min, then 2 h) instead of stopping at one.
+ *    W61b already made exactly this trade for the same reason and for the same
+ *    reason class — a permanent record froze a platform across logins, and nothing
+ *    in the product clears one.
+ *
+ * 🔴 **403 and 400 are deliberately left where they are**, and this is a decision
+ *    rather than an omission. 403 stays `rate-limited`: 429/403/5xx-as-"not now" is
+ *    the reading the ladder below was built on, the task that added this line
+ *    forbids moving it without evidence, and there is still none — no platform this
+ *    leg drives has been measured answering 403 for a credential reason. 400 stays
+ *    `shape-changed`, because a 400 that is not an auth failure is a genuinely
+ *    malformed request and there is no `.private` measurement to separate the two.
+ *
+ * 🔴 **The Gemini residual, named rather than left out.** Gemini's own wrapper
+ *    documents its 400 as the shape of a missing or stale token
+ *    (`createGeminiAuthorizedFetch`'s header, which retries on 400 and 401 for
+ *    exactly that reason), so a Gemini 400 that survives that one retry is very
+ *    likely the condition this function now handles for 401 — and it still lands on
+ *    `shape-changed`, still permanent. It is not fixed here because the only
+ *    evidence is a comment in our own file rather than a measurement, and a blanket
+ *    `400 → auth-refused` would swallow every genuinely malformed request; choosing
+ *    a reason by evidence is the rule this whole file follows. What would close it
+ *    is one logged-in Gemini request with `at` blanked, its status read from the
+ *    page's own context — the same shape of probe that produced W64's Kimi table.
+ */
 function haltReasonForStatus(status: number): HaltReason {
+  if (status === 401) return 'auth-refused';
   if (status === 429 || status === 403 || status >= 500) return 'rate-limited';
   return 'shape-changed';
 }

@@ -81,29 +81,29 @@ apps/extension/lib/backfill/debt-store.ts:68-87  c2b9b363b155  lines=20
   <- docs/privacy.md:273  :: export const BACKFILL_DB_VERSION = 2;
 apps/extension/lib/backfill/engine.ts:87-90  fc50ac101905  lines=4
   <- docs/privacy.md:421, docs/threat-model.md:62  :: async function sendVia(http: HttpPort, url: string, init: B…
-apps/extension/lib/backfill/engine.ts:406  ed9623369ff0  lines=1
+apps/extension/lib/backfill/engine.ts:471  ed9623369ff0  lines=1
   <- docs/privacy.md:415  :: */
-apps/extension/lib/backfill/engine.ts:808-873  ee2bc9ba2e6b  lines=66
+apps/extension/lib/backfill/engine.ts:873-938  ee2bc9ba2e6b  lines=66
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: * So a scoped plan refuses it, with the same reason as "no …
-apps/extension/lib/backfill/engine.ts:824-835  e2c3ce9c7b6a  lines=12
+apps/extension/lib/backfill/engine.ts:889-900  e2c3ce9c7b6a  lines=12
   <- docs/privacy.md:347  :: if (plan.scopeInPath && (
-apps/extension/lib/backfill/engine.ts:897-942  2fa266e59801  lines=46
+apps/extension/lib/backfill/engine.ts:962-1007  2fa266e59801  lines=46
   <- README.md:168, docs/privacy.md:546, docs/threat-model.md:302  :: */
-apps/extension/lib/backfill/engine.ts:926-942  9d1747258133  lines=17
+apps/extension/lib/backfill/engine.ts:991-1007  9d1747258133  lines=17
   <- README.md:172  :: && state.enumCursor.truncated === undefined
-apps/extension/lib/backfill/engine.ts:1007-1052  f8405b040a2f  lines=46
+apps/extension/lib/backfill/engine.ts:1072-1117  f8405b040a2f  lines=46
   <- docs/install.md:725  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
-apps/extension/lib/backfill/engine.ts:1204-1226  defca7d5b6b2  lines=23
+apps/extension/lib/backfill/engine.ts:1269-1291  defca7d5b6b2  lines=23
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: /**
-apps/extension/lib/backfill/engine.ts:1334-1386  4b16348d7335  lines=53
+apps/extension/lib/backfill/engine.ts:1399-1451  4b16348d7335  lines=53
   <- README.md:171, docs/privacy.md:441, docs/privacy.md:460, docs/privacy.md:527, docs/threat-model.md:302, docs/threat-model.md:603  :: }
-apps/extension/lib/backfill/engine.ts:1423-1475  1ad645e96bae  lines=53
+apps/extension/lib/backfill/engine.ts:1488-1540  1ad645e96bae  lines=53
   <- docs/install.md:109  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:1438-1473  692bb7ee49c8  lines=36
+apps/extension/lib/backfill/engine.ts:1503-1538  692bb7ee49c8  lines=36
   <- README.md:169, docs/privacy.md:527, docs/privacy.md:541, docs/threat-model.md:302, docs/threat-model.md:597  :: 'shape-changed',
-apps/extension/lib/backfill/engine.ts:1509-1522  deaf6a14fee1  lines=14
+apps/extension/lib/backfill/engine.ts:1574-1587  deaf6a14fee1  lines=14
   <- docs/privacy.md:529  :: if (!matchesResponseShape(platformRow, deliveredText)) {
-apps/extension/lib/backfill/engine.ts:1545-1580  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:1610-1645  2cb492e06a56  lines=36
   <- docs/install.md:109, docs/install.md:728  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
 apps/extension/lib/backfill/enumerate.ts:1242-1310  9034b1d0c6c2  lines=69
   <- docs/install.md:724, docs/privacy.md:304  :: const SHAPE_DEPTH = 2;
