@@ -106,6 +106,19 @@ fn hand_written_config() -> String {
     )
 }
 
+/// The config line that records `stage`, spelled the way TOML spells it.
+///
+/// Deliberately *not* `format!("{:?}", path)`. That is Rust's escaping of a
+/// `str`, and it matches TOML's rendering only while the value contains no
+/// backslash — true of every Unix path, and of no Windows path. TOML has two
+/// string forms and prefers the literal one (`'C:\Users\…'`) once a value
+/// contains a backslash, because `\` is its escape character inside `"…"`;
+/// both forms are the same value, and `docs/output-inventory.txt` shows the
+/// tool's own warning telling users to prefer the literal one on Windows.
+fn stage_line(stage: &str) -> String {
+    format!("stage = {}", toml::Value::String(stage.to_owned()))
+}
+
 #[test]
 fn the_stage_key_is_added_without_touching_a_single_other_byte() {
     let fixture = Fixture::new();
@@ -141,7 +154,7 @@ fn the_stage_key_is_added_without_touching_a_single_other_byte() {
         "the new section is missing: {appended:?}"
     );
     assert!(
-        appended.contains(&format!("stage = {:?}", stage.to_string_lossy())),
+        appended.contains(&stage_line(&stage.to_string_lossy())),
         "the new key is missing: {appended:?}"
     );
     // Comments inside the original survived (they are part of `before`, which
@@ -210,9 +223,9 @@ fn changing_the_stage_prints_the_old_value_and_the_new_one() {
     );
 
     let after = fixture.read_config();
-    assert!(after.contains(&format!("stage = {:?}", second.to_string_lossy())));
+    assert!(after.contains(&stage_line(&second.to_string_lossy())));
     assert!(
-        !after.contains(&format!("stage = {:?}", first.to_string_lossy())),
+        !after.contains(&stage_line(&first.to_string_lossy())),
         "the old value is still in the file"
     );
     assert!(after.contains("# chat-stasher configuration"));
@@ -288,8 +301,62 @@ fn a_missing_config_is_created_from_the_template_and_then_gains_the_key() {
         "the first-run path must write the shipped template, comments and all"
     );
     assert!(
-        after.contains(&format!("stage = {:?}", stage.to_string_lossy())),
+        after.contains(&stage_line(&stage.to_string_lossy())),
         "the key was not written into the fresh config:\n{after}"
+    );
+}
+
+/// The shape that made the three cases above pass on macOS and Linux and fail
+/// on Windows, reproduced on every platform — this is the test that would have
+/// caught the Windows failure without a Windows machine.
+///
+/// TOML renders a value containing a backslash as a literal string; Rust's
+/// `{:?}` renders it as a basic string with every backslash doubled. Every
+/// Windows path contains backslashes, and on Unix a directory with one in its
+/// name produces the same input, so the writer's escaping branch is reachable
+/// here.
+#[test]
+fn a_stage_path_toml_would_escape_is_recorded_as_the_same_value() {
+    let fixture = Fixture::new();
+    let before = hand_written_config();
+    fixture.write_config(&before);
+    let stage = fixture._dir.path().join("stage\\with\\backslash");
+    fs::create_dir_all(&stage).expect("stage");
+    let stage = stage.to_string_lossy().into_owned();
+    assert!(
+        stage.contains('\\'),
+        "fixture premise: the stage path has a backslash in it"
+    );
+
+    let output = fixture.run(&["--stage", &stage]);
+    assert_eq!(
+        Fixture::code(&output),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after = fixture.read_config();
+    assert!(
+        after.starts_with(&before),
+        "the original config was not preserved verbatim.\n--- after ---\n{after}"
+    );
+    let appended = &after[before.len()..];
+    assert!(
+        appended.contains(&stage_line(&stage)),
+        "the new key is missing: {appended:?}"
+    );
+
+    // The independent half: read the file back as TOML and compare the value,
+    // so the assertion is about the path rather than about which of TOML's two
+    // string forms the writer picked.
+    let doc: toml::Value = after
+        .parse()
+        .expect("the config the command wrote must be valid TOML");
+    assert_eq!(
+        doc["native_host"]["stage"].as_str(),
+        Some(stage.as_str()),
+        "the recorded stage is not the path it was given"
     );
 }
 
