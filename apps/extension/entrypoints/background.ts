@@ -53,6 +53,7 @@ import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
+  cursorStartIndex,
   findUnreadableState,
   isBackfillChainArmed,
   loadTargets,
@@ -1599,16 +1600,24 @@ async function runAlarmTickBody(): Promise<TickResult> {
     return await conclude();
   }
 
-  // 🔴 W76 · **The fair rotation.** Last tick served the target at `cursor`; this
-  //    tick the walk starts at the target **after** it and wraps around the
-  //    registry. A platform captured later (and so sitting higher in
-  //    `cs_backfill_targets_v1`) can no longer take every tick for itself. A
-  //    `null` cursor — never served, or an unreadable byte at that key — starts
-  //    at the head, which is the old behaviour and can never skip a platform
-  //    forever.
+  // 🔴 W76 · **The fair rotation.** Last tick served one target; this tick the
+  //    walk starts at the target **after** it and wraps around the registry. A
+  //    platform captured later (and so sitting higher in `cs_backfill_targets_v1`)
+  //    can no longer take every tick for itself.
+  //
+  // 🔴 W86 · **"After it" means after the target, not after the slot it sat in.**
+  //    The cursor stores the served target's platform+scope, and `cursorStartIndex`
+  //    finds that row wherever it now sits. Storing its index instead made the walk
+  //    start one row early whenever a live capture prepended a row ahead of the
+  //    cursor, which re-served the row the cursor stood for — with a stable
+  //    registry and a steady capture stream that degenerates into one scope taking
+  //    every wake. A `null` cursor — never served, an unreadable byte, the
+  //    pre-W86 positional shape, or a target no longer in the registry — starts at
+  //    the head, which is the old behaviour, examines every row, and so can never
+  //    skip a platform forever.
   const n = targets.length;
   const cursor = await loadTickCursor(store);
-  const orderStart = cursor === null ? 0 : ((cursor + 1) % n);
+  const orderStart = cursorStartIndex(targets, cursor);
   const order: number[] = [];
   for (let k = 0; k < n; k += 1) order.push((orderStart + k) % n);
 
@@ -1659,7 +1668,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
      */
     const endWalkIfAsked = async (): Promise<boolean> => {
       if (scopeResolution.request === 'none') return false;
-      await saveTickCursor(store, idx);
+      await saveTickCursor(store, target.platform, target.scope);
       schedule.served = target.platform;
       last = { ran: false, reason: 'scope-asked', report: null };
       return true;
@@ -1794,7 +1803,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
       last = result;
       break;
     }
-    await saveTickCursor(store, idx);
+    await saveTickCursor(store, target.platform, target.scope);
     schedule.served = target.platform;
     last = result;
     break;

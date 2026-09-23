@@ -467,25 +467,37 @@ describe('W76-E · the cursor survives a service-worker restart and fails safe',
     expect(first.served?.scope).toBe(SCOPES[0]);
     // …and the garbage is replaced by a real cursor, so the leg cannot stay stuck
     // at the head forever on the strength of one bad byte.
-    expect(store[CURSOR_KEY]).toMatchObject({ served: 0 });
+    //
+    // 🔴 W86 · The stored *shape* is no longer an index into
+    //    `cs_backfill_targets_v1`; it is the served target's identity, which is the
+    //    whole point of that revision (a prepend reorders the array, so a stored
+    //    index names a different row afterwards — `w86-cursor-by-identity.test.ts`
+    //    is the file that measures it). The property asserted here is unchanged and
+    //    is now the stronger one: not "the byte became index 0" but "the byte became
+    //    the target just served".
+    expect(store[CURSOR_KEY]).toEqual({ platform: PLATFORM, scope: SCOPES[0] });
 
     // The next tick really does move on — the cursor is honoured, not merely written.
     const second = await serveOne(mod, rows);
     expect(second.served?.scope).toBe(SCOPES[1]);
   });
 
-  it('a cursor past the end of a shrunk registry wraps instead of skipping the walk', async () => {
+  it('a cursor that names a row the registry does not hold falls back to the head', async () => {
     const rows = SCOPES.slice(0, 2).map(chatgpt);
     seedTargets(rows);
     await enableBackfill();
     await openTab(91);
-    // Three targets were served last time; the registry now holds two.
+    // A position past the end of a registry that has since shrunk. 🔴 W86 restates
+    // this byte without losing the case: the cursor is keyed by identity, so a
+    // stale position — which is what `{ served: 99 }` now is, and what every
+    // upgrading profile has at this key — is not a target and is read as no cursor
+    // at all. It must still not be a reason for the walk to find nothing.
     store[CURSOR_KEY] = { served: 99 };
 
     const mod = await bootBackground();
     const { served, rec } = await serveOne(mod, rows);
-    console.log('[W76-E] cursor past the end:', JSON.stringify(rec?.schedule));
-    // Whoever is served, somebody is: an out-of-range cursor is a position to wrap,
+    console.log('[W76-E] cursor naming no row:', JSON.stringify(rec?.schedule));
+    // Whoever is served, somebody is: a cursor that names nothing is a head start,
     // never a reason for the walk to find nothing.
     expect(served).not.toBeNull();
     expect(rec?.schedule?.served).toBe(PLATFORM);

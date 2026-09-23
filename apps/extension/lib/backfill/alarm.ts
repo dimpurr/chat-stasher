@@ -222,40 +222,102 @@ export const MAX_TARGET_ENTRIES = 8;
  * transient backoff, still returned a non-`no-http-port` result and consumed
  * the tick too, blocking everyone else forever.
  *
- * The cursor records the index of the target that was served last. The next
- * tick starts its walk at the target **after** it (round-robin over the
- * registry, wrapping around), so no platform can be starved by a more-recently
- * captured one. It is a single small `storage.local` value, in the same
- * `cs_backfill_*` key family; it is not the header, and it survives an MV3
- * service-worker reclaim exactly as the trace does.
+ * So the cursor records who was served last, and the next tick starts its walk
+ * at the target **after** it, wrapping around. It is a single small
+ * `storage.local` value, in the same `cs_backfill_*` key family; it is not the
+ * header, and it survives an MV3 service-worker reclaim exactly as the trace
+ * does.
  *
- * 🔴 Unreadable / absent ⇒ `null` ("no position has been served"): the walk
- * starts at the registry head. That is the safe fallback — it is the old
- * behaviour, it can never skip a platform forever, and a garbage byte at this
- * key must not be turned into "serve nothing".
+ * 🔴 W86 · **The cursor names a target, and it used to name a slot.** It was
+ *    `{ served: <index> }` — a position in `cs_backfill_targets_v1` — and that
+ *    array is not a fixed list: `rememberTarget` **prepends** on every live
+ *    capture, so a capture moves one row to the head and shifts the rows above it
+ *    down by one. An index read back after that names a *different row*, and the
+ *    walk starts one row too early. Where the captured row sat at or ahead of the
+ *    cursor, the row the cursor was standing for is served again — in the worst
+ *    arrangement, observed as the head being served on every single wake while the
+ *    other scopes were never reached at all (W79 recorded the reordering live: a
+ *    claude live capture prepended mid-run and persisted in the registry). A
+ *    removal has the same shape from the other side: the index then names the row
+ *    one *later* than intended, so the row directly behind the served one is
+ *    skipped for a cycle.
  *
- * 🔴 W76b · **And "a position" means an index the registry can be indexed by, so
- *    `Number.isInteger` is not a tidy-up.** `1.5` used to satisfy this predicate:
- *    `(1.5 + 1) % n` is not an integer, `targets[2.5]` is `undefined`, every slot
- *    `continue`s — and because nobody runs, `saveTickCursor` is never reached and
- *    the same `1.5` is loaded by every later wake. One bad byte served nobody
- *    *forever*, which is the one thing this fallback exists to prevent. A
- *    non-index value is therefore the same fact as an unreadable one: no position
- *    has been served, start at the head. (`NaN`/`Infinity`/negatives were already
- *    refused by the two lines below, and `isInteger` subsumes them.)
+ *    So the cursor stores the served target's **identity** — `platform` and
+ *    `scope`, which is exactly the pair `rememberTarget` dedups on and therefore a
+ *    unique key in the registry — and `cursorStartIndex` looks that row up
+ *    wherever it now sits. Positional drift cannot happen because no position is
+ *    stored.
+ *
+ * 🔴 Unreadable / absent / **naming a row the registry no longer holds** ⇒
+ * `null` ("no position has been served"): the walk starts at the registry head.
+ * That is the safe fallback — it is the old behaviour, and it can never skip a
+ * platform forever, because the walk from the head still examines every row. A
+ * garbage byte at this key must not be turned into "serve nothing", and neither
+ * must a target that was forgotten, evicted by `MAX_TARGET_ENTRIES`, or renamed
+ * to a scope this build has not seen.
+ *
+ *    What the fallback costs, stated: starting at the head can serve the head
+ *    once more before the wrap, so a cursor whose target just disappeared can cost
+ *    the other targets one turn. It cannot cost them more than that, and it cannot
+ *    starve anyone, which is the property the fallback is chosen for.
+ *
+ * 🔴 W76b · **The predicate still has to refuse a value that is not a cursor.** It
+ *    was written when the cursor was an index, because `1.5` satisfied "finite
+ *    number ≥ 0": `(1.5 + 1) % n` is not an integer, `targets[2.5]` is
+ *    `undefined`, every slot `continue`d — and because nobody ran,
+ *    `saveTickCursor` was never reached, so the same `1.5` was loaded by every
+ *    later wake and one bad byte served nobody *forever*. That particular trap is
+ *    gone with the index (an unmatched identity always falls to the head, and a
+ *    serve always rewrites the key), but the rule it belongs to is not: a value
+ *    that does not name a target is not a cursor, and it reads as "nothing has
+ *    been served" rather than as a row to be guessed at. 🩸 The predicate also
+ *    refuses the **old positional shape** on purpose. An upgrading profile still
+ *    has `{ served: <n> }` at this key; it names a slot, not a target, and the
+ *    registry it indexed has since been reordered. Reading it as an identity would
+ *    be the bug this revision exists to remove, so it is read as no cursor at all
+ *    and the first wake after the upgrade starts at the head — one turn's cost,
+ *    once, instead of a rotation that stays wrong.
  */
 export const BACKFILL_CURSOR_KEY = 'cs_backfill_cursor_v1';
 
 export interface TickCursor {
-  /** The index, in `cs_backfill_targets_v1` order, of the target served by the most recent tick. */
-  served: number;
+  /** The platform of the target the most recent tick served. */
+  platform: string;
+  /** That target's account scope. `platform`+`scope` is the registry's unique key. */
+  scope: string;
 }
 
 function isTickCursor(v: unknown): v is TickCursor {
-  return typeof v === 'object' && v !== null
-    && typeof (v as { served?: unknown }).served === 'number'
-    && Number.isInteger((v as { served: number }).served)
-    && (v as { served: number }).served >= 0;
+  if (typeof v !== 'object' || v === null) return false;
+  const c = v as { platform?: unknown; scope?: unknown };
+  return typeof c.platform === 'string' && typeof c.scope === 'string';
+}
+
+/**
+ * 🔴 W86 · **Where the walk starts: the row after the target the cursor names.**
+ *
+ * `at` is the index the identity occupies in `targets` **as it is now** — that
+ * lookup is the whole fix, and there is deliberately no fallback to a stored
+ * position, because a stored position is the thing that goes stale.
+ *
+ * Returns `0` — the head — whenever there is no identity to follow: no cursor
+ * (never served, unreadable byte, or the pre-W86 positional shape), an empty
+ * registry, or an identity that is not in the registry any more (forgotten,
+ * evicted by `MAX_TARGET_ENTRIES`, or re-scoped). The walk from the head
+ * examines every row, so "the target is gone" costs at most one turn and can
+ * never strand a platform.
+ */
+export function cursorStartIndex(
+  targets: readonly BackfillTarget[],
+  cursor: TickCursor | null,
+): number {
+  const n = targets.length;
+  if (cursor === null || n === 0) return 0;
+  const at = targets.findIndex(
+    (t) => t.platform === cursor.platform && t.scope === cursor.scope,
+  );
+  if (at === -1) return 0;
+  return (at + 1) % n;
 }
 
 /**
@@ -264,7 +326,7 @@ function isTickCursor(v: unknown): v is TickCursor {
  *
  * `saveTickCursor` is best-effort by design (a failed write must not fail the
  * tick), and it logged and moved on — but the walk's start is *only* read back
- * from storage, so a write that keeps failing pins the start at the last index
+ * from storage, so a write that keeps failing pins the start at the last value
  * that ever landed. The first target from that stale start takes every wake: the
  * head monopoly W76 removed, restored by an unrelated storage fault, with nothing
  * in the trace to say so.
@@ -275,12 +337,17 @@ function isTickCursor(v: unknown): v is TickCursor {
  * only thing that can carry the position *across* a reclaim (an MV3 service
  * worker is reclaimed routinely, and this variable dies with it — which is why it
  * is a fallback and not a replacement: with the writes working the two always
- * hold the same index, and with them failing, a reclaim costs exactly what it
+ * hold the same identity, and with them failing, a reclaim costs exactly what it
  * costs today, the stale stored start, rather than a wrong answer).
+ *
+ * 🔴 W86 · It holds an **identity** for the same reason the stored cursor does,
+ *    and it is looked up in the registry the same way (through
+ *    `cursorStartIndex`): a reorder between two wakes of one worker must not make
+ *    this one stale either.
  *
  * `null` = this worker has not served anyone yet, so storage is the only witness.
  */
-let servedThisWorker: number | null = null;
+let servedThisWorker: TickCursor | null = null;
 
 /**
  * Read the cursor. Unreadable / absent ⇒ `null` ("start at the head"), never a fabricated position.
@@ -288,25 +355,26 @@ let servedThisWorker: number | null = null;
  * 🔴 W76b · The in-memory position wins while it exists: it is the same value the
  *    successful writes store, and the only one that keeps advancing when they fail.
  */
-export async function loadTickCursor(store: BackfillStore | null): Promise<number | null> {
+export async function loadTickCursor(store: BackfillStore | null): Promise<TickCursor | null> {
   if (servedThisWorker !== null) return servedThisWorker;
   if (!store) return null;
   const raw = await store.load(BACKFILL_CURSOR_KEY);
-  return isTickCursor(raw) ? raw.served : null;
+  return isTickCursor(raw) ? raw : null;
 }
 
 /** Write the cursor. Best-effort, same rule as the trace: a failed write is logged, never a reason to fail the tick. */
 export async function saveTickCursor(
   store: BackfillStore | null,
-  served: number,
+  platform: string,
+  scope: string,
 ): Promise<void> {
   // 🔴 Before the write, not after: a write that throws still happened as far as
   //    the walk is concerned, and the next wake must start after it (see
   //    `servedThisWorker`).
-  servedThisWorker = served;
+  servedThisWorker = { platform, scope };
   if (!store) return;
   try {
-    await store.save(BACKFILL_CURSOR_KEY, { served } satisfies TickCursor);
+    await store.save(BACKFILL_CURSOR_KEY, { platform, scope } satisfies TickCursor);
   } catch (err) {
     console.warn('[chat-stasher] backfill tick cursor write failed', (err as Error).message);
   }
