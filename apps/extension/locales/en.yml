@@ -346,24 +346,89 @@ popup:
         only {moved} could be moved. The rest are still in storage, untouched, and
         this leg will not run against them — the ids in them are yours and are not
         being discarded. Reason: {reason}. Technical detail: {detail}
-    # 🔴 W43 · A top frame that told us its own capture hook is not working. Until
+    # 🔴 W43 · A top frame that told us something about its own capture hook. Until
     # this existed, such a page produced an empty stage — exactly what a page
     # where the user opened no conversation produces — so the two states were
     # one state in everything the user could see.
-    # The sentence states the observation and the one action that fixes it, and
-    # it does NOT name a cause: the measurement behind it (2026-09-19) left the
-    # cause of one of the two platforms it was seen on unsettled.
+    # 🔴 W69 · The note is now three lines, and the split is the fix. The head
+    # states the observation and its time and NOTHING ELSE — the old copy drew an
+    # archiving claim ("a conversation you open there is not archived") out of an
+    # identity check, and W68 measured that claim unsupported on all three origins
+    # that report it, because the wrapper that replaced ours forwards to the value
+    # it captured. Then the capture fact, which is what makes the state of capture
+    # measurable at all, and then the verdict those two facts support — one of
+    # three, decided by captureVerdict() in lib/live-capture.ts.
+    # None of the three clauses names a cause: the measurement behind the head
+    # (2026-09-19) left the cause on one of its two platforms unsettled.
     hook:
-      notInstalled: >-
-        {origin} (platform: {platform}) reported that its live-capture hook is
-        not working. A conversation you open there is not archived, and this
-        page looked the same as a page where you opened nothing until this line
-        was recorded. What was observed, as of {when}: {reasons}. Reloading the
-        tab is the way to get a fresh observation from that page.
+      # The observation, as observed, with its reason codes in words and the time
+      # it was made. `{reasons}` is the joined per-reason clauses below.
+      observed: >-
+        {origin} (platform: {platform}) reported, as of {when}: {reasons}.
+      # What is on record for this platform. Deliberately two entries, because a
+      # row and the absence of one are two different facts: `recorded` prints the
+      # time and the count, and `noneRecorded` says the record is empty rather
+      # than saying that nothing arrived. No reader invents a zero, so wording the
+      # absence as "no capture arrived" would record an unknown as a measurement.
+      # 🔴 W69b · Both facts `recorded` prints are "what is on record", and the
+      # second is not a count of arrivals: an unchanged re-send (ChatGPT sends the
+      # whole conversation on every view) moves the time and is *not* newly
+      # stored, so the old "{count} in total have been stored" over one
+      # conversation read four times said four were stored. The count can be 0 in
+      # a row that exists, and this sentence stays true then: nothing NEW is on
+      # record, and the time beside it is what says a capture did reach the
+      # archive.
+      capture:
+        recorded: >-
+          What is on record for live capture on this platform: a capture from it
+          was last confirmed in your archive {captureWhen}, and {count} capture(s)
+          are on record as newly stored. A capture the page sends again unchanged
+          was already in your archive, so it moves the time above and not that
+          count.
+        noneRecorded: >-
+          What is on record for live capture on this platform: nothing. Not one
+          capture from it has ever been recorded here — that is a gap in this
+          record, not a measurement that none arrived.
+      # The verdict the two facts above support. Exactly one of these is printed.
+      verdict:
+        # A stored capture at or after the moment the current observation began.
+        # Scoped to the platform on purpose: the record is kept per platform while
+        # the observation is kept per origin, so the capture may have come from
+        # another tab of that platform and this line must not claim otherwise.
+        # 🔴 W69b · `{since}` is that moment, and the sentence names it because
+        # the time in the line above is the page's last *re-send* of the same
+        # state: comparing against that one made this last five seconds.
+        working: >-
+          So live capture from this platform is working: a conversation that
+          reached your archive is a measurement of the whole path, and it is at
+          least as recent as {since}, the moment the observation above began.
+        # Our hook is not in that page, and the record holds nothing to the
+        # contrary. "The record above holds no capture at or after this
+        # observation" is the exact condition the verdict was decided on, and it
+        # is deliberately not worded as "no capture has been stored since": when
+        # there is no record at all, the time of the last stored capture is not
+        # known, and that is a gap rather than a measurement.
+        notWorking: >-
+          Our hook is not in effect in that page, and the record above holds no
+          capture from this platform at or after this observation — so a
+          conversation you open there is not being archived. Reloading the tab is
+          the way to get a fresh observation from it, and a conversation stored
+          from there is what would settle it.
+        # The case this change exists for: an identity change, and nothing on
+        # record to settle what it meant.
+        unknown: >-
+          Whether capture still works there is unknown. What was observed is that
+          the hook's place in the page changed, and a page or another extension
+          that takes that over usually still calls through to the copy it
+          replaced — so that on its own is not a measurement that captures
+          stopped, and the record above holds no capture from this platform at or
+          after this observation to settle it either way. Reloading the tab is the
+          way to get a fresh observation from that page, and a conversation stored
+          from there is what would settle it.
       reason:
         didNotRun: no copy of the hook ran in that page at all
         didNotTake: the hook ran, and the page's own global refused its patch
-        wasReplaced: the hook was installed, and something replaced it afterwards
+        wasReplaced: the hook was installed, and the page took that global back afterwards
       # 🔴 W47 · A page told us about its own capture hook and background did NOT
       # write it down. That case used to produce nothing at all — no record, no
       # line in any console a person can read — so it looked exactly like a page

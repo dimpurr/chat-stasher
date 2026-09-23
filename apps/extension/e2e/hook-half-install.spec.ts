@@ -140,8 +140,14 @@ test('a page that takes the XHR half back after the handshake is recorded, and t
   const popup = await openPopup(ext);
   await expect(popup.locator('#notes')).toContainText(ORIGIN);
   const notes = await popup.locator('#notes').innerText();
-  expect(notes).toContain('reported that its live-capture hook is not working');
-  expect(notes).toContain('something replaced it afterwards');
+  expect(notes).toContain('the page took that global back afterwards');
+  // 🔴 W69 · And it must not read as breakage. This page took the XHR half back,
+  //    which is an identity change and not a measurement that captures stopped —
+  //    whether the replacement calls through to ours is not measured here — so the
+  //    verdict the popup owes the user is unknown, in so many words. On the tree
+  //    this change is for, the same record is reported as the hook not working.
+  expect(notes).toContain('Whether capture still works there is unknown.');
+  expect(notes).not.toContain('is not being archived');
   await popup.close();
 
   expect(escaped).toEqual([]);

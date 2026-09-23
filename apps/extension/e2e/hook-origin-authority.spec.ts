@@ -183,7 +183,7 @@ test('a healthy child frame does not withdraw a half-install the main document r
   const popup = await openPopup(ext);
   await expect(popup.locator('#notes')).toContainText(ORIGIN);
   const notes = await popup.locator('#notes').innerText();
-  expect(notes).toContain('something replaced it afterwards');
+  expect(notes).toContain('the page took that global back afterwards');
   await popup.close();
 
   expect(escaped).toEqual([]);

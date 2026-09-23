@@ -80,10 +80,36 @@ export const HOOK_STATUS_KEY_PREFIX = 'cs_hook_v1:';
 export { HOOK_OBSERVATIONS, isHookObservation };
 export type { HookObservation };
 
-/** One observation and when it was made (`Date.now()` ms). */
+/** One observation, when it was last made, and since when it has been held. */
 export interface HookObservationRecord {
   reason: HookObservation;
+  /**
+   * When this observation was **last** made (`Date.now()` ms). A page that is
+   * still in the state it reported re-sends the same observation on a timer
+   * (`lib/page-hook.ts`), and a re-send of the same fact replaces this rather
+   * than appending — so this is the answer to "is this still happening".
+   */
   at: number;
+  /**
+   * 🔴 W69b · When this observation was **first** made in this record, as
+   *    distinct from `at`, the last time. The two differ for exactly one case:
+   *    a condition the page re-reports every few seconds because it still
+   *    holds. A reader that asks "how long has this been going on" needs the
+   *    first time; one that asks "is this still happening" needs the last, and
+   *    using the last for the first made a capture that arrived after the
+   *    condition began stop counting as evidence of working 5 seconds later,
+   *    when the page re-sent it (see `captureVerdict`,
+   *    `lib/live-capture.ts`).
+   *
+   * 🔴 **Optional, and absent means "not recorded", not "began at `at`".** A
+   *    record written before this field existed carries no first time, and a
+   *    reader must then fall back to `at`: the latest time the reason was seen
+   *    is the *latest* the condition can have begun, so falling back to it
+   *    claims less than the truth rather than more — an unknown start is never
+   *    read as an early one. `mergeHookObservation` fills it in on the next
+   *    observation of that reason.
+   */
+  since?: number;
 }
 
 /**
@@ -91,7 +117,9 @@ export interface HookObservationRecord {
  * closed set — a repeated observation updates its timestamp rather than
  * appending, so the size is bounded by the vocabulary and not by uptime. `at` is
  * the most recent observation of any reason, so "when did this page last fail"
- * is one field to read.
+ * is one field to read, and the reason carrying that same `at` is the one the
+ * page is in **now** — the record is a history of reasons, not a claim that all
+ * of them are still true (see `captureVerdict`, `lib/live-capture.ts`).
  */
 export interface HookStatusRecord {
   origin: string;
@@ -115,7 +143,14 @@ export function looksLikeHookStatus(value: unknown): value is HookStatusRecord {
   return record.reasons.every((entry) => {
     if (!entry || typeof entry !== 'object') return false;
     const row = entry as Record<string, unknown>;
-    return isHookObservation(row.reason) && typeof row.at === 'number' && Number.isFinite(row.at);
+    if (!isHookObservation(row.reason)) return false;
+    if (typeof row.at !== 'number' || !Number.isFinite(row.at)) return false;
+    // A `since` that is not a time is not "no `since`" — see the field's own
+    // comment: the one thing that must never be invented here is a first time,
+    // because a reader would use it to decide whether a capture settles the
+    // question. Missing is accepted and means "not recorded"; junk is not.
+    if (row.since === undefined) return true;
+    return typeof row.since === 'number' && Number.isFinite(row.since);
   });
 }
 
@@ -124,6 +159,15 @@ export function looksLikeHookStatus(value: unknown): value is HookStatusRecord {
  * persists what comes back. A reason already recorded has its timestamp replaced
  * — the fact is the same fact, and the newest time is the one that answers "is
  * this still happening".
+ *
+ * 🔴 W69b · **The first time survives the re-send.** Only `at` moves when a
+ *    reason is observed again; `since` is carried from the entry already there,
+ *    or, for an entry that has none (a record written before the field
+ *    existed), from that entry's `at` — the latest time we can prove the
+ *    condition was already true, and never earlier than that. `Math.min` with
+ *    the arriving time keeps a clock that moved backwards from pushing the
+ *    first time into the future, the same way `mergeLiveCapture` keeps a row's
+ *    time from going backwards.
  */
 export function mergeHookObservation(
   existing: HookStatusRecord | null,
@@ -132,8 +176,12 @@ export function mergeHookObservation(
   // A record stored under a different origin is not this origin's record; start
   // a fresh one rather than merging two pages into one row.
   const base = existing && existing.origin === observation.origin ? existing : null;
+  const previous = base?.reasons.find((row) => row.reason === observation.reason) ?? null;
+  const since = previous
+    ? Math.min(previous.since ?? previous.at, observation.at)
+    : observation.at;
   const reasons = (base?.reasons ?? []).filter((row) => row.reason !== observation.reason);
-  reasons.push({ reason: observation.reason, at: observation.at });
+  reasons.push({ reason: observation.reason, at: observation.at, since });
   // Sorted by the closed set, so the order is a property of the vocabulary and
   // not of the order things happened to be noticed in.
   reasons.sort((a, b) => HOOK_OBSERVATIONS.indexOf(a.reason) - HOOK_OBSERVATIONS.indexOf(b.reason));

@@ -71,6 +71,16 @@ import {
   type HookStatusRecord,
 } from './hook-status';
 import {
+  captureVerdict,
+  currentObservation,
+  liveCaptureFor,
+  CAPTURE_VERDICT_NOT_WORKING,
+  CAPTURE_VERDICT_UNKNOWN,
+  CAPTURE_VERDICT_WORKING,
+  type CaptureVerdict,
+  type LiveCaptureRecord,
+} from './live-capture';
+import {
   HOOK_REASON_DID_NOT_RUN,
   HOOK_REASON_DID_NOT_TAKE,
   HOOK_REASON_WAS_REPLACED,
@@ -241,6 +251,31 @@ export interface PopupModel {
    * worse than the silence it replaces.
    */
   hookStatus?: HookStatusRecord[];
+  /**
+   * 🔴 W69 · **When a live capture from each platform was last confirmed in the
+   *    archive** (`lib/live-capture.ts`), newest first.
+   *
+   * The field that turns the note above from an observation into evidence. W68
+   * measured what a page's hook *is* on the three origins that report
+   * `hook-was-replaced` and could not measure whether conversations were still
+   * being archived, because no instrument recorded an arrival: the one
+   * per-delivery store, `cs_last_delivered_v1`, has no time field at all. What
+   * the popup reads here is the row that does.
+   *
+   * 🔴 W69b · Each row is two facts and the note names both: its `at` is the time
+   *    of the last confirmation (an unchanged re-send moves it), and its `count`
+   *    is how many captures are on record as **newly stored** (only a delivery
+   *    moves it). The count is not a count of arrivals — see
+   *    `LiveCaptureRecord.count` for why that distinction had to be made.
+   *
+   * Omitted ⇒ this load did not look, and an empty list ⇒ there is no row for
+   * that platform. **Both mean the same thing and must be worded as it**: "no
+   * capture from that platform has been recorded", which is a gap in the record
+   * and not a measurement that none arrived. No reader invents a row, and a row
+   * that exists is printed as it is — a `count` of 0 in a row is not that absence,
+   * and is not rounded up either.
+   */
+  liveCapture?: LiveCaptureRecord[];
   /**
    * 🔴 W47 · **A report a page sent that background received and did not record,
    *    and why** (`lib/hook-status.ts`'s `HookDeclineRecord`).
@@ -1095,24 +1130,89 @@ const HOOK_REASON_NOTE_KEYS: Record<HookObservation, string> = {
 };
 
 /**
- * 🔴 W43 · One origin's hook record, as a sentence.
+ * 🔴 W69 · **Which verdict, in words.** A total map over the closed set in
+ * `lib/live-capture.ts`, not a lookup with a fallback, and for the same reason as
+ * `HOOK_REASON_NOTE_KEYS` above: a verdict this table does not name must fail
+ * `tsc` here rather than reaching a user as a raw code or, worse, as a sentence
+ * about a different fact.
+ */
+const HOOK_VERDICT_NOTE_KEYS: Record<CaptureVerdict, string> = {
+  [CAPTURE_VERDICT_WORKING]: 'popup.notes.hook.verdict.working',
+  [CAPTURE_VERDICT_NOT_WORKING]: 'popup.notes.hook.verdict.notWorking',
+  [CAPTURE_VERDICT_UNKNOWN]: 'popup.notes.hook.verdict.unknown',
+};
+
+/**
+ * 🔴 W43 · One origin's hook record, as a sentence — and, since W69, together
+ * with the one fact that can settle it.
  *
  * Every observation the record holds is named — they are different facts and the
  * one that matters to a reader (did captures happen and then stop, or did nothing
  * ever run?) differs between them — and the time is printed as the stamp it is,
- * because "the hook is not working" is only ever true **as of** that moment: a
- * top frame that verifies afterwards clears the record.
+ * because an observation is only true **as of** that moment: a top frame that
+ * verifies afterwards clears the record.
+ *
+ * 🔴 W69 · **And then what that observation is evidence of, which it is not, on
+ *    its own.** The sentence used to read "its live-capture hook is not working.
+ *    A conversation you open there is not archived." — a claim about archiving
+ *    drawn from an identity check. On chatgpt.com, grok.com and www.kimi.com the
+ *    wrapper that replaced ours was measured to forward to the value it captured,
+ *    which was ours, so that claim was unsupported on all three. So the note now
+ *    prints two facts and the verdict they support, and the verdict comes from
+ *    `captureVerdict` in one place: an arrival at or after the observation
+ *    settles it as working; an observation that says our hook is not in that page
+ *    leaves it broken; and an identity change with nothing on record since is
+ *    **unknown** — never rounded into either of the other two.
+ *
+ * The capture fact is always printed, in all three cases, and it says which of
+ * two things it is: a row with a time, or the absence of a row. The absence is
+ * worded as a gap in the record, because that is what it is — no reader here
+ * invents a zero, so reading the absence as "no captures arrived" would be an
+ * unknown recorded as empty, which is the invariant this whole file is built on.
+ *
+ * 🔴 W69b · **The capture sentence names the two fields separately**, because
+ *    they are two facts: the time a capture was last confirmed in the archive
+ *    (which an unchanged re-send also moves) and how many are on record as newly
+ *    stored (which only a delivery moves). The old sentence said "{count} in
+ *    total have been stored" over a count of arrivals, so four views of one
+ *    acked conversation read as four stored (R69 §2).
+ *
+ * 🔴 W69b · **The `working` line names when the current observation began.** The
+ *    verdict is decided from the record's *current* observation — the latest one
+ *    — and a capture is evidence about it if it came at or after the moment that
+ *    observation began, not the moment it was last re-sent. The head line above
+ *    prints the re-send (that is when the page last said so); this line prints
+ *    the beginning, so the claim can be checked against the two times the note
+ *    carries. Both come from `currentObservation`, one definition, so the
+ *    sentence cannot disagree with the verdict.
  */
-function hookStatusNote(record: HookStatusRecord): string {
+function hookStatusNote(record: HookStatusRecord, live: LiveCaptureRecord | null): string {
   const reasons = record.reasons
     .map((row) => t(HOOK_REASON_NOTE_KEYS[row.reason]))
     .join(' · ');
-  return t('popup.notes.hook.notInstalled', {
-    platform: record.platform,
-    origin: record.origin,
-    reasons,
-    when: ui.stamp(record.at),
-  });
+  const capture = live
+    ? t('popup.notes.hook.capture.recorded', {
+      captureWhen: ui.stamp(live.at),
+      count: live.count,
+    })
+    : t('popup.notes.hook.capture.noneRecorded');
+  // A record the readers accept always has at least one reason
+  // (`looksLikeHookStatus` rejects an empty one), so `current` is null only for a
+  // hand-built record; `record.at` is then the only time it carries, and the
+  // verdict for that same record is `unknown` — a sentence that uses no time.
+  const current = currentObservation(record.reasons);
+  return [
+    t('popup.notes.hook.observed', {
+      platform: record.platform,
+      origin: record.origin,
+      reasons,
+      when: ui.stamp(record.at),
+    }),
+    capture,
+    t(HOOK_VERDICT_NOTE_KEYS[captureVerdict(record, live)], {
+      since: ui.stamp(current?.since ?? record.at),
+    }),
+  ].join('\n');
 }
 
 /**
@@ -1211,7 +1311,13 @@ function notesFor(model: PopupModel): string[] {
   //    backfill that has not ticked yet is a wait; a page whose capture hook is
   //    not installed is live capture that will never produce anything, on a page
   //    the user is looking at right now. Saying "waiting" first would bury it.
-  for (const record of model.hookStatus ?? []) notes.push(hookStatusNote(record));
+  // 🔴 W69 · Each record is paired with **its own platform's** arrival row. The
+  //    row is read per platform and the record is kept per origin; the two are
+  //    joined here and nowhere else, so nothing downstream has to know that a
+  //    platform id and an origin name the same site.
+  for (const record of model.hookStatus ?? []) {
+    notes.push(hookStatusNote(record, liveCaptureFor(model.liveCapture, record.platform)));
+  }
 
   // 🔴 W47 · **And immediately after it, the page whose report was not recorded.**
   //    The two are neighbours on purpose: `hookStatusNote` says "a page told us

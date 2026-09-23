@@ -494,7 +494,12 @@ describe('W47 · a report background declines is a fact, not a silence', () => {
     expect(store['cs_hook_v1:https://chatgpt.com']).toEqual({
       origin: ORIGIN,
       platform: 'chatgpt',
-      reasons: [{ reason: 'hook-was-replaced', at: 4_242 }],
+      // 🔴 W69b · `since` is when the reason was first observed, and an
+      //    observation made once began when it was made — so the two times are
+      //    the same here. They come apart only when a page re-sends a state it is
+      //    still in, which is the case that made a capture stop counting as
+      //    evidence of working five seconds later (`lib/live-capture.ts`).
+      reasons: [{ reason: 'hook-was-replaced', at: 4_242, since: 4_242 }],
       at: 4_242,
     });
   });

@@ -65,6 +65,7 @@ import {
 } from '../../lib/outbox';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
 import { hookStatusOf, loadHookDecline } from '../../lib/hook-status';
+import { liveCaptureOf } from '../../lib/live-capture';
 import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 
@@ -187,6 +188,11 @@ async function collect(): Promise<PopupModel> {
     // 🔴 W43 · Read from the same snapshot as the failures above, and with the
     //    same rule for an unreadable one (see PopupModel.hookStatus).
     hookStatus: hookStatusOf(snapshot),
+    // 🔴 W69 · Read from the **same snapshot** as the observation above, and with
+    //    the same rule for an unreadable one: an empty list there means "we have
+    //    no row for that platform", which the note words as a gap in the record —
+    //    never as "no capture arrived" (see PopupModel.liveCapture).
+    liveCapture: liveCaptureOf(snapshot),
     // 🔴 W47 · The other half of the pair: a report a page sent that background
     //    received and did not record, read from its own key. `null` = nothing has
     //    been declined, which is not the same sentence as "a page told us about

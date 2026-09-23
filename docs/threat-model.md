@@ -31,7 +31,7 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:309-377`;
-   `apps/extension/entrypoints/background.ts:212-229`).
+   `apps/extension/entrypoints/background.ts:260-277`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -108,7 +108,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:64-80`, `:309-377`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:139-167`). It sits there,
+   (`apps/extension/entrypoints/background.ts:140-168`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:379-394`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -324,7 +324,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:894-907`, `:1053-1069`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:154-156`). It never leaves your
+(`apps/extension/entrypoints/background.ts:155-157`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 ### The browser extension ecosystem — other extensions installed alongside ours
@@ -594,7 +594,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:62-136`;
-   `apps/extension/entrypoints/background.ts:821-865`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:875-919`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:258-295`); a body
    response that admits it is incomplete is refused and listed as a failure
