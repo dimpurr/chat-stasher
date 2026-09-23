@@ -13,8 +13,14 @@ set -euo pipefail
 # 1. Pin the version (env-overridable). We never default to "latest": an
 #    unbounded tag makes installs non-reproducible and lets a future bad
 #    release silently reach everyone. Override with CHAT_STASHER_VERSION.
+#
+#    This default is the newest *stable* release, and moving it is a release
+#    step (RELEASING.md step 4). It is never a `-dev` and never a `-rc.N`:
+#    this is the version `curl | sh` installs for everyone who does not name
+#    one, so a prerelease here would hand every new user an unreleased build.
+#    Asking for a prerelease by name is exactly what the override is for.
 # ---------------------------------------------------------------------------
-VERSION="${CHAT_STASHER_VERSION:-0.1.0}"
+VERSION="${CHAT_STASHER_VERSION:-0.2.0}"
 
 # Where the binary + SHA256SUMS live. The default is the tagged GitHub release
 # (https only). Override with CHAT_STASHER_BASE_URL, e.g. to test against a

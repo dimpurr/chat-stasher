@@ -1,8 +1,9 @@
 # Releasing chat-stasher
 
 The operational model, and the exact steps to cut a release. It is short on
-purpose: every rule here is one a release has to obey, and every one of them is
-checkable.
+purpose: every rule here is one a release has to obey, and the ones a machine
+can check are checked by the workflow that publishes — see "What the workflow
+checks" for that list and for the one rule it deliberately leaves to the owner.
 
 ## Channels
 
@@ -30,9 +31,14 @@ different owner and a different release-time edit:
 | `SECURITY.md` | "Supported versions" table | Which line receives fixes. |
 | `apps/extension/package.json` | `version` | **The extension's own version**, independent of the CLI. See "The extension" below. |
 
-Anything else that displays a version (the release title, the asset names) is
-derived from the **tag**, not from these files — the release workflow never
-reads `Cargo.toml`.
+The release title and the asset names are derived from the **tag**, not from
+these files. `Cargo.toml` is read by the release workflow all the same, for
+exactly one thing: its first gate asserts that the tag's version and the
+`[package]` version are the same string, and ends the run if they are not. The
+binary embeds that string (`CARGO_PKG_VERSION`, from the `cargo build` in the
+same workflow), so a tag that disagrees with it ships a Release named after the
+tag whose `chat-stasher --version` reports the other one. For an rc that is
+worse than cosmetic; see "How a release candidate works".
 
 ## Cutting a stable release
 
@@ -45,19 +51,32 @@ automation creates one.
    or add the dated heading, so the entry that ships is the entry that was
    reviewed. Check it against
    `git log --no-merges vPREV..HEAD -- crates/ scripts/ install.sh`.
-3. **Drop the `-dev` suffix** in `crates/chat-stasher/Cargo.toml`, so the
-   tagged binary reports the released version and not a development one.
+3. **Set the release version** in `crates/chat-stasher/Cargo.toml` — `0.3.0-dev`
+   becomes `0.3.0` — and commit the same change in `Cargo.lock`, which records
+   the workspace crate's own version (`cargo build` rewrites that line for you).
+   The tag pushed in step 6 must equal this string exactly, and the binary must
+   report the released version rather than a development one.
 4. **Update the version pins** in `scripts/install.sh` (the `VERSION` default),
    the `homebrew/chat-stasher.rb` `version` and both `url`s, and the
    "Supported versions" table in `SECURITY.md`. The Homebrew `sha256` values can
    only be filled in after step 7.
+
+   The `VERSION` default is the release that `curl | sh` installs for everyone
+   who does not name one, so it is the newest **stable** version — never a
+   `-dev` and never a `-rc.N`. Left behind, it quietly hands a new user an old
+   build from a command the docs told them to run. Naming a prerelease is what
+   `CHAT_STASHER_VERSION` is for.
 5. **Commit** those edits on `main` (English, per `CONTRIBUTING.md`).
 6. **Tag and push the tag.** This is the act that publishes:
    ```sh
-   git tag vX.Y.Z
+   git tag -a vX.Y.Z -m "chat-stasher vX.Y.Z"
    git push origin vX.Y.Z
    ```
-   The `Release` workflow runs from the tag push — it does not run on a branch.
+   `-a`, because an annotated tag is the one artifact that records who cut the
+   release and when. (The workflow does not check that, though — see "What the
+   workflow checks".) The `Release` workflow runs from the tag push — it does
+   not run on a branch — and its first gate ends the run unless the tag is
+   exactly `vX.Y.Z` or `vX.Y.Z-rc.N` **and** agrees with `Cargo.toml`.
 7. **Verify the published release** before telling anyone it exists:
    - the Release is marked **latest**, and the three uploaded assets are exactly
      `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64` and
@@ -83,13 +102,21 @@ version becomes stable. It uses the same workflow and the same gates as a stable
 tag:
 
 ```sh
-git tag vX.Y.Z-rc.1
+git tag -a vX.Y.Z-rc.1 -m "chat-stasher vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The tag must end in `-rc.N`; the workflow marks exactly those releases as
-GitHub **prereleases**, so they never become the repository's "latest". That
-matters because "latest" is what a reader of the Releases page means by stable.
+An rc is cut by the steps above with two differences. The version committed in
+step 3 is `X.Y.Z-rc.N`, not `X.Y.Z` — the binary embeds it, so an rc that
+claimed `X.Y.Z` would print the same `chat-stasher --version` as the stable it
+is a candidate for, and step 7 could not tell you which of the two you had
+downloaded. The version pins in step 4 stay on the newest **stable** release: an
+rc is never what an unqualified install gets.
+
+The tag must end in `-rc.N`; the workflow refuses every other `v*` shape, and
+marks exactly this one as a GitHub **prerelease**, so an rc never becomes the
+repository's "latest". That matters because "latest" is what a reader of the
+Releases page means by stable.
 
 **Nothing installs an rc by default.** `install.sh` pins its version and never
 resolves "latest", so an rc is reachable only by asking for it by name:
@@ -99,7 +126,9 @@ CHAT_STASHER_VERSION=0.3.0-rc.1 curl -fsSL .../install.sh | sh
 ```
 
 If the release candidate is good, cut `vX.Y.Z` from the same code (not from the
-rc tag) by the steps above. If it is bad, fix `main` and cut `rc.2`.
+rc tag) by the steps above — which includes a commit that sets `Cargo.toml` to
+`X.Y.Z`, since the tag has to agree with it. If it is bad, fix `main` and cut
+`rc.2`.
 
 ## The extension
 
@@ -112,6 +141,34 @@ the CLI end to end; until then it is distributed only as an unpacked
 development build. That is a condition to be checked by the owner, not a rule
 the workflow can enforce, so nothing in `.github/workflows/` will stop a mistake
 here — look at the asset list in step 7.
+
+## What the workflow checks
+
+A rule here is worth writing down only if something can tell when it is broken,
+so this is the list of what `release.yml` refuses — and, at the end, the one
+thing it does not.
+
+- **The tag's shape.** Before the gates and before the build, the tag must be
+  exactly `vX.Y.Z` or `vX.Y.Z-rc.N`. The workflow is triggered by `v*`, which is
+  wider than that, and each of the other shapes is a plausible typo:
+  `v0.3.0rc1` and `v0.3.0-beta.1` would otherwise have published as a normal
+  release and taken the "latest" slot, and `v0.3.0-rc` would have published as a
+  prerelease under a rule that only asked whether the version contained a
+  hyphen. None of them is built now; the run ends first.
+- **The version's agreement with `Cargo.toml`.** The same gate reads the
+  `[package]` version and requires it to equal the tag minus `v`, character for
+  character, for both shapes.
+- **The uploaded asset set.** Exactly `chat-stasher-darwin-arm64`,
+  `chat-stasher-darwin-x86_64` and `SHA256SUMS` reach the Release, so nothing
+  extension-shaped can arrive by accident.
+
+It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
+every check above, so `git tag -a` in step 6 is a step the owner follows and not
+a property this pipeline verifies. Nothing downstream depends on the tag object:
+the Release title, notes and asset names are all derived from the tag's name.
+The reason to keep using `-a` anyway is that `v0.1.0` and `v0.2.0` are annotated,
+and an annotated tag is the only artifact that records who cut a release and
+when.
 
 ## Why the release workflow runs the gates itself
 
