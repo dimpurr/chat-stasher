@@ -233,6 +233,16 @@ export const MAX_TARGET_ENTRIES = 8;
  * starts at the registry head. That is the safe fallback — it is the old
  * behaviour, it can never skip a platform forever, and a garbage byte at this
  * key must not be turned into "serve nothing".
+ *
+ * 🔴 W76b · **And "a position" means an index the registry can be indexed by, so
+ *    `Number.isInteger` is not a tidy-up.** `1.5` used to satisfy this predicate:
+ *    `(1.5 + 1) % n` is not an integer, `targets[2.5]` is `undefined`, every slot
+ *    `continue`s — and because nobody runs, `saveTickCursor` is never reached and
+ *    the same `1.5` is loaded by every later wake. One bad byte served nobody
+ *    *forever*, which is the one thing this fallback exists to prevent. A
+ *    non-index value is therefore the same fact as an unreadable one: no position
+ *    has been served, start at the head. (`NaN`/`Infinity`/negatives were already
+ *    refused by the two lines below, and `isInteger` subsumes them.)
  */
 export const BACKFILL_CURSOR_KEY = 'cs_backfill_cursor_v1';
 
@@ -244,12 +254,42 @@ export interface TickCursor {
 function isTickCursor(v: unknown): v is TickCursor {
   return typeof v === 'object' && v !== null
     && typeof (v as { served?: unknown }).served === 'number'
-    && Number.isFinite((v as { served: number }).served)
+    && Number.isInteger((v as { served: number }).served)
     && (v as { served: number }).served >= 0;
 }
 
-/** Read the cursor. Unreadable / absent ⇒ `null` ("start at the head"), never a fabricated position. */
+/**
+ * 🔴 W76b · **The position this *worker* has already served, which is newer than
+ * anything it can read back when the write is failing.**
+ *
+ * `saveTickCursor` is best-effort by design (a failed write must not fail the
+ * tick), and it logged and moved on — but the walk's start is *only* read back
+ * from storage, so a write that keeps failing pins the start at the last index
+ * that ever landed. The first target from that stale start takes every wake: the
+ * head monopoly W76 removed, restored by an unrelated storage fault, with nothing
+ * in the trace to say so.
+ *
+ * So the same fact is kept in memory as well, and it is the one that decides:
+ * it advances on every serve whether or not the byte reaches storage, so the
+ * rotation makes progress for as long as this worker lives. Storage stays the
+ * only thing that can carry the position *across* a reclaim (an MV3 service
+ * worker is reclaimed routinely, and this variable dies with it — which is why it
+ * is a fallback and not a replacement: with the writes working the two always
+ * hold the same index, and with them failing, a reclaim costs exactly what it
+ * costs today, the stale stored start, rather than a wrong answer).
+ *
+ * `null` = this worker has not served anyone yet, so storage is the only witness.
+ */
+let servedThisWorker: number | null = null;
+
+/**
+ * Read the cursor. Unreadable / absent ⇒ `null` ("start at the head"), never a fabricated position.
+ *
+ * 🔴 W76b · The in-memory position wins while it exists: it is the same value the
+ *    successful writes store, and the only one that keeps advancing when they fail.
+ */
 export async function loadTickCursor(store: BackfillStore | null): Promise<number | null> {
+  if (servedThisWorker !== null) return servedThisWorker;
   if (!store) return null;
   const raw = await store.load(BACKFILL_CURSOR_KEY);
   return isTickCursor(raw) ? raw.served : null;
@@ -260,6 +300,10 @@ export async function saveTickCursor(
   store: BackfillStore | null,
   served: number,
 ): Promise<void> {
+  // 🔴 Before the write, not after: a write that throws still happened as far as
+  //    the walk is concerned, and the next wake must start after it (see
+  //    `servedThisWorker`).
+  servedThisWorker = served;
   if (!store) return;
   try {
     await store.save(BACKFILL_CURSOR_KEY, { served } satisfies TickCursor);
@@ -272,8 +316,23 @@ export async function saveTickCursor(
  * W76 · Why a target was passed over by a tick's fair rotation without running.
  * A small closed set — each value is a different fact, and none of them is
  * "it ran" (a target that ran consumes its tick and is reported as `served`).
+ *
+ * 🔴 W76b · The last two are a **different kind** of "passed over", and the set
+ *    keeps them apart on purpose. `no-http-port`/`halted`/`waiting-retry` are
+ *    reasons the target *could not* run. `daily-cap`/`state-unreadable` are
+ *    reasons it *would have made no request*: the engine reaches
+ *    `finish('daily-cap')` and `openLedger`'s unreadable-record refusal before it
+ *    fetches anything, so a tick spent on either is a tick the platforms behind
+ *    are owed. Both are decidable from this scope's stored header alone — see
+ *    `tickIdleReason`, which is also where the two no-request classes that are
+ *    **not** skip-able are written down and why.
  */
-export type TickSkipReason = 'no-http-port' | 'halted' | 'waiting-retry';
+export type TickSkipReason =
+  | 'no-http-port'
+  | 'halted'
+  | 'waiting-retry'
+  | 'daily-cap'
+  | 'state-unreadable';
 
 /**
  * 🔴 W76 · **The fairness half of the tick trace.**

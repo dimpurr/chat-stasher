@@ -638,6 +638,9 @@ tick:
     # 🔴 W76 · Not a channel problem and not an empty registry: there were targets,
     # and none of them could run this time (held by a stop, or waiting out a backoff).
     noRunnableTarget: there were targets, but none of them could run this time
+    # 🔴 W76b · The tick was not idle: it asked a platform which account to read
+    # (an unresolved account scope), and that request is the whole of one wake.
+    scopeAsked: it asked a platform which account to read, and that was the whole of this wake
     disabled: the switch was off at the time
     noStore: browser storage was unavailable at the time
     hostPaused: this machine's host is unreachable, so this leg paused until it answers

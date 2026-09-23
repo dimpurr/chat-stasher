@@ -48,7 +48,7 @@ import {
   type TickResult,
 } from '../lib/backfill/schedule';
 import { markScopeRetried, recordBackfillHalt, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
-import type { LedgerRefusal } from '../lib/backfill/ledger';
+import { unreadableStateRefusal, type LedgerRefusal } from '../lib/backfill/ledger';
 import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
@@ -73,10 +73,14 @@ import {
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
 // 🔴 W31 · The scope a scoped plan's requests carry is read out of the page's own
 //    captured URL, and the plan table is asked whether this platform is one of them.
-import { backfillCapabilityOf, backfillPlanFor } from '../lib/backfill/enumerate';
+import { backfillCapabilityOf, backfillPlanFor, canBackfillDetail } from '../lib/backfill/enumerate';
+// 🔴 W76b · `DEFAULT_PACE` is the pace the run would be given when no test seam
+//    overrides it, and the daily-cap skip has to compare against the very number
+//    the engine would (`tickIdleReason`).
+import { DEFAULT_PACE } from '../lib/backfill/pace';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey, type HaltReason } from '../lib/backfill/types';
+import { dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey, type HaltReason } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -987,6 +991,85 @@ async function tickHoldReason(
 }
 
 /**
+ * 🔴 W76b · **Would this scope's next run issue no request at all?**
+ *
+ * The sibling of `tickHoldReason`, one step further out. A hold is "the run would
+ * stop by name before fetching"; this is "the run would *finish* before fetching" —
+ * the run happens, the engine writes what it learned, and not one request goes out.
+ * Such a run still consumes the tick unless the walk can tell in advance, and the
+ * platforms behind it lose the wake for nothing. Two of the engine's three finishes
+ * of that shape are decidable here, **from this scope's stored header alone**, with
+ * no debt-store open and no network:
+ *
+ *  · `daily-cap` — the body quota for today is spent. The engine reaches
+ *    `finish('daily-cap')` before the first fetch (`engine.ts:1911`), and both
+ *    facts it decides on are on the header: `detailToday` (the stored day, count
+ *    and drawn cap) and the plan's `maxPerDay`, which is `pace.detail.maxPerDay`
+ *    — the same pace the run would be given, read from the same override.
+ *    🔴 The stored cap may only be used when `detailToday.day` is **today**:
+ *    on a new day the cap has not been drawn yet, and a run would draw it and
+ *    fetch. And the check is `>=`, on the same `min(cap ?? maxPerDay, maxPerDay)`
+ *    the engine computes — one arithmetic, two readers, or the skip would fire on
+ *    a scope the engine would have fetched for, which is a starvation, not a
+ *    saving.
+ *  · `state-unreadable` — what sits at this scope's key is not a record this build
+ *    can read, which is `openLedger`'s refusal with the same words, asked through
+ *    the **same function** (`unreadableStateRefusal`, W47's one decision): the run
+ *    would fetch nothing and would persist no halt, so `scopeRetryDue` keeps
+ *    saying "ask" and this scope would spend a slot on every visit, for as long as
+ *    the unreadable record sits there.
+ *
+ * 🔴 **The two no-request finishes this deliberately does not catch, and why.**
+ *
+ *  · `queue-empty`: the header's `pendingCount` is *not* the authority for "nothing
+ *    is owed" — `types.ts:1449-1452` says so in as many words, and `stateFrom`
+ *    re-derives the queue from the debt store on every open. A header that is one
+ *    persist behind the store is an ordinary state (the debt store is written
+ *    first, `ledger.ts:107-111`), so leading with `pendingCount === 0` would let
+ *    it report "nothing owed" about a scope with real debts — and because the walk
+ *    is the only thing that would ever write a fresher header, that skip could not
+ *    end. Knowing it means opening the debt store, which is what starting the run
+ *    does. So it is left: that scope spends its slot, and `schedule` says nothing
+ *    about it because nothing distinguishes it from an ordinary run that cleared
+ *    its one debt.
+ *  · The `ledger-mismatch` half of `openLedger`'s refusal: decided from the debt
+ *    set (`openHeaderLedger` reads it before judging), so it is not a header fact
+ *    either. Left for the same reason.
+ *
+ * Returns the `TickSkipReason` for an idle turn, or `null` when the run is due and
+ * may consume its tick.
+ */
+async function tickIdleReason(
+  store: ReturnType<typeof browserLocalStore>,
+  platform: string,
+  scope: string,
+  now: number,
+): Promise<'daily-cap' | 'state-unreadable' | null> {
+  if (!store) return null;
+  const plan = backfillPlanFor(platform);
+  // A plan with no body route never reaches the cap check: it either finishes
+  // `queue-empty` (nothing owed — not this helper's business) or halts
+  // `detail-unsupported`, which is a record a user needs to see. Skipping it as
+  // `daily-cap` would suppress that halt for good, so the plan must be one that
+  // can fetch bodies at all.
+  if (!plan || !canBackfillDetail(plan)) return null;
+  const raw = await store.load(stateKey(platform, scope));
+  // 🔴 Before `isHeader`: a record that is not a header at all is exactly the
+  //    refusal `openLedger` would raise, and it must be reported rather than fall
+  //    through to "not a header, therefore no cap".
+  if (unreadableStateRefusal(raw, platform, scope) !== null) return 'state-unreadable';
+  if (!isHeader(raw)) return null;
+  const maxPerDay = (backfillPaceOverride?.pace ?? DEFAULT_PACE).detail.maxPerDay;
+  if (maxPerDay === null) return null;
+  // The list must be finished, or the run would still issue list requests first
+  // (`engine.ts:1504-1510`): a capped scope that has pages left to read is not idle.
+  if (!raw.enumCursor.complete && raw.enumCursor.truncated === undefined) return null;
+  if (raw.detailToday.day !== dayKeyOf(now)) return null;
+  const cap = Math.min(raw.detailToday.cap ?? maxPerDay, maxPerDay);
+  return raw.detailToday.count >= cap ? 'daily-cap' : null;
+}
+
+/**
  * 🔴 C33 · The registration entry point for **explicit informed consent**: the
  * user pressed "start backfilling this platform" in the popup.
  *
@@ -1221,16 +1304,53 @@ async function rearmBackfillTick(): Promise<void> {
  *    under that organization. The dropped row's local ledger header is removed
  *    with it; the host archive is not touched.
  */
+/**
+ * 🔴 W76b · **What a scope resolution proves about the one request it may spend.**
+ *
+ * The question is put to the platform's page over the tab channel
+ * (`claudeScopeFromTab`), and the page-side resolver (`resolveClaudeOrgOnPage`)
+ * calls `fetchOrganizations` — `GET /api/organizations` — **exactly when the page's
+ * own requests and the cookie name nothing**. So the answer's shape says which of
+ * three facts happened:
+ *
+ *  · `none`     — the question never left us, or the answer came from the page or
+ *                 the cookie. Nothing was issued; the walk is free to carry on.
+ *  · `proven`   — a request to the platform itself went out. `source: 'endpoint'`
+ *                 is the endpoint's answer; `org-ambiguous` and `org-unresolved`
+ *                 are read off the endpoint's **body** (the page-side resolver
+ *                 asks the endpoint whenever the free sources answer nothing, so it
+ *                 can never report the `not-asked` refusal), so both of those are
+ *                 also proof that a body came back.
+ *  · `possible` — `transport-error`, and it is the same value for two different
+ *                 facts *by design* ("we could not ask" has one meaning on every
+ *                 path — see `askTabForClaudeOrg`): the page may have made the
+ *                 request and had it fail (a 5xx on the endpoint, the review's own
+ *                 scenario), **or** the channel may have failed before any page was
+ *                 ever reached (a closed tab, a wedged renderer, a timeout), in
+ *                 which case nothing was issued at all. Nothing on the background
+ *                 side can tell those apart, so the walk uses the one fact that
+ *                 separates them in practice: whether a live page of that platform
+ *                 answered the port check (see `runAlarmTickBody`).
+ */
+type ScopeRequest = 'none' | 'proven' | 'possible';
+
+function scopeRequestSpend(resolved: OrgResolution): ScopeRequest {
+  if (resolved.ok) return resolved.source === 'endpoint' ? 'proven' : 'none';
+  return resolved.halt === 'transport-error' ? 'possible' : 'proven';
+}
+
 async function resolveScopeForTick(
   store: ReturnType<typeof browserLocalStore>,
   target: { platform: string; origin: string; scope: string },
-): Promise<string> {
-  if (!backfillPlanFor(target.platform)?.scopeInPath) return target.scope;
+): Promise<{ scope: string; request: ScopeRequest }> {
+  if (!backfillPlanFor(target.platform)?.scopeInPath) {
+    return { scope: target.scope, request: 'none' };
+  }
   // 🔴 W49 · Only an organization id is "already resolved". `'default'` is the
   //    sentinel, and a conversation title is the same kind of fact: it names no
   //    account. Treating either as an organization would substitute it into
   //    `/api/organizations/<scope>/…`.
-  if (isClaudeOrgId(target.scope)) return target.scope;
+  if (isClaudeOrgId(target.scope)) return { scope: target.scope, request: 'none' };
   // 🔴 W49b · Collapse through the one-write path. If a live organization is
   //    already registered, that path drops the title (and its ledger) *without*
   //    inserting `'default'`, and this tick runs under the organization rather
@@ -1243,11 +1363,11 @@ async function resolveScopeForTick(
   const existingOrg = next.find(
     (t) => t.platform === target.platform && isClaudeOrgId(t.scope),
   );
-  if (existingOrg) return existingOrg.scope;
+  if (existingOrg) return { scope: existingOrg.scope, request: 'none' };
   const resolver = scopeResolverFor(target.platform);
-  if (!resolver) return UNRESOLVED_SCOPE;
+  if (!resolver) return { scope: UNRESOLVED_SCOPE, request: 'none' };
   if (!(await scopeRetryDue(store, target.platform, UNRESOLVED_SCOPE, Date.now()))) {
-    return UNRESOLVED_SCOPE;
+    return { scope: UNRESOLVED_SCOPE, request: 'none' };
   }
   /**
    * 🔴 W59b · **The attempt is spent before the question is asked, and a stamp that
@@ -1268,7 +1388,7 @@ async function resolveScopeForTick(
   if (!(await markScopeRetried(store, {
     platform: target.platform, scope: UNRESOLVED_SCOPE,
   }))) {
-    return UNRESOLVED_SCOPE;
+    return { scope: UNRESOLVED_SCOPE, request: 'none' };
   }
   const resolved = await resolver(null, target.origin);
   if (!resolved.ok) {
@@ -1276,12 +1396,12 @@ async function resolveScopeForTick(
       platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
     // The engine now finds the halt record and stops by name, issuing nothing.
-    return UNRESOLVED_SCOPE;
+    return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(resolved) };
   }
   await rememberScopedTarget(store, {
     platform: target.platform, origin: target.origin, scope: resolved.org, at: Date.now(),
   });
-  return resolved.org;
+  return { scope: resolved.org, request: scopeRequestSpend(resolved) };
 }
 
 async function runAlarmTickBody(): Promise<TickResult> {
@@ -1362,25 +1482,70 @@ async function runAlarmTickBody(): Promise<TickResult> {
    */
   let tabSweep: TabSweepReport | null = null;
   /**
-   * 🔴 W76 · **The tick-global gates, asked explicitly.**
+   * 🔴 W76b · **The tick's one exit.**
+   *
+   * Two places end a tick — the pre-walk gate stop below, and the walk itself —
+   * and both have to leave the same two records: the in-memory `lastTick` the
+   * popup and `lastTickReason` read, and the persisted trace. Written twice they
+   * would drift, and the drift would be silent in whichever copy was not updated,
+   * so they are written here once.
+   *
+   * 🔴 The in-memory probe has to be kept honest on a tick that served nothing: it
+   *    reads the module `lastTick`, so it must be told "this tick ran nothing"
+   *    (`last`) rather than keep a stale module default. The per-platform truth is
+   *    in `schedule.skipped`.
+   */
+  const conclude = async (): Promise<TickResult> => {
+    lastTick = last;
+    await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep, schedule);
+    return last;
+  };
+  /**
+   * 🔴 W76 · **The tick-global gates, asked once, before the walk.**
    *
    * In the base revision the per-target call to `tickBackfill` was also what asked
    * `no-store` / `disabled` / `host-paused` / `already-running`. Those are settled
-   * before the port is looked at, so a target with *no* tab could still come back
-   * with one of them — and a reason other than `no-http-port` stopped the whole
-   * tick. The fair rotation below decides "no tab" from `resolveHttpPort` itself,
-   * so unless those gates are asked here a tick taken while the switch is off would
-   * be recorded as a missing port **and** would run the recovery sweep, which is
-   * periodic tab work (it pings, prunes and registers rows) and must not happen
-   * without consent.
+   * before the port is looked at, and a reason other than `no-http-port` stopped
+   * the whole tick — so they were asked on every tick, because the walk's first
+   * target was always run or gated. W76's fair rotation broke that: the "no tab"
+   * decision moved to `resolveHttpPort`, and the gate probe went with it, so a tick
+   * whose every target has a tab and is held never asked them at all — it ran no
+   * resume hello, and was recorded as `no-runnable-target` while the switch was
+   * off, the host was paused, or another run held the single-flight lock. The
+   * rotation must not be able to hide a gate, so the probe is asked here,
+   * unconditionally, before the walk: a gate stops the tick *and* its answer is
+   * what the trace carries, and only a tick that gets `no-http-port` from it —
+   * "with no port, nothing else would stop this kick" — walks the registry.
    *
-   * The gates do not depend on *which* target they are asked about, so one answer
-   * serves the whole tick and it is asked lazily — only once a target actually has
-   * no tab. `tickOne(undefined)` is the identical call the base revision made for
-   * that target, so the authority for "why will this kick not move" is not
-   * recopied here; it is the same function.
+   * `tickBackfill` with no http port is that probe, and it is the identical call
+   * the base revision made (and the one W76 kept, lazily), so the authority for
+   * "why will this kick not move" is not recopied here; it is the same function —
+   * including the resume `hello` it runs while paused, which is the whole reason
+   * the answer must come from it and not from a second reading of the switch.
+   *
+   * 🔴 The head target's identity is passed and never read: with no port the call
+   *    can only answer `already-running` / `no-store` / `disabled` / `host-paused` /
+   *    `no-http-port`, all of which are conclusions about the kick rather than
+   *    about any one target. Its scope is the raw registry value at that point —
+   *    deliberately *not* the resolved one, because resolving is per-target work
+   *    and this probe must not spend a request (`resolveScopeForTick`). The
+   *    registry is not empty here: the `no-targets` case returned above.
    */
-  let gateProbe: TickResult | null = null;
+  const head = targets[0]!;
+  const gateProbe = await tickBackfill({
+    platform: head.platform,
+    origin: head.origin,
+    scope: head.scope,
+    store,
+    http: undefined,
+    sink: (c) => deliverBackfillItem(c),
+    ...(backfillPaceOverride ?? {}),
+  });
+
+  if (gateProbe.reason !== 'no-http-port') {
+    last = gateProbe;
+    return await conclude();
+  }
 
   // 🔴 W76 · **The fair rotation.** Last tick served the target at `cursor`; this
   //    tick the walk starts at the target **after** it and wraps around the
@@ -1402,7 +1567,49 @@ async function runAlarmTickBody(): Promise<TickResult> {
     //    reason to serve nothing, not a reason to lose the whole tick.
     const target = targets[idx];
     if (!target) continue;
-    const scope = await resolveScopeForTick(store, target);
+    const scopeResolution = await resolveScopeForTick(store, target);
+    const scope = scopeResolution.scope;
+    /**
+     * 🔴 W76b · **Has this target's turn already put a request to the platform?**
+     *
+     * `resolveScopeForTick` runs first, and its last source asks the platform
+     * itself (`GET /api/organizations`), so by the time the walk reaches the port
+     * check and the hold check a request may already have gone out **for this
+     * target**. Whatever those two checks then decide, that request is this tick's
+     * work and the walk stops here — a wake that issued the organization request
+     * for one platform *and* a list plus a detail for another would be two sites
+     * fetching in one tick, which is the rule the whole walk exists to keep.
+     *
+     * 🔴 `proven` and `possible` are treated differently, and the difference is the
+     *    port check (`pageAnswered`): a resolution that came back from the
+     *    endpoint, or as one of the two organization refusals, is proof the page
+     *    asked the platform even if that page is gone by now. A `transport-error`
+     *    is not proof — it is the same value for the page's own failed request and
+     *    for a channel that never reached a page at all — so it ends the walk only
+     *    when a live page of that platform answered the port check a moment later,
+     *    which is the only reading of "the question reached a page" available here.
+     *    The one case that can slip through is a page that died inside the two
+     *    awaits; reading it the other way round would let a *closed* tab starve
+     *    every other platform for as long as the retry ladder lasts, which is the
+     *    defect W76 exists to remove.
+     */
+    const spentRequest = (pageAnswered: boolean): boolean =>
+      scopeResolution.request === 'proven'
+      || (scopeResolution.request === 'possible' && pageAnswered);
+    /**
+     * Charge this tick to the target the question was put to, and end the walk.
+     *
+     * `schedule.served` names it because it *was* served in the sense the rotation
+     * cares about — its turn consumed the tick — and the cursor advances past it so
+     * the next wake starts at the platform behind it. It is not the same fact as
+     * "it ran", which is what `last.ran` and the tick's own `scope-asked` reason
+     * say.
+     */
+    const serveAsked = async (): Promise<void> => {
+      await saveTickCursor(store, idx);
+      schedule.served = target.platform;
+      last = { ran: false, reason: 'scope-asked', report: null };
+    };
     const tickOne = (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
       tickBackfill({
         platform: target.platform,
@@ -1422,15 +1629,11 @@ async function runAlarmTickBody(): Promise<TickResult> {
       //    runs at most once per tick so a closed-unregistered tab can get one
       //    more chance to fetch *this* tick (W51 semantics unchanged).
       //
-      // 🔴 But the tick-global gates are asked first, and a gate answer still
-      //    stops the tick rather than skipping on: it is a conclusion about the
-      //    whole kick, not about this target, so walking to the next one would
-      //    reach the same one (that is the base revision's behaviour, kept).
-      gateProbe ??= await tickOne(undefined);
-      if (gateProbe.reason !== 'no-http-port') {
-        last = gateProbe;
-        break;
-      }
+      // 🔴 The tick-global gates are already answered — `gateProbe`, before the
+      //    walk, got `no-http-port` or this tick would have stopped there. They
+      //    are not re-asked here: a second call could only reach the same
+      //    conclusion about the kick, and it would re-run the resume hello to do
+      //    it (W76b).
       if (tabSweep === null) {
         // 🔴 W62 · **Record the migration + gate decision *before* the recovery
         //    sweep, so a no-tab tick is never held open by the sweep's liveness
@@ -1478,6 +1681,13 @@ async function runAlarmTickBody(): Promise<TickResult> {
       }
       if (http === undefined) {
         schedule.skipped.push({ platform: target.platform, reason: 'no-http-port' });
+        // No live page answered, so the question cannot have been put to one. Only
+        // a resolution that *proves* the page asked the platform ends the walk
+        // here; a `possible` one did not reach a page at all.
+        if (spentRequest(false)) {
+          await serveAsked();
+          break;
+        }
         continue;
       }
     }
@@ -1489,6 +1699,25 @@ async function runAlarmTickBody(): Promise<TickResult> {
     const hold = await tickHoldReason(store, target.platform, scope, tickNow());
     if (hold !== null) {
       schedule.skipped.push({ platform: target.platform, reason: hold });
+      // 🔴 W76b · Unless the scope resolution already asked the platform on this
+      //    target's behalf: then this hold is the *end* of the tick, not a reason
+      //    to hand it to someone else. A live page answered the port check, so the
+      //    question reached one.
+      if (spentRequest(true)) {
+        await serveAsked();
+        break;
+      }
+      continue;
+    }
+    // 🔴 W76b · **A run that would fetch nothing does not get the tick either.**
+    //    The engine has finishes that write what they learned and issue no request
+    //    at all (a spent daily body quota, a record this build cannot read);
+    //    `tickIdleReason` decides those two from this scope's stored header, with
+    //    no request and no debt-store open, and the walk moves on to a platform
+    //    that can actually be served.
+    const idle = await tickIdleReason(store, target.platform, scope, tickNow());
+    if (idle !== null) {
+      schedule.skipped.push({ platform: target.platform, reason: idle });
       continue;
     }
     // Genuinely runnable now: it may issue a request (a normal run, a W59
@@ -1532,13 +1761,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
   ) {
     last = { ran: false, reason: 'no-runnable-target', report: null };
   }
-  // 🔴 Keep the in-memory probe (`backfillRuntimeStatus().lastTickReason`) honest
-  //    on a tick that served nothing: it reads the module `lastTick`, so it must
-  //    reflect "this tick ran nothing" (the resolved `last`) rather than the stale
-  //    module default (`null`). The per-platform truth is in `schedule.skipped`.
-  lastTick = last;
-  await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep, schedule);
-  return last;
+  return await conclude();
 }
 
 /** What the watchdog decided. `idle` is the healthy case and must be the common one. */

@@ -32,9 +32,11 @@
  *     hand-built record.
  *  2. **A refusal reaches storage without the run.** With an unreadable record in
  *     `storage.local` and **no platform tab open**, the trace names it — and the
- *     record it refused is still there, byte for byte. The engine's own route to
- *     the same refusal (a live tab, so the run really happens) is asserted beside
- *     it, because the two must agree rather than merely both exist.
+ *     record it refused is still there, byte for byte. With a live tab it is
+ *     named by the walk's own skip (W76b: this scope no longer spends a tick on a
+ *     run that would fetch nothing), and the engine's route to the same refusal is
+ *     then asserted **directly**, because the two must agree rather than merely
+ *     both exist.
  *  3. **A declined report is a fact.** Both decline reasons are written down, the
  *     accepted path is unchanged, and the popup renders it — a record nothing
  *     reads is exactly the "written down but never rendered" defect W36c exists
@@ -341,7 +343,7 @@ describe('W47 · a refusal reaches storage even when no run happens', () => {
     expect(store[STATE_KEY]).toEqual(planted);
   });
 
-  it('🟢 the same refusal, reached by the run itself, names the same reason', async () => {
+  it('🟢 the same refusal with a live tab, and the same words wherever it is decided', async () => {
     await enabledWithTarget();
     store[STATE_KEY] = { not: 'a header', v: 99 };
     const before = JSON.stringify(store[STATE_KEY]);
@@ -349,13 +351,48 @@ describe('W47 · a refusal reaches storage even when no run happens', () => {
     const mod = await bootBackground();
     await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 101);
 
-    // A live tab means the gates pass and the run really happens. It refuses, and
-    // the trace must say exactly what the blocked path above said — two routes to
-    // one fact, not two different sentences.
+    // 🔴 W76b · **This assertion moved; the claim it stands on did not.**
+    //
+    // It used to say `{ran: true, reason: 'ran', stopped: 'halted'}`: the live tab
+    // made the gates pass, the run really happened, and `openLedger` refused inside
+    // it. W76b's fourth finding made the unreadable record a **skip** instead — it
+    // is decidable from this scope's own header, with no request and no debt-store
+    // open, so a scope carrying one no longer spends a tick that a runnable
+    // platform behind it is owed (and, because the refusal persists nothing,
+    // `scopeRetryDue` would otherwise keep this scope in the walk forever).
+    //
+    // What this test exists for is that the refusal is **one fact in one wording**,
+    // whichever layer notices it — so that is what is asserted below: this route,
+    // and the engine's own `openLedger` route beside it, must agree down to the
+    // detail string. Nothing was relaxed to make it pass.
     await alarmTick(mod);
     const rec = await trace();
-    expect(rec).toMatchObject({ ran: true, reason: 'ran', stopped: 'halted', halted: 'state-unreadable' });
+    expect(rec).toMatchObject({
+      ran: false,
+      reason: 'no-runnable-target',
+      stopped: 'no-runnable-target',
+      halted: 'state-unreadable',
+    });
     expect(rec.detail).toContain(STATE_KEY);
+    expect(JSON.stringify(store[STATE_KEY])).toBe(before);
+
+    // The engine's route still exists — it is what the live leg's kick reaches
+    // (`tickBackfill` from a capture, outside the alarm's walk) — and it names the
+    // same refusal in the same words.
+    const { runBackfill } = await import('../lib/backfill/engine');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const report = await runBackfill({
+      platform: 'chatgpt',
+      origin: ORIGIN,
+      scope: SCOPE,
+      store: browserLocalStore()!,
+      // The refusal is settled before any request, and this stub makes that
+      // observable rather than assumed: if the engine ever fetches on this path,
+      // the test fails here instead of quietly passing.
+      http: async () => { throw new Error('the refusal path must not fetch'); },
+    });
+    expect(report.halted?.reason).toBe(rec.halted);
+    expect(report.halted?.detail).toBe(rec.detail);
     expect(JSON.stringify(store[STATE_KEY])).toBe(before);
   });
 

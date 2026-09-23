@@ -99,9 +99,10 @@ export type TickReason =
    * 🔴 W76 · **The registry has targets and none of them may run right now.**
    *
    * The alarm's walk (see `runAlarmTickBody`) skips a target that has no live tab,
-   * a target held by a permanent halt that still applies, and a target still inside
-   * a transient backoff — and it must keep walking past all three, or the first
-   * platform in the registry takes every tick (W72 §1, the defect this names).
+   * a target held by a permanent halt that still applies, a target still inside a
+   * transient backoff, and (W76b) a target whose stored header already says its
+   * next run would fetch nothing — and it must keep walking past all of them, or
+   * the first platform in the registry takes every tick (W72 §1, this names it).
    * When nothing along the whole walk was runnable, no run happened, so this is the
    * tick's own outcome.
    *
@@ -112,6 +113,27 @@ export type TickReason =
    * 📌 A wrong reason is harder to investigate than no reason.
    */
   | 'no-runnable-target'
+  /**
+   * 🔴 W76b · **This tick put its one question to a platform, took the answer, and
+   * stopped there.**
+   *
+   * A target whose account scope is still unresolved is asked again when its retry
+   * is due (W31c), and the last source of that question is a request to the
+   * platform itself — so the tick may have spent a request on that target's behalf
+   * *before* the walk reaches the port check and the hold check
+   * (`background.ts`'s `resolveScopeForTick`). Whatever the answer was, that
+   * question is this tick's work: the walk stops, the target is recorded as
+   * `served`, and no other platform runs. Without this, one wake could issue the
+   * organization request for one platform **and** a list plus a detail request for
+   * another, which is what the tick's one-run-per-wake rule exists to prevent.
+   *
+   * Why it is a reason of its own rather than `no-runnable-target`: nothing ran, but
+   * this target was *not* passed over — the tick did work on it, and a reader of the
+   * trace has to be able to tell those two wakes apart. `schedule` carries the rest:
+   * `served` names the platform the question was put to, `skipped` says why its run
+   * did not follow (`halted` / `waiting-retry` / `no-http-port`).
+   */
+  | 'scope-asked'
   /** runBackfill really was called. */
   | 'ran';
 
