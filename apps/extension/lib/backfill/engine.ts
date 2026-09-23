@@ -65,6 +65,20 @@ import {
 export interface HttpResponse {
   status: number;
   text: string;
+  /**
+   * 🔴 W64c · **Evidence, carried from the wrapper that owns the credential, never
+   * inferred from the status.**
+   *
+   * `true` = the page-side wrapper for this platform's credential produced this
+   * response from its credential path, after re-reading what the page holds. Absent =
+   * nothing has been claimed, which is what a fixture, a platform with no credential,
+   * and an older content script all produce — and the classifier reads it as "no
+   * evidence about the credential", not as a denial.
+   *
+   * See `lib/platform-auth.ts`'s `GeminiAuthorizedResponse` for what a wrapper is
+   * allowed to set, and `haltReasonForStatus` for who reads it.
+   */
+  survivedCredentialReread?: boolean;
 }
 
 /**
@@ -450,6 +464,107 @@ export async function recordBackfillHalt(
 }
 
 /**
+ * Classify a non-2xx for any backfill segment: credential refusal, rate-limit
+ * family, or everything else. All three stop, but they leave different traces and
+ * they promise different things.
+ *
+ * 🔴 W64 · **A 401 is its own answer, and it is not "the shape changed".**
+ *
+ * Measured 2026-09-23 from the page's own context in a logged-in Chrome: the list
+ * request `KIMI_PLAN` builds — the plan's own body, every header
+ * `createKimiAuthorizedFetch` produces, `authorization: Bearer <the page's
+ * localStorage access_token>` — answered **HTTP 401** with
+ * `{ code: "unauthenticated", message: "invalid user token: token has invalid claims:
+ * token is expired" }`. The stored token had **expired about 15 hours earlier**; the
+ * key name had not moved and no header was missing (the W64 probe table is in that
+ * task's report). The cookie-only form of the same request answered 401 too, with
+ * `code: "unauthenticated"` and no `message`.
+ *
+ * What a user was told before this line existed: `shape-changed` — "the API changed,
+ * wait for a fix". That is a **permanent** record, so the leg never asked again, and
+ * nothing in the product clears one. The platform had said, in as many words, that
+ * the credential it was handed is expired.
+ *
+ * 🔴 **Why every 401, and not only the platforms that have an auth wrapper.**
+ *    `lib/platform-auth.ts` is the only thing that knows which platforms send a
+ *    credential, and a second list of them living here is a list that can disagree
+ *    with it — silently, and in the direction that keeps this bug, because the wrong
+ *    answer is still a *permanent* record. The reason itself needs no such list: a
+ *    401 says a credential was required and what was presented was not accepted, and
+ *    there is no platform anywhere for which that is a statement about the wire
+ *    format. That is also why 401 may not fall to `shape-changed` on the one plan
+ *    that declares no credential — the sentence would be false there too.
+ *
+ * 🔴 **Why not `rate-limited`.** It is a different fact about why the platform said
+ *    no, its sentence promises a wait rather than a login, and it sits on its own
+ *    rung. `auth-refused` is the existing reason for a refused credential; it is
+ *    transient (`haltClassOf`), which is what makes the leg come back on its own and
+ *    pick up a token the page has since refreshed — and refreshing is the whole
+ *    remedy, since the token is re-read on every request (`lib/platform-auth.ts`).
+ *    Its popup sentence names the login, which is the correct action for a 401.
+ *    🔴 The cost, stated rather than implied: an account that is logged out for good
+ *    now costs one request per rung (30 min, then 2 h) instead of stopping at one.
+ *    W61b already made exactly this trade for the same reason and for the same
+ *    reason class — a permanent record froze a platform across logins, and nothing
+ *    in the product clears one.
+ *
+ * 🔴 **403 is deliberately left where it is**, and this is a decision rather than an
+ *    omission. 403 stays `rate-limited`: 429/403/5xx-as-"not now" is the reading the
+ *    ladder below was built on, the task that added this line forbids moving it
+ *    without evidence, and there is still none — no platform this leg drives has been
+ *    measured answering 403 for a credential reason. 400 is no longer a blanket
+ *    `shape-changed`; see W64b below for the one platform where it is not one.
+ *
+ * 🔴 🔴 W64b · **A 400 on Gemini is the same login refusal a 401 is, and Gemini is the
+ *    only platform for which that is claimed.**
+ *
+ *    Gemini's wrapper records the measurement this rests on (`createGeminiAuthorizedFetch`'s
+ *    header, from the 2026-09-14 logged-in probe): a `batchexecute` request whose `at`
+ *    is missing or stale is answered **HTTP 400** — "a real refusal, never data, never
+ *    an empty page" — and that is why the wrapper re-reads `at` and retries **on 400**
+ *    rather than only on 401. A retry keyed on a malformed-request status would be
+ *    pointless; it is keyed on that status because that status is what this platform
+ *    sends when the credential it was handed is not usable.
+ *
+ *    So a 400 that survives the wrapper's retry is the condition W64 handles for 401,
+ *    and until W64b it landed on `shape-changed` — **permanent**, so a user who was
+ *    signed out when the leg ran stayed stopped after signing back in, and nothing in
+ *    the product clears such a record. It is now the transient `auth-refused`: the leg
+ *    comes back on its own and picks up the `at` the page has since refreshed.
+ *
+ * 🔴 **Why the platform and not the status.** `platform` is the plan's own id, so the
+ *    rule is "a 400 from Gemini", not "a 400". Every other platform keeps 400 ⇒
+ *    `shape-changed`, because there is no measurement on them separating an auth
+ *    refusal from a genuinely malformed request, and a blanket `400 → auth-refused`
+ *    would swallow every malformed request into a message telling the user to sign in
+ *    — a remedy for something that is not wrong with their account. Choosing a reason
+ *    by evidence is the rule this whole function follows; this is what the evidence
+ *    covers and no more.
+ *
+ * 🔴 🔴 W64c · **…and the evidence has to arrive, rather than be assumed from the
+ *    status.** The paragraph above was written as if `platform === 'gemini'` *were* the
+ *    evidence; it is not. The re-review of W64b found the rule applying to every Gemini
+ *    400, including one nothing had been measured about (`nm/R64b-grok.log`, finding 2:
+ *    "Any Gemini 400 is mapped, including a malformed batch"). The measurement belongs
+ *    to an event — this platform refusing a request that came back through *its*
+ *    credential path — and only the wrapper that owns that credential sees the event.
+ *    So it is carried: `survivedCredentialReread` on the response, set by
+ *    `createGeminiAuthorizedFetch` and by nothing else, threaded through the content
+ *    script and the fetch channel (`lib/backfill/tab-port.ts`). A 400 without it is a
+ *    400 with no evidence, and the honest answer for that is what every other platform
+ *    gets.
+ *
+ * 🔴 **The residual, stated rather than implied.** A Gemini 400 caused by a genuinely
+ *    malformed batch that *did* go out through the credential path is still read as a
+ *    login refusal, because the status cannot separate the two — the same admission W64
+ *    makes above about a 401 with no `message`. The cost is bounded and it is the
+ *    cheaper error: the record is transient (30 min, then 2 h) rather than permanent,
+ *    so the leg retries and records the same 400 again with its status in the trace,
+ *    where the old behaviour would have stopped the platform for good on the first one.
+ *    What W64c removes is the case where there is no evidence at all.
+ */
+
+/**
  * 🔴 W59b · **Spend this build's one re-decision on a scope's stored halt — before the
  * question is asked.**
  *
@@ -512,7 +627,42 @@ export async function markScopeRetried(
 }
 
 /** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
-function haltReasonForStatus(status: number): HaltReason {
+function haltReasonForStatus(
+  status: number,
+  platform: string,
+  /**
+   * 🔴 W64c · The wrapper's own statement that this response came back from its
+   * credential path — see `HttpResponse.survivedCredentialReread`. Required, not
+   * optional, so that a new call site has to say which response it is holding instead
+   * of defaulting into the wrong answer.
+   */
+  survivedCredentialReread: boolean,
+): HaltReason {
+  if (status === 401) return 'auth-refused';
+  /**
+   * 🔴 W64b · Gemini's own measured shape of "the token was missing or stale" — see
+   *    this function's header.
+   *
+   * 🔴 W64c · **And the evidence is now required, rather than assumed from the
+   *    status.** The re-review found this line classifying *every* Gemini 400 as a
+   *    refused login, including one nothing was measured about — a malformed batch
+   *    this leg built itself — while the message it produced told the user to sign in
+   *    (`nm/R64b-grok.log`, finding 2). A 400 is a statement about the credential only
+   *    when the wrapper that owns that credential says so: it read the page's `at`,
+   *    re-read it once, and this response is what stood afterwards. With no such
+   *    evidence the honest answer is the same one every other platform gets —
+   *    `shape-changed`.
+   *
+   *    Scoped to the platform as well, and to that platform only: no other plan has
+   *    such a measurement, so on every other plan a 400 is a malformed request, which
+   *    is a wire fact and stays `shape-changed` whatever a response claims.
+   *
+   *    The residual, unchanged and stated rather than implied: a malformed batch that
+   *    *does* go out through Gemini's credential path is still indistinguishable from a
+   *    stale `at` at the status level, so it is still read as a login refusal. What the
+   *    evidence rules out is the case where there is no evidence at all.
+   */
+  if (status === 400 && platform === 'gemini' && survivedCredentialReread) return 'auth-refused';
   if (status === 429 || status === 403 || status >= 500) return 'rate-limited';
   return 'shape-changed';
 }
@@ -1401,7 +1551,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     if (res.status < 200 || res.status > 299) {
       return halt(
-        haltReasonForStatus(res.status),
+        haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true),
         `${listWhere()} returned HTTP ${res.status}`,
       );
     }
@@ -1795,7 +1945,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
-      return halt(haltReasonForStatus(res.status), `detail returned HTTP ${res.status}`);
+      return halt(haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true), `detail returned HTTP ${res.status}`);
     }
 
     /**
@@ -1847,7 +1997,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         return halt('transport-error', `detail step 2: ${(err as Error).message}`);
       }
       if (res2.status < 200 || res2.status > 299) {
-        return halt(haltReasonForStatus(res2.status), `detail step 2 returned HTTP ${res2.status}`);
+        return halt(haltReasonForStatus(res2.status, plan.platform, res2.survivedCredentialReread === true), `detail step 2 returned HTTP ${res2.status}`);
       }
       deliveredUrl = step2Url;
       deliveredMethod = 'POST';
@@ -1921,7 +2071,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           return halt('transport-error', `detail page: ${(err as Error).message}`);
         }
         if (next.status < 200 || next.status > 299) {
-          return halt(haltReasonForStatus(next.status), `detail page returned HTTP ${next.status}`);
+          return halt(haltReasonForStatus(next.status, plan.platform, next.survivedCredentialReread === true), `detail page returned HTTP ${next.status}`);
         }
         if (!matchesResponseShape(platformRow, next.text)) {
           return halt('shape-changed', `detail page does not match the ${platformRow.id} response shape`);

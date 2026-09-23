@@ -291,6 +291,22 @@ popup:
       tried to reset this scope so its conversation list is read again from the
       start — the detail below says what it recorded and whether that succeeded.
       Technical detail: {detail}
+    # 🔴 W62b · **A record written before the tick finished is not a verdict on
+    # the tick**, so this sentence replaces the head rather than following it:
+    # "that tick did nothing at all" is the wrong statement about a tick that was
+    # still running when the record was written. Reaching this line means the
+    # last wake did not complete — the worker was reclaimed, the tab-lookup threw,
+    # or the tick's own record could not be written — which is why it is said out
+    # loud rather than left blank. It names no outcome, because at that instant
+    # there was none.
+    unfinished: >-
+      Alarm: the last wake-up was {when}, and that tick had not finished when
+      this was written — it was still checking whether an open tab could fetch
+      for it ({targets} backfill target(s) in the registry at the time). So this
+      is the state it was in while running, not a verdict on it: nothing here
+      says the tick found no channel, and nothing here says it never looked. If
+      the next wake-up has not already replaced this line, that wake-up did not
+      complete either.
   progress:
     notStarted: >-
       Progress: not started yet — storage holds no debt set for this platform,

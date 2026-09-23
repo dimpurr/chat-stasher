@@ -295,7 +295,13 @@ test('with no platform tab open at all, the layout still moves: the migration do
   });
 
   await fireAlarm(ext, TICK_ALARM);
-  const all = await waitForHeader(ext);
+  // Wait for the complete tick record, not just the header. The header is
+  // written by the migration before any gate; the trace that names how the tick
+  // ended (and that this body asserts on) is what makes the state consistent, so
+  // reading on the header alone could catch the tick between the two. Since W62
+  // the trace is recorded before the recovery sweep, so in this no-tab case it
+  // lands in the same instant as the migration — never behind the sweep's pings.
+  const all = await waitForTickRecord(ext);
 
   // The tick was blocked — that is the point — and the trace says which gate.
   const tick = all['cs_backfill_lasttick_v1'] as Record<string, unknown>;
