@@ -8,6 +8,24 @@ numbers the document still carries, find that same text in the merged working
 tree, rewrite the range — and doing it by hand is what has cost this repository
 several extra rounds (W46b, W59d, W65m, W64c). This script does that one step.
 
+🔴 It does **exact shifts only**. A citation is relocated when, and only when,
+the block of lines it named at the parent is still in the merged file as the
+same run of lines, unchanged, in exactly one place. Anything else — a line
+inserted inside the block, a line deleted from it, a reworded line, a block
+that now occurs twice, a block that is gone — is refused, reported as needing a
+human, and leaves every document byte-identical.
+
+That is a deliberate narrowing. The earlier version also tried to follow a
+block that grew: it walked the file for the cited lines in order and took the
+earliest alignment each step allowed, with checks meant to prove "earliest" was
+the only answer. Three review rounds each built an input where it was not — a
+`);` belonging to an inner call, a `}` written inside a `// }` comment, a
+two-line block with no interior line to check — and each time the tool wrote a
+range nobody had cited and exited 0. On the merge it was built for, the answer
+it needed was exact shifts and nothing else (3 of 3; no citation needed lines
+inserted inside it). The heuristic and its brace arithmetic are gone, not
+disabled.
+
     python3 scripts/relocate-citations.py --old <parentA> --old <parentB> --dry-run
     python3 scripts/relocate-citations.py --old <parentA> --old <parentB>
     python3 scripts/check-citation-drift.py        # then read every failure
@@ -35,11 +53,19 @@ the one docs/citations.lock already pins: the range's lines with surrounding
 whitespace removed, joined by newlines. Pure reindentation is therefore not a
 move; a changed word is.
 
-🔴 A relocation is applied only when the old text is found in exactly one place,
-in every side that claims it. Zero matches, several matches, and sides that
-disagree are all left alone and reported, and the run exits non-zero: an edit
-made under any of those is a guess about which of several candidate claims a
-sentence was written about.
+🔴 A relocation is applied only when the old text is found as one unchanged run
+of lines, in exactly one place, in every side that claims it. Zero matches,
+several matches, and sides that disagree are all left alone and reported, and
+the run exits non-zero: an edit made under any of those is a guess about which
+of several candidate claims a sentence was written about.
+
+🔴 A token must also name the same *file* on both sides. Which file `a.ts`
+refers to is a fact about a tree, and a merge can change it — delete the root
+`a.ts` and leave `pkg/a.ts`, and a sentence about the root file reads as a
+citation of the other one. Each side's document is therefore parsed in that
+side's own tree (`git ls-tree` at the commit), and a citation whose token
+resolved to a different file there than in the merged tree is refused by name,
+even when the merged file offers a perfectly clean range for it.
 
 **Which documents this rewrites** is not a list kept here: it is exactly
 `drift.doc_files()`, the scan set of scripts/check-citation-drift.py — README.md,
@@ -151,24 +177,40 @@ def die(msg: str, code: int = 2) -> None:
 # --------------------------------------------------------------------------
 # Outcomes of looking for one citation's old text in the merged file.
 # --------------------------------------------------------------------------
-RIGHT = "right"            # the same text is at the same lines: nothing to do
-SHIFTED = "shifted"        # found as one contiguous run: relocate
-GROWN = "grown"            # found with lines inserted inside it: relocate, and say so
-AMBIGUOUS = "ambiguous"    # found in several places
-MISSING = "missing"        # found nowhere
+RIGHT = "right"            # the cited lines are still the cited lines: nothing to do
+SHIFTED = "shifted"        # the whole block moved, unchanged: relocate
+AMBIGUOUS = "ambiguous"    # the block's text is in several places
+MISSING = "missing"        # the block's text is not there as one run of lines
 UNKNOWN = "unknown"        # the file, or the range, is not readable at --old
 UNCLAIMED = "unclaimed"    # no declared side's own document writes this range
 BLANK = "blank"            # every cited line is whitespace, so it names nothing
+ELSEWHERE = "elsewhere"    # the same token names a different file on each side
 
-# Outcomes that rewrite a range. Everything else leaves the document alone.
-RELOCATED = (SHIFTED, GROWN)
+# Outcomes that rewrite a range. 🔴 Exactly one, and it has to be: the cited
+# block's text must still sit in the merged file as the same run of lines, in
+# exactly one place. That is the only placement the file forces.
+#
+# A block that grew, shrank, was reworded, now occurs twice, or is gone has
+# either more than one placement a reader could defend or none at all, and this
+# tool does not choose between them. It used to. The grown heuristic walked the
+# file for the block's lines in order and took the earliest alignment each step
+# allowed, guarded by checks that tried to prove "earliest" was the only answer —
+# and three review rounds each built an input where the walk was not the only
+# answer, landed on a range nobody had written, and exited 0: a `);` that closes
+# an inner call rather than the cited one; a `}` written inside a `// }` comment
+# cancelling the real closing brace; a two-line block with no interior line for
+# the checks to look at. The heuristic and its brace arithmetic are deleted, not
+# disabled: there is no config that turns them back on.
+RELOCATED = (SHIFTED,)
 
 # The refusing outcomes, kept apart because they mean different things to
 # whoever has to fix them: several matches is "this sentence could be about any
-# of these", zero matches is "the text it was written about is gone", blank is
-# "there is no text here to look for", and unclaimed is "these numbers are in
-# nobody's coordinate system".
-REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED, BLANK)
+# of these", zero matches is "the block is not in the merged file unchanged",
+# blank is "there is no text here to look for", unclaimed is "these numbers are
+# in nobody's coordinate system", and elsewhere is "this token names a different
+# file here than it did at --old". All five need a human, and none of them is
+# another.
+REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED, BLANK, ELSEWHERE)
 
 
 class SourceIndex:
@@ -246,9 +288,20 @@ def working_tree_index(rel: str) -> SourceIndex:
 
 
 class Parent:
-    """One side of the merge: a commit, and the documents as that side wrote them."""
+    """One side of the merge: a commit, and the documents as that side wrote them.
 
-    def __init__(self, commit: str, basenames: dict[str, list[str]]):
+    🔴 The documents are parsed **in this side's own tree**, never against the
+    merged one. Which file a token names is a fact about a tree: with a root
+    `a.ts` here and only `pkg/a.ts` after the merge, `a.ts:1-2` names one file
+    then and a different file now. Reading this side's document with the merged
+    tree's file list answers the merged tree's question and files the answer
+    under this side's commit, which is how a citation of `pkg/a.ts` came to be
+    relocated on the strength of a sentence about `a.ts` — and how the run
+    exited 0 while writing it. So the basename index and the "is this a file"
+    test both come from `git ls-tree` at this commit.
+    """
+
+    def __init__(self, commit: str):
         self.commit = commit
         # Every citation this side's own documents write, already resolved to
         # the file it names. A parsed citation, not a raw range scan: the
@@ -257,12 +310,45 @@ class Parent:
         # second, rougher reader here answered it differently — see claims().
         self.spans: dict[str, set[tuple[str, int, int]]] = {}
         self.lines: dict[str, set[str]] = {}
+        # (doc, doc line) -> the tokens written there, as (raw, target, start,
+        # end). Kept so that a citation whose token resolves to a different file
+        # here than in the merged tree can be *told apart* from one this side
+        # never wrote: the first is a hazard to name, the second is ordinary
+        # unclaimed numbers. See decide().
+        self.resolved: dict[tuple[str, int], list[tuple[str, str, int, int]]] = {}
+
+        files = self._tree_files()
+        self._files = set(files)
+        basenames: dict[str, list[str]] = {}
+        for rel in files:
+            basenames.setdefault(os.path.basename(rel), []).append(rel)
+
         for doc in drift.doc_files():
             rc, out = git("show", f"{commit}:{doc}")
-            if rc == 0:
-                citations, _ = drift.parse_text(doc, out.splitlines(), basenames)
-                self.spans[doc] = {(c.target, c.start, c.end) for c in citations}
-                self.lines[doc] = set(out.splitlines())
+            if rc != 0:
+                continue
+            citations, _ = drift.parse_text(doc, out.splitlines(), basenames, self._exists)
+            self.spans[doc] = {(c.target, c.start, c.end) for c in citations}
+            self.lines[doc] = set(out.splitlines())
+            for c in citations:
+                self.resolved.setdefault((doc, c.doc_line), []).append(
+                    (c.raw, c.target, c.start, c.end)
+                )
+
+    def _tree_files(self) -> list[str]:
+        """This commit's tracked files, repo-relative.
+
+        `ls-tree` rather than a walk of some directory: it is the tree, it needs
+        no checkout, and it does not pick up the build output and untracked
+        scratch a working-tree walk would.
+        """
+        rc, out = git("ls-tree", "-r", "--name-only", self.commit)
+        if rc != 0:
+            die(f"cannot list the files of --old {self.commit[:12]}")
+        return [line for line in out.splitlines() if line]
+
+    def _exists(self, rel: str) -> bool:
+        return rel in self._files
 
     @property
     def short(self) -> str:
@@ -329,7 +415,22 @@ def is_right(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> bool:
 
 
 def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision:
-    """Where the text cited as lines start..end in this side's numbers lives now."""
+    """Where the text cited as lines start..end in this side's numbers lives now.
+
+    A relocation requires the merged file to carry the cited block as the same
+    run of lines, in exactly one place. "The same run of lines" is the
+    repository's own definition of what a citation pins, the one
+    docs/citations.lock already uses: the range's lines with surrounding
+    whitespace removed, joined by newlines. Pure reindentation is therefore not
+    a move; a changed word is, and so is an inserted or deleted line, because
+    both change the run.
+
+    Everything that is not that one case is a refusal, and the run exits
+    non-zero: a block with a line inserted inside it, a block that lost a line,
+    a reworded block, a block that now occurs twice, and a block that is gone
+    all mean the merged file does not force a placement. They are reported
+    apart, because the repairs differ.
+    """
     if end > len(old):
         return Decision(
             UNKNOWN, start, end, None, None,
@@ -361,179 +462,14 @@ def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision
             f"(lines {', '.join(str(h + 1) for h in hits[:6])}"
             + (", …" if len(hits) > 6 else "") + ")",
         )
-    return grown(old, cur, start, end) or Decision(
-        MISSING, start, end, None, None,
-        "that text is not in the merged file at all — it was rewritten or removed",
-    )
-
-
-def embedding(cur: SourceIndex, block: list[str]) -> "list[int] | None":
-    """The earliest line indices at which `block` embeds in `cur`, lines in order.
-
-    `block` is the cited lines in order. A merge edits the middle of a construct
-    a sentence cites, so the block's lines stay in the file in order but not
-    adjacent any more; an embedding picks one line of the file for each line of
-    the block, and the earliest one is the tightest window there is.
-
-    🔴 "Earliest" is a choice, and the choice is only trustworthy when each step
-    had no alternative — see `grown()`, which checks that before using this.
-    """
-    hits: list[int] = []
-    at = 0
-    for want in block:
-        while at < len(cur) and cur.norm[at] != want:
-            at += 1
-        if at >= len(cur):
-            return None
-        hits.append(at)
-        at += 1
-    return hits
-
-
-def brace_balance(lines: list[str]) -> int:
-    """How many more `{` than `}` these lines hold."""
-    return sum(ln.count("{") - ln.count("}") for ln in lines)
-
-
-def end_is_forced(cur: SourceIndex, block: list[str], matched: list[int]) -> bool:
-    """Whether the walk's last line is the only candidate for the block's end.
-
-    🔴 The walk takes the earliest line that fits each step, and the last step is
-    where "earliest" can still be wrong. A cited `fn unique_name() {` /
-    `step();` / `helper();` / `}` whose merge inserted an `if` was rewritten to
-    `src/a.ts:1-5` — stopping on the `}` of the inserted `if` while the
-    function's own `}` was on line 7 — and the run exited 0, with the document
-    now citing a range that ends inside the function. The two-line
-    `fn unique_only_here() {` / `}` has no interior line for the check in
-    `grown()` to look at and fails the same way.
-
-    The last line cannot be checked the way the interior ones are ("does it
-    occur again later"). A closing brace legitimately repeats all over a source
-    file: in `export function beta(): number { … }` followed by another
-    function, the cited `}` occurs three times, and refusing every repeat would
-    refuse almost every citation that names a whole function — the control cases
-    in this tool's own selftest among them.
-
-    So the end is checked against the window it is the end of. Count the braces
-    of the cited lines from the first matched line to the last, and require the
-    last line to close the window — the balance at the end must be the balance
-    the cited block itself has. When it is not, the last line closed something
-    *inside* the window rather than the construct the window started: the merge
-    inserted an opening brace and the walk took the `}` that closes it, so every
-    later line with that same text is an equally good end and which one the
-    citation was about cannot be told.
-
-    A block that opens nothing (`return c;`, a Markdown paragraph) balances at
-    zero on both sides and is unaffected. Braces inside a string or a comment
-    are counted as if they were code, which can only refuse a window that is not
-    in doubt — the direction a wrong answer here has to fall.
-    """
-    return brace_balance(cur.norm[matched[0] : matched[-1] + 1]) == brace_balance(block)
-
-
-def grown(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> "Decision | None":
-    """The block with lines inserted inside it, so it is no longer one run.
-
-    This is the common shape after a merge: the other side edited the middle of
-    the function a sentence cites, and every line the citation named is still
-    there, just not adjacent any more. It is not a guess, and it is not "nearest
-    match": the block's own first line must occur in the merged file **exactly
-    once** — that is the anchor — and then every remaining line of the block must
-    be found after it, in order. The window is the tightest one that satisfies
-    both, so it cannot stretch further than the content forces.
-
-    A block whose lines genuinely changed fails the in-order test and returns
-    None, which is what sends it to a human rather than to a neighbouring range.
-    A block whose first line is not unique returns None too: four occurrences of
-    `*/` at the top of four different comments is not an anchor.
-
-    "In order" is not enough on its own, because a file can offer the block more
-    than one alignment and only one of them is the construct the sentence was
-    written about. Two more things are required of the walk, and both are checks
-    on the alignment the greedy walk produced:
-
-      * every cited line except the first and the last must have had no
-        alternative at its step — the line must not occur again later in the
-        file. A cited block whose middle line also occurs further down has two
-        alignments, and the greedy walk silently takes the earlier one, which is
-        the alignment that stops short of the real text;
-      * no line skipped *between* two matched lines may be one of the block's
-        own lines. That means the "inserted" line is really a second copy of a
-        cited line: the walk has stepped over the block's own tail to reach a
-        later copy of it, and the window has run off the end of the cited
-        construct onto whatever repeats it further down the file;
-      * the last line must be the only candidate for the block's end — see
-        `end_is_forced()`. The interior check above cannot see the last step,
-        which is why a window that stops on an inner `}` used to be written
-        into the document as a growth.
-
-    Two identical cited lines with one of them deleted used to come back as a
-    *shrunk* one-line range, and a deleted line whose text still existed later
-    used to come back as a window covering two other constructs; both are
-    refusals now.
-
-    🔴 The result can be longer than the old range, and how much longer is a
-    judgement about whether the inserted lines belong to the cited claim. The
-    caller prints both numbers and the count of inserted lines; read them before
-    `--update`.
-    """
-    if end - start < 1:
-        return None
-    anchors = cur.windows(old.block(start, start))
-    if len(anchors) != 1:
-        return None
-    block = old.norm[start - 1 : end]
-    matched = embedding(cur, block)
-    if matched is None:
-        # Not a refusal to report from here: the caller does not know either
-        # whether the block embeds, and "these lines are not in the file in this
-        # order at all" is the `missing` it reports.
-        return None
-    for i in range(1, len(block) - 1):
-        # Occurrences of this line later in the same block are the block's own
-        # content, not a competing alignment. A cited block whose two middle
-        # lines read the same (`step();` twice, say) had the second copy counted
-        # as an alternative and was refused, though the walk had placed it
-        # exactly; the range stayed stale and a human had to redo a relocation
-        # that was never in doubt. `own` is what the block itself contributes
-        # after step i, and the walk matched those copies in order.
-        own = sum(1 for j in range(i + 1, len(block)) if block[j] == block[i])
-        if cur.norm[matched[i] + 1 :].count(block[i]) > own:
-            return Decision(
-                AMBIGUOUS, start, end, None, None,
-                f"the cited lines are in the merged file, but in more than one "
-                f"alignment: `{block[i]}` is one of them and occurs again later, so "
-                f"which copy the citation was about cannot be told",
-            )
-    first, last = matched[0], matched[-1]
-    matched_at = set(matched)
-    cited = set(block)
-    for between in range(first, last + 1):
-        if between not in matched_at and cur.norm[between] in cited:
-            return Decision(
-                AMBIGUOUS, start, end, None, None,
-                f"the cited lines are in the merged file, but in more than one "
-                f"alignment: line {between + 1} is `{cur.norm[between]}`, one of them, "
-                f"and it sits between two of the others",
-            )
-    if not end_is_forced(cur, block, matched):
-        return Decision(
-            AMBIGUOUS, start, end, None, None,
-            f"the cited lines are in the merged file, but the walk's last line "
-            f"`{block[-1]}` is not the only candidate for the block's end: the lines "
-            f"it spans open a construct the last one does not close, so a later line "
-            f"with the same text is just as good an end",
-        )
-    if (first, last) == (start - 1, end - 1):
-        # Every old line is still on its own line; only lines *between* them were
-        # removed. The citation's range has not moved, which is this script's
-        # whole question — the content change is check-citation-drift.py's, and
-        # it reports it on the next run.
-        return Decision(RIGHT, start, end, start, end)
     return Decision(
-        GROWN, start, end, first + 1, last + 1,
-        f"{last - first + 1 - (end - start + 1)} line(s) inserted inside the block",
+        MISSING, start, end, None, None,
+        "that text is not in the merged file at all as one run of lines — it was "
+        "rewritten, removed, or had lines inserted inside it, and which of the "
+        "three it was decides the repair. Needs a human",
     )
+
+
 
 
 def decide(
@@ -541,11 +477,35 @@ def decide(
     cur: SourceIndex,
     doc: str,
     line: str,
-    target: str,
-    start: int,
-    end: int,
+    cit,
 ) -> Decision:
     """Decide one citation, using only the sides whose own document writes it."""
+    target, start, end = cit.target, cit.start, cit.end
+
+    # 🔴 Before anything else: the token has to name the same file on both
+    # sides. `a.ts:1-2` is a claim about whatever file the tree it was written
+    # in called `a.ts`, and the two trees need not agree — delete the root
+    # `a.ts` in the merge and leave `pkg/a.ts`, and the sentence that was about
+    # the root file now reads as a citation of a file it never named. Every
+    # number in it means something different, so no range is forced, however
+    # cleanly the merged file offers one. Checked here rather than left to the
+    # ownership test below, because an unclaimed range can still come back
+    # "already right" against the wrong file and be reported as a clean run.
+    for p in parents:
+        for p_raw, p_target, p_start, p_end in p.resolved.get((doc, cit.doc_line), ()):
+            if (
+                p_target != target
+                and p_raw == cit.raw
+                and (p_start, p_end) == (start, end)
+            ):
+                return Decision(
+                    ELSEWHERE, start, end, None, None,
+                    f"the token `{cit.raw}` on this line names `{target}` in the merged "
+                    f"tree but named `{p_target}` at --old {p.short}: the same citation "
+                    f"resolves to a different file on each side, so its numbers mean "
+                    f"different things and no range is forced. Needs a human",
+                )
+
     owners = [p for p in parents if p.claims(doc, target, start, end)]
     if len(owners) > 1:
         # Both sides wrote this range, which means different code by it. The
@@ -804,7 +764,7 @@ def plan_doc(
             moved = False
             stuck: Decision | None = None
             for j, cit in enumerate(group):
-                d = decide(parents, cur, doc, lines[lineno - 1], cit.target, cit.start, cit.end)
+                d = decide(parents, cur, doc, lines[lineno - 1], cit)
                 group_decisions.append(d)
                 if d.status in RELOCATED:
                     moved = True
@@ -859,7 +819,12 @@ def plan_doc(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Relocate documentation citations to where their cited text went.",
+        description="Relocate documentation citations to where their cited text went. "
+                    "Exact shifts only: a citation moves when the block it named is "
+                    "still one unchanged run of lines in exactly one place. A block "
+                    "that grew, shrank, was reworded, is duplicated or is gone is "
+                    "reported as needing a human, and the run exits non-zero with "
+                    "every document left as it was.",
         epilog="The documents this rewrites are the ones "
                "scripts/check-citation-drift.py scans: README.md, SECURITY.md, "
                "CONTRIBUTING.md, docs/install.md, docs/privacy.md, "
@@ -900,7 +865,7 @@ def main() -> int:
         rc, out = git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
         if rc != 0:
             die(f"--old {rev} is not a commit in this repository")
-        parents.append(Parent(out.strip(), basenames))
+        parents.append(Parent(out.strip()))
 
     citations, parse_problems = drift.parse_docs(basenames)
     if parse_problems:
@@ -933,8 +898,8 @@ def main() -> int:
             print(f"  - {p}", file=sys.stderr)
         return 1
 
-    counts = {s: 0 for s in (RIGHT, SHIFTED, GROWN, AMBIGUOUS, MISSING, UNKNOWN,
-                             UNCLAIMED, BLANK)}
+    counts = {s: 0 for s in (RIGHT, SHIFTED, AMBIGUOUS, MISSING, UNKNOWN,
+                             UNCLAIMED, BLANK, ELSEWHERE)}
     for doc, d, target in all_decisions:
         counts[d.status] += 1
         if d.status == RIGHT:
@@ -942,12 +907,11 @@ def main() -> int:
                 print(f"  right    {doc}:  {target}:{d.old_start}-{d.old_end}")
             continue
         if d.status in RELOCATED:
-            label = "shift" if d.status == SHIFTED else "GROWN"
             via = f"  [via {d.via[:12]}]" if len(parents) > 1 else ""
-            print(f"  {label:8s} {doc}:  {target}:{d.old_start}-{d.old_end} -> "
+            print(f"  shifted  {doc}:  {target}:{d.old_start}-{d.old_end} -> "
                   f"{target}:{d.new_start}-{d.new_end}  "
-                  f"({d.old_end - d.old_start + 1} -> {d.new_end - d.new_start + 1} lines"
-                  + (f", {d.detail})" if d.detail else ")") + via)
+                  f"({d.old_end - d.old_start + 1} lines, unchanged)"
+                  + via)
             continue
         print(f"  REFUSE   {doc}:  {target}:{d.old_start}-{d.old_end} — {d.detail}")
 
@@ -956,8 +920,8 @@ def main() -> int:
     total_lines = sum(len(edits) for edits in plans.values())
     print(
         f"[citation-relocate] --old {' '.join(p.short for p in parents)}: "
-        f"{len(all_decisions)} citations, {counts[SHIFTED] + counts[GROWN]} relocated "
-        f"({counts[SHIFTED]} by shift, {counts[GROWN]} with lines inserted inside), "
+        f"{len(all_decisions)} citations, {counts[SHIFTED]} relocated "
+        f"(exact shifts only, every block byte-identical), "
         f"{counts[RIGHT]} already right, {refusals} need a human"
     )
 
@@ -1039,17 +1003,50 @@ def main() -> int:
                 for doc, d, target in all_decisions if d.status in RELOCATED}
     got = {(c.doc, c.target, c.start, c.end) for c in after}
     if after_problems or not expected <= got:
+        # 🔴 Putting the documents back is itself a write, and it can fail. An
+        # OSError escaping here used to be a traceback out of main(): a document
+        # earlier in the loop already restored and a later one still carrying
+        # the rewrite, with nothing on stdout saying which — the read-back check
+        # exists precisely so that a rewritten tree is never reported as a clean
+        # run, and an unguarded restore put that report behind a stack trace.
+        # Each document is restored on its own, and one that cannot be put back
+        # is named to stderr *and* counted in the summary below, because "the
+        # edits were reverted" over an unrestored document is the one sentence
+        # this branch must not print.
+        stranded: list[str] = []
         for doc, original in originals.items():
-            write_atomic(doc, original)
+            try:
+                write_atomic(doc, original)
+            except OSError as undo:
+                stranded.append(f"{doc} ({undo})")
+                print(f"[citation-relocate] {doc} could not be restored: {undo}",
+                      file=sys.stderr)
         drift._file_cache.clear()
         detail = "\n".join(f"  - {p}" for p in after_problems) if after_problems else ""
         missing = "; ".join(f"{d} {t}:{s}-{e}" for d, t, s, e in sorted(expected - got))
-        print("[citation-relocate] the rewritten documents do not parse back to the plan; "
-              "all edits were reverted:\n"
-              f"  expected {len(expected)} relocated anchor(s), {len(expected - got)} of "
-              f"them not read back where the plan put them"
-              + (f": {missing}" if missing else "") + detail,
-              file=sys.stderr)
+        head = (
+            "[citation-relocate] the rewritten documents do not parse back to the plan:\n"
+            f"  expected {len(expected)} relocated anchor(s), {len(expected - got)} of "
+            f"them not read back where the plan put them"
+            + (f": {missing}" if missing else "")
+            + "\n"
+            + (f"  the read-back reports:\n{detail}\n" if detail else "")
+        )
+        if stranded:
+            print(
+                head
+                + f"  {len(originals) - len(stranded)} of the {len(originals)} "
+                f"rewritten document(s) were put back. COULD NOT RESTORE: "
+                + "; ".join(stranded)
+                + " — these documents are left carrying the rewrite and the tree is "
+                  "NOT as the run found it. Fix them before anything else.",
+                file=sys.stderr,
+            )
+        else:
+            print(head
+                  + f"  all {len(originals)} rewritten document(s) were put back, so "
+                    f"nothing was changed",
+                  file=sys.stderr)
         return 1
 
     if rewritten:

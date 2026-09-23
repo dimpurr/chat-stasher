@@ -28,6 +28,7 @@ import hashlib
 import os
 import re
 import sys
+from typing import Callable
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCK_PATH = os.path.join(REPO, "docs", "citations.lock")
@@ -190,8 +191,16 @@ def is_path_shaped(token: str, basenames: dict[str, list[str]]) -> bool:
     return token in basenames
 
 
+def _worktree_file(rel: str) -> bool:
+    """Whether `rel` is a file in the working tree the checker is reading."""
+    return os.path.isfile(os.path.join(REPO, rel))
+
+
 def resolve_target(
-    token: str, last_target: str | None, basenames: dict[str, list[str]]
+    token: str,
+    last_target: str | None,
+    basenames: dict[str, list[str]],
+    exists: Callable[[str], bool] | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve a cited path token to a repo-relative file, or say why it cannot be.
 
@@ -205,14 +214,26 @@ def resolve_target(
 
     🔴 A token that cannot be resolved is a problem, never a fallback. Guessing
     a file for it is how a typo becomes a wrong anchor that still validates.
+
+    🔴 `exists` is the tree the resolution happens *in*, and it defaults to the
+    working tree. It exists because `relocate-citations.py` parses a parent's
+    document too, and the sentence "what file does this token name" has a
+    different answer in a tree that has different files: with a root `a.ts` at
+    the parent and only `pkg/a.ts` after the merge, `a.ts:1-2` named one file
+    then and a different one now. Resolving the parent's document against the
+    working tree answers the merged tree's question and calls it the parent's,
+    which is how a citation came to be moved onto a file the sentence never
+    named. Callers that read a committed document pass that commit's own tree —
+    both this predicate and a `basenames` index built from it.
     """
+    is_file = exists if exists is not None else _worktree_file
     if "/" in token:
-        if os.path.isfile(os.path.join(REPO, token)):
+        if is_file(token):
             return token, None
         return None, f"names `{token}`, which is not a file in this repository"
     # Bare file name: the repo root, then the file the previous citation used,
     # then a name that is unique in the repo.
-    if os.path.isfile(os.path.join(REPO, token)):
+    if is_file(token):
         return token, None
     if last_target is not None and os.path.basename(last_target) == token:
         return last_target, None
@@ -228,7 +249,10 @@ def resolve_target(
 
 
 def parse_text(
-    doc: str, lines: list[str], basenames: dict[str, list[str]]
+    doc: str,
+    lines: list[str],
+    basenames: dict[str, list[str]],
+    exists: Callable[[str], bool] | None = None,
 ) -> tuple[list[Citation], list[str]]:
     """把一份文档的正文行解析成 (引用列表, 无法解析的问题列表)。
 
@@ -297,7 +321,7 @@ def parse_text(
                     # start, so a path the regex recognised is still reported
                     # as `a.rs:3` and not as the token plus its own tail.
                     raw = text[token_start : m.end()]
-                    target, problem = resolve_target(token, last_target, basenames)
+                    target, problem = resolve_target(token, last_target, basenames, exists)
                 elif last_target is not None:
                     # A bare `:N` inside the sentence of a citation: the
                     # common `\`a.ts:1\`, \`:2\`` list.

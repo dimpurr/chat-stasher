@@ -10,18 +10,29 @@
 # whose whole job is to edit the real documents is how a test leaves the tree
 # dirty when it fails.
 #
+# 🔴 The tool relocates on **exact shifts only**: the block a citation named must
+#    still be one unchanged run of lines, in exactly one place. Every probe
+#    below that used to expect a *grown* range to be relocated now expects a
+#    refusal instead, because the grown heuristic is gone — it walked the file
+#    for the cited lines in order and took the earliest alignment each step
+#    allowed, and three review rounds each built an input where the earliest
+#    alignment was not the cited one and the run wrote a range nobody had cited
+#    while exiting 0. A refusal that leaves the range stale is recoverable; a
+#    wrong range that validates is not. So each of those probes is kept, and
+#    asserts the refusal's reason, not just the exit code.
+#
 # Fixtures, because the shapes do not fit in one repository:
 #
-#   A  everything relocates — a shift, a grown range, a continuation, a
-#      two-range span in one token
+#   A  everything relocates — two shifts, a continuation, a two-range span in
+#      one token, and one block that grew and is therefore refused beside them
 #   B  nothing relocates — a duplicated snippet, a deleted snippet, and one
 #      certain citation alongside them to prove a refusal does not stop the run
 #   C  two parents — a citation written by side A's document and one written by
 #      side B's, moved by a single invocation that declares both
-#   D  the grown range that is not the right alignment — a cited line deleted
-#      from a repeat, a deleted line whose text still exists further down, a
-#      block whose lines also occur earlier, a cited line that is blank, and one
-#      genuine grown range beside them all as the positive control
+#   D  the shapes that are not an exact shift — a cited line deleted from a
+#      repeat, a deleted line whose text still exists further down, a block
+#      whose lines also occur earlier, a cited line that is blank, a block that
+#      grew, and one certain shift beside them all as the positive control
 #   F  two parents that disagree — the same range written by both sides with
 #      different text, a reworded prose line, and a range only another file's
 #      document ever wrote
@@ -30,15 +41,19 @@
 #   H  a document that cannot be written, after an earlier one has been
 #   I  another worktree's copy of the tool, run from this worktree, and a
 #      directory that is in no git repository at all
-#   J  a grown range whose last line is an inner `}` the merge inserted, the
-#      two-line block that has no interior line to check, and one that really
-#      does grow
+#   J  a block whose last line the merge's insertion left behind — the `}` of an
+#      inner `if`, and the two-line block that has no interior line at all —
+#      plus one certain shift so that a run refusing everything cannot pass
 #   K  a bare `:N` continuation and a bare file name that resolves to neither
 #      of the two files sharing it
 #   L  a comma list one of whose spans cannot be placed
-#   M  a block whose two middle lines read the same, so the block's own second
-#      copy is not an alternative alignment
+#   M  a block whose two middle lines read the same, and which grew anyway
 #   N  a document that cannot be put back after a later write failed
+#   O  the three inputs three review rounds built to make the grown heuristic
+#      write a wrong range and exit 0: a `);` that closes an inner call, a `}`
+#      written inside a `// }` comment, and a bare name whose file the merge
+#      deleted while another file with that name remained
+#   P  a read-back restore that cannot be written
 #
 # 🔴 Probes 4, 5 and 6 are the point of the tool, not decoration. A relocation
 #    that guesses when the answer is not unique is worse than the hand work it
@@ -49,14 +64,13 @@
 #    system, which is how a tool with the best rules in the world corrupts a
 #    document.
 #
-# 🔴 Fixtures D, F and G are the same hazard in the one case where the answer
+# 🔴 Fixtures D, F, G and O are the same hazard in the case where the answer
 #    *looks* unique. Every one of them was, before this selftest existed, a run
 #    that edited the document and exited 0: the range it wrote still pointed at
-#    real lines, so nothing downstream could tell. Each probe below therefore
-#    asserts the refusal's reason, not just the exit code — "the text is gone"
-#    and "the file offers this block in two alignments" are different repairs.
-#    Fixture H is the same idea for the write itself: a run that fails partway
-#    must leave the documents it already rewrote as it found them.
+#    real lines, so nothing downstream could tell. Fixtures H and P are the same
+#    idea for the write itself: a run that fails partway must either leave the
+#    documents it already rewrote as it found them, or say plainly which ones it
+#    could not.
 
 set -u
 
@@ -164,7 +178,7 @@ MD
 }
 
 echo "=============================================================="
-echo "Fixture A: a file the merge moves, grows and re-indents around"
+echo "Fixture A: a file the merge moves, re-indents and grows around"
 echo "=============================================================="
 FIXA="$TMP/a"
 seed_repo "$FIXA"
@@ -261,11 +275,15 @@ cd "$FIXA" || exit 2
 echo
 echo "=============================================================="
 echo "Probe 1: --dry-run prints the plan and changes nothing"
+echo "  Fixture A's plan is not clean — beta's block grew, so it is"
+echo "  refused — and a dry run over it must say so with the same"
+echo "  non-zero exit the real run gives. A clean plan's exit 0 is"
+echo "  probe 9's job, where both citations really do relocate."
 echo "=============================================================="
 before="$(shasum -a 256 docs/install.md | cut -d' ' -f1)"
 python3 scripts/relocate-citations.py --old "$OLDA" --dry-run >"$TMP/dry.out" 2>&1
 rc=$?
-expect 0 "$rc" "a plan that can be carried out must not be an error"
+expect 1 "$rc" "a plan with a refusal in it must be an error"
 if [ "$before" = "$(shasum -a 256 docs/install.md | cut -d' ' -f1)" ]; then
   echo "  ✔ docs/install.md is byte-identical after --dry-run"
 else
@@ -277,24 +295,24 @@ echo
 echo "=============================================================="
 echo "Probe 2: the real run moves each citation to the text it named"
 echo "  alpha  2-4   -> 6-8    (three lines inserted above it)"
-echo "  beta   7-10  -> 11-15  (one line inserted inside it: GROWN)"
-echo "  gamma  15-17 -> 20-22  (shifted by alpha's three lines and beta's one)"
+echo "  beta   7-10  -> REFUSED (one line inserted inside it)"
+echo "  gamma  15-17 -> 20-22  (shifted by alpha's three lines)"
+echo "  The run relocates the two exact shifts and refuses beta, so"
+echo "  it exits non-zero — and beta's line keeps the text it had."
 echo "=============================================================="
 python3 scripts/relocate-citations.py --old "$OLDA" >"$TMP/run1.out" 2>&1
 rc=$?
-expect 0 "$rc" "every citation in fixture A can be relocated"
+expect 1 "$rc" "a block with a line inserted inside it is refused, so the run is not clean"
 contains docs/install.md '`src/a.ts:6-8`' "alpha's citation shifted to 6-8"
-contains docs/install.md '`src/a.ts:11-15`' "beta's citation grew to 11-15"
 contains docs/install.md '`src/a.ts:6-8,20-22`' "the two-range span was rewritten as one token"
 contains docs/install.md '`:20-22`' "the continuation kept its bare form and moved"
 absent docs/install.md '`src/a.ts:2-4`' "no stale range survived"
-if grep -q -F 'GROWN' "$TMP/run1.out"; then
-  echo "  ✔ the grown range is reported as its own class"
-else
-  echo "  ✘ the grown range was not reported as GROWN:"
-  sed 's/^/      /' "$TMP/run1.out"
-  FAILED=1
-fi
+refused "$TMP/run1.out" 'REFUSE.*src/a\.ts:7-10 .*not in the merged file at all' \
+  "beta's grown block is refused as text that is no longer one run of lines"
+contains docs/install.md 'and beta is `src/a.ts:7-10`' \
+  "beta's citation is left with the text it had, for a human"
+absent "$TMP/run1.out" 'GROWN' "and nothing is reported as a growth any more"
+absent docs/install.md 'src/a.ts:11-15' "the grown range was not invented for it"
 
 echo
 echo "=============================================================="
@@ -302,7 +320,27 @@ echo "Probe 3: the anchor moved, the pinned content did not"
 echo "  Each relocated range must hash to what the old range hashed"
 echo "  to: the tool moved where the citation points, it did not"
 echo "  change what the sentence is a claim about."
+echo ""
+echo "  The refusal in probe 2 left beta's range stale on purpose,"
+echo "  and a document in that state is not one --update may be run"
+echo "  over: pinning a refused anchor locks in a range the run just"
+echo "  said it could not place. Repairing it is the human step the"
+echo "  refusal asks for, so it is done here, explicitly — the"
+echo "  '11-15' below is beta's construct in the merged file, the"
+echo "  same one the old '7-10' named."
 echo "=============================================================="
+python3 - <<'PY'
+import pathlib
+
+doc = pathlib.Path("docs/install.md")
+text = doc.read_text(encoding="utf-8")
+repaired = text.replace("`src/a.ts:7-10`", "`src/a.ts:11-15`")
+if repaired == text:
+    raise SystemExit("the refused citation is not where this repair expects it")
+doc.write_text(repaired, encoding="utf-8")
+PY
+rc=$?
+expect 0 "$rc" "the human repair the refusal asks for is applied to the fixture"
 python3 scripts/check-citation-drift.py --update >/dev/null 2>&1
 rc=$?
 expect 0 "$rc" "--update must accept the relocated documents"
@@ -679,20 +717,21 @@ contains docs/privacy.md '`src/two.ts:6-7`' "side B's document was rewritten"
 
 echo
 echo "=============================================================="
-echo "Fixture D: a grown range, and the four shapes where the"
-echo "  alignment only looks forced"
-echo "  The file offers this cited block more than one alignment,"
-echo "  or none, in each of these. A walk that takes the earliest"
-echo "  copy of each line answers anyway: it shrinks a two-line"
-echo "  claim to one, or stitches a range across two constructs"
-echo "  and calls it a growth. There is one citation here that"
-echo "  really did grow, in the other document, so that a run"
-echo "  which refuses everything cannot pass either."
+echo "Fixture D: five shapes that are not an exact shift, and one"
+echo "  that is"
+echo "  None of these blocks is still one unchanged run of lines,"
+echo "  so none of them has a placement the merged file forces. The"
+echo "  old tool walked the file for the cited lines in order and"
+echo "  answered anyway: it shrank a two-line claim to one, or"
+echo "  stitched a range across two constructs and called it a"
+echo "  growth. There is one citation here that really did shift,"
+echo "  in the other document, so that a run which refuses"
+echo "  everything cannot pass either."
 echo "=============================================================="
 FIXD="$TMP/d"
 seed_repo "$FIXD"
 cat > "$FIXD/docs/install.md" <<'MD'
-# The alignments that are not forced
+# The shapes that are not an exact shift
 
 The function is `src/a.ts:1-4`.
 
@@ -703,9 +742,11 @@ The repeats are `src/a.ts:9-10`.
 The blank line is `src/blank.ts:2`.
 MD
 cat > "$FIXD/docs/privacy.md" <<'MD'
-# The one that does grow
+# The block that grew, and the one that merely moved
 
 The function is `src/a.ts:11-14`.
+
+The certain one is `src/mover.ts:1-2`.
 MD
 cat > "$FIXD/src/a.ts" <<'TS'
 fn unique_name() {
@@ -723,6 +764,7 @@ export function beta(): number {
   return c;
 }
 TS
+printf 'm1\nm2\nm3\n' > "$FIXD/src/mover.ts"
 # Line 2 is three spaces. The drift checker pins it like any other range — the
 # digest of a range with no non-blank line is the digest of the empty string.
 printf '// alpha\n   \n// gamma\n' > "$FIXD/src/blank.ts"
@@ -756,6 +798,7 @@ export function beta(): number {
 }
 TS
 printf '// gamma\n// delta\n   \n' > "$FIXD/src/blank.ts"
+printf 'NEW1\nNEW2\nm1\nm2\nm3\n' > "$FIXD/src/mover.ts"
 if ! grep -q 'UNRELATED' "$FIXD/src/a.ts" || [ "$(grep -c 'repeat();' "$FIXD/src/a.ts")" -ne 1 ]; then
   echo "  ✘ fixture D's merged file is not what this selftest means to write; it is void"
   FAILED=1
@@ -769,23 +812,34 @@ echo "Probe 12: the run refuses, and still relocates the one that"
 echo "  is certain"
 echo "=============================================================="
 cp docs/install.md "$TMP/d-install.before"
+cp docs/privacy.md "$TMP/d-privacy.before"
 python3 scripts/relocate-citations.py --old "$OLDD" >"$TMP/run7.out" 2>&1
 rc=$?
-expect 1 "$rc" "citations whose alignment is not forced are an error, not a relocation"
-contains docs/privacy.md '`src/a.ts:15-19`' "the genuine grown range beside them still relocated"
+expect 1 "$rc" "a block that is not still one run of lines is an error, not a relocation"
+contains docs/privacy.md '`src/mover.ts:3-4`' "the exact shift beside them still relocated"
+refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:11-14 .*not in the merged file at all' \
+  "the block the merge inserted a line into is refused, not grown"
+contains docs/privacy.md '`src/a.ts:11-14`' "and its line keeps the text it had"
+if [ "$(diff "$TMP/d-privacy.before" docs/privacy.md | grep -c '^[<>]')" = "2" ]; then
+  echo "  ✔ and it is the only line of privacy.md that changed"
+else
+  echo "  ✘ privacy.md changed in more than the one certain citation:"
+  diff "$TMP/d-privacy.before" docs/privacy.md | sed 's/^/      /'
+  FAILED=1
+fi
 
 echo
 echo "=============================================================="
 echo "Probe 13: two cited lines that are the same, one of them"
 echo "  deleted, is not a one-line range"
 echo "  src/a.ts:9-10 at --old is \`repeat();\` twice; the merge"
-echo "  deletes one. The walk has to advance past the anchor"
-echo "  before looking for the block's second line, or the anchor"
-echo "  matches itself and the claim shrinks to \`src/a.ts:14\`"
-echo "  with a negative count of inserted lines."
+echo "  deletes one, so the block is not one run of lines any"
+echo "  more. A walk that advanced past the anchor and matched the"
+echo "  anchor itself instead would shrink the claim to"
+echo "  \`src/a.ts:14\` — one line, from a block that named two."
 echo "=============================================================="
 refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:9-10.*not in the merged file at all' \
-  "the deleted repeat is refused as absent, not shrunk to one line"
+  "the deleted repeat is refused, not shrunk to one line"
 contains docs/install.md '`src/a.ts:9-10`' "it is still the range the document carries"
 absent docs/install.md 'src/a.ts:14' "no one-line range was invented for it"
 
@@ -794,11 +848,13 @@ echo "=============================================================="
 echo "Probe 14: a deleted line whose text still exists further"
 echo "  down the file is not stitched into the range"
 echo "  The cited function lost \`helper();\` and its \`}\`. Both"
-echo "  still exist further down, after \`other();\`. Taking the"
-echo "  earliest later copy of each line builds src/a.ts:1-6 — a"
-echo "  window covering three lines that belong to other code."
+echo "  still exist further down, after \`other();\`. A walk that"
+echo "  takes the earliest later copy of each line builds"
+echo "  src/a.ts:1-6 — a window covering three lines that belong"
+echo "  to other code — and the block it started from is not one"
+echo "  run of lines at all."
 echo "=============================================================="
-refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:1-4.*more than one alignment.*sits between two of the others' \
+refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:1-4.*not in the merged file at all' \
   "the block whose tail repeats further down is refused"
 absent docs/install.md '`src/a.ts:1-6`' "the stitched range was not written"
 
@@ -806,12 +862,13 @@ echo
 echo "=============================================================="
 echo "Probe 15: a block whose lines also occur earlier is refused"
 echo "  src/a.ts:5-7 is three marker comments. All three also"
-echo "  occur further down with the real pair at the end, so the"
-echo "  earliest alignment is not the cited one — it stops at"
-echo "  \`// UNRELATED\` and short of the very text that survived."
+echo "  occur further down with the real pair at the end, and the"
+echo "  merge broke the cited run with \`// UNRELATED\`, so the"
+echo "  block is contiguous nowhere — in particular not at the"
+echo "  alignment that stops short of the very text that survived."
 echo "=============================================================="
-refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:5-7.*more than one alignment.*occurs again later' \
-  "the block with an alignment that is not forced is refused"
+refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:5-7.*not in the merged file at all' \
+  "the block whose run the merge broke is refused"
 absent docs/install.md '`src/a.ts:7-10`' "no alignment was picked for it"
 
 echo
@@ -1229,32 +1286,34 @@ contains "$TMP/run12.out" 'not inside a git repository' \
 
 echo
 echo "=============================================================="
-echo "Fixture J: a grown range that ends on the wrong line"
-echo "  The cited block's last line is a closing brace. The merge"
-echo "  inserts a construct *inside* the block, and the walk takes"
-echo "  the brace that closes the insertion — an earlier copy than"
-echo "  the one the citation named — so the range it writes ends"
-echo "  inside the cited construct and still points at real lines."
-echo "  Fixture D's alignments are caught by the interior lines;"
-echo "  these two are the shapes where the last step is the only"
-echo "  wrong one, including the two-line block that has no"
-echo "  interior line at all. The control beside them really does"
-echo "  grow, so a run that refuses everything cannot pass."
+echo "Fixture J: the blocks whose last line the insertion moved"
+echo "  The cited block's last line is a closing brace, and the"
+echo "  merge inserts a construct *inside* the block, so the cited"
+echo "  run is broken. A walk that took the brace closing the"
+echo "  insertion wrote a range ending inside the cited construct"
+echo "  — an inner \`}\` for the first, and for the two-line block"
+echo "  there is not even an interior line for the old checks to"
+echo "  look at. Both are refusals now. The shift beside them"
+echo "  really does relocate, so a run that refuses everything"
+echo "  cannot pass."
 echo "=============================================================="
 FIXJ="$TMP/j"
 seed_repo "$FIXJ"
 cat > "$FIXJ/docs/install.md" <<'MD'
-# The grown ranges that end on the wrong line
+# The blocks the insertion broke
 
 The inner brace is `src/inner.ts:1-4`.
 
 The pair is `src/pair.ts:1-2`.
 MD
 cat > "$FIXJ/docs/privacy.md" <<'MD'
-# The one that really does grow
+# The block that grew, and the one that merely moved
 
 The function is `src/control.ts:1-4`.
+
+The certain one is `src/mover.ts:1-2`.
 MD
+printf 'm1\nm2\nm3\n' > "$FIXJ/src/mover.ts"
 cat > "$FIXJ/src/inner.ts" <<'TS'
 fn unique_name() {
   step();
@@ -1301,6 +1360,7 @@ export function beta(): number {
   return c;
 }
 TS
+printf 'NEW1\nNEW2\nm1\nm2\nm3\n' > "$FIXJ/src/mover.ts"
 if ! grep -q 'guard' "$FIXJ/src/inner.ts" || ! grep -q 'tail();' "$FIXJ/src/inner.ts" \
   || [ "$(wc -l < "$FIXJ/src/inner.ts")" -ne 7 ]; then
   echo "  ✘ fixture J's merged file is not what this selftest means to write; it is void"
@@ -1311,41 +1371,56 @@ cd "$FIXJ" || exit 2
 
 echo
 echo "=============================================================="
-echo "Probe 27: a window that stops on an inner brace is refused"
+echo "Probe 27: a block whose insertion moved its closing brace is"
+echo "  refused"
 echo "  src/inner.ts:1-4 is the whole of fn unique_name. The merge"
-echo "  put an \`if\` inside it, and the walk's last step lands on"
-echo "  the \`}\` that closes the \`if\` — line 5 — while the"
-echo "  function's own \`}\` is line 7."
+echo "  put an \`if\` inside it, so the cited \`}\` is no longer the"
+echo "  line after \`helper();\`. The \`}\` that closes the \`if\`"
+echo "  (line 5) is an earlier candidate the old walk took, and"
+echo "  the function's own \`}\` is line 7."
 echo "=============================================================="
 cp docs/install.md "$TMP/j-install.before"
+cp docs/privacy.md "$TMP/j-privacy.before"
 python3 scripts/relocate-citations.py --old "$OLDJ" >"$TMP/run13.out" 2>&1
 rc=$?
-expect 1 "$rc" "a window whose end is not forced is an error, not a relocation"
-refused "$TMP/run13.out" 'REFUSE.*src/inner\.ts:1-4 .*is not the only candidate' \
-  "the inner-brace window is refused, naming the end line"
+expect 1 "$rc" "a block that is not one unchanged run of lines is an error"
+refused "$TMP/run13.out" 'REFUSE.*src/inner\.ts:1-4 .*not in the merged file at all' \
+  "the inner-brace block is refused as text that is no longer one run"
 absent docs/install.md 'src/inner.ts:1-5' "the range that ends inside the function was not written"
 
 echo
 echo "=============================================================="
-echo "Probe 28: a two-line block has no interior check to fall back on"
+echo "Probe 28: and so is the two-line block, which has no interior"
+echo "  line for any check to look at"
 echo "  src/pair.ts:1-2 is fn unique_only_here and its \`}\`. Both"
-echo "  lines are cited, so the interior rule has nothing to test,"
-echo "  and the walk takes the \`}\` of an inserted \`if\` on line 3"
-echo "  as the end — with the function's own \`}\` still on line 5."
+echo "  lines are cited; an inserted \`if\` breaks the run, and the"
+echo "  \`}\` of the \`if\` sits on line 3 with the function's own"
+echo "  \`}\` still on line 5."
 echo "=============================================================="
-refused "$TMP/run13.out" 'REFUSE.*src/pair\.ts:1-2 .*is not the only candidate' \
-  "the two-line window is refused by the same rule"
+refused "$TMP/run13.out" 'REFUSE.*src/pair\.ts:1-2 .*not in the merged file at all' \
+  "the two-line block is refused by the same rule"
 absent docs/install.md 'src/pair.ts:1-3' "the range that ends on the inserted brace was not written"
 
 echo
 echo "=============================================================="
-echo "Probe 29: the block that really grows still relocates"
-echo "  lines inserted inside a cited block that opens and closes"
-echo "  its own construct leave the window's balance where the"
-echo "  block's was, so this is still a relocation and the run"
-echo "  still exits non-zero for the two refusals beside it."
+echo "Probe 29: the refusals do not stop the run, and the block that"
+echo "  grew is left for a human"
+echo "  The control.ts citation is a block the merge inserted a line"
+echo "  into, so it is refused too; mover.ts is a plain shift and"
+echo "  must still relocate, with the run exiting non-zero for the"
+echo "  three refusals beside it."
 echo "=============================================================="
-contains docs/privacy.md '`src/control.ts:1-5`' "the genuine grown range relocated"
+contains docs/privacy.md '`src/mover.ts:3-4`' "the exact shift relocated"
+contains docs/privacy.md '`src/control.ts:1-4`' "the grown block keeps the text it had"
+refused "$TMP/run13.out" 'REFUSE.*src/control\.ts:1-4 .*not in the merged file at all' \
+  "and the grown block is refused, not grown"
+if [ "$(diff "$TMP/j-privacy.before" docs/privacy.md | grep -c '^[<>]')" = "2" ]; then
+  echo "  ✔ and it is the only line of privacy.md that changed"
+else
+  echo "  ✘ privacy.md changed in more than the one certain citation:"
+  diff "$TMP/j-privacy.before" docs/privacy.md | sed 's/^/      /'
+  FAILED=1
+fi
 same_bytes "$TMP/j-install.before" docs/install.md \
   "docs/install.md is exactly as the run found it"
 
@@ -1559,11 +1634,12 @@ echo
 echo "=============================================================="
 echo "Fixture M: a block whose two middle lines read the same"
 echo "  The citation names fn unique_name, \`step();\`, \`step();\`"
-echo "  and the closing brace. The two identical lines are the"
-echo "  block's own content, not two alignments to choose between —"
-echo "  the walk placed both, and the range it produced is the one"
-echo "  the sentence is about. Counting the block's own second copy"
-echo "  as an alternative refused it and left the citation stale."
+echo "  and the closing brace. The merge inserts \`extra();\` before"
+echo "  the brace, so the cited run is broken. A walk that matched"
+echo "  the block's lines in order placed all four and reported a"
+echo "  grown range to the whole construct; the lines it matched"
+echo "  are in order, but the block is not one run of lines, which"
+echo "  is the only shape that forces a range."
 echo "=============================================================="
 FIXM="$TMP/m"
 seed_repo "$FIXM"
@@ -1601,20 +1677,18 @@ cd "$FIXM" || exit 2
 
 echo
 echo "=============================================================="
-echo "Probe 35: the range relocates, and is reported as grown"
+echo "Probe 35: the block that grew is refused, whatever the walk"
+echo "  could have matched"
 echo "=============================================================="
+cp docs/install.md "$TMP/m-install.before"
 python3 scripts/relocate-citations.py --old "$OLDM" >"$TMP/run16.out" 2>&1
 rc=$?
-expect 0 "$rc" "a block whose embedding is unique is a relocation, not a refusal"
-contains docs/install.md '`src/a.ts:1-5`' "the function's range grew to the whole construct"
-absent docs/install.md '`src/a.ts:1-4`' "no stale range survived"
-if grep -q -F 'GROWN' "$TMP/run16.out"; then
-  echo "  ✔ and the growth is reported as GROWN"
-else
-  echo "  ✘ the growth was not reported as GROWN:"
-  sed 's/^/      /' "$TMP/run16.out"
-  FAILED=1
-fi
+expect 1 "$rc" "a block with a line inserted inside it is a refusal, not a relocation"
+refused "$TMP/run16.out" 'REFUSE.*src/a\.ts:1-4 .*not in the merged file at all' \
+  "the grown block is refused as text that is no longer one run of lines"
+absent docs/install.md 'src/a.ts:1-5' "the whole-construct range was not written"
+same_bytes "$TMP/m-install.before" docs/install.md \
+  "docs/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -1712,22 +1786,287 @@ absent "$TMP/run17.out" 'nothing was changed' \
 
 echo
 echo "=============================================================="
+echo "Fixture O: the three inputs three review rounds built to make"
+echo "  the grown heuristic write a wrong range and exit 0"
+echo "  Each is a block the merge broke, in the one shape where the"
+echo "  old walk still found an alignment that looked forced:"
+echo "    * a \`);\` that closes an inner call rather than the cited"
+echo "      one — no braces at all, so the brace check had nothing"
+echo "      to say, for both a three-line and a two-line citation;"
+echo "    * a \`}\` written inside a \`// }\` comment, which cancels"
+echo "      the function's own opening brace so the walk stopped on"
+echo "      the \`if\`'s brace instead;"
+echo "    * a bare name whose file the merge deleted while another"
+echo "      file with that name remained, so the same token named"
+echo "      one file at --old and a different one in the merged"
+echo "      tree."
+echo "  The shift in the other document is the control: refusing"
+echo "  everything is not a way to pass this fixture."
+echo "=============================================================="
+FIXO="$TMP/o"
+seed_repo "$FIXO"
+mkdir -p "$FIXO/pkg"
+cat > "$FIXO/src/call.ts" <<'TS'
+uniqueCall(
+  arg
+);
+TS
+printf 'uniqueCall(\n);\n' > "$FIXO/src/twoline.ts"
+cat > "$FIXO/src/fn.ts" <<'TS'
+fn unique_name() {
+  step();
+  helper();
+}
+TS
+printf 'R1\nR2\n' > "$FIXO/a.ts"
+printf 'T1\nT2\n' > "$FIXO/pkg/a.ts"
+printf 's1\ns2\ns3\n' > "$FIXO/src/shift.ts"
+cat > "$FIXO/docs/install.md" <<'MD'
+# The inputs the grown heuristic answered wrongly
+
+The call is `src/call.ts:1-3`.
+
+The two-line call is `src/twoline.ts:1-2`.
+
+The function is `src/fn.ts:1-4`.
+
+The basename is `a.ts:1-2`.
+MD
+cat > "$FIXO/docs/privacy.md" <<'MD'
+# The one that only moved
+
+The certain one is `src/shift.ts:1-2`.
+MD
+(
+  cd "$FIXO" || exit 2
+  git add -A
+  git commit -qm "fixture O: the state the document's line numbers describe"
+)
+OLDO="$(cd "$FIXO" && git rev-parse HEAD)"
+echo "  fixture O at ${OLDO:0:7}"
+cat > "$FIXO/src/call.ts" <<'TS'
+uniqueCall(
+  arg
+  inner(
+  );
+  more
+);
+TS
+printf 'uniqueCall(\n  arg\n  inner(\n  );\n);\n' > "$FIXO/src/twoline.ts"
+cat > "$FIXO/src/fn.ts" <<'TS'
+fn unique_name() {
+  step();
+  // }
+  if (guard) {
+    helper();
+  }
+  tail();
+}
+TS
+# The merge deleted the root a.ts and left pkg/a.ts, which then gained a line —
+# so the token `a.ts:1-2` now names a file the sentence never named.
+(cd "$FIXO" && git rm -q a.ts)
+printf 'YY\nT1\nT2\n' > "$FIXO/pkg/a.ts"
+printf 'NEW1\nNEW2\ns1\ns2\ns3\n' > "$FIXO/src/shift.ts"
+if [ -e "$FIXO/a.ts" ] || ! grep -q 'inner(' "$FIXO/src/call.ts"; then
+  echo "  ✘ fixture O's merged tree is not what this selftest means to write; it is void"
+  FAILED=1
+fi
+
+cd "$FIXO" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 37: neither the inner \`);\` nor the commented \`}\` is"
+echo "  taken as the end of a block the merge broke"
+echo "  All three blocks are refused, and none of the ranges the"
+echo "  old walk wrote is in the document."
+echo "=============================================================="
+cp docs/install.md "$TMP/o-install.before"
+python3 scripts/relocate-citations.py --old "$OLDO" >"$TMP/run18.out" 2>&1
+rc=$?
+expect 1 "$rc" "blocks the merge broke are errors, not relocations"
+refused "$TMP/run18.out" 'REFUSE.*src/call\.ts:1-3 .*not in the merged file at all' \
+  "the outer call is refused rather than ended on the inner \`);\`"
+refused "$TMP/run18.out" 'REFUSE.*src/twoline\.ts:1-2 .*not in the merged file at all' \
+  "the two-line call is refused by the same rule"
+refused "$TMP/run18.out" 'REFUSE.*src/fn\.ts:1-4 .*not in the merged file at all' \
+  "the function is refused rather than ended on the \`// }\` brace"
+absent docs/install.md 'src/call.ts:1-4' "no range ending on the inner \`);\` was written"
+absent docs/install.md 'src/call.ts:1-5' "and no longer growth of it either"
+absent docs/install.md 'src/twoline.ts:1-3' "no range ending on the inserted \`);\` was written"
+absent docs/install.md 'src/fn.ts:1-6' "no range ending on the \`if\`'s brace was written"
+
+echo
+echo "=============================================================="
+echo "Probe 38: the token that names a different file on each side"
+echo "  is refused by name"
+echo "  \`a.ts:1-2\` named the root a.ts at --old. The merge deleted"
+echo "  that file and left pkg/a.ts, which is one line further down,"
+echo "  so the merged tree resolves the same token to pkg/a.ts —"
+echo "  and pkg/a.ts's old first two lines are still there, one"
+echo "  line down, waiting for a run that answers with numbers"
+echo "  alone. Every number in the citation means something"
+echo "  different on the two sides, so no range is forced."
+echo "=============================================================="
+refused "$TMP/run18.out" 'REFUSE.*pkg/a\.ts:1-2 .*resolves to a different file' \
+  "the token that re-resolves to another file is refused, and the other file is named"
+absent docs/install.md 'a.ts:2-3' "no range was written against pkg/a.ts's old lines"
+contains docs/install.md '`a.ts:1-2`' "and the citation keeps the text it had"
+same_bytes "$TMP/o-install.before" docs/install.md \
+  "docs/install.md is exactly as the run found it"
+
+echo
+echo "=============================================================="
+echo "Probe 39: the shift beside the three refusals still relocated"
+echo "  The refusals must not turn the run into one that refuses"
+echo "  everything: src/shift.ts:1-2 is one unchanged run of lines"
+echo "  two lines further down, and it must move."
+echo "=============================================================="
+contains docs/privacy.md '`src/shift.ts:3-4`' "the exact shift relocated"
+
+echo
+echo "=============================================================="
+echo "Fixture P: a read-back restore that cannot be written"
+echo "  README.md and contracts/api.md both relocate, so both are"
+echo "  written. The read-back parse is then made to disagree,"
+echo "  which puts the run on its restore path, and the restore of"
+echo "  every document is made to raise OSError. An OSError"
+echo "  escaping there used to be a traceback out of main(): one"
+echo "  document put back, another still carrying the rewrite, and"
+echo "  nothing on stdout saying which. The summary has to name the"
+echo "  documents it could not restore and say the tree is not as"
+echo "  the run found it."
+echo "=============================================================="
+FIXP="$TMP/p"
+seed_repo "$FIXP"
+mkdir -p "$FIXP/contracts"
+cat > "$FIXP/docs/install.md" <<'MD'
+# Fixture P
+
+Install cites nothing.
+MD
+cat > "$FIXP/README.md" <<'MD'
+# Fixture P
+
+Readme cites `src/a.ts:2-3`.
+MD
+cat > "$FIXP/contracts/api.md" <<'MD'
+# Contract
+
+Contract cites `src/a.ts:2-3`.
+MD
+printf '# Fixture P\n\nPrivacy cites nothing.\n' > "$FIXP/docs/privacy.md"
+printf 'AA\nBB\nCC\nDD\n' > "$FIXP/src/a.ts"
+(
+  cd "$FIXP" || exit 2
+  git add -A
+  git commit -qm "fixture P: two documents that relocate"
+)
+OLDP="$(cd "$FIXP" && git rev-parse HEAD)"
+echo "  fixture P at ${OLDP:0:7}"
+printf 'PP\nQQ\nAA\nBB\nCC\nDD\n' > "$FIXP/src/a.ts"
+
+echo
+echo "=============================================================="
+echo "Probe 40: a restore that raises is reported, not traced back"
+echo "=============================================================="
+python3 - "$FIXP" "$OLDP" >"$TMP/run19.out" 2>&1 <<'PY'
+import importlib.util
+import os
+import sys
+
+fixture, old = sys.argv[1], sys.argv[2]
+os.chdir(fixture)
+spec = importlib.util.spec_from_file_location(
+    "relocate_citations_readback",
+    os.path.join(fixture, "scripts", "relocate-citations.py"),
+)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["relocate_citations_readback"] = mod
+spec.loader.exec_module(mod)
+
+state = {"restoring": False}
+real_write_atomic = mod.write_atomic
+
+
+def write_atomic_that_fails_the_restore(doc, text):
+    if state["restoring"]:
+        # From here on every write is the run putting a document back.
+        raise OSError(13, "injected: the read-back restore cannot be written")
+    real_write_atomic(doc, text)
+
+
+mod.write_atomic = write_atomic_that_fails_the_restore
+
+# The drift module is loaded inside main(), not at import, so the read-back
+# parse is wrapped where it is created rather than on a module attribute that
+# does not exist yet.
+real_load_drift_module = mod.load_drift_module
+calls = {"n": 0}
+
+
+def load_drift_module_whose_readback_disagrees():
+    drift_module = real_load_drift_module()
+    real_parse_docs = drift_module.parse_docs
+
+    def parse_docs_that_disagrees(basenames):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            # The second parse is the read-back. Making it disagree is what
+            # puts the run on the restore path at all; the writes above were
+            # the real ones.
+            state["restoring"] = True
+            return [], ["injected: the read-back does not agree with the plan"]
+        return real_parse_docs(basenames)
+
+    drift_module.parse_docs = parse_docs_that_disagrees
+    return drift_module
+
+
+mod.load_drift_module = load_drift_module_whose_readback_disagrees
+sys.argv = ["relocate-citations.py", "--old", old]
+sys.exit(mod.main())
+PY
+rc=$?
+expect 1 "$rc" "a read-back restore that fails must not exit 0"
+if grep -q -F 'COULD NOT RESTORE: README.md' "$TMP/run19.out"; then
+  echo "  ✔ the summary names the document it could not put back"
+else
+  echo "  ✘ the summary does not name the unrestored document:"
+  sed 's/^/      /' "$TMP/run19.out"
+  FAILED=1
+fi
+contains "$TMP/run19.out" 'the tree is NOT as the run found it' \
+  "and it says the tree is not as the run found it"
+absent "$TMP/run19.out" 'nothing was changed' \
+  "it does not claim the tree is as the run found it"
+absent "$TMP/run19.out" 'Traceback' \
+  "and no OSError escapes as a traceback"
+
+echo
+echo "=============================================================="
 echo "After: each fixture's own git status"
 echo "=============================================================="
 for d in "$FIXA" "$FIXB" "$FIXC" "$FIXD" "$FIXF" "$FIXG" "$FIXH" \
-         "$FIXI" "$FIXI_OTHER" "$FIXJ" "$FIXK" "$FIXL" "$FIXM"; do
+         "$FIXI" "$FIXI_OTHER" "$FIXJ" "$FIXK" "$FIXL" "$FIXM" "$FIXO"; do
   echo "  $(basename "$d"):"
   (cd "$d" && git status --porcelain | sed 's/^/    /')
 done
+echo "  p (fixture P is deliberately left as its injected failure left it):"
+(cd "$FIXP" && git status --porcelain | sed 's/^/    /')
 echo
 
 if [ "$FAILED" -eq 0 ]; then
-  echo "SELFTEST PASS: relocation, growth, continuation, multi-span, both refusals,"
-  echo "  the stale-rerun refusal and the two-sided run all behave — as do the"
-  echo "  grown ranges that are not the right alignment, the whitespace-only range,"
-  echo "  the disagreeing sides, the range only another file's document wrote, the"
-  echo "  citation that is a suffix of a longer token, the document that keeps its"
-  echo "  own newlines, and the failed write that is put back."
+  echo "SELFTEST PASS: exact shifts, continuations, multi-span tokens and the"
+  echo "  two-sided run all behave — as do every shape that is not an exact shift"
+  echo "  (a grown block, a shrunk one, a reworded one, a duplicated one, a deleted"
+  echo "  one, a blank range, a name that resolves to a different file), the"
+  echo "  whitespace-only range, the disagreeing sides, the range only another"
+  echo "  file's document wrote, the citation that is a suffix of a longer token,"
+  echo "  the document that keeps its own newlines, the failed write that is put"
+  echo "  back, and the failed read-back restore that is reported instead of"
+  echo "  traced back."
   exit 0
 fi
 echo "SELFTEST FAIL: a probe did not behave as the tool's contract says."
