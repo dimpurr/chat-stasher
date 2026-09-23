@@ -197,7 +197,41 @@ export type HaltReason =
    * filled again (`recoverLedgerLoss` in lib/backfill/ledger.ts), and the popup
    * says so.
    */
-  | 'ledger-mismatch';
+  | 'ledger-mismatch'
+  /**
+   * 🔴 W61 · **The platform answered, and the answer was a refusal — with HTTP 200.**
+   *
+   * Measured from the page's own context in a logged-in Chrome (2026-09-23):
+   * DeepSeek answers a cookie-only request to either backfill endpoint with status
+   * **200** and the failure in the envelope — `{code: 40002, data: null, msg:
+   * "Missing Token"}` on the list, `{code: 40003, data: null, msg:
+   * "INVALID_TOKEN"}` on the body. Both observed non-zero codes are about
+   * credentials, which is what this reason is named for, and the two requests that
+   * carried `Bearer <userToken.value>` answered `code: 0` with the data the
+   * parsers expect (`lib/platform-auth.ts`'s DeepSeek section).
+   *
+   * Why it has to be its own reason rather than `shape-changed`: that is what it
+   * **was** recorded as, and the sentence a user got was "the API changed" about a
+   * platform that had said, in as many words, that no token was sent. W57's
+   * comparison table already flagged the missing field — our row for `code` /
+   * `biz_code` read *never read (2 sources in conflict)* while two reference
+   * implementations gate on exactly those — so the one field that names the
+   * refusal was the one field being discarded.
+   *
+   * Why it is not `rate-limited`: that reason is classified **transient** — it
+   * promises the leg will come back by itself — and nothing about a missing or
+   * rejected token heals by waiting. It is also not `shape-changed`, whose promise
+   * ("wait for a fix") is equally false.
+   *
+   * 🔴 What it is **not** claiming. The reason is named for the credential family
+   *    because that is the only family measured here; the platform's own code and
+   *    message are carried in the halt detail, so a future non-zero code that means
+   *    something else stays readable rather than being rounded into a sentence
+   *    about logging in. And it is **not** "you have no conversations": zero
+   *    conversations were observed, and the refusal is precisely the case in which
+   *    the list was never read.
+   */
+  | 'auth-refused';
 
 /**
  * 🔴 C28 · The two observable outcomes of an "empty" body.
@@ -311,6 +345,13 @@ export type HaltClass = 'transient' | 'permanent';
  *    self-resuming wait, which is a different story from the one that is true —
  *    that the leg found a provable loss, refused to fetch against it, and reset the
  *    scope so the next run can read its list again.
+ *  · 'auth-refused' — W61. Permanent by the default below, and that is the whole
+ *    point of not reusing 'rate-limited': the two look alike (the platform said
+ *    no, in a body rather than a status) and are opposites in time. A rate limit
+ *    lifts by itself and the popup says so; a missing or rejected token does not,
+ *    and a leg on the backoff ladder would spend the wait promising a resume that
+ *    cannot come. It stops, names the platform's own code and message, and waits
+ *    for the human who can log back in.
  */
 export function haltClassOf(reason: HaltReason): HaltClass {
   return reason === 'transport-error' || reason === 'rate-limited' ? 'transient' : 'permanent';
@@ -372,9 +413,15 @@ export function haltSubjectOf(reason: HaltReason): HaltSubject {
 
     // Arrived-and-unreadable, arrived-empty, refused, or never arrived. The build
     // that reads them next is not what makes them true or false.
+    // 🔴 W61 · 'auth-refused' is the same kind of statement as 'rate-limited': a
+    //    refusal that **arrived**, in an envelope rather than in a status. Nothing
+    //    this extension ships can make it untrue — only the platform, or a human
+    //    logging back in — so it may never be classified 'capability' and expire
+    //    itself against the plan table.
     case 'shape-changed':
     case 'detail-empty-unverified':
     case 'rate-limited':
+    case 'auth-refused':
     case 'transport-error':
       return 'upstream';
 

@@ -1052,6 +1052,37 @@ export interface BackfillEnumPlan {
    * checks whichever it declares.
    */
   detailQueryPinned?: readonly { readonly key: string; readonly value: string }[];
+  /**
+   * 🔴 W61 · **Does this platform refuse a request in-band, so that a 2xx can still
+   * be a failure?**
+   *
+   * Every other platform in this table signals a refusal with a status, which is
+   * why `haltReasonForStatus` (engine.ts) reads like a complete answer. DeepSeek
+   * does not: measured 2026-09-23, both its list and its body endpoint answer
+   * **HTTP 200** to a refused request and put the failure in the envelope instead
+   * (`code: 40002` / `msg: "Missing Token"`, and `code: 40003` / `msg:
+   * "INVALID_TOKEN"`). Declaring this makes the engine ask the plan, **before any
+   * shape judgement on a 2xx body**, whether the body names a refusal — see
+   * `deepSeekEnvelopeRefusal` for why the check has to come first, and why it can
+   * only replace one halt with a more honest halt.
+   *
+   * 🔴 The body segment needs this hook and the list segment does not, and that
+   *    asymmetry is the reason the hook is a plan field rather than a few lines
+   *    inside `parseDeepSeekListPage`. The list segment hands a 2xx body straight
+   *    to `parseListPage`, which can make the refusal its first check; the body
+   *    segment runs `matchesResponseShape` (engine.ts, the same gate the live leg
+   *    uses) **before** the plan's `parseDetailPage`, and a refusal envelope — no
+   *    `data`, therefore none of the contract row's `requiredAnyPaths` — fails that
+   *    gate as `shape-changed` and never reaches the parser. Reordering that shared
+   *    gate for one platform would move it for all of them; declaring the refusal
+   *    on the plan moves nothing.
+   *
+   * 🔴 A refusal is only ever an **added** stop. This hook cannot return a page,
+   *    cannot pass a body on, and cannot make any existing check less strict: when
+   *    it answers `null` — every non-DeepSeek plan, and every well-formed DeepSeek
+   *    response — execution is byte-for-byte what it was.
+   */
+  refusalOf?(text: string): DeepSeekEnvelopeRefusal | null;
   /** 7 · Provenance. Same standard as the credibility note in contract.ts. */
   provenance: string;
 }
@@ -1276,6 +1307,124 @@ export function describeJsonShape(value: unknown, depth: number = SHAPE_DEPTH): 
  */
 function sawShape(where: string, value: unknown): string {
   return ` [saw ${where}: ${describeJsonShape(value)}]`;
+}
+
+/**
+ * 🔴 W61 · **DeepSeek refuses in-band, and a refusal is not a shape change.**
+ *
+ * Measured from the page's own context in a logged-in Chrome (2026-09-23):
+ * a cookie-only `GET /api/v0/chat_session/fetch_page?count=20` answers **HTTP 200**
+ * with `{code: 40002, data: null, msg: "Missing Token"}`, and a cookie-only
+ * `GET /api/v0/chat/history_messages?chat_session_id=<id>` answers **HTTP 200**
+ * with `{code: 40003, data: null, msg: "INVALID_TOKEN"}`. The same two requests
+ * with `authorization: Bearer <userToken.value>` answer `code: 0`,
+ * `data.biz_code: 0` and the data the parsers below expect.
+ *
+ * 🔴 **What went wrong without this.** The only thing our parsers read was `data`.
+ *    A refusal has `data: null`, so `parseDeepSeekListPage`'s envelope check fired
+ *    and the leg halted **`shape-changed`** with *"deepseek list response has no
+ *    `data` object (envelope changed?)"*. The user was told the API had changed.
+ *    It had not — the leg had not sent a token, and was told exactly that. And the
+ *    HTTP status could not have caught it either: 200 is the status of both
+ *    answers, so `haltReasonForStatus` (engine.ts) never ran.
+ *
+ * So a non-zero business code is checked **before** any shape judgement, on both
+ * segments, and becomes `auth-refused` — the reason W61 added to `HaltReason`.
+ * Three things about that ordering, all deliberate:
+ *
+ *  · **Before, not after.** A refusal has nothing to shape-check, and checking the
+ *    shape first is what produced the false `shape-changed`. Nothing is loosened
+ *    by moving the check earlier: this can only ever **replace one halt with a
+ *    more honest halt**. It can never let a body through, and `data.biz_data` is
+ *    still checked exactly as strictly as before for every response that is not a
+ *    refusal.
+ *  · **A non-zero code wins over present-looking data.** If an envelope carried
+ *    both a non-zero code and a `chat_sessions` array, the code is believed: the
+ *    platform said this request failed, and reading the payload anyway would be
+ *    recording a refused answer as an answer. No such response was observed — code
+ *    `0` on every successful one — so this is the conservative side of an unmeasured
+ *    case, chosen because the other side is the one this project exists to avoid.
+ *  · **`data.biz_code` is checked too, not only `code`.** The two sources that gate
+ *    on business codes do not agree on which one, and `data.biz_code` is the one
+ *    nested inside the object the refusal nulls out — so reading only the top-level
+ *    one would leave the nested one unread on exactly the responses where it is a
+ *    sibling of the payload. Reading both costs one property access.
+ *
+ * 🔴 What the reason claims, and what it does not. The two non-zero codes ever
+ *    observed here are **both about credentials** (`Missing Token`,
+ *    `INVALID_TOKEN`), which is why the reason is named `auth-refused` and its
+ *    popup sentence names the login. It is not claimed that every future non-zero
+ *    code will be about credentials: the code and the platform's own message are
+ *    carried in the detail, so a code that means something else is still readable
+ *    in the trace rather than rounded into a sentence about logging in.
+ */
+export interface DeepSeekEnvelopeRefusal {
+  reason: 'auth-refused';
+  detail: string;
+}
+
+/**
+ * How much of the platform's own `msg` may enter a stored halt detail. 🔴 Bounded
+ * for the same reason `describeJsonShape` is: this string is written into the
+ * ledger and read back into the popup, and a server is free to answer with
+ * something enormous. The truncation is marked, never silent.
+ */
+export const DEEPSEEK_REFUSAL_MSG_MAX_CHARS = 120;
+
+/** One code-and-message pair as it reads in a detail: `code 40002 "Missing Token"`, or just `code 40002` when no message came with it. */
+function describeDeepSeekCode(label: string, code: number, rawMsg: unknown): string {
+  const at = `${label} ${code}`;
+  if (typeof rawMsg !== 'string') return at;
+  // 🔴 Control characters removed before storage: a `msg` is untrusted text from a
+  //    response, and it ends up in a line a terminal prints. Newlines and escapes
+  //    would let it forge the surrounding sentence.
+  // eslint-disable-next-line no-control-regex
+  const clean = rawMsg.replace(/[\u0000-\u001F\u007F]/g, ' ').trim();
+  if (clean.length === 0) return at;
+  const bounded = clean.length > DEEPSEEK_REFUSAL_MSG_MAX_CHARS
+    ? `${clean.slice(0, DEEPSEEK_REFUSAL_MSG_MAX_CHARS)}…`
+    : clean;
+  return `${at} "${bounded}"`;
+}
+
+/**
+ * The refusal DeepSeek names in its own envelope, or `null` when the body does not
+ * name one.
+ *
+ * `null` covers every case that is not a refusal: not JSON, not an object, no
+ * `code`, a `code` of exactly `0`, and a code that is not a finite number at all
+ * (a string `"0"`, say — reading that as "success" would be inventing agreement the
+ * platform did not give, so it is left to the shape checks below, which is where a
+ * type change belongs).
+ */
+export function deepSeekEnvelopeRefusal(text: string): DeepSeekEnvelopeRefusal | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const record = body as Record<string, unknown>;
+
+  const refusal = (where: string, code: unknown, msg: unknown): DeepSeekEnvelopeRefusal | null =>
+    typeof code === 'number' && Number.isFinite(code) && code !== 0
+      ? {
+          reason: 'auth-refused',
+          detail:
+            `deepseek refused this request in-band: ${describeDeepSeekCode(where, code, msg)}`
+            + ' (HTTP status was not the signal — this platform answers 200 either way)',
+        }
+      : null;
+
+  const topLevel = refusal('code', record.code, record.msg);
+  if (topLevel) return topLevel;
+
+  const data = record.data;
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return refusal('data.biz_code', (data as Record<string, unknown>).biz_code, (data as Record<string, unknown>).biz_msg);
+  }
+  return null;
 }
 
 /**
@@ -2301,6 +2450,15 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
   //    declared none and a possibly-partial body was stored and its debt settled.
   //    See parseDeepSeekDetailPage and parseDeepSeekDetailTree.
   parseDetailPage: parseDeepSeekDetailPage,
+  // 🔴 W61 · **This platform refuses in-band, so a 200 is not an answer.** Both
+  //    segments answer HTTP 200 to a refused request and name the failure in the
+  //    envelope (`code: 40002 "Missing Token"` on the list, `code: 40003
+  //    "INVALID_TOKEN"` on the body — measured 2026-09-23 from the page's own
+  //    context). Without this the engine read `data: null` as a wire-shape change
+  //    and halted `shape-changed`. See deepSeekEnvelopeRefusal, and
+  //    BackfillEnumPlan.refusalOf for why the body segment cannot simply have its
+  //    parser check this first.
+  refusalOf: deepSeekEnvelopeRefusal,
   provenance:
     'cross-source reverse-engineering (research ticket R25, 2026-08-17; four mutually '
     + 'independent open-source implementations agreeing) · '

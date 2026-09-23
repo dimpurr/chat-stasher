@@ -420,6 +420,24 @@ popup:
         This leg stopped before requesting anything because it could not tell
         which Claude organization this account is using. Open a Claude
         conversation once, and it will find your organization.
+      # 🔴 W61 · DeepSeek answers a refused request with HTTP **200** and puts the
+      # failure in the envelope, so this is the one stop on this leg that no status
+      # could have shown. Its own sentence, and NOT the `other` fallback: `other`
+      # prints "the platform refused a request (auth-refused)", which is a
+      # description of the record rather than the two things a user needs — that
+      # nothing was read, and that the fix is a login. It must also not be confused
+      # with `waitingRetry` above, which promises a self-resuming wait; nothing
+      # about a missing or rejected token heals by waiting. The platform's own code
+      # and message are in {detail}, so a refusal that is not about credentials
+      # stays readable rather than being rounded into this sentence.
+      authRefused: >-
+        This leg stopped without reading anything, and it is not a change to the
+        platform: {platform} refused the request and said so in its own answer
+        ({detail}). Both refusals measured on this platform mean the login token
+        was missing or no longer valid, so the fix is usually to open {platform} in
+        this browser and sign in again. No conversation was counted, passed over,
+        or written off while this stood — the list request itself was the one
+        refused, so nothing about your history has been read yet.
       waitingRetry: >-
         This leg is NOT stopped and nothing has been written off: the platform
         refused or dropped a request ({reason}), so it is waiting out its backoff

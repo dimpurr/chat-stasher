@@ -26,6 +26,8 @@
 import {
   CHATGPT_DETAIL_PATH,
   CHATGPT_LIST_PATH,
+  DEEPSEEK_DETAIL_PATH,
+  DEEPSEEK_LIST_PATH,
   GEMINI_BATCHEXECUTE_PATH,
   GEMINI_FORM_FIELD_AT,
   GEMINI_FORM_FIELD_BATCH,
@@ -254,6 +256,162 @@ export function createKimiAuthorizedFetch(
      */
     if (first.status !== 401 || token === null) return first;
     return send(url, init, usableHeaderToken(options.readToken()));
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DeepSeek: the token lives in the page's own storage, like Kimi's.
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 W61 · **DeepSeek's conversation list and body both need the page's own
+ * bearer token.**
+ *
+ * Measured in a logged-in Chrome (2026-09-23), from the page's own context:
+ * `GET /api/v0/chat_session/fetch_page?count=20` and
+ * `GET /api/v0/chat/history_messages?chat_session_id=<id>` both answer **HTTP 200**
+ * with a cookie-only request — and answer with an **error envelope**:
+ * `{code: 40002, data: null, msg: "Missing Token"}` for the list and
+ * `{code: 40003, data: null, msg: "INVALID_TOKEN"}` for the body. The same two
+ * requests with `authorization: Bearer <userToken.value>` answer `code: 0`,
+ * `data.biz_code: 0`, a 20-row `chat_sessions` array (`has_more: true`) and a
+ * 6-message `chat_messages` array respectively.
+ *
+ * 🔴 **The 200 is the whole reason this wrapper exists.** Every other platform in
+ *    this file refuses with a status this leg can branch on (ChatGPT 404, Kimi 401,
+ *    Gemini 400), so "no auth" is visible at the transport. DeepSeek refuses
+ *    **in-band**: there is no status to key off, `data` comes back `null`, and the
+ *    parser's own envelope check is what fires — which is how an authentication
+ *    refusal was recorded as `halted.reason = "shape-changed"`, detail
+ *    "deepseek list response has no `data` object (envelope changed?)". The user
+ *    was told the API had changed. It had not.
+ *
+ * So the second half of W61 is not here but in the parsers: they read `code` and
+ * `data.biz_code` and refuse with `auth-refused`, so that even with no wrapper, or
+ * with a token the platform rejects, the leg says what happened. This wrapper is
+ * what makes that branch rare rather than constant.
+ *
+ * The three rules are ChatGPT's and Kimi's, unchanged:
+ *  · the token is read from the page's own storage **at request time**, is never
+ *    cached, never written to storage, never logged, and never sent to the native
+ *    host — it exists as a local for the length of one `fetch`;
+ *  · it is attached **only** to DeepSeek's two backfill paths, compared **in full**,
+ *    on a DeepSeek origin — and to nothing else. Every other request, including
+ *    every other path on chat.deepseek.com, is sent exactly as it would have been;
+ *  · a **401 or 403** re-reads it once and retries once. 🔴 This is the honest
+ *    limit of that rule on this platform and it is stated rather than implied: the
+ *    refusal DeepSeek actually sends is a 200, so **the retry does not cover it**.
+ *    It does not need to. The token is re-read per request, so the freshest value
+ *    the page holds is already in the header, and a retry would send byte-identical
+ *    bytes. A token the page rotated between two requests — the case Kimi's retry
+ *    covers — is already covered here by the per-request read. The 401/403 branch
+ *    is kept because it is the status family that *can* appear, and passing a
+ *    refusal through uninterpreted is the rule, not the retry.
+ *
+ * 🔴 When no token is readable the request is sent **without** one, exactly as
+ *    Kimi's is: the platform's own refusal is then what the leg sees, and it now
+ *    halts as `auth-refused` with the code and message in the trace, instead of
+ *    being mistaken for an empty account.
+ *
+ * 🔴 What the first two rules buy, stated as the attack they close: nothing on the
+ *    page can ask this code for the token. It has no message, no keyword and no
+ *    return channel — the value goes into one header of one request the plan itself
+ *    built.
+ */
+export const DEEPSEEK_USER_TOKEN_STORAGE_KEY = 'userToken';
+
+const DEEPSEEK_ORIGINS: readonly string[] =
+  PLATFORMS.find((platform) => platform.id === 'deepseek')?.origins ?? [];
+
+/**
+ * True only for the backfill leg's two DeepSeek endpoints, on the page's own
+ * origin. Both are compared **in full**: DeepSeek's detail id travels in the
+ * query, not the path, so neither route is a directory — see
+ * `DEEPSEEK_DETAIL_PATH`'s own note. A third path on the same origin is not this.
+ */
+export function needsDeepSeekBearer(url: string, pageOrigin: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === pageOrigin
+      && DEEPSEEK_ORIGINS.includes(parsed.origin)
+      && (parsed.pathname === DEEPSEEK_LIST_PATH || parsed.pathname === DEEPSEEK_DETAIL_PATH);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The page's stored `userToken` as a value this code can put in a header, or null.
+ *
+ * 🔴 It is **not** the stored string. Measured 2026-09-23, DeepSeek's `userToken`
+ *    is a JSON object whose usable token is its `value` member — the same shape two
+ *    of the W57 references read (`localStorage.userToken` → `.value`), and the
+ *    shape `sisodiabhumca` reads *without* the `.value`, which is why that one
+ *    could not be copied verbatim. So the unwrapping is written out here rather
+ *    than left to a caller: the JSON is data from a page, and the one thing it may
+ *    produce is a string or nothing.
+ *
+ * `null` covers all four of "no key", "unreadable storage" (the caller catches the
+ * throw), "not JSON and not a token", and "a value that cannot go in a header at
+ * all" — and none of them is turned into an empty result: the request then goes out
+ * with no authorization header and the platform's own refusal is what the leg
+ * records. A raw non-JSON string is passed through, because a platform that stops
+ * wrapping its token in JSON must not thereby lose it.
+ *
+ * 🔴 The three characters below are gates on the **parse**, not tests of content:
+ *    a value that starts like JSON must finish as JSON, and a value that parses to
+ *    something that is not the container is not a token. Both halves matter —
+ *    `'[]'` is valid JSON and is not the token, while `'{"value":'` is neither
+ *    valid JSON nor a usable token, and reading either as a raw token would put a
+ *    string no page ever sent into an HTTP header.
+ */
+export function readDeepSeekUserToken(raw: string | null): string | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  let value: unknown = raw;
+  if (raw[0] === '{' || raw[0] === '[' || raw[0] === '"') {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    value = (value as Record<string, unknown>).value;
+  }
+  return usableHeaderToken(typeof value === 'string' ? value : null);
+}
+
+export interface DeepSeekAuthOptions {
+  /** Reads this origin's `userToken` from the page's own storage. Called per request, never cached. */
+  readToken: () => string | null;
+}
+
+/**
+ * A fetch that adds DeepSeek's bearer token to DeepSeek's two backfill paths and
+ * leaves every other request untouched. One instance per content script (one page).
+ */
+export function createDeepSeekAuthorizedFetch(
+  pageOrigin: string,
+  rawFetch: RawFetch,
+  options: DeepSeekAuthOptions,
+) {
+  const send = (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
+    if (token === null) return rawFetch(url, init);
+    return rawFetch(url, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` },
+    });
+  };
+
+  return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
+    if (!needsDeepSeekBearer(url, pageOrigin)) return rawFetch(url, init);
+    const token = options.readToken();
+    const first = await send(url, init, token);
+    // 🔴 Retried once, and only when the first attempt carried a token — see this
+    //    section's header for why the refusal this platform actually sends (a 200)
+    //    is deliberately not what this branch keys on.
+    if ((first.status !== 401 && first.status !== 403) || token === null) return first;
+    return send(url, init, options.readToken());
   };
 }
 

@@ -1211,6 +1211,19 @@ function notesFor(model: PopupModel): string[] {
         platform: model.state.platform,
         detail: model.state.halted.detail,
       }));
+    } else if (model.state.halted.reason === 'auth-refused') {
+      // 🔴 W61 · The platform refused the request **in its own answer**, with HTTP
+      //    200 — so no status line this popup prints could have shown it, and the
+      //    reason it must never read as is `other`. `other` would say "the platform
+      //    refused a request (auth-refused) — <detail>", which describes the record
+      //    instead of the two things a user needs: that nothing was read, and that
+      //    the fix is a login. It must not read as `waitingRetry` either: that
+      //    sentence promises a self-resuming wait, and nothing about a missing or
+      //    rejected token heals by waiting.
+      notes.push(t('popup.notes.halted.authRefused', {
+        platform: model.state.platform,
+        detail: model.state.halted.detail,
+      }));
     } else if (haltClassOf(model.state.halted.reason) === 'transient') {
       // 🔴 W13 · This is the sentence that did not exist, and its absence is why a
       //    real account sat at 0 archived for over an hour. A transient stop must
