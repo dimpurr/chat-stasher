@@ -555,7 +555,7 @@ export default defineContentScript({
       //    Content-Type have already passed checkBackfillRequest's closed-set
       //    checks (serveBackfillFetch). Nothing is decided here, and nothing
       //    **may** be — the decision lives in exactly one place, that allowlist.
-      const res = init && init.method === 'POST'
+      const answer = init && init.method === 'POST'
         ? await authorizedFetch(url, {
             method: 'POST',
             credentials: 'same-origin',
@@ -569,7 +569,17 @@ export default defineContentScript({
             credentials: 'same-origin',
             headers: { accept: 'application/json' },
           });
-      return { status: res.status, text: () => res.text() };
+      // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
+      //    the page but does not own a token, and a decision taken here would be a
+      //    second opinion about somebody else's evidence. `true` is passed on as-is;
+      //    absent stays absent, which is what the engine reads as "no evidence".
+      // 🔴 W64d · `answer.response` is the live `Response` the wrapper was handed, and
+      //    `text()` is called later — down in `serveBackfillFetch`, after this
+      //    projection. Reading the status here and the body there is only possible
+      //    because that object is passed on rather than rebuilt.
+      return answer.survivedCredentialReread === true
+        ? { status: answer.response.status, text: () => answer.response.text(), survivedCredentialReread: true }
+        : { status: answer.response.status, text: () => answer.response.text() };
     };
 
     /**

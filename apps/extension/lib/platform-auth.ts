@@ -209,6 +209,48 @@ export interface KimiAuthOptions {
 }
 
 /**
+ * 🔴 W64b · **The same redirect policy DeepSeek's wrapper already has, for the same
+ * reason and with the same shape.**
+ *
+ * `fetch` defaults to `redirect: 'follow'`, and a redirect of a *same-origin* URL
+ * keeps the `Authorization` header (only a cross-origin hop drops it). So a 302
+ * from Kimi's list or detail path to any other path on `www.kimi.com` would be
+ * re-sent **with the page's own bearer token** — to a URL this extension never
+ * chose, on the strength of a decision `needsKimiBearer` made about the *first*
+ * URL. The allowlist cannot help: it approved the request that was sent, not the
+ * one the platform redirected it to. W61b fixed exactly this for DeepSeek and left
+ * this wrapper unguarded, which is the defect W64b's review found.
+ *
+ * So the two paths are fetched with `redirect: 'manual'`. The browser then does not
+ * follow, the header is never re-sent, and what comes back is an **opaque**
+ * response: `status 0`, no readable body. That is not a response this leg can read a
+ * conversation list out of, and it is not a shape either — a redirect is a transport
+ * fact, and it is said as one rather than passed on as `HTTP 0` for the engine's
+ * status branch to call a wire-shape change (which is permanent, and would stop the
+ * leg for good over a redirect that may be a login page today and absent tomorrow).
+ *
+ * 🔴 The throw is deliberate and its scope is exact: it covers the unfollowed
+ *    redirect only (status 0, which with `redirect: 'manual'` is what an
+ *    opaqueredirect response is). Every other response — 200, 401, 403, 500 — is
+ *    returned untouched, so the 401 re-read-and-retry below is unchanged, and no
+ *    other status handling moves.
+ */
+const KIMI_REDIRECT_MODE = 'manual' as const;
+
+/**
+ * The failure an unfollowed redirect becomes. It names the path rather than the URL,
+ * and carries no header and no token — a halt detail is persisted and shown to the
+ * user.
+ */
+function kimiRedirectRefusal(url: string): Error {
+  return new Error(
+    `kimi answered ${new URL(url).pathname} with a redirect; this leg does not follow it,`
+    + ' because the page\'s own bearer token is attached to this request and would be re-sent'
+    + ' to wherever it points (status 0, body unreadable — the request was not read as a result)',
+  );
+}
+
+/**
  * A fetch that adds Kimi's bearer token and the two headers the page sends to
  * Kimi's two backfill paths, and leaves every other request untouched. One
  * instance per content script (one page).
@@ -218,7 +260,7 @@ export function createKimiAuthorizedFetch(
   rawFetch: RawFetch,
   options: KimiAuthOptions,
 ) {
-  const send = (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
+  const send = async (url: string, init: RequestInit, token: string | null): Promise<MinimalResponse> => {
     const headers: Record<string, string> = {
       ...(init.headers as Record<string, string> | undefined),
       [KIMI_PLATFORM_HEADER]: KIMI_PLATFORM_HEADER_VALUE,
@@ -231,7 +273,12 @@ export function createKimiAuthorizedFetch(
     if (typeof options.language === 'string' && options.language.length > 0) {
       headers[KIMI_LANGUAGE_HEADER] = options.language;
     }
-    return rawFetch(url, { ...init, headers });
+    // 🔴 `redirect: 'manual'` is set whether or not a token was found: the request is
+    //    built the same way either way, so a trace cannot read as two different
+    //    requests depending on whether the user happened to be signed in.
+    const res = await rawFetch(url, { ...init, headers, redirect: KIMI_REDIRECT_MODE });
+    if (res.status === 0) throw kimiRedirectRefusal(url);
+    return res;
   };
 
   return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
@@ -571,14 +618,59 @@ export interface GeminiAuthOptions {
 }
 
 /**
+ * 🔴 W64c · **What Gemini's wrapper answers with: the response, and the credential fact
+ * about it — two things, side by side.**
+ *
+ * The fact exists because a status alone cannot say what a refusal is about. W64b made
+ * a Gemini 400 halt `auth-refused` on the strength of a real measurement — this file's
+ * Gemini header records that a `batchexecute` request whose `at` is missing or stale is
+ * answered HTTP 400 — and the re-review found the classifier applying that to **every**
+ * Gemini 400, including one nothing had been measured about (`nm/R64b-grok.log`,
+ * finding 2).
+ *
+ * So the fact travels instead of being inferred: `survivedCredentialReread: true` means
+ * *this response is the answer Gemini's own credentialed request path returned, after
+ * the wrapper re-read the page's `at` and accepted the refusal as final* — either the
+ * retried request's own answer, or the first answer re-affirmed by a re-read that
+ * turned up nothing better. The engine's classifier requires it before it calls a
+ * Gemini 400 an auth refusal, and treats its absence as what it is: no evidence about
+ * the credential.
+ *
+ * 🔴 Absent is the default and means "no such evidence" — never "false, so treat it as
+ *    the opposite", which is why the flag's type admits `true` and nothing else. Only
+ *    this wrapper ever sets it, and it sets it only on a refusal its credential path
+ *    produced.
+ *
+ * 🔴 W64d · **Why the fact is a sibling of the response and not a property of it.** The
+ *    first version of this carried the flag *on* the response — `{...response, …}` —
+ *    and what a browser's `fetch` resolves to is a `Response`, whose `status` is a
+ *    prototype accessor and whose `text` is a prototype method. Neither is an own
+ *    enumerable property, so the spread produced an object holding the flag and nothing
+ *    else: no status, no body, no `text()` to call. Every Gemini answer on this path
+ *    then failed as a transport error — the 400, the 401, and the retry that came back
+ *    200. A copy of a `Response` is not a response, so there is no copy: the wrapper
+ *    hands back the object it was given, and what it adds is a field beside it.
+ */
+export interface GeminiAuthorizedResponse {
+  /** The response the credentialed path returned, by reference and untouched. */
+  response: MinimalResponse;
+  /** `true` when that response is the refusal this wrapper's credential path settled on. */
+  survivedCredentialReread?: true;
+}
+
+/**
  * A fetch that fills Gemini's three page tokens into `batchexecute` requests and
  * leaves every other request untouched. One instance per content script.
+ *
+ * 🔴 W64d · It answers with a `GeminiAuthorizedResponse`, not a bare response: the
+ *    credential fact is this wrapper's alone to state, and an answer that can hold it
+ *    is the only shape that can carry it without copying the response to do so.
  */
 export function createGeminiAuthorizedFetch(
   pageOrigin: string,
   rawFetch: RawFetch,
   options: GeminiAuthOptions,
-) {
+): (url: string, init: RequestInit) => Promise<GeminiAuthorizedResponse> {
   /**
    * The page's own request counter. 🔴 Its value carries **no meaning this code
    * relies on** — the page increments one per request and the server has not been
@@ -619,22 +711,60 @@ export function createGeminiAuthorizedFetch(
     });
   };
 
-  return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
-    if (!needsGeminiTokens(url, pageOrigin)) return rawFetch(url, init);
+  return async (url: string, init: RequestInit): Promise<GeminiAuthorizedResponse> => {
+    if (!needsGeminiTokens(url, pageOrigin)) return { response: await rawFetch(url, init) };
     const tokens = await options.readTokens();
     const first = await send(url, init, tokens);
+    // Anything that is not a refusal of this request's credential is the platform's
+    // answer and is passed through untouched, with no mark — a 200 has no refusal to
+    // explain.
+    if (first.status !== 400 && first.status !== 401) return { response: first };
     /**
-     * 🔴 Retried **once**, and only when the first attempt carried a token: a
-     *    refusal of a request that *had* one is the case a re-read can change (the
-     *    page may have rotated the value). With no token there is nothing to
-     *    re-read and nothing to refresh, so the retry would be byte-identical
-     *    except for the request counter — sending it would double this leg's
-     *    request count for a user who is simply logged out, to reach the same 400.
+     * 🔴 W64c · **The credential is re-read once before a refusal is accepted as the
+     *    answer**, and the answer this wrapper returns carries that fact.
+     *
+     * Two things happen here, and the order matters.
+     *
+     * 1 · The page's `at` is read **again**. Previously a re-read happened only when
+     *     the first attempt had carried a token, so a request sent with a blank `at`
+     *     — a signed-out user — got a refusal that had never been re-checked against
+     *     the page. The re-read is cheap and bounded (one `postMessage` round trip,
+     *     `GEMINI_TOKEN_PULL_TIMEOUT_MS`, on a path that stops the leg), and it is the
+     *     one thing that can change the answer: if the page has a token now, the
+     *     request is sent again with it.
+     *
+     * 2 · The answer returned from here holds the response that **stands after that
+     *     re-read**, and it is marked `survivedCredentialReread`. Either shape is a
+     *     statement about the credential, which is why both are marked:
+     *      · the retried request's own answer (the first attempt carried a token);
+     *      · the first answer, when the re-read turned up no credential to present —
+     *        this wrapper's header records exactly that shape as the measured refusal
+     *        ("a request whose `at` is missing … is answered HTTP 400").
+     *
+     * 🔴 What the mark does **not** claim: that the batch was well-formed. A malformed
+     *    batch this leg built is still indistinguishable from a stale token at the
+     *    status level (W64b's stated residual). What it does claim, and what the
+     *    classifier now requires, is that the refusal came back from this path — so a
+     *    400 with no such evidence is no longer reported to the user as a refused login.
+     *
+     * 🔴 Why the retry is still keyed on a credential the wrapper can present: sending
+     *    a byte-identical request (except for the request counter) would double this
+     *    leg's request count to reach the same 400, which is the cost the previous
+     *    version of this comment refused to pay. A re-read that finds a token is a
+     *    different case: the request really is different, and it goes out.
+     *
+     * 🔴 W64d · The response travels **by reference**, and the mark is a field beside
+     *    it: `response` is the object `fetch` produced, so its status and its `text()`
+     *    are still the ones that object has. This is the whole of the fix — there is no
+     *    copy of a `Response` anywhere on this path, because a copy has neither.
      */
-    if ((first.status !== 400 && first.status !== 401) || usableHeaderToken(tokens?.at ?? null) === null) {
-      return first;
+    const reread = await options.readTokens();
+    const hadToken = usableHeaderToken(tokens?.at ?? null) !== null;
+    const hasTokenNow = usableHeaderToken(reread?.at ?? null) !== null;
+    if (!hadToken && !hasTokenNow) {
+      return { response: first, survivedCredentialReread: true };
     }
-    return send(url, init, await options.readTokens());
+    return { response: await send(url, init, reread), survivedCredentialReread: true };
   };
 }
 
