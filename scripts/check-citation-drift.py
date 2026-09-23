@@ -28,6 +28,7 @@ import hashlib
 import os
 import re
 import sys
+from typing import Callable
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCK_PATH = os.path.join(REPO, "docs", "citations.lock")
@@ -190,8 +191,16 @@ def is_path_shaped(token: str, basenames: dict[str, list[str]]) -> bool:
     return token in basenames
 
 
+def _worktree_file(rel: str) -> bool:
+    """Whether `rel` is a file in the working tree the checker is reading."""
+    return os.path.isfile(os.path.join(REPO, rel))
+
+
 def resolve_target(
-    token: str, last_target: str | None, basenames: dict[str, list[str]]
+    token: str,
+    last_target: str | None,
+    basenames: dict[str, list[str]],
+    exists: Callable[[str], bool] | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve a cited path token to a repo-relative file, or say why it cannot be.
 
@@ -205,14 +214,26 @@ def resolve_target(
 
     🔴 A token that cannot be resolved is a problem, never a fallback. Guessing
     a file for it is how a typo becomes a wrong anchor that still validates.
+
+    🔴 `exists` is the tree the resolution happens *in*, and it defaults to the
+    working tree. It exists because `relocate-citations.py` parses a parent's
+    document too, and the sentence "what file does this token name" has a
+    different answer in a tree that has different files: with a root `a.ts` at
+    the parent and only `pkg/a.ts` after the merge, `a.ts:1-2` named one file
+    then and a different one now. Resolving the parent's document against the
+    working tree answers the merged tree's question and calls it the parent's,
+    which is how a citation came to be moved onto a file the sentence never
+    named. Callers that read a committed document pass that commit's own tree —
+    both this predicate and a `basenames` index built from it.
     """
+    is_file = exists if exists is not None else _worktree_file
     if "/" in token:
-        if os.path.isfile(os.path.join(REPO, token)):
+        if is_file(token):
             return token, None
         return None, f"names `{token}`, which is not a file in this repository"
     # Bare file name: the repo root, then the file the previous citation used,
     # then a name that is unique in the repo.
-    if os.path.isfile(os.path.join(REPO, token)):
+    if is_file(token):
         return token, None
     if last_target is not None and os.path.basename(last_target) == token:
         return last_target, None
@@ -227,6 +248,118 @@ def resolve_target(
     )
 
 
+def parse_text(
+    doc: str,
+    lines: list[str],
+    basenames: dict[str, list[str]],
+    exists: Callable[[str], bool] | None = None,
+) -> tuple[list[Citation], list[str]]:
+    """把一份文档的正文行解析成 (引用列表, 无法解析的问题列表)。
+
+    这是唯一的解析实现: parse_docs() 拿工作树里的文件调它, 而
+    scripts/relocate-citations.py 拿 **某个提交版本** 的同一份文档调它 —— 它必须
+    知道某个 parent 的文档到底写了哪些引用, 才能判断一条引用是不是那个 parent
+    的坐标系。两份实现会漂移, 而漂移出来的那份就是「这条引用到底是不是引用」的
+    第二个答案。
+
+    🔴 文件名解析走这里的 resolve_target(): 省略路径的 `main.rs:3` 落在它真正
+    指的那个文件上, 而一个被多个文件共用的名字会返回问题而不是猜一个。裸 `:N`
+    继承的是**同一句话里**上一条引用所指的文件, 所以 `a.ts:1`, `:2` 的第二段
+    只属于 a.ts —— 它不是对每个文件第 2 行的断言。
+    """
+    citations: list[Citation] = []
+    problems: list[str] = []
+
+    last_target: str | None = None  # the file a bare `:N` inherits in this sentence
+    # Absolute offsets in the document where inheritance stops: the end of
+    # every sentence, and the end of every blank line (a new paragraph).
+    # Computed over the whole document rather than line by line, because a
+    # sentence that ends *at* a line break must stop the scope just as one
+    # that ends mid-line does.
+    stops = [m.end() for m in SENTENCE_END_RE.finditer("\n".join(lines))]
+    line_base = 0
+    for line in lines:
+        if not line.strip():
+            stops.append(line_base)
+        line_base += len(line) + 1
+    stops.sort()
+    stop = 0
+    base = 0
+    for lineno, line in enumerate(lines, start=1):
+        for span in CODE_SPAN_RE.finditer(line):
+            while stop < len(stops) and base + span.start() >= stops[stop]:
+                last_target = None
+                stop += 1
+            text = span.group(1)
+            for m in CITATION_RE.finditer(text):
+                # The token the author wrote before this colon: the path the
+                # regex recognised, or — when it recognised none — the run of
+                # path characters sitting directly before the colon.
+                token = m.group("path")
+                token_start = m.start()
+                if token is None:
+                    named = PATH_TOKEN_RE.search(text[: m.start()])
+                    if named is not None:
+                        token = named.group("token")
+                        token_start = named.start()
+                # A token is a citation only when it is shaped like a path and
+                # is not the tail of a URL. Anything else is ordinary inline
+                # code (`HH:23`) — it names no file, so there is nothing to
+                # resolve. Such a `:N` is then read exactly as a token-less
+                # one: it continues a citation from its own sentence if there
+                # is one, and otherwise it is not a citation at all (quiet,
+                # not red — a document may mention `HH:23` in a sentence that
+                # cites nothing).
+                not_a_citation = token is not None and (
+                    is_url_tail(text[:token_start], token)
+                    or not is_path_shaped(token, basenames)
+                )
+                if not_a_citation:
+                    token = None
+                if token is not None:
+                    # The citation as the author wrote it: from the token's
+                    # start, so a path the regex recognised is still reported
+                    # as `a.rs:3` and not as the token plus its own tail.
+                    raw = text[token_start : m.end()]
+                    target, problem = resolve_target(token, last_target, basenames, exists)
+                elif last_target is not None:
+                    # A bare `:N` inside the sentence of a citation: the
+                    # common `\`a.ts:1\`, \`:2\`` list.
+                    raw = m.group(0)
+                    target, problem = last_target, None
+                elif not_a_citation:
+                    # Nothing here names a file, and nothing was cited
+                    # earlier in the sentence to continue. Not a citation.
+                    continue
+                else:
+                    raw = m.group(0)
+                    problems.append(
+                        f"{doc}:{lineno}: citation `{raw}` omits the file name, and no "
+                        f"citation in the same sentence names one to inherit it from"
+                    )
+                    continue
+                if target is None:
+                    problems.append(f"{doc}:{lineno}: citation `{raw}` {problem}")
+                    continue
+                last_target = target
+
+                for chunk in m.group("spans").split(","):
+                    if "-" in chunk:
+                        a, b = chunk.split("-", 1)
+                        start, end = int(a), int(b)
+                    else:
+                        start = end = int(chunk)
+                    if start < 1 or end < start:
+                        problems.append(
+                            f"{doc}:{lineno}: citation `{raw}` has an illegal line range {chunk}"
+                        )
+                        continue
+                    citations.append(Citation(doc, lineno, raw, target, start, end))
+        base += len(line) + 1
+
+    return citations, problems
+
+
 def parse_docs(basenames: dict[str, list[str]]) -> tuple[list[Citation], list[str]]:
     """扫描全部文档, 返回 (引用列表, 无法解析的问题列表)。"""
     citations: list[Citation] = []
@@ -239,93 +372,9 @@ def parse_docs(basenames: dict[str, list[str]]) -> tuple[list[Citation], list[st
             continue
         with open(abs_doc, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
-
-        last_target: str | None = None  # the file a bare `:N` inherits in this sentence
-        # Absolute offsets in the document where inheritance stops: the end of
-        # every sentence, and the end of every blank line (a new paragraph).
-        # Computed over the whole document rather than line by line, because a
-        # sentence that ends *at* a line break must stop the scope just as one
-        # that ends mid-line does.
-        stops = [m.end() for m in SENTENCE_END_RE.finditer("\n".join(lines))]
-        line_base = 0
-        for line in lines:
-            if not line.strip():
-                stops.append(line_base)
-            line_base += len(line) + 1
-        stops.sort()
-        stop = 0
-        base = 0
-        for lineno, line in enumerate(lines, start=1):
-            for span in CODE_SPAN_RE.finditer(line):
-                while stop < len(stops) and base + span.start() >= stops[stop]:
-                    last_target = None
-                    stop += 1
-                text = span.group(1)
-                for m in CITATION_RE.finditer(text):
-                    # The token the author wrote before this colon: the path the
-                    # regex recognised, or — when it recognised none — the run of
-                    # path characters sitting directly before the colon.
-                    token = m.group("path")
-                    token_start = m.start()
-                    if token is None:
-                        named = PATH_TOKEN_RE.search(text[: m.start()])
-                        if named is not None:
-                            token = named.group("token")
-                            token_start = named.start()
-                    # A token is a citation only when it is shaped like a path and
-                    # is not the tail of a URL. Anything else is ordinary inline
-                    # code (`HH:23`) — it names no file, so there is nothing to
-                    # resolve. Such a `:N` is then read exactly as a token-less
-                    # one: it continues a citation from its own sentence if there
-                    # is one, and otherwise it is not a citation at all (quiet,
-                    # not red — a document may mention `HH:23` in a sentence that
-                    # cites nothing).
-                    not_a_citation = token is not None and (
-                        is_url_tail(text[:token_start], token)
-                        or not is_path_shaped(token, basenames)
-                    )
-                    if not_a_citation:
-                        token = None
-                    if token is not None:
-                        # The citation as the author wrote it: from the token's
-                        # start, so a path the regex recognised is still reported
-                        # as `a.rs:3` and not as the token plus its own tail.
-                        raw = text[token_start : m.end()]
-                        target, problem = resolve_target(token, last_target, basenames)
-                    elif last_target is not None:
-                        # A bare `:N` inside the sentence of a citation: the
-                        # common `\`a.ts:1\`, \`:2\`` list.
-                        raw = m.group(0)
-                        target, problem = last_target, None
-                    elif not_a_citation:
-                        # Nothing here names a file, and nothing was cited
-                        # earlier in the sentence to continue. Not a citation.
-                        continue
-                    else:
-                        raw = m.group(0)
-                        problems.append(
-                            f"{doc}:{lineno}: citation `{raw}` omits the file name, and no "
-                            f"citation in the same sentence names one to inherit it from"
-                        )
-                        continue
-                    if target is None:
-                        problems.append(f"{doc}:{lineno}: citation `{raw}` {problem}")
-                        continue
-                    last_target = target
-
-                    for chunk in m.group("spans").split(","):
-                        if "-" in chunk:
-                            a, b = chunk.split("-", 1)
-                            start, end = int(a), int(b)
-                        else:
-                            start = end = int(chunk)
-                        if start < 1 or end < start:
-                            problems.append(
-                                f"{doc}:{lineno}: citation `{raw}` has an illegal line range {chunk}"
-                            )
-                            continue
-                        citations.append(Citation(doc, lineno, raw, target, start, end))
-            base += len(line) + 1
+        doc_citations, doc_problems = parse_text(doc, lines, basenames)
+        citations.extend(doc_citations)
+        problems.extend(doc_problems)
 
     return citations, problems
 

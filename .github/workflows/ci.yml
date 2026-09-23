@@ -241,6 +241,15 @@ jobs:
       - name: Citation anchors still point at what the docs claim
         run: python3 scripts/check-citation-drift.py
 
+      # The relocation script's own self-test, for the same reason the two
+      # above are here: a gate that cannot prove it still catches anything is
+      # worth nothing. It builds throwaway repositories under a temp directory
+      # and never edits this checkout, so it needs no history and cannot leave
+      # the tree dirty.
+      - name: Citation relocation self-test
+        run: bash scripts/selftest-relocate-citations.sh
+
+
       - name: Output inventory is up to date
         run: python3 scripts/output-inventory.py --check
 
