@@ -270,7 +270,8 @@ fn export_opts(out: &Path, turns: Turns, trim: bool) -> ExportOptions {
     }
 }
 
-/// Relative paths of the files a run wrote, sorted.
+/// Relative paths of the files a run wrote, sorted, spelled the way the
+/// archive spells them: `/`, on every OS.
 fn written_paths(out: &Path) -> Vec<String> {
     let mut found = Vec::new();
     collect_files(out, out, &mut found);
@@ -287,14 +288,36 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
         if path.is_dir() {
             collect_files(root, &path, out);
         } else {
-            out.push(
-                path.strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+            out.push(portable_relative(&path, root).unwrap());
         }
     }
+}
+
+/// The path of `path` below `root`, spelled the way the archive spells a
+/// relative path: `/`, on every OS.
+///
+/// `Path`'s own spelling — `Display`, `to_string_lossy` — is the separator of
+/// the machine the test happens to run on. Asked for the relative path of
+/// `<out>/m-alpha/claude-code/<id>.jsonl`, it answers
+/// `m-alpha/claude-code/<id>.jsonl` here and `m-alpha\claude-code\<id>.jsonl`
+/// under `windows-latest`, so an assertion written against the first spelling
+/// is comparing the runner's OS to the archive. The product does not have that
+/// problem: `export.rs` builds `relative_path` with a `format!` literal and
+/// `/`, so `manifest.json` reads the same everywhere.
+///
+/// Joining `Path::components()` is the fix, not `str::replace('\\', "/")`:
+/// `components` is the OS's own parse of the path, so a backslash that is part
+/// of a real file *name* is left where it is instead of being promoted to a
+/// separator.
+fn portable_relative(path: &Path, root: &Path) -> Option<String> {
+    Some(
+        path.strip_prefix(root)
+            .ok()?
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
 }
 
 fn manifest(out: &Path) -> serde_json::Value {
@@ -324,6 +347,47 @@ fn written_set(out: &Path) -> BTreeSet<(String, String)> {
             )
         })
         .collect()
+}
+
+// ------------------------------------------------------ the path spelling rule
+
+/// A relative path is spelled with `/`, whatever separator the `Path` it came
+/// from is spelled with.
+///
+/// This is the rule the Windows job was failing on: the export writes
+/// `<out>/<machine>/<harness>/<session>.jsonl`, and the file the walk finds
+/// there has to carry that name on `windows-latest` too, not
+/// `m-alpha\claude-code\<session>.jsonl`.
+#[test]
+fn a_relative_path_is_spelled_with_forward_slashes_on_every_os() {
+    let root = Path::new("out");
+    // Built the way the export builds its paths: with `join`.
+    let path = root
+        .join("m-alpha")
+        .join("claude-code")
+        .join("session.jsonl");
+    assert_eq!(
+        portable_relative(&path, root).as_deref(),
+        Some("m-alpha/claude-code/session.jsonl")
+    );
+}
+
+/// The same rule, for a path spelled the way Windows spells one.
+///
+/// Windows-only, and it has to be: on Unix `\` is an ordinary character in a
+/// file name rather than a separator, so `out\m-alpha\session.jsonl` is a
+/// *single* component there and the property this asserts does not exist on
+/// that side. The test above runs everywhere and covers the composition, which
+/// is all a Unix runner can see of this rule; `windows-latest` runs this one.
+#[cfg(windows)]
+#[test]
+fn a_backslash_spelled_relative_path_is_still_written_with_forward_slashes() {
+    let root = Path::new("out");
+    let path = PathBuf::from(r"out\m-alpha\claude-code\session.jsonl");
+    assert_eq!(
+        portable_relative(&path, root).as_deref(),
+        Some("m-alpha/claude-code/session.jsonl")
+    );
 }
 
 // ------------------------------------------------------------------ test 1
@@ -510,6 +574,16 @@ fn written_files_are_byte_identical_to_read_and_the_manifest_sha_matches() {
         let machine = entry["machine"].as_str().unwrap();
         let session = entry["session_id"].as_str().unwrap();
         let relative = entry["relative_path"].as_str().unwrap();
+        // A portable archive: the manifest is read on machines other than the
+        // one that wrote it, so this path is spelled for the archive and not
+        // for the writer. `is_safe_component` already refuses `\` inside any
+        // component, so this can only fail by the path being built from a
+        // `Path` instead of the `format!` in `export.rs`.
+        assert!(
+            !relative.contains('\\'),
+            "the manifest's relative_path must be spelled for a portable archive, not for the \
+             machine that wrote it: `{relative}`"
+        );
         let file = out.join(relative);
         let on_disk = fs::read(&file).unwrap();
 
