@@ -23,37 +23,41 @@ SECURITY.md:9  381d717079a5  lines=1
   <- docs/privacy.md:719  :: **Contact: `work@team.iopho.com`.** Mail that address direc…
 SECURITY.md:29-35  02cf2eee45d3  lines=7
   <- docs/privacy.md:727  :: This is a personal project with a single maintainer. **We d…
-apps/extension/entrypoints/background.ts:140-168  30c84e84ef5b  lines=29
+apps/extension/entrypoints/background.ts:147-175  30c84e84ef5b  lines=29
   <- docs/privacy.md:240, docs/threat-model.md:111  :: function buildBundle(captured: CapturedFetch): InboxBundle {
-apps/extension/entrypoints/background.ts:155-157  36c85931504a  lines=3
+apps/extension/entrypoints/background.ts:162-164  36c85931504a  lines=3
   <- docs/threat-model.md:327  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
-apps/extension/entrypoints/background.ts:234-236  66920853936e  lines=3
+apps/extension/entrypoints/background.ts:241-243  66920853936e  lines=3
   <- docs/privacy.md:278  :: const recordArrival = async (newlyStored: boolean): Promise…
-apps/extension/entrypoints/background.ts:249  73dcc2a4f27a  lines=1
+apps/extension/entrypoints/background.ts:256  73dcc2a4f27a  lines=1
   <- docs/privacy.md:278  :: await recordArrival(false);
-apps/extension/entrypoints/background.ts:260-277  41d87a302a6d  lines=18
+apps/extension/entrypoints/background.ts:267-284  41d87a302a6d  lines=18
   <- README.md:214, docs/privacy.md:129, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
-apps/extension/entrypoints/background.ts:324  dd1ea05b0312  lines=1
+apps/extension/entrypoints/background.ts:331  dd1ea05b0312  lines=1
   <- docs/privacy.md:278  :: await recordArrival(true);
-apps/extension/entrypoints/background.ts:493-500  185eedd6b024  lines=8
+apps/extension/entrypoints/background.ts:500-507  185eedd6b024  lines=8
   <- docs/install.md:258  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:741-771  e6c80301633c  lines=31
+apps/extension/entrypoints/background.ts:748-778  e6c80301633c  lines=31
   <- docs/privacy.md:373  :: /**
-apps/extension/entrypoints/background.ts:875-919  20a9a510a90a  lines=45
+apps/extension/entrypoints/background.ts:924-968  20a9a510a90a  lines=45
   <- docs/privacy.md:345, docs/threat-model.md:597  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:916-1012  e1286e14c7ba  lines=97
+apps/extension/entrypoints/background.ts:965-986  4e91a0385326  lines=22
   <- docs/privacy.md:322  :: //
-apps/extension/entrypoints/background.ts:1025-1068  fda982ba64df  lines=44
+apps/extension/entrypoints/background.ts:1115-1189  dc1702283c38  lines=75
+  <- docs/privacy.md:322  :: * 🔴 C33 · The registration entry point for **explicit infor…
+apps/extension/entrypoints/background.ts:1202-1245  fda982ba64df  lines=44
   <- docs/privacy.md:309  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1068  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1245  6539997ed831  lines=1
   <- docs/privacy.md:311  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1172-1233  e92b07871804  lines=62
+apps/extension/entrypoints/background.ts:1392-1456  c394f5bf25c3  lines=65
   <- README.md:172, docs/install.md:635, docs/privacy.md:361, docs/privacy.md:377  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1449-1520  3a57e749886b  lines=72
+apps/extension/entrypoints/background.ts:1894-1928  117bbd69b73e  lines=35
   <- docs/privacy.md:276  :: /**
-apps/extension/entrypoints/background.ts:1651-1667  80fe37fa4a45  lines=17
+apps/extension/entrypoints/background.ts:1936-1973  64b51e737fa5  lines=38
+  <- docs/privacy.md:276  :: ): Promise<void> {
+apps/extension/entrypoints/background.ts:2104-2120  80fe37fa4a45  lines=17
   <- docs/privacy.md:277  :: */
-apps/extension/entrypoints/background.ts:1694-1710  467c5cf25463  lines=17
+apps/extension/entrypoints/background.ts:2147-2163  467c5cf25463  lines=17
   <- docs/privacy.md:277  :: const platform = PLATFORMS.find((row) => row.origins.includ…
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:122  :: function readKimiAccessToken(): string | null {
@@ -67,11 +71,11 @@ apps/extension/lib/backfill/alarm.ts:90-91  8ec0655980dd  lines=2
   <- docs/install.md:586  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
 apps/extension/lib/backfill/alarm.ts:211  b9377ab9524d  lines=1
   <- docs/privacy.md:272  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
-apps/extension/lib/backfill/alarm.ts:281-345  b7fe4ad6726e  lines=65
+apps/extension/lib/backfill/alarm.ts:426-490  b7fe4ad6726e  lines=65
   <- docs/privacy.md:376  :: /**
-apps/extension/lib/backfill/alarm.ts:309-345  5c5f30daf7f9  lines=37
+apps/extension/lib/backfill/alarm.ts:454-490  5c5f30daf7f9  lines=37
   <- docs/privacy.md:384  :: export async function rememberOrganizationScopedTarget(
-apps/extension/lib/backfill/alarm.ts:676-779  fb4f574def1e  lines=104
+apps/extension/lib/backfill/alarm.ts:821-924  fb4f574def1e  lines=104
   <- docs/privacy.md:276  :: /**
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs/privacy.md:326  :: * ## Why this module exists at all
@@ -307,9 +311,9 @@ apps/extension/lib/platform-auth.ts:258-295  03784069e1a6  lines=38
   <- README.md:169, docs/install.md:109, docs/install.md:729, docs/privacy.md:121, docs/privacy.md:534, docs/threat-model.md:275, docs/threat-model.md:302, docs/threat-model.md:599  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:669-769  9037a7e5f6b3  lines=101
   <- README.md:171, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:279, docs/threat-model.md:606  :: export function createGeminiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:831-844  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:843-856  00dceceff078  lines=14
   <- README.md:173, docs/install.md:161  :: /**
-apps/extension/lib/popup-view.ts:1581-1643  bfa880659cd6  lines=63
+apps/extension/lib/popup-view.ts:1593-1655  bfa880659cd6  lines=63
   <- docs/privacy.md:385  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:263  :: export function fixCommand(stage: string | null | undefined…

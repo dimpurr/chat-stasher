@@ -803,6 +803,18 @@ export function describeTickReason(reason: string): string {
       return t('tick.reason.noTargets');
     case 'no-http-port':
       return t('tick.reason.noHttpPort');
+    case 'no-runnable-target':
+      // 🔴 W76 · The registry is not empty and the channel is not the problem: the
+      //    walk reached its end without finding a target it was allowed to run.
+      return t('tick.reason.noRunnableTarget');
+    case 'scope-asked':
+      // 🔴 W76b · Nothing ran, and the reason is not that nothing could: the tick
+      //    asked a platform which account to read (W31c) and that question was the
+      //    whole of its work — no other platform is served on a wake that has
+      //    already put a request to one. Named rather than folded into
+      //    `noRunnableTarget`, because a reader who is told "none of them could
+      //    run" would look in the wrong place for why the wake went where it did.
+      return t('tick.reason.scopeAsked');
     case 'disabled':
       return t('tick.reason.disabled');
     case 'no-store':
