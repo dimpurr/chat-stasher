@@ -30,12 +30,15 @@ import { createClaudePageScope } from '../lib/backfill/claude-page';
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
+  createDeepSeekAuthorizedFetch,
   createGeminiAuthorizedFetch,
   createKimiAuthorizedFetch,
   createSeenGate,
   isConversationSeenMessage,
+  DEEPSEEK_USER_TOKEN_STORAGE_KEY,
   KIMI_ACCESS_TOKEN_STORAGE_KEY,
   GEMINI_TOKEN_PULL_TIMEOUT_MS,
+  readDeepSeekUserToken,
 } from '../lib/platform-auth';
 import { completeGeminiLiveCapture, isGeminiDetailRequest } from '../lib/gemini-capture';
 import {
@@ -452,6 +455,29 @@ export default defineContentScript({
     }
 
     /**
+     * 🔴 W61 · The page origin's own DeepSeek token, read at the moment a request is
+     * about to be made and never kept. Same rule as `readKimiAccessToken` above, with
+     * one difference that is the platform's, not this function's: DeepSeek stores a
+     * **JSON object** under `userToken` and the usable token is its `value` member, so
+     * the unwrapping is `readDeepSeekUserToken`'s job (lib/platform-auth.ts) rather
+     * than a parse here. The stored string itself is never returned to anything.
+     *
+     * `null` covers "the key is not there", "the storage is unreadable" (a
+     * partitioned or blocked origin throws on access) and "the value is not a token".
+     * They are three different facts and **not to this function**: what matters
+     * downstream is that none of them becomes an empty result — the request goes out
+     * with no authorization header and the platform's own refusal is what the leg
+     * reads (lib/platform-auth.ts, and `auth-refused` in lib/backfill/types.ts).
+     */
+    function readDeepSeekToken(): string | null {
+      try {
+        return readDeepSeekUserToken(window.localStorage.getItem(DEEPSEEK_USER_TOKEN_STORAGE_KEY));
+      } catch {
+        return null;
+      }
+    }
+
+    /**
      * 🔴 W29 · **Gemini's bootstrap tokens, asked for through the page world.**
      *
      * The values live in the page's `WIZ_global_data`, which a content script
@@ -504,13 +530,23 @@ export default defineContentScript({
       readToken: readKimiAccessToken,
       language: typeof navigator === 'undefined' ? null : navigator.language,
     });
+    // 🔴 W61 · DeepSeek's two backfill paths need the page origin's own `userToken`
+    //    as a bearer token. Same shape as the Kimi wrapper above — read per request,
+    //    kept in no variable, attached only to those two paths — and the reason it
+    //    exists is that DeepSeek does not refuse with a status: a cookie-only request
+    //    is answered **HTTP 200** with the failure in the envelope, which is how a
+    //    missing token was recorded as a wire-shape change.
+    const deepseekFetch = createDeepSeekAuthorizedFetch(pageOrigin, kimiFetch, {
+      readToken: readDeepSeekToken,
+    });
     // 🔴 W29 · Gemini's `batchexecute` requests carry three of the page's own
     //    values: `at` in the body, `bl` and `f.sid` (plus the page's language and
     //    its request counter) in the query. The wrapper reads them per request
     //    through the pull above, rebuilds the query and the body from what it
     //    just read, attaches them only to those two rpcids, and passes every
-    //    other request — ChatGPT's and Kimi's included — straight through.
-    const authorizedFetch = createGeminiAuthorizedFetch(pageOrigin, kimiFetch, {
+    //    other request — ChatGPT's, Kimi's and DeepSeek's included — straight
+    //    through.
+    const authorizedFetch = createGeminiAuthorizedFetch(pageOrigin, deepseekFetch, {
       readTokens: pullGeminiTokens,
       language: typeof navigator === 'undefined' ? null : navigator.language,
     });

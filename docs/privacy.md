@@ -43,7 +43,7 @@ that document is the honest one.
   from the page and held in memory only (step 1 of section 1). **Gemini's were
   measured too**, and its requests carry three values out of the page's own
   bootstrap blob — read at request time through the page-world hook, held in memory
-  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:355-417`).
+  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:577-639`).
   Claude is the one platform whose requests are addressed by an account-scoped
   identifier the page URL does not carry; the extension resolves it from the
   page's own requests, the browser's cookie, or one extra request, and stops
@@ -99,13 +99,13 @@ the sentence.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
    page, on the same origin (`apps/extension/lib/page-hook.ts:679-684`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:562-588`). That request —
+   `apps/extension/entrypoints/dw-bridge.content.ts:598-624`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin. The token is held only
    in the page's content-script memory: it is never written to storage, never
    logged, never sent to the `chat-stasher` host, and never attached to any
-   other request (`apps/extension/lib/platform-auth.ts:59-69`, `:99-118`).
+   other request (`apps/extension/lib/platform-auth.ts:61-71`, `:101-120`).
    **A second token, on Kimi, and it is read from the page rather than requested.**
    Backfill's two Kimi requests — the conversation list and one conversation's
    body — need the session's bearer token, and a request carrying only cookies is
@@ -118,8 +118,8 @@ the sentence.
    kimi.com; after a 401 it is re-read once and the request retried once, and if
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
-   conversations” (`apps/extension/lib/platform-auth.ts:214-246`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:446-452`).
+   conversations” (`apps/extension/lib/platform-auth.ts:216-248`,
+   `apps/extension/entrypoints/dw-bridge.content.ts:449-455`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:34-37`,
@@ -270,7 +270,7 @@ What is kept there:
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:29` |
 | `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for | `apps/extension/lib/backfill/alarm.ts:211`; `apps/extension/lib/backfill/tab-port.ts:162` |
-| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, and the record that a platform's id list had to be read again. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:930-964`; `apps/extension/lib/backfill/debt-store.ts:68-87` |
+| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, and the record that a platform's id list had to be read again. The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:1096-1130`; `apps/extension/lib/backfill/debt-store.ts:68-87` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:89-113` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:59-60`, `:477-501` |
 | `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:676-774`; `apps/extension/entrypoints/background.ts:1289-1345` |
@@ -301,7 +301,7 @@ Three things in that table deserve to be called out rather than buried:
   by titles or ids) is withheld and shown as a marker, so the shape stays legible
   without the text. The structure is capped in both depth and the number of keys
   named per object
-  (`apps/extension/lib/backfill/enumerate.ts:1200-1268`).
+  (`apps/extension/lib/backfill/enumerate.ts:1242-1310`).
 - The `<scope>` part of that key is your **account identifier on that platform**
   when the extension could find one in a response body (a user id, an email
   address, or a handle), and the literal string `default` when it could not
@@ -375,7 +375,7 @@ Three things in that table deserve to be called out rather than buried:
   popup ignores a header whose scope is not a registered target, so an abandoned
   halt cannot outrank the organization's own ledger
   (`apps/extension/lib/backfill/alarm.ts:309-345`;
-  `apps/extension/lib/popup-view.ts:1364-1426`).
+  `apps/extension/lib/popup-view.ts:1406-1468`).
 - **The trace of a declined hook report may name a site this extension is not
   built for.** That record says which page's report was refused, and a refusal
   happens precisely when that origin is *not* one of the eight in the platform
@@ -437,27 +437,27 @@ request of its own, it reads the response the page fetches for the conversation
 you have open). On **Claude** it is a conversation list, one body request per
 conversation, and — only when neither the page's own requests nor the cookie has
 named the organization — **one** `GET /api/organizations`.
-(`apps/extension/lib/backfill/enumerate.ts:3890-3917`;
-`apps/extension/lib/backfill/engine.ts:1313-1365`.) The
+(`apps/extension/lib/backfill/enumerate.ts:4171-4198`;
+`apps/extension/lib/backfill/engine.ts:1334-1386`.) The
 practical reading for you: enabling backfill on Perplexity produces list traffic
 the platform can see, and produces **no backup whatsoever** on your side. On
 DeepSeek it produces list traffic *and* one body request per conversation, and on
 Grok two (a skeleton call and a content call — a request pattern the platform is
 more likely to notice, although both are the same two calls grok.com's own page
 makes when you open a conversation, separated by a 2-5 second pause,
-`apps/extension/lib/backfill/enumerate.ts:2476`), and on Kimi one body request —
+`apps/extension/lib/backfill/enumerate.ts:2757`), and on Kimi one body request —
 the same call its own page makes when you open a conversation, carrying the page's
-own token as described above (`apps/extension/lib/backfill/enumerate.ts:2624-2686`).
+own token as described above (`apps/extension/lib/backfill/enumerate.ts:2905-2967`).
 On Claude it is a conversation list and one body request per conversation — the
 same call claude.ai's own page makes when you open a past conversation — plus, at
 most once for as long as the organization stays unresolved, the organization-list
 request described above
-(`apps/extension/lib/backfill/enumerate.ts:3204-3216`).
+(`apps/extension/lib/backfill/enumerate.ts:3485-3497`).
 On Gemini, one conversation costs as many requests as it has pages: the leg
 follows the continuation token until the response says there is no more, waiting
 1-3 seconds between pages, and it refuses (and lists as a failure) a conversation
 that would need more than 20
-(`apps/extension/lib/backfill/enumerate.ts:3063-3191`; `apps/extension/lib/backfill/engine.ts:1313-1365`).
+(`apps/extension/lib/backfill/enumerate.ts:3344-3472`; `apps/extension/lib/backfill/engine.ts:1334-1386`).
 Its **passive capture** sends requests too, on the same route: a conversation you
 open is fetched from its first page and followed to the end, one request for the
 first page plus one per remaining page (`apps/extension/lib/gemini-capture.ts:150-234`).
@@ -524,9 +524,9 @@ tier of that list is easy to misread:
 
 | Platform | What backfill does when you enable it |
 |---|---|
-| **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:3890-3917`). All six are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:2239-2266`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:1313-1365`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:214-246`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1417-1452`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:2539-2600`). |
-| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:3890-3917`). |
-| **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:3194-3200`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, the extension walks the active branch from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:3345-3401`; `apps/extension/lib/backfill/engine.ts:1470-1483`). Whether a **long** conversation is capped server-side is not established by any source, which is exactly the case that check exists for. |
+| **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:4171-4198`). All six are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:2511-2538`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:1334-1386`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:216-248`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:1438-1473`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:2820-2881`). |
+| **Perplexity** | Lists your conversations and **saves none of their content** — **nothing is delivered or queued, so this history is not backed up** (`apps/extension/lib/backfill/enumerate.ts:4171-4198`). |
+| **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:3475-3481`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, the extension walks the active branch from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:3626-3682`; `apps/extension/lib/backfill/engine.ts:1509-1522`). Whether a **long** conversation is capped server-side is not established by any source, which is exactly the case that check exists for. |
 
 We state this in a privacy policy because the failure mode is a privacy
 expectation, not just a feature gap: a user who believes their Perplexity
@@ -538,7 +538,7 @@ have not checked a genuinely long conversation against any of them. Kimi is the
 one where that case is at least refused out loud: a body response that says it
 holds only part of a conversation is not archived and is listed as a failure,
 so a long Kimi conversation is missing from your archive rather than silently
-half-there (`apps/extension/lib/backfill/engine.ts:1417-1452`). Grok
+half-there (`apps/extension/lib/backfill/engine.ts:1438-1473`). Grok
 carries a second caveat of its own: where the sources for its list cursor
 disagree, the extension does **not** pick one — a page that repeats what was
 already listed stops the leg and says the response shape changed, rather than
