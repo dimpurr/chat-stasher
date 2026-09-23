@@ -1405,6 +1405,27 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         `${listWhere()} returned HTTP ${res.status}`,
       );
     }
+    /**
+     * 🔴 W61 · **A 2xx is not the same thing as an answer, on a platform that
+     * refuses in-band.**
+     *
+     * Everywhere else in this file a refusal arrives as a status, so the check
+     * above is the whole story. DeepSeek answers **HTTP 200** to a request it
+     * refuses and puts the failure in the envelope (`code: 40002` /
+     * `"Missing Token"`), so without this the body went straight into the parser,
+     * its `data` was `null`, and the leg halted **`shape-changed`** — the user was
+     * told the API had changed when the platform had said, in as many words, that
+     * no token was sent.
+     *
+     * 🔴 It is asked **before** the parser and before any shape judgement, and it
+     *    can only ever replace one halt with a more honest halt: a plan that does
+     *    not declare `refusalOf`, and a body that names no refusal, take exactly
+     *    the path they took before. Nothing below this line is relaxed.
+     */
+    const listRefused = plan.refusalOf?.(res.text);
+    if (listRefused) {
+      return halt(listRefused.reason, `${listWhere()}: ${listRefused.detail}`);
+    }
     const parsed = plan.parseListPage(res.text);
     if (!parsed.ok) {
       return halt('shape-changed', `${listWhere()}: ${parsed.detail}`);
@@ -1925,6 +1946,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       // the **first** page's, i.e. the one the page itself also makes. Every raw
       // page is inside the bundle, so the archive holds the whole exchange.
       deliveredText = pages.assemble(id, rawPages);
+    }
+
+    /**
+     * 🔴 W61 · **The in-band refusal, asked before the shape gate.**
+     *
+     * This is the body segment's half of the reason `refusalOf` is a plan field
+     * rather than a few lines in the list parser: a refusal envelope has no `data`,
+     * so it fails `matchesResponseShape` just below and never reaches
+     * `parseDetailPage`. Waiting for the parser to notice would mean the leg
+     * reported `shape-changed` for a body that says `INVALID_TOKEN`.
+     *
+     * It is asked here, on the **delivered** body, for the same reason the shape
+     * gate is (see the W21 note above): on a two-step plan this is step 2's
+     * response, which is the artefact the platform row describes.
+     */
+    const detailRefused = plan.refusalOf?.(deliveredText);
+    if (detailRefused) {
+      return halt(detailRefused.reason, `detail body: ${detailRefused.detail}`);
     }
 
     // The same shape checker the live leg uses: if the API changes, this is the first to know.

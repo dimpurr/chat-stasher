@@ -197,7 +197,87 @@ export type HaltReason =
    * filled again (`recoverLedgerLoss` in lib/backfill/ledger.ts), and the popup
    * says so.
    */
-  | 'ledger-mismatch';
+  | 'ledger-mismatch'
+  /**
+   * 🔴 W61 · **The platform answered, and the answer was a refusal — with HTTP 200.**
+   *
+   * Measured from the page's own context in a logged-in Chrome (2026-09-23):
+   * DeepSeek answers a cookie-only request to either backfill endpoint with status
+   * **200** and the failure in the envelope — `{code: 40002, data: null, msg:
+   * "Missing Token"}` on the list, `{code: 40003, data: null, msg:
+   * "INVALID_TOKEN"}` on the body. Both observed non-zero codes are about
+   * credentials, which is what this reason is named for, and the two requests that
+   * carried `Bearer <userToken.value>` answered `code: 0` with the data the
+   * parsers expect (`lib/platform-auth.ts`'s DeepSeek section).
+   *
+   * Why it has to be its own reason rather than `shape-changed`: that is what it
+   * **was** recorded as, and the sentence a user got was "the API changed" about a
+   * platform that had said, in as many words, that no token was sent. W57's
+   * comparison table already flagged the missing field — our row for `code` /
+   * `biz_code` read *never read (2 sources in conflict)* while two reference
+   * implementations gate on exactly those — so the one field that names the
+   * refusal was the one field being discarded.
+   *
+   * Why it is not `rate-limited`: that reason is classified **transient** — it
+   * promises the leg will come back by itself — and nothing about a missing or
+   * rejected token heals by waiting. It is also not `shape-changed`, whose promise
+   * ("wait for a fix") is equally false.
+   *
+   * 🔴 What it is **not** claiming. The reason is named for the credential family
+   *    because that is the only family measured here; the platform's own code and
+   *    message are carried in the halt detail, so a future non-zero code that means
+   *    something else stays readable rather than being rounded into a sentence
+   *    about logging in. And it is **not** "you have no conversations": zero
+   *    conversations were observed, and the refusal is precisely the case in which
+   *    the list was never read.
+   *
+   * 🔴 **W61b — this reason is only for a code that was *measured* to mean a
+   *    credential failure**, and the platform's own two (`40002 "Missing Token"`,
+   *    `40003 "INVALID_TOKEN"`) are the whole of that set. The first version of
+   *    W61 made every non-zero code land here, which turned `"server busy"` and
+   *    `"too many requests"` into "you are not logged in" — the original bug
+   *    wearing the opposite coat — so the classification is now evidence-backed
+   *    and lives in one function (`deepSeekEnvelopeRefusal`, lib/backfill/
+   *    enumerate.ts): a code naming a rate or busy condition is `rate-limited`, and
+   *    a code this build cannot read is `refused-unknown`. Neither is ever guessed
+   *    to be this one, because this one tells a user to log in.
+   *
+   * 🔴 **W61b — and it is transient, not permanent** (`haltClassOf`). The first
+   *    version classified it permanent by the default, on the reasoning that
+   *    waiting does not heal a missing token. That reasoning is true and the
+   *    conclusion was still wrong: the token is **re-read on every request**
+   *    (`lib/platform-auth.ts`), so a user who signs back in *is* the remedy, and
+   *    nothing in the product clears a permanent record — a temporary logout froze
+   *    the platform across logins and across updates. See the ladder's own table
+   *    for the rung this sits on and why it is the gentlest one that still exists.
+   */
+  | 'auth-refused'
+  /**
+   * 🔴 W61b · **The platform refused this request in-band with a code this build
+   * cannot read.**
+   *
+   * Measured 2026-09-23, DeepSeek answers a refused request with **HTTP 200** and
+   * the failure in the envelope, exactly as it does for `40002` / `40003` — but
+   * only those two codes were ever observed, and only they were ever said to mean
+   * a credential failure. So a non-zero code outside that set is not rounded into
+   * `auth-refused` ("log in again", which may be false) and it is not rounded into
+   * `shape-changed` ("the API changed", which assigns a cause the body did not
+   * give). It is recorded as what it is: a refusal whose meaning this build does
+   * not know, with the platform's own code and message in the detail so whoever
+   * reads it next has the evidence rather than the guess.
+   *
+   * 🔴 Why it is transient rather than permanent, which is the same question
+   *    `auth-refused` answers above and is decided the other way for a reason
+   *    worth stating: permanence is a **claim**, and for an unreadable code there
+   *    is nothing to support it — "no amount of waiting changes this" is exactly
+   *    what an unknown code does not establish. Classifying it permanent would be
+   *    the W13 mistake in new clothes (an unknown condition recorded as a settled
+   *    one, and the measured cost of that was an hour of a frozen leg; here it
+   *    would be forever). So it sits on the same gentle ladder as the auth
+   *    refusal, and every round it is re-asked, the code and message are written
+   *    down again.
+   */
+  | 'refused-unknown';
 
 /**
  * 🔴 C28 · The two observable outcomes of an "empty" body.
@@ -267,6 +347,19 @@ export type EnumTruncation =
  *                    is not one we know, or the code cannot do this platform yet.
  *                    A human has to look, and this is the old semantics verbatim.
  *
+ * 🔴 **W61b · "transient" is about the request being worth sending again, not
+ *    about the clock being the thing that fixes it.** An in-band refusal
+ *    (`auth-refused`, `refused-unknown`) is transient because asking again is the
+ *    right thing to do and costs one request — the healing agent is the user
+ *    signing back in, or the platform changing its mind, and the ladder only
+ *    decides *how often we look*. Classifying those two permanent was W61's
+ *    defect: nothing in the product clears a permanent record, so a temporary
+ *    logout stopped that platform until someone edited storage. Before adding a
+ *    reason here, ask which of the two sentences is supportable — "asking again
+ *    may return something different" (transient) or "no amount of asking will"
+ *    (permanent) — and if the honest answer is "we do not know", it is transient:
+ *    an unknown recorded as settled is the mistake this file exists against.
+ *
  * 🔴 This is the "unknown must never be recorded as empty" invariant applied to
  *    time: "we do not know yet, and we will ask again at T" is a different fact
  *    from "we will not get this without a human", and collapsing them into one
@@ -286,6 +379,21 @@ export type HaltClass = 'transient' | 'permanent';
  *  · 'rate-limited'    — 429/403/5xx is the platform saying "not now". A reference
  *    implementation treats this one as retryable *and differently from other errors* (longer
  *    base, hard ceiling) — see the retry notes below.
+ *  · 'auth-refused' — W61b. The platform refused in-band and its own code says
+ *    the login token was missing or rejected. **Transient**, and the first version
+ *    had it permanent, which is the defect this fix-back exists for: a temporary
+ *    logout froze that platform for good, because nothing in the product clears a
+ *    permanent record and the leg never asked again. Every premise of the
+ *    permanent reading was true except the one that decides it — the token is
+ *    re-read on every request (`lib/platform-auth.ts`), so a user who signs back
+ *    in *is* the remedy, and the leg has to be the thing that notices. It is not
+ *    folded into 'rate-limited': those are two different facts about why the
+ *    platform said no, so they keep two reasons, two sentences and two rungs.
+ *  · 'refused-unknown' — W61b. The same kind of refusal with a code this build
+ *    cannot read. Transient for the reason recorded on the reason itself:
+ *    permanence is a claim, and "no amount of asking will change this" is exactly
+ *    what an unreadable code does not establish. Asking again costs one request
+ *    and re-writes the code and message into the trace each time.
  *
  * permanent:
  *  · 'shape-changed'          — the bytes are not a shape we recognise; sending
@@ -313,7 +421,7 @@ export type HaltClass = 'transient' | 'permanent';
  *    scope so the next run can read its list again.
  */
 export function haltClassOf(reason: HaltReason): HaltClass {
-  return reason === 'transport-error' || reason === 'rate-limited' ? 'transient' : 'permanent';
+  return isTransientReason(reason) ? 'transient' : 'permanent';
 }
 
 /**
@@ -372,9 +480,18 @@ export function haltSubjectOf(reason: HaltReason): HaltSubject {
 
     // Arrived-and-unreadable, arrived-empty, refused, or never arrived. The build
     // that reads them next is not what makes them true or false.
+    // 🔴 W61 · 'auth-refused' is the same kind of statement as 'rate-limited': a
+    //    refusal that **arrived**, in an envelope rather than in a status. Nothing
+    //    this extension ships can make it untrue — only the platform, or a human
+    //    logging back in — so it may never be classified 'capability' and expire
+    //    itself against the plan table. 🔴 W61b: the same for 'refused-unknown',
+    //    for the same reason and one more — the code was never read by any build,
+    //    so it is not a judgement about this build's capability either.
     case 'shape-changed':
     case 'detail-empty-unverified':
     case 'rate-limited':
+    case 'auth-refused':
+    case 'refused-unknown':
     case 'transport-error':
       return 'upstream';
 
@@ -759,6 +876,29 @@ export function haltStillApplies(record: HaltRecord, judgement: HaltJudgement): 
  *                                                       request/hour while
  *                                                       limited — a 12x reduction
  *                                                       from the normal rate.
+ *   auth-refused      30 min  120 min   6 → 12 → 24     🔴 W61b. The platform
+ *   refused-unknown                                     said no about *this
+ *                                                       request*, and what makes
+ *                                                       the next one different is
+ *                                                       a person signing in or the
+ *                                                       platform recovering — not
+ *                                                       the clock. So this is the
+ *                                                       gentlest ladder here: it
+ *                                                       is how often the leg
+ *                                                       **looks**, and looking
+ *                                                       must cost almost nothing
+ *                                                       (two requests in the first
+ *                                                       hour, one every two hours
+ *                                                       after that) while still
+ *                                                       being frequent enough that
+ *                                                       a user who signs back in
+ *                                                       does not wait the rest of
+ *                                                       the day to see it work.
+ *                                                       The alternative — no
+ *                                                       ladder at all, i.e. the
+ *                                                       permanent record W61 first
+ *                                                       wrote — is what froze the
+ *                                                       platform across logins.
  *
  * 🔴 The reference implementation's ratios are 60x (base) / 5x (cap) on the 429 ladder; ours are 3x / 4x.
  *    Deliberately milder, for one reason: its ladder **gives up** after 2
@@ -772,22 +912,48 @@ export function haltStillApplies(record: HaltRecord, judgement: HaltJudgement): 
  * halt it issues exactly as many (zero), and for a transient one strictly fewer
  * than a naive "just clear `halted`" fix, which would re-fire on the next tick.
  */
-export const TRANSIENT_RETRY_BASE_MS: Record<'transport-error' | 'rate-limited', number> = {
+export const TRANSIENT_RETRY_BASE_MS: Record<TransientHaltReason, number> = {
   'transport-error': 5 * 60_000,
   'rate-limited': 15 * 60_000,
+  'auth-refused': 30 * 60_000,
+  'refused-unknown': 30 * 60_000,
 };
 
 /** The ceiling of each ladder. Never exceeded, however long the streak runs. */
-export const TRANSIENT_RETRY_MAX_MS: Record<'transport-error' | 'rate-limited', number> = {
+export const TRANSIENT_RETRY_MAX_MS: Record<TransientHaltReason, number> = {
   'transport-error': 30 * 60_000,
   'rate-limited': 60 * 60_000,
+  'auth-refused': 120 * 60_000,
+  'refused-unknown': 120 * 60_000,
 };
 
-/** The transient reasons this ladder is defined for. A permanent reason has no delay at all. */
-export type TransientHaltReason = keyof typeof TRANSIENT_RETRY_BASE_MS;
+/**
+ * The transient reasons this ladder is defined for. A permanent reason has no
+ * delay at all.
+ *
+ * 🔴 W61b · **Written out rather than derived from the table above**, which is
+ *    where it used to come from (`keyof typeof TRANSIENT_RETRY_BASE_MS`). The
+ *    derivation made the union a *consequence* of a table that lives three
+ *    hundred lines below the reasons it names, so adding a reason and adding its
+ *    rung were two edits that could not be checked against each other — and the
+ *    table's own type would have silently accepted a union that no longer matched
+ *    `haltClassOf`'s answer. Two edits that must agree are one edit here.
+ */
+export type TransientHaltReason = 'transport-error' | 'rate-limited' | 'auth-refused' | 'refused-unknown';
 
+/** The reasons this ladder is defined for, as a runtime list — one place, so `isTransientReason` cannot disagree with the tables. */
+const TRANSIENT_REASONS: readonly TransientHaltReason[] = ['transport-error', 'rate-limited', 'auth-refused', 'refused-unknown'];
+
+/**
+ * 🔴 The **one** list: `haltClassOf` (above) delegates to this, and the engine
+ *    and `recordBackfillHalt` both ask `haltClassOf` before deciding to write a
+ *    retry moment. A reason that is transient here and permanent there would
+ *    produce a record with no `retryAt` that the resume path reads as due now —
+ *    i.e. an immediate retry loop — which is why the two questions are one
+ *    function and not two lists.
+ */
 export function isTransientReason(reason: HaltReason): reason is TransientHaltReason {
-  return reason === 'transport-error' || reason === 'rate-limited';
+  return (TRANSIENT_REASONS as readonly string[]).includes(reason);
 }
 
 /**

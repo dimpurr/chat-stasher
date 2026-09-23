@@ -420,6 +420,57 @@ popup:
         This leg stopped before requesting anything because it could not tell
         which Claude organization this account is using. Open a Claude
         conversation once, and it will find your organization.
+      # 🔴 W61 · DeepSeek answers a refused request with HTTP **200** and puts the
+      # failure in the envelope, so this is the one stop on this leg that no status
+      # could have shown. Its own sentence, and NOT the `other` fallback: `other`
+      # prints "the platform refused a request (auth-refused)", which is a
+      # description of the record rather than the two things a user needs — why it
+      # stopped, and what to do. The platform's own code and message are in
+      # {detail}, so a refusal that is not about credentials stays readable rather
+      # than being rounded into this sentence.
+      #
+      # 🔴 W61b · Two halves had to be added and one clause removed.
+      #   · Added: the retry. The reason is transient now, so the sentence may not
+      #     read like a dead end; the login is what makes the *next* round work, and
+      #     the leg is what comes back to ask. It carries the same numbers
+      #     `waitingRetry` does, from the same function, so the popup and the
+      #     progress line cannot quote two different waits for one record.
+      #   · Removed: "the list request itself was the one refused, so nothing about
+      #     your history has been read yet". This sentence is printed for a refusal
+      #     on the **body** segment too, where the list had already been read and
+      #     its ids were already pending — so that clause was false in exactly the
+      #     state a user is most likely to be looking at. A sentence has to be true
+      #     of every state it is printed in, and `{detail}` still names which
+      #     request it was.
+      authRefused: >-
+        This leg has come to a stop, and it is not a change to the platform:
+        {platform} refused a request and said so in its own answer ({detail}).
+        Every refusal measured on this platform means the login token was missing
+        or no longer valid, so the fix is to open {platform} in this browser and
+        sign in again — and that is all it takes: this leg keeps asking by itself,
+        next in about {minutes} minute(s) (attempt {attempts} of this streak), so a
+        fresh login is picked up on its own. Nothing was counted, passed over, or
+        written off while this stood: a refused request records nothing, whatever
+        had already been read stays exactly as it was, and what was not read is
+        still unread.
+      # 🔴 W61b · The same in-band refusal with a code this build cannot read. Its
+      # own sentence, because the thing it must not do is guess: `waitingRetry`
+      # would say the platform "refused or dropped a request" and leave the user
+      # with a cause nobody established, and `authRefused` above would name a
+      # login the platform never mentioned. It says what is known — a refusal
+      # arrived, its code is not one this build recognises — and that the leg will
+      # look again, which is what its rung on the ladder does.
+      refusedUnknown: >-
+        This leg has come to a stop, and it is not a change to the platform:
+        {platform} refused a request, in its own answer, with a code this build
+        does not recognise ({detail}). Nothing here is known about what that code
+        means — it is not treated as a login problem, and it is not treated as a
+        platform change either — so the leg does not guess: it asks again by itself
+        in about {minutes} minute(s) (attempt {attempts} of this streak), and the
+        platform's own code and message are part of this record, so whoever reads
+        it next has the evidence rather than a guess. Nothing was counted, passed
+        over, or written off while this stood: a refused request records nothing,
+        and every debt the leg already held is still held.
       waitingRetry: >-
         This leg is NOT stopped and nothing has been written off: the platform
         refused or dropped a request ({reason}), so it is waiting out its backoff
