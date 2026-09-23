@@ -41,6 +41,7 @@ import {
   BACKFILL_TARGETS_KEY,
   BACKFILL_TICK_DELAY_MAX_MINUTES,
   BACKFILL_TICK_DELAY_MIN_MINUTES,
+  isSweepNotConcluded,
   type BackfillTickRecord,
   type LegacyMigration,
 } from './backfill/alarm';
@@ -703,6 +704,31 @@ function failureNote(summary: FailureSummary): string {
 function lastTickNote(rec: BackfillTickRecord | null): string | null {
   if (!rec) return t('popup.lastTick.none');
   const when = stampOf(rec.at);
+  // 🔴 W62b · **A record written before the tick's sweep concluded is not a
+  //    verdict on that tick, and it may not be printed as one.**
+  //
+  // The provisional trace W62 writes carries `ran: false` and the gate's own
+  // reason, because at that instant neither has been decided any further — so
+  // every sentence below would read it out as a finished skip ("that tick did
+  // nothing at all — no-http-port") over a tick that was still running. That is
+  // the same shape of error as reading `null` as "never swept": a state that
+  // means "not yet" printed as a state that means "no".
+  //
+  // 🔴 It replaces the head rather than appending to it. The head is not a
+  //    weaker fact to lead with; it is the *wrong* fact — `ran: false` here says
+  //    "this tick never reached the run", which is true only of the moment the
+  //    record was written, and the sentence a person actually needs is that the
+  //    tick had not finished when the record was last written.
+  //
+  // This is the normal case for exactly one tick at a time and it is not an
+  // error state: the record is overwritten in the same tick whenever the tick
+  // gets to finish, and the tick is only prevented from finishing by the worker
+  // being reclaimed, the sweep throwing, or the final write failing. Reaching
+  // this line at all is therefore information — it says the last wake did not
+  // complete — which is why it is a sentence and not a suppressed blank.
+  if (isSweepNotConcluded(rec.tabSweep)) {
+    return t('popup.lastTick.unfinished', { when, targets: rec.targets });
+  }
   const head = rec.ran
     ? t('popup.lastTick.ran', { when, targets: rec.targets })
     : t('popup.lastTick.skipped', {

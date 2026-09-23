@@ -692,6 +692,34 @@ async function migrateOneLegacyKey(
  * is a count of answering tabs the sweep refused for want of a slot — a
  * sweep that registered everyone who answered writes `crowded: 0`. A ping
  * cap and a full registry are not the same fact.
+ *
+ * 🔴 W62b · **And a fourth fact: the sweep had not concluded.** W62 gave the
+ *    tick a trace *before* the sweep, so that the migration and the gate
+ *    decision reach storage without waiting on liveness pings that cannot
+ *    change them. That first write has to say what is true at that instant —
+ *    that this tick is about to look and has not finished looking — and it
+ *    may not borrow any of the three values above, because each of them is a
+ *    finished statement. `null` in particular reads as "this tick never
+ *    swept", which is exactly what a tick that is *about to* sweep is not;
+ *    and if the worker is reclaimed mid-sweep, or the sweep throws after
+ *    `tabs.query` has already pruned or registered rows, or the tick's final
+ *    save fails, that first record is the one that stays. It would then
+ *    report a tick that never looked — a false statement about an event that
+ *    did happen, which is the one thing this field exists to prevent.
+ *
+ *    `{ sweeping: true }` is therefore not a fourth *outcome*; it is the
+ *    record saying it has no outcome yet. It is written only by the
+ *    provisional trace, and it is replaced in the same tick by one of the
+ *    three real values whenever the tick gets to finish (`background.ts`,
+ *    the final `recordAlarmTick`). A reader must treat it as provisional —
+ *    see `isSweepNotConcluded`, and `lastTickNote`, which says so rather
+ *    than printing the tick's state as a verdict.
+ *
+ *    It is deliberately a variant *without* a `looked` key rather than a
+ *    third value of `looked`: `looked` stays a boolean, so every existing
+ *    `if (sweep.looked)` keeps meaning what it meant, and a reader that
+ *    forgets this state fails to compile rather than silently taking the
+ *    `undefined` for "did not look".
  */
 export type TabSweepTrace =
   | { looked: false }
@@ -705,7 +733,50 @@ export type TabSweepTrace =
       deferred: number;
       /** Answering tabs refused because the registry was already full of live-listed rows. 0 if every answering tab was registered. */
       crowded: number;
-    };
+    }
+  | TabSweepNotConcluded;
+
+/**
+ * 🔴 W62b · **The one written form of "this tick's sweep has no outcome yet".**
+ *
+ * Its own interface rather than an inline member of the union so that a writer
+ * can name the state and a reader can narrow to it — the constant below is the
+ * only value a writer is meant to pass, and `isSweepNotConcluded` is the only
+ * predicate a reader needs.
+ */
+export interface TabSweepNotConcluded {
+  sweeping: true;
+}
+
+/**
+ * 🔴 W62b · The value the provisional trace writes, in one spelling.
+ *
+ * Exported rather than written as an object literal at the call site, so that
+ * `background.ts` and any reader are talking about the same state by name, and
+ * a grep for `SWEEP_NOT_CONCLUDED` finds every place that produces one.
+ */
+export const SWEEP_NOT_CONCLUDED: TabSweepNotConcluded = { sweeping: true };
+
+/**
+ * 🔴 W62b · **Is this trace something the tick said, or something it has not
+ * said yet?**
+ *
+ * The single predicate for the difference, so no reader has to re-derive it
+ * from the shape — a reader that spelled `'sweeping' in sweep` itself would be
+ * a second copy of this rule, free to disagree with the first.
+ *
+ * `true` means the record is **provisional**: the tick that wrote it had not
+ * concluded its tab sweep, so the record is not a verdict on that tick and must
+ * not be rendered as one. It does **not** mean the sweep failed, and it is not
+ * `{ looked: false }` (which is "we tried to look and could not") nor `null`
+ * (which stays "this tick never swept").
+ */
+export function isSweepNotConcluded(
+  trace: TabSweepTrace | null | undefined,
+): trace is TabSweepNotConcluded {
+  return typeof trace === 'object' && trace !== null
+    && (trace as { sweeping?: unknown }).sweeping === true;
+}
 
 export interface BackfillTickRecord {
   /** When this tick happened (Date.now()). */
@@ -769,6 +840,13 @@ export interface BackfillTickRecord {
    * registry had lost.** See `TabSweepTrace`. Optional so a record written
    * before this field existed still parses (`isTickRecord` does not require
    * it); `null` is the written form of "never swept".
+   *
+   * 🔴 W62b · `{ sweeping: true }` is the fourth value and is not an outcome:
+   *    it is the provisional record saying its sweep had not concluded. A
+   *    reader that shows this field to a person must ask
+   *    `isSweepNotConcluded` first (see `lastTickNote`) — on a provisional
+   *    record the other fields (`ran`, `stopped`, `halted`) are the tick's
+   *    state *while it was still running*, not its result.
    */
   tabSweep?: TabSweepTrace | null;
 }

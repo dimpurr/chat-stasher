@@ -59,9 +59,11 @@ import {
   rememberOrganizationScopedTarget,
   rememberTarget,
   saveLastTick,
+  SWEEP_NOT_CONCLUDED,
   syncBackfillAlarm,
   type AlarmsApi,
   type BackfillTarget,
+  type TabSweepNotConcluded,
   type TabSweepTrace,
 } from '../lib/backfill/alarm';
 import { systemRandom, type RandomFn } from '../lib/backfill/random';
@@ -560,8 +562,18 @@ async function recoverUnregisteredTabs(): Promise<TabSweepReport> {
   );
 }
 
-function persistSweep(report: TabSweepReport | null): TabSweepTrace | null {
+/**
+ * 🔴 W62b · The one place the runtime sweep state becomes the written one.
+ *
+ * `TabSweepNotConcluded` passes straight through: it is already the written
+ * form, and mapping it to anything else here — to `null` above all — is the
+ * false "this tick never swept" the provisional trace exists to avoid.
+ */
+function persistSweep(
+  report: TabSweepReport | TabSweepNotConcluded | null,
+): TabSweepTrace | null {
   if (report === null) return null;
+  if ('sweeping' in report) return report;
   if (!report.looked) return { looked: false };
   return {
     looked: true,
@@ -1258,6 +1270,36 @@ async function runAlarmTickBody(): Promise<TickResult> {
       });
     let result = await tickOne(await resolveHttpPort(target.origin));
     if (result.reason === 'no-http-port' && tabSweep === null) {
+      // 🔴 W62 · **Record the migration + gate decision *before* the recovery
+      //    sweep, so a no-tab tick is never held open by the sweep's liveness
+      //    pings.** The trace that W36/W47's acceptance reads — that the storage
+      //    layout moved and the tick was blocked at `no-http-port`, with no
+      //    refusal — is knowable the moment `resolveHttpPort` concedes. W51's
+      //    sweep then runs to give a closed-unregistered platform tab one more
+      //    chance to fetch *this* tick; in the true no-tab case it can only ping
+      //    tabs of another origin (there is no `tabs` permission to filter by),
+      //    so it cannot change this result, yet each silent unknown tab can cost
+      //    `BACKFILL_PING_TIMEOUT_MS` of stall. Writing the trace first means the
+      //    migration is reported even while the sweep is still pinging, and the
+      //    final write below replaces it with the run's own outcome and the
+      //    sweep's counts when a recovery did happen (W47 / W51 semantics).
+      //
+      // 🔴 W62b · **And the provisional record says it is provisional.** This
+      //    write happens before the sweep, so `null` here would be a claim that
+      //    this tick never swept — a false statement about a tick that is about
+      //    to sweep. It is not a harmless one either: this is the record that
+      //    *stays* if the worker is reclaimed mid-sweep, if the sweep throws
+      //    after `tabs.query` has already pruned or registered rows, or if the
+      //    tick's final save fails. W51's three values are all *conclusions*,
+      //    so the fourth fact — "no outcome yet" — is written as
+      //    `SWEEP_NOT_CONCLUDED` and rendered as a tick still in flight rather
+      //    than as a finished skip (`isSweepNotConcluded`, `lastTickNote`).
+      //
+      //    Cost, stated: one extra `storage.local` write per sweeping tick. It
+      //    is the write W62 already added — W62b only changes *what* it says, it
+      //    adds no third write — and it buys the property that no reader can
+      //    mistake an interrupted tick for one that decided not to look.
+      await recordAlarmTick(store, result, targets.length, preflightRefusal, SWEEP_NOT_CONCLUDED);
       tabSweep = await recoverUnregisteredTabs();
       // Retry this target only by aiming at a row the sweep just registered
       // of *this* origin. Walking pickLiveTab again would re-strike the
@@ -1378,8 +1420,13 @@ async function recordAlarmTick(
    * 🔴 W51 · The tab-registry recovery sweep, or `null` when this tick never
    *    swept. Written as `tabSweep` on the trace so a later reader can tell
    *    "we looked and found nothing" from "we never looked".
+   *
+   * 🔴 W62b · **Or the state that is neither: the sweep has no outcome yet.**
+   *    `SWEEP_NOT_CONCLUDED` is passed only by the provisional write, which is
+   *    the record of a tick that is still running; it is not one of the three
+   *    outcomes and must never stand in for one (see `TabSweepNotConcluded`).
    */
-  tabSweep: TabSweepReport | null = null,
+  tabSweep: TabSweepReport | TabSweepNotConcluded | null = null,
 ): Promise<void> {
   const halt = result.report?.halted ?? null;
   await saveLastTick(store, {
