@@ -72,6 +72,29 @@ export function needsChatgptBearer(url: string, pageOrigin: string): boolean {
 export interface MinimalResponse {
   status: number;
   text: () => Promise<string>;
+  /**
+   * 🔴 W64c · **Gemini's wrapper marks the refusals its credential path produced, and
+   * nobody else may set this.**
+   *
+   * It exists because a status alone cannot say what a refusal is about. W64b made a
+   * Gemini 400 halt `auth-refused` on the strength of a real measurement — this file's
+   * Gemini header records that a `batchexecute` request whose `at` is missing or stale
+   * is answered HTTP 400 — and the re-review found the classifier applying that to
+   * **every** Gemini 400, including one nothing had been measured about
+   * (`nm/R64b-grok.log`, finding 2).
+   *
+   * So the fact travels instead of being inferred: `true` means *this response is the
+   * answer Gemini's own credentialed request path returned, after the wrapper re-read
+   * the page's `at` and accepted the refusal as final* — either the retried request's
+   * own answer, or the first answer re-affirmed by a re-read that turned up nothing
+   * better. The engine's classifier requires it before it calls a Gemini 400 an auth
+   * refusal, and treats its absence as what it is: no evidence about the credential.
+   *
+   * 🔴 Absent is the default and means "no such evidence" — never "false, so treat it
+   *    as the opposite". Every other wrapper leaves it unset, and so does every
+   *    response that is not a credential refusal.
+   */
+  survivedCredentialReread?: boolean;
 }
 
 export type RawFetch = (url: string, init: RequestInit) => Promise<MinimalResponse>;
@@ -670,18 +693,51 @@ export function createGeminiAuthorizedFetch(
     if (!needsGeminiTokens(url, pageOrigin)) return rawFetch(url, init);
     const tokens = await options.readTokens();
     const first = await send(url, init, tokens);
+    // Anything that is not a refusal of this request's credential is the platform's
+    // answer and is passed through untouched, with no mark — a 200 has no refusal to
+    // explain.
+    if (first.status !== 400 && first.status !== 401) return first;
     /**
-     * 🔴 Retried **once**, and only when the first attempt carried a token: a
-     *    refusal of a request that *had* one is the case a re-read can change (the
-     *    page may have rotated the value). With no token there is nothing to
-     *    re-read and nothing to refresh, so the retry would be byte-identical
-     *    except for the request counter — sending it would double this leg's
-     *    request count for a user who is simply logged out, to reach the same 400.
+     * 🔴 W64c · **The credential is re-read once before a refusal is accepted as the
+     *    answer**, and the response this wrapper returns carries that fact.
+     *
+     * Two things happen here, and the order matters.
+     *
+     * 1 · The page's `at` is read **again**. Previously a re-read happened only when
+     *     the first attempt had carried a token, so a request sent with a blank `at`
+     *     — a signed-out user — got a refusal that had never been re-checked against
+     *     the page. The re-read is cheap and bounded (one `postMessage` round trip,
+     *     `GEMINI_TOKEN_PULL_TIMEOUT_MS`, on a path that stops the leg), and it is the
+     *     one thing that can change the answer: if the page has a token now, the
+     *     request is sent again with it.
+     *
+     * 2 · The response returned from here is the answer that **stands after that
+     *     re-read**, and it is marked `survivedCredentialReread`. Either shape is a
+     *     statement about the credential, which is why both are marked:
+     *      · the retried request's own answer (the first attempt carried a token);
+     *      · the first answer, when the re-read turned up no credential to present —
+     *        this wrapper's header records exactly that shape as the measured refusal
+     *        ("a request whose `at` is missing … is answered HTTP 400").
+     *
+     * 🔴 What the mark does **not** claim: that the batch was well-formed. A malformed
+     *    batch this leg built is still indistinguishable from a stale token at the
+     *    status level (W64b's stated residual). What it does claim, and what the
+     *    classifier now requires, is that the refusal came back from this path — so a
+     *    400 with no such evidence is no longer reported to the user as a refused login.
+     *
+     * 🔴 Why the retry is still keyed on a credential the wrapper can present: sending
+     *    a byte-identical request (except for the request counter) would double this
+     *    leg's request count to reach the same 400, which is the cost the previous
+     *    version of this comment refused to pay. A re-read that finds a token is a
+     *    different case: the request really is different, and it goes out.
      */
-    if ((first.status !== 400 && first.status !== 401) || usableHeaderToken(tokens?.at ?? null) === null) {
-      return first;
+    const reread = await options.readTokens();
+    const hadToken = usableHeaderToken(tokens?.at ?? null) !== null;
+    const hasTokenNow = usableHeaderToken(reread?.at ?? null) !== null;
+    if (!hadToken && !hasTokenNow) {
+      return { ...first, survivedCredentialReread: true };
     }
-    return send(url, init, await options.readTokens());
+    return { ...(await send(url, init, reread)), survivedCredentialReread: true };
   };
 }
 

@@ -569,7 +569,13 @@ export default defineContentScript({
             credentials: 'same-origin',
             headers: { accept: 'application/json' },
           });
-      return { status: res.status, text: () => res.text() };
+      // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
+      //    the page but does not own a token, and a decision taken here would be a
+      //    second opinion about somebody else's evidence. `true` is passed on as-is;
+      //    absent stays absent, which is what the engine reads as "no evidence".
+      return res.survivedCredentialReread === true
+        ? { status: res.status, text: () => res.text(), survivedCredentialReread: true }
+        : { status: res.status, text: () => res.text() };
     };
 
     /**

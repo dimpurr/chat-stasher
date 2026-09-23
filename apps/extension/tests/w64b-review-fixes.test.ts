@@ -203,12 +203,24 @@ describe('W64b-1 · Kimi\'s bearer is not re-sent to a path the allowlist never 
 // 2 · A logged-out Gemini comes back by itself
 // ---------------------------------------------------------------------------
 
-/** A synthetic backend over one status. Any path it was not given throws. */
+/**
+ * A synthetic backend over one status. Any path it was not given throws.
+ *
+ * 🔴 W64c · For a **refusal** it answers the way Gemini's wrapper answers — with the
+ *    credential fact attached, and only for the two statuses the wrapper marks (400
+ *    and 401). That is not decoration: since W64c the classifier requires the fact
+ *    before it will call a 400 a refused login, so a stub that omitted it would be
+ *    modelling a response no page produces for these paths and would be testing the
+ *    "no evidence" answer instead of this suite's subject. Every assertion below is
+ *    unchanged; what changed is that the stub stands for the transport it replaces.
+ */
 function geminiBackend(status: number) {
   const calls: string[] = [];
   const http = async (url: string): Promise<HttpResponse> => {
     calls.push(new URL(url).pathname);
-    return { status, text: 'synthetic refusal' };
+    return status === 400 || status === 401
+      ? { status, text: 'synthetic refusal', survivedCredentialReread: true }
+      : { status, text: 'synthetic refusal' };
   };
   return { calls, http };
 }

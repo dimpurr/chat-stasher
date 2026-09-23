@@ -65,6 +65,20 @@ import {
 export interface HttpResponse {
   status: number;
   text: string;
+  /**
+   * 🔴 W64c · **Evidence, carried from the wrapper that owns the credential, never
+   * inferred from the status.**
+   *
+   * `true` = the page-side wrapper for this platform's credential produced this
+   * response from its credential path, after re-reading what the page holds. Absent =
+   * nothing has been claimed, which is what a fixture, a platform with no credential,
+   * and an older content script all produce — and the classifier reads it as "no
+   * evidence about the credential", not as a denial.
+   *
+   * See `lib/platform-auth.ts`'s `MinimalResponse` for what each wrapper is allowed to
+   * set, and `haltReasonForStatus` for who reads it.
+   */
+  survivedCredentialReread?: boolean;
 }
 
 /**
@@ -527,13 +541,27 @@ export async function recordBackfillHalt(
  *    by evidence is the rule this whole function follows; this is what the evidence
  *    covers and no more.
  *
+ * 🔴 🔴 W64c · **…and the evidence has to arrive, rather than be assumed from the
+ *    status.** The paragraph above was written as if `platform === 'gemini'` *were* the
+ *    evidence; it is not. The re-review of W64b found the rule applying to every Gemini
+ *    400, including one nothing had been measured about (`nm/R64b-grok.log`, finding 2:
+ *    "Any Gemini 400 is mapped, including a malformed batch"). The measurement belongs
+ *    to an event — this platform refusing a request that came back through *its*
+ *    credential path — and only the wrapper that owns that credential sees the event.
+ *    So it is carried: `survivedCredentialReread` on the response, set by
+ *    `createGeminiAuthorizedFetch` and by nothing else, threaded through the content
+ *    script and the fetch channel (`lib/backfill/tab-port.ts`). A 400 without it is a
+ *    400 with no evidence, and the honest answer for that is what every other platform
+ *    gets.
+ *
  * 🔴 **The residual, stated rather than implied.** A Gemini 400 caused by a genuinely
- *    malformed batch is now read as a login refusal too, because this build cannot
- *    tell the two apart from the status — the same admission W64 makes above about a
- *    401 with no `message`. The cost is bounded and it is the cheaper error: the
- *    record is transient (30 min, then 2 h) rather than permanent, so the leg retries
- *    and records the same 400 again with its status in the trace, where the old
- *    behaviour would have stopped the platform for good on the first one.
+ *    malformed batch that *did* go out through the credential path is still read as a
+ *    login refusal, because the status cannot separate the two — the same admission W64
+ *    makes above about a 401 with no `message`. The cost is bounded and it is the
+ *    cheaper error: the record is transient (30 min, then 2 h) rather than permanent,
+ *    so the leg retries and records the same 400 again with its status in the trace,
+ *    where the old behaviour would have stopped the platform for good on the first one.
+ *    What W64c removes is the case where there is no evidence at all.
  */
 
 /**
@@ -598,12 +626,43 @@ export async function markScopeRetried(
   return true;
 }
 
-function haltReasonForStatus(status: number, platform: string): HaltReason {
+/** Classify a non-2xx: rate-limit family vs everything else. Both stop, but they leave different traces. */
+function haltReasonForStatus(
+  status: number,
+  platform: string,
+  /**
+   * 🔴 W64c · The wrapper's own statement that this response came back from its
+   * credential path — see `HttpResponse.survivedCredentialReread`. Required, not
+   * optional, so that a new call site has to say which response it is holding instead
+   * of defaulting into the wrong answer.
+   */
+  survivedCredentialReread: boolean,
+): HaltReason {
   if (status === 401) return 'auth-refused';
-  // 🔴 W64b · Gemini's own measured shape of "the token was missing or stale" — see
-  //    this function's header. Scoped to the platform: on every other plan a 400 is
-  //    a malformed request, which is a wire fact and stays `shape-changed`.
-  if (status === 400 && platform === 'gemini') return 'auth-refused';
+  /**
+   * 🔴 W64b · Gemini's own measured shape of "the token was missing or stale" — see
+   *    this function's header.
+   *
+   * 🔴 W64c · **And the evidence is now required, rather than assumed from the
+   *    status.** The re-review found this line classifying *every* Gemini 400 as a
+   *    refused login, including one nothing was measured about — a malformed batch
+   *    this leg built itself — while the message it produced told the user to sign in
+   *    (`nm/R64b-grok.log`, finding 2). A 400 is a statement about the credential only
+   *    when the wrapper that owns that credential says so: it read the page's `at`,
+   *    re-read it once, and this response is what stood afterwards. With no such
+   *    evidence the honest answer is the same one every other platform gets —
+   *    `shape-changed`.
+   *
+   *    Scoped to the platform as well, and to that platform only: no other plan has
+   *    such a measurement, so on every other plan a 400 is a malformed request, which
+   *    is a wire fact and stays `shape-changed` whatever a response claims.
+   *
+   *    The residual, unchanged and stated rather than implied: a malformed batch that
+   *    *does* go out through Gemini's credential path is still indistinguishable from a
+   *    stale `at` at the status level, so it is still read as a login refusal. What the
+   *    evidence rules out is the case where there is no evidence at all.
+   */
+  if (status === 400 && platform === 'gemini' && survivedCredentialReread) return 'auth-refused';
   if (status === 429 || status === 403 || status >= 500) return 'rate-limited';
   return 'shape-changed';
 }
@@ -1492,7 +1551,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     if (res.status < 200 || res.status > 299) {
       return halt(
-        haltReasonForStatus(res.status, plan.platform),
+        haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true),
         `${listWhere()} returned HTTP ${res.status}`,
       );
     }
@@ -1886,7 +1945,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
-      return halt(haltReasonForStatus(res.status, plan.platform), `detail returned HTTP ${res.status}`);
+      return halt(haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true), `detail returned HTTP ${res.status}`);
     }
 
     /**
@@ -1938,7 +1997,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         return halt('transport-error', `detail step 2: ${(err as Error).message}`);
       }
       if (res2.status < 200 || res2.status > 299) {
-        return halt(haltReasonForStatus(res2.status, plan.platform), `detail step 2 returned HTTP ${res2.status}`);
+        return halt(haltReasonForStatus(res2.status, plan.platform, res2.survivedCredentialReread === true), `detail step 2 returned HTTP ${res2.status}`);
       }
       deliveredUrl = step2Url;
       deliveredMethod = 'POST';
@@ -2012,7 +2071,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           return halt('transport-error', `detail page: ${(err as Error).message}`);
         }
         if (next.status < 200 || next.status > 299) {
-          return halt(haltReasonForStatus(next.status, plan.platform), `detail page returned HTTP ${next.status}`);
+          return halt(haltReasonForStatus(next.status, plan.platform, next.survivedCredentialReread === true), `detail page returned HTTP ${next.status}`);
         }
         if (!matchesResponseShape(platformRow, next.text)) {
           return halt('shape-changed', `detail page does not match the ${platformRow.id} response shape`);

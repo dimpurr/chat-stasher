@@ -204,7 +204,16 @@ export interface TabEntry {
 }
 
 export type BackfillFetchReply =
-  | { ok: true; status: number; text: string }
+  /**
+   * 🔴 W64c · `survivedCredentialReread` is **carried, never inferred**: the page-side
+   * wrapper that owns a credential is the only code that can know whether a refusal
+   * came back from its credential path, and this field is how that fact reaches the
+   * engine's classifier. Absent means "nobody claimed it", which the classifier reads
+   * as "no evidence" — never as the opposite of a claim. It is optional on every hop
+   * so that a reply from any other wrapper, and every existing reply shape, stays what
+   * it was.
+   */
+  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean }
   | { ok: false; error: string };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -746,7 +755,7 @@ export function isAllowedBackfillUrl(
 export type FetchLike = (
   url: string,
   init?: BackfillRequestInit,
-) => Promise<{ status: number; text: () => Promise<string> }>;
+) => Promise<{ status: number; text: () => Promise<string>; survivedCredentialReread?: boolean }>;
 
 /**
  * The content-script-side fetch. **This code runs in the context of the page the
@@ -784,7 +793,12 @@ export async function serveBackfillFetch(
       // The same size red line as the live leg: an over-large response is not conversation JSON.
       return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
     }
-    return { ok: true, status: res.status, text };
+    // 🔴 W64c · The one fact the engine cannot derive is passed on here, and only when
+    //    it is claimed (`true`). A response that carries nothing stays a reply of
+    //    exactly the shape it was.
+    return res.survivedCredentialReread === true
+      ? { ok: true, status: res.status, text, survivedCredentialReread: true }
+      : { ok: true, status: res.status, text };
   } catch (err) {
     // Only the technical detail goes back, never the body.
     return { ok: false, error: (err as Error).message };
@@ -960,7 +974,13 @@ export function tabHttpPort(
     if (typeof reply.status !== 'number' || typeof reply.text !== 'string') {
       throw new Error(`tab ${tabId} replied with an unrecognised shape`);
     }
-    return { status: reply.status, text: reply.text };
+    // 🔴 W64c · Passed through only when the page claimed it. Anything else — an older
+    //    content script, another platform's wrapper — produces the response it always
+    //    did, with no field added, so the classifier sees "no evidence" and not a fact
+    //    invented by the transport.
+    return reply.survivedCredentialReread === true
+      ? { status: reply.status, text: reply.text, survivedCredentialReread: true }
+      : { status: reply.status, text: reply.text };
   };
 }
 
