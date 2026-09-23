@@ -422,7 +422,7 @@ describe('W59b-5 · the tick that lifts a halt reads one page, whatever the plan
         // Two rows on the first page, nothing on the second: the list is read to its
         // own end, which for this platform is the empty page (there is no has_more).
         text: calls.length === 1
-          ? JSON.stringify([{ thread_id: 'pplx-0001-aaaaaaaa' }, { thread_id: 'pplx-0002-aaaaaaaa' }])
+          ? JSON.stringify([{ slug: 'pplx-0001-aaaaaaaa' }, { slug: 'pplx-0002-aaaaaaaa' }])
           : '[]',
       };
     };

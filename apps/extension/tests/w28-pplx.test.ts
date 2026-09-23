@@ -94,17 +94,23 @@ const GOOD_CONTENT = contentBody([
 /**
  * One record of the list response.
  *
- * 🔴 Both names for the same value are present on purpose, and they are the same
- * string: `thread_id` is what this repository's list parser consumes, `slug` is
- * what the reference implementations read. The property this file pins is not
- * which key is spelled how — it is that the list's id and the live leg's id are
- * ONE value for one thread. If a live probe ever shows the two keys holding
- * different strings, this fixture is the first thing to change, together with
- * the row's `sessionIdPatterns`.
+ * 🔴 W65 (2026-09-23) · **the live probe this comment asked for has now run, and
+ * it changed this fixture.** The comment that stood here said: "`thread_id` is
+ * what this repository's list parser consumes, `slug` is what the reference
+ * implementations read ... If a live probe ever shows the two keys holding
+ * different strings, this fixture is the first thing to change." The probe
+ * showed something stronger — the endpoint's items carry **36 keys and no
+ * `thread_id` at all**, so the parser was reading a name the API never had and
+ * every list run halted on it. `thread_id` is gone from this fixture; `slug` is
+ * what the parser now consumes, which is also what the reference reads.
+ *
+ * `uuid` stays, and stays a DIFFERENT string on purpose: it is the other id the
+ * reference carries, and `slug` being the one the parser takes (not `uuid`) is
+ * exactly the property this fixture now pins. Probe + reasoning:
+ * `w65-pplx-list-shape.test.ts`.
  */
 function threadRecord(slug: string): Record<string, unknown> {
   return {
-    thread_id: slug,
     slug,
     uuid: THREAD_UUID,
     title: `synthetic-${slug}`,
