@@ -20,6 +20,7 @@ import {
   recordHookStatus,
 } from '../lib/hook-status';
 import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
+import { recordLiveCapture } from '../lib/live-capture';
 import { contentFingerprint, isUnchangedSinceDelivery, rememberDelivered } from '../lib/recapture';
 import {
   drainOutbox,
@@ -198,7 +199,45 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   const recaptureStore = browserLocalStore();
   const platformId = findPlatformForUrl(captured.url)?.id ?? null;
   const fingerprint = platformId ? await contentFingerprint(platformId, captured.text) : null;
+
+  /**
+   * 🔴 W69 · **The one place a live capture is written down as an arrival.**
+   *
+   * It is called from exactly the two returns below that answer `saved: true`,
+   * because that is what this function's own contract above says the word means —
+   * a capture that was queued, rejected or refused is not an arrival, and a record
+   * that counted one would make "a conversation from this platform reached the
+   * archive" true of a conversation that did not.
+   *
+   * 🔴 `Date.now()`, not `captured.capturedAt`: the row answers "when did this
+   *    extension last manage to store one", and that is our clock. The page's
+   *    stamp is the page's.
+   *
+   * 🔴 `await`ed rather than fired and forgotten. This handler's own answer is the
+   *    only thing keeping the message channel open under MV3; a write left running
+   *    behind it can be lost when the worker is reclaimed at the reply, and the
+   *    row this task exists to make trustworthy would then be missing exactly the
+   *    arrival that ended the worker. `recordLiveCapture` is best-effort and never
+   *    throws, so a store that cannot be written costs this capture nothing.
+   *
+   * 🔴 `platformId` is the same value the recapture fingerprint above is built
+   *    from, deliberately: "which platform is this capture" is one question with
+   *    one answer, and a second derivation of it here is how two expressions of
+   *    one fact drift apart (the failure C21 removed from the identity path).
+   *    `null` writes nothing — a row keyed by a guess is worse than no row.
+   */
+  const recordArrival = async (): Promise<void> => {
+    await recordLiveCapture(recaptureStore, { platform: platformId, at: Date.now() });
+  };
+
   if (fingerprint && await isUnchangedSinceDelivery(recaptureStore, name, fingerprint)) {
+    // 🔴 W69 · This **is** an arrival. The page produced a capture and the archive
+    //    already held exactly this copy, so nothing was sent again — but the whole
+    //    path from the page to here demonstrably worked. Recording only fresh acks
+    //    would freeze the row on a page that re-sends an unchanged conversation on
+    //    every view (measured on ChatGPT: lib/recapture.ts's header), and the row
+    //    would then read as stale while captures kept arriving.
+    await recordArrival();
     return {
       saved: true,
       status: 'unchanged',
@@ -268,6 +307,10 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
         );
       }
     }
+    // 🔴 W69 · The other arrival: the host acknowledged this conversation, so it
+    //    is on disk. Recorded here, after the fingerprint write above and before
+    //    the answer — see `recordArrival`.
+    await recordArrival();
     return {
       saved: true,
       status: 'delivered',
