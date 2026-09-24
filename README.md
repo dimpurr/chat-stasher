@@ -165,14 +165,14 @@ There is no `scan` subcommand in the current source; `status` is the scanner-fac
 
 The paths below are placeholders on purpose. Do not paste real account names, hostnames, or keys into examples.
 
-- `status` reads the local harness locations known to the registry and prints IDs, paths, sizes, mtimes, and flags; it does not print session content. (`crates/chat-stasher/src/main.rs:7045-7236,7353-7644`.)
+- `status` reads the local harness locations known to the registry and prints IDs, paths, sizes, mtimes, and flags; it does not print session content. (`crates/chat-stasher/src/main.rs:7058-7249,7366-7657`.)
 - `doctor` reads local harness metadata for its diagnostic report; its declared output is paths, counts, bytes, and timestamps. (`crates/chat-stasher/src/main.rs:376-377`.)
 - `ingest` reads complete export files from the `--inbox` you provide and writes sealed shards beneath the `--stage` you provide; consumed inputs are moved under `<your-inbox>/consumed/`. It prints paths, counts, and SHA-256 values, not conversation text. (`crates/chat-stasher/src/main.rs:648-669`.)
 - `seal` reads the registry and the active file you name, then may rename that file into the stage tree. The registry policy and confidence gate are part of the decision. (`crates/chat-stasher/src/main.rs:707-739`.)
 - `push`, `read`, and `verify` read the repository and key file selected by config or flags. They can use a backend you explicitly configure with repository options; do not assume those three commands are offline. (`crates/chat-stasher/src/main.rs:236-273`; `crates/chat-stasher/src/main.rs:332-376`; `crates/chat-stasher/src/main.rs:389-427`.)
 - The browser-spawned host answers the extension's `summary` request from the stage's **directory entries and shard mtimes only** plus the local `run-state.json`: it does not open a shard, does not decrypt the repository and does not touch the network. What goes back is counts, one harness name per bucket, a window length and a timestamp — nothing that identifies a conversation. (`crates/chat-stasher/src/nativehost.rs`.)
 
-What does not leave the process through the metadata-only paths: `status`, `doctor`, and `ingest` do not print conversation bodies, and the ingest summary is explicitly metadata-only. (`crates/chat-stasher/src/main.rs:274-334,379-393,655-681,7045-7236,7353-7644`.) `read` is intentionally different: its single-session mode dumps session data to your stdout, so treat that command as payload output. (`crates/chat-stasher/src/main.rs:5634-5752`.)
+What does not leave the process through the metadata-only paths: `status`, `doctor`, and `ingest` do not print conversation bodies, and the ingest summary is explicitly metadata-only. (`crates/chat-stasher/src/main.rs:274-334,379-393,655-681,7058-7249,7366-7657`.) `read` is intentionally different: its single-session mode dumps session data to your stdout, so treat that command as payload output. (`crates/chat-stasher/src/main.rs:5647-5765`.)
 
 The destination is selected by your config and flags: local stage/repository paths or a backend you configure. The source exposes repository, key-file, and backend-option inputs rather than a hard-coded destination. (`crates/chat-stasher/src/main.rs:138-175`; `crates/chat-stasher/src/main.rs:236-273`.)
 
@@ -223,7 +223,7 @@ Three things worth knowing before reading either:
   unreadable forever, with no recovery path of any kind
   (`crates/chat-stasher/src/store.rs:1189-1196`, `:1147-1151`).
 - **There is no restore command.** `read` returns one session at a time to
-  stdout (`crates/chat-stasher/src/main.rs:332-334,5634-5752`) and `export`
+  stdout (`crates/chat-stasher/src/main.rs:332-334,5647-5765`) and `export`
   writes many to files under `--out` (`crates/chat-stasher/src/main.rs:541-621`);
   both are payload-output commands. Getting sessions *back into* a harness's own
   directories is not implemented, by either of them or by anything else.
