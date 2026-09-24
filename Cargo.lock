@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "chat-stasher"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",

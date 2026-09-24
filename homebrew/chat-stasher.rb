@@ -19,7 +19,7 @@ class ChatStasher < Formula
   desc "Append-only archive for every LLM conversation, across harnesses"
   homepage "https://github.com/dimpurr/chat-stasher"
   license "Apache-2.0"
-  version "0.2.0"
+  version "0.3.0"
 
   # macOS-only, precompiled-binary tap. `on_macos` + Hardware::CPU.arm? picks
   # the per-architecture URL. There is intentionally no top-level `url`: no
@@ -27,12 +27,12 @@ class ChatStasher < Formula
   # fetch a darwin binary.
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/dimpurr/chat-stasher/releases/download/v0.2.0/chat-stasher-darwin-arm64"
+      url "https://github.com/dimpurr/chat-stasher/releases/download/v0.3.0/chat-stasher-darwin-arm64"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # TODO(RELEASE): replace with real darwin-arm64 sha256
     else
       # darwin-x86_64 is shipped alongside darwin-arm64. Filling this sha256 is
       # part of that release.
-      url "https://github.com/dimpurr/chat-stasher/releases/download/v0.2.0/chat-stasher-darwin-x86_64"
+      url "https://github.com/dimpurr/chat-stasher/releases/download/v0.3.0/chat-stasher-darwin-x86_64"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # TODO(RELEASE): replace with real darwin-x86_64 sha256 (when released)
     end
   end
@@ -47,8 +47,8 @@ class ChatStasher < Formula
   test do
     # Real verification, not a shell: `--version` must exit 0 (shell_output
     # fails the test on a non-zero exit) and the stdout must carry the version.
-    # clap derives `--version` from Cargo.toml version (0.2.0) → "chat-stasher 0.2.0".
+    # clap derives `--version` from Cargo.toml version (0.3.0) → "chat-stasher 0.3.0".
     version_output = shell_output("#{bin}/chat-stasher --version")
-    assert_match(/chat-stasher 0\.1\.0/, version_output)
+    assert_match(/chat-stasher 0\.3\.0/, version_output)
   end
 end

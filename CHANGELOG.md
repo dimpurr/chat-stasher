@@ -6,7 +6,7 @@ browser extension has its own version and ships on its own schedule; see
 
 The comparison point for the entry below is `v0.2.0`, tagged 2026-09-12.
 
-## Unreleased — 0.3.0
+## 0.3.0 — 2026-09-24
 
 ### Added
 
