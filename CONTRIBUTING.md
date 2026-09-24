@@ -208,9 +208,16 @@ the pair is not, so for the instant between the two renames the load dir does
 not exist. That window is not left for you to find — if the second rename fails
 the script renames `.prev` back and exits non-zero, and if a run is interrupted
 inside the window the next run refuses to touch the load dir and asks for
-`--recover`, which moves `.prev` back. The one step it cannot take for you — the
-browser offers no supported API for it — it prints: toggle the extension off and
-on in chrome://extensions, then reload the platform tabs.
+`--recover`, which moves `.prev` back. By default the reload of the running
+extension is left manual, because the browser offers no supported API for it; the
+script prints it: toggle the extension off and on in chrome://extensions, then
+reload the platform tabs.
+
+That toggle is removable when Chrome was started with
+`--remote-debugging-port`. Passing `--cdp-port <port>` makes the script find the
+extension's service worker over the DevTools Protocol, call
+`chrome.runtime.reload()`, and fail unless the worker comes back on the version
+it just built. It needs `node` on PATH; without the flag nothing changes.
 
 The build number comes from `--build-number`, else from the previous load
 dir's 4th version component plus one, or 1. A load dir that does not look like

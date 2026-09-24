@@ -5,10 +5,13 @@
 # Why it exists: real-browser acceptance runs against an unpacked build, and
 # Chrome only re-reads a manifest when the version changes. The reload cycle is
 # therefore: build a fresh extension from committed source, bump the 4th
-# version component, and drop it into the load directory. This script automates
-# every step except the two a browser offers no supported API for (toggling the
-# extension off/on in chrome://extensions and reloading the platform tabs),
-# which it prints so the operator knows the one remaining manual action.
+# version component, and drop it into the load directory. Chrome then keeps
+# running the old service worker until the extension is reloaded, and a browser
+# restart does not fix that: it re-reads the manifest but can leave the old
+# worker running. With --cdp-port the script reloads the worker itself over the
+# DevTools Protocol and checks the version it comes back on, which removes the
+# manual toggle; without it, it prints the toggle as before. Reloading the
+# platform tabs stays manual in both cases.
 #
 # It builds from a throwaway git worktree of the ref so uncommitted edits in
 # the current checkout can never leak into the build.
@@ -29,12 +32,18 @@
 # >>> usage
 # Usage:
 #   reload-extension.sh --load-dir <dir> [--ref <git-ref>] [--build-number <n>]
-#                        [--init] [--recover] [--dry-run]
+#                        [--cdp-port <port>] [--init] [--recover] [--dry-run]
 #
 #   --load-dir <dir>    Directory Chrome loads unpacked from (required).
 #   --ref <ref>         Git ref to build (default: HEAD).
 #   --build-number <n>  Build number for the 4th version component. Defaults to
 #                       the previous load-dir build's 4th component + 1, or 1.
+#   --cdp-port <port>   After the swap, reload the running extension over the
+#                       DevTools Protocol on 127.0.0.1:<port> (the port given to
+#                       Chrome's --remote-debugging-port) and fail unless the
+#                       worker comes back on the version just built. Off by
+#                       default, in which case the manual toggle is printed.
+#                       Requires node on PATH.
 #   --init              Allow a load dir that is absent or empty, so a first
 #                       build can seed it. A non-empty directory that is not a
 #                       chat-stasher build is refused even with --init: --init
@@ -88,6 +97,7 @@ dir_is_empty() {
 REF=HEAD
 LOAD_DIR=""
 BUILD_NUMBER=""
+CDP_PORT=""
 MODE=install
 INIT=0
 RECOVER=0
@@ -103,6 +113,9 @@ while [ $# -gt 0 ]; do
     --build-number)
       [ $# -ge 2 ] || usage
       BUILD_NUMBER="$2"; shift 2 ;;
+    --cdp-port)
+      [ $# -ge 2 ] || usage
+      CDP_PORT="$2"; shift 2 ;;
     --init)
       INIT=1; shift ;;
     --recover)
@@ -124,6 +137,15 @@ done
 if [ -n "$BUILD_NUMBER" ] && ! [[ "$BUILD_NUMBER" =~ ^(0|[1-9][0-9]*)$ ]]; then
   echo "reload-extension.sh: --build-number must be a non-negative integer, got: $BUILD_NUMBER" >&2
   exit 2
+fi
+
+# Validate the CDP port up front for the same reason: a typo must fail before a
+# build, not after the load dir has already been swapped.
+if [ -n "$CDP_PORT" ]; then
+  if ! [[ "$CDP_PORT" =~ ^[0-9]{1,5}$ ]] || [ "$CDP_PORT" -lt 1 ] || [ "$CDP_PORT" -gt 65535 ]; then
+    echo "reload-extension.sh: --cdp-port must be a TCP port number (1-65535), got: $CDP_PORT" >&2
+    exit 2
+  fi
 fi
 
 # --recover moves the previous build back, and --dry-run promises to change
@@ -231,7 +253,11 @@ if [ "$MODE" = dry-run ]; then
   echo "                  output into a sibling temp dir, then swap: rename"
   echo "                  old build -> $LOAD_DIR_PREV (absent for a new load"
   echo "                  dir), then rename the temp dir -> $LOAD_DIR"
-  echo "  manual step:    $MANUAL_STEP"
+  if [ -n "$CDP_PORT" ]; then
+    echo "  cdp:            reload over CDP on 127.0.0.1:$CDP_PORT and verify $NEW_VERSION"
+  else
+    echo "  manual step:    $MANUAL_STEP"
+  fi
   exit 0
 fi
 
@@ -332,6 +358,33 @@ fi
 # path too); this body only reflects on what it just did.
 echo "reload-extension.sh: $PLAN_MSG"
 echo "reload-extension.sh: previous build kept at $LOAD_DIR_PREV"
-echo "reload-extension.sh: remaining manual step: $MANUAL_STEP"
+
+if [ -z "$CDP_PORT" ]; then
+  echo "reload-extension.sh: remaining manual step: $MANUAL_STEP"
+  echo "reload-extension.sh: done."
+  exit 0
+fi
+
+# --- optional CDP reload ----------------------------------------------------
+# The swap is already committed at this point, so a CDP failure is not rolled
+# back: the new build is on disk and Chrome will pick it up on the next reload
+# however that happens. But the operator asked for the reload to be done, so a
+# failure exits non-zero and still prints the manual step as the fallback.
+# The helper sits next to this script, not at the root of the checkout being
+# built: the script may be run from any checkout, and in tests the "repo" is a
+# throwaway whose only content is the fixture.
+CDP_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cdp-reload-extension.mjs"
+if ! command -v node >/dev/null 2>&1; then
+  echo "reload-extension.sh: --cdp-port needs node on PATH, and none was found" >&2
+  echo "reload-extension.sh: remaining manual step: $MANUAL_STEP" >&2
+  exit 1
+fi
+if ! node "$CDP_HELPER" --port "$CDP_PORT" --expected-version "$NEW_VERSION"; then
+  echo "reload-extension.sh: the CDP reload did not complete (the file swap is already done)" >&2
+  echo "reload-extension.sh: remaining manual step: $MANUAL_STEP" >&2
+  exit 1
+fi
+echo "reload-extension.sh: extension reloaded over CDP; running version is $NEW_VERSION"
+echo "reload-extension.sh: remaining manual step: reload the platform tabs"
 echo "reload-extension.sh: done."
 exit 0
