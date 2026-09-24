@@ -226,6 +226,11 @@ pub struct BackupStore {
     /// Normalised machine name — used for both the path partition *and* the
     /// snapshot `host`.
     pub machine: String,
+    /// The body cache this store serves conversation-body reads from, when the
+    /// operation is allowed to use one (ADR-034). `None` is the default, the
+    /// whole-cache-off case, and every bulk operation alike — see
+    /// [`BackupStore::with_body_cache`].
+    body_cache: Option<std::sync::Arc<crate::body_cache::BodyCache>>,
 }
 
 impl BackupStore {
@@ -245,7 +250,11 @@ impl BackupStore {
 
     pub fn new(cfg: StoreConfig, machine: String) -> Self {
         Self::limit_parallelism(cfg.connections);
-        BackupStore { cfg, machine }
+        BackupStore {
+            cfg,
+            machine,
+            body_cache: None,
+        }
     }
 
     /// Construct a store for operations that inspect repository metadata across
@@ -257,7 +266,33 @@ impl BackupStore {
         BackupStore {
             cfg,
             machine: String::new(),
+            body_cache: None,
         }
+    }
+
+    /// Serve this store's conversation-body reads from `cache` (ADR-034).
+    ///
+    /// Deliberately a per-store decision rather than a global setting, because
+    /// whether a run may use the cache is a property of the *operation*: a
+    /// single-session read may fill it, while `export`, `verify`, `dest-init`
+    /// and `read --all-machines` are bulk work whose whole point is to be
+    /// independent of what happens to be cached. `verify` in particular reads
+    /// to prove the **remote** is intact, and a cache answering for the remote
+    /// would move the verdict onto the wrong disk.
+    ///
+    /// Callers pass [`crate::body_cache::for_operation`]; the default (no call)
+    /// is `None`, which is also what a store built for bulk work keeps.
+    pub fn with_body_cache(
+        mut self,
+        cache: Option<std::sync::Arc<crate::body_cache::BodyCache>>,
+    ) -> Self {
+        self.body_cache = cache;
+        self
+    }
+
+    /// The cache this store would serve body reads from, if any.
+    pub fn body_cache(&self) -> Option<&std::sync::Arc<crate::body_cache::BodyCache>> {
+        self.body_cache.as_ref()
     }
 
     /// Build the backend handles.
@@ -274,7 +309,21 @@ impl BackupStore {
             options.extend(self.cfg.options.iter().map(|(k, v)| (k.clone(), v.clone())));
             opts = opts.options(options);
         }
-        opts.to_backends().context("build backend options")
+        let backends = opts.to_backends().context("build backend options")?;
+        // ADR-034: the body cache sits *below* rustic, as a wrapper over the
+        // backend handles — the only seam where a conversation body can be
+        // observed as the remote's own ciphertext. `rustic_backend` hands back
+        // `Arc<dyn WriteBackend>`, so this needs no fork: the wrapper delegates
+        // every non-body operation unchanged.
+        let Some(cache) = &self.body_cache else {
+            return Ok(backends);
+        };
+        Ok(RepositoryBackends::new(
+            crate::body_cache::BodyCacheBackend::wrap(backends.repository(), Some(cache.clone())),
+            backends
+                .repo_hot()
+                .map(|hot| crate::body_cache::BodyCacheBackend::wrap(hot, Some(cache.clone()))),
+        ))
     }
 
     fn repo_exists(&self, backends: &RepositoryBackends) -> anyhow::Result<bool> {
@@ -539,6 +588,10 @@ impl BackupStore {
         if entries.is_empty() {
             return Err(anyhow!("session dir is empty in snapshot"));
         }
+        let _scope = declare_session_scope(
+            self.body_cache.as_ref(),
+            entries.iter().map(|(_, _, node)| node.meta.size).sum(),
+        );
 
         let mut concat = Vec::new();
         let mut hashes = Vec::new();
@@ -603,7 +656,8 @@ impl BackupStore {
                 crate::id::short_session_id(session_id)
             ));
         }
-        let (concat, hashes) = dump_shard_slots(&repo, &entries, &shards)?;
+        let (concat, hashes) =
+            dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
         Ok((concat, hashes))
     }
 
@@ -661,7 +715,8 @@ impl BackupStore {
                 if shards.is_empty() {
                     continue;
                 }
-                let (concat, hashes) = dump_shard_slots(&repo, &entries, &shards)?;
+                let (concat, hashes) =
+                    dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
                 out.insert((machine.clone(), session_id.to_string()), (concat, hashes));
             }
         }
@@ -704,6 +759,25 @@ pub(crate) fn session_shard_slots(
     shards
 }
 
+/// Declare the plaintext size of the session about to be dumped, so ADR-034's
+/// "a session larger than a tenth of the quota is never cached" rule can be
+/// applied by the cache to its *writes* while leaving reads alone.
+///
+/// The size is summed from the snapshot's own node metadata before a byte is
+/// fetched, so the rule is decided by the archive, not by what arrived. A
+/// missing or short size can only cause a store that would have been allowed —
+/// never a wrong read — and a shard larger than the whole quota is refused by
+/// the cache's own per-entry ceiling.
+///
+/// The returned guard restores the previous declaration when the dump ends, so
+/// a batch that dumps several sessions in one repository open stays correct.
+fn declare_session_scope<'a>(
+    body_cache: Option<&'a std::sync::Arc<crate::body_cache::BodyCache>>,
+    plaintext_bytes: u64,
+) -> Option<crate::body_cache::SessionScope<'a>> {
+    body_cache.map(|cache| cache.declare_session(plaintext_bytes))
+}
+
 /// Decrypt and concatenate the shards named by [`session_shard_slots`], with one
 /// sha256 per shard.
 ///
@@ -714,7 +788,15 @@ fn dump_shard_slots<S: rustic_core::IndexedFull>(
     repo: &Repository<S>,
     entries: &[(PathBuf, rustic_core::repofile::Node)],
     shards: &[(u64, usize, String)],
+    body_cache: Option<&std::sync::Arc<crate::body_cache::BodyCache>>,
 ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+    let _scope = declare_session_scope(
+        body_cache,
+        shards
+            .iter()
+            .map(|(_, idx, _)| entries[*idx].1.meta.size)
+            .sum(),
+    );
     let mut concat = Vec::new();
     let mut hashes = Vec::new();
     for (_, idx, name) in shards {

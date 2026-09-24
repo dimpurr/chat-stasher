@@ -47,6 +47,14 @@ toml_edit = "0.22"
 # as the `toml_edit` note above; appended for the same citation-stability
 # reason.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# The body cache sits *below* `rustic_core`, as a wrapper over its backend
+# trait, and that trait's read methods are typed in `bytes::Bytes`
+# (`ReadBackend::read_partial`). Naming the type in an `impl` requires a direct
+# edge to the crate that defines it. It is already in the lock file and the
+# build graph as `rustic_core`'s own dependency, so this adds no package —
+# only a direct edge. Appended for the same citation-stability reason as the
+# notes above.
+bytes = "1"
 tempfile = "3"
 
 [dev-dependencies]

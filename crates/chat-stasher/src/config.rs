@@ -166,6 +166,39 @@ pub struct Config {
     /// `config` and the second with `nack` `stage-unavailable`, because the fix
     /// a user has to apply is different in each case.
     pub native_host: Option<NativeHostConfig>,
+
+    /// The `[cache]` section: this machine's body cache (ADR-034).
+    ///
+    /// Distinct from `rustic_cache_dir` / `rustic_no_cache` above, which are
+    /// rustic's own **metadata** cache (snapshots, index, tree packs). This one
+    /// holds conversation **bodies** — the bytes that made a warm `read` of a
+    /// 107 MB session cost 22.6 s (W117) — and is one quota shared by every
+    /// destination on this machine, never an allowance per destination.
+    pub cache: Option<CacheSectionConfig>,
+}
+
+/// The `[cache]` section (ADR-034).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheSectionConfig {
+    /// How much disk this machine's body cache may occupy, before the least
+    /// recently used entries are evicted.
+    ///
+    /// Default: [`crate::body_cache::DEFAULT_MAX_BYTES`] (2 GiB). Write it as a
+    /// plain byte count, or with a unit: `"50GB"` is 50 × 10⁹ bytes and
+    /// `"50GiB"` is 50 × 2³⁰; both spellings are accepted so that a value meant
+    /// as one thing cannot be read as the other. `0` turns the cache off
+    /// entirely — reads then go to the remote as they did before ADR-034.
+    ///
+    /// The quota is not a promise about disk usage: it is enforced against the
+    /// bytes of the entry files, and the cache is disposable, so `cache clear`
+    /// reclaims all of it.
+    pub max_bytes: Option<crate::body_cache::CacheSize>,
+    /// Where the entries live. Default: this platform's cache directory
+    /// (`~/Library/Caches/chat-stasher/body` on macOS), which is deliberate —
+    /// ADR-034 requires a cache directory that takes part in no synchronisation
+    /// and no backup-of-record.
+    pub dir: Option<String>,
 }
 
 /// The `[native_host]` section.

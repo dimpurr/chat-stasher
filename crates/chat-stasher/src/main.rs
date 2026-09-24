@@ -3603,7 +3603,15 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         connections,
         &options,
     );
-    let store = BackupStore::for_metadata_query(cfg.clone());
+    // ADR-034: the dashboard is the other single-session body reader. Every
+    // route except `load` is metadata-tier, and only `load` reaches this cache.
+    let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
+        chat_stasher::body_cache::for_operation(
+            &config,
+            chat_stasher::body_cache::Policy::ReadThrough,
+        )
+        .handle(),
+    );
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -5682,10 +5690,25 @@ fn cmd_read(
         connections,
         options,
     );
+    // ADR-034: one session's body is exactly what the body cache is for, and
+    // `--all-machines` is exactly what it is not — that mode reads every
+    // session of every machine, so filling the cache from it would evict the
+    // sessions a user actually re-reads.
+    let cache_policy = if all_machines {
+        chat_stasher::body_cache::Policy::Bulk
+    } else {
+        chat_stasher::body_cache::Policy::ReadThrough
+    };
+    let body_cache = chat_stasher::body_cache::for_operation(&config, cache_policy);
     let store = match machine.as_deref() {
         Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
         None => BackupStore::for_metadata_query(cfg.clone()),
-    };
+    }
+    .with_body_cache(body_cache.handle());
+    println!(
+        "[read] body cache     : {}",
+        body_cache_state_line(&body_cache)
+    );
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -5752,6 +5775,9 @@ fn cmd_read(
                 return ExitCode::from(3);
             }
         };
+        if let Some(line) = body_cache_stats_line(&body_cache) {
+            println!("[read] body cache     : {line}");
+        }
         println!("[read] shards (seq order):");
         for (name, hash) in &hashes {
             println!("  {name}  sha256={hash}");
@@ -5770,6 +5796,57 @@ fn cmd_read(
     };
     reap_remote(&cfg, keep_ssh_masters);
     code
+}
+
+/// One line saying whether this run used the body cache — and if not, which of
+/// the three different reasons applies (ADR-034).
+///
+/// The three off states are worded apart on purpose: a user who set a quota and
+/// sees `off` must be able to tell "I turned it off" from "this command is
+/// bulk" from "your configured location is broken", because only the last one
+/// is a problem to fix.
+fn body_cache_state_line(availability: &chat_stasher::body_cache::Availability) -> String {
+    use chat_stasher::body_cache::Availability;
+    match availability {
+        Availability::On(cache) => format!(
+            "on (quota={} B, root={})",
+            cache.max_bytes(),
+            cache.root().display()
+        ),
+        Availability::Off => "off (cache.max_bytes = 0)".to_string(),
+        Availability::Bulk => "not used (bulk read, ADR-034)".to_string(),
+        Availability::Unresolved(why) => {
+            format!("unavailable ({why}); this read goes to the remote uncached")
+        }
+    }
+}
+
+/// What the cache did during this run, or `None` when it was not installed.
+///
+/// `usage` is reported separately from the counters because it is a
+/// measurement of the disk, and it can fail on its own: an unreadable
+/// directory prints as unreadable, never as 0 bytes.
+fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) -> Option<String> {
+    use chat_stasher::body_cache::Availability;
+    let Availability::On(cache) = availability else {
+        return None;
+    };
+    let stats = cache.stats();
+    let usage = match cache.usage() {
+        Ok(usage) => format!("{} B in {} entries", usage.bytes, usage.entries),
+        Err(e) => format!("<unreadable> {e}"),
+    };
+    Some(format!(
+        "hits={} misses={} corrupt={} stored={} skipped_too_large={} skipped_session={} errors={} usage={}",
+        stats.hits,
+        stats.misses,
+        stats.corrupt,
+        stats.stored,
+        stats.skipped_too_large,
+        stats.skipped_session,
+        stats.errors,
+        usage
+    ))
 }
 
 /// `read --all-machines` — group every snapshot by hostname, take each
