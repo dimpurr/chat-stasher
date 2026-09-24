@@ -56,7 +56,12 @@ fn synthetic_shard(lines: usize, line_bytes: usize, tag: &str) -> Vec<u8> {
 
 /// Write the same sealed stage into `repo` under `mk`, then return the
 /// repository's `(data blob ids, pack ids)`.
-fn push_and_read_ids(repo: &Path, key: &Path, mk: &MasterKey, stage: &Path) -> (BTreeSet<String>, BTreeSet<PackId>) {
+fn push_and_read_ids(
+    repo: &Path,
+    key: &Path,
+    mk: &MasterKey,
+    stage: &Path,
+) -> (BTreeSet<String>, BTreeSet<PackId>) {
     store::persist_key_file(&cfg(repo, key), mk).expect("persist key");
     let store = BackupStore::new(cfg(repo, key), "w120-premise".to_string());
     let summary = store.push(stage, mk).expect("push fixture");
@@ -121,10 +126,18 @@ fn same_content_different_keys_same_data_blob_ids_different_pack_ids() {
 
     let mk_a = MasterKey::new();
     let mk_b = MasterKey::new();
-    let (blobs_a, packs_a) =
-        push_and_read_ids(&root.join("repo-a"), &root.join("key-a.json"), &mk_a, &stage);
-    let (blobs_b, packs_b) =
-        push_and_read_ids(&root.join("repo-b"), &root.join("key-b.json"), &mk_b, &stage);
+    let (blobs_a, packs_a) = push_and_read_ids(
+        &root.join("repo-a"),
+        &root.join("key-a.json"),
+        &mk_a,
+        &stage,
+    );
+    let (blobs_b, packs_b) = push_and_read_ids(
+        &root.join("repo-b"),
+        &root.join("key-b.json"),
+        &mk_b,
+        &stage,
+    );
 
     println!(
         "premise: data blobs a={} b={} shared={} · packs a={} b={} shared={}",
