@@ -290,8 +290,14 @@ impl ExportReport {
     /// [`crate::search::SearchReport::answer_complete`]: a run that wrote files and also found
     /// a session it could not place, or a session it could not write, has not
     /// answered the question and must not exit 0.
+    ///
+    /// A session with no conversation content (dimension `no_content`) is the
+    /// one exception: it is a proven non-match for any window, so it does not
+    /// leave the answer open (ADR-035).
     pub fn answer_complete(&self) -> bool {
-        self.complete() && self.not_placed.is_empty() && self.failed.is_empty()
+        self.complete()
+            && self.not_placed.iter().all(|u| u.dimension == "no_content")
+            && self.failed.is_empty()
     }
 
     /// The exit status this run returns, also recorded in the manifest so the
@@ -756,6 +762,7 @@ pub fn export_sessions(
                 dimension: match u.dimension {
                     UnplacedBy::Time => "time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::NoContent => "no_content",
                 },
                 why: u.why.clone(),
             })

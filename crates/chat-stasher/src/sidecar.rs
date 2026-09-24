@@ -161,6 +161,7 @@ pub fn to_overview_row(row: &ActivityRow) -> OverviewRow {
                 OverviewTimeSource::Messages { exact: *exact }
             }
             ActivityTimeSource::ListUpdated => OverviewTimeSource::ListUpdated,
+            ActivityTimeSource::NoConversationContent => OverviewTimeSource::NoConversationContent,
             ActivityTimeSource::Unknown { why } => OverviewTimeSource::Unknown { why: why.clone() },
         },
     }
