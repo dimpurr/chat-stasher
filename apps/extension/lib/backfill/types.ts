@@ -1481,6 +1481,22 @@ export interface BackfillState {
    * attempt has an answer on disk.
    */
   haltRetried?: HaltRetry;
+  /**
+   * 🔴 W98 · **The one-time re-enumeration migrations this scope has already run**,
+   * keyed by migration id and carrying the moment each ran (ms).
+   *
+   * Why it is a map on the header rather than a boolean: a migration is a
+   * *versioned* repair, and a second, later parser fix must be able to run even
+   * though the first already did. A single flag could only ever say "something was
+   * re-listed once"; keyed by id, each fix is independent and the mechanism is
+   * reusable by any platform (the platform half of the key is simply the header
+   * this record lives on). See `REENUMERATE_MIGRATIONS` in lib/backfill/ledger.ts.
+   *
+   * Optional: a state written before W98 has no such field and reads back as `{}`
+   * ⇒ no migration has run, byte-identical to before, with no version bump and no
+   * progress invalidated.
+   */
+  reenumerated?: Record<string, number>;
   /** Non-null means this leg has stopped and left a trace. */
   halted: HaltRecord | null;
 }
@@ -1502,6 +1518,7 @@ export function initialState(platform: string, scope: string): BackfillState {
     lastFetchAt: { enumerate: null, detail: null },
     failures: [],
     failuresDropped: 0,
+    reenumerated: {},
     halted: null,
   };
 }
@@ -1554,6 +1571,8 @@ export interface BackfillHeader {
   haltExpired?: HaltExpiry;
   /** W59b · Same meaning and same compatibility rule as `BackfillState.haltRetried`; spelled out here so a change to one is forced to be a change to the other. */
   haltRetried?: HaltRetry;
+  /** W98 · Same meaning and same compatibility rule as `BackfillState.reenumerated`; spelled out here so a change to one is forced to be a change to the other. */
+  reenumerated?: Record<string, number>;
   halted: HaltRecord | null;
 }
 
@@ -1591,6 +1610,7 @@ export function headerOf(state: BackfillState): BackfillHeader {
     relisted: state.relisted,
     haltExpired: state.haltExpired,
     haltRetried: state.haltRetried,
+    reenumerated: state.reenumerated,
     halted: state.halted,
   };
 }
@@ -1630,8 +1650,19 @@ export function stateFrom(header: BackfillHeader, pending: string[], archived: s
     relisted: header.relisted,
     haltExpired: header.haltExpired,
     haltRetried: header.haltRetried,
+    // 🔴 W98 · A record written before this field reads back as `{}` ("no re-enumeration
+    //    migration has run here"), never as a missing value that a lookup would treat
+    //    differently. A value that is not a plain object is the same fact: what sits at
+    //    a storage key can be anything, and "we cannot say a migration ran" is not
+    //    "it ran".
+    reenumerated: isMigrationMarker(header.reenumerated) ? { ...header.reenumerated } : {},
     halted: header.halted,
   };
+}
+
+/** Is this a plain object usable as the `reenumerated` marker map (not an array, not null)? */
+function isMigrationMarker(value: unknown): value is Record<string, number> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function isHeader(value: unknown): value is BackfillHeader {

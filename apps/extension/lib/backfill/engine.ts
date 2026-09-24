@@ -49,7 +49,7 @@ import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import type { BackfillStore } from './store';
-import { openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
+import { applyReenumerations, openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
 import {
   dayKeyOf,
   haltClassOf,
@@ -882,6 +882,43 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const persist = async (s: BackfillState): Promise<void> => {
     await ledger.save(s);
   };
+
+  /**
+   * 🔴 W98 · **The one-time re-enumeration a parser fix owes a ledger that predates
+   * it, and it happens before anything in this run reads the cursor.**
+   *
+   * A scope whose list was fully enumerated and whose bodies an old parser then
+   * refused has `enumCursor.complete === true`; nothing reads the list again, and
+   * each refused id was dropped, so those conversations are never backfilled. The
+   * fix cannot reach them without re-reading the list once. `migrationsDue` /
+   * `applyReenumerations` (lib/backfill/ledger.ts) decide that "once" by a marker
+   * keyed by platform + migration id, and this is where the decision is taken.
+   *
+   * 🔴 It is applied **before the halt block below**, on purpose. The reset is a
+   *    ledger migration, not a fetch: it is also owed on a scope that is currently
+   *    stopped, and leaving it unmade because a halt returns early would mean the
+   *    repair waits on a record a human controls. The marker is written in the same
+   *    header write as the reset, so a run that stops right here cannot leave the
+   *    migration half-done — and the cursor it reset is already what the next run
+   *    reads.
+   *
+   * 🔴 Nothing is fetched by this write and no id is touched: `enqueueDebts` below is
+   *    what brings back only the ids in neither `pending` nor `archived`, on whatever
+   *    pages the ordinary list pacer and daily caps allow.
+   *
+   * 🔴 The log line names only the platform and the migration id. The scope is an
+   *    account identifier and never goes into a log (see the repo's data rules).
+   */
+  const reenumerated = applyReenumerations(state, clock.now());
+  if (reenumerated.length > 0) {
+    await persist(state);
+    for (const migration of reenumerated) {
+      console.warn(
+        `[chat-stasher] backfill re-enumerating ${migration.platform} once (${migration.id}):`
+        + ' the enumeration cursor was reset so ids dropped before this fix can be listed again',
+      );
+    }
+  }
 
   // 🔴 C19 · BUG-3: seed both pacers with the persisted "moment of the last fetch",
   // so the interval takes effect across ticks.
