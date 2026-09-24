@@ -6,7 +6,58 @@ browser extension has its own version and ships on its own schedule; see
 
 ## Unreleased — 0.4.0
 
-Nothing yet.
+### CLI
+
+#### Added
+
+- `activity-index --rebuild --destination … --machine …` rebuilds that machine's
+  activity index from every archived snapshot. It is safe to rerun but starts
+  over rather than resuming, and restarts if the same machine pushes during the
+  rebuild. From issue #2.
+- `search --json` and export manifests report per-machine recall with
+  `located`, `time_unknown` and `index_trusted`; daily manifest entries also
+  report `unknown_anywhere`. A `WARN` goes to stderr when at least half of a
+  machine's candidate sessions have unknown time. From issue #2.
+- `overview` and `status --destination …` show each machine's last writer
+  version and flag versions behind the newest writer.
+
+#### Changed
+
+- Conversation time is now derived from message timestamps for ChatGPT, Claude,
+  Gemini, DeepSeek, Grok, Perplexity and Kimi web captures. Export manifests
+  mark `time_source` as `messages` or `list-updated`, and numeric epochs are
+  interpreted as absolute timestamps. From issue #3.
+
+#### Fixed
+
+- `install-native-host --stage …` appends with the file's dominant line ending
+  and refuses a dotted or implicit `stage` table.
+
+### Browser extension (first stable release, 0.2.0)
+
+#### Added
+
+- Stable releases now ship the extension for ChatGPT, Claude, DeepSeek, Gemini
+  and Grok; Perplexity and Kimi are available in development builds.
+- Perplexity conversation bodies can be archived in development builds when the
+  response proves the body is complete; incomplete or unproven bodies are
+  refused.
+
+#### Changed
+
+- Claude history backfill now archives verified active branches, re-lists once
+  to recover conversations an earlier walk dropped, and works from a newly
+  opened `claude.ai/new` page by resolving its organization from that page.
+- Gemini history listing now continues beyond the former request-body size cap.
+- Backfill rotates fairly across platforms and accounts by least-recent service.
+  Turning it off is honored during an active run, and the popup switch sends
+  alarm changes through the worker's single synchronization queue.
+
+#### Fixed
+
+- An empty conversation no longer stops platform backfill: its id stays owed
+  until a real body is archived, while three consecutive empty bodies halt the
+  run as a signal that the endpoint may have changed.
 
 ## 0.3.0 — 2026-09-24
 

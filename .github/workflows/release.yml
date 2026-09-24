@@ -161,12 +161,35 @@ jobs:
       - name: Gate — full release gate
         run: bash scripts/release-gate.sh
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23.10.0
+          cache: pnpm
+          cache-dependency-path: apps/extension/pnpm-lock.yaml
+
+      - name: Install extension dependencies
+        working-directory: apps/extension
+        run: pnpm install --frozen-lockfile
+
+      - name: Build stable extension zip
+        working-directory: apps/extension
+        run: |
+          set -euo pipefail
+          unset CS_RELEASE_CHANNEL
+          pnpm zip
+
       - name: Build release binaries (aarch64 + x86_64)
         run: |
           cargo build --release --target aarch64-apple-darwin
           cargo build --release --target x86_64-apple-darwin
 
-      - name: Stage artifacts (binaries + SHA256SUMS)
+      - name: Stage artifacts (binaries + stable extension + SHA256SUMS)
         run: |
           set -euo pipefail
 
@@ -176,10 +199,29 @@ jobs:
           #   ARTIFACT = "chat-stasher-${TARGET}"
           ARTIFACT_ARM64="chat-stasher-darwin-arm64"
           ARTIFACT_X86="chat-stasher-darwin-x86_64"
+          EXT_VERSION="$(node -p "require('./apps/extension/package.json').version")"
+          EXT_ASSET="chat-stasher-extension-${EXT_VERSION}.zip"
 
           mkdir -p dist
           cp "target/aarch64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_ARM64"
           cp "target/x86_64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_X86"
+          EXT_ZIP="$(find apps/extension/.output -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          if [ -z "$EXT_ZIP" ]; then
+            echo "error: extension zip was not produced" >&2
+            exit 1
+          fi
+          cp "$EXT_ZIP" "dist/$EXT_ASSET"
+
+          # The stable extension manifest must not include experimental origins.
+          unzip -p "dist/$EXT_ASSET" manifest.json | python3 -c '
+          import json, sys
+          manifest = json.load(sys.stdin)
+          serialized = json.dumps(manifest).lower()
+          forbidden = [origin for origin in ("perplexity.ai", "kimi.com") if origin in serialized]
+          if forbidden:
+              raise SystemExit("error: stable extension manifest includes experimental origins: " + ", ".join(forbidden))
+          print("stable extension manifest OK: no experimental origins")
+          '
 
           # Guard against a mislabeled binary: assert each Mach-O is really its architecture
           file "dist/$ARTIFACT_ARM64" | grep -q 'arm64' || {
@@ -198,11 +240,11 @@ jobs:
           # one "<hex>  <filename>" line per asset. `shasum -a 256` emits the
           # same two-space separator release-artifacts.sh produces locally
           # (scripts/release-artifacts.sh:52).
-          ( cd dist && shasum -a 256 "$ARTIFACT_ARM64" "$ARTIFACT_X86" > SHA256SUMS )
+          ( cd dist && shasum -a 256 "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET" > SHA256SUMS )
 
           # Self-check with install.sh's own awk: the digest for each artifact
           # must be present, or installs would hard-fail at install.sh:81-84.
-          for art in "$ARTIFACT_ARM64" "$ARTIFACT_X86"; do
+          for art in "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET"; do
             EXPECTED="$(awk -v a="$art" '$2 == a { print $1 }' dist/SHA256SUMS)"
             [ -n "$EXPECTED" ] || {
               echo "error: SHA256SUMS has no entry for '${art}'" >&2
@@ -214,14 +256,10 @@ jobs:
           ls -l dist
           cat dist/SHA256SUMS
 
-          # 🔴 The release ships the CLI only. The browser extension is NOT an
-          # asset — it is distributed as an unpacked development build until at
-          # least four platforms deliver data to the CLI (RELEASING.md). Nothing
-          # above can produce an extension file today; this assertion is what
-          # keeps that true if someone later adds a build step to this workflow,
-          # because "the asset list looks right" is not something a reviewer
-          # checks on a diff that only adds a step.
-          expected="$(printf '%s\n' "$ARTIFACT_ARM64" "$ARTIFACT_X86" SHA256SUMS | sort)"
+          # The extension joins stable releases only as a stable-channel zip.
+          # Keep the uploaded set closed so a dev-channel build or stray file
+          # cannot become an unreviewed release asset.
+          expected="$(printf '%s\n' "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET" SHA256SUMS | sort)"
           actual="$(ls dist | sort)"
           if [ "$expected" != "$actual" ]; then
             echo "error: unexpected release assets in dist/ — expected exactly:" >&2
@@ -230,7 +268,7 @@ jobs:
             printf '%s\n' "$actual" >&2
             exit 1
           fi
-          echo "asset set OK: CLI binaries + SHA256SUMS only (no extension)"
+          echo "asset set OK: CLI binaries + stable extension zip + SHA256SUMS"
       - name: Create Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -282,5 +320,5 @@ jobs:
             gh release create "$TAG" dist/* \
               ${RC_FLAG:+--prerelease} \
               --title "chat-stasher v${VERSION}" \
-              --notes "Prebuilt binaries for macOS (aarch64-apple-darwin and x86_64-apple-darwin) plus SHA256SUMS. See docs/install.md for installation."
+              --notes "Prebuilt macOS CLI binaries, the stable browser extension zip, and SHA256SUMS. See docs/install.md for installation."
           fi
