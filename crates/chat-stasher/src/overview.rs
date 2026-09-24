@@ -40,13 +40,19 @@ const UNKNOWN: char = '?';
 )]
 pub enum TimeSource {
     Exact,
-    Inferred { how: String },
+    Inferred {
+        how: String,
+    },
     /// Web chat harness: span derived from per-message timestamps.
-    Messages { exact: bool },
+    Messages {
+        exact: bool,
+    },
     /// Web chat harness: span from the conversation list's update time only.
     #[serde(rename = "list-updated")]
     ListUpdated,
-    Unknown { why: String },
+    Unknown {
+        why: String,
+    },
 }
 
 impl From<&crate::activity::TimeSource> for TimeSource {

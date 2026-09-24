@@ -190,9 +190,7 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
 
     let time_source = if first.is_some() {
         if any_messages {
-            TimeSource::Messages {
-                exact: any_rfc3339,
-            }
+            TimeSource::Messages { exact: any_rfc3339 }
         } else if any_list {
             // A list-only span is low confidence by construction; it is never
             // reported as an exact/inferred message interval.
@@ -562,7 +560,10 @@ enum EpochMode {
     Rfc3339,
     /// Local-wall-clock epoch seconds at a fixed measured offset; unix = value −
     /// offset. The declared zone label is attached to every stamp.
-    NaiveLocal { offset_seconds: i64, label: &'static str },
+    NaiveLocal {
+        offset_seconds: i64,
+        label: &'static str,
+    },
 }
 
 /// DeepSeek's numeric timestamps were measured at +08:00 by the owner (the
@@ -763,7 +764,10 @@ fn array_at<'a>(payload: &'a serde_json::Value, path: &str) -> Option<&'a Vec<se
 /// {create_time}}}}`. `create_time` is a (possibly fractional) epoch second.
 fn chatgpt_span(payload: &serde_json::Value) -> WebSpan {
     let mut msg = Stamps::default();
-    if let Some(mapping) = payload.get("mapping").and_then(serde_json::Value::as_object) {
+    if let Some(mapping) = payload
+        .get("mapping")
+        .and_then(serde_json::Value::as_object)
+    {
         for node in mapping.values() {
             if let Some(ct) = node.get("message").and_then(|m| m.get("create_time")) {
                 msg.add(ct, EpochMode::Absolute);
@@ -886,10 +890,7 @@ fn grok_span(payload: &serde_json::Value) -> WebSpan {
 /// RFC 3339 strings.
 fn perplexity_span(payload: &serde_json::Value) -> WebSpan {
     let mut msg = Stamps::default();
-    if let Some(entries) = payload
-        .get("entries")
-        .and_then(serde_json::Value::as_array)
-    {
+    if let Some(entries) = payload.get("entries").and_then(serde_json::Value::as_array) {
         msg.add_field(entries.iter(), "updated_datetime", EpochMode::Rfc3339);
     }
     if msg.has() {
@@ -929,10 +930,7 @@ fn kimi_span(payload: &serde_json::Value) -> WebSpan {
             }
         }
     }
-    if let Some(items) = payload
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-    {
+    if let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) {
         if items.len() == 1 {
             if let Some(chat) = items[0].get("chat") {
                 for field in ["createTime", "updateTime"] {
@@ -1044,7 +1042,16 @@ fn parse_batchexecute_frames(body: &str) -> Vec<serde_json::Value> {
         let line_end = body[pos..].find('\n').map_or(body.len(), |i| pos + i);
         let line = &body[pos..line_end];
         if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) {
-            let len: usize = line.parse().unwrap_or(0);
+            let Ok(len) = line.parse::<usize>() else {
+                // A length that does not fit in a usize cannot be a frame we
+                // could read; move past the line rather than inventing a zero.
+                pos = if line_end < body.len() {
+                    line_end + 1
+                } else {
+                    body.len()
+                };
+                continue;
+            };
             let start = if body[line_end..].starts_with('\n') {
                 line_end + 1
             } else {
@@ -1588,7 +1595,11 @@ mod tests {
         .to_string();
         let line = web_line("deepseek", &body);
         let a = analyze_session("deepseek", &[line.as_str()]);
-        assert_eq!(a.first_unix, Some(T1), "the +08:00 value must be shifted to UTC");
+        assert_eq!(
+            a.first_unix,
+            Some(T1),
+            "the +08:00 value must be shifted to UTC"
+        );
         assert_eq!(a.last_unix, Some(T2));
         assert_eq!(a.source_zone.as_deref(), Some("+08:00"));
         assert_eq!(a.time_source, TimeSource::Messages { exact: false });
@@ -1674,8 +1685,15 @@ mod tests {
         // turn[4] = [seconds, nanos]; payload[0] is the turns array.
         let turn = |secs: i64| serde_json::json!([["c_x", "r_y"], null, null, null, [secs, 0]]);
         let inner = serde_json::json!([[turn(T1), turn(T2)]]);
-        let entry =
-            serde_json::json!(["wrb.fr", "hNvQHb", inner.to_string(), null, null, null, "generic"]);
+        let entry = serde_json::json!([
+            "wrb.fr",
+            "hNvQHb",
+            inner.to_string(),
+            null,
+            null,
+            null,
+            "generic"
+        ]);
         let frame = serde_json::json!([entry]).to_string();
         let page = format!(")]}}'\n\n{}\n{}", frame.len(), frame);
         let bundle = serde_json::json!({
@@ -1726,8 +1744,15 @@ mod tests {
         // payload[2] = items, item[5] = [seconds, nanos].
         let item = |secs: i64| serde_json::json!([null, "t", null, null, null, [secs, 0]]);
         let inner = serde_json::json!([[], null, [item(T1)]]);
-        let entry =
-            serde_json::json!(["wrb.fr", "MaZiqc", inner.to_string(), null, null, null, "generic"]);
+        let entry = serde_json::json!([
+            "wrb.fr",
+            "MaZiqc",
+            inner.to_string(),
+            null,
+            null,
+            null,
+            "generic"
+        ]);
         let frame = serde_json::json!([entry]).to_string();
         let page = format!(")]}}'\n\n{}\n{}", frame.len(), frame);
         let bundle = serde_json::json!({ "pages": [page] }).to_string();

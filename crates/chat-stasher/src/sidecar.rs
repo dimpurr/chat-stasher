@@ -257,7 +257,7 @@ mod tests {
             last_unix: Some(2),
             line_count: 3,
             time_source: ActivityTimeSource::Exact,
-        source_zone: None,
+            source_zone: None,
         };
         let o = to_overview_row(&exact);
         assert_eq!(o.session_id, "s1");
