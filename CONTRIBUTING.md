@@ -168,6 +168,24 @@ before `--update` and confirm they belong to the claim.
 failures defeats the check; the whole point of the sequence above is that the drift
 check gets a chance to be red first.
 
+For a branch whose documentation changes are citation coordinates only, use
+`bash scripts/dev/rebase-onto-main.sh [--onto <ref>]`. It refuses a dirty
+worktree, preserves the original SHA if rebasing or checking fails, and takes
+the onto side for conflicts in `README.md`, `docs/*.md`, and
+`docs/citations.lock`. Before rebasing, it compares the branch's changed
+Markdown with the onto version after normalizing citation line ranges; any
+remaining difference is reported as prose to re-apply by hand. Code conflicts
+abort and restore the original SHA. A relocation that needs a human leaves the
+branch rebased and uncommitted so the reported citations can be reviewed. A
+successful run commits `Relocate citations after rebasing onto main`.
+
+The workflow's throwaway-repository self-test covers citation conflicts,
+prose refusal, and code-conflict rollback:
+
+```sh
+bash scripts/dev/test-rebase-onto-main.sh
+```
+
 ## Reloading the extension during development
 
 Chrome only re-reads a manifest when the version changes — its "Update" button
