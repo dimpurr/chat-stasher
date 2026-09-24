@@ -453,7 +453,10 @@ fn no_content_section_renders_when_time_unknown_is_zero() {
             machine,
         ],
     );
-    assert!(indexed.status.success(), "activity-index failed: {indexed:?}");
+    assert!(
+        indexed.status.success(),
+        "activity-index failed: {indexed:?}"
+    );
     let pushed = run(
         sb.path(),
         &[
@@ -475,11 +478,25 @@ fn no_content_section_renders_when_time_unknown_is_zero() {
     let (status, html) = ui.get("/");
     assert_eq!(status, 200);
     assert!(html.contains("<h2>No conversation content</h2>"), "{html}");
-    assert!(!html.contains("every session in view has a recorded conversation time"), "{html}");
+    assert!(
+        !html.contains("every session in view has a recorded conversation time"),
+        "{html}"
+    );
     let (status, json) = ui.get("/api/overview");
     assert_eq!(status, 200);
     let overview: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(overview["summary"]["time_unknown"], serde_json::json!(0));
+    let (status, sessions) = ui.get("/api/sessions");
+    assert_eq!(status, 200);
+    let sessions: serde_json::Value = serde_json::from_str(&sessions).unwrap();
+    assert_eq!(
+        sessions["sessions"][0]["first_unix"]["kind"],
+        "no_conversation_content"
+    );
+    assert_eq!(
+        sessions["sessions"][0]["last_unix"]["kind"],
+        "no_conversation_content"
+    );
 }
 
 /// **The pin.** A drill-down link and `chat-stasher search` with the same flags

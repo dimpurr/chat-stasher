@@ -1448,8 +1448,8 @@ fn json_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
             "session_short_id": s.short_id,
             "shards": s.shard_count,
             "bytes": s.bytes,
-            "first_unix": time_state(s.first_unix, s.time_why.as_deref()),
-            "last_unix": time_state(s.last_unix, s.time_why.as_deref()),
+            "first_unix": time_state(s.first_unix, s.time_why.as_deref(), &s.time_source),
+            "last_unix": time_state(s.last_unix, s.time_why.as_deref(), &s.time_source),
             "line_count": s.line_count,
             "archive_time_unix": s.archive_time_unix,
             "href": format!("/session?i={}&token={}", s.index, percent_encode(token)),
@@ -1499,9 +1499,16 @@ fn json_filter_error(data: &UiData, e: &UsageError) -> String {
     }))
 }
 
-fn time_state(unix: Option<i64>, why: Option<&str>) -> crate::json_out::TimeState {
+fn time_state(
+    unix: Option<i64>,
+    why: Option<&str>,
+    source: &TimeSource,
+) -> crate::json_out::TimeState {
     match unix {
         Some(unix) => crate::json_out::TimeState::known(unix),
+        None if source.is_no_conversation_content() => {
+            crate::json_out::TimeState::no_conversation_content()
+        }
         None => crate::json_out::TimeState::unknown(
             why.unwrap_or("no conversation time was recorded for this session")
                 .to_string(),

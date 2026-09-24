@@ -586,9 +586,22 @@ fn no_content_activity_row_survives_real_search_index_read() {
 
     let result = search_sessions(&store, &mk, &Selector::default()).unwrap();
     assert_eq!(result.hits.len(), 1);
-    assert_eq!(result.hits[0].time_source, TimeSource::NoConversationContent);
+    assert_eq!(
+        result.hits[0].time_source,
+        TimeSource::NoConversationContent
+    );
     assert_eq!(result.hits[0].time_why, None);
     assert_eq!(result.machine_window_summary()[0].time_unknown, 0);
+    let json: serde_json::Value =
+        serde_json::from_str(&chat_stasher::search::report_json(&result, false)).unwrap();
+    assert_eq!(
+        json["sessions"][0]["first_unix"]["kind"],
+        "no_conversation_content"
+    );
+    assert_eq!(
+        json["sessions"][0]["last_unix"]["kind"],
+        "no_conversation_content"
+    );
 
     let window = search_sessions(
         &store,

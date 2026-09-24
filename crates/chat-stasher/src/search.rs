@@ -589,8 +589,12 @@ impl SearchReport {
 /// Lives here rather than in the CLI so the shape is testable without a
 /// repository, exactly like [`crate::view::render_json`].
 pub fn report_json(report: &SearchReport, cost: bool) -> String {
-    let time_state = |unix: Option<i64>, why: Option<&str>| match unix {
+    let time_state = |unix: Option<i64>, why: Option<&str>, source: &ActivityTimeSource| match unix
+    {
         Some(unix) => crate::json_out::TimeState::known(unix),
+        None if source.is_no_conversation_content() => {
+            crate::json_out::TimeState::no_conversation_content()
+        }
         None => crate::json_out::TimeState::unknown(
             why.unwrap_or("no conversation time was recorded for this session")
                 .to_string(),
@@ -608,8 +612,8 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "bytes": h.bytes,
                 "snapshot_short_id": h.short_snapshot(),
                 "archive_time_unix": h.archive_time_unix,
-                "first_unix": time_state(h.first_unix, h.time_why.as_deref()),
-                "last_unix": time_state(h.last_unix, h.time_why.as_deref()),
+                "first_unix": time_state(h.first_unix, h.time_why.as_deref(), &h.time_source),
+                "last_unix": time_state(h.last_unix, h.time_why.as_deref(), &h.time_source),
             })
         })
         .collect();
