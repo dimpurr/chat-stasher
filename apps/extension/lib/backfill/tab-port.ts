@@ -815,14 +815,6 @@ export async function serveBackfillFetch(
       : { method: 'GET' };
     // 🔴 A GET segment keeps C22's call byte for byte: pass the url only, not one argument more.
     const res = verdict.method === 'GET' ? await fetchImpl(verdict.url) : await fetchImpl(verdict.url, init);
-    const text = await res.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
-      // The same size red line as the live leg: an over-large response is not conversation JSON.
-      return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
-    }
-    // 🔴 W64c · The one fact the engine cannot derive is passed on here, and only when
-    //    it is claimed (`true`). A response that carries nothing stays a reply of
-    //    exactly the shape it was.
     // 🔴 W127 · The platform's `Retry-After`, when the page-side fetch could read it,
     //    is forwarded as the raw header value and bounded in length. The engine parses
     //    and clamps it (`parseRetryAfterMs`, types.ts); a value that is not a short
@@ -830,12 +822,46 @@ export async function serveBackfillFetch(
     const retryAfter = typeof res.retryAfter === 'string' && res.retryAfter.length <= RETRY_AFTER_HEADER_MAX_CHARS
       ? res.retryAfter
       : null;
+    /**
+     * 🔴 W127b · **A 429/503 carries its status and `Retry-After` independently of
+     * its body.** Those are the two statuses RFC 9110 defines `Retry-After` for,
+     * and the engine only reads the header on them (`retryAfterMsFor`). Reading
+     * the body first meant a body-read failure or an over-`MAX_RAW_BYTES` body
+     * turned the whole reply into `{ok:false}`, which `tabHttpPort` throws and the
+     * engine records as `transport-error` — a shorter, unrequested retry instead
+     * of the rate-limit the platform asked us to wait out.
+     *
+     * So on these two statuses the body is best-effort: an unreadable or
+     * oversized one is replaced by the empty string, which the non-2xx branch
+     * never parses anyway. Every other status keeps the old contract — a body
+     * that cannot be read or measured is a transport failure, not an empty
+     * conversation.
+     */
+    const status = res.status;
+    const rateLimited = status === 429 || status === 503;
+    const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
+    let text: string;
+    try {
+      text = await res.text();
+      if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
+        // The same size red line as the live leg: an over-large response is not conversation JSON.
+        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+        return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
+      }
+    } catch (err) {
+      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+      // Only the technical detail goes back, never the body.
+      return { ok: false, error: (err as Error).message };
+    }
+    // 🔴 W64c · The one fact the engine cannot derive is passed on here, and only when
+    //    it is claimed (`true`). A response that carries nothing stays a reply of
+    //    exactly the shape it was.
     return {
       ok: true,
-      status: res.status,
+      status,
       text,
       ...(res.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
-      ...(retryAfter === null ? {} : { retryAfter }),
+      ...carryRetryAfter,
     };
   } catch (err) {
     // Only the technical detail goes back, never the body.
