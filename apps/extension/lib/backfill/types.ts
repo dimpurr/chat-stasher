@@ -1335,6 +1335,22 @@ export interface BackfillState {
      */
     token?: string | null;
     truncated?: EnumTruncation;
+    /**
+     * 🔴 W124 · **The ids of the first page of the current enumeration pass**, for
+     * the repeat-page guard (engine.ts).
+     *
+     * The guard has to tell "the server handed the first page back" (the parameter
+     * did not move ⇒ `shape-changed`) from "this page's ids are already owed"
+     * (which is normal during the W98 re-enumeration — its last page is the tail the
+     * previous run never finished). Only the first page of the pass settles that, so
+     * it is recorded here and compared against later pages.
+     *
+     * Optional: a header written before W124 carries none, and the guard is then off
+     * for the rest of that pass — the safe direction, since the halt is permanent and
+     * the pass still ends at the real short/empty page. A cursor reset (migration or
+     * `recoverLedgerLoss`) clears the field with the rest of `enumCursor`.
+     */
+    firstPageIds?: string[];
   };
   /** Debts: conversation ids that were enumerated but whose body has not been fetched. */
   pending: string[];
@@ -1557,7 +1573,8 @@ export interface BackfillHeader {
   scope: string;
   totalKnown: number | null;
   totalSource: TotalSource;
-  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation };
+  /** W124 · Same meaning and same compatibility rule as `BackfillState.enumCursor.firstPageIds`. */
+  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation; firstPageIds?: string[] };
   /** How many debts were still owed when this header was written. */
   pendingCount: number;
   /** How many conversations had been settled when this header was written. */

@@ -1642,17 +1642,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       : cursorMode
         ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
         : `list offset=${state.enumCursor.offset}`;
-  /**
-   * 🔴 W21 · **Every id this enumeration has handed us**, for the repeat-page guard.
-   *
-   * Why a run-local set on top of `state.pending` / `state.archived`, which
-   * already hold the ids earlier pages produced: those two are the *persisted*
-   * record, and an id can leave them without being settled (`dropDebt` on a
-   * failed delivery removes it from pending and does not archive it). This set
-   * makes "already seen in this enumeration" true for the whole run regardless of
-   * what later happened to the debt, which is the narrower and safer reading.
-   */
-  const seenThisEnumeration = new Set<string>();
   while (
     !state.enumCursor.complete
     && state.enumCursor.truncated === undefined
@@ -1752,9 +1741,38 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * that treated "a page came back" as progress would re-enumerate the same
      * conversations on every tick forever while the ledger said it was advancing.
      *
-     * The symptom is decidable without knowing which shape is right: **on a
-     * non-first page, a page whose ids this enumeration has already seen means the
-     * cursor did not move.**
+     * 🔴 W31 · **The same question, asked of an offset-paged plan**
+     *    (`listOffsetInferred`: claude.ai). There is no token to hold; the
+     *    parameter that must move is the `offset` this plan's own URL builder
+     *    emits. The condition is `offset > 0` rather than "we hold a token", and
+     *    everything else, including the halt and its reasoning, is shared.
+     *
+     * 🔴 W124 · **The detector is "the page repeats the first page of this pass",
+     *    and it is no longer "every id is already owed".** The old detector —
+     *    `parsed.page.ids.every(id => archived ∪ pending ∪ seenThisRun has id)` —
+     *    was a proxy for "the parameter did not move", and the W98 versioned
+     *    re-enumeration (ADR-030 item 3) falsified it: a re-list deliberately
+     *    re-reads pages whose ids are already owed, and its **last** page is the
+     *    one the previous run never finished — every id on it is still `pending`.
+     *    Measured on the live Claude scope (W124): offset 200 of a 218-row list
+     *    returned the 18 never-dropped tail ids, all owed, and the leg wrote a
+     *    permanent `shape-changed` while the offset was in fact advancing (three
+     *    live GETs at offsets 0/100/200 returned pairwise-disjoint pages). The
+     *    re-list then could not finish and the dropped ids could not be reached.
+     *
+     *    So the first page of a pass is remembered (`enumCursor.firstPageIds`), and
+     *    a later page is a repeat **only** when every id on it appeared on that
+     *    first page. A server that ignores the parameter hands the first page back
+     *    again and is caught; a re-list over an already-covered tail is not, because
+     *    its page is the list's other end and shares nothing with the first page.
+     *    A reset of the cursor (a migration or `recoverLedgerLoss`) starts a new
+     *    pass and clears the record with it.
+     *
+     *    🔴 A header written before W124 carries no `firstPageIds`, so the guard is
+     *    off for the rest of that pass — the safe direction, because the halt is
+     *    permanent and the pass is bounded (it ends at the real short/empty page).
+     *    The next pass records it. This is exactly the state the live Claude scope
+     *    is in: the fix has to let it finish, not re-halt it.
      *
      * 🔴 It is halt('shape-changed') — a permanent, traced stop — and deliberately
      *    neither of the two things it resembles:
@@ -1769,36 +1787,28 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * 🔴 The guard runs **before** `enqueueDebts` below, so a repeated page adds
      *    nothing: its ids are already in pending/archived by construction (that is
      *    the premise of the check), so nothing can be lost by stopping here.
-     *
-     * 🔴 W31 · **The same question, asked of an offset-paged plan**
-     *    (`listOffsetInferred`: claude.ai). There is no token to hold; the
-     *    parameter that must move is the `offset` this plan's own URL builder
-     *    emits, and "a non-first page carried only ids we have already seen" means
-     *    exactly the same thing it does above — the parameter was ignored, and the
-     *    next tick would read this page again. The condition is `offset > 0`
-     *    rather than "we hold a token", and everything else, including the halt
-     *    and its reasoning, is shared: one guard, two ways of knowing a page is
-     *    not the first.
      */
     const notFirstPage = tokenMode ? !!state.enumCursor.token : state.enumCursor.offset > 0;
     const guardApplies = tokenMode || plan.listOffsetInferred === true;
-    if (guardApplies && notFirstPage && parsed.page.ids.length > 0) {
-      const known = new Set<string>([
-        ...state.archived,
-        ...state.pending,
-        ...seenThisEnumeration,
-      ]);
-      if (parsed.page.ids.every((id) => known.has(id))) {
-        return halt(
-          'shape-changed',
-          `${listWhere()}: the page carried only conversations this enumeration has already seen;`
-          + (tokenMode
-            ? ' the page cursor did not advance (the platform may not honour the cursor parameter)'
-            : ' the page offset did not advance (the platform may not honour the offset parameter)'),
-        );
+    if (guardApplies && !notFirstPage) {
+      // The first page of the pass: remember it, so a later page can be told from
+      // the first page rather than from "already owed" (see W124 above).
+      state.enumCursor.firstPageIds = parsed.page.ids.slice();
+    } else if (guardApplies && parsed.page.ids.length > 0) {
+      const first = state.enumCursor.firstPageIds;
+      if (Array.isArray(first) && first.length > 0) {
+        const firstSet = new Set(first);
+        if (parsed.page.ids.every((id) => firstSet.has(id))) {
+          return halt(
+            'shape-changed',
+            `${listWhere()}: the page repeated the first page of this enumeration;`
+            + (tokenMode
+              ? ' the page cursor did not advance (the platform may not honour the cursor parameter)'
+              : ' the page offset did not advance (the platform may not honour the offset parameter)'),
+          );
+        }
       }
     }
-    if (guardApplies) for (const id of parsed.page.ids) seenThisEnumeration.add(id);
 
     // 🔴 W10 · The total the API gave is recorded, but it is **not** trusted as
     //    the denominator forever: it is a number this endpoint prints, not a
