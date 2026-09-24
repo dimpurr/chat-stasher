@@ -335,7 +335,7 @@ See section 2. If you already did it, you do not need to do it again.
 The archive's destination is decided by your config and command-line arguments
 — a local path, or a backend you configure yourself. `push` / `read` / `verify`
 read the repository and key file you select in config or arguments
-(`crates/chat-stasher/src/main.rs:251-256,340-345,391-396`).
+(`crates/chat-stasher/src/main.rs:241-273,335-376,389-438`).
 
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
@@ -363,11 +363,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:3713-3740`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:3736-3749`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:3753-3775`). An
+it does anything else (`crates/chat-stasher/src/main.rs:3772-3796`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -399,10 +399,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3726-3740`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3751-3760`;
 `crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:3716-3724`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:3739-3747`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -459,12 +459,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:288-297`). This is the
+does not (`crates/chat-stasher/src/main.rs:7073-7074`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:6717-6734`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:6778-6779`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -480,7 +480,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:7021-7080`):
+(`crates/chat-stasher/src/main.rs:7234-7525`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -493,7 +493,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:6799-6862`; `:7000-7020`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:6871-6878`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -532,15 +532,7 @@ That writes `<out>/<machine>/<harness>/<session-id>.jsonl` — each session's
 archived lines in their native format, byte-identical to what `read` returns for
 that session — plus `<out>/manifest.json`, which lists every session written
 with its first and last message time, shard count, bytes, sha256 and the filters
-that were applied. Its `machine_recall` array records each machine's located and
-time-unknown candidate counts for the query window, plus `index_trusted` (whether
-the activity index was readable and covered every candidate session). A WARN is
-printed to stderr when at least half of a machine's candidates have unknown time;
-this threshold means unknown candidates are at least as numerous as located
-ones. For a bounded calendar-day window, `machine_recall_by_day` gives those
-located and time-unknown counts separately for every machine and each local day
-in the requested range. An unknown-time candidate is counted on every requested
-day because the archive cannot establish which day it belongs to.
+that were applied.
 
 Before it fetches anything it prints the price it is about to pay
 (`sessions=` · `shards=` · `data_blobs=` · `plaintext_bytes=`), the same numbers
@@ -559,18 +551,6 @@ no directory is created and no file is written.
 - `--out` must be empty or absent unless you pass `--force`. Nothing is ever
   deleted, and nothing is written outside `--out`.
 
-`chat-stasher status --destination <your-destination>` and
-`chat-stasher overview --destination <your-destination>` list each
-machine's last recorded chat-stasher writer version and flags versions behind
-the newest writer. Older snapshots without version metadata are shown as
-`unknown (not recorded)`; the next successful push writes `meta/<machine>/writer.json`.
-In `status --json`, the same version results are under `scanner.writer_versions`
-to preserve the pinned top-level status schema.
-To repair a partition directly from a named destination, use
-`chat-stasher activity-index --rebuild --destination <your-destination> --machine <machine-id> --stage <existing-workspace>`.
-The command restores all sessions for that machine, appends a complete snapshot,
-and removes its temporary restored shards when the run ends.
-
 Exit codes are the same family `search` uses: `0` wrote at least one session ·
 `1` read everything and selected nothing · `3` did not finish (the files it did
 write are real, and the manifest says what is missing) · `2` usage error
@@ -585,7 +565,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` command — nothing puts a session back into a
   harness's own directory, and that is not in phase one.** The subcommand table
-  has no `restore` entry (`crates/chat-stasher/src/main.rs:130-991`). Getting
+  has no `restore` entry (`crates/chat-stasher/src/main.rs:130-1044`). Getting
   content *out* does have a bulk path: `export --out <dir>` writes every session
   a time window selects to files in one command
   (`crates/chat-stasher/src/main.rs:541-621`), and `read` dumps **one**
