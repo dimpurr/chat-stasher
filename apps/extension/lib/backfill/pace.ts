@@ -16,9 +16,9 @@
  *  · detail minIntervalMs = 20000 (one conversation every 20 seconds)
  *      ⇒ an order of magnitude slower than any real person clicking through
  *        conversations one after another; it cannot read as burst fetching.
- *  · detail maxPerDay = 200 (at most 200 a day)
- *      ⇒ 1000 conversations spread over exactly 5 days, matching the product's
- *        "everything slowly gets indexed over several days"; 200 × 20s ≈ 67
+ *  · detail maxPerDay = 400 (at most 400 a day; ADR-033 doubled the old 200)
+ *      ⇒ 1000 conversations spread over 2.5–3.3 days, matching the product's
+ *        "everything slowly gets indexed over several days"; 400 × 20s ≈ 133
  *        minutes of sparse activity a day, inside a normal user's daily range.
  *
  * ⚠️ These numbers are **defaults chosen by the arithmetic above**, **not**
@@ -91,7 +91,7 @@ export const DEFAULT_ENUM_PACE: PacePlan = {
 
 export const DEFAULT_DETAIL_PACE: PacePlan = {
   minIntervalMs: 20_000,
-  maxPerDay: 200,
+  maxPerDay: 400,
   /**
    * One body every 20-45 seconds, drawn per body. This is the segment that
    * carries the 1000 expensive fetches, so it gets the wide band: the floor is
@@ -107,7 +107,7 @@ export const DEFAULT_DETAIL_PACE: PacePlan = {
  *
  * The daily cap is the brake that actually governs this leg's rate (the alarm
  * only wakes it), so of all the knobs it is the one worth making unsteady: a
- * cap of exactly 200 every single day is the most predictable number the leg
+ * cap of exactly 400 every single day is the most predictable number the leg
  * publishes. It is drawn uniformly from `[DAILY_CAP_MIN, DAILY_CAP_MAX]` once
  * per local day and persisted with the day's counter.
  *
@@ -115,19 +115,28 @@ export const DEFAULT_DETAIL_PACE: PacePlan = {
  *    plan's own `maxPerDay` — so this can never raise the rate. `drawDailyCap`
  *    takes the plan's ceiling and clamps to it, which also means an explicit
  *    small `maxPerDay` (every test that uses one) is still the hard ceiling and
- *    is not silently raised to 150 by the roll.
+ *    is not silently raised to `DAILY_CAP_MIN` by the roll.
+ *
+ * 🔴 ADR-033 · The band doubled on 2026-09-24: it used to be `[150, 200]`, and
+ *    the drawn ceiling used to be 200. The old pair survives as
+ *    `QUIET_DAILY_CAP_MIN` / `QUIET_DAILY_CAP_MAX` for ADR-032's quiet preset;
+ *    the preset itself is not built here, and no caller reads them yet.
  */
-export const DAILY_CAP_MIN = 150;
-export const DAILY_CAP_MAX = 200;
+export const DAILY_CAP_MIN = 300;
+export const DAILY_CAP_MAX = 400;
 
-/** The day's cap: uniform in `[150, 200]`, clamped to the plan's ceiling. `null` ⇒ nothing to draw. */
+/** ADR-032 · The values the drawn cap had before ADR-033 doubled it. The quiet preset's band, kept for the future preset. */
+export const QUIET_DAILY_CAP_MIN = 150;
+export const QUIET_DAILY_CAP_MAX = 200;
+
+/** The day's cap: uniform in `[DAILY_CAP_MIN, DAILY_CAP_MAX]`, clamped to the plan's ceiling. `null` ⇒ nothing to draw. */
 export function drawDailyCap(maxPerDay: number | null, random: RandomFn): number | null {
   if (maxPerDay === null) return null;
-  // `+ 1` then floor makes the top of the range inclusive: random()=0 ⇒ 150, random()→1 ⇒ 200.
+  // `+ 1` then floor makes the top of the range inclusive: random()=0 ⇒ DAILY_CAP_MIN, random()→1 ⇒ DAILY_CAP_MAX.
   const rolled = Math.floor(uniformBetween(random, DAILY_CAP_MIN, DAILY_CAP_MAX + 1));
   // The plan's ceiling always wins over the roll, so a smaller maxPerDay is never raised.
   // DAILY_CAP_MAX is applied here too, so the function never returns more than
-  // 200 on its own, whatever ceiling a future caller passes.
+  // DAILY_CAP_MAX on its own, whatever ceiling a future caller passes.
   return Math.max(0, Math.min(rolled, DAILY_CAP_MAX, maxPerDay));
 }
 

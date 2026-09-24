@@ -1265,7 +1265,8 @@ export interface DailyCounter {
   /**
    * 🔴 W16 · **This day's quota, drawn once when the day rolled over.**
    *
-   * The cap used to be the constant `pace.detail.maxPerDay = 200`, which meant
+   * The cap used to be the constant `pace.detail.maxPerDay = 400` (ADR-033; it
+   * was 200 before 2026-09-24), which meant
    * the leg published exactly the same ceiling every single day — the most
    * predictable number it has. It is now drawn uniformly from
    * `[DAILY_CAP_MIN, DAILY_CAP_MAX]` (lib/backfill/pace.ts) at the moment

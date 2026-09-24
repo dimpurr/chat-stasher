@@ -280,8 +280,9 @@ describe('W76-A · a runnable head stops starving the targets behind it', () => 
     for (const row of rows) counts.push(await archived(row));
     console.log('[W76-A] served per tick:', JSON.stringify(served), 'archived per scope:', JSON.stringify(counts));
 
-    // ⌈6/3⌉ = ⌊6/3⌋ = 2, so this is an exact figure and not a range.
-    expect(counts).toEqual([2, 2, 2]);
+    // Each of the 3 targets is served twice (⌈6/3⌉ = ⌊6/3⌋ = 2), and each serve
+    // clears DEFAULT_TICK_DETAILS (2) bodies ⇒ an exact 4 per scope, not a range.
+    expect(counts).toEqual([4, 4, 4]);
     // And it is a rotation, not a coincidence of totals: the order wraps.
     expect(served).toEqual([
       SCOPES[0], SCOPES[1], SCOPES[2], SCOPES[0], SCOPES[1], SCOPES[2],
@@ -330,7 +331,8 @@ describe('W76-B · a permanently halted target does not eat the tick', () => {
     // served every tick, and the dead one is never run at all.
     expect(served).toEqual([SCOPES[1], SCOPES[1], SCOPES[1], SCOPES[1]]);
     expect(await archived(dead)).toBe(0);
-    expect(await archived(alive)).toBe(4);
+    // 4 serves × DEFAULT_TICK_DETAILS (2) bodies.
+    expect(await archived(alive)).toBe(8);
 
     const { rec } = await serveOne(mod, rows);
     console.log('[W76-B] schedule:', JSON.stringify(rec?.schedule));
@@ -363,7 +365,8 @@ describe('W76-C · a target waiting out a transient backoff does not eat the tic
 
     expect(served).toEqual([SCOPES[1], SCOPES[1], SCOPES[1]]);
     expect(await archived(waiting)).toBe(0);
-    expect(await archived(alive)).toBe(3);
+    // 3 serves × DEFAULT_TICK_DETAILS (2) bodies.
+    expect(await archived(alive)).toBe(6);
 
     const { rec } = await serveOne(mod, rows);
     console.log('[W76-C] schedule:', JSON.stringify(rec?.schedule));
@@ -421,8 +424,9 @@ describe('W76-D · a target with no tab is skipped and does not consume the tick
 
     expect(served).toEqual([SCOPES[0], SCOPES[1], SCOPES[0], SCOPES[1]]);
     expect(await archived(rows[0]!)).toBe(0);
-    expect(await archived(rows[1]!)).toBe(2);
-    expect(await archived(rows[2]!)).toBe(2);
+    // Each of the two runnable targets is served twice × DEFAULT_TICK_DETAILS (2) bodies.
+    expect(await archived(rows[1]!)).toBe(4);
+    expect(await archived(rows[2]!)).toBe(4);
   });
 });
 

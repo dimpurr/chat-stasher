@@ -1076,7 +1076,7 @@ async function tickHoldReason(
  *    end. Knowing it means opening the debt store, which is what starting the run
  *    does. So it is left: that scope spends its slot, and `schedule` says nothing
  *    about it because nothing distinguishes it from an ordinary run that cleared
- *    its one debt.
+ *    its per-tick budget of debts.
  *  · The `ledger-mismatch` half of `openLedger`'s refusal: decided from the debt
  *    set (`openHeaderLedger` reads it before judging), so it is not a header fact
  *    either. Left for the same reason.
@@ -1290,7 +1290,7 @@ export async function kickBackfill(
  * with identical gate ordering.
  * Its only difference from the live leg: the target is read from the registry in
  * storage rather than taken from a message that just arrived.
- * One alarm clears at most 1 debt (DEFAULT_TICK_DETAILS); once it runs, it stops.
+ * One alarm clears at most DEFAULT_TICK_DETAILS debts (currently 2); once it runs, it stops.
  *
  * 🔴 W16 · **This function is also where the next tick is armed**, at the very
  *    end, with a fresh draw from `[5, 10]` minutes. The alarm that woke us was a

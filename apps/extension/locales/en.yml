@@ -206,9 +206,9 @@ popup:
       Running: NOT running — the switch is on, but there is no usable fetch
       channel right now, so not one conversation is being fetched.
     active: >-
-      Running: archiving — one debt is cleared automatically at an irregular
-      interval of about {minMinutes} to {maxMinutes} minutes (never a fixed
-      period), at most {maxPerDay} a day, and never less than
+      Running: archiving — past conversations are fetched automatically at an
+      irregular interval of about {minMinutes} to {maxMinutes} minutes (never a
+      fixed period), at most {maxPerDay} a day, and never less than
       {minIntervalSeconds} seconds apart.
   missing:
     noStore: >-
@@ -456,7 +456,7 @@ popup:
         report refused in a row so far: {count}.
     whatOpening: >-
       What turning it on does: as long as one page of a supported platform is
-      open, it quietly backfills one past conversation in the background at an
+      open, it quietly backfills past conversations in the background at an
       irregular interval of about {minMinutes} to {maxMinutes} minutes (never a
       fixed period), using the login of that page of yours; at most {maxPerDay}
       a day, so a long history fills in over several days. Turning it off stops

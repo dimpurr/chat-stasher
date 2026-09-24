@@ -286,9 +286,9 @@ describe('W16-3 · the daily cap is a drawn number, not a fixed one', () => {
   });
 
   it('🔴 it can never exceed the plan ceiling, so it can never raise a caller’s cap', () => {
-    // The 200 is not a law of the universe, it is the *plan's* ceiling. A caller
+    // The 400 is not a law of the universe, it is the *plan's* ceiling. A caller
     // that asked for less must not be given more by the roll.
-    for (const requested of [0, 1, 7, 149, 150, 199, 200]) {
+    for (const requested of [0, 1, 7, 299, 300, 399, 400]) {
       for (const r of [0, 0.5, 1]) {
         expect(drawDailyCap(requested, fixed(r))).toBeLessThanOrEqual(requested);
       }
@@ -315,7 +315,7 @@ describe('W16-3 · the daily cap is a drawn number, not a fixed one', () => {
     draw = 1;                       // a restart with a different draw source
     await runOnce(store, clock, random, 'cap-once');
     const afterSecond = (await store.load(stateKey('chatgpt', 'cap-once'))) as { detailToday: { day: string; count: number; cap?: number } };
-    expect(afterSecond.detailToday.cap).toBe(DAILY_CAP_MIN);   // not 200
+    expect(afterSecond.detailToday.cap).toBe(DAILY_CAP_MIN);   // not the top of the band
     expect(afterSecond.detailToday.day).toBe(afterFirst.detailToday.day);
   });
 
@@ -334,7 +334,7 @@ describe('W16-3 · the daily cap is a drawn number, not a fixed one', () => {
     const day2 = (await store.load(stateKey('chatgpt', 'cap-days'))) as { detailToday: { day: string; cap?: number } };
     expect(day2.detailToday.day).not.toBe(day1.detailToday.day);
     expect(day2.detailToday.cap).toBe(DAILY_CAP_MAX);
-    expect(day2.detailToday.cap).toBeLessThanOrEqual(200);
+    expect(day2.detailToday.cap).toBeLessThanOrEqual(DAILY_CAP_MAX);
   });
 
   it('🔴 the enforced cap is the smaller of the drawn one and the plan ceiling', async () => {

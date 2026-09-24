@@ -18,6 +18,7 @@ import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { DEFAULT_TICK_DETAILS } from '../lib/backfill/schedule';
 
 // ---- Replace the engine with a spy (in this file only) ----
 const runBackfillSpy = vi.fn(async (opts: any) => ({
@@ -138,7 +139,7 @@ describe('C13 · the backfill leg wired into the runtime', () => {
     expect(opts.origin).toBe('https://chatgpt.com');
     expect(opts.platform).toBe('chatgpt');
     expect(typeof opts.sink).toBe('function');         // the archive exit does not fork
-    expect(opts.maxDetails).toBe(1);                   // pacing: one tick clears exactly one debt
+    expect(opts.maxDetails).toBe(DEFAULT_TICK_DETAILS);   // pacing: one tick clears at most DEFAULT_TICK_DETAILS debts
     // 🔴 W2: the pause gate is **not** in the engine. The engine only knows the exit's
     //    retryLater answer; "should it run right now" is answered by schedule.ts's gate —
     expect('downloadGuard' in opts).toBe(false);

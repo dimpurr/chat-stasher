@@ -360,7 +360,8 @@ describe('W86b-A · a capture between every wake reorders the registry under the
     //    identity sits at index 0 from wake 3 on, so the walk always starts at
     //    index 1 and C — registered and runnable the whole time — is never it.
     expect(served).toEqual([A, B, C, A, B, C]);
-    expect(counts).toEqual([2, 2, 2]);
+    // Each runnable target is served twice; ADR-033: each serve clears 2 bodies ⇒ 4 per scope.
+    expect(counts).toEqual([4, 4, 4]);
   });
 });
 
