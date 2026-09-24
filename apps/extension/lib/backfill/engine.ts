@@ -1699,6 +1699,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     try {
       res = await sendVia(http, url, init);
     } catch (err) {
+      const pageReason = (err as Error).message;
+      if (pageReason === 'scope-mismatch' || pageReason === 'org-ambiguous' || pageReason === 'org-unresolved') {
+        return halt(pageReason, pageReason === 'scope-mismatch'
+          ? 'the page active organization differs from the stored backfill scope'
+          : `the page could not establish an organization (${pageReason})`);
+      }
       return halt('transport-error', `${listWhere()}: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
@@ -2139,6 +2145,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     try {
       res = await sendVia(http, url, init);
     } catch (err) {
+      const pageReason = (err as Error).message;
+      if (pageReason === 'scope-mismatch' || pageReason === 'org-ambiguous' || pageReason === 'org-unresolved') {
+        return halt(pageReason, pageReason === 'scope-mismatch'
+          ? 'the page active organization differs from the stored backfill scope'
+          : `the page could not establish an organization (${pageReason})`);
+      }
       // 🔴 A POST failure and a GET failure take **the same line**:
       //    halt('transport-error') + a persisted trace. No silent path was opened
       //    for POST.

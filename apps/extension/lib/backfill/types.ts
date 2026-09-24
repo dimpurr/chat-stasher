@@ -57,6 +57,8 @@ export type HaltReason =
   | 'shape-changed'
   /** The network / transport layer threw outright */
   | 'transport-error'
+  /** The page's active Claude organization differs from the stored run scope; re-resolve next tick. */
+  | 'scope-mismatch'
   /** No usable persistent storage ⇒ no stop-and-resume ⇒ better not to crawl at all */
   | 'storage-unavailable'
   /**
@@ -497,6 +499,7 @@ export function haltSubjectOf(reason: HaltReason): HaltSubject {
 
     case 'org-ambiguous':
     case 'org-unresolved':
+    case 'scope-mismatch':
       return 'account';
 
     // No store, an unreadable store, a store that lost rows, and "there is nowhere
@@ -913,6 +916,7 @@ export function haltStillApplies(record: HaltRecord, judgement: HaltJudgement): 
  * than a naive "just clear `halted`" fix, which would re-fire on the next tick.
  */
 export const TRANSIENT_RETRY_BASE_MS: Record<TransientHaltReason, number> = {
+  'scope-mismatch': 0,
   'transport-error': 5 * 60_000,
   'rate-limited': 15 * 60_000,
   'auth-refused': 30 * 60_000,
@@ -921,6 +925,7 @@ export const TRANSIENT_RETRY_BASE_MS: Record<TransientHaltReason, number> = {
 
 /** The ceiling of each ladder. Never exceeded, however long the streak runs. */
 export const TRANSIENT_RETRY_MAX_MS: Record<TransientHaltReason, number> = {
+  'scope-mismatch': 0,
   'transport-error': 30 * 60_000,
   'rate-limited': 60 * 60_000,
   'auth-refused': 120 * 60_000,
@@ -939,10 +944,10 @@ export const TRANSIENT_RETRY_MAX_MS: Record<TransientHaltReason, number> = {
  *    table's own type would have silently accepted a union that no longer matched
  *    `haltClassOf`'s answer. Two edits that must agree are one edit here.
  */
-export type TransientHaltReason = 'transport-error' | 'rate-limited' | 'auth-refused' | 'refused-unknown';
+export type TransientHaltReason = 'scope-mismatch' | 'transport-error' | 'rate-limited' | 'auth-refused' | 'refused-unknown';
 
 /** The reasons this ladder is defined for, as a runtime list — one place, so `isTransientReason` cannot disagree with the tables. */
-const TRANSIENT_REASONS: readonly TransientHaltReason[] = ['transport-error', 'rate-limited', 'auth-refused', 'refused-unknown'];
+const TRANSIENT_REASONS: readonly TransientHaltReason[] = ['scope-mismatch', 'transport-error', 'rate-limited', 'auth-refused', 'refused-unknown'];
 
 /**
  * 🔴 The **one** list: `haltClassOf` (above) delegates to this, and the engine
