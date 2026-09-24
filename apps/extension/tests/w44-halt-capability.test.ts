@@ -40,7 +40,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { runBackfill, loadState, type HttpResponse, type HttpPort } from '../lib/backfill/engine';
+import { runBackfill, loadState, type HttpResponse, type HttpPort, DETAIL_EMPTY_HALT_STREAK } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import { backfillPlanFor } from '../lib/backfill/enumerate';
 import { stateKey, type BackfillHeader, type HaltReason } from '../lib/backfill/types';
@@ -372,13 +372,19 @@ describe('W44-2 · a record THIS build wrote is what must go on persisting', () 
 
   it('🔴 a detail-empty-unverified record whose condition recurs names this build, and the next run refuses', async () => {
     // The fourth of the four, and the one whose condition a run **can** re-observe:
-    // the body loop reaches the conversation (it is still a debt) and the body comes
-    // back empty again. So this is a round trip through production code rather than a
-    // hand-written record — the write-back is what the next run meets.
+    // the body loop reaches the conversations (they are still debts) and every body
+    // comes back empty again. So this is a round trip through production code rather
+    // than a hand-written record — the write-back is what the next run meets.
+    //
+    // 🔴 W92b · The queue is `DETAIL_EMPTY_HALT_STREAK` long, not one, because one
+    //    empty body is now a per-conversation failure and only K in a row halt the
+    //    leg. This is still the same round trip: the run re-observes the condition
+    //    (K consecutive empties), writes the same stop back stamped with this build,
+    //    and the next run holds.
     const store = memoryStore();
     const clock = stepClock(T0);
     const scope = 'w59c-recurs-detail-empty';
-    const all = ids(1);
+    const all = ids(DETAIL_EMPTY_HALT_STREAK);
     const be = backend(all);
     // The structure is good and the content is empty: C28's case, and the only one
     // that returns this outcome. Injected the same way tests/c28-emptyguard.test.ts
@@ -403,6 +409,9 @@ describe('W44-2 · a record THIS build wrote is what must go on persisting', () 
     // The condition recurred, so the same stop comes back — naming the build that saw it.
     expect(r1.halted?.reason).toBe('detail-empty-unverified');
     expect(r1.halted?.build).toBe(TEST_BUILD_ID);
+    // The first K-1 empties were per-conversation failures; the Kth halted.
+    expect(r1.failedThisRun.map((f) => f.reason))
+      .toEqual(Array(DETAIL_EMPTY_HALT_STREAK - 1).fill('detail-empty'));
     expect(be.calls.length, 'the run reached the body it was told had come back empty').toBeGreaterThan(1);
 
     // ---- and the second run is the first one's equal: it refuses, and asks nothing.

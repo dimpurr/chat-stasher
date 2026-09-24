@@ -688,6 +688,8 @@ failure:
   detailTreeIncomplete: >-
     the conversation came back only in part — following it back from its newest
     message reached a message the reply did not carry — so nothing was stored
+  detailEmpty: >-
+    the conversation came back with no content at all, so nothing was stored
   unknownReason: "reason code {reason}"
   shortIdEmpty: (empty)
 

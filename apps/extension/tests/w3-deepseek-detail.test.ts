@@ -27,7 +27,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { loadState, runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
+import {
+  DETAIL_EMPTY_HALT_STREAK,
+  loadState,
+  runBackfill,
+  type HttpResponse,
+  type SinkOutcome,
+} from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey } from '../lib/backfill/types';
 import { extractSessionId, getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../lib/contract';
@@ -49,6 +55,7 @@ const SCOPES = {
   round: 'acct-w8-round',
   shape: 'acct-w8-shape',
   empty: 'acct-w8-empty',
+  emptyStreak: 'acct-w8-empty-streak',
   identity: 'acct-w8-identity',
 } as const;
 
@@ -364,7 +371,7 @@ describe('W8-4 · "we could not read it" may never be recorded as "we read it"',
     expect(matchesResponseShape(getPlatformByOrigin(ORIGIN)!, drifted)).toBe(false);
   });
 
-  it('an empty chat_messages array is a shape the contract accepts — and it is never settled as an empty conversation', async () => {
+  it('a single empty chat_messages array is the per-conversation detail-empty outcome — not settled as an empty conversation, and not a leg halt', async () => {
     const store = memoryStore();
     const be = backend(JSON.stringify({ data: { biz_data: { chat_session: { id: ID }, chat_messages: [] } } }));
     const seen: CapturedFetch[] = [];
@@ -375,32 +382,50 @@ describe('W8-4 · "we could not read it" may never be recorded as "we read it"',
     });
 
     /**
-     * 🔴 W42 · **This assertion set changed, and the change is a strengthening. The premise is what
-     *    moved.** W8 asserted `halted === null`, one sink call, and no receipt — because W8 declared no
-     *    parseDetailPage for DeepSeek and therefore claimed nothing about an empty body. W42 declares
-     *    one, so the same body now has an answer, and the answer is the one CLAUDE.md invariant 1
-     *    requires: from this response alone "this conversation has no messages" and "this response is a
-     *    window with nothing in it" are not distinguishable, so the ambiguous case takes the **unknown**
-     *    path (a receipt with `complete:false`) and never the empty one. Nothing is archived and the
-     *    sink is never reached, which is strictly more than W8 could say.
-     *    Before: halted null · sink called · detailOutcomes []
-     *    After:  halted detail-empty-unverified · sink NOT called · one receipt, complete:false · unarchived
+     * 🔴 W42 declared the parser; W92b changes what the engine does with its empty
+     *    answer. Before W92b this body halted the whole leg, which left the debt at
+     *    the head of pending (FIFO) — every later run halted on the same
+     *    conversation and the platform archived nothing. Now one empty body is a
+     *    per-conversation failure: the debt leaves pending with a receipt, nothing
+     *    is archived, and the leg carries on. What W42 pinned is unchanged: the
+     *    ambiguous body takes the unknown path (complete:false) and never the empty
+     *    one, and the sink is never reached.
+     *    Before: halted detail-empty-unverified · sink NOT called · one receipt · unarchived
+     *    After:  no halt · sink NOT called · one receipt, complete:false · pending cleared by the failure path
      */
-    expect(report.stopped).toBe('halted');
-    expect(report.halted?.reason).toBe('detail-empty-unverified');
+    expect(report.halted).toBeNull();
+    expect(report.stopped).toBe('queue-empty');
     // 🔴 The sink is never reached: an empty body may not be handed on as if it were a conversation.
     expect(seen.length).toBe(0);
     expect(report.archivedThisRun).toEqual([]);
     expect(report.state.archived).toEqual([]);
+    expect(report.state.pending).toEqual([]);
+    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-empty']);
     // The receipt is the durable half: `complete:false` is the difference between "we saw nothing" and
     // "there was nothing", and it is on the ledger rather than only in a log line.
     expect(report.detailOutcomes).toEqual([
       { sessionId: ID, outcome: 'detail-empty-unverified', complete: false, at: expect.any(Number) },
     ]);
     expect(report.state.detailOutcomes).toEqual(report.detailOutcomes);
-    // And the debt is neither settled nor written off: it is still owed, so a later, better answer can
-    // pick it up instead of the conversation being counted as handled.
-    expect(report.state.pending).toEqual([ID]);
+  });
+
+  it(`🔴 ${DETAIL_EMPTY_HALT_STREAK} empty chat_messages arrays in a row still halt the leg`, async () => {
+    const store = memoryStore();
+    const ids = ['ds-e1-aaaaaaaa', 'ds-e2-aaaaaaaa', 'ds-e3-aaaaaaaa'];
+    const empty = JSON.stringify({ data: { biz_data: { chat_session: { id: ID }, chat_messages: [] } } });
+    const be = backend(empty, ids);
+
+    const report = await run(store, be.http, SCOPES.emptyStreak);
+
+    // A whole endpoint answering empty is the contract change C28 was written for.
+    expect(report.stopped).toBe('halted');
+    expect(report.halted?.reason).toBe('detail-empty-unverified');
+    expect(report.archivedThisRun).toEqual([]);
+    expect(report.failedThisRun.map((f) => f.reason))
+      .toEqual(Array(DETAIL_EMPTY_HALT_STREAK - 1).fill('detail-empty'));
+    // The Kth empty is the halt, so it stays owed rather than being written off.
+    expect(report.state.pending).toEqual([ids[2]]);
+    expect(report.detailOutcomes.map((d) => d.sessionId)).toEqual(ids);
   });
 });
 

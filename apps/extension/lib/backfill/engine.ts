@@ -149,6 +149,33 @@ export const notWiredHttp: HttpPort = async (url: string) => {
 export const LIST_PAGES_PER_TICK = 8;
 
 /**
+ * 🔴 W92b · **How many empty bodies in a row make an empty body stop being a
+ * per-conversation fact and start looking like a contract change.**
+ *
+ * C28's whole point is that one empty body is not proof of anything: an
+ * opened-but-never-sent conversation really is empty on Claude and Perplexity, and
+ * treating that one conversation as a leg-wide stop left the id at the head of
+ * pending (FIFO) — so the next run halted on it again and the platform archived
+ * nothing (W92 §Task 5). So a single empty body is now the per-conversation
+ * outcome `detail-empty`: the debt leaves pending, a failure receipt names it, and
+ * the leg moves to the next conversation.
+ *
+ * But a body that suddenly parses to nothing for *every* conversation is the
+ * contract change C28 was written for, and losing that signal would be worse than
+ * the halt it fixes. K is the line between the two:
+ *
+ * 🔴 **Why 3.** It is the smallest number that cannot be reached by the known
+ *    benign shape: a user can leave several conversations opened-but-never-sent
+ *    (the measured Claude account had one such conversation at the head), and 1 or
+ *    2 consecutive empties must not stop the leg. Three in a row, with no
+ *    non-empty body between them, is not a run of unlucky conversations: it is a
+ *    whole endpoint answering empty, which is what a changed wire looks like from
+ *    this side. A non-empty body resets the streak, so a legitimate empty between
+ *    two real bodies never accumulates.
+ */
+export const DETAIL_EMPTY_HALT_STREAK = 3;
+
+/**
  * 🔴 C20 · The one thing the sink answers: **was it actually stored?**
  * Structurally compatible with entrypoints/background.ts's HandledResult (which is
  * returned as-is from there).
@@ -1905,6 +1932,18 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     : Math.min(state.detailToday.cap ?? planCap, planCap);
   const budget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
 
+  /**
+   * 🔴 W92b · **How many detail bodies in a row have come back empty in this run.**
+   *
+   * Run-local on purpose: C28's guard is about one wire answering empty right now,
+   * and a restart is a new observation window (the persisted receipts and failures
+   * are the durable trace, not this counter). See `DETAIL_EMPTY_HALT_STREAK` for
+   * the choice of K. It is incremented only on `detail-empty-unverified` and is
+   * reset to 0 the moment any body is not one — including a confirmed-empty body,
+   * whose whole meaning is "this much emptiness is legitimate".
+   */
+  let emptyBodyStreak = 0;
+
   while (state.pending.length > 0) {
     if (opts.shouldAbort?.()) return finish('aborted');
     if (archivedThisRun.length >= budget) return finish('budget-exhausted');
@@ -2134,12 +2173,26 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    one-step plan this is byte-for-byte the old `res.text`, so no existing
      *    platform's behaviour moves. Grok is the first production plan to declare
      *    one, and it exists for exactly the case this hook describes.
-     * Otherwise unchanged: once the raw payload is available, the plan's parser
-     * implementation returns "succeeded but empty" as detail-empty-unverified; this
-     * branch then writes the receipt at once and halts, never letting the
-     * sinkVerdict/settleDebt below pass it off as success. Only when a parser
-     * explicitly returns detail-empty-confirmed may a legitimately empty
-     * conversation be completed as this body item.
+     *
+     * 🔴 W92b · **One empty body is a per-conversation outcome, not a leg-wide stop.**
+     *    C28's first version halted the whole leg the moment one body came back
+     *    empty, which left the debt at the head of pending (FIFO) and made every
+     *    later run halt on the same conversation — measured on Claude, where an
+     *    opened-but-never-sent conversation (HTTP 200, `chat_messages: []`) stopped
+     *    the platform from archiving anything (W92 §Task 5). So a single empty body
+     *    takes the same shape as `detail-paged-unsupported` below: the plan's answer
+     *    is written down as a receipt (`complete: false`), the debt leaves pending
+     *    with a `detail-empty` failure receipt, and the leg moves to the next
+     *    conversation. An empty conversation has nothing to back up; if the user
+     *    later writes in it, live capture takes it.
+     *
+     *    🔴 C28's original intent is kept by the streak: a whole endpoint answering
+     *       empty is a contract change, and `DETAIL_EMPTY_HALT_STREAK` consecutive
+     *       `detail-empty-unverified` bodies in one run still halt the leg with the
+     *       reason C28 introduced. Every other outcome resets the streak (the line
+     *       just below the branch), so one legitimate empty between two real bodies
+     *       cannot accumulate.
+     *
      * 🔴 W22 added a third answer, handled in its own branch just below:
      *    'detail-paged-unsupported' — real content that the plan knows is
      *    incomplete — which must neither be archived nor halt the leg.
@@ -2150,12 +2203,30 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     if (detailParsed?.ok === true && detailParsed.outcome === 'detail-empty-unverified') {
       const entry = recordDetailOutcome(id, detailParsed.outcome, clock.now());
-      return halt(
-        'detail-empty-unverified',
-        `detail returned HTTP ${deliveredStatus} with empty content for a pending conversation;`
-        + ` recorded ${entry.outcome} with complete=false`,
+      emptyBodyStreak += 1;
+      if (emptyBodyStreak >= DETAIL_EMPTY_HALT_STREAK) {
+        return halt(
+          'detail-empty-unverified',
+          `detail returned HTTP ${deliveredStatus} with empty content for a pending`
+          + ` conversation, ${emptyBodyStreak} in a row this run; recorded ${entry.outcome}`
+          + ' with complete=false',
+        );
+      }
+      dropDebt(state, id);
+      failedThisRun.push(recordFailure(state, { id, reason: 'detail-empty', at: clock.now() }));
+      state.detailToday.count += 1;
+      await persist(state);
+      console.warn(
+        '[chat-stasher] backfill: this conversation\'s body came back empty'
+        + ` (${emptyBodyStreak} in a row this run, still below the ${DETAIL_EMPTY_HALT_STREAK}`
+        + ' that would look like a contract change); nothing was stored and the failure list names it',
       );
+      continue;
     }
+    // 🔴 W92b · Any body that is not an unverified empty breaks the streak: real
+    //    content, a confirmed-empty body, and the two named "incomplete" outcomes
+    //    below all mean the wire is answering with something it recognises.
+    emptyBodyStreak = 0;
     /**
      * 🔴 W22 · **A real body that is explicitly incomplete.**
      *

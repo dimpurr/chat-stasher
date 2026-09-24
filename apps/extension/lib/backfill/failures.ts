@@ -156,7 +156,29 @@ export type FailureReason =
    *    specific loss here is the *middle* of the branch, which no reader could
    *    even notice.
    */
-  | 'detail-tree-incomplete';
+  | 'detail-tree-incomplete'
+  /**
+   * 🔴 W92b · The body was fetched, HTTP succeeded, the shape was recognised — and
+   * the body **itself is empty** (Claude: `chat_messages: []` and no
+   * `current_leaf_message_uuid`; Perplexity: `entries: []`). This is a
+   * per-conversation fact: an opened-but-never-sent conversation really has
+   * nothing to back up, so the debt leaves pending with this receipt and the leg
+   * carries on with the next conversation.
+   *
+   * A fact we observed, phrased as one: it says "the response carried no content".
+   * It is deliberately **not** 'not-saved' (nothing was ever handed to a sink) and
+   * not a claim that the conversation never had content — from this one response
+   * alone "this conversation is empty" and "this response is a window with nothing
+   * in it" are not distinguishable, which is why the receipt, not the archive, is
+   * where it lands.
+   *
+   * 🔴 What it is **not** used for: a whole endpoint answering empty for many
+   *    conversations in a row. That is the contract change C28 warned about, and
+   *    the engine still halts the leg with `detail-empty-unverified` once
+   *    `DETAIL_EMPTY_HALT_STREAK` consecutive bodies are empty (engine.ts). So this
+   *    code appears at most `K - 1` times per run before the halt takes over.
+   */
+  | 'detail-empty';
 
 export interface FailureEntry {
   /** The first 8 characters of the session id. 🔴 Not the full id. */
@@ -257,6 +279,8 @@ export function describeFailureReason(reason: string): string {
       return t('failure.detailTooLong');
     case 'detail-tree-incomplete':
       return t('failure.detailTreeIncomplete');
+    case 'detail-empty':
+      return t('failure.detailEmpty');
     default:
       return t('failure.unknownReason', { reason });
   }
