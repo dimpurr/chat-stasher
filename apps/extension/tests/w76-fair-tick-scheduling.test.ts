@@ -473,11 +473,15 @@ describe('W76-E · the cursor survives a service-worker restart and fails safe',
     //    whole point of that revision (a prepend reorders the array, so a stored
     //    index names a different row afterwards — `w86-cursor-by-identity.test.ts`
     //    is the file that measures it). 🔴 W86b re-shapes it once more: the byte is
-    //    now a map of how long each identity has waited (least-recently-served
-    //    selection), not a single identity. The property asserted here is unchanged
-    //    and is still the stronger one: not "the byte became index 0" but "the byte
-    //    became the target just served".
-    expect(store[CURSOR_KEY]).toEqual({ served: { [`${PLATFORM}\0${SCOPES[0]}`]: expect.any(Number) } });
+    //    a map of how long each identity has waited (least-recently-served
+    //    selection), not a single identity. 🔴 W86c: the map is the whole registered
+    //    rotation, dense `0..k-1`, with the served row at the back — here `A` was
+    //    just served, so `B` (not yet served) is the oldest rank. The property
+    //    asserted is unchanged and still the stronger one: not "the byte became
+    //    index 0" but "the byte became the target just served".
+    expect(store[CURSOR_KEY]).toEqual({
+      served: { [`${PLATFORM}\0${SCOPES[1]}`]: 0, [`${PLATFORM}\0${SCOPES[0]}`]: 1 },
+    });
 
     // The next tick really does move on — the cursor is honoured, not merely written.
     const second = await serveOne(mod, rows);

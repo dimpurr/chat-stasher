@@ -331,12 +331,13 @@ describe('W86-A · the rotation survives a registry that reorders under it', () 
     //    every wake and the other two are never reached, from a reorder alone.
     //    🔴 W86b · the walk is now least-recently-served, not "after the stored
     //    identity", so the exact order is no longer the guarantee this revision
-    //    makes: `captureTail` re-registers the tail at the head, and the registry-
-    //    order tie-break among never-served rows legitimately serves C before B.
+    //    makes. 🔴 W86c §1 · the tie-break among never-served rows moved: they
+    //    rank at the *back* of the rotation now, so a fresh registry is served in
+    //    its own order ([A,B,C]) rather than re-ordering the newcomer group first.
     //    The property W86-A exists for is the anti-starvation one, and it is
     //    asserted in full: every target is still served as often as the others and
     //    no single capture can make one scope take them all.
-    expect(served).toEqual([A, C, B, A, C, B]);
+    expect(served).toEqual([A, B, C, A, B, C]);
     // Each runnable target is served twice — nobody is starved by the reorder.
     expect(counts).toEqual([2, 2, 2]);
   });
@@ -389,9 +390,10 @@ describe('W86-B · a removal between wakes does not pass a row over', () => {
     //    still examines every row, which is why this fallback cannot strand anyone.
     expect(second?.scope).toBe(B);
     // And the fallback is written down: the next wake has a real cursor again.
-    // (W86b: the byte is now a map that records how long each served identity has
-    // waited, and it names the target just served as longest-waiting.)
-    expect(cursorByte()).toEqual({ served: { [`${PLATFORM}\0${B}`]: expect.any(Number) } });
+    // (W86b: the byte is a map of serve-order ranks. 🔴 W86c: it is dense `0..k-1`
+    // and names *every* registered row — on this wake C:0, B just served:1 — so
+    // the map the next wake reads is the whole rotation, not one served identity.)
+    expect(cursorByte()).toEqual({ served: { [`${PLATFORM}\0${C}`]: 0, [`${PLATFORM}\0${B}`]: 1 } });
   });
 });
 
@@ -415,9 +417,11 @@ describe('W86-C · a cursor that does not name a registered target starts at the
     console.log('[W86-C1] served:', first?.scope, '· cursor now:', JSON.stringify(cursorByte()));
     // 🔴 On `588ab22` this byte is a real position and the walk starts at C.
     expect(first?.scope).toBe(A);
-    // The stale byte is replaced by a real map that names the target just served,
-    // so the leg cannot stay skewed.
-    expect(cursorByte()).toEqual({ served: { [`${PLATFORM}\0${A}`]: expect.any(Number) } });
+    // The stale byte is replaced by a real dense map (🔴 W86c: it names the whole
+    // registered rotation, `0..k-1`), so the leg cannot stay skewed.
+    expect(cursorByte()).toEqual({
+      served: { [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2 },
+    });
 
     // And it is honoured, not merely written: the next wake moves on to B.
     expect((await servedByOneTick(mod, rows))?.scope).toBe(B);
@@ -436,7 +440,9 @@ describe('W86-C · a cursor that does not name a registered target starts at the
     const first = await servedByOneTick(mod, rows);
     console.log('[W86-C2] served:', first?.scope, '· cursor now:', JSON.stringify(cursorByte()));
     expect(first?.scope).toBe(A);
-    expect(cursorByte()).toEqual({ served: { [`${PLATFORM}\0${A}`]: expect.any(Number) } });
+    expect(cursorByte()).toEqual({
+      served: { [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2 },
+    });
   });
 
   it('guard · a half-written or wrongly-typed identity falls back to the head', async () => {
@@ -462,7 +468,9 @@ describe('W86-C · a cursor that does not name a registered target starts at the
       const served = await servedByOneTick(fresh, rows);
       console.log('[W86-C3] byte', JSON.stringify(byte), '⇒ served', served?.scope, '· cursor now:', JSON.stringify(cursorByte()));
       expect(served?.scope, `byte ${JSON.stringify(byte)} served nobody`).toBe(A);
-      expect(cursorByte(), `byte ${JSON.stringify(byte)} was not replaced`).toEqual({ served: { [`${PLATFORM}\0${A}`]: expect.any(Number) } });
+      expect(cursorByte(), `byte ${JSON.stringify(byte)} was not replaced`).toEqual({
+        served: { [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2 },
+      });
     }
   });
 });
