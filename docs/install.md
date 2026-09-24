@@ -184,10 +184,8 @@ cd <your-directory>
 cargo build --release
 ```
 
-- You need the Rust toolchain (`cargo`). **The repository does not declare a
-  minimum Rust version:** neither `Cargo.toml` nor
-  `crates/chat-stasher/Cargo.toml` has a `rust-version` field
-  (`./Cargo.toml:1-11`, `crates/chat-stasher/Cargo.toml:1-6`). Which exact
+- You need the Rust toolchain (`cargo`). **The package manifest does not declare a
+  minimum Rust version** (`crates/chat-stasher/Cargo.toml:1-6`). Which exact
   version compiles — **unverified**.
 - The build output is at `target/release/chat-stasher`.
 
@@ -220,8 +218,9 @@ pnpm build:firefox    # Firefox
 and pnpm; **the exact minimum versions are not declared in the repository —
 unverified**.)
 
-The build output lands in `apps/extension/.output/` (that directory is excluded
-by `.gitignore`, `.gitignore:15`). Load that directory into your browser with
+The build output lands in `apps/extension/.output/` (excluded by the root ignore
+rule at `.gitignore:15` and the extension ignore rule at
+`apps/extension/.gitignore:11`). Load that directory into your browser with
 its "Load unpacked extension" menu — we have not tested each browser's menu
 path, and section 8 marks them "unverified".
 
@@ -644,7 +643,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:1395-1476`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:1440-1521`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4521-4548`) is covered.
