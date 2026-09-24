@@ -48,6 +48,7 @@ import {
 import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
+import { sha256Hex } from '../native-host';
 import type { BackfillStore } from './store';
 import { applyReenumerations, openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
 import {
@@ -790,6 +791,21 @@ function rotatePendingToTail(state: BackfillState, id: string): void {
 /** Is this id parked (an empty body waiting for either proof or the halt)? */
 function isParkedEmpty(state: BackfillState, id: string): boolean {
   return (state.parkedEmpty ?? []).includes(id);
+}
+
+/**
+ * 🔴 W124b · **The repeat-page guard's fingerprint of one list page.**
+ *
+ * sha256 over the page's ids **sorted**, so two pages naming the same set of
+ * conversations in a different order are the same page. `null` from `sha256Hex`
+ * (no WebCrypto in this context) falls back to the sorted id list itself: the
+ * comparison stays exact rather than becoming a silent no-check. `sha256Hex` is
+ * the same helper the delivery path trusts, so no second hash implementation
+ * enters the build.
+ */
+export async function listPageFingerprint(ids: readonly string[]): Promise<string> {
+  const sorted = JSON.stringify([...ids].sort());
+  return (await sha256Hex(sorted)) ?? sorted;
 }
 
 export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
@@ -1642,17 +1658,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       : cursorMode
         ? `list cursor=${state.enumCursor.cursor ?? 'first-page'} (enumerated ${state.enumCursor.offset})`
         : `list offset=${state.enumCursor.offset}`;
-  /**
-   * 🔴 W21 · **Every id this enumeration has handed us**, for the repeat-page guard.
-   *
-   * Why a run-local set on top of `state.pending` / `state.archived`, which
-   * already hold the ids earlier pages produced: those two are the *persisted*
-   * record, and an id can leave them without being settled (`dropDebt` on a
-   * failed delivery removes it from pending and does not archive it). This set
-   * makes "already seen in this enumeration" true for the whole run regardless of
-   * what later happened to the debt, which is the narrower and safer reading.
-   */
-  const seenThisEnumeration = new Set<string>();
   while (
     !state.enumCursor.complete
     && state.enumCursor.truncated === undefined
@@ -1752,9 +1757,44 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * that treated "a page came back" as progress would re-enumerate the same
      * conversations on every tick forever while the ledger said it was advancing.
      *
-     * The symptom is decidable without knowing which shape is right: **on a
-     * non-first page, a page whose ids this enumeration has already seen means the
-     * cursor did not move.**
+     * 🔴 W31 · **The same question, asked of an offset-paged plan**
+     *    (`listOffsetInferred`: claude.ai). There is no token to hold; the
+     *    parameter that must move is the `offset` this plan's own URL builder
+     *    emits. The condition is `offset > 0` rather than "we hold a token", and
+     *    everything else, including the halt and its reasoning, is shared.
+     *
+     * 🔴 W124 / W124b · **The detector is "the page has already been returned in
+     *    this pass", and it is no longer "every id is already owed".** The old
+     *    detector — `parsed.page.ids.every(id => archived ∪ pending ∪ seenThisRun
+     *    has id)` — was a proxy for "the parameter did not move", and the W98
+     *    versioned re-enumeration (ADR-030 item 3) falsified it: a re-list
+     *    deliberately re-reads pages whose ids are already owed, and its **last**
+     *    page is the one the previous run never finished — every id on it is still
+     *    `pending`. Measured on the live Claude scope (W124): offset 200 of a
+     *    218-row list returned the 18 never-dropped tail ids, all owed, and the leg
+     *    wrote a permanent `shape-changed` while the offset was in fact advancing
+     *    (three live GETs at offsets 0/100/200 returned pairwise-disjoint pages).
+     *    The re-list then could not finish and the dropped ids could not be reached.
+     *
+     *    W124 replaced that with "the page repeats the *first* page of this pass",
+     *    but a read-only review found the hole: first-page-only lets a server return
+     *    page A, then page B, then keep returning B for larger offsets — B is not
+     *    the first page, so the offset and the request count grow across ticks with
+     *    no end-of-list signal.
+     *
+     *    So the fingerprint of **every non-empty page of the pass** is recorded on
+     *    the cursor (`enumCursor.pageFingerprints`), and a non-empty page whose
+     *    fingerprint is already there is a repeat. This catches the first page
+     *    repeated, the previous page repeated, and any page repeated later; a
+     *    versioned re-enumeration is untouched because its pages are
+     *    pairwise-disjoint, so every fingerprint is new. A reset of the cursor (a
+     *    migration or `recoverLedgerLoss`) starts a new pass and clears the set.
+     *
+     *    🔴 A header written before W124b carries no `pageFingerprints`; the pass then
+     *    records from this tick on, so a repeat of a page returned from here is still
+     *    caught. (A page already returned before the upgrade cannot be fingerprinted
+     *    retroactively, but the halt is permanent and the pass is bounded by the real
+     *    short/empty page.)
      *
      * 🔴 It is halt('shape-changed') — a permanent, traced stop — and deliberately
      *    neither of the two things it resembles:
@@ -1769,36 +1809,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * 🔴 The guard runs **before** `enqueueDebts` below, so a repeated page adds
      *    nothing: its ids are already in pending/archived by construction (that is
      *    the premise of the check), so nothing can be lost by stopping here.
-     *
-     * 🔴 W31 · **The same question, asked of an offset-paged plan**
-     *    (`listOffsetInferred`: claude.ai). There is no token to hold; the
-     *    parameter that must move is the `offset` this plan's own URL builder
-     *    emits, and "a non-first page carried only ids we have already seen" means
-     *    exactly the same thing it does above — the parameter was ignored, and the
-     *    next tick would read this page again. The condition is `offset > 0`
-     *    rather than "we hold a token", and everything else, including the halt
-     *    and its reasoning, is shared: one guard, two ways of knowing a page is
-     *    not the first.
      */
-    const notFirstPage = tokenMode ? !!state.enumCursor.token : state.enumCursor.offset > 0;
     const guardApplies = tokenMode || plan.listOffsetInferred === true;
-    if (guardApplies && notFirstPage && parsed.page.ids.length > 0) {
-      const known = new Set<string>([
-        ...state.archived,
-        ...state.pending,
-        ...seenThisEnumeration,
-      ]);
-      if (parsed.page.ids.every((id) => known.has(id))) {
+    if (guardApplies && parsed.page.ids.length > 0) {
+      const fingerprint = await listPageFingerprint(parsed.page.ids);
+      const recorded = Array.isArray(state.enumCursor.pageFingerprints)
+        ? state.enumCursor.pageFingerprints
+        : [];
+      if (recorded.includes(fingerprint)) {
         return halt(
           'shape-changed',
-          `${listWhere()}: the page carried only conversations this enumeration has already seen;`
+          `${listWhere()}: the page repeated a page this enumeration already returned;`
           + (tokenMode
             ? ' the page cursor did not advance (the platform may not honour the cursor parameter)'
             : ' the page offset did not advance (the platform may not honour the offset parameter)'),
         );
       }
+      state.enumCursor.pageFingerprints = [...recorded, fingerprint];
     }
-    if (guardApplies) for (const id of parsed.page.ids) seenThisEnumeration.add(id);
 
     // 🔴 W10 · The total the API gave is recorded, but it is **not** trusted as
     //    the denominator forever: it is a number this endpoint prints, not a

@@ -1335,6 +1335,29 @@ export interface BackfillState {
      */
     token?: string | null;
     truncated?: EnumTruncation;
+    /**
+     * 🔴 W124 / W124b · **The fingerprints of every non-empty page returned so far
+     * in the current enumeration pass**, for the repeat-page guard (engine.ts).
+     *
+     * W124 first recorded only the *first* page's ids and halted when a later page
+     * contained a subset of them. A read-only review found the hole: a server that
+     * returns page A, then page B, then keeps returning B for larger offsets was
+     * never caught, because B is not the first page — the offset and the request
+     * count would grow across ticks with no end-of-list signal.
+     *
+     * So the guard records the **fingerprint** of every non-empty page of the pass
+     * (sha256 of the sorted id list, engine.ts `listPageFingerprint`) and halts when
+     * a page's fingerprint has already been seen. That catches the first page
+     * repeated, the previous page repeated, and any page repeated later in the pass,
+     * while a versioned re-enumeration — whose pages are pairwise-disjoint, hence all
+     * fingerprints distinct — is untouched.
+     *
+     * Optional: a header written before W124b carries none, and the pass then records
+     * from this tick on (a repeat of a page from here onward is still caught). A
+     * cursor reset (migration or `recoverLedgerLoss`) clears the field with the rest
+     * of `enumCursor`.
+     */
+    pageFingerprints?: string[];
   };
   /** Debts: conversation ids that were enumerated but whose body has not been fetched. */
   pending: string[];
@@ -1557,7 +1580,8 @@ export interface BackfillHeader {
   scope: string;
   totalKnown: number | null;
   totalSource: TotalSource;
-  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation };
+  /** W124b · Same meaning and same compatibility rule as `BackfillState.enumCursor.pageFingerprints`. */
+  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation; pageFingerprints?: string[] };
   /** How many debts were still owed when this header was written. */
   pendingCount: number;
   /** How many conversations had been settled when this header was written. */
