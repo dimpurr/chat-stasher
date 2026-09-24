@@ -413,6 +413,17 @@ tick:
     ran: 它跑了
     unknown: "结局码：{reason}"
 
+  # 🔴 W113 · **某个目标这一跳为什么没跑** —— `TickSchedule.skipped` 里的码，说成人话。
+  # 这里的键是驼峰，记录里是连字符；映射在 lib/coverage.ts 的 `describeSkipReason`，
+  # 认不出来的码走 unknown，而不是拿码去拼键名。
+  skip:
+    noHttpPort: 当时没有这个平台的页面开着，没有可以取数的通道
+    halted: 这个平台被一条仍然生效的停止记录挡着
+    waitingRetry: 这个平台被拒之后正在退避等待，它自己会再来问
+    dailyCap: 这个平台今天的正文额度已经用完了
+    stateUnreadable: 这个平台保存的进度记录读不出来，所以原样没动
+    unknown: "这个 build 不认识的跳过原因：{reason}"
+
 progress:
   haltedPrefix: "[已停止：{reason}] "
   retryPrefix: "[等待重试：{reason}（第 {attempts} 次，约 {minutes} 分钟后）] "
@@ -444,3 +455,103 @@ failure:
   shortIdEmpty: "（空）"
 
 # platformNote: W84 起不再有半程声明的平台，注释块留空；若未来有 partial 平台，集中在这里。
+
+
+# ---------------------------------------------------------------------------
+# ADR-032 · 覆盖页（独立扩展页）与弹窗摘要卡。
+# ---------------------------------------------------------------------------
+coverage:
+  title: 回溯覆盖情况
+  subtitle: >-
+    以下是扩展自己记录下来的内容，读取时间 {when}。这个页面只读本浏览器自己的进度记录——
+    它不向任何平台发请求；归档自己的视图是 `chat-stasher ui` 命令。
+  empty: >-
+    还没有任何进度记录。这不等于「什么都没归档」——它的意思是这个浏览器还没有回溯过任何平台，
+    第一次在开关打开的情况下打开某个受支持平台时才会出现。
+  state:
+    off: >-
+      回溯开关是关的。在你于扩展弹窗里打开它之前，不会取任何东西，也不会发出任何请求。
+    hostPaused: >-
+      本机的 chat-stasher host 够不着，所以这条腿暂停了，而不是去取它送不出去的正文。
+      启动 host 之后，它会从同一条对话继续。
+    haltedNoRecord: >-
+      这里记着一次停止，但记录本身读不出来，所以原因未知。在看清楚之前不会取任何东西。
+    unregistered: >-
+      {platform} 有进度记录，但没有已注册的目标，所以这里不会运行。再打开一次 {platform} 就会重新注册。
+    capped: >-
+      这个平台今天的额度已经用完了（{cap} 条），这是限速在按预期工作，不是故障。明天它会自己继续。
+    waiting: "此刻没有在跑：{why}。"
+    done: 这个平台列出来的对话都已经存下了。
+  counts:
+    fromHeader: >-
+      存欠账的那份清单读不出来，所以下面的「已存」「待存」是进度头里记下的数字——
+      那是方便读的副本，不是权威。清单本身没有被改动。
+  enum:
+    complete: "已列出：{listed} —— 这个列表已经读到末尾"
+    inProgress: "仍在列出：目前 ≥ {listed}"
+    truncated: "已列出：{listed}，并且这个列表【没有】读到末尾 —— {why}"
+    why:
+      cursorMissing: 平台的回复里没有带翻页游标，所以只列出了拿到的那一页
+      hasMoreMissing: 平台的回复没有说还有没有下一页，所以我们停下，而不是去假设
+      emptyPageInferred: 这个平台没有明确的「列表结束」信号，而它返回了一个空页——那是推断，不是确认
+      shortPageInferred: 这个平台没有明确的「列表结束」信号，而它返回了一个不满的页——那是推断，不是确认
+      unknown: "列表停下的原因是这个 build 不认识的：{kind}"
+  totals:
+    label: "总数（平台自己报的）"
+    fromResponse: "至少见上；平台自报的总数是 {total}"
+    unknown: 这个平台不提供这个列表的总数，所以没有分母
+    contradicted: >-
+      平台自报的总数已经被实际返回的行数超过了，所以不拿它当分母
+  labels:
+    archived: 已完整存下
+    pending: 仍欠
+    percent: "占已列出的对话"
+    failures: 没有存下的（按原因）
+    failuresDropped: "这份列表里较早的 {count} 条已被丢弃（它是有上限的）"
+    parked: >-
+      被搁置：它们的正文回来是空的，而且还没有任何东西证明这个平台仍然会返回对话
+    emptyStreak: "连续空正文：{count}"
+    relisted: >-
+      这个平台存下的对话列表在 {when} 被重新读过一遍：记录里写着 {recorded} 个对话 id，
+      而存下的欠账清单只持有 {held}。你的归档没有被删除；并且一条已经存过的对话和一条从没取过的
+      对话无法分辨。
+    never: 从不
+  speed:
+    noCap: "当前没有生效的每日上限（这个计划不取正文）。"
+    cap: "今天生效的每日上限：{cap} 条，每次唤醒最多 {tick} 条。"
+    measured: "今天到目前为止实测：约 {rate}/天（{bodies} 条，用了 {hours} 小时）"
+    measuredUnknown: "实测速度：今天过去的时间还不够发这个数（今天过了 {hours} 小时）"
+    eta: >-
+      估算：约需 {days} 天跑完仍欠的 {pending} 条（按{basis}）——这是估算，不是承诺：
+      它假设这条腿会一直取下去
+    etaUnknown: >-
+      估算：没有——还没有可以拿来除的速度，因为既没有生效的额度，也没有可用的实测速度
+    etaNothingOwed: 估算：这里没有欠账，也就没有「跑完」可言
+    basisMeasured: 今天实测的速度
+    basisCap: 每日上限
+    neverFetched: 还没有取过任何正文
+    lastBody: "最近一次取正文在 {minutes} 分钟前"
+  months:
+    title: 对话是什么时候的
+    note: >-
+      按平台自己的列表给每条对话的时间统计，用的是本浏览器的日历。平台没有给出时间的月份单独计在
+      下面，【不会】摊到上面的月份里——没有记到时间不等于属于某个月。
+    archived: 已存
+    pending: 待存
+    unknownTime: >-
+      时间未知：已存 {archived} 条、待存 {pending} 条——平台的列表没有给出它们的时间，
+      所以它们不在上面任何一个月里
+    none: >-
+      这里还没有任何一条对话记下了时间，所以没有月度分布可看。这不是「历史是空的」——
+      只是时间还没有被记录。
+  preset:
+    title: 速度
+    gentle: 温和（默认）
+    standard: 标准
+    faster: 加速
+    risky: >-
+      加速会抬高每天、每次唤醒取多少。它不改变两个请求之间靠得多近，每一段间隔也仍然是不规则的——
+      但它确实是这里唯一一个对平台要求更高的设置，所以它不是默认。
+    applied: "速度已切换为：{preset}。"
+    failed: "速度设置没能保存（{detail}），所以什么都没有变。"
+    what: "每天最多 {cap} 条，每次唤醒 {tick} 条"
