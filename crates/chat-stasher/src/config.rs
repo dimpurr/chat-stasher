@@ -1727,12 +1727,12 @@ fn insert_missing_stage_line(
         }
     };
 
-    // Detect the dominant line ending from the whole file so a CRLF file
-    // stays CRLF even when the line we follow is the last one and carries no
-    // newline of its own. We examine the whole `raw` rather than only the
-    // followed line because when the followed line is the last one there is no
-    // newline to look at.
-    let dominant_ending = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    // The line we follow may be the file's last and carry no newline of its
+    // own, so there is nothing local to copy. Read the file's own convention
+    // instead — but only from line breaks that are *structure*: a `\r\n` that
+    // is data inside a string must not choose the separator. See
+    // [`dominant_line_ending`].
+    let dominant_ending = dominant_line_ending(raw, base);
 
     // The character after `base`, past the line we are appending to.
     let Some(newline) = raw[base..].find('\n') else {
@@ -1757,4 +1757,207 @@ fn insert_missing_stage_line(
     out.push_str(&format!("stage = {literal}{ending}"));
     out.push_str(&raw[nl + 1..]);
     Ok(out)
+}
+
+/// Decide which line ending a line appended at the end of the file should use,
+/// when the line it follows carries no newline of its own.
+///
+/// Only line breaks that are *structure* count. A `\r\n` that is data inside a
+/// TOML string — most easily a multi-line string — is string content, not the
+/// file's line-ending convention, and must not choose the separator. The
+/// string literals are read back from the same text through the span-preserving
+/// parser, so the count matches the lines the file really lays out.
+///
+/// The majority ending wins, so a mostly-LF file with one stray CRLF, or a CRLF
+/// that is only string data, stays LF. When the two counts tie there is no
+/// dominant convention; the ending that terminates the line the new one follows
+/// — the nearest newline before `before` — is reused, and a file with no line
+/// break at all falls back to `\n`.
+fn dominant_line_ending(raw: &str, before: usize) -> &'static str {
+    let bytes = raw.as_bytes();
+    let mut string_spans: Vec<std::ops::Range<usize>> = Vec::new();
+    // `raw` was parsed by the caller, so this succeeds for every input that
+    // reaches here; the empty-span fallback only avoids a second panic path.
+    if let Ok(doc) = toml_edit::ImDocument::parse(raw) {
+        collect_string_spans(doc.as_table(), &mut string_spans);
+    }
+
+    let (mut crlf, mut lf) = (0usize, 0usize);
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'\n' || string_spans.iter().any(|s| i >= s.start && i < s.end) {
+            continue;
+        }
+        if i > 0 && bytes[i - 1] == b'\r' {
+            crlf += 1;
+        } else {
+            lf += 1;
+        }
+    }
+
+    if crlf > lf {
+        "\r\n"
+    } else if lf > crlf {
+        "\n"
+    } else {
+        preceding_line_ending(raw, before).unwrap_or("\n")
+    }
+}
+
+/// The line ending that terminates the line before `before`, when the text has
+/// one: `\r\n` if the nearest preceding `\n` is preceded by `\r`, else `\n`.
+fn preceding_line_ending(raw: &str, before: usize) -> Option<&'static str> {
+    let bytes = raw.as_bytes();
+    let mut i = before.min(bytes.len());
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'\n' {
+            return Some(if i > 0 && bytes[i - 1] == b'\r' {
+                "\r\n"
+            } else {
+                "\n"
+            });
+        }
+    }
+    None
+}
+
+/// Collect the byte spans of every string literal in `table`, including those
+/// nested in inline tables and arrays, so line breaks inside a string can be
+/// told apart from the ones that lay out the file.
+fn collect_string_spans(table: &toml_edit::Table, spans: &mut Vec<std::ops::Range<usize>>) {
+    for (_, item) in table.iter() {
+        collect_item_string_spans(item, spans);
+    }
+}
+
+fn collect_item_string_spans(item: &toml_edit::Item, spans: &mut Vec<std::ops::Range<usize>>) {
+    match item {
+        toml_edit::Item::Value(value) => collect_value_string_spans(value, spans),
+        toml_edit::Item::Table(table) => collect_string_spans(table, spans),
+        toml_edit::Item::ArrayOfTables(tables) => {
+            for table in tables.iter() {
+                collect_string_spans(table, spans);
+            }
+        }
+        toml_edit::Item::None => {}
+    }
+}
+
+fn collect_value_string_spans(value: &toml_edit::Value, spans: &mut Vec<std::ops::Range<usize>>) {
+    match value {
+        toml_edit::Value::String(_) => {
+            if let Some(span) = value.span() {
+                spans.push(span);
+            }
+        }
+        toml_edit::Value::Array(array) => {
+            for value in array.iter() {
+                collect_value_string_spans(value, spans);
+            }
+        }
+        toml_edit::Value::InlineTable(table) => {
+            for (_, value) in table.iter() {
+                collect_value_string_spans(value, spans);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod line_ending_tests {
+    use super::*;
+
+    /// Insert `stage = "C:/stage"` into a fixture's `[native_host]` section.
+    fn insert_into(raw: &str) -> String {
+        let doc = toml_edit::ImDocument::parse(raw).expect("fixture must be valid TOML");
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture must have [native_host]");
+        let literal = toml_edit::Value::from("C:/stage").to_string();
+        set_existing_section_stage(raw, table, &literal).expect("insert should succeed")
+    }
+
+    /// R83b fixture: 21 LF breaks and a single CRLF on the first line. On main
+    /// the lone CRLF made the appended line use a CRLF separator.
+    #[test]
+    fn insert_after_last_line_uses_lf_when_crlf_is_a_minority() {
+        let mut raw = String::from("# intro\r\n");
+        for i in 0..20 {
+            raw.push_str(&format!("k{i} = {i}\n"));
+        }
+        raw.push_str("[native_host]\nmachine = \"desk\"");
+        let result = insert_into(&raw);
+        assert!(
+            result.contains("machine = \"desk\"\nstage = "),
+            "a mostly-LF file must get an LF separator; result bytes: {:?}",
+            result.as_bytes()
+        );
+        assert!(
+            !result.contains("machine = \"desk\"\r\nstage = "),
+            "the lone CRLF must not be read as the file's ending; result bytes: {:?}",
+            result.as_bytes()
+        );
+    }
+
+    /// R83b fixture: the only CRLF is data inside a multi-line string; every
+    /// structural line break is LF.
+    #[test]
+    fn insert_after_last_line_ignores_crlf_inside_a_multiline_string() {
+        let raw = "[native_host]\nnote = \"\"\"\nkeep\r\nme\n\"\"\"\nmachine = \"desk\"";
+        let result = insert_into(raw);
+        assert!(
+            result.contains("machine = \"desk\"\nstage = "),
+            "a CRLF inside a string must not choose the separator; result bytes: {:?}",
+            result.as_bytes()
+        );
+        assert!(
+            !result.contains("machine = \"desk\"\r\nstage = "),
+            "the separator must not be CRLF; result bytes: {:?}",
+            result.as_bytes()
+        );
+    }
+
+    /// A pure-CRLF file keeps its CRLF when a line is appended at EOF.
+    #[test]
+    fn insert_after_last_line_keeps_crlf_in_a_pure_crlf_file() {
+        let raw = "[native_host]\r\nmachine = \"desk\"";
+        let result = insert_into(raw);
+        assert!(
+            result.contains("machine = \"desk\"\r\nstage = "),
+            "a pure-CRLF file must keep a CRLF separator; result bytes: {:?}",
+            result.as_bytes()
+        );
+    }
+
+    /// A pure-LF file keeps its LF and gains no `\r`.
+    #[test]
+    fn insert_after_last_line_keeps_lf_in_a_pure_lf_file() {
+        let raw = "[native_host]\nmachine = \"desk\"";
+        let result = insert_into(raw);
+        assert!(
+            result.contains("machine = \"desk\"\nstage = "),
+            "a pure-LF file must keep an LF separator; result bytes: {:?}",
+            result.as_bytes()
+        );
+        assert!(
+            !result.contains('\r'),
+            "a pure-LF file must gain no CR byte; result bytes: {:?}",
+            result.as_bytes()
+        );
+    }
+
+    /// A tie in the structural-break counts has no dominant ending, so the
+    /// ending of the line the new one follows is reused.
+    #[test]
+    fn insert_after_last_line_on_a_tie_reuses_the_followed_line_ending() {
+        let raw = "[native_host]\r\nmachine = \"desk\"\nnote = \"x\"";
+        let result = insert_into(raw);
+        assert!(
+            result.contains("note = \"x\"\nstage = "),
+            "a tie must reuse the ending of the followed line; result bytes: {:?}",
+            result.as_bytes()
+        );
+    }
 }
