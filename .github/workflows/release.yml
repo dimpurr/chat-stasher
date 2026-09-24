@@ -312,8 +312,29 @@ jobs:
               ;;
           esac
 
+          # The staged set, already asserted in the "Stage artifacts" step to be
+          # exactly four files. This is the set the Release must end up with.
+          expected_assets="$(cd dist && ls -1 | sort)"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists; uploading assets (--clobber)."
+            echo "Release ${TAG} already exists; reconciling its asset set."
+            # 🔴 A re-run must not fail on an existing asset, and must not grow
+            # the published set. `gh release upload --clobber` replaces a
+            # same-named asset but leaves any *other* asset in place, so a
+            # mistakenly attached file (or one from an earlier draft) would
+            # survive every re-run and the Release would carry more than the
+            # build produced. Remove every existing asset this run does not
+            # stage, then upload.
+            existing_assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              if printf '%s\n' "$expected_assets" | grep -qxF -- "$name"; then
+                continue
+              fi
+              echo "removing stale release asset: ${name}"
+              gh release delete-asset "$TAG" "$name" --yes
+            done <<< "$existing_assets"
+
             gh release upload "$TAG" dist/* --clobber
           else
             echo "Creating Release ${TAG}${RC_FLAG:+ (prerelease)}."
@@ -322,3 +343,23 @@ jobs:
               --title "chat-stasher v${VERSION}" \
               --notes "Prebuilt macOS CLI binaries, the stable browser extension zip, and SHA256SUMS. See docs/install.md for installation."
           fi
+
+          # 🔴 The published set must equal the staged set, exactly — the same
+          # four names the "Stage artifacts" step asserted in `dist/`. Checking
+          # the *result* rather than trusting the commands is what turns a
+          # partial upload (a `--clobber` that lost an asset, a delete that did
+          # not happen) into a red run instead of a Release that quietly
+          # differs from what was built.
+          published_assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
+          if [ "$published_assets" != "$expected_assets" ]; then
+            {
+              echo "error: the published asset set does not match dist/."
+              echo "       expected:"
+              printf '%s\n' "$expected_assets"
+              echo "       published:"
+              printf '%s\n' "$published_assets"
+            } >&2
+            exit 1
+          fi
+          echo "published asset set OK:"
+          printf '%s\n' "$published_assets"

@@ -11,13 +11,16 @@
  *      reload script never installs a manifest it mis-parsed.
  */
 
-import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 import { buildVersion, parseBuildNumber } from '../lib/build-version';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = new URL('..', import.meta.url).pathname; // apps/extension
+const WXT_BIN = join(ROOT, 'node_modules', 'wxt', 'bin', 'wxt.mjs');
+const OUT_BASE = join(ROOT, '.output', 'build-version-pin');
 
 describe('buildVersion', () => {
   it('keeps the base semver and no version_name when there is no build number', () => {
@@ -73,12 +76,50 @@ describe('parseBuildNumber', () => {
 });
 
 describe('the produced manifest stays byte-identical without a build number', () => {
-  // Mirrors the pattern in w2-manifest.test.ts: this layer only bites when the
-  // build output exists, i.e. after `pnpm -s build` at closing time.
+  /**
+   * 🔴 W115 · **Build the manifest this case reads, rather than reading the
+   * shared `.output/chrome-mv3`.**
+   *
+   * `.output` is whatever build ran last — a dev-reload build that carries a
+   * build number, or one produced before a `package.json` version bump. Reading
+   * it made this case assert the freshness of an artifact it did not control:
+   * in the main checkout `pnpm test` failed with "expected '0.1.0' to be
+   * '0.2.0'" only because `.output` was older than `package.json`. That is a
+   * test depending on a stale artifact, not a property of the build.
+   *
+   * So the case runs the real build into its own `CS_OUT_DIR` — the same seam
+   * `w91-build-channels.test.ts` uses — and reads that manifest. The property
+   * under test is unchanged; it no longer measures the age of someone else's
+   * output. `CS_BUILD_NUMBER` is cleared so the run tests "no build number"
+   * regardless of the caller's environment, which is exactly the case this
+   * describe names.
+   */
+  let manifest: { version?: unknown; version_name?: unknown };
+
+  beforeAll(() => {
+    rmSync(OUT_BASE, { recursive: true, force: true });
+    const env: NodeJS.ProcessEnv = { ...process.env, CS_OUT_DIR: OUT_BASE };
+    delete env.CS_BUILD_NUMBER;
+    const result = spawnSync(process.execPath, [WXT_BIN, 'build'], {
+      cwd: ROOT,
+      env,
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `wxt build exited ${result.status}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`,
+      );
+    }
+    manifest = JSON.parse(
+      readFileSync(join(OUT_BASE, 'chrome-mv3', 'manifest.json'), 'utf8'),
+    ) as { version?: unknown; version_name?: unknown };
+  }, 180_000);
+
+  afterAll(() => {
+    rmSync(OUT_BASE, { recursive: true, force: true });
+  });
+
   it('a built manifest has no version_name and a 4-component-free version', () => {
-    const manifestPath = join(ROOT, '.output', 'chrome-mv3', 'manifest.json');
-    if (!existsSync(manifestPath)) return; // not built yet — nothing to pin
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     // `version` equals the semver from package.json with no 4th component.
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
     expect(String(manifest.version)).toBe(String(pkg.version));
