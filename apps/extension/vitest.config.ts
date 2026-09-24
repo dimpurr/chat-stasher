@@ -19,6 +19,7 @@ export default defineConfig({
    */
   define: {
     __CS_BUILD_STAMP__: JSON.stringify('b-testsuite'),
+    __CS_RELEASE_CHANNEL__: JSON.stringify(process.env.CS_RELEASE_CHANNEL ?? 'dev'),
   },
   test: {
     environment: 'node',

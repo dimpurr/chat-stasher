@@ -65,6 +65,7 @@ import {
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
 import { hookStatusOf, loadHookDecline } from '../../lib/hook-status';
 import { liveCaptureOf } from '../../lib/live-capture';
+import { currentReleaseChannel, isPlatformActiveInChannel } from '../../lib/contract';
 import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 
@@ -185,13 +186,20 @@ async function collect(): Promise<PopupModel> {
     //    empty list (at that point we genuinely know nothing).
     failures: collectFailures(snapshot),
     // 🔴 W43 · Read from the same snapshot as the failures above, and with the
-    //    same rule for an unreadable one (see PopupModel.hookStatus).
-    hookStatus: hookStatusOf(snapshot),
+    //    same rule for an unreadable one (see PopupModel.hookStatus). 🔴 W91 · A
+    //    stable build does not list an experimental platform, so a record left
+    //    behind by an older dev build is dropped here rather than shown: the
+    //    popup must not speak about a page this build does not inject into. The
+    //    record in storage is not touched.
+    hookStatus: hookStatusOf(snapshot).filter((record) =>
+      isPlatformActiveInChannel(record.platform, currentReleaseChannel())),
     // 🔴 W69 · Read from the **same snapshot** as the observation above, and with
     //    the same rule for an unreadable one: an empty list there means "we have
     //    no row for that platform", which the note words as a gap in the record —
-    //    never as "no capture arrived" (see PopupModel.liveCapture).
-    liveCapture: liveCaptureOf(snapshot),
+    //    never as "no capture arrived" (see PopupModel.liveCapture). 🔴 W91 · kept
+    //    to the active channel for the same reason as `hookStatus` above.
+    liveCapture: liveCaptureOf(snapshot).filter((record) =>
+      isPlatformActiveInChannel(record.platform, currentReleaseChannel())),
     // 🔴 W47 · The other half of the pair: a report a page sent that background
     //    received and did not record, read from its own key. `null` = nothing has
     //    been declined, which is not the same sentence as "a page told us about

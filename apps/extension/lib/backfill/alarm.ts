@@ -30,6 +30,11 @@ import type { TickReason } from './schedule';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import { completeInterruptedMigration, openLedger, unreadableStateRefusal, type LedgerRefusal } from './ledger';
 import {
+  currentReleaseChannel,
+  isPlatformActiveInChannel,
+  type ReleaseChannel,
+} from '../contract';
+import {
   BACKFILL_STATE_VERSION,
   isHeader,
   isLegacyState,
@@ -700,24 +705,43 @@ function isTarget(v: unknown): v is BackfillTarget {
     && typeof t.at === 'number';
 }
 
-export async function loadTargets(store: BackfillStore | null): Promise<BackfillTarget[]> {
+/**
+ * 🔴 W91 · The target registry, read for one release channel.
+ *
+ * `channel` exists so a test can drive the stable channel deterministically
+ * instead of relying on the build-time constant the suite pins to `dev`; every
+ * production caller omits it and gets the active build's channel. The filter is
+ * what makes a stable build **ignore** an experimental platform's leftover row
+ * rather than serve it — the row is left in storage untouched.
+ */
+export async function loadTargets(
+  store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<BackfillTarget[]> {
   if (!store) return [];
   const raw = await store.load(BACKFILL_TARGETS_KEY);
-  return Array.isArray(raw) ? raw.filter(isTarget) : [];
+  const targets = Array.isArray(raw) ? raw.filter(isTarget) : [];
+  return targets.filter((t) => isPlatformActiveInChannel(t.platform, channel));
 }
 
 /** Record one target (deduplicated by platform+scope, most recent first). */
 export async function rememberTarget(
   store: BackfillStore | null,
   target: BackfillTarget,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<BackfillTarget[]> {
   if (!store) return [];
-  const rest = (await loadTargets(store)).filter(
+  if (!isPlatformActiveInChannel(target.platform, channel)) {
+    return await loadTargets(store, channel);
+  }
+  const raw = await store.load(BACKFILL_TARGETS_KEY);
+  const allTargets = Array.isArray(raw) ? raw.filter(isTarget) : [];
+  const rest = allTargets.filter(
     (t) => !(t.platform === target.platform && t.scope === target.scope),
   );
   const next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
   await store.save(BACKFILL_TARGETS_KEY, next);
-  return next;
+  return next.filter((t) => isPlatformActiveInChannel(t.platform, channel));
 }
 
 /**
@@ -970,7 +994,10 @@ export function scopeFromStateKey(
  *    is new is that the reason is returned to the caller, which puts it in the
  *    tick trace and in the popup instead of dropping it on the floor.
  */
-export async function migrateLegacyScopes(store: BackfillStore | null): Promise<LegacyMigration> {
+export async function migrateLegacyScopes(
+  store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<LegacyMigration> {
   if (!store) return NOTHING_TO_MIGRATE;
 
   let keys: string[];
@@ -993,7 +1020,7 @@ export async function migrateLegacyScopes(store: BackfillStore | null): Promise<
   const report: LegacyMigration = { ...NOTHING_TO_MIGRATE };
   for (const key of keys.sort()) {
     const named = legacyScopeFromKey(key);
-    if (!named) continue;
+    if (!named || !isPlatformActiveInChannel(named.platform, channel)) continue;
     report.found += 1;
     // 🔴 One unreadable scope must not hide the ones behind it: `continue`, never
     //    `return`. (W36 returned here; a store that threw on the first key skipped
@@ -1063,6 +1090,7 @@ export async function migrateLegacyScopes(store: BackfillStore | null): Promise<
  */
 export async function findUnreadableState(
   store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<LedgerRefusal | null> {
   if (!store) return null;
 
@@ -1081,7 +1109,7 @@ export async function findUnreadableState(
 
   for (const key of keys.sort()) {
     const named = scopeFromStateKey(key, STATE_KEY_PREFIX);
-    if (!named) continue;
+    if (!named || !isPlatformActiveInChannel(named.platform, channel)) continue;
     let raw: unknown;
     try {
       raw = await store.load(key);

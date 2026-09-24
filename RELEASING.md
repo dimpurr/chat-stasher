@@ -142,6 +142,44 @@ development build. That is a condition to be checked by the owner, not a rule
 the workflow can enforce, so nothing in `.github/workflows/` will stop a mistake
 here — look at the asset list in step 7.
 
+### Release channel: `stable` vs `dev`
+
+The extension is built for one of two release channels, and the channel decides
+which platforms a build activates:
+
+- **`stable`** — the default of `pnpm build`, and therefore of the zip a release
+  produces. An experimental platform is **fully inert** here: its origins are not
+  in the generated manifest's content-script matches (no `host_permissions` are
+  declared at all), its backfill registry rows and ledgers are **ignored, not
+  deleted**, no enumeration or tick serves it, and the popup does not list it.
+- **`dev`** — `pnpm dev`, `pnpm build:dev`, and the `pnpm e2e` suite. Every
+  platform is active exactly as it is in development today.
+
+The channel is chosen at build time. `build:dev` runs
+`CS_RELEASE_CHANNEL=dev pnpm build`; with the variable unset the build is
+`stable`. `pnpm dev` and the e2e suite are `dev` because they are development
+commands, not because anything sets the variable for them.
+
+**One list is the source of truth.** `ALL_PLATFORMS` in
+`apps/extension/lib/contract.ts` carries every platform row with a per-row
+`channel: 'stable' | 'experimental'`. A stable build derives its manifest matches
+and its runtime platform set from the `stable` rows of that list; a dev build
+derives both from every row. Nothing else decides what a stable build touches.
+
+**Promoting a platform is a one-line change.** After an acceptance run on the dev
+channel proves the platform's live capture, backfill, and popup path, change that
+one row's `channel` from `'experimental'` to `'stable'` in `ALL_PLATFORMS`, then
+run the gates (`pnpm -s compile`, `pnpm -s test`, the stable and dev builds,
+`pnpm e2e`). `tests/w91-build-channels.test.ts` builds both channels and reads
+the generated manifests back, and `tests/w91-channels.test.ts` asserts the list,
+the derived sets, and the runtime refusal; together they fail if the two channels
+and the list ever drift apart. Demoting a platform — shelving it again — is the
+same edit in reverse, and stored rows and ledgers for it are ignored, never
+deleted.
+
+The native host and the CLI side need no change for any of this: the channel only
+decides what the extension itself builds and serves.
+
 ## What the workflow checks
 
 A rule here is worth writing down only if something can tell when it is broken,

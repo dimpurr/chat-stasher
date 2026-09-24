@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'wxt';
 
-import { buildStamp, buildVersion, parseBuildNumber } from './lib/build-version';
+import { buildStamp, buildVersion, parseBuildNumber, resolveReleaseChannel } from './lib/build-version';
 
 export default defineConfig({
   // `@wxt-dev/i18n` (module source: node_modules/@wxt-dev/i18n/dist/module.mjs:10-93)
@@ -12,6 +12,15 @@ export default defineConfig({
   // unless `manifest.default_locale` is set (module.mjs:18-21), which is why the
   // two lines below are a pair.
   modules: ['@wxt-dev/i18n/module'],
+  /**
+   * 🔴 W91 · **Where a build lands.**
+   *
+   * `.output` for every ordinary build and for releases. `CS_OUT_DIR` is a test
+   * seam with exactly one caller — `tests/w91-build-channels.test.ts`, which
+   * builds the stable and dev channels in one run and must not have the second
+   * build overwrite the first's manifest. It changes no manifest byte.
+   */
+  outDir: process.env.CS_OUT_DIR ?? '.output',
   /**
    * 🔴 W59b · **The build stamp, folded into the bundle.**
    *
@@ -33,9 +42,12 @@ export default defineConfig({
    *    still `buildVersion`'s, so an unversioned build's manifest stays byte-identical
    *    and `tests/build-version.test.ts` keeps meaning what it says.
    */
-  vite: () => ({
+  vite: (env) => ({
     define: {
       __CS_BUILD_STAMP__: JSON.stringify(buildStamp(Date.now())),
+      __CS_RELEASE_CHANNEL__: JSON.stringify(
+        resolveReleaseChannel(process.env.CS_RELEASE_CHANNEL, env),
+      ),
     },
   }),
   // `manifest` is a function so the version can reflect `CS_BUILD_NUMBER`

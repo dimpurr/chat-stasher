@@ -106,7 +106,12 @@
  * path, the method, the structure and the size are all fixed.
  */
 
-import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
+import {
+  currentReleaseChannel,
+  getPlatformByOrigin,
+  MAX_RAW_BYTES,
+  type ReleaseChannel,
+} from '../contract';
 import type { OrgResolution } from './claude-org';
 import {
   backfillPlanFor,
@@ -1189,10 +1194,21 @@ export function resetTabRegistryMirrorForTest(): void {
   tabRegistryMirrors = new WeakMap();
 }
 
-export async function loadTabs(store: BackfillStore | null): Promise<TabEntry[]> {
+/**
+ * 🔴 W91 · The tab registry, read for one release channel.
+ *
+ * A stable build must ignore a row left behind by a dev build for an
+ * experimental platform rather than serve it. `channel` is the same test seam as
+ * `loadTargets`' — production callers omit it and get the active channel.
+ */
+export async function loadTabs(
+  store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<TabEntry[]> {
   if (!store) return [];
   const raw = await store.load(BACKFILL_TABS_KEY);
-  return Array.isArray(raw) ? raw.filter(isTabEntry) : [];
+  const tabs = Array.isArray(raw) ? raw.filter(isTabEntry) : [];
+  return tabs.filter((t) => getPlatformByOrigin(t.origin, channel) !== undefined);
 }
 
 /**
@@ -1219,8 +1235,15 @@ async function writeRegistry(store: BackfillStore, next: TabEntry[]): Promise<vo
 }
 
 /** Record one (deduplicated by tabId, most recent first). */
-export async function rememberTab(store: BackfillStore | null, entry: TabEntry): Promise<TabEntry[]> {
+export async function rememberTab(
+  store: BackfillStore | null,
+  entry: TabEntry,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<TabEntry[]> {
   if (!store) return [];
+  if (!getPlatformByOrigin(entry.origin, channel)) {
+    return await loadTabs(store, channel);
+  }
   const known = await readRegistry(store);
   const previous = known.find((t) => t.tabId === entry.tabId);
   if (
@@ -1514,6 +1537,7 @@ export async function sweepUnregisteredTabs(
   let crowded = 0;
   for (const found of replies) {
     if (!found) continue;
+    if (!getPlatformByOrigin(found.origin)) continue;
     const knownNow = await readRegistry(store);
     const before = knownNow.some((t) => t.tabId === found.tabId);
     // Prune already dropped ids the query does not list, so every remaining

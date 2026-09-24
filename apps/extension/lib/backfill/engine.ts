@@ -21,7 +21,13 @@
  *    needed.
  */
 
-import { getPlatformByOrigin, matchesResponseShape, type CapturedFetch } from '../contract';
+import {
+  currentReleaseChannel,
+  getPlatformByOrigin,
+  matchesResponseShape,
+  type CapturedFetch,
+  type ReleaseChannel,
+} from '../contract';
 import { runningBuildId } from '../extension-build';
 import { isClaudeOrgId } from './claude-org';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
@@ -300,6 +306,17 @@ export interface BackfillOptions {
    * missing one, and it is why this is `string | null` rather than `string`.
    */
   build?: string | null;
+  /**
+   * 🔴 W91 · **Which release channel this run is judged in.**
+   *
+   * The platform table is already channel-filtered at import time, so production
+   * never sets this: an experimental origin simply is not in `PLATFORMS` in a
+   * stable build, and this run halts on it by name. The field exists for the one
+   * caller that cannot reproduce that: the test suite pins the build-time channel
+   * to `dev`, so a test that wants to prove "stable never serves Perplexity/Kimi"
+   * says `channel: 'stable'` here instead of rebuilding the bundle.
+   */
+  channel?: ReleaseChannel;
   clock?: Clock;
   pace?: BackfillPace;
   /**
@@ -1383,7 +1400,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
   }
 
-  const platformRow = getPlatformByOrigin(opts.origin);
+  const platformRow = getPlatformByOrigin(opts.origin, opts.channel ?? currentReleaseChannel());
   if (!platformRow) {
     return halt('shape-changed', `origin ${opts.origin} is not in the platform table`);
   }
