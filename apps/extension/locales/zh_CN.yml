@@ -504,6 +504,8 @@ coverage:
       平台自报的总数已经被实际返回的行数超过了，所以不拿它当分母
   labels:
     archived: 已完整存下
+    archivedOf: "{archived} / 已列出 {total}（{percent}%）"
+    noPercent: "没有百分比：{reason}"
     pending: 仍欠
     percent: "占已列出的对话"
     failures: 没有存下的（按原因）
@@ -527,10 +529,20 @@ coverage:
     etaUnknown: >-
       估算：没有——还没有可以拿来除的速度，因为既没有生效的额度，也没有可用的实测速度
     etaNothingOwed: 估算：这里没有欠账，也就没有「跑完」可言
+    etaHours: >-
+      估算：还需 {hours} 小时才能跑完仍欠的 {pending} 条（按{basis}）——这是估算，不是承诺：
+      它假设这条腿会一直取下去
     basisMeasured: 今天实测的速度
     basisCap: 每日上限
     neverFetched: 还没有取过任何正文
     lastBody: "最近一次取正文在 {minutes} 分钟前"
+  # 🔴 弹窗里的摘要卡。只有计数和状态词——不出现百分比，也不出现估算：
+  # 那些需要页面上的说明，两行卡片承载不了。
+  card:
+    open: 打开覆盖页
+    title: 覆盖情况
+    line: "{platform} · 已存 {archived}、欠 {pending} —— {state}"
+    running: 正在跑
   months:
     title: 对话是什么时候的
     note: >-

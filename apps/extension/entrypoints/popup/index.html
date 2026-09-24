@@ -55,6 +55,19 @@
         margin: 8px 0; padding: 6px 8px; font-size: 12px;
         border-left: 3px solid rgba(128,128,128,.55);
       }
+      /* ADR-032 · The coverage card: the counts, the state, and the way into the full page.
+         Quiet like the stage summary — it is a fact, not an alert — and above the switch,
+         because it is about what has already happened rather than what is switched on. */
+      #coverage-card {
+        margin: 8px 0; padding: 6px 8px; font-size: 12px;
+        border-left: 3px solid rgba(128,128,128,.55);
+      }
+      #coverage-card .title { font-weight: 600; margin-bottom: 2px; }
+      #coverage-card .line { opacity: .92; white-space: pre-wrap; }
+      #open-coverage {
+        display: block; margin: 8px 0 0; padding: 6px 12px;
+        font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      }
       #open-dashboard {
         display: block; margin: 8px 0; padding: 6px 12px;
         font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
@@ -123,6 +136,9 @@
     <button type="button" id="open-dashboard"></button>
     <div id="dashboard-note" hidden></div>
     <div id="coverage"></div>
+    <!-- ADR-032 §1 · The summary card and the entry link into the standalone coverage page. -->
+    <div id="coverage-card" hidden></div>
+    <button type="button" id="open-coverage" hidden></button>
     <div class="row">
       <input type="checkbox" id="toggle" />
       <label for="toggle" id="toggle-label"></label>

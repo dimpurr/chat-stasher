@@ -786,6 +786,10 @@ coverage:
       returned, so it is not used as a denominator
   labels:
     archived: stored in full
+    archivedOf: "{archived} of {total} listed ({percent}%)"
+    # 🔴 The percentage is missing **by rule** (computeProgress), and the sentence says which
+    #    condition failed rather than leaving the reader to wonder why there is no number.
+    noPercent: "no percentage: {reason}"
     pending: still owed
     percent: "of the listed conversations" 
     failures: not stored, by reason
@@ -815,10 +819,22 @@ coverage:
       estimate: none — there is no rate to divide by yet, because no quota is in
       force and no measured rate is available
     etaNothingOwed: "estimate: nothing is owed here, so there is nothing to finish"
+    # 🔴 Under a day the sentence switches units. "about 0.0 day(s)" is arithmetically right and
+    #    useless: the reader cannot tell it from "no time at all".
+    etaHours: >-
+      estimate: about {hours} hour(s) of fetching left for the {pending} still owed at the {basis} —
+      an estimate, not a promise: it assumes the leg keeps fetching
     basisMeasured: rate measured today
     basisCap: daily limit
     neverFetched: no conversation body has been fetched yet
     lastBody: "last conversation fetched {minutes} min ago"
+  # 🔴 The popup's summary card. Counts and a state word only — never a percentage and never an estimate:
+  # those need the caveats that live on the page, and a two-line card cannot carry them.
+  card:
+    open: Open the coverage page
+    title: Coverage
+    line: "{platform} · stored {archived}, owed {pending} — {state}"
+    running: running
   months:
     title: When the conversations are from
     note: >-
