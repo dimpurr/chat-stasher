@@ -44,7 +44,7 @@ leave the report open indefinitely.
 
 | Version | Supported |
 |---|---|
-| `main` — the dev channel; between a release commit and the next `-dev` bump it briefly carries the released version (`crates/chat-stasher/Cargo.toml:3`) | Yes — this is the only line that receives fixes |
+| `main` — the dev channel, versioned `0.5.0-dev` (`crates/chat-stasher/Cargo.toml:3`) | Yes — this is the only line that receives fixes |
 | `0.4.0` — the current stable release (`v0.4.0`, tagged 2026-09-24; CLI + browser extension 0.2.0) | No — fixes land on `main` and ship in the next stable release |
 
 Stable releases are the git tags `vX.Y.Z`; the newest is `v0.4.0`, tagged and
