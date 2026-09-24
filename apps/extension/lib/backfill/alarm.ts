@@ -1402,6 +1402,8 @@ export interface BackfillTickRecord {
    *    compatibility rule the other optional fields follow.
    */
   schedule?: TickSchedule;
+  /** Which page-owned fact established a Claude scope for this tick. */
+  claudeScopeSource?: 'observed' | 'cookie' | 'organizations-endpoint';
 }
 
 function isTickRecord(v: unknown): v is BackfillTickRecord {

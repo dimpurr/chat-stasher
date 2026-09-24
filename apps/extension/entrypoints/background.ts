@@ -1394,7 +1394,11 @@ function scopeRequestSpend(answer: ScopeAnswer): ScopeRequest {
 async function resolveScopeForTick(
   store: ReturnType<typeof browserLocalStore>,
   target: { platform: string; origin: string; scope: string },
-): Promise<{ scope: string; request: ScopeRequest }> {
+): Promise<{
+  scope: string;
+  request: ScopeRequest;
+  source?: 'observed' | 'cookie' | 'organizations-endpoint';
+}> {
   if (!backfillPlanFor(target.platform)?.scopeInPath) {
     return { scope: target.scope, request: 'none' };
   }
@@ -1454,7 +1458,10 @@ async function resolveScopeForTick(
   await rememberScopedTarget(store, {
     platform: target.platform, origin: target.origin, scope: resolved.org, at: Date.now(),
   });
-  return { scope: resolved.org, request: scopeRequestSpend(answer) };
+  const source = resolved.source === 'page'
+    ? 'observed'
+    : resolved.source === 'cookie' ? 'cookie' : 'organizations-endpoint';
+  return { scope: resolved.org, request: scopeRequestSpend(answer), source };
 }
 
 async function runAlarmTickBody(): Promise<TickResult> {
@@ -1526,6 +1533,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
 
   let last: TickResult = { ran: false, reason: 'no-http-port', report: null };
   const schedule: TickSchedule = { served: null, skipped: [] };
+  let claudeScopeSource: 'observed' | 'cookie' | 'organizations-endpoint' | undefined;
   /**
    * 🔴 W51 · The recovery sweep runs **at most once per tick**, and only when a
    *    registered target is about to concede `no-http-port`. A tick that already
@@ -1550,7 +1558,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
    */
   const conclude = async (): Promise<TickResult> => {
     lastTick = last;
-    await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep, schedule);
+    await recordAlarmTick(store, last, targets.length, preflightRefusal, tabSweep, schedule, claudeScopeSource);
     return last;
   };
   /**
@@ -1630,6 +1638,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     if (!target) continue;
     const scopeResolution = await resolveScopeForTick(store, target);
     const scope = scopeResolution.scope;
+    claudeScopeSource = scopeResolution.source ?? claudeScopeSource;
     /**
      * 🔴 W76b · **Has this target's turn already put a request to the platform?**
      *
@@ -1727,7 +1736,9 @@ async function runAlarmTickBody(): Promise<TickResult> {
         //    is the write W62 already added — W62b only changes *what* it says, it
         //    adds no third write — and it buys the property that no reader can
         //    mistake an interrupted tick for one that decided not to look.
-        await recordAlarmTick(store, last, targets.length, preflightRefusal, SWEEP_NOT_CONCLUDED, schedule);
+        await recordAlarmTick(
+          store, last, targets.length, preflightRefusal, SWEEP_NOT_CONCLUDED, schedule, claudeScopeSource,
+        );
         tabSweep = await recoverUnregisteredTabs();
         // Retry this target only by aiming at a row the sweep just registered
         // of *this* origin. Walking pickLiveTab again would re-strike the
@@ -1943,6 +1954,7 @@ async function recordAlarmTick(
    *    "no such record" rule the other optional fields follow).
    */
   schedule?: TickSchedule,
+  claudeScopeSource?: 'observed' | 'cookie' | 'organizations-endpoint',
 ): Promise<void> {
   const halt = result.report?.halted ?? null;
   await saveLastTick(store, {
@@ -1980,6 +1992,7 @@ async function recordAlarmTick(
     detail: halt?.detail ?? (result.ran ? null : preflightRefusal?.detail) ?? null,
     tabSweep: persistSweep(tabSweep),
     schedule,
+    ...(claudeScopeSource ? { claudeScopeSource } : {}),
   });
 }
 

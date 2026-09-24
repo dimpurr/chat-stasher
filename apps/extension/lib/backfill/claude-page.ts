@@ -62,6 +62,10 @@ export interface ClaudePageScope {
 export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScope {
   let seen: string | null = null;
   let allowed: string | null = null;
+  // A page load may spend at most one request on organization discovery. Keep
+  // the promise (including a rejection) so concurrent asks cannot burst and a
+  // transient failure is not retried until the page is reloaded.
+  let organizationsRequest: Promise<string> | null = null;
 
   /**
    * 🔴 The resolution-only path, **as the plan itself declares it** — never spelled
@@ -83,12 +87,15 @@ export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScop
    */
   const fetchOrganizations = async (): Promise<string> => {
     if (resolvePath === null) throw new Error('the claude plan declares no resolution path');
-    const reply = await serveBackfillFetch(`${deps.pageOrigin}${resolvePath}`, deps.pageOrigin, deps.fetchImpl);
-    if (!reply.ok) throw new Error(`the organizations request did not complete: ${reply.error}`);
-    if (reply.status < 200 || reply.status > 299) {
-      throw new Error(`the organizations request answered HTTP ${reply.status}`);
-    }
-    return reply.text;
+    organizationsRequest ??= (async () => {
+      const reply = await serveBackfillFetch(`${deps.pageOrigin}${resolvePath}`, deps.pageOrigin, deps.fetchImpl);
+      if (!reply.ok) throw new Error(`the organizations request did not complete: ${reply.error}`);
+      if (reply.status < 200 || reply.status > 299) {
+        throw new Error(`the organizations request answered HTTP ${reply.status}`);
+      }
+      return reply.text;
+    })();
+    return organizationsRequest;
   };
 
   return {

@@ -43,6 +43,7 @@ import { readFileSync } from 'node:fs';
 import { withI18n } from './i18n-harness';
 import {
   BACKFILL_FETCH_MESSAGE,
+  CLAUDE_ORG_REQUEST_MESSAGE,
   handleBackfillMessage,
   isBackfillFetchRequest,
 } from '../lib/backfill/tab-port';
@@ -475,6 +476,34 @@ describe('W31c-2 · a real capture is still the strongest source', () => {
 // 3 · The scope the page allows is the scope the request carries
 // ---------------------------------------------------------------------------
 describe('W31c-3 · the allowlist compares the path segment against the page\'s own scope', () => {
+  it('🔴 a cookie-derived page scope allows the matching list and spends no second organization request', async () => {
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG2]);
+    routes[`/api/organizations/${ORG2}/chat_conversations`] = jsonRoute(() => '[]');
+    const page = openTab(7, { cookie: `lastActiveOrg=${ORG2}` });
+    const resolved = await page.handleMessage({ type: CLAUDE_ORG_REQUEST_MESSAGE });
+    expect(await resolved).toMatchObject({ ok: true, org: ORG2, source: 'cookie' });
+    expect(page.allowedScope()).toBe(ORG2);
+
+    const sent = await handleBackfillMessage(
+      { type: BACKFILL_FETCH_MESSAGE, url: `${CLAUDE_ORIGIN}/api/organizations/${ORG2}/chat_conversations` },
+      CLAUDE_ORIGIN, pageFetch, undefined, page.allowedScope(),
+    );
+    expect(sent?.ok).toBe(true);
+    expect(pageCalls).toEqual([`${CLAUDE_ORIGIN}/api/organizations/${ORG2}/chat_conversations`]);
+  });
+
+  it('🔴 endpoint discovery is limited to one request per page load, including concurrent asks', async () => {
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    const page = openTab(7);
+    const first = page.handleMessage({ type: CLAUDE_ORG_REQUEST_MESSAGE });
+    const second = page.handleMessage({ type: CLAUDE_ORG_REQUEST_MESSAGE });
+    expect(await Promise.all([first, second])).toEqual([
+      { ok: true, org: ORG, source: 'endpoint' },
+      { ok: true, org: ORG, source: 'endpoint' },
+    ]);
+    expect(pageCalls).toEqual([RESOLVE_URL]);
+  });
+
   it('🔴 the same URL is refused while the page has no organization, and sent once it has one', async () => {
     routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
     const request = { type: BACKFILL_FETCH_MESSAGE, url: LIST_URL };
@@ -601,6 +630,8 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     // organization in its path, which is the whole point of resolving it.
     expect(conversationRequests().length).toBeGreaterThan(0);
     expect(conversationRequests().every((url) => url.includes(`/api/organizations/${ORG}/`))).toBe(true);
+    const { loadLastTick } = await import('../lib/backfill/alarm');
+    expect(await loadLastTick(s)).toMatchObject({ claudeScopeSource: 'organizations-endpoint' });
   });
 
   it('🔴 a permanent halt is not re-asked, and the tick therefore issues nothing', async () => {

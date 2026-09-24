@@ -49,16 +49,16 @@ apps/extension/entrypoints/background.ts:1204-1247  fda982ba64df  lines=44
   <- docs/privacy.md:310  :: export function backfillTargetFor(
 apps/extension/entrypoints/background.ts:1247  6539997ed831  lines=1
   <- docs/privacy.md:312  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1394-1458  c394f5bf25c3  lines=65
+apps/extension/entrypoints/background.ts:1394-1464  7645b936d3b6  lines=71
   <- README.md:172, docs/install.md:645, docs/privacy.md:362, docs/privacy.md:378  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1904-1938  117bbd69b73e  lines=35
+apps/extension/entrypoints/background.ts:1915-1949  117bbd69b73e  lines=35
   <- docs/privacy.md:277  :: /**
-apps/extension/entrypoints/background.ts:1946-1983  64b51e737fa5  lines=38
-  <- docs/privacy.md:277  :: ): Promise<void> {
-apps/extension/entrypoints/background.ts:2212-2228  80fe37fa4a45  lines=17
-  <- docs/privacy.md:278  :: */
-apps/extension/entrypoints/background.ts:2255-2271  467c5cf25463  lines=17
-  <- docs/privacy.md:278  :: const platform = PLATFORMS.find((row) => row.origins.includ…
+apps/extension/entrypoints/background.ts:1965-1995  d0d3cb4d3a68  lines=31
+  <- docs/privacy.md:277  :: /**
+apps/extension/entrypoints/background.ts:2213-2228  13c87fcdd54d  lines=16
+  <- docs/privacy.md:278  :: /**
+apps/extension/entrypoints/background.ts:2241-2259  6b8629fcf40e  lines=19
+  <- docs/privacy.md:278  :: if (isHookStatusMessage(message)) {
 apps/extension/entrypoints/dw-bridge.content.ts:449-455  ff11500827ff  lines=7
   <- docs/privacy.md:123  :: function readKimiAccessToken(): string | null {
 apps/extension/entrypoints/dw-bridge.content.ts:608-634  c4f63f6e72e7  lines=27
@@ -77,7 +77,7 @@ apps/extension/lib/backfill/alarm.ts:813-882  b2f19b8949af  lines=70
   <- docs/privacy.md:377  :: * 🔴 W49 / W49b · Store one scoped-platform row, drop every …
 apps/extension/lib/backfill/alarm.ts:1221-1323  0ec9970a66d5  lines=103
   <- docs/privacy.md:277  :: /**
-apps/extension/lib/backfill/alarm.ts:1326-1405  56e327744fb3  lines=80
+apps/extension/lib/backfill/alarm.ts:1326-1406  8c912171ce37  lines=81
   <- docs/privacy.md:277  :: export interface BackfillTickRecord {
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs/privacy.md:327  :: * ## Why this module exists at all
@@ -85,9 +85,9 @@ apps/extension/lib/backfill/claude-org.ts:110-136  13f59996d45c  lines=27
   <- docs/privacy.md:373  :: /**
 apps/extension/lib/backfill/claude-org.ts:211-265  042cd322b76d  lines=55
   <- README.md:172, docs/privacy.md:345, docs/threat-model.md:304, docs/threat-model.md:595  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
-apps/extension/lib/backfill/claude-page.ts:62-136  434dcd589586  lines=75
+apps/extension/lib/backfill/claude-page.ts:62-143  6d8e105b0313  lines=82
   <- README.md:172, docs/install.md:640, docs/privacy.md:339, docs/threat-model.md:606  :: export function createClaudePageScope(deps: ClaudePageScope…
-apps/extension/lib/backfill/claude-page.ts:84-92  b8faf8b2d241  lines=9
+apps/extension/lib/backfill/claude-page.ts:88-99  584c9ab14ea0  lines=12
   <- docs/privacy.md:334  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs/privacy.md:274  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…

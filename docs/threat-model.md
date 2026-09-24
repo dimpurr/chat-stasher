@@ -603,7 +603,7 @@ a real limitation of the current code.
    judgement written by another build is not this one's, and the attempt is
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
-   (`apps/extension/lib/backfill/claude-page.ts:62-136`;
+   (`apps/extension/lib/backfill/claude-page.ts:62-143`;
    `apps/extension/entrypoints/background.ts:926-970`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:258-295`); a body
