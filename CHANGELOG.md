@@ -6,7 +6,71 @@ browser extension has its own version and ships on its own schedule; see
 
 ## Unreleased — 0.4.0
 
-Nothing yet.
+### Added
+
+#### CLI
+
+- The web archive can now retain a conversation's time basis in export manifests,
+  and discovery can rebuild its activity index from all saved snapshots, including
+  sessions whose time was previously unknown.
+- Stage updates preserve the file's original line endings, including CRLF, and
+  refuse an implicit stage table rather than editing an ambiguous configuration.
+
+#### Extension
+
+- The stable release channel now includes the browser extension. Stable builds
+  activate the five platforms that have passed live acceptance; experimental
+  integrations remain inactive in stable builds.
+- History backfill now retrieves conversation bodies on an additional experimental
+  platform and refuses responses that do not establish that the body is complete.
+- A scoped history integration can authorize a freshly opened page and establish
+  its organization before requesting a history listing.
+
+### Changed
+
+#### CLI
+
+- The backfill scheduler now tracks service by target identity, re-arms through
+  its alarm synchronization queue, and preserves rotation across worker restarts.
+  Never-served targets are prioritized and service stamps are normalized on save.
+- A paginated conversation listing treats a list-only response as a time point,
+  and numeric web-archive timestamps are interpreted as absolute epochs.
+
+#### Extension
+
+- Stable and development builds now have separate platform sets. A production
+  build with no channel override selects stable, while development and end-to-end
+  builds retain the development channel.
+- Body completeness failures are kept local to the affected conversation where
+  possible, so an empty or uncorroborated detail response does not halt unrelated
+  backfill work.
+
+### Fixed
+
+#### CLI
+
+- Activity-index rebuilds no longer use stale snapshots, and the appended stage
+  line uses the line ending already present in the file.
+- Backfill scheduling no longer starves targets because of registry order or a
+  stale positional cursor.
+
+#### Extension
+
+- A frame walker handles the corrected response shape, and a scoped backfill is
+  re-enumerated once after the detail-walk correction.
+- Empty detail identifiers remain pending until a real body proves the endpoint
+  works; one empty body is reported for that conversation instead of stopping the
+  full run. Uncorroborated branch roots and incomplete experimental bodies are
+  refused rather than archived as complete.
+- A stable build no longer removes or exposes state left by a development build.
+
+#### Repository and release tooling
+
+- Citation anchors can be relocated safely after rebasing, with a helper that
+  refuses ambiguous moves. The output inventory and citation lock were refreshed
+  where source line changes required it.
+- The Homebrew formula's release checksums were completed for the prior stable
+  release.
 
 ## 0.3.0 — 2026-09-24
 

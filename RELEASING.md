@@ -78,12 +78,15 @@ automation creates one.
    not run on a branch — and its first gate ends the run unless the tag is
    exactly `vX.Y.Z` or `vX.Y.Z-rc.N` **and** agrees with `Cargo.toml`.
 7. **Verify the published release** before telling anyone it exists:
-   - the Release is marked **latest**, and the three uploaded assets are exactly
-     `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64` and
-     `SHA256SUMS` — nothing extension-shaped is among them. (GitHub's own
+   - the Release is marked **latest**, and the four uploaded assets are exactly
+     `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64`,
+     `chat-stasher-extension-X.Y.Z.zip` and `SHA256SUMS`. The extension zip is
+     the stable channel and its manifest contains no experimental origins.
+     (GitHub's own
      auto-generated "Source code" archives are not assets and are always
      present; the workflow asserts the uploaded set, `release.yml`.)
-   - `sha256` of each downloaded binary matches its `SHA256SUMS` line;
+   - `sha256` of each downloaded asset, including the extension zip, matches its
+     `SHA256SUMS` line;
    - the downloaded arm64 binary prints `chat-stasher X.Y.Z`.
 8. **Fill the Homebrew `sha256` values** from that `SHA256SUMS` and commit them
    to the tap.
@@ -132,15 +135,15 @@ rc tag) by the steps above — which includes a commit that sets `Cargo.toml` to
 
 ## The extension
 
-**Stable releases ship the CLI only.** The extension is not built by the release
-workflow, is not attached as a release asset, and is not versioned by the CLI's
-version — its `package.json` moves on its own schedule.
+**Stable releases ship the CLI binaries and the stable-channel extension zip.**
+The extension zip is named `chat-stasher-extension-X.Y.Z.zip`, using the
+extension's own `package.json` version independently of the CLI version. The
+release workflow builds it with `CS_RELEASE_CHANNEL` unset, checks that its
+manifest has no experimental origins, includes its checksum, and asserts the
+exact four-file asset set.
 
-The extension joins stable releases when at least four platforms deliver data to
-the CLI end to end; until then it is distributed only as an unpacked
-development build. That is a condition to be checked by the owner, not a rule
-the workflow can enforce, so nothing in `.github/workflows/` will stop a mistake
-here — look at the asset list in step 7.
+Chrome Web Store submission is a separate manual owner step; publishing a GitHub
+Release does not submit or publish the extension to a browser store.
 
 ### Release channel: `stable` vs `dev`
 
@@ -206,8 +209,9 @@ thing it does not.
   `[package]` version and requires it to equal the tag minus `v`, character for
   character, for both shapes.
 - **The uploaded asset set.** Exactly `chat-stasher-darwin-arm64`,
-  `chat-stasher-darwin-x86_64` and `SHA256SUMS` reach the Release, so nothing
-  extension-shaped can arrive by accident.
+  `chat-stasher-darwin-x86_64`, `chat-stasher-extension-X.Y.Z.zip` and
+  `SHA256SUMS` reach the Release. The zip is built on the stable channel and its
+  manifest is rejected if an experimental origin is present.
 
 It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
 every check above, so `git tag -a` in step 6 is a step the owner follows and not

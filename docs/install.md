@@ -204,8 +204,14 @@ The config file lives at `~/.config/chat-stasher/config.toml`, or under
 
 ## 3. Install the browser extension
 
-**It is not yet on any app store** (see section 6 for details). For now you can
-only install it manually:
+**It is not yet on any app store** (see section 6 for details). Stable releases
+include a stable-channel extension zip named `chat-stasher-extension-X.Y.Z.zip`.
+Download that asset from the GitHub Release, unzip it, then open your browser's
+extension management page, enable developer mode, choose **Load unpacked**, and
+select the extracted extension directory. The zip is already built for the
+stable channel.
+
+You can also build from source:
 
 ```sh
 cd apps/extension
@@ -218,11 +224,10 @@ pnpm build:firefox    # Firefox
 and pnpm; **the exact minimum versions are not declared in the repository —
 unverified**.)
 
-The build output lands in `apps/extension/.output/` (excluded by the root ignore
+A source build lands in `apps/extension/.output/` (excluded by the root ignore
 rule at `.gitignore:15` and the extension ignore rule at
-`apps/extension/.gitignore:11`). Load that directory into your browser with
-its "Load unpacked extension" menu — we have not tested each browser's menu
-path, and section 8 marks them "unverified".
+`apps/extension/.gitignore:11`). Load that directory with your browser's **Load
+unpacked** menu. The exact menu path varies by browser and is unverified.
 
 ### 3.1 Register the Native Messaging host
 
