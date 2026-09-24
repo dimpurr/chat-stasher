@@ -2449,6 +2449,37 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       continue;
     }
     /**
+     * 🔴 W84b · **A real body that does not prove it is the whole conversation.**
+     *
+     * Perplexity alone answers here: the response is recognised and carries real
+     * content, but its completeness signal is not the exact confirmed-no-more pair
+     * (`has_next_page === false` + `next_cursor === null`) — one key missing,
+     * `next_cursor: ""`, a wrong-typed key — or an entry holds no readable content
+     * (an empty `blocks` and no non-empty `text`). Either way the archive would be
+     * settling debt on a body that never said, in the form this code reads, that
+     * it is complete.
+     *
+     * A per-conversation fact, exactly like 'detail-paged-unsupported': every
+     * other conversation in the same run is unaffected. The debt leaves pending
+     * (no retry), a person-readable receipt with this reason and the
+     * conversation's short id goes on the failure list, and the leg carries on
+     * with the next conversation. Nothing enters `archived`.
+     */
+    if (detailParsed?.ok === true && detailParsed.outcome === 'detail-unverified') {
+      dropDebt(state, id);
+      failedThisRun.push(
+        recordFailure(state, { id, reason: 'detail-unverified', at: clock.now() }),
+      );
+      state.detailToday.count += 1;
+      await persist(state);
+      console.warn(
+        '[chat-stasher] backfill: this conversation\'s body does not prove it is whole'
+        + ' (its no-more signal is absent, empty or wrong-typed, or an entry carried no readable content),'
+        + ' so nothing was stored; the failure list names it',
+      );
+      continue;
+    }
+    /**
      * 🔴 W31 · **A recognised body whose own parent links cannot be walked.**
      *
      * Both platforms that reach this are trees with a named current leaf, and the

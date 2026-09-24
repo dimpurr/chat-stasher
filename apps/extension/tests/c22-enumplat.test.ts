@@ -286,20 +286,20 @@ describe('C22-4 · every platform must have a definite conclusion', () => {
     //    recorded the request's content type, and the one declaration that was missing —
     //    "the channel's Content-Type closed set holds only application/json" — was widened with
     //    that evidence rather than by relaxing anything.
-    // 🔴 W31 (2026-09-14) moved the **last** row across and left BACKFILL_UNSUPPORTED **empty**,
-    //    which is a state worth naming rather than letting a reader discover it from an empty
-    //    array: claude's three recorded gaps were closed by the W20 research (the organization
-    //    resolver, the limit/offset paging parameters, and the list response's array of `uuid`
-    //    summaries). So every row of the platform table now has a plan, and the only platform not
-    //    on the supported side is Perplexity — which is *half*-declared, not undeclared, and
-    //    appears below through `BACKFILL_UNSUPPORTED_PLATFORMS` because that list means "cannot
-    //    backfill history in full", not "has no plan".
-    //    The `unsupported-platform` halt path and the BACKFILL_UNSUPPORTED table are therefore
-    //    unreachable from the real platform table today. They are **kept**, and C22-3 below now
-    //    exercises them with a plan lookup that returns null, so the mechanism stays covered for
-    //    the next platform that needs it. Nothing about the criterion moved.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
-    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual(['perplexity']);
+    // 🔴 W31 (2026-09-14) moved the **last** undeclared row across and left BACKFILL_UNSUPPORTED
+    //    empty — claude's three gaps were closed by the W20 research. Perplexity stayed on the
+    //    unsupported side, but only as the half-declared row ("lists, cannot fetch bodies").
+    // 🔴 W84 (2026-09-23) moved Perplexity across too: its body segment was filled in from the
+    //    live probe, so the only non-supported row is gone and the unsupported side is **empty**
+    //    in full — every platform in the table has both segments. That is a state worth naming
+    //    rather than discovering from an empty array. The `unsupported-platform` halt path and
+    //    the BACKFILL_UNSUPPORTED table are therefore unreachable from the real platform table
+    //    today; they are **kept**, and C22-3 below exercises them with a plan lookup that returns
+    //    null, so the mechanism stays covered for the next platform that needs it. Nothing about
+    //    the criterion moved.
+    expect(BACKFILL_SUPPORTED_PLATFORMS)
+      .toEqual(['deepseek', 'perplexity', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
+    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([]);
   });
 
   it('every "temporarily impossible" must name what is missing plus give the user one plain sentence', () => {
@@ -316,13 +316,16 @@ describe('C22-4 · every platform must have a definite conclusion', () => {
 // 5 · The popup has to say this out loud
 // ---------------------------------------------------------------------------
 describe('C22-5 · the popup\'s honest explanation', () => {
-  it('that line says all three at once: who can backfill, who cannot, and that cannot ≠ broken', () => {
+  it('the line says who can backfill, and that there is nobody it cannot yet read', () => {
     const line = coverageLine();
     expect(line).toContain('chatgpt');
-    for (const id of BACKFILL_UNSUPPORTED_PLATFORMS) expect(line).toContain(id);
-    expect(line).toContain('cannot yet');
-    expect(line).toContain('not a breakdown');
-    // Carrying C18's red line forward: no percent sign and no time estimate in progress-type wording.
+    expect(line).toContain('perplexity');
+    // 🔴 W84: no platform is on the unsupported side any more (Perplexity's body
+    //    segment was filled in), so the "all supported" branch renders — and it
+    //    must never describe a supported platform as "cannot yet".
+    expect(BACKFILL_UNSUPPORTED_PLATFORMS).toEqual([]);
+    expect(line).toContain('every platform supported');
+    expect(line).not.toContain('cannot yet');
     expect(line).not.toContain('%');
     expect(line).not.toContain('estimated');
   });
@@ -335,22 +338,14 @@ describe('C22-5 · the popup\'s honest explanation', () => {
     expect(out).toContain(coverageLine());
     expect(out).not.toContain('%');
     // The per-platform sticking point has to be visible too (in the notes).
-    // 🔴 W8 changed this assertion's **protagonist**: the "can list conversations, cannot fetch
-    //    bodies yet" sentence no longer describes DeepSeek (its body segment was filled in), so the
-    //    note is checked on Perplexity, which is where that state now lives. The criterion — a
-    //    half-leg platform's sticking point must be readable by the user — is unchanged.
-    expect(out).toContain('Perplexity: past conversation bodies cannot be backfilled yet');
-    // 🔴 W29 changed this assertion's **protagonist** for the second time, and the same way W8
-    //    changed it: gemini is no longer an unsupported platform (its plan was filled in from the
-    //    2026-09-14 probe and the W20 research), so the note that has to be readable is claude's —
-    //    the last platform with no plan at all. The criterion is unchanged: a platform whose
-    //    history cannot be backfilled yet has to say so where the user can read it.
-    // 🔴 W31 (2026-09-14) · claude's plan was filled in from the W20 research too, so
-    //    BACKFILL_UNSUPPORTED is now empty and there is no such platform left to point at. The
-    //    assertion is turned around rather than deleted, and it is the same fact read the other
-    //    way: a platform that **has** a plan must not be described as one that cannot be
-    //    backfilled. The catalog still holds claude's old sentence (nothing consumes it), so this
-    //    line fails the moment some future code starts rendering a note for a supported platform.
+    // 🔴 W31 turned the claude assertion around (BACKFILL_UNSUPPORTED empty, nothing to point
+    //    at). 🔴 W84 (2026-09-23) did the same to the last remaining note: Perplexity's body
+    //    segment was filled in from the live probe, so no platform has a partial note any more.
+    //    The criterion is unchanged: a platform that **has** a plan must not be described as one
+    //    that cannot be backfilled. The perplexity partial sentence is gone from the catalog (its
+    //    locale key was removed with the `partial` it served), so this line fails the moment some
+    //    future code starts rendering a note for a supported platform.
+    expect(out).not.toContain('Perplexity: past conversation bodies cannot be backfilled yet');
     expect(out).not.toContain('Claude: history cannot be backfilled yet');
   });
 

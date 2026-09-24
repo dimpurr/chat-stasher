@@ -438,11 +438,9 @@ failure:
     这条会话只取回了一部分——从最新一条往回追，追到一条这次回复里没有的消息——所以什么都没有存
   detailEmpty: >-
     这条会话取回来是空的，什么都没有存
+  detailUnverified: >-
+    这条会话没能证明自己完整——回复里的结束信号缺失、为空或类型不对，或者某条没有可读内容——所以什么都没有存
   unknownReason: "理由码 {reason}"
   shortIdEmpty: "（空）"
 
-platformNote:
-  perplexity:
-    partial: >-
-      Perplexity：还不能回溯历史正文。已经能列出你的历史会话了，但还不会去取每条
-      会话的内容，所以暂时一条也不会存下来。
+# platformNote: W84 起不再有半程声明的平台，注释块留空；若未来有 partial 平台，集中在这里。

@@ -171,18 +171,18 @@ describe('W10-1 · the first tick fetches a body while the list has only moved o
 
   it('the control: the page cap is tied to "this plan has a body segment", not to every platform', () => {
     // 🔴 The interleave is bounded by "is there a body segment to starve". A
-    //    list-only platform has none, and capping its list at one page per tick
-    //    would end its tick in halt('detail-unsupported') with the rest of its
-    //    history never named — a persisted halt stops every later tick, so the
-    //    second page would never be read at all. The engine therefore asks the
-    //    plan, and this pins the answer the plan table gives today.
-    //    (tests/c27-pplx.test.ts drives the real list-only platform end to end.)
+    //    plan without one has no body loop to starve, so its list is not capped
+    //    the way a full plan's is. The engine therefore asks the plan, and this
+    //    pins the answer the plan table gives today.
+    //    🔴 W84 · every real plan now has a body segment (Perplexity's was filled
+    //    in from the live probe), so the "no body segment" answer is demonstrated
+    //    on a bodyless variant of a real plan rather than on a live list-only one.
     const chatgpt = backfillPlanFor('chatgpt');
     const deepseek = backfillPlanFor('deepseek');
-    const perplexity = backfillPlanFor('perplexity');
     expect(chatgpt && canBackfillDetail(chatgpt)).toBe(true);
     expect(deepseek && canBackfillDetail(deepseek)).toBe(true);
-    expect(perplexity && canBackfillDetail(perplexity)).toBe(false);
+    const bodyless = chatgpt ? { ...chatgpt, detailPath: null, detailUrl: null } : null;
+    expect(bodyless && canBackfillDetail(bodyless)).toBe(false);
   });
 });
 

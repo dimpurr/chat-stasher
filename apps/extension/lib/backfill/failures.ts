@@ -158,6 +158,31 @@ export type FailureReason =
    */
   | 'detail-tree-incomplete'
   /**
+   * 🔴 W84b · The body was fetched, HTTP succeeded, the shape was recognised —
+   * and **the response did not prove it is the whole conversation**, so it was
+   * never archived and its debt was never settled.
+   *
+   * Two observed sub-facts land here, both per-conversation:
+   *  · Perplexity's completeness signal is not the exact confirmed-no-more pair
+   *    (`has_next_page === false` + `next_cursor === null`) — one of the two keys
+   *    absent, `next_cursor: ""`, a non-boolean `has_next_page`, or a non-null
+   *    non-string `next_cursor` — so the response may be truncated; or
+   *  · an entry carries no readable content (an empty `blocks` and no non-empty
+   *    `text`).
+   *
+   * A fact we observed, phrased as one: it says "this body did not prove it holds
+   * the whole conversation". It is deliberately **not** 'detail-paged-unsupported',
+   * which would claim the platform declared more when it never did, and not
+   * 'shape-changed', because the envelope itself is recognised.
+   *
+   * 🔴 Why it is a failure and not a stored conversation: archiving it would
+   *    settle a debt for a conversation whose wholeness was never confirmed. The
+   *    failure list is exactly the place built for "this one is missing, and here
+   *    is why" (see the file header), and the debt leaves pending with this
+   *    receipt — never the archive.
+   */
+  | 'detail-unverified'
+  /**
    * 🔴 W92b · The body was fetched, HTTP succeeded, the shape was recognised — and
    * the body **itself is empty** (Claude: `chat_messages: []` and no
    * `current_leaf_message_uuid`; Perplexity: `entries: []`). This is a
@@ -293,6 +318,8 @@ export function describeFailureReason(reason: string): string {
       return t('failure.detailTreeIncomplete');
     case 'detail-empty':
       return t('failure.detailEmpty');
+    case 'detail-unverified':
+      return t('failure.detailUnverified');
     default:
       return t('failure.unknownReason', { reason });
   }

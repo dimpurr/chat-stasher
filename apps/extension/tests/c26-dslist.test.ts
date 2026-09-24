@@ -29,15 +29,16 @@
 
 import { describe, it, expect } from 'vitest';
 import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
-import { t } from '../lib/i18n';
 import { memoryStore } from '../lib/backfill/store';
 import {
   BACKFILL_LIST_ONLY_PLATFORMS,
+  BACKFILL_PARTIAL,
   BACKFILL_SUPPORTED_PLATFORMS,
   DEEPSEEK_DETAIL_PATH,
   DEEPSEEK_DETAIL_QUERY_KEY,
   DEEPSEEK_LIST_PATH,
   DEEPSEEK_PLAN,
+  PERPLEXITY_PLAN,
   backfillPlanFor,
   parseDeepSeekListPage,
 } from '../lib/backfill/enumerate';
@@ -416,8 +417,9 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
   });
 
   it('the platform lists give this intermediate state its own place rather than rounding it to either side', () => {
-    // 🔴 W8: DeepSeek moved off this list; Perplexity stays, so the intermediate state still has a home.
-    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['perplexity']);
+    // 🔴 W84 (2026-09-23): Perplexity's body segment was filled in from the live probe, so it
+    //    too left this list — which is now empty (every platform has both segments).
+    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual([]);
     // 🔴 "can backfill history" now holds four: being able to list conversations is still not enough
     //    on its own, and DeepSeek is here because its body segment was filled in — not because the test
     //    was broadened. 🔴 W21 added grok to the platform table with both segments declared (its body
@@ -430,11 +432,16 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
     //    three recorded gaps were closed by the W20 research (the organization resolver, the
     //    limit/offset paging, and the list response's array of `uuid` summaries), so it now has
     //    both segments and sits where the platform table puts it — between gemini and kimi.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
+    // 🔴 W84 (2026-09-23): Perplexity joins it, in platform-table order, since its body segment
+    //    was filled in from the live probe. The list-only side is now empty.
+    expect(BACKFILL_SUPPORTED_PLATFORMS)
+      .toEqual(['deepseek', 'perplexity', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
     // 🔴 DeepSeek no longer declares a missing half; the field's absence is what "both segments work" means.
     expect(DEEPSEEK_PLAN.partial).toBeUndefined();
-    // The wording that said DeepSeek cannot fetch bodies is gone from the catalog with it.
-    expect(t('platformNote.perplexity.partial')).not.toMatch(/backfilling now|is backfilling|in progress/);
+    // 🔴 Perplexity no longer declares a missing half either; the partial-notes catalog has emptied
+    //    with it — the wording that said a platform cannot fetch bodies is gone from the catalog.
+    expect(PERPLEXITY_PLAN.partial).toBeUndefined();
+    expect(BACKFILL_PARTIAL).toEqual([]);
   });
 
   it('the plan\'s declarations and provenance: both segments are complete, and the unverified part is written down', () => {

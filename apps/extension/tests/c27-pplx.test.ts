@@ -15,6 +15,7 @@ import {
   PERPLEXITY_LIST_PATH,
   PERPLEXITY_PLAN,
   backfillPlanFor,
+  type BackfillEnumPlan,
   parsePerplexityListPage,
 } from '../lib/backfill/enumerate';
 import type { Clock } from '../lib/backfill/pace';
@@ -50,6 +51,33 @@ interface Call {
   init?: { method?: string; body?: string; contentType?: string };
 }
 
+/**
+ * 🔴 W84 · A *list-only* plan, injected for the run tests below.
+ *
+ * C27 is the list test. When Perplexity was a list-only plan the leg enumerated
+ * to the end and halted `detail-unsupported` in one unbounded run, which is the
+ * shape every assertion here was written against. W84 filled the real plan's
+ * body in, so the real plan now runs capped enumeration and fetches bodies —
+ * neither of which C27 is about. So the run tests inject this list-only plan
+ * (it uses the **real** `parsePerplexityListPage`, so the list parsing under test
+ * is unchanged) and keep testing the list exactly as designed; the full-plan,
+ * body-fetching behaviour is the business of tests/w84-pplx-detail.test.ts.
+ */
+const PERPLEXITY_LIST_ONLY_PLAN: BackfillEnumPlan = {
+  platform: 'perplexity',
+  listPath: PERPLEXITY_LIST_PATH,
+  listUrl: (origin) => `${origin}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`,
+  listPost: {
+    contentType: 'application/json',
+    bodyKeys: ['limit', 'offset', 'ascending', 'search_term'],
+    body: (_origin, offset, limit) => JSON.stringify({ limit, offset, ascending: false, search_term: '' }),
+  },
+  parseListPage: parsePerplexityListPage,
+  detailPath: null,
+  detailUrl: null,
+  provenance: 'synthetic list-only plan: keeps the C27 list tests list-scoped',
+};
+
 function backend(pages: string[]): { http: HttpPort; calls: Call[] } {
   const calls: Call[] = [];
   const http: HttpPort = async (url, init) => {
@@ -70,6 +98,10 @@ async function run(store: ReturnType<typeof memoryStore>, pages: string[], scope
     http: be.http,
     clock: fakeClock(),
     listLimit: LIMIT,
+    // 🔴 W84 · the list-only plan, so this list test keeps the unbounded-enum +
+    //    halt-detail-unsupported behaviour it was written against.
+    plans: (platform: string) =>
+      platform === 'perplexity' ? PERPLEXITY_LIST_ONLY_PLAN : backfillPlanFor(platform),
   });
   return { report, calls: be.calls };
 }
@@ -110,8 +142,13 @@ describe('C27-1 · POST paging parameters', () => {
     ]);
     expect(JSON.parse(PERPLEXITY_PLAN.listPost!.body(ORIGIN, LIMIT, LIMIT)))
       .toEqual({ limit: LIMIT, offset: LIMIT, ascending: false, search_term: '' });
-    expect(PERPLEXITY_PLAN.detailPath).toBeNull();
-    expect(PERPLEXITY_PLAN.detailUrl).toBeNull();
+    // 🔴 W84 · The body segment is filled in; it is no longer the half-leg this
+    //    test used to assert was null.
+    expect(PERPLEXITY_PLAN.detailPath).toBe('/rest/thread/{id}');
+    expect(PERPLEXITY_PLAN.detailUrl).toBeTypeOf('function');
+    expect(PERPLEXITY_PLAN.detailUrl!(ORIGIN, 'pplx-0001-aaaaaaaa'))
+      .toBe(`${ORIGIN}/rest/thread/pplx-0001-aaaaaaaa?with_parent_info=true`
+        + '&with_schematized_response=true&version=2.18&source=default&from_first=true');
   });
 });
 
@@ -149,7 +186,8 @@ describe('C27-2 · with no termination field, an empty page and a short page mus
     expect(report.state.enumCursor.truncated).toBe('short-page-inferred');
     expect(report.enumTruncated).not.toBe('empty-page-inferred');
     expect(report.state.enumCursor.complete).toBe(false);
-    // The list segment really was read, but the body segment has no source, so this is not "the user has no conversations".
+    // The list segment really was read, and (with the injected list-only plan) the
+    // body segment has no source, so this is not "the user has no conversations".
     expect(report.halted?.reason).toBe('detail-unsupported');
   });
 });
@@ -212,23 +250,14 @@ describe('C27-4 · the Perplexity backfill allowlist', () => {
     }, ORIGIN).ok).toBe(false);
   });
 
-  it('the platform lists: Perplexity can only list conversations, and supported holds the platforms with both segments', () => {
-    // 🔴 W8 (2026-09-14) · The fact changed, not the criterion: DeepSeek's body segment was filled in,
-    //    so it left this list and joined the supported side. Perplexity is now the only platform in the
-    //    "lists conversations, cannot fetch bodies" state — which is why this file also owns that state's
-    //    engine test at line ~144 above.
-    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual(['perplexity']);
-    // 🔴 W21 (2026-09-14) · grok joins the supported side (both segments declared). 🔴 W22 (2026-09-14)
-    //    · kimi joins it too, from a logged-in probe rather than from sources. Perplexity is still the
-    //    only half-declared plan, which is what this test is about; the roster grew by a platform each
-    //    time, the criterion did not move.
-    // 🔴 W29 (2026-09-14) · gemini joins it as well, from a measured probe rather than from
-    //    sources. Perplexity is *still* the only half-declared plan, which is what this test is
-    //    about — the roster grew, the criterion did not move.
-    // 🔴 W31 (2026-09-14) · claude joins it from the W20 research, the same way each row before it
-    //    moved: its organization resolver, its paging parameters and its list shape were read out of
-    //    sources and written into a plan. Perplexity remains the only half-declared plan, which is
-    //    what this test is about; the roster grew, the criterion did not move.
-    expect(BACKFILL_SUPPORTED_PLATFORMS).toEqual(['deepseek', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
+  it('the platform lists: Perplexity now has both segments, so no platform is list-only', () => {
+    // 🔴 W84 (2026-09-23) · The fact changed, not the criterion: Perplexity's body segment was
+    //    filled in from the live probe (completeness signal observed), so it left the list-only
+    //    side and joined the supported one. That side is now empty — every platform backfills
+    //    both segments — which is a state worth naming rather than discovering from an empty array.
+    expect(BACKFILL_LIST_ONLY_PLATFORMS).toEqual([]);
+    // Perplexity is backfillable: in platform-table order.
+    expect(BACKFILL_SUPPORTED_PLATFORMS)
+      .toEqual(['deepseek', 'perplexity', 'chatgpt', 'gemini', 'claude', 'kimi', 'grok']);
   });
 });

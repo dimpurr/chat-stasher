@@ -690,16 +690,17 @@ failure:
     message reached a message the reply did not carry — so nothing was stored
   detailEmpty: >-
     the conversation came back with no content at all, so nothing was stored
+  detailUnverified: >-
+    this conversation did not prove it was complete — the reply left its
+    no-more signal absent, empty or wrong-typed, or held an entry with no
+    readable content — so nothing was stored
   unknownReason: "reason code {reason}"
   shortIdEmpty: (empty)
 
 # ---------------------------------------------------------------------------
-# Per-platform coverage notes. These are written for the user: no jargon, and
-# none of them may hint that the platform is being backfilled right now.
+# Per-platform coverage notes. Written for the user: no jargon, and none of them
+# may hint that the platform is being backfilled right now. 🔴 W84: no platform
+# is half-declared any more (Perplexity's body segment was filled in from the
+# live probe), so the notes block is empty. If a future partial plan arrives,
+# its note goes back under a `platformNote:` key here and in zh_CN.yml together.
 # ---------------------------------------------------------------------------
-platformNote:
-  perplexity:
-    partial: >-
-      Perplexity: past conversation bodies cannot be backfilled yet. Your past
-      conversations can already be listed, but we do not fetch the content of
-      each one yet, so for now not a single one will be stored.
