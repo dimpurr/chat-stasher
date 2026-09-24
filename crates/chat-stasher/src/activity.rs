@@ -35,6 +35,13 @@ pub struct ActivityRow {
     pub last_unix: Option<i64>,
     pub line_count: u64,
     pub time_source: TimeSource,
+    /// The time zone the source expressed this session's timestamps in, when
+    /// the source actually said (or the owner measured) one. `None` means the
+    /// values were absolute epoch numbers, where a zone would be meaningless.
+    /// Nothing is ever read as UTC by assumption: a naive field carries its
+    /// declared zone here, and an offset-bearing RFC 3339 string keeps its
+    /// offset label.
+    pub source_zone: Option<String>,
 }
 
 /// Where the first/last time came from (or why it could not be obtained).
@@ -49,6 +56,16 @@ pub enum TimeSource {
     Exact,
     /// Derived from a field, with the inference written down.
     Inferred { how: String },
+    /// Web chat harness: the span was derived from the **per-message**
+    /// timestamps inside the stored payload (`messages`). `exact` is true when
+    /// at least one came from an RFC 3339 string, false when all were numeric
+    /// epochs whose unit/zone the parser had to interpret.
+    Messages { exact: bool },
+    /// Web chat harness: no messages are archived yet, so the span is only the
+    /// conversation list's update time. Low confidence, and named as such so a
+    /// consumer can tell it from a message-derived interval.
+    #[serde(rename = "list-updated")]
+    ListUpdated,
     /// Could not be obtained; why it could not.
     Unknown { why: String },
 }
@@ -60,12 +77,43 @@ pub struct TimeAnalysis {
     pub last_unix: Option<i64>,
     pub line_count: u64,
     pub time_source: TimeSource,
+    pub source_zone: Option<String>,
 }
 
 /// Harnesses this module knows how to read times from. Everything else is
 /// reported [`TimeSource::Unknown`] with an explicit "not implemented" `why`,
 /// never guessed.
-const SUPPORTED_HARNESSES: &[&str] = &["claude-code", "codex", "opencode", "cursor", "gemini-cli"];
+///
+/// The first group are read from files/SQLite exports whose lines are the
+/// conversation itself. The second group are the browser-extension web chat
+/// harnesses, whose archived line is an inbox bundle carrying the raw HTTP body
+/// under `raw.text` (see `inbox.rs`).
+const SUPPORTED_HARNESSES: &[&str] = &[
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "gemini-cli",
+    "chatgpt",
+    "deepseek",
+    "claude",
+    "grok",
+    "gemini",
+    "perplexity",
+    "kimi",
+];
+
+/// Web chat harnesses whose archived payload is an inbox bundle, not a message
+/// line. Their times live inside `raw.text` and are read by [`web_time`].
+const WEB_HARNESSES: &[&str] = &[
+    "chatgpt",
+    "deepseek",
+    "claude",
+    "grok",
+    "gemini",
+    "perplexity",
+    "kimi",
+];
 
 /// Analyse a session's lines and pull out the earliest/latest conversation time.
 ///
@@ -81,6 +129,9 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     let mut first: Option<i64> = None;
     let mut last: Option<i64> = None;
     let mut any_rfc3339 = false;
+    let mut any_messages = false;
+    let mut any_list = false;
+    let mut source_zone: Option<String> = None;
 
     // Diagnosis counters for the Unknown branch: they keep "parse failure"
     // distinct from "this harness never records a time".
@@ -107,6 +158,8 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
                 first: f,
                 last: l,
                 rfc3339,
+                basis,
+                zone,
             } => {
                 first = Some(first.map_or(f, |old| old.min(f)));
                 last = Some(last.map_or(l, |old| old.max(l)));
@@ -114,6 +167,14 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
                 // is Exact; otherwise (numeric epochs only) it is Inferred.
                 if rfc3339 {
                     any_rfc3339 = true;
+                }
+                match basis {
+                    Basis::Messages => any_messages = true,
+                    Basis::List => any_list = true,
+                    Basis::Local => {}
+                }
+                if source_zone.is_none() {
+                    source_zone = zone;
                 }
             }
             LineTime::Absent => {}
@@ -128,7 +189,15 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     }
 
     let time_source = if first.is_some() {
-        if any_rfc3339 {
+        if any_messages {
+            TimeSource::Messages {
+                exact: any_rfc3339,
+            }
+        } else if any_list {
+            // A list-only span is low confidence by construction; it is never
+            // reported as an exact/inferred message interval.
+            TimeSource::ListUpdated
+        } else if any_rfc3339 {
             TimeSource::Exact
         } else {
             TimeSource::Inferred {
@@ -152,6 +221,7 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
         last_unix: last,
         line_count,
         time_source,
+        source_zone,
     }
 }
 
@@ -202,6 +272,11 @@ enum LineTime {
         /// (unambiguous); false when all came from numeric epochs whose unit
         /// was inferred.
         rfc3339: bool,
+        /// What the span was derived from: the local harnesses' own fields
+        /// (neither), web **messages**, or a web list update time.
+        basis: Basis,
+        /// The source zone label, when the source named one.
+        zone: Option<String>,
     },
     /// The harness is supported but this line carries no timestamp field.
     Absent,
@@ -211,13 +286,41 @@ enum LineTime {
     Invalid,
 }
 
+/// A local-harness span: not message/list classified, no named source zone.
+fn local_time(first: i64, last: i64, rfc3339: bool) -> LineTime {
+    LineTime::Time {
+        first,
+        last,
+        rfc3339,
+        basis: Basis::Local,
+        zone: None,
+    }
+}
+
+/// Where a recovered span came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Basis {
+    /// A local CLI harness's own fields (the pre-existing harnesses).
+    Local,
+    /// Per-message timestamps inside a web chat payload.
+    Messages,
+    /// A web conversation list's update time, with no messages archived yet.
+    List,
+}
+
 /// Extract the timestamp-bearing value from a line, per harness.
 ///
 /// `claude-code` / `codex` export one JSON object per message line, each with a
 /// top-level `timestamp`. The SQLite-backed harnesses (opencode, cursor) and
-/// gemini export one *whole session* per JSON line, so their timestamps live in
-/// the nested structure and a single line yields a full first/last span.
+/// gemini-cli export one *whole session* per JSON line, so their timestamps live
+/// in the nested structure and a single line yields a full first/last span.
+///
+/// Web chat harnesses (`WEB_HARNESSES`) archive an inbox bundle per line; their
+/// payload is the raw HTTP body under `raw.text` and is read by [`web_time`].
 fn line_time(harness: &str, value: &serde_json::Value) -> LineTime {
+    if WEB_HARNESSES.contains(&harness) {
+        return web_time(harness, value);
+    }
     match harness {
         "claude-code" | "codex" => top_level_timestamp(value),
         "opencode" => opencode_time(value),
@@ -275,11 +378,7 @@ fn top_level_timestamp(value: &serde_json::Value) -> LineTime {
         return LineTime::Absent;
     };
     match one_ts_value(ts) {
-        Some((t, rfc3339)) => LineTime::Time {
-            first: t,
-            last: t,
-            rfc3339,
-        },
+        Some((t, rfc3339)) => local_time(t, t, rfc3339),
         None => LineTime::Invalid,
     }
 }
@@ -299,11 +398,7 @@ fn opencode_time(value: &serde_json::Value) -> LineTime {
         .flatten();
     let (mf, ml, mrfc, msaw, minvalid) = collect_span(messages, "time_created");
     if let (Some(f), Some(l)) = (mf, ml) {
-        return LineTime::Time {
-            first: f,
-            last: l,
-            rfc3339: mrfc,
-        };
+        return local_time(f, l, mrfc);
     }
     // No usable message time — fall back to the session-level fields.
     let (sf, sl, srfc, ssaw, sinvalid) = match value.get("session") {
@@ -329,21 +424,9 @@ fn opencode_time(value: &serde_json::Value) -> LineTime {
         None => (None, None, false, false, false),
     };
     match (sf, sl) {
-        (Some(f), Some(l)) => LineTime::Time {
-            first: f,
-            last: l.max(f),
-            rfc3339: srfc,
-        },
-        (Some(f), None) => LineTime::Time {
-            first: f,
-            last: f,
-            rfc3339: srfc,
-        },
-        (None, Some(l)) => LineTime::Time {
-            first: l,
-            last: l,
-            rfc3339: srfc,
-        },
+        (Some(f), Some(l)) => local_time(f, l.max(f), srfc),
+        (Some(f), None) => local_time(f, f, srfc),
+        (None, Some(l)) => local_time(l, l, srfc),
         (None, None) => {
             if msaw || ssaw || minvalid || sinvalid {
                 LineTime::Invalid
@@ -368,11 +451,7 @@ fn cursor_time(value: &serde_json::Value) -> LineTime {
         .or_else(|| value.get("session").and_then(|s| s.get("createdAt")));
     match created {
         Some(raw) => match one_ts_value(raw) {
-            Some((t, rfc3339)) => LineTime::Time {
-                first: t,
-                last: t,
-                rfc3339,
-            },
+            Some((t, rfc3339)) => local_time(t, t, rfc3339),
             None => LineTime::Invalid,
         },
         None => LineTime::Absent,
@@ -392,11 +471,7 @@ fn gemini_time(value: &serde_json::Value) -> LineTime {
         .flatten();
     let (mf, ml, mrfc, msaw, minvalid) = collect_span(messages, "timestamp");
     if let (Some(f), Some(l)) = (mf, ml) {
-        return LineTime::Time {
-            first: f,
-            last: l,
-            rfc3339: mrfc,
-        };
+        return local_time(f, l, mrfc);
     }
     let start = value.get("startTime").and_then(one_ts_value);
     let last_updated = value.get("lastUpdated").and_then(one_ts_value);
@@ -410,21 +485,9 @@ fn gemini_time(value: &serde_json::Value) -> LineTime {
     let sf = start.map(|(t, _)| t);
     let sl = last_updated.map(|(t, _)| t);
     match (sf, sl) {
-        (Some(f), Some(l)) => LineTime::Time {
-            first: f,
-            last: l.max(f),
-            rfc3339: rfc,
-        },
-        (Some(f), None) => LineTime::Time {
-            first: f,
-            last: f,
-            rfc3339: rfc,
-        },
-        (None, Some(l)) => LineTime::Time {
-            first: l,
-            last: l,
-            rfc3339: rfc,
-        },
+        (Some(f), Some(l)) => local_time(f, l.max(f), rfc),
+        (Some(f), None) => local_time(f, f, rfc),
+        (None, Some(l)) => local_time(l, l, rfc),
         (None, None) => {
             if msaw || has_top || minvalid || invalid {
                 LineTime::Invalid
@@ -473,6 +536,544 @@ fn plausible_seconds(v: i64) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
+// Web chat harnesses (browser-extension captures)
+// ---------------------------------------------------------------------------
+//
+// A web chat session is archived as an inbox bundle line: the platform's own
+// identity envelope under top-level keys, with the authoritative raw HTTP body
+// as a **string** in `raw.text` (see `inbox.rs`). So every field name below is
+// read out of the platform's real wire shape — the shapes the extension's own
+// parsers already read (`lib/backfill/enumerate.ts`, `lib/gemini-rpc.ts`,
+// `lib/contract.ts`) and the real-sanitized competitor fixtures under
+// `nm/w5-competitors/`.
+//
+// Zone discipline: nothing is read as UTC by assumption. An RFC 3339 string
+// keeps the offset it was written with (`source_zone` records it), and a
+// platform whose numeric field is local wall clock declares its measured zone
+// (DeepSeek, +08:00) — the value is shifted to true UTC and the zone is
+// recorded, never silently dropped.
+
+/// How one raw JSON value becomes unix seconds for a web harness.
+#[derive(Clone, Copy)]
+enum EpochMode {
+    /// Absolute epoch seconds (or millis) — a zone would be meaningless.
+    Absolute,
+    /// RFC 3339 string; the string's own offset is recorded.
+    Rfc3339,
+    /// Local-wall-clock epoch seconds at a fixed measured offset; unix = value −
+    /// offset. The declared zone label is attached to every stamp.
+    NaiveLocal { offset_seconds: i64, label: &'static str },
+}
+
+/// DeepSeek's numeric timestamps were measured at +08:00 by the owner (the
+/// account's wall clock). Competitor implementations treat the same `inserted_at`
+/// as an absolute epoch; this parser follows the owner's measurement and records
+/// the zone so a consumer can see the choice. See the W97 report's Prior art.
+const DEEPSEEK_ZONE: EpochMode = EpochMode::NaiveLocal {
+    offset_seconds: 8 * 3600,
+    label: "+08:00",
+};
+
+/// A folded set of stamps for one candidate source (messages or list).
+#[derive(Default, Clone)]
+struct Stamps {
+    first: Option<i64>,
+    last: Option<i64>,
+    exact: bool,
+    saw: bool,
+    invalid: bool,
+    zone: Option<String>,
+}
+
+impl Stamps {
+    fn add(&mut self, raw: &serde_json::Value, mode: EpochMode) {
+        self.saw = true;
+        match stamp_from_value(raw, mode) {
+            Some((t, exact, zone)) => {
+                self.exact |= exact;
+                self.first = Some(self.first.map_or(t, |old| old.min(t)));
+                self.last = Some(self.last.map_or(t, |old| old.max(t)));
+                if self.zone.is_none() {
+                    self.zone = zone;
+                }
+            }
+            None => self.invalid = true,
+        }
+    }
+
+    /// Fold the field `field` of every object in `objects`.
+    fn add_field<'a, I>(&mut self, objects: I, field: &str, mode: EpochMode)
+    where
+        I: Iterator<Item = &'a serde_json::Value>,
+    {
+        for object in objects {
+            if let Some(raw) = object.get(field) {
+                self.add(raw, mode);
+            }
+        }
+    }
+
+    fn has(&self) -> bool {
+        self.first.is_some()
+    }
+}
+
+/// What one web payload yielded, before it is turned into a [`LineTime`].
+enum WebSpan {
+    /// The span came from **messages** in the stored payload.
+    Messages(Stamps),
+    /// No messages; the span is the conversation list's update time only.
+    List(Stamps),
+    /// Payload present, but carries no time field of the expected name.
+    Absent,
+    /// A time field is present but unreadable / out of the plausible window.
+    Invalid,
+}
+
+impl WebSpan {
+    fn into_line_time(self) -> LineTime {
+        let (stamps, basis) = match self {
+            WebSpan::Messages(s) => (s, Basis::Messages),
+            WebSpan::List(s) => (s, Basis::List),
+            WebSpan::Absent => return LineTime::Absent,
+            WebSpan::Invalid => return LineTime::Invalid,
+        };
+        match (stamps.first, stamps.last) {
+            (Some(f), Some(l)) => LineTime::Time {
+                first: f,
+                last: l.max(f),
+                rfc3339: stamps.exact,
+                basis,
+                zone: stamps.zone,
+            },
+            _ => {
+                if stamps.saw || stamps.invalid {
+                    LineTime::Invalid
+                } else {
+                    LineTime::Absent
+                }
+            }
+        }
+    }
+}
+
+/// Prefer messages; fall back to the list's update time; otherwise say which
+/// failure it was. Never merges the two: a list-only span stays `ListUpdated`.
+fn classify(msg: Stamps, list: Stamps) -> WebSpan {
+    if msg.has() {
+        return WebSpan::Messages(msg);
+    }
+    if list.has() {
+        return WebSpan::List(list);
+    }
+    if msg.saw || msg.invalid || list.saw || list.invalid {
+        WebSpan::Invalid
+    } else {
+        WebSpan::Absent
+    }
+}
+
+/// Parse one raw value into `(unix seconds, exact, zone)` per its mode.
+fn stamp_from_value(
+    raw: &serde_json::Value,
+    mode: EpochMode,
+) -> Option<(i64, bool, Option<String>)> {
+    match mode {
+        EpochMode::Rfc3339 => {
+            let text = raw.as_str()?;
+            parse_rfc3339_zoned(text).map(|(t, zone)| (t, true, zone))
+        }
+        EpochMode::Absolute => web_numeric_seconds(raw).map(|t| (t, false, None)),
+        EpochMode::NaiveLocal {
+            offset_seconds,
+            label,
+        } => web_numeric_seconds(raw).map(|t| (t - offset_seconds, false, Some(label.to_string()))),
+    }
+}
+
+/// Numeric epoch for a web field: number (may be a float epoch second) or a
+/// numeric string. Unit inferred by magnitude, same window as the rest.
+fn web_numeric_seconds(raw: &serde_json::Value) -> Option<i64> {
+    match raw {
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                plausible_seconds(v)
+            } else {
+                let v = n.as_f64()?;
+                if v.is_finite() {
+                    plausible_seconds(v.trunc() as i64)
+                } else {
+                    None
+                }
+            }
+        }
+        serde_json::Value::String(s) => parse_numeric_epoch(s),
+        _ => None,
+    }
+}
+
+/// Read a web chat harness's line into a [`LineTime`], unwrapping the inbox
+/// bundle's `raw.text` first.
+fn web_time(harness: &str, line: &serde_json::Value) -> LineTime {
+    let raw_text = line
+        .get("raw")
+        .and_then(|raw| raw.get("text"))
+        .and_then(serde_json::Value::as_str);
+
+    // Gemini's raw body is a `)]}'`-guarded batchexecute stream, not JSON, so it
+    // is handed the text rather than a parsed document.
+    if harness == "gemini" {
+        return gemini_web_time(line, raw_text);
+    }
+
+    let owned;
+    let payload: &serde_json::Value = match raw_text {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => {
+                owned = value;
+                &owned
+            }
+            Err(_) => return LineTime::Invalid,
+        },
+        None => line,
+    };
+
+    let span = match harness {
+        "chatgpt" => chatgpt_span(payload),
+        "deepseek" => deepseek_span(payload),
+        "claude" => claude_span(payload),
+        "grok" => grok_span(payload),
+        "perplexity" => perplexity_span(payload),
+        "kimi" => kimi_span(payload),
+        _ => WebSpan::Absent,
+    };
+    span.into_line_time()
+}
+
+/// Iterate `payload[path]` as an array of objects, following `.` separators.
+fn array_at<'a>(payload: &'a serde_json::Value, path: &str) -> Option<&'a Vec<serde_json::Value>> {
+    let mut current = payload;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    current.as_array()
+}
+
+/// ChatGPT: detail body `{create_time, update_time, mapping:{<id>:{message:
+/// {create_time}}}}`. `create_time` is a (possibly fractional) epoch second.
+fn chatgpt_span(payload: &serde_json::Value) -> WebSpan {
+    let mut msg = Stamps::default();
+    if let Some(mapping) = payload.get("mapping").and_then(serde_json::Value::as_object) {
+        for node in mapping.values() {
+            if let Some(ct) = node.get("message").and_then(|m| m.get("create_time")) {
+                msg.add(ct, EpochMode::Absolute);
+            }
+        }
+    }
+    let mut list = Stamps::default();
+    for field in ["create_time", "update_time"] {
+        if let Some(raw) = payload.get(field) {
+            list.add(raw, EpochMode::Absolute);
+        }
+    }
+    classify(msg, list)
+}
+
+/// DeepSeek: detail `{data:{biz_data:{chat_messages:[{inserted_at}],
+/// chat_session:{inserted_at,updated_at}}}}`; list
+/// `{data:{biz_data:{chat_sessions:[{updated_at}]}}}`. Local +08:00 (owner-measured).
+fn deepseek_span(payload: &serde_json::Value) -> WebSpan {
+    let biz = payload.pointer("/data/biz_data");
+    let mut msg = Stamps::default();
+    if let Some(messages) = biz
+        .and_then(|b| b.get("chat_messages"))
+        .and_then(serde_json::Value::as_array)
+    {
+        msg.add_field(messages.iter(), "inserted_at", DEEPSEEK_ZONE);
+    }
+    if msg.has() {
+        return WebSpan::Messages(msg);
+    }
+    let mut list = Stamps::default();
+    if let Some(session) = biz.and_then(|b| b.get("chat_session")) {
+        for field in ["inserted_at", "updated_at"] {
+            if let Some(raw) = session.get(field) {
+                list.add(raw, DEEPSEEK_ZONE);
+            }
+        }
+    }
+    // A list body stored under one conversation: only a single-item page is
+    // unambiguous enough to attribute to this session.
+    if let Some(sessions) = biz
+        .and_then(|b| b.get("chat_sessions"))
+        .and_then(serde_json::Value::as_array)
+    {
+        if sessions.len() == 1 {
+            list.add_field(sessions.iter(), "updated_at", DEEPSEEK_ZONE);
+        }
+    }
+    classify(msg, list)
+}
+
+/// claude.ai: detail `{created_at, updated_at, chat_messages:[{created_at,
+/// updated_at}]}` (RFC 3339, `Z`); list `[{uuid, created_at, updated_at}]`.
+fn claude_span(payload: &serde_json::Value) -> WebSpan {
+    let mut msg = Stamps::default();
+    if let Some(messages) = payload
+        .get("chat_messages")
+        .and_then(serde_json::Value::as_array)
+    {
+        for field in ["created_at", "updated_at"] {
+            msg.add_field(messages.iter(), field, EpochMode::Rfc3339);
+        }
+    }
+    if msg.has() {
+        return WebSpan::Messages(msg);
+    }
+    let mut list = Stamps::default();
+    for field in ["created_at", "updated_at"] {
+        if let Some(raw) = payload.get(field) {
+            list.add(raw, EpochMode::Rfc3339);
+        }
+    }
+    if let Some(items) = payload.as_array() {
+        if items.len() == 1 {
+            for field in ["created_at", "updated_at"] {
+                list.add_field(items.iter(), field, EpochMode::Rfc3339);
+            }
+        }
+    }
+    classify(msg, list)
+}
+
+/// Grok: detail `{responses:[{createTime}]}` (extension's measured shape) or the
+/// competitor fixture's `{conversation_v2:{conversation:{createTime,modifyTime}},
+/// load_responses:{responses:[{createTime}]}}`; list `{conversations:[{
+/// createTime,modifyTime}]}`. RFC 3339 strings.
+fn grok_span(payload: &serde_json::Value) -> WebSpan {
+    let mut msg = Stamps::default();
+    for path in ["responses", "load_responses.responses"] {
+        if let Some(items) = array_at(payload, path) {
+            msg.add_field(items.iter(), "createTime", EpochMode::Rfc3339);
+        }
+    }
+    if msg.has() {
+        return WebSpan::Messages(msg);
+    }
+    let mut list = Stamps::default();
+    if let Some(conversation) = payload.pointer("/conversation_v2/conversation") {
+        for field in ["createTime", "modifyTime"] {
+            if let Some(raw) = conversation.get(field) {
+                list.add(raw, EpochMode::Rfc3339);
+            }
+        }
+    }
+    if let Some(items) = payload
+        .get("conversations")
+        .and_then(serde_json::Value::as_array)
+    {
+        if items.len() == 1 {
+            for field in ["createTime", "modifyTime"] {
+                list.add_field(items.iter(), field, EpochMode::Rfc3339);
+            }
+        }
+    }
+    classify(msg, list)
+}
+
+/// Perplexity: content response `{entries:[{updated_datetime}]}`; list is a
+/// top-level array whose items carry `last_query_datetime` (probe-observed).
+/// RFC 3339 strings.
+fn perplexity_span(payload: &serde_json::Value) -> WebSpan {
+    let mut msg = Stamps::default();
+    if let Some(entries) = payload
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+    {
+        msg.add_field(entries.iter(), "updated_datetime", EpochMode::Rfc3339);
+    }
+    if msg.has() {
+        return WebSpan::Messages(msg);
+    }
+    let mut list = Stamps::default();
+    if let Some(items) = payload.as_array() {
+        if items.len() == 1 {
+            for field in ["last_query_datetime", "updated_datetime"] {
+                list.add_field(items.iter(), field, EpochMode::Rfc3339);
+            }
+        }
+    }
+    classify(msg, list)
+}
+
+/// Kimi: detail `{messages:[{createTime,updateTime}]}`; feed/list
+/// `{items:[{chat:{id,createTime,updateTime}}]}` or `{chat:{...}}`. RFC 3339.
+fn kimi_span(payload: &serde_json::Value) -> WebSpan {
+    let mut msg = Stamps::default();
+    if let Some(messages) = payload
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+    {
+        for field in ["createTime", "updateTime"] {
+            msg.add_field(messages.iter(), field, EpochMode::Rfc3339);
+        }
+    }
+    if msg.has() {
+        return WebSpan::Messages(msg);
+    }
+    let mut list = Stamps::default();
+    if let Some(chat) = payload.get("chat") {
+        for field in ["createTime", "updateTime"] {
+            if let Some(raw) = chat.get(field) {
+                list.add(raw, EpochMode::Rfc3339);
+            }
+        }
+    }
+    if let Some(items) = payload
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+    {
+        if items.len() == 1 {
+            if let Some(chat) = items[0].get("chat") {
+                for field in ["createTime", "updateTime"] {
+                    if let Some(raw) = chat.get(field) {
+                        list.add(raw, EpochMode::Rfc3339);
+                    }
+                }
+            }
+        }
+    }
+    classify(msg, list)
+}
+
+/// Gemini web: the archived artifact is a `{rpcid, conversationId, pages}`
+/// bundle (lib/gemini-rpc.ts:817) or a bare page string. Each page is a
+/// `)]}'`-guarded batchexecute stream; a detail `hNvQHb` document holds turns at
+/// `payload[0]` with the exchange timestamp at `turn[4] = [seconds, nanos]`, and
+/// a list `MaZiqc` document holds items at `payload[2]` with `item[5] =
+/// [seconds, nanos]`. Epoch seconds (absolute).
+fn gemini_web_time(line: &serde_json::Value, raw_text: Option<&str>) -> LineTime {
+    let mut msg = Stamps::default();
+    let mut list = Stamps::default();
+    match raw_text {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => gemini_collect(&value, &mut msg, &mut list),
+            Err(_) => gemini_scan_text(text, &mut msg, &mut list),
+        },
+        None => gemini_collect(line, &mut msg, &mut list),
+    }
+    classify(msg, list).into_line_time()
+}
+
+/// Collect from a gemini bundle object, a bare page string, or a decoded array.
+fn gemini_collect(value: &serde_json::Value, msg: &mut Stamps, list: &mut Stamps) {
+    if let Some(pages) = value.get("pages").and_then(serde_json::Value::as_array) {
+        for page in pages {
+            if let Some(text) = page.as_str() {
+                gemini_scan_text(text, msg, list);
+            }
+        }
+    } else if let Some(text) = value.as_str() {
+        gemini_scan_text(text, msg, list);
+    }
+}
+
+/// Decode one batchexecute page and fold its turn / item timestamps.
+fn gemini_scan_text(text: &str, msg: &mut Stamps, list: &mut Stamps) {
+    let body = text.strip_prefix(")]}'").unwrap_or(text);
+    for frame in parse_batchexecute_frames(body) {
+        let serde_json::Value::Array(entries) = frame else {
+            continue;
+        };
+        for entry in entries {
+            let serde_json::Value::Array(entry) = entry else {
+                continue;
+            };
+            if entry.first().and_then(serde_json::Value::as_str) != Some("wrb.fr") {
+                continue;
+            }
+            let Some(inner) = entry.get(2).and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(inner) else {
+                continue;
+            };
+            // Detail: payload[0] = turns, turn[4] = [seconds, nanos].
+            if let Some(turns) = payload.get(0).and_then(serde_json::Value::as_array) {
+                for turn in turns {
+                    if let Some(raw) = turn.get(4).and_then(tuple_seconds) {
+                        msg.add(&serde_json::Value::Number(raw.into()), EpochMode::Absolute);
+                    }
+                }
+            }
+            // List: payload[2] = items, item[5] = [seconds, nanos].
+            if let Some(items) = payload.get(2).and_then(serde_json::Value::as_array) {
+                for item in items {
+                    if let Some(raw) = item.get(5).and_then(tuple_seconds) {
+                        list.add(&serde_json::Value::Number(raw.into()), EpochMode::Absolute);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `[seconds, nanos]` (or a bare number) → seconds.
+fn tuple_seconds(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Array(pair) => pair.first().and_then(serde_json::Value::as_i64),
+        serde_json::Value::Number(_) => value.as_i64(),
+        _ => None,
+    }
+}
+
+/// Split a batchexecute body into its length-prefixed JSON frames. Mirrors the
+/// extension's own `walkFrames`: a line that is all digits is the byte length of
+/// the frame that follows; anything else is taken as a one-line frame.
+fn parse_batchexecute_frames(body: &str) -> Vec<serde_json::Value> {
+    let mut frames = Vec::new();
+    let bytes = body.as_bytes();
+    let mut pos = 0usize;
+    while pos < body.len() {
+        while pos < body.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= body.len() {
+            break;
+        }
+        let line_end = body[pos..].find('\n').map_or(body.len(), |i| pos + i);
+        let line = &body[pos..line_end];
+        if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) {
+            let len: usize = line.parse().unwrap_or(0);
+            let start = if body[line_end..].starts_with('\n') {
+                line_end + 1
+            } else {
+                line_end
+            };
+            if len == 0 {
+                pos = start;
+                continue;
+            }
+            let end = (start + len).min(body.len());
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body[start..end]) {
+                frames.push(value);
+            }
+            pos = end;
+        } else {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                frames.push(value);
+            }
+            pos = if line_end < body.len() {
+                line_end + 1
+            } else {
+                body.len()
+            };
+        }
+    }
+    frames
+}
+
+// ---------------------------------------------------------------------------
 // RFC 3339 parsing (no external time crate — this crate adds no dependencies)
 // ---------------------------------------------------------------------------
 
@@ -481,6 +1082,14 @@ fn plausible_seconds(v: i64) -> Option<i64> {
 /// second is discarded — we report whole seconds). `None` on any malformed /
 /// out-of-range input.
 fn parse_rfc3339(s: &str) -> Option<i64> {
+    parse_rfc3339_zoned(s).map(|(t, _)| t)
+}
+
+/// As [`parse_rfc3339`], but also reporting the source zone the string was
+/// written in: `"UTC"` for a `Z` suffix, or the literal `+HH:MM` / `-HH:MM`
+/// offset. The offset is already applied to the returned unix seconds; the
+/// label is what a consumer needs to know which zone the source used.
+fn parse_rfc3339_zoned(s: &str) -> Option<(i64, Option<String>)> {
     let b = s.as_bytes();
     if b.len() < 20 {
         return None;
@@ -521,8 +1130,8 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
         }
     }
 
-    let (second, offset_seconds) = match b.get(idx) {
-        Some(&b'Z') => (second, 0),
+    let (second, offset_seconds, zone) = match b.get(idx) {
+        Some(&b'Z') => (second, 0, Some("UTC".to_string())),
         Some(&b'+') | Some(&b'-') => {
             if b.len() < idx + 6 {
                 return None;
@@ -536,13 +1145,17 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
                 return None;
             }
             let sign: i64 = if b[idx] == b'+' { 1 } else { -1 };
-            (second, sign * (oh * 3600 + om * 60))
+            let label = format!("{}{oh:02}:{om:02}", b[idx] as char);
+            (second, sign * (oh * 3600 + om * 60), Some(label))
         }
         _ => return None,
     };
 
     let days = days_from_civil(year as i64, month as u32, day as u32)?;
-    Some(days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second - offset_seconds)
+    Some((
+        days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second - offset_seconds,
+        zone,
+    ))
 }
 
 /// Read `len` ASCII digits starting at `start`. `None` if they are not digits.
@@ -587,6 +1200,7 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         last_unix: a.last_unix,
         line_count: a.line_count,
         time_source: a.time_source,
+        source_zone: a.source_zone,
     }
 }
 
@@ -922,6 +1536,230 @@ mod tests {
             why.contains("timestamp"),
             "why should mention the missing field: {why}"
         );
+    }
+
+    // --------------------------------------------------------- web chat harnesses
+    // Each case is a synthetic but real-shaped inbox bundle: the platform's own
+    // body under `raw.text`, exactly as `inbox.rs` seals it. No real content.
+
+    fn web_line(platform: &str, body: &str) -> String {
+        serde_json::json!({
+            "schema": "chat-stasher/inbox@2",
+            "platform": platform,
+            "sessionId": "s1",
+            "raw": { "text": body, "bytes": body.len() },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn chatgpt_message_times_are_message_derived() {
+        let body = serde_json::json!({
+            "title": "t",
+            "create_time": T1,
+            "update_time": T2,
+            "mapping": {
+                "n1": { "message": { "create_time": T1 } },
+                "n2": { "message": { "create_time": T2 } },
+            },
+        })
+        .to_string();
+        let line = web_line("chatgpt", &body);
+        let a = analyze_session("chatgpt", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: false });
+    }
+
+    /// DeepSeek's numeric fields are local +08:00 (owner-measured): the stored
+    /// value is 8 h ahead of true UTC, and the parser records the source zone.
+    #[test]
+    fn deepseek_message_times_apply_the_plus_08_zone() {
+        let z = 8 * 3600;
+        let body = serde_json::json!({
+            "data": { "biz_data": {
+                "chat_messages": [
+                    { "inserted_at": T1 + z },
+                    { "inserted_at": T2 + z },
+                ],
+                "chat_session": { "inserted_at": T1 + z, "updated_at": T2 + z },
+            } },
+        })
+        .to_string();
+        let line = web_line("deepseek", &body);
+        let a = analyze_session("deepseek", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T1), "the +08:00 value must be shifted to UTC");
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.source_zone.as_deref(), Some("+08:00"));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: false });
+    }
+
+    #[test]
+    fn claude_web_message_times_are_exact() {
+        let body = serde_json::json!({
+            "uuid": "u",
+            "created_at": RFC_T1,
+            "updated_at": RFC_T2,
+            "chat_messages": [
+                { "created_at": RFC_T1 },
+                { "created_at": RFC_T2 },
+            ],
+        })
+        .to_string();
+        let line = web_line("claude", &body);
+        let a = analyze_session("claude", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: true });
+        assert_eq!(a.source_zone.as_deref(), Some("UTC"));
+    }
+
+    /// A `+08:00` RFC 3339 string is converted to UTC and its offset recorded.
+    #[test]
+    fn rfc3339_offset_is_converted_and_its_zone_recorded() {
+        let body = r#"{"chat_messages":[{"created_at":"2025-01-15T20:34:56+08:00"}]}"#;
+        let line = web_line("claude", body);
+        let a = analyze_session("claude", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.source_zone.as_deref(), Some("+08:00"));
+    }
+
+    #[test]
+    fn grok_message_times_from_responses() {
+        let body = serde_json::json!({
+            "responses": [
+                { "createTime": RFC_T1 },
+                { "createTime": RFC_T2 },
+            ],
+        })
+        .to_string();
+        let line = web_line("grok", &body);
+        let a = analyze_session("grok", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: true });
+    }
+
+    #[test]
+    fn kimi_message_times_are_message_derived() {
+        let body = serde_json::json!({
+            "messages": [
+                { "createTime": RFC_T1 },
+                { "createTime": RFC_T2 },
+            ],
+        })
+        .to_string();
+        let line = web_line("kimi", &body);
+        let a = analyze_session("kimi", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: true });
+    }
+
+    #[test]
+    fn perplexity_entry_times_are_message_derived() {
+        let body = serde_json::json!({
+            "entries": [
+                { "updated_datetime": RFC_T1 },
+                { "updated_datetime": RFC_T2 },
+            ],
+        })
+        .to_string();
+        let line = web_line("perplexity", &body);
+        let a = analyze_session("perplexity", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: true });
+    }
+
+    #[test]
+    fn gemini_batchexecute_turn_times_are_message_derived() {
+        // turn[4] = [seconds, nanos]; payload[0] is the turns array.
+        let turn = |secs: i64| serde_json::json!([["c_x", "r_y"], null, null, null, [secs, 0]]);
+        let inner = serde_json::json!([[turn(T1), turn(T2)]]);
+        let entry =
+            serde_json::json!(["wrb.fr", "hNvQHb", inner.to_string(), null, null, null, "generic"]);
+        let frame = serde_json::json!([entry]).to_string();
+        let page = format!(")]}}'\n\n{}\n{}", frame.len(), frame);
+        let bundle = serde_json::json!({
+            "rpcid": "hNvQHb",
+            "conversationId": "c_x",
+            "pages": [page],
+        })
+        .to_string();
+        let line = web_line("gemini", &bundle);
+        let a = analyze_session("gemini", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: false });
+    }
+
+    /// No messages archived yet: the span is only the list/update time, and its
+    /// low confidence is named.
+    #[test]
+    fn claude_web_list_only_is_list_updated() {
+        let body = serde_json::json!({
+            "uuid": "u",
+            "created_at": RFC_T1,
+            "updated_at": RFC_T2,
+        })
+        .to_string();
+        let line = web_line("claude", &body);
+        let a = analyze_session("claude", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::ListUpdated);
+    }
+
+    #[test]
+    fn deepseek_list_only_is_list_updated() {
+        let z = 8 * 3600;
+        let body = serde_json::json!({
+            "data": { "biz_data": {
+                "chat_session": { "inserted_at": T1 + z, "updated_at": T2 + z },
+            } },
+        })
+        .to_string();
+        let line = web_line("deepseek", &body);
+        let a = analyze_session("deepseek", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::ListUpdated);
+    }
+
+    #[test]
+    fn gemini_list_only_items_fall_back_to_list_updated() {
+        // payload[2] = items, item[5] = [seconds, nanos].
+        let item = |secs: i64| serde_json::json!([null, "t", null, null, null, [secs, 0]]);
+        let inner = serde_json::json!([[], null, [item(T1)]]);
+        let entry =
+            serde_json::json!(["wrb.fr", "MaZiqc", inner.to_string(), null, null, null, "generic"]);
+        let frame = serde_json::json!([entry]).to_string();
+        let page = format!(")]}}'\n\n{}\n{}", frame.len(), frame);
+        let bundle = serde_json::json!({ "pages": [page] }).to_string();
+        let line = web_line("gemini", &bundle);
+        let a = analyze_session("gemini", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.time_source, TimeSource::ListUpdated);
+    }
+
+    /// A web payload that carries no time field at all is Unknown, and its
+    /// reason is the "no timestamp field" one, not "not implemented".
+    #[test]
+    fn web_payload_without_time_is_unknown_and_not_implemented_is_gone() {
+        let body = r#"{"messages":[{"role":"user"}]}"#;
+        let line = web_line("kimi", body);
+        let a = analyze_session("kimi", &[line.as_str()]);
+        assert_eq!(a.first_unix, None);
+        let TimeSource::Unknown { why } = &a.time_source else {
+            panic!("expected Unknown, got {:?}", a.time_source);
+        };
+        assert!(!why.contains("not implemented"), "{why}");
+        assert!(why.contains("timestamp"), "{why}");
+    }
+
+    #[test]
+    fn web_harness_overview_why_no_longer_says_not_implemented() {
+        let line = web_line("chatgpt", r#"{"title":"t"}"#);
+        let a = analyze_session("chatgpt", &[line.as_str()]);
+        let TimeSource::Unknown { why } = &a.time_source else {
+            panic!("expected Unknown, got {:?}", a.time_source);
+        };
+        assert!(!why.contains("not implemented"), "{why}");
     }
 
     // helpers -----------------------------------------------------------------

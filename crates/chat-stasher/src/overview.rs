@@ -41,6 +41,11 @@ const UNKNOWN: char = '?';
 pub enum TimeSource {
     Exact,
     Inferred { how: String },
+    /// Web chat harness: span derived from per-message timestamps.
+    Messages { exact: bool },
+    /// Web chat harness: span from the conversation list's update time only.
+    #[serde(rename = "list-updated")]
+    ListUpdated,
     Unknown { why: String },
 }
 
@@ -59,6 +64,10 @@ impl From<&crate::activity::TimeSource> for TimeSource {
             crate::activity::TimeSource::Inferred { how } => {
                 TimeSource::Inferred { how: how.clone() }
             }
+            crate::activity::TimeSource::Messages { exact } => {
+                TimeSource::Messages { exact: *exact }
+            }
+            crate::activity::TimeSource::ListUpdated => TimeSource::ListUpdated,
             crate::activity::TimeSource::Unknown { why } => {
                 TimeSource::Unknown { why: why.clone() }
             }
@@ -99,7 +108,10 @@ impl OverviewRow {
     pub fn has_known_time(&self) -> bool {
         matches!(
             self.time_source,
-            TimeSource::Exact | TimeSource::Inferred { .. }
+            TimeSource::Exact
+                | TimeSource::Inferred { .. }
+                | TimeSource::Messages { .. }
+                | TimeSource::ListUpdated
         ) && (self.first_unix.is_some() || self.last_unix.is_some())
     }
 

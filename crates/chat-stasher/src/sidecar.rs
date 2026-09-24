@@ -136,6 +136,10 @@ pub fn to_overview_row(row: &ActivityRow) -> OverviewRow {
             ActivityTimeSource::Inferred { how } => {
                 OverviewTimeSource::Inferred { how: how.clone() }
             }
+            ActivityTimeSource::Messages { exact } => {
+                OverviewTimeSource::Messages { exact: *exact }
+            }
+            ActivityTimeSource::ListUpdated => OverviewTimeSource::ListUpdated,
             ActivityTimeSource::Unknown { why } => OverviewTimeSource::Unknown { why: why.clone() },
         },
     }
@@ -253,6 +257,7 @@ mod tests {
             last_unix: Some(2),
             line_count: 3,
             time_source: ActivityTimeSource::Exact,
+        source_zone: None,
         };
         let o = to_overview_row(&exact);
         assert_eq!(o.session_id, "s1");
