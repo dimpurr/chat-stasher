@@ -36,11 +36,12 @@ pub struct ActivityRow {
     pub line_count: u64,
     pub time_source: TimeSource,
     /// The time zone the source expressed this session's timestamps in, when
-    /// the source actually said (or the owner measured) one. `None` means the
-    /// values were absolute epoch numbers, where a zone would be meaningless.
-    /// Nothing is ever read as UTC by assumption: a naive field carries its
-    /// declared zone here, and an offset-bearing RFC 3339 string keeps its
-    /// offset label.
+    /// the source actually said one. Nothing is ever read as UTC by assumption:
+    /// a numeric epoch is an absolute instant whose own zone is `"UTC"`, a
+    /// naive date-time string would carry its declared zone here, and an
+    /// offset-bearing RFC 3339 string keeps its offset label. `None` means the
+    /// harness reported no source (the local file/SQLite harnesses, which carry
+    /// no zone).
     pub source_zone: Option<String>,
 }
 
@@ -546,34 +547,21 @@ fn plausible_seconds(v: i64) -> Option<i64> {
 // `nm/w5-competitors/`.
 //
 // Zone discipline: nothing is read as UTC by assumption. An RFC 3339 string
-// keeps the offset it was written with (`source_zone` records it), and a
-// platform whose numeric field is local wall clock declares its measured zone
-// (DeepSeek, +08:00) — the value is shifted to true UTC and the zone is
-// recorded, never silently dropped.
+// keeps the offset it was written with (`source_zone` records it); a numeric
+// field is a Unix epoch — an absolute instant whose own zone is UTC — so it is
+// recorded as `"UTC"` and never shifted. Only a naive date-time **string** with
+// no offset could carry a source-zone label other than its own, and such a
+// field would have to say so here; no such field is read today.
 
 /// How one raw JSON value becomes unix seconds for a web harness.
 #[derive(Clone, Copy)]
 enum EpochMode {
-    /// Absolute epoch seconds (or millis) — a zone would be meaningless.
+    /// Absolute epoch seconds (or millis). A numeric epoch is an instant in
+    /// UTC; its own zone is recorded as `"UTC"`, and the value is never shifted.
     Absolute,
     /// RFC 3339 string; the string's own offset is recorded.
     Rfc3339,
-    /// Local-wall-clock epoch seconds at a fixed measured offset; unix = value −
-    /// offset. The declared zone label is attached to every stamp.
-    NaiveLocal {
-        offset_seconds: i64,
-        label: &'static str,
-    },
 }
-
-/// DeepSeek's numeric timestamps were measured at +08:00 by the owner (the
-/// account's wall clock). Competitor implementations treat the same `inserted_at`
-/// as an absolute epoch; this parser follows the owner's measurement and records
-/// the zone so a consumer can see the choice. See the W97 report's Prior art.
-const DEEPSEEK_ZONE: EpochMode = EpochMode::NaiveLocal {
-    offset_seconds: 8 * 3600,
-    label: "+08:00",
-};
 
 /// A folded set of stamps for one candidate source (messages or list).
 #[derive(Default, Clone)]
@@ -684,11 +672,9 @@ fn stamp_from_value(
             let text = raw.as_str()?;
             parse_rfc3339_zoned(text).map(|(t, zone)| (t, true, zone))
         }
-        EpochMode::Absolute => web_numeric_seconds(raw).map(|t| (t, false, None)),
-        EpochMode::NaiveLocal {
-            offset_seconds,
-            label,
-        } => web_numeric_seconds(raw).map(|t| (t - offset_seconds, false, Some(label.to_string()))),
+        EpochMode::Absolute => {
+            web_numeric_seconds(raw).map(|t| (t, false, Some("UTC".to_string())))
+        }
     }
 }
 
@@ -785,7 +771,8 @@ fn chatgpt_span(payload: &serde_json::Value) -> WebSpan {
 
 /// DeepSeek: detail `{data:{biz_data:{chat_messages:[{inserted_at}],
 /// chat_session:{inserted_at,updated_at}}}}`; list
-/// `{data:{biz_data:{chat_sessions:[{updated_at}]}}}`. Local +08:00 (owner-measured).
+/// `{data:{biz_data:{chat_sessions:[{updated_at}]}}}`. `inserted_at`/`updated_at`
+/// are Unix epochs (absolute instants), never shifted.
 fn deepseek_span(payload: &serde_json::Value) -> WebSpan {
     let biz = payload.pointer("/data/biz_data");
     let mut msg = Stamps::default();
@@ -793,7 +780,7 @@ fn deepseek_span(payload: &serde_json::Value) -> WebSpan {
         .and_then(|b| b.get("chat_messages"))
         .and_then(serde_json::Value::as_array)
     {
-        msg.add_field(messages.iter(), "inserted_at", DEEPSEEK_ZONE);
+        msg.add_field(messages.iter(), "inserted_at", EpochMode::Absolute);
     }
     if msg.has() {
         return WebSpan::Messages(msg);
@@ -802,7 +789,7 @@ fn deepseek_span(payload: &serde_json::Value) -> WebSpan {
     if let Some(session) = biz.and_then(|b| b.get("chat_session")) {
         for field in ["inserted_at", "updated_at"] {
             if let Some(raw) = session.get(field) {
-                list.add(raw, DEEPSEEK_ZONE);
+                list.add(raw, EpochMode::Absolute);
             }
         }
     }
@@ -813,7 +800,7 @@ fn deepseek_span(payload: &serde_json::Value) -> WebSpan {
         .and_then(serde_json::Value::as_array)
     {
         if sessions.len() == 1 {
-            list.add_field(sessions.iter(), "updated_at", DEEPSEEK_ZONE);
+            list.add_field(sessions.iter(), "updated_at", EpochMode::Absolute);
         }
     }
     classify(msg, list)
@@ -1576,20 +1563,20 @@ mod tests {
         assert_eq!(a.first_unix, Some(T1));
         assert_eq!(a.last_unix, Some(T2));
         assert_eq!(a.time_source, TimeSource::Messages { exact: false });
+        assert_eq!(a.source_zone.as_deref(), Some("UTC"));
     }
 
-    /// DeepSeek's numeric fields are local +08:00 (owner-measured): the stored
-    /// value is 8 h ahead of true UTC, and the parser records the source zone.
+    /// A numeric `inserted_at` is a Unix epoch: an absolute instant. The parser
+    /// must not shift it, and records the value's own zone as UTC.
     #[test]
-    fn deepseek_message_times_apply_the_plus_08_zone() {
-        let z = 8 * 3600;
+    fn deepseek_message_times_are_absolute_epochs_not_shifted() {
         let body = serde_json::json!({
             "data": { "biz_data": {
                 "chat_messages": [
-                    { "inserted_at": T1 + z },
-                    { "inserted_at": T2 + z },
+                    { "inserted_at": T1 },
+                    { "inserted_at": T2 },
                 ],
-                "chat_session": { "inserted_at": T1 + z, "updated_at": T2 + z },
+                "chat_session": { "inserted_at": T1, "updated_at": T2 },
             } },
         })
         .to_string();
@@ -1598,10 +1585,10 @@ mod tests {
         assert_eq!(
             a.first_unix,
             Some(T1),
-            "the +08:00 value must be shifted to UTC"
+            "the epoch is the instant as stored; it must not be shifted by any zone"
         );
         assert_eq!(a.last_unix, Some(T2));
-        assert_eq!(a.source_zone.as_deref(), Some("+08:00"));
+        assert_eq!(a.source_zone.as_deref(), Some("UTC"));
         assert_eq!(a.time_source, TimeSource::Messages { exact: false });
     }
 
@@ -1726,16 +1713,16 @@ mod tests {
 
     #[test]
     fn deepseek_list_only_is_list_updated() {
-        let z = 8 * 3600;
         let body = serde_json::json!({
             "data": { "biz_data": {
-                "chat_session": { "inserted_at": T1 + z, "updated_at": T2 + z },
+                "chat_session": { "inserted_at": T1, "updated_at": T2 },
             } },
         })
         .to_string();
         let line = web_line("deepseek", &body);
         let a = analyze_session("deepseek", &[line.as_str()]);
         assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.source_zone.as_deref(), Some("UTC"));
         assert_eq!(a.time_source, TimeSource::ListUpdated);
     }
 
