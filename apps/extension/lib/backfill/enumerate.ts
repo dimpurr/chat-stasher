@@ -303,6 +303,44 @@ export type BackfillContentType = (typeof ALLOWED_BACKFILL_CONTENT_TYPES)[number
  */
 export const MAX_REQUEST_BODY_BYTES = 4096;
 
+/**
+ * 🔴 W101 · The byte ceiling for a **form** request body — today, only Gemini's
+ * `batchexecute` body (`FormPostSpec`, `encoding: 'form'`). The JSON ceiling
+ * above is unchanged.
+ *
+ * Why the form kind needs a ceiling of its own: `MAX_REQUEST_BODY_BYTES`' premise
+ * is "a backfill body can only ever be something like a page cursor / a
+ * conversation id, tens of bytes", and that premise is **true of a JSON body**
+ * (Perplexity's `offset`, Kimi's `page_token`, DeepSeek's `seq_id` — all small)
+ * but **false of the one form body this build sends.** Gemini's list request
+ * carries the platform's own opaque continuation cursor inside `f.req`, and that
+ * cursor is *the whole list already returned*, so its size grows with the account
+ * rather than staying "tens of bytes".
+ *
+ * What was measured (W101, 2026-09-24, no request sent):
+ *  · the live gemini ledger's `enumCursor.token` is **3993 characters** at
+ *    `offset = 280` (`nm/w92-ledger-read.json`), and our own builder turns it
+ *    into a **4323-byte** body — 227 bytes over the 4 KiB ceiling, which is the
+ *    exact request the page bridge refused (`list token=set (enumerated 280):
+ *    refused: request body exceeds MAX_REQUEST_BODY_BYTES`);
+ *  · the pinguarmy real-sanitized fixture carries a **441-character** token after
+ *    **25** items (`nm/w5-competitors/repos/pinguarmy-ai-chat-exporter/tests/
+ *    fixtures/providers/gemini/2026-08-24-normal.json`).
+ *
+ * Those two points put the cursor at roughly **14 encoded characters per
+ * conversation** already listed (`token ≈ 93 + 13.9·items` over 25 and 280
+ * items), so a bound has to scale with the largest account this build will meet,
+ * not with a single page. 128 KiB clears the body a **7,783-conversation**
+ * account would produce (~116 KB projected from the same linear model) — and
+ * 7,783 is not hypothetical: it is the size of the ChatGPT account sitting in
+ * the *same* ledger this measurement came from. It remains a fixed, finite
+ * ceiling: 1/128 of `MAX_RAW_BYTES` (16 MiB), far below "use this channel to
+ * ship a payload out", and it still refuses a body the plan's own builder could
+ * never produce. A JSON body does **not** get this headroom — only the form
+ * kind, whose cursor the platform controls and grows.
+ */
+export const MAX_FORM_REQUEST_BODY_BYTES = 128 * 1024;
+
 /** Everything variable about one backfill request besides the URL. Omitted = GET with no body. */
 export interface BackfillRequestInit {
   method: BackfillMethod;
