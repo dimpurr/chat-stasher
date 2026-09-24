@@ -1327,9 +1327,9 @@ bail         crates/chat-stasher/src/seal.rs:97  "refusing seal: --active must b
 bail         crates/chat-stasher/src/seal.rs:122  "active file does not exist: {}"
 bail         crates/chat-stasher/src/seal.rs:130  "seal target already exists: {}"
 with_context crates/chat-stasher/src/seal.rs:133  "seal rename {} -> {}"
-context      crates/chat-stasher/src/search.rs:758  "open repository for search"
-context      crates/chat-stasher/src/search.rs:760  "index repository for search"
-context      crates/chat-stasher/src/search.rs:764  "list snapshots for search"
+context      crates/chat-stasher/src/search.rs:765  "open repository for search"
+context      crates/chat-stasher/src/search.rs:767  "index repository for search"
+context      crates/chat-stasher/src/search.rs:771  "list snapshots for search"
 help_doc     crates/chat-stasher/src/selector.rs:255  Filters shared by `search` and (later) `export`, flattened into each
 help_doc     crates/chat-stasher/src/selector.rs:256  command's argument struct so the two commands cannot drift apart.
 help_doc     crates/chat-stasher/src/selector.rs:257  

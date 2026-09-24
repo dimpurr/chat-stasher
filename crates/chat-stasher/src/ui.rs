@@ -1079,10 +1079,23 @@ fn render_time_unknown(in_view: &[&UiSession], token: &str) -> String {
         .collect();
     let mut pending_append = String::new();
     if unknown.is_empty() {
-        pending_append.push_str(
-            "<section><h2>Time unknown</h2>\n<p class=ok>0 sessions — every session in view \
-             has a recorded conversation time.</p></section>\n",
-        );
+        if no_content.is_empty() {
+            pending_append.push_str(
+                "<section><h2>Time unknown</h2>\n<p class=ok>0 sessions — every session in view \
+                 has a recorded conversation time.</p></section>\n",
+            );
+        } else {
+            pending_append.push_str(
+                "<section><h2>Time unknown</h2>\n<p class=ok>0 sessions with conversation content \
+                 have an unknown conversation time.</p></section>\n",
+            );
+            pending_append.push_str(&format!(
+                "<section><h2>No conversation content</h2>\n<p>{} session(s) in view were archived \
+                 with no user or assistant message — an empty shard or metadata-only lines. They are \
+                 not in any time bucket, and are not counted as time-unknown.</p></section>\n",
+                no_content.len()
+            ));
+        }
         return pending_append;
     }
     let mut by_reason: BTreeMap<String, Vec<&&UiSession>> = BTreeMap::new();
