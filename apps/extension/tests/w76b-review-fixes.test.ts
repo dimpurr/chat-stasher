@@ -499,7 +499,7 @@ describe('W76b-2 · the cursor', () => {
     // (W86b: the byte is now a map of waiting-time stamps; 🔴 W86c: dense `0..k-1`
     // naming the whole rotation, with the just-served A at the back — the stricter
     // claim of the original comment is unchanged, it must name the served row.)
-    expect(store[CURSOR_KEY]).toEqual({ served: { [`${CHATGPT}\0${B}`]: 0, [`${CHATGPT}\0${A}`]: 1 } });
+    expect((store[CURSOR_KEY] as any).served).toEqual({ [`${CHATGPT}\0${B}`]: 0, [`${CHATGPT}\0${A}`]: 1 });
 
     // And the next wake really moves on: the cursor is honoured, not merely written.
     expect(await servedByOneTick(mod, rows)).toBe(B);

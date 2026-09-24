@@ -32,8 +32,8 @@
  *
  * The cursor is a **map from identity to the sequence number of the wake that
  * last served it** (`{served: {'<platform>\0<scope>': <n>}}`). A wake walks the
- * runnable targets in **least-recently-served-first** order — never-served
- * before served, ties broken by registry order — and stamps the identity it
+ * runnable targets in **least-recently-served-first** order — never-seen targets
+ * join at the back, ties broken by registry order — and stamps the identity it
  * really served. Registry order is a tie-break, not the schedule, so no prepend,
  * removal or permutation can move a target out of its turn.
  *
@@ -98,6 +98,7 @@ interface TargetRow { platform: string; origin: string; scope: string }
 const chatgpt = (scope: string): TargetRow => ({ platform: PLATFORM, origin: ORIGIN, scope });
 
 const store: Record<string, unknown> = {};
+const sessionStore: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];
 const alarmBook = new Map<string, { periodInMinutes?: number }>();
@@ -153,6 +154,15 @@ const fakeBrowser: any = {
       },
       async set(values: Record<string, unknown>) { Object.assign(store, values); },
       async remove(keys: string[]) { for (const k of keys) delete store[k]; },
+    },
+    session: {
+      async get(defaults: Record<string, unknown>) {
+        const out: Record<string, unknown> = {};
+        for (const k of Object.keys(defaults)) out[k] = k in sessionStore ? sessionStore[k] : defaults[k];
+        return out;
+      },
+      async set(values: Record<string, unknown>) { Object.assign(sessionStore, values); },
+      async remove(keys: string[]) { for (const k of keys) delete sessionStore[k]; },
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
@@ -298,6 +308,7 @@ function stamps(): Record<string, number> {
 
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
+  for (const k of Object.keys(sessionStore)) delete sessionStore[k];
   runtimeListeners.length = 0;
   alarmListeners.length = 0;
   alarmBook.clear();
@@ -501,6 +512,7 @@ describe('W86b-F · a malformed or pre-W86 byte is an empty map, never a crash',
     ];
     for (const byte of notCursors) {
       store[CURSOR_KEY] = byte;
+      delete sessionStore[`${CURSOR_KEY}:session`];
       // A fresh worker, so no in-memory map can answer for the byte.
       const fresh = await restartServiceWorker();
       const served = await servedByOneTick(fresh, rows);
@@ -572,6 +584,33 @@ describe('W86b-G · a cursor write that keeps failing still rotates', () => {
       fakeBrowser.storage.local.set = realSet;
     }
   });
+
+  it('🔴 survives a fresh worker on every wake when the local cursor write keeps failing', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(72);
+    const realSet = fakeBrowser.storage.local.set;
+    fakeBrowser.storage.local.set = async (values: Record<string, unknown>) => {
+      if (Object.prototype.hasOwnProperty.call(values, CURSOR_KEY)) {
+        throw new Error('synthetic: storage.local refused the cursor write');
+      }
+      await realSet(values);
+    };
+    try {
+      const served: Array<string | null> = [];
+      let mod = await bootBackground();
+      for (let wake = 0; wake < rows.length; wake += 1) {
+        served.push(...await servedSequence(mod, rows, 1));
+        mod = await restartServiceWorker();
+      }
+      console.log('[W86b-G restart] served per fresh worker:', JSON.stringify(served));
+      expect(store[CURSOR_KEY]).toBeUndefined();
+      expect(served).toEqual([A, B, C]);
+    } finally {
+      fakeBrowser.storage.local.set = realSet;
+    }
+  });
 });
 
 // ===========================================================================
@@ -600,8 +639,10 @@ const CAP = 8;
  *    the pre-W86b version of this loop fell into on `835d4f1`);
  *  · move-to-front and remove-then-re-prepend still happen, as before.
  *
- * The bound asserted is the one W86c states: every scope that is registered for
- * `n` consecutive real-work wakes is served within those `n`. `n` is the registry
+ * The bound asserted is the one W86c states while at least one cursor mirror
+ * accepts writes: every scope that is registered for `n` consecutive real-work
+ * wakes is served within those `n`. If both local and session writes fail, a fresh
+ * worker can repeat a stale cursor until one write succeeds. `n` is the registry
  * cap (`MAX_TARGET_ENTRIES`, 8), which is the strongest safe form of "served
  * within `m` real-work wakes for `m` registered runnable rows" — `m` varies with
  * the churn, so a single hard upper bound keeps every row covered.
@@ -665,8 +706,13 @@ async function propertyRun(
       await captureScope(s);
       ops.push(`remove+prepend ${s}`);
     }
-    // The effective set this wake can serve (post-mutation).
-    registered.push((await registry()).map((r) => r.scope));
+    // Snapshot every identity before the tick, including a newcomer first
+    // registered on this wake, so serving it now is observed as a real serve.
+    const afterMutation = await registry();
+    for (const target of afterMutation) {
+      if (!(target.scope in counts)) counts[target.scope] = await archived(chatgpt(target.scope));
+    }
+    registered.push(afterMutation.map((r) => r.scope));
     alarmListeners[0]!({ name: 'cs-backfill-tick' });
     await mod.backfillTickSettled();
     const s = await servedThisWake();
@@ -685,13 +731,16 @@ describe('W86b-H / W86c · every row that stays registered is served within n wa
     const n = CAP;
     const WAKES = 24;
     /** Two fixed streams, so the property is not a statement about one lucky seed. */
-    const SEEDS = [0x51eed, 0xbeef1];
+    // Seed 0 registers a newcomer before the first wake and that prepended row
+    // is served immediately; its before-tick baseline must make it observable.
+    const SEEDS = [0, 0x51eed, 0xbeef1];
     for (const seed of SEEDS) {
       // 🔴 Each seed is an independent world: the previous seed's newcomers are
       //    still in the registry (their evictions were for-good, not for the next
       //    run), so re-seed, drop any stale cursor and boot a fresh worker.
       seedTargets(rows);
       delete store[CURSOR_KEY];
+      delete sessionStore[`${CURSOR_KEY}:session`];
       const mod = await restartServiceWorker();
       const { served, ops, registered } = await propertyRun(seed, WAKES, rows, mod);
       console.log(`[W86b-H/W86c seed ${seed}] served:`, JSON.stringify(served));
@@ -701,6 +750,7 @@ describe('W86b-H / W86c · every row that stays registered is served within n wa
       // evictions actually happened, and the registry never ran empty (so a
       // null-serve cannot excuse a window the defect would have shrunk).
       expect(served.filter((s) => s === null)).toEqual([]);
+      if (seed === 0) expect(served[0]).toMatch(/^acct-w86c-new-/);
       expect(ops.some((o) => o.startsWith('new '))).toBe(true);
       expect(ops.some((o) => o.startsWith('evict '))).toBe(true);
       expect(ops.some((o) => o.startsWith('remove+prepend '))).toBe(true);
@@ -724,6 +774,18 @@ describe('W86b-H / W86c · every row that stays registered is served within n wa
       //    scopes joining (which the old loop excluded), their front-of-queue -1
       //    rank leaves a long-lived row out of every window too.
       expect(violations).toEqual([]);
+
+      // Reclaim once the churn has settled. The persisted map must cover exactly
+      // the registered identities and contain dense ranks, even when session
+      // storage was the newer mirror selected by the fresh worker.
+      await restartServiceWorker();
+      const finalRows = await registry();
+      const saved = cursorByte() as { served?: Record<string, number> } | undefined;
+      const identities = finalRows.map((row) => idKey(row.scope));
+      expect(Object.keys(saved?.served ?? {}).sort()).toEqual(identities.sort());
+      expect(Object.values(saved?.served ?? {}).sort((a, b) => a - b)).toEqual(
+        identities.map((_identity, i) => i),
+      );
     }
   });
 });

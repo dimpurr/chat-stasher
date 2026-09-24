@@ -479,8 +479,8 @@ describe('W76-E · the cursor survives a service-worker restart and fails safe',
     //    just served, so `B` (not yet served) is the oldest rank. The property
     //    asserted is unchanged and still the stronger one: not "the byte became
     //    index 0" but "the byte became the target just served".
-    expect(store[CURSOR_KEY]).toEqual({
-      served: { [`${PLATFORM}\0${SCOPES[1]}`]: 0, [`${PLATFORM}\0${SCOPES[0]}`]: 1 },
+    expect((store[CURSOR_KEY] as any).served).toEqual({
+      [`${PLATFORM}\0${SCOPES[1]}`]: 0, [`${PLATFORM}\0${SCOPES[0]}`]: 1,
     });
 
     // The next tick really does move on — the cursor is honoured, not merely written.

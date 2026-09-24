@@ -290,7 +290,11 @@ export const MAX_TARGET_ENTRIES = 8;
  *    puts the row just served at the back, so the walk is a round robin over the
  *    whole set of `m` — **every row that stays registered is served within `m`
  *    real-work wakes, regardless of how many newcomers arrive, and each newcomer
- *    waits at most `m` wakes.** Reorder never changes the smallest rank, and a
+ *    waits at most `m` wakes while at least one cursor mirror accepts writes.**
+ *    The session mirror carries successful writes across worker reclaims in one
+ *    browser session. If both session and local writes fail, a fresh worker can
+ *    reload a stale cursor, so this bound does not hold across reclaims until a
+ *    mirror accepts a write. Reorder never changes the smallest rank, and a
  *    skipped non-runnable row keeps its rank, so neither can push out a runnable
  *    row's turn.
  *
@@ -352,6 +356,8 @@ export interface TickCursor {
    * **absent** has never been served and sorts at the back of the rotation.
    */
   served: Record<string, number>;
+  /** Write generation used to select the newer local/session mirror. */
+  revision?: number;
 }
 
 /**
@@ -395,7 +401,30 @@ function readTickCursor(raw: unknown): TickCursor | null {
     if (typeof stamp !== 'number' || !Number.isSafeInteger(stamp) || stamp < 0) continue;
     served[key] = stamp;
   }
-  return { served };
+  const revision = (raw as { revision?: unknown }).revision;
+  return {
+    served,
+    ...(typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+      ? { revision }
+      : {}),
+  };
+}
+
+const BACKFILL_CURSOR_SESSION_KEY = `${BACKFILL_CURSOR_KEY}:session`;
+
+type CursorSessionArea = {
+  get: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  set: (values: Record<string, unknown>) => Promise<void>;
+};
+
+/** The session mirror survives worker restarts and is cleared when the browser restarts. */
+function cursorSessionArea(): CursorSessionArea | null {
+  const g = globalThis as {
+    browser?: { storage?: { session?: CursorSessionArea } };
+    chrome?: { storage?: { session?: CursorSessionArea } };
+  };
+  const area = g.browser?.storage?.session ?? g.chrome?.storage?.session;
+  return area && typeof area.get === 'function' && typeof area.set === 'function' ? area : null;
 }
 
 /** The map restricted to the identities `targets` holds. */
@@ -417,7 +446,9 @@ function pruneToRegistry(
  *
  * A row with a stamp is ranked by that stamp; a row with **no** stamp — never
  * served, a corrupt stamp dropped, or a brand-new identity — is ranked at the
- * **back** (`Infinity`), not ahead of every stamp. Ties (equal stamps, or the
+ * **back** (`Infinity`), not ahead of every stamp. This rotation survives worker
+ * reclaims when either cursor mirror accepts its write; if both writes fail, the
+ * in-worker rotation is lost at reclaim and a stale map can repeat. Ties (equal stamps, or the
  * whole never-served group) are broken by the registry's own order. That is the
  * whole selection rule, and it reads nothing but the stamps — no position, no
  * stored order, no "after the last one" — so a registry that was prepended to,
@@ -438,10 +469,13 @@ function pruneToRegistry(
  * of registered runnable targets. Because every save renormalises the stamps to
  * dense ranks `0..m-1` and places the row just served at the back (§2), the
  * rounds are a round robin over the whole registered set of `m`: each is served
- * once in every `m` real-work wakes, **no matter how many newcomers arrive** (a
- * newcomer is materialised at the back on its first save and then rounds forward
- * like everyone else, so it waits at most `m` wakes). Reorder never changes the
- * smallest stamp, and a skipped non-runnable row keeps its stamp, so it cannot
+ * once in every `m` real-work wakes, **no matter how many newcomers arrive, while
+ * at least one storage mirror accepts cursor writes** (a newcomer is materialised
+ * at the back on its first save and then rounds forward like everyone else, so it
+ * waits at most `m` wakes). The session mirror preserves successful writes across
+ * worker reclaims in the browser session; if both mirror writes fail, the in-worker
+ * rotation is lost at reclaim and a stale map can repeat. Reorder never changes
+ * the smallest stamp, and a skipped non-runnable row keeps its stamp, so it cannot
  * push out a runnable row's turn either.
  *
  * `null` — no stamp is known for anyone — is every target never-served, all at
@@ -486,13 +520,12 @@ export function tickWalkOrder(
  * storage fault, with nothing in the trace to say so.
  *
  * So the same fact is kept in memory as well, and it is the one that decides: it
- * advances on every serve whether or not the byte reaches storage, so the
- * rotation makes progress for as long as this worker lives. Storage stays the
- * only thing that can carry the schedule *across* a reclaim (an MV3 service
- * worker is reclaimed routinely, and this variable dies with it — which is why it
- * is a fallback and not a replacement: with the writes working the two always
- * hold the same map, and with them failing, a reclaim costs exactly what it costs
- * today, the stale stored map, rather than a wrong answer).
+ * advances on every serve whether or not either storage write succeeds. The
+ * session mirror carries that map across worker reclaims within the browser
+ * session; local storage remains durable across browser restarts. Revisions let
+ * a worker select the newer mirror if only one write succeeds. If both areas
+ * reject writes, a fresh worker can reload only the last persisted map and may
+ * repeat a row until one area accepts a write.
  *
  * `null` = this worker has neither read nor served any schedule yet, so storage
  * is the only witness.
@@ -510,7 +543,25 @@ let servedThisWorker: TickCursor | null = null;
  */
 export async function loadTickCursor(store: BackfillStore | null): Promise<TickCursor | null> {
   if (servedThisWorker === null && store !== null) {
-    servedThisWorker = readTickCursor(await store.load(BACKFILL_CURSOR_KEY));
+    let local: TickCursor | null = null;
+    let session: TickCursor | null = null;
+    try {
+      local = readTickCursor(await store.load(BACKFILL_CURSOR_KEY));
+    } catch {
+      // The session mirror can still preserve rotation during a local read fault.
+    }
+    const area = cursorSessionArea();
+    if (area) {
+      try {
+        const got = await area.get({ [BACKFILL_CURSOR_SESSION_KEY]: null });
+        session = readTickCursor(got[BACKFILL_CURSOR_SESSION_KEY]);
+      } catch {
+        // Session storage is optional; keep the local answer if the mirror is unavailable.
+      }
+    }
+    servedThisWorker = session && (!local || (session.revision ?? 0) > (local.revision ?? 0))
+      ? session
+      : local;
   }
   return servedThisWorker;
 }
@@ -571,7 +622,15 @@ export async function saveTickCursor(
   // 🔴 Before the write, not after: a write that throws still happened as far as
   //    the walk is concerned, and the next wake must start after it (see
   //    `servedThisWorker`).
-  servedThisWorker = { served };
+  servedThisWorker = { served, revision: (servedThisWorker?.revision ?? 0) + 1 };
+  const session = cursorSessionArea();
+  if (session) {
+    try {
+      await session.set({ [BACKFILL_CURSOR_SESSION_KEY]: servedThisWorker });
+    } catch (err) {
+      console.warn('[chat-stasher] backfill session cursor write failed', (err as Error).message);
+    }
+  }
   if (!store) return;
   try {
     await store.save(BACKFILL_CURSOR_KEY, servedThisWorker);

@@ -1613,8 +1613,8 @@ async function runAlarmTickBody(): Promise<TickResult> {
   //    after the cursor" slot forever; forgetting the cursor's own row was worse
   //    still, because the walk then restarted at the head. `tickWalkOrder` reads
   //    the cursor's stamps instead and returns the targets least-recently-served
-  //    first (never-served before served, ties by registry order), which no
-  //    reordering can influence. A `null` cursor — never served, an unreadable
+  //    first (never-seen identities join at the back; ties use registry order),
+  //    which no reordering can influence. A `null` cursor — no saved schedule, an unreadable
   //    byte, either pre-W86b shape, or nothing pruned — is every target
   //    never-served, i.e. the registry in its own order, which examines every row
   //    and so can never skip a platform.

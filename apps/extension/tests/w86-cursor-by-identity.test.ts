@@ -91,6 +91,7 @@ interface TargetRow { platform: string; origin: string; scope: string }
 const chatgpt = (scope: string): TargetRow => ({ platform: PLATFORM, origin: ORIGIN, scope });
 
 const store: Record<string, unknown> = {};
+const sessionStore: Record<string, unknown> = {};
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];
 const alarmBook = new Map<string, { periodInMinutes?: number }>();
@@ -146,6 +147,15 @@ const fakeBrowser: any = {
       },
       async set(values: Record<string, unknown>) { Object.assign(store, values); },
       async remove(keys: string[]) { for (const k of keys) delete store[k]; },
+    },
+    session: {
+      async get(defaults: Record<string, unknown>) {
+        const out: Record<string, unknown> = {};
+        for (const k of Object.keys(defaults)) out[k] = k in sessionStore ? sessionStore[k] : defaults[k];
+        return out;
+      },
+      async set(values: Record<string, unknown>) { Object.assign(sessionStore, values); },
+      async remove(keys: string[]) { for (const k of keys) delete sessionStore[k]; },
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
@@ -285,6 +295,7 @@ function cursorByte(): unknown {
 
 beforeEach(async () => {
   for (const k of Object.keys(store)) delete store[k];
+  for (const k of Object.keys(sessionStore)) delete sessionStore[k];
   runtimeListeners.length = 0;
   alarmListeners.length = 0;
   alarmBook.clear();
@@ -393,7 +404,7 @@ describe('W86-B · a removal between wakes does not pass a row over', () => {
     // (W86b: the byte is a map of serve-order ranks. 🔴 W86c: it is dense `0..k-1`
     // and names *every* registered row — on this wake C:0, B just served:1 — so
     // the map the next wake reads is the whole rotation, not one served identity.)
-    expect(cursorByte()).toEqual({ served: { [`${PLATFORM}\0${C}`]: 0, [`${PLATFORM}\0${B}`]: 1 } });
+    expect((cursorByte() as any)?.served).toEqual({ [`${PLATFORM}\0${C}`]: 0, [`${PLATFORM}\0${B}`]: 1 });
   });
 });
 
@@ -419,8 +430,8 @@ describe('W86-C · a cursor that does not name a registered target starts at the
     expect(first?.scope).toBe(A);
     // The stale byte is replaced by a real dense map (🔴 W86c: it names the whole
     // registered rotation, `0..k-1`), so the leg cannot stay skewed.
-    expect(cursorByte()).toEqual({
-      served: { [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2 },
+    expect((cursorByte() as any)?.served).toEqual({
+      [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2,
     });
 
     // And it is honoured, not merely written: the next wake moves on to B.
@@ -440,8 +451,8 @@ describe('W86-C · a cursor that does not name a registered target starts at the
     const first = await servedByOneTick(mod, rows);
     console.log('[W86-C2] served:', first?.scope, '· cursor now:', JSON.stringify(cursorByte()));
     expect(first?.scope).toBe(A);
-    expect(cursorByte()).toEqual({
-      served: { [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2 },
+    expect((cursorByte() as any)?.served).toEqual({
+      [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2,
     });
   });
 
@@ -463,13 +474,14 @@ describe('W86-C · a cursor that does not name a registered target starts at the
     ];
     for (const byte of notCursors) {
       store[CURSOR_KEY] = byte;
+      delete sessionStore[`${CURSOR_KEY}:session`];
       // A fresh worker, so the in-memory position cannot answer for the byte.
       const fresh = await restartServiceWorker();
       const served = await servedByOneTick(fresh, rows);
       console.log('[W86-C3] byte', JSON.stringify(byte), '⇒ served', served?.scope, '· cursor now:', JSON.stringify(cursorByte()));
       expect(served?.scope, `byte ${JSON.stringify(byte)} served nobody`).toBe(A);
-      expect(cursorByte(), `byte ${JSON.stringify(byte)} was not replaced`).toEqual({
-        served: { [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2 },
+      expect((cursorByte() as any)?.served, `byte ${JSON.stringify(byte)} was not replaced`).toEqual({
+        [`${PLATFORM}\0${B}`]: 0, [`${PLATFORM}\0${C}`]: 1, [`${PLATFORM}\0${A}`]: 2,
       });
     }
   });
