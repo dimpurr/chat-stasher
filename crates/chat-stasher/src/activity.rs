@@ -181,12 +181,25 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             }
             continue;
         };
-        if harness == "claude-code" {
+        let is_claude_code_conversation_line = if harness == "claude-code" {
             match value.get("type").and_then(serde_json::Value::as_str) {
-                Some("user") | Some("assistant") => message_lines += 1,
-                Some(_) => {}
-                None => undetermined_lines += 1,
+                Some("user") | Some("assistant") => {
+                    message_lines += 1;
+                    true
+                }
+                Some(_) => false,
+                None => {
+                    undetermined_lines += 1;
+                    false
+                }
             }
+        } else {
+            true
+        };
+        // Claude Code metadata can carry timestamps too (for example summary
+        // shards). Those describe the metadata row, not conversation activity.
+        if !is_claude_code_conversation_line {
+            continue;
         }
         match line_time(harness, &value) {
             // A single line can now span a whole session (opencode/cursor/
@@ -1814,6 +1827,18 @@ mod tests {
         ];
         let a = analyze_session("claude-code", &lines);
         assert_eq!(a.first_unix, None);
+        assert_eq!(a.time_source, TimeSource::NoConversationContent);
+    }
+
+    #[test]
+    fn claude_code_timestamped_summary_is_not_conversation_activity() {
+        let line = format!(
+            r#"{{"type":"summary","sessionId":"s","uuid":"u9","summary":"...","timestamp":"{RFC_T1}"}}"#
+        );
+        let a = analyze_session("claude-code", &[line.as_str()]);
+        assert_eq!(a.first_unix, None);
+        assert_eq!(a.last_unix, None);
+        assert_eq!(a.line_count, 1);
         assert_eq!(a.time_source, TimeSource::NoConversationContent);
     }
 
