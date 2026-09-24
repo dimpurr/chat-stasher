@@ -42,6 +42,11 @@ pub struct ActivityRow {
     /// offset-bearing RFC 3339 string keeps its offset label. `None` means the
     /// harness reported no source (the local file/SQLite harnesses, which carry
     /// no zone).
+    ///
+    /// `#[serde(default)]` keeps the field additive: an `activity-v1.jsonl`
+    /// written before this field existed has no such key, and must still
+    /// deserialize (as `None`) rather than failing the whole index read.
+    #[serde(default)]
     pub source_zone: Option<String>,
 }
 
@@ -785,12 +790,11 @@ fn deepseek_span(payload: &serde_json::Value) -> WebSpan {
     if msg.has() {
         return WebSpan::Messages(msg);
     }
+    // List-only: the interval is the session's update time as a point.
     let mut list = Stamps::default();
     if let Some(session) = biz.and_then(|b| b.get("chat_session")) {
-        for field in ["inserted_at", "updated_at"] {
-            if let Some(raw) = session.get(field) {
-                list.add(raw, EpochMode::Absolute);
-            }
+        if let Some(raw) = session.get("updated_at") {
+            list.add(raw, EpochMode::Absolute);
         }
     }
     // A list body stored under one conversation: only a single-item page is
@@ -821,16 +825,16 @@ fn claude_span(payload: &serde_json::Value) -> WebSpan {
     if msg.has() {
         return WebSpan::Messages(msg);
     }
+    // List-only: the interval is the list's **update** time as a point, never a
+    // created..updated span. `created_at` is deliberately not folded in.
     let mut list = Stamps::default();
-    for field in ["created_at", "updated_at"] {
-        if let Some(raw) = payload.get(field) {
-            list.add(raw, EpochMode::Rfc3339);
-        }
+    if let Some(raw) = payload.get("updated_at") {
+        list.add(raw, EpochMode::Rfc3339);
     }
     if let Some(items) = payload.as_array() {
         if items.len() == 1 {
-            for field in ["created_at", "updated_at"] {
-                list.add_field(items.iter(), field, EpochMode::Rfc3339);
+            if let Some(raw) = items[0].get("updated_at") {
+                list.add(raw, EpochMode::Rfc3339);
             }
         }
     }
@@ -851,12 +855,11 @@ fn grok_span(payload: &serde_json::Value) -> WebSpan {
     if msg.has() {
         return WebSpan::Messages(msg);
     }
+    // List-only: the interval is the conversation's modify time as a point.
     let mut list = Stamps::default();
     if let Some(conversation) = payload.pointer("/conversation_v2/conversation") {
-        for field in ["createTime", "modifyTime"] {
-            if let Some(raw) = conversation.get(field) {
-                list.add(raw, EpochMode::Rfc3339);
-            }
+        if let Some(raw) = conversation.get("modifyTime") {
+            list.add(raw, EpochMode::Rfc3339);
         }
     }
     if let Some(items) = payload
@@ -864,8 +867,8 @@ fn grok_span(payload: &serde_json::Value) -> WebSpan {
         .and_then(serde_json::Value::as_array)
     {
         if items.len() == 1 {
-            for field in ["createTime", "modifyTime"] {
-                list.add_field(items.iter(), field, EpochMode::Rfc3339);
+            if let Some(raw) = items[0].get("modifyTime") {
+                list.add(raw, EpochMode::Rfc3339);
             }
         }
     }
@@ -909,21 +912,18 @@ fn kimi_span(payload: &serde_json::Value) -> WebSpan {
     if msg.has() {
         return WebSpan::Messages(msg);
     }
+    // List-only: the interval is the chat's update time as a point.
     let mut list = Stamps::default();
     if let Some(chat) = payload.get("chat") {
-        for field in ["createTime", "updateTime"] {
-            if let Some(raw) = chat.get(field) {
-                list.add(raw, EpochMode::Rfc3339);
-            }
+        if let Some(raw) = chat.get("updateTime") {
+            list.add(raw, EpochMode::Rfc3339);
         }
     }
     if let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) {
         if items.len() == 1 {
             if let Some(chat) = items[0].get("chat") {
-                for field in ["createTime", "updateTime"] {
-                    if let Some(raw) = chat.get(field) {
-                        list.add(raw, EpochMode::Rfc3339);
-                    }
+                if let Some(raw) = chat.get("updateTime") {
+                    list.add(raw, EpochMode::Rfc3339);
                 }
             }
         }
@@ -1013,58 +1013,135 @@ fn tuple_seconds(value: &serde_json::Value) -> Option<i64> {
 }
 
 /// Split a batchexecute body into its length-prefixed JSON frames. Mirrors the
-/// extension's own `walkFrames`: a line that is all digits is the byte length of
-/// the frame that follows; anything else is taken as a one-line frame.
+/// extension's own `walkFrames` (`apps/extension/lib/gemini-rpc.ts`): a line
+/// that is all digits declares the **UTF-16 code-unit** length of the frame
+/// that follows (measured on the one real captured body: declared = JSON line
+/// + 2 units); anything else is taken as a one-line frame.
+///
+/// The declared length is checked, not trusted. Its slice is used only when it
+/// lands on a frame boundary and parses as JSON; otherwise the newline-
+/// delimited line is used. Because a Rust `&str` is indexed in bytes while the
+/// prefix counts UTF-16 code units, the count is first translated to a byte
+/// offset that is guaranteed to be a character boundary — a declared length
+/// that would land inside a character (or past the end) simply fails the check
+/// and falls back, so no input can panic.
 fn parse_batchexecute_frames(body: &str) -> Vec<serde_json::Value> {
     let mut frames = Vec::new();
-    let bytes = body.as_bytes();
     let mut pos = 0usize;
     while pos < body.len() {
-        while pos < body.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
+        // Leading separators between frames are not part of any chunk.
+        while pos < body.len() && is_separator_at(body, pos) {
+            pos += char_len_at(body, pos);
         }
         if pos >= body.len() {
             break;
         }
         let line_end = body[pos..].find('\n').map_or(body.len(), |i| pos + i);
-        let line = &body[pos..line_end];
-        if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) {
-            let Ok(len) = line.parse::<usize>() else {
-                // A length that does not fit in a usize cannot be a frame we
-                // could read; move past the line rather than inventing a zero.
-                pos = if line_end < body.len() {
-                    line_end + 1
-                } else {
-                    body.len()
-                };
-                continue;
-            };
-            let start = if body[line_end..].starts_with('\n') {
-                line_end + 1
-            } else {
-                line_end
-            };
-            if len == 0 {
-                pos = start;
-                continue;
-            }
-            let end = (start + len).min(body.len());
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body[start..end]) {
-                frames.push(value);
-            }
-            pos = end;
+        let header = body[pos..line_end].trim();
+        let declared = if !header.is_empty() && header.bytes().all(|b| b.is_ascii_digit()) {
+            header.parse::<usize>().ok()
         } else {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            None
+        };
+
+        // No length line: the line itself has to be the chunk.
+        let Some(declared) = declared else {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body[pos..line_end]) {
                 frames.push(value);
             }
-            pos = if line_end < body.len() {
-                line_end + 1
-            } else {
-                body.len()
-            };
+            pos = next_line_start(body, line_end);
+            continue;
+        };
+
+        let start = next_line_start(body, line_end);
+        if start >= body.len() {
+            // A length line with nothing after it declares a chunk that is not
+            // there; move past it rather than inventing a frame.
+            break;
         }
+        let line_stop = body[start..].find('\n').map_or(body.len(), |i| start + i);
+
+        // A zero-length prefix can never be a chunk; step past the line so the
+        // walk terminates instead of re-reading the same position.
+        if declared == 0 {
+            pos = next_line_start(body, line_stop);
+            continue;
+        }
+
+        // Try the declared slice, interpreted in UTF-16 code units. The
+        // translation returns `None` when the count runs past the end or would
+        // land inside a character, in which case the declared slice is not
+        // usable and the newline line below is used instead.
+        let declared_end = byte_index_after_utf16(&body[start..], declared).map(|off| start + off);
+        if let Some(end) = declared_end {
+            if end >= body.len() || is_separator_at(body, end) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body[start..end]) {
+                    frames.push(value);
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+
+        // Fallback: the newline-delimited line, exactly as the extension does
+        // when the declared slice is not a usable frame.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body[start..line_stop]) {
+            frames.push(value);
+        }
+        pos = next_line_start(body, line_stop);
     }
     frames
+}
+
+/// The byte index of the newline ending a line that ends at `line_end`, or the
+/// end of `body` when that line is the last one.
+fn next_line_start(body: &str, line_end: usize) -> usize {
+    if line_end < body.len() {
+        line_end + 1
+    } else {
+        body.len()
+    }
+}
+
+/// The UTF-8 length of the character starting at `byte`, or `1` if `byte` is not
+/// a character boundary (so a caller only ever advances past a whole character).
+fn char_len_at(s: &str, byte: usize) -> usize {
+    s.get(byte..)
+        .and_then(|rest| rest.chars().next())
+        .map_or(1, |c| c.len_utf8())
+}
+
+/// Whether the character at `byte` is a frame separator. `false` when `byte` is
+/// at or past the end, or not a character boundary.
+fn is_separator_at(s: &str, byte: usize) -> bool {
+    matches!(
+        s.get(byte..).and_then(|rest| rest.chars().next()),
+        Some('\n' | '\r' | '\t' | ' ')
+    )
+}
+
+/// The byte index in `s` that sits `units` UTF-16 code units in, or `None` when
+/// that count runs past the end of `s` or lands between the two halves of a
+/// surrogate pair (i.e. at no byte boundary). The returned index is always a
+/// valid byte boundary, so a caller can slice `s` there without panicking.
+fn byte_index_after_utf16(s: &str, units: usize) -> Option<usize> {
+    if units == 0 {
+        return Some(0);
+    }
+    let mut remaining = units;
+    for (byte, ch) in s.char_indices() {
+        let width = ch.len_utf16();
+        if width > remaining {
+            // A cut inside a supplementary character (width 2, one unit left):
+            // there is no byte boundary here.
+            return None;
+        }
+        remaining -= width;
+        if remaining == 0 {
+            return Some(byte + ch.len_utf8());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1695,10 +1772,104 @@ mod tests {
         assert_eq!(a.time_source, TimeSource::Messages { exact: false });
     }
 
+    /// A frame's declared length prefix is a **UTF-16 code-unit count**, not a
+    /// byte count. When the JSON holds CJK/emoji the two differ, and a
+    /// byte-indexed cut either truncates the frame or slices inside a char.
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
+    #[test]
+    fn gemini_batchexecute_frame_with_multibyte_json_uses_utf16_length() {
+        let turn = |secs: i64| serde_json::json!([["c_x", "r_y"], null, null, null, [secs, 0]]);
+        let inner = serde_json::json!([[turn(T1), turn(T2)], ["café résumé 😀"]]);
+        let entry = serde_json::json!([
+            "wrb.fr",
+            "hNvQHb",
+            inner.to_string(),
+            null,
+            null,
+            null,
+            "generic"
+        ]);
+        let frame = serde_json::json!([entry]).to_string();
+        assert!(
+            frame.len() > utf16_len(&frame),
+            "the frame must contain multibyte text for this test to mean anything"
+        );
+        let page = format!(")]}}'\n\n{}\n{}", utf16_len(&frame), frame);
+        let bundle = serde_json::json!({ "pages": [page] }).to_string();
+        let line = web_line("gemini", &bundle);
+        let a = analyze_session("gemini", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: false });
+    }
+
+    /// The measured real framing declares `JSON line + 2` UTF-16 units. That
+    /// slice must fall back to the newline-delimited line rather than drop the
+    /// frame (or slice mid-char).
+    #[test]
+    fn gemini_batchexecute_declared_length_plus_two_falls_back_to_line() {
+        let turn = |secs: i64| serde_json::json!([["c_x", "r_y"], null, null, null, [secs, 0]]);
+        let inner = serde_json::json!([[turn(T1), turn(T2)], ["café 😀"]]);
+        let entry = serde_json::json!([
+            "wrb.fr",
+            "hNvQHb",
+            inner.to_string(),
+            null,
+            null,
+            null,
+            "generic"
+        ]);
+        let frame = serde_json::json!([entry]).to_string();
+        let page = format!(")]}}'\n\n{}\n{}", utf16_len(&frame) + 2, frame);
+        let bundle = serde_json::json!({ "pages": [page] }).to_string();
+        let line = web_line("gemini", &bundle);
+        let a = analyze_session("gemini", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+    }
+
+    /// A digit prefix that points somewhere useless must not consume the frame:
+    /// the newline-delimited line is read instead.
+    #[test]
+    fn gemini_batchexecute_garbage_prefix_falls_back_to_line() {
+        let turn = |secs: i64| serde_json::json!([["c_x", "r_y"], null, null, null, [secs, 0]]);
+        let inner = serde_json::json!([[turn(T1), turn(T2)], ["café 😀"]]);
+        let entry = serde_json::json!([
+            "wrb.fr",
+            "hNvQHb",
+            inner.to_string(),
+            null,
+            null,
+            null,
+            "generic"
+        ]);
+        let frame = serde_json::json!([entry]).to_string();
+        let page = format!(")]}}'\n\n1\n{}", frame);
+        let bundle = serde_json::json!({ "pages": [page] }).to_string();
+        let line = web_line("gemini", &bundle);
+        let a = analyze_session("gemini", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+    }
+
+    /// No input may panic: the walker must never slice a `&str` at a byte index
+    /// inside a character. Every declared length around a multibyte body is
+    /// tried; returning frames (or none) is fine, panicking is not.
+    #[test]
+    fn gemini_frame_walker_never_panics_on_multibyte_cut_points() {
+        let payload = "é😀xyz";
+        for declared in 0..=(utf16_len(payload) + 4) {
+            let body = format!("{declared}\n{payload}\n");
+            let _ = parse_batchexecute_frames(&body);
+        }
+    }
+
     /// No messages archived yet: the span is only the list/update time, and its
     /// low confidence is named.
     #[test]
     fn claude_web_list_only_is_list_updated() {
+        // created and updated differ by a year: the list-only interval is the
+        // updated time as a point, never the created..updated span.
         let body = serde_json::json!({
             "uuid": "u",
             "created_at": RFC_T1,
@@ -1707,7 +1878,7 @@ mod tests {
         .to_string();
         let line = web_line("claude", &body);
         let a = analyze_session("claude", &[line.as_str()]);
-        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!((a.first_unix, a.last_unix), (Some(T2), Some(T2)));
         assert_eq!(a.time_source, TimeSource::ListUpdated);
     }
 
@@ -1721,8 +1892,36 @@ mod tests {
         .to_string();
         let line = web_line("deepseek", &body);
         let a = analyze_session("deepseek", &[line.as_str()]);
-        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T2)));
+        assert_eq!((a.first_unix, a.last_unix), (Some(T2), Some(T2)));
         assert_eq!(a.source_zone.as_deref(), Some("UTC"));
+        assert_eq!(a.time_source, TimeSource::ListUpdated);
+    }
+
+    #[test]
+    fn grok_list_only_is_the_modify_time_point() {
+        // The list folds `createTime` and `modifyTime`; the interval is only the
+        // update end, as a point.
+        let body = serde_json::json!({
+            "conversation_v2": {
+                "conversation": { "createTime": RFC_T1, "modifyTime": RFC_T2 },
+            },
+        })
+        .to_string();
+        let line = web_line("grok", &body);
+        let a = analyze_session("grok", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T2), Some(T2)));
+        assert_eq!(a.time_source, TimeSource::ListUpdated);
+    }
+
+    #[test]
+    fn kimi_list_only_is_the_update_time_point() {
+        let body = serde_json::json!({
+            "chat": { "createTime": RFC_T1, "updateTime": RFC_T2 },
+        })
+        .to_string();
+        let line = web_line("kimi", &body);
+        let a = analyze_session("kimi", &[line.as_str()]);
+        assert_eq!((a.first_unix, a.last_unix), (Some(T2), Some(T2)));
         assert_eq!(a.time_source, TimeSource::ListUpdated);
     }
 
@@ -1745,7 +1944,7 @@ mod tests {
         let bundle = serde_json::json!({ "pages": [page] }).to_string();
         let line = web_line("gemini", &bundle);
         let a = analyze_session("gemini", &[line.as_str()]);
-        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!((a.first_unix, a.last_unix), (Some(T1), Some(T1)));
         assert_eq!(a.time_source, TimeSource::ListUpdated);
     }
 
@@ -1772,6 +1971,15 @@ mod tests {
             panic!("expected Unknown, got {:?}", a.time_source);
         };
         assert!(!why.contains("not implemented"), "{why}");
+    }
+
+    /// An `activity-v1.jsonl` line written before `source_zone` existed must
+    /// still deserialize, so `overview`/`search` keep reading old destinations.
+    #[test]
+    fn activity_row_without_source_zone_still_deserializes() {
+        let old = r#"{"session_id":"s","machine":"m","harness":"claude-code","first_unix":1736944496,"last_unix":1736948707,"line_count":2,"time_source":{"kind":"exact"}}"#;
+        let row: ActivityRow = serde_json::from_str(old).expect("pre-W97 row must deserialize");
+        assert_eq!(row.source_zone, None);
     }
 
     // helpers -----------------------------------------------------------------

@@ -310,3 +310,109 @@ fn web_chat_time_parses_and_selects_by_day_and_export() {
         "the claude list-only interval must be marked list-updated: {list_only}"
     );
 }
+
+/// A list-only row's interval is the list's **updated** time as a point, not a
+/// `created..updated` span. A conversation created long before its last update
+/// must not be selected for a day inside a span no message is known on.
+#[test]
+fn list_only_interval_is_the_updated_point_not_the_created_span() {
+    const CREATED_DAY: &str = "2023-11-14";
+    const INTERVENING_DAY: &str = "2024-06-01";
+    let sb = tempfile::TempDir::new().unwrap();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-web";
+    // Same local day in every plausible test time zone (12:xx UTC).
+    let claude = serde_json::json!({
+        "uuid": "synthetic",
+        "created_at": "2023-11-14T12:00:00.000Z",
+        "updated_at": "2025-01-15T12:40:00Z",
+    })
+    .to_string();
+    write_shard(
+        &stage,
+        machine,
+        LIST_SESSION,
+        &[bundle_line(
+            "claude",
+            "w97list0000000000000000000000001",
+            &claude,
+        )],
+    );
+
+    let idx = run_cmd(
+        sb.path(),
+        [
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        idx.status.success(),
+        "activity-index failed: {:?}",
+        idx.status
+    );
+
+    let repo = sb.path().join("repo");
+    let key = sb.path().join("keys").join("masterkey.json");
+    let push = run_cmd(
+        sb.path(),
+        [
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(push.status.success(), "push failed: {:?}", push.status);
+
+    let search = |day: &str| {
+        run_cmd(
+            sb.path(),
+            vec![
+                "search",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--key-file",
+                key.to_str().unwrap(),
+                "--day",
+                day,
+                "--keep-ssh-masters",
+            ],
+        )
+    };
+
+    // A day strictly inside the old created..updated span is NOT the
+    // conversation's time: the interval is the updated point alone.
+    let intervening = search(INTERVENING_DAY);
+    assert_eq!(
+        intervening.status.code(),
+        Some(1),
+        "a day between created and updated must not select a list-only row:\n{}",
+        String::from_utf8_lossy(&intervening.stdout)
+    );
+    // The created day is not the updated point either.
+    let created = search(CREATED_DAY);
+    assert_eq!(
+        created.status.code(),
+        Some(1),
+        "the created day must not select a list-only row:\n{}",
+        String::from_utf8_lossy(&created.stdout)
+    );
+    // The updated day is.
+    let updated = search(DAY);
+    assert_eq!(
+        updated.status.code(),
+        Some(0),
+        "the updated day must select the list-only row:\n{}",
+        String::from_utf8_lossy(&updated.stdout)
+    );
+}
