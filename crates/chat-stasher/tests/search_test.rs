@@ -172,6 +172,7 @@ fn index_row(machine: &str, session: &str, first: i64, last: i64) -> ActivityRow
         last_unix: Some(last),
         line_count: 4,
         time_source: TimeSource::Exact,
+        source_zone: None,
     }
 }
 

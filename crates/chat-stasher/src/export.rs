@@ -84,7 +84,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::activity::analyze_session;
+use crate::activity::{analyze_session, TimeSource as ActivityTimeSource};
 use crate::json_out::TimeState;
 use crate::search::{search_sessions, SessionHit};
 use crate::selector::{Selector, TimeWindow, UnplacedBy, UsageError};
@@ -203,6 +203,10 @@ pub struct ExportedSession {
     pub first_message: TimeState,
     /// Latest conversation time, same encoding.
     pub last_message: TimeState,
+    /// Where the interval came from: `messages`, `list-updated`, `exact`,
+    /// `inferred` or `unknown`. Carried beside the two bounds so a consumer of
+    /// the manifest can tell an estimate from a message-derived interval.
+    pub time_source: ActivityTimeSource,
     /// Sealed shards concatenated into the file.
     pub shard_count: usize,
     /// Lines in the session as archived, before any filter.
@@ -324,6 +328,7 @@ impl ExportReport {
                     "snapshot_id": s.snapshot_id,
                     "first_message": s.first_message,
                     "last_message": s.last_message,
+                    "time_source": s.time_source,
                     "shard_count": s.shard_count,
                     "lines_total": s.lines_total,
                     "lines_written": s.lines_written,
@@ -830,6 +835,7 @@ pub fn export_sessions(
             snapshot_id: hit.snapshot_id.clone(),
             first_message: time_state(hit.first_unix, why_time),
             last_message: time_state(hit.last_unix, why_time),
+            time_source: hit.time_source.clone(),
             shard_count: hit.shard_count,
             lines_total: filtered.lines_total,
             lines_written: filtered.lines_written,
@@ -1438,6 +1444,7 @@ mod tests {
                     snapshot_id: "abcdef0123456789".into(),
                     first_message: TimeState::known(1),
                     last_message: TimeState::known(2),
+                    time_source: ActivityTimeSource::Exact,
                     shard_count: 1,
                     lines_total: 1,
                     lines_written: 1,
