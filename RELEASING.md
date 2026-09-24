@@ -212,6 +212,12 @@ thing it does not.
   `chat-stasher-darwin-x86_64`, `chat-stasher-extension-X.Y.Z.zip` and
   `SHA256SUMS` reach the Release. The zip is built on the stable channel and its
   manifest is rejected if an experimental origin is present.
+- **The uploaded asset set on a re-run.** Re-running the job for a tag whose
+  Release already exists replaces the assets rather than failing on them or
+  adding to them: every asset the run does not stage is deleted first, the four
+  staged files are uploaded with `--clobber`, and the workflow fails unless the
+  Release's asset set then equals the staged set exactly. First publication is
+  unaffected — `gh release create` starts from nothing.
 
 It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
 every check above, so `git tag -a` in step 6 is a step the owner follows and not
