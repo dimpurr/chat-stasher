@@ -52,6 +52,40 @@ import {
 } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillHeader, type HaltReason } from '../lib/backfill/types';
+import {
+  backfillPlanFor,
+  type BackfillEnumPlan,
+  parsePerplexityListPage,
+  PERPLEXITY_LIST_PATH,
+} from '../lib/backfill/enumerate';
+
+/**
+ * 🔴 W84 · The synthetic list-only plan these re-decision tests need.
+ *
+ * W59b exercises the "list-only plan's ordinary tick is uncapped / re-decided one
+ * page at a time" path, which the real Perplexity plan used to be. W84 filled its
+ * body in, so the run tests inject this list-only plan (real list parser, no body
+ * segment) to keep that path covered.
+ */
+const PPLX_SYNTHETIC_LIST_ONLY_PLAN: BackfillEnumPlan = {
+  platform: 'perplexity',
+  listPath: PERPLEXITY_LIST_PATH,
+  listUrl: (origin) => `${origin}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`,
+  listPost: {
+    contentType: 'application/json',
+    bodyKeys: ['limit', 'offset', 'ascending', 'search_term'],
+    body: (_origin, offset, limit) => JSON.stringify({ limit, offset, ascending: false, search_term: '' }),
+  },
+  parseListPage: parsePerplexityListPage,
+  detailPath: null,
+  detailUrl: null,
+  provenance: 'synthetic list-only plan: keeps the W59b list-only re-decision path covered',
+};
+
+/** The run opts' `plans` lookup: Perplexity answers list-only, everything else real. */
+function plansWithListOnlyPplx(platform: string): BackfillEnumPlan | null {
+  return platform === 'perplexity' ? PPLX_SYNTHETIC_LIST_ONLY_PLAN : backfillPlanFor(platform);
+}
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
 import { TEST_BUILD_ID } from './i18n-harness';
 
@@ -434,6 +468,8 @@ describe('W59b-5 · the tick that lifts a halt reads one page, whatever the plan
         origin: PPLX_ORIGIN,
         scope,
         listLimit: 2,
+        // 🔴 W84 · the synthetic list-only plan, so this stays a list-only test.
+        plans: plansWithListOnlyPplx,
       },
     };
   }
@@ -482,6 +518,7 @@ describe('W59b-5 · the tick that lifts a halt reads one page, whatever the plan
       origin: PPLX_ORIGIN,
       scope,
       listLimit: 2,
+      plans: plansWithListOnlyPplx,
     });
     expect(r3.stopped).toBe('halted');
     expect(calls.length).toBe(after);

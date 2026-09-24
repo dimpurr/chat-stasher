@@ -42,7 +42,12 @@
 import { describe, it, expect } from 'vitest';
 import { runBackfill, loadState, type HttpResponse, type HttpPort, DETAIL_EMPTY_HALT_STREAK } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
-import { backfillPlanFor } from '../lib/backfill/enumerate';
+import {
+  backfillPlanFor,
+  type BackfillEnumPlan,
+  parsePerplexityListPage,
+  PERPLEXITY_LIST_PATH,
+} from '../lib/backfill/enumerate';
 import { stateKey, type BackfillHeader, type HaltReason } from '../lib/backfill/types';
 import { renderPopup, popupText, NO_FAILURES } from '../lib/popup-view';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
@@ -130,6 +135,31 @@ function opts(store: ReturnType<typeof memoryStore>, http: HttpPort, clock: Cloc
     random: () => 1,
   } as const;
 }
+
+/**
+ * A list-only plan for Perplexity.
+ *
+ * 🔴 W84: Perplexity's real plan now has both segments (its body was filled in from the
+ * 2026-09-23 live probe), so it no longer exercises the 'list-only' capability path. That path
+ * is still real code and still needs coverage, so this test injects a list-only plan to keep it
+ * covered rather than pointing at a platform that is no longer in that state. Everything about
+ * the injected plan is synthetic; the list parser it uses is the real one, and the http port
+ * below only ever serves list pages because a list-only leg halts before any body request.
+ */
+const SYNTHETIC_LIST_ONLY_PLAN: BackfillEnumPlan = {
+  platform: 'perplexity',
+  listPath: PERPLEXITY_LIST_PATH,
+  listUrl: (origin) => `${origin}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`,
+  listPost: {
+    contentType: 'application/json',
+    bodyKeys: ['limit', 'offset', 'ascending', 'search_term'],
+    body: (_origin, offset, limit) => JSON.stringify({ limit, offset, ascending: false, search_term: '' }),
+  },
+  parseListPage: parsePerplexityListPage,
+  detailPath: null,
+  detailUrl: null,
+  provenance: 'synthetic list-only plan: keeps the W44 list-only capability path covered',
+};
 
 /** An http port that blows up: on the paths asserted below, not one request may be attempted. */
 const mustNotFetch: HttpPort = async (url: string) => {
@@ -557,10 +587,12 @@ describe('W44-3 · the record already on disk, written by an older build', () =>
   });
 
   it('a legacy unmarked detail-unsupported record for a list-only platform expires once and is then stable', async () => {
-    // 🔴 Perplexity's plan is the live example of the other capability value: its
-    //    list segment is real and its body segment has no source, so this build's
-    //    answer for it is 'list-only'. The record on disk says nothing, and the
-    //    run has to decide that for itself.
+    // 🔴 Perplexity's plan used to be the live example of the other capability
+    //    value ('list-only', list real + body unsourced). 🔴 W84 filled its body
+    //    segment in from the live probe, so it is no longer list-only — this test
+    //    injects a synthetic list-only plan (SYNTHETIC_LIST_ONLY_PLAN) so the
+    //    'list-only' capability path stays covered. The record on disk says
+    //    nothing, and the run has to decide the capability for itself.
     const store = memoryStore();
     const clock = stepClock(T0);
     const scope = 'w44-legacy-detail';
@@ -576,11 +608,9 @@ describe('W44-3 · the record already on disk, written by an older build', () =>
     const http: HttpPort = async (url: string) => {
       calls.push(url);
       // Two rows, then an empty page: the list is read to its own end.
-      // 🔴 W65: the list item's id field is `slug`, not the `thread_id` C27
-      //    invented — the live endpoint has no `thread_id` key (see
-      //    w65-pplx-list-shape.test.ts). A stub keyed `thread_id` no longer
-      //    parses, which would make this test stop on `shape-changed` before it
-      //    ever reached the capability question it exists to ask.
+      // 🔴 The list item's id field is `slug`; a stub keyed `thread_id` would not
+      //    parse and this test would stop on `shape-changed` before the
+      //    capability question it exists to ask.
       return { status: 200, text: calls.length === 1 ? JSON.stringify([{ slug: 'pplx-0001-aaaaaaaa' }, { slug: 'pplx-0002-aaaaaaaa' }]) : '[]' };
     };
     const pplx = {
@@ -589,6 +619,8 @@ describe('W44-3 · the record already on disk, written by an older build', () =>
       origin: PPLX_ORIGIN,
       scope,
       listLimit: 2,
+      plans: (platform: string) =>
+        platform === 'perplexity' ? SYNTHETIC_LIST_ONLY_PLAN : backfillPlanFor(platform),
     };
 
     const r1 = await runBackfill(pplx);

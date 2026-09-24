@@ -44,6 +44,40 @@ import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillHeader } from '../lib/backfill/types';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';
 import { TEST_BUILD_ID } from './i18n-harness';
+import {
+  backfillPlanFor,
+  type BackfillEnumPlan,
+  parsePerplexityListPage,
+  PERPLEXITY_LIST_PATH,
+} from '../lib/backfill/enumerate';
+
+/**
+ * 🔴 W84 · The synthetic list-only plan these list-cap tests need.
+ *
+ * W59c exercises "a list-only plan reads a bounded number of pages per tick",
+ * which the real Perplexity plan used to be. W84 filled its body in, so the run
+ * tests inject this list-only plan (real list parser, no body segment) to keep
+ * the list-only page-cap path covered.
+ */
+const PPLX_SYNTHETIC_LIST_ONLY_PLAN: BackfillEnumPlan = {
+  platform: 'perplexity',
+  listPath: PERPLEXITY_LIST_PATH,
+  listUrl: (origin) => `${origin}${PERPLEXITY_LIST_PATH}?version=2.18&source=default`,
+  listPost: {
+    contentType: 'application/json',
+    bodyKeys: ['limit', 'offset', 'ascending', 'search_term'],
+    body: (_origin, offset, limit) => JSON.stringify({ limit, offset, ascending: false, search_term: '' }),
+  },
+  parseListPage: parsePerplexityListPage,
+  detailPath: null,
+  detailUrl: null,
+  provenance: 'synthetic list-only plan: keeps the W59c list-only page-cap path covered',
+};
+
+/** The run opts' `plans` lookup: Perplexity answers list-only, everything else real. */
+function plansWithListOnlyPplx(platform: string): BackfillEnumPlan | null {
+  return platform === 'perplexity' ? PPLX_SYNTHETIC_LIST_ONLY_PLAN : backfillPlanFor(platform);
+}
 
 const ORIGIN = 'https://chatgpt.com';
 const CLAUDE_ORIGIN = 'https://claude.ai';
@@ -341,6 +375,8 @@ describe('W59c-4 · a list-only plan reads a bounded number of pages per tick', 
         origin: PPLX_ORIGIN,
         scope,
         listLimit: 2,
+        // 🔴 W84 · the synthetic list-only plan, so this stays a list-only page-cap test.
+        plans: plansWithListOnlyPplx,
       },
     };
   }

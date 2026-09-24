@@ -102,20 +102,23 @@ that platform."** The extension has two legs; please read them separately:
 ### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
 
 The list below comes directly from the two tables in the code, not from
-marketing (`apps/extension/lib/backfill/enumerate.ts:4343-4367`):
+marketing (`apps/extension/lib/backfill/enumerate.ts:4360-4387`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
-| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the six. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2617-2620`). 🔴 Grok and Claude are the least verified of the six: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:2787-2789`, `:2869-2930`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:2954-3016`; `apps/extension/lib/platform-auth.ts:258-295`; `apps/extension/lib/backfill/engine.ts:2437-2450`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3393-3521`; `apps/extension/lib/backfill/engine.ts:2237-2277`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:669-769`). |
-| **🔴 Can only list conversations, saves none of their content** | **Perplexity** | The extension can list which historical conversations you have, but **will not fetch each conversation's content**, so **not one of them is delivered or queued**. Your Perplexity history is **not backed up**. |
+| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Perplexity**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the seven. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2708-2711`). 🔴 Grok and Claude are the least verified of the seven: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:2927-2929`, `:3009-3070`). 🔴 W84 (2026-09-23) filled in Perplexity's body segment last: its route is `GET /rest/thread/<slug>` with a five-parameter set pinned by the plan (`apps/extension/lib/backfill/enumerate.ts:2812-2823`), and a logged-in probe observed a stated completeness signal (`has_next_page` + `next_cursor`) at the top level, so the extension archives a body only when the response declares there is no more, and **refuses** a body that declares more rather than archiving a truncated conversation (`apps/extension/lib/backfill/enumerate.ts:2160-2204`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:3094-3156`; `apps/extension/lib/platform-auth.ts:258-295`; `apps/extension/lib/backfill/engine.ts:2160-2195`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3533-3661`; `apps/extension/lib/backfill/engine.ts:2038-2090`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:669-769`). |
 
 
-🔴 **The middle tier is the easiest to misunderstand, so say it again**:
-Perplexity, with backfill enabled, the extension **does act** (it lists
-conversations), and the popup shows "already listed N, waiting". **But not one of
-those N is saved.** If you now close your browser, format your disk, or the
-platform deletes your history, those N conversations are gone — the extension
-holds only their ids, not their content.
+🔴 There is no longer a middle tier: the "can list conversations but saves none of
+their content" row was Perplexity's, and W84 (2026-09-23) filled that plan's body
+segment in from a live probe, so every platform in the table above now fetches
+content. The reason that middle tier existed at all is worth keeping in view,
+because it is the same reason every completeness watchword in this section exists:
+**a platform that can list your conversations is not automatically one that can
+save them.** A wrong body profile would not error — it would silently archive only
+the first few turns of every conversation while you believed you had them all, so
+the body leg was only written once a completeness signal was *observed*, not
+guessed.
 
 🔴 **The DeepSeek caveat, which exists for the same reason.** DeepSeek fetches
 bodies, and whether its body endpoint pages or truncates a long conversation is
@@ -126,36 +129,40 @@ looking at, and every message names its `parent_id`. The extension walks that
 chain and archives the body **only when the walk closes at a root**; a response
 that came back short is **not archived** — it is recorded as a failure with its
 own reason code and the leg carries on, rather than being stored as a complete
-conversation (`apps/extension/lib/backfill/enumerate.ts:2560-2587`). The evidence
+conversation (`apps/extension/lib/backfill/enumerate.ts:2651-2678`). The evidence
 for the endpoint itself is solid — it is the route DeepSeek's own page calls over
 XHR when a user opens a past conversation in a real logged-in session, and several
 mutually independent open-source exporters request the same route
-(`apps/extension/lib/backfill/enumerate.ts:2544-2558`). What the check cannot
+(`apps/extension/lib/backfill/enumerate.ts:2635-2649`). What the check cannot
 prove is written down too: it shows the response is closed under the branch you
 were looking at, not under every discarded sibling branch, and it cannot catch a
 server that truncates a body *and* rewrites the boundary message's `parent_id` to
 `null` so the chain looks rooted. That is the residual, and it is why the
 completeness question is still called open rather than answered.
 
-🔴 **Perplexity gets one more sentence, and its two legs now point in opposite
-directions:** passive capture names and delivers the conversation you have open
-(the note above), while **backfill still archives nothing** — it lists your past
-conversations and saves none of their content. So "Perplexity is supported" is
-true of the conversation in front of you and false of your history. Read the
-table row above as being about **backfill**, which is what it is about.
-
-The reason is written in the code, not because we are lazy: Perplexity's
-**conversation-list endpoint** has multiple independent open-source
-implementations that cross-check one another
-(`apps/extension/lib/backfill/enumerate.ts:2763-2777`), but this plan's
-**single-conversation segment is left unfilled** — and it is left unfilled on
-purpose, not for want of a route. The content route itself is known
-(`apps/extension/lib/contract.ts:367-399`), but the parameters the sources give
-for it disagree with one another and nothing establishes whether one response
-holds a whole long conversation, so `detailPath` stays `null`
-(`apps/extension/lib/backfill/enumerate.ts:2751-2760`, `:2763-2777`). We will not guess a
-content-endpoint profile — a wrong guess would not error; it would save only the
-first few turns of every conversation while you believed you had it all.
+🔴 **Perplexity's body leg is filled in, and it carries the same honesty Perplexity
+used to be the exception for.** Passive capture names and delivers the
+conversation you have open; backfill now lists your past conversations **and**
+fetches their content, one `GET /rest/thread/<slug>` per conversation
+(`apps/extension/lib/backfill/enumerate.ts:2812-2823`). What W84 observed, and
+what the earlier refusals were waiting for, is a **completeness signal at the top
+level of the body**: a 2026-09-23 logged-in probe of one thread returned
+`has_next_page` (boolean) and `next_cursor` (string or null), present under both
+the schematized and the minimal parameter set, and an `offset=500` request came
+back byte-identical. So the extension does not guess whether a single response
+holds a whole conversation: a body is archived **only when the response declares
+there is no more**; a body that declares more is **refused** — recorded as a
+failure with its own reason code, with nothing archived, and the leg carries on
+with the next conversation (`apps/extension/lib/backfill/enumerate.ts:2160-2204`);
+a body with no `entries` is the unverified-empty case, never a confirmed receipt;
+and a body with no signal at all halts the leg `shape-changed` rather than being
+read as complete. 🔴 **Unverified, written down rather than hidden:** the observed
+thread had one entry, so whether a genuinely long thread answers
+`has_next_page:true` (or a non-null `next_cursor`) when it truncates was not
+directly observed — the completeness rule refuses when the signal says more and
+treats the response as whole when it says no more, and no complete Perplexity
+backfill has been observed in a real browser, so read the row as *implemented,
+not verified*.
 
 The popup shows these three tiers in the same terms as the table above
 (`apps/extension/lib/popup-view.ts:865-878`).
@@ -635,12 +642,10 @@ confirmed in the code, not a temporary disclaimer.
   claude.ai does not move it, and starting one for another organization means
   opening a conversation in that organization and pressing start there — the two
   then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:1394-1458`). Perplexity **only lists
-  conversations, saving none of their content**. See section 1.1 for
-  the list and the detailed explanation (list from
-  `apps/extension/lib/backfill/enumerate.ts:4343-4367`). The
-  middle tier is the one most likely to make you think "I've backed it up", so it
-  gets its own bullet here.
+  (`apps/extension/entrypoints/background.ts:1394-1458`). Perplexity now lists
+  conversations **and** fetches their content — with the completeness gate
+  described in section 1.1, where every platform's body leg (list from
+  `apps/extension/lib/backfill/enumerate.ts:4360-4387`) is covered.
 
 - **The extension is not on a store yet; you install it manually.** The
   repository has no store listing material and no store extension ID;

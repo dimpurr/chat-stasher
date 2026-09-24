@@ -2113,6 +2113,97 @@ export function parsePerplexityListPage(text: string): ParseResult {
 }
 
 /**
+ * 🔴 W84 · The completeness rule of one Perplexity body — an observation, not an
+ * inference, and the reason the body leg can be written at all.
+ *
+ * Measured from the logged-in page's context on 2026-09-23 (raw CDP to
+ * 127.0.0.1:9222, a fresh `GET /rest/thread/<slug>`): the envelope is
+ * `{ background_entries, entries, first_entry, has_next_page, latest_entry,
+ * next_cursor, status, thread_metadata }`, and two of those keys are a
+ * **stated** end-of-thread signal: `has_next_page` is a boolean and `next_cursor`
+ * is `string | null`. Both were present under both the schematized parameter set
+ * (`with_schematized_response=true` ⇒ `entries[].blocks`) and the minimal one
+ * (`version`+`source` ⇒ `entries[].text`), and an offset=500 request returned a
+ * byte-identical body. So whether one response holds the whole thread is decided
+ * by what the response *says*, not by "fewer entries than we asked for".
+ *
+ * Three outcomes, and the split keeps an unknown from being recorded as empty:
+ *  · `entries` non-empty and the response declares no more → `non-empty` — the
+ *    only shape that may be archived. This is W40 outcome (b): refuse whole
+ *    unless the signal itself says "no more".
+ *  · the response declares more (`has_next_page === true`, or a non-empty
+ *    `next_cursor`) → `detail-paged-unsupported` — real content, explicitly
+ *    incomplete, and this leg does not page the route; the engine records a
+ *    per-conversation failure and stores nothing (engine.ts:2182).
+ *  · `entries` empty and no-more → `detail-empty-unverified` — from one
+ *    response "this conversation has no turns" and "a window with nothing in
+ *    it" cannot be told apart, so no confirmed receipt (the same trade
+ *    `parseKimiDetailPage` makes).
+ *
+ * 🔴 The completeness signal is **required**, not advisory: if neither
+ * `has_next_page` nor `next_cursor` is present, the leg halts `shape-changed`.
+ * A windowed body with no signal is exactly the silent truncation this project
+ * exists to refuse, and both keys were present in every observed response, so
+ * their joint absence is a wire change. A present-but-wrong-typed key is the
+ * same call: `has_next_page` not a boolean, or `next_cursor` neither null nor a
+ * string, is a type change, which means the shape moved.
+ *
+ * 🔴 The residual, named rather than left out: a server that truncates a long
+ * thread **and** drops the "more" signal would be undetectable here. The
+ * observed thread had one entry; whether a genuinely long thread answers
+ * `has_next_page: true` / a non-null `next_cursor` when it truncates was not
+ * directly observed (the 3-request budget), so that claim rests on the signal
+ * being the platform's own stated semantics rather than on a long-thread
+ * measurement. When it does declare more, the leg refuses — which is the honest
+ * direction; when it does not, this parser treats the response as whole.
+ */
+export function parsePerplexityDetailPage(text: string): DetailParseResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'perplexity detail response is not JSON' };
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, detail: 'perplexity detail response is not a JSON object' };
+  }
+  const record = body as Record<string, unknown>;
+  const entries = record.entries;
+  if (!Array.isArray(entries)) {
+    return { ok: false, detail: 'perplexity detail response has no `entries` array (shape changed?)' };
+  }
+
+  // The completeness signal. Each key, when present, must be the type the probe
+  // measured; a non-matching type is a wire change and halts rather than being
+  // rounded into a definite reading.
+  let more = false;
+  if ('has_next_page' in record) {
+    const h = record.has_next_page;
+    if (typeof h !== 'boolean') {
+      return { ok: false, detail: 'perplexity detail response has a non-boolean `has_next_page` (wire shape changed?)' };
+    }
+    if (h) more = true;
+  }
+  if ('next_cursor' in record) {
+    const c = record.next_cursor;
+    if (c !== null && typeof c !== 'string') {
+      return { ok: false, detail: 'perplexity detail response has a non-null non-string `next_cursor` (wire shape changed?)' };
+    }
+    if (typeof c === 'string' && c.length > 0) more = true;
+  }
+  if (!('has_next_page' in record) && !('next_cursor' in record)) {
+    return {
+      ok: false,
+      detail: 'perplexity detail response carries no completeness signal (no `has_next_page` and no `next_cursor`; wire shape changed?)',
+    };
+  }
+
+  if (more) return { ok: true, outcome: 'detail-paged-unsupported' };
+  if (entries.length === 0) return { ok: true, outcome: 'detail-empty-unverified' };
+  return { ok: true, outcome: 'non-empty' };
+}
+
+/**
  * Parse one page of a Grok conversation list.
  *
  * ## What is read, and what is deliberately not
@@ -2688,9 +2779,54 @@ export const DEEPSEEK_PLAN: BackfillEnumPlan = {
 
 export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
 
+/** 🔴 W84 · The body endpoint: `GET /rest/thread/{id}`, the `{id}` form not the trailing-slash form. */
+export const PERPLEXITY_DETAIL_PATH = '/rest/thread/{id}';
+
 /**
- * 🔴 C27 · Perplexity's conversation list. **The list segment only**, and W28
- * (2026-09-14) did not fill in the body segment either.
+ * 🔴 W84 · The exact query the body segment's own builder emits, pinned key by
+ * key (W40 §4.3, now licensed by the 2026-09-23 probe).
+ *
+ * 🔴 `limit`, `offset` and `from_first` are deliberately NOT here, and
+ * `supported_block_use_cases` is deliberately not either. The first two request a
+ * **window**, and this leg never asks for one — it must not be handed one it will
+ * mark whole. `from_first` is kept because "which end of the conversation a
+ * window comes from" is the one parameter that would matter if a window existed,
+ * and it is carried by two of the three recorded sources; `limit`/`offset` say
+ * *how big a window to return*, which is a claim about completeness this leg does
+ * not make. `supported_block_use_cases` is a **repeated** query key, which
+ * `detailQueryPinned` cannot declare at all (W40 §4.8.2): `pinnedQueryMatches`
+ * requires unique name count === pinned count, so adding it twice would make the
+ * whole allowlist check fail closed. Omitting it is the only move that needs no
+ * mechanism change, and the reference's own read path works without reading it.
+ *
+ * 🔴 The 2026-09-23 probe sent neither this exact five-key set nor a long thread
+ *    (3-request budget; the observed thread had one entry). What it did send:
+ *    the full reference set (these five plus `limit`/`offset`/the repeated key)
+ *    → 200 with the `blocks` shape, and the minimal `version`+`source` set → 200
+ *    with the `text` shape. Both returned the completeness signal. `with_schematized_response=true`
+ *    is what switches to the `blocks` shape (matching the live-capture row and the
+ *    reference's read path), so it is kept; `with_parent_info` and `from_first`
+ *    are each carried by two recorded sources (W40 §2.4), so dropping them would
+ *    be a decision with no evidence behind it.
+ */
+export const PERPLEXITY_DETAIL_QUERY: readonly { readonly key: string; readonly value: string }[] = [
+  { key: 'with_parent_info', value: 'true' },
+  { key: 'with_schematized_response', value: 'true' },
+  { key: 'version', value: '2.18' },
+  { key: 'source', value: 'default' },
+  { key: 'from_first', value: 'true' },
+];
+
+/** The body URL the plan itself builds — `{id}` here is the list's `slug`, substituted by `detailUrl`. */
+const perplexityDetailUrl = (origin: string, conversationId: string): string =>
+  `${origin}/rest/thread/${encodeURIComponent(conversationId)}?${
+    PERPLEXITY_DETAIL_QUERY.map(({ key, value }) => `${key}=${value}`).join('&')
+  }`;
+
+/**
+ * 🔴 C27 → W84 · Perplexity's conversation list **and now its body**. W84 filled
+ * in the body segment that every earlier change (C27, W28) deliberately left
+ * out, on a live probe rather than a source guess.
  *
  * Request facts (R26 research, 2026-08-17; this change does not go online, does
  * not log in, and sends no request to perplexity.ai), each with its independent
@@ -2716,17 +2852,20 @@ export const PERPLEXITY_LIST_PATH = '/rest/thread/list_ask_threads';
  * Space / Collection threads routes have only paths, no parameters and no
  * response provenance, so they are not done either.
  *
- * 🔴 The body segment is a **decision**, not a hole in the research. The route
- * that carries one thread's content is known — W28 (2026-09-14) read it out of
- * four independent reference implementations and the endpoint table extracted
- * from the site's own front-end bundle, and the extension's live-capture row now
- * registers it (lib/contract.ts:134-149) — but this plan does not spend it. The
- * sources disagree about that route's parameters, and not one of them
- * establishes whether a single response holds a whole long conversation. So
- * detailPath/detailUrl stay null and Perplexity stays LIST_ONLY: a wrong guess
- * here would not error, it would archive the first few turns of every
- * conversation while reporting success, which is the loss this project exists to
- * make impossible.
+ * 🔴 **The body segment (W84).** The route — `GET /rest/thread/{slug-or-uuid}` —
+ * was already known (W28 read it out of four reference implementations and the
+ * site's own extracted endpoint table; lib/contract.ts registers it). What W84
+ * supplied is the ancestor of every earlier refusal to fill it in: **an observed
+ * completeness signal.** A 2026-09-23 probe from the logged-in page's context
+ * (3 body requests, `/Users/dimpurr/scratch/DimLifeS/chat-stasher/nm/drive/w84-probe.mjs`)
+ * returned top-level `has_next_page` (boolean) and `next_cursor` (string | null)
+ * under both the schematized and the minimal parameter set. So the completeness
+ * rule is W40 outcome (b): archive only when the response says it holds the whole
+ * thread; refuse `detail-paged-unsupported` when it says there is more; and
+ * `detail-empty-unverified` when `entries` is empty. `parsePerplexityDetailPage`
+ * implements exactly that, and the residual is written there and in the W84
+ * report. The id is the list's `slug` (which the parser reads and the live
+ * capture names files by), and `detailUrl` feeds it to the path.
  */
 export const PERPLEXITY_PLAN: BackfillEnumPlan = {
   platform: 'perplexity',
@@ -2745,36 +2884,37 @@ export const PERPLEXITY_PLAN: BackfillEnumPlan = {
     }),
   },
   parseListPage: parsePerplexityListPage,
-  // 🔴 Body segment: the route is known (see this plan's own doc block and
-  // lib/contract.ts:134-149) but its parameter profile is not, and neither is the
-  // completeness question. Neither path nor parameters are guessed here.
-  detailPath: null,
-  detailUrl: null,
-  partial: {
-    missing: [
-      'detailPath / detailUrl: the route that carries one thread\'s content is '
-      + 'known, but the sources disagree about its parameters and none of them '
-      + 'establishes whether a single response holds a whole long conversation. The '
-      + 'body segment is therefore not filled in — not guessed — so Perplexity only '
-      + 'enters LIST_ONLY.',
-    ],
-    userNoteKey: 'platformNote.perplexity.partial',
-  },
+  detailPath: PERPLEXITY_DETAIL_PATH,
+  detailUrl: perplexityDetailUrl,
+  detailQueryPinned: PERPLEXITY_DETAIL_QUERY,
+  // 🔴 W84 · The completeness rule. `parsePerplexityDetailPage` returns
+  //    'non-empty' only when entries are non-empty and the response declares no
+  //    more; 'detail-paged-unsupported' when it declares more (real content,
+  //    explicitly incomplete — never archived); 'detail-empty-unverified' when
+  //    entries is empty (never a confirmed receipt). A body with no signal at all
+  //    halts shape-changed under {ok:false}.
+  parseDetailPage: parsePerplexityDetailPage,
   provenance:
     'cross-source reverse-engineering (R26 research, 2026-08-17; three independent '
     + '"build the request yourself" implementations agreeing character for character; '
-    + 'not official documentation, not verified end to end) · '
+    + 'body segment from the 2026-09-23 logged-in probe, not from those sources) · '
     + 'POST /rest/thread/list_ask_threads?version=2.18&source=default: 3 sources; '
     + 'body.limit: 3 sources; body.offset (client does offset += limit): 3 sources; '
     + 'body.ascending=false: 3 sources; body.search_term="": 3 sources. '
-    + 'total / has_more / count: read by none of the three sources, so they cannot be '
-    + 'treated as API fields; the GraphQL channel needs a sha256 persisted-query hash '
+    + 'total / has_more / count: read by none of the three list sources, so they cannot be '
+    + 'treated as list-termination fields (the engine uses empty/short-page client '
+    + 'inference instead); the GraphQL channel needs a sha256 persisted-query hash '
     + 'with no public stable value, so it is not used; the Space / Collection threads '
     + 'routes have only paths and no parameters or response provenance, so they are not '
-    + 'used; the single-body route is known (W28, 2026-09-14: four reference '
-    + 'implementations and the site\'s extracted endpoint table) but its parameters and '
-    + 'its completeness for a long conversation are not, so detailPath/detailUrl stay '
-    + 'null by decision.',
+    + 'used. Body route GET /rest/thread/{slug-or-uuid}: W28 (2026-09-14, four reference '
+    + 'implementations + the site\'s extracted endpoint table) supplied the route; W84 '
+    + '(2026-09-23) measured the completeness signal `has_next_page` (boolean) and '
+    + '`next_cursor` (string|null) on a logged-in body request, and the offset=500 '
+    + 'request returning a byte-identical body. 🔴 Honest residuals: the exact pinned '
+    + '5-key query set was not itself transmitted (3-request budget), and the observed '
+    + 'thread had one entry, so a long thread\'s truncation signal was not directly '
+    + 'observed — the completeness rule refuses when the signal says more and treats '
+    + 'the response as whole when it says no more, which is W40 outcome (b).',
 };
 
 export const GROK_LIST_PATH = '/rest/app-chat/conversations';
