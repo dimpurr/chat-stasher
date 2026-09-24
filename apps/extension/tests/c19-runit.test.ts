@@ -16,7 +16,8 @@ import { IDBFactory } from 'fake-indexeddb';
 import { loadState, runBackfill } from '../lib/backfill/engine';
 import type { BackfillState } from '../lib/backfill/types';
 import { memoryStore } from '../lib/backfill/store';
-import { DEFAULT_DETAIL_PACE, type Clock } from '../lib/backfill/pace';
+import { DAILY_CAP_MAX, DEFAULT_DETAIL_PACE, type Clock } from '../lib/backfill/pace';
+import { DEFAULT_TICK_DETAILS } from '../lib/backfill/schedule';
 import { handleBackfillMessage } from '../lib/backfill/tab-port';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
@@ -82,7 +83,7 @@ describe('C19 task 3 · BUG-3: the body-fetch minimum interval must take effect 
       store,
       http: server.port,
       clock,
-      maxDetails: 1,   // consistent with runtime: one tick clears exactly 1 debt
+      maxDetails: 1,   // deliberately 1 here: this case is about the cross-tick interval, so it isolates one body per tick from the runtime budget
       /**
        * 🔴 W16 · Pinned to the bottom of every jitter band, so the split between
        *    the two segments of a tick is exactly `2_000` / `18_000` / `20_000`
@@ -508,12 +509,12 @@ describe('C19 task 2 · the http port: really injected in production code', () =
     console.log('[C19-2] names the host acked:', host.names());
 
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
-    // One page enumerated + one body fetched, all through the content script's same-origin fetch.
+    // One page enumerated + up to DEFAULT_TICK_DETAILS bodies fetched, all through the content script's same-origin fetch.
     expect(contentFetches.some((u) => u.includes('/backend-api/conversations'))).toBe(true);
-    expect(contentFetches.filter((u) => u.includes('/backend-api/conversation/')).length).toBe(1);
+    expect(contentFetches.filter((u) => u.includes('/backend-api/conversation/')).length).toBe(DEFAULT_TICK_DETAILS);
     const s = await stateOf();
-    expect(s.archived.length).toBe(1);
-    expect(s.pending.length).toBe(IDS.length - 1);
+    expect(s.archived.length).toBe(DEFAULT_TICK_DETAILS);
+    expect(s.pending.length).toBe(IDS.length - DEFAULT_TICK_DETAILS);
   });
 
   it('🔴 the alarm path: with no live capture at all, the alarm waking on its own still clears a debt', async () => {
@@ -660,7 +661,7 @@ describe('C19 task 4 · what the popup says agrees with the real state', () => {
      *    and keeps checking that both ends and the daily ceiling are shown.
      */
     expect(view.running).toContain('5 to 10 minutes');
-    expect(view.running).toContain('200');
+    expect(view.running).toContain(String(DAILY_CAP_MAX));
     expect(text).not.toContain('estimated remaining');
   });
 

@@ -160,9 +160,9 @@ popup:
       运行：未在运行 —— 开关已经打开了，但此刻没有可用的取数通道，一条也没有
       在取。
     active: >-
-      运行：正在归档 —— 大约每 {minMinutes} 到 {maxMinutes} 分钟自动清 1 笔账，
-      间隔刻意不固定（不是固定周期）；每天最多 {maxPerDay} 笔，每笔之间至少隔
-      {minIntervalSeconds} 秒。
+      运行：正在归档 —— 大约每 {minMinutes} 到 {maxMinutes} 分钟自动取一批历史
+      对话，间隔刻意不固定（不是固定周期）；每天最多 {maxPerDay} 笔，每笔之间至少
+      隔 {minIntervalSeconds} 秒。
   missing:
     noStore: >-
       缺：browser.storage.local。没有持久化就没有可断可续，与其每次重启都从头
@@ -302,7 +302,7 @@ popup:
         当前这个版本不认识这个原因代码。同一条报告连续被拒绝次数：{count}。
     whatOpening: >-
       打开之后会做什么：只要有一个受支持平台的页面开着，就在后台悄悄补历史对话，
-      间隔刻意不固定，大约每 {minMinutes} 到 {maxMinutes} 分钟一笔，用的是你
+      间隔刻意不固定，大约每 {minMinutes} 到 {maxMinutes} 分钟取一批，用的是你
       自己那个页面的登录态；每天最多 {maxPerDay} 笔，好几天里慢慢补完。关掉即停
       （定时器也会一并清掉）。
     relisted: >-

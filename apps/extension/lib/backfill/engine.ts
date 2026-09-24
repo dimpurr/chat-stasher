@@ -135,16 +135,16 @@ export const notWiredHttp: HttpPort = async (url: string) => {
  * until their page arrives.
  *
  * 🔴 **Why 8.** Two existing numbers, from the two budgets this run already has:
- *   · the tick's **body** budget is `DEFAULT_TICK_DETAILS = 1` (lib/backfill/
- *     schedule.ts), one body per wake at a 20-45 s paced gap (pace.ts);
+ *   · the tick's **body** budget is `DEFAULT_TICK_DETAILS = 2` (lib/backfill/
+ *     schedule.ts), two bodies per wake, each on its own 20-45 s paced gap (pace.ts);
  *   · one list page at the enumeration pace is 2-6 s (pace.ts), so eight pages is
- *     16-48 s of paced list traffic — the same order of magnitude as the single body
- *     this tick already pays for, and nine requests in total against the gentlest
- *     reference implementation's ≤50 per run.
+ *     16-48 s of paced list traffic — inside the 40-90 s the two bodies already pay
+ *     for, and nine requests in total against the gentlest reference implementation's
+ *     ≤50 per run.
  *   Eight also makes a whole account's list a bounded number of ticks rather than a
  *   burst: ChatGPT's 1,000 conversations ≈ 10 pages ⇒ two ticks; the 74-page account
  *   above ⇒ ten ticks, about an hour of the 5-10 minute jittered cadence, against
- *   7,391 bodies it can only fetch 200 of a day. Enumeration is never the constraint
+ *   7,391 bodies it can only fetch 400 of a day. Enumeration is never the constraint
  *   on this leg; a burst is the one thing it must not be.
  *
  * 🔴 The cursor is persisted at the end of every page (see the loop), so a capped tick
@@ -2043,7 +2043,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * particular cannot re-roll it *upward*.
    *
    * 🔴 `todaysCap` is `min(stored, plan)`, never the raw stored value: the
-   *    plan's `maxPerDay` stays the hard ceiling, so a cap drawn at 200 can never
+   *    plan's `maxPerDay` stays the hard ceiling, so a cap drawn at 400 can never
    *    exceed a caller that asked for less, and a hand-edited or corrupt stored
    *    value cannot raise the rate either. `maxPerDay: null` draws nothing.
    */
@@ -2053,7 +2053,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     //    first run of a new day that stops early (the cap was already reached, or
     //    the budget was 0) would return without ever writing the counter, the
     //    stored day would stay yesterday's, and the next run would roll again —
-    //    i.e. a restart loop could keep re-rolling upward until it hit 200. One
+    //    i.e. a restart loop could keep re-rolling upward until it hit 400. One
     //    write per platform-scope per local day buys the "drawn once, kept" rule.
     await persist(state);
   }

@@ -52,8 +52,9 @@ export const SHORT_ID_LEN = 8;
  *    that point the 51st id carries zero information over the 50th — what you
  *    want to look at is the reason code, not the length of the list.
  *  · Check it against the runtime dimensions: the daily cap on fetching bodies
- *    is 200 (`lib/backfill/pace.ts`, DEFAULT_DETAIL_PACE.maxPerDay = 200).
- *    50 = a quarter of one day's theoretical throughput. If a quarter of a day's
+ *    is 400 (`lib/backfill/pace.ts`, DEFAULT_DETAIL_PACE.maxPerDay = 400;
+ *    ADR-033 doubled it from 200 on 2026-09-24).
+ *    50 = an eighth of one day's theoretical throughput. If an eighth of a day's
  *    work failed, the conclusion is already in.
  *  · The storage cost is bounded along the way: 50 × ~80 bytes ≈ 4 KiB, which is
  *    nothing next to the debt set itself, so "the failure list blows up

@@ -589,16 +589,18 @@ confirmed in the code, not a temporary disclaimer.
   words are in section 4.3 (`crates/chat-stasher/src/store.rs:1189-1196`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
-  Content is fetched **at most 150–200 per day** (the day's cap is drawn once per
-  local day and can never exceed 200), with at least 20 seconds plus a random
-  0–25 seconds between two requests
-  (`apps/extension/lib/backfill/pace.ts:92-103`, `:120-121`), and each round
+  Content is fetched **at most 300–400 per day** (the day's cap is drawn once per
+  local day and can never exceed 400; ADR-033 doubled the old 150–200 on
+  2026-09-24), up to two conversations per round, with at least 20 seconds plus a
+  random 0–25 seconds between two requests
+  (`apps/extension/lib/backfill/pace.ts:92-103`, `:125-126`;
+  `apps/extension/lib/backfill/schedule.ts:72`), and each round
   starts a random 5–10 minutes after the previous one
-  (`apps/extension/lib/backfill/alarm.ts:95-96`). At that cap, a thousand
-  conversations take at least 5 days. This is deliberately slow, not a bug.
+  (`apps/extension/lib/backfill/alarm.ts:99-100`). At that cap, a thousand
+  conversations take 2.5–3.3 days. This is deliberately slow, not a bug.
 
 - **Backfill is off by default.** The default is off
-  (`apps/extension/lib/backfill/schedule.ts:40`), and the source states the
+  (`apps/extension/lib/backfill/schedule.ts:50`), and the source states the
   reason for enabling it clearly: backfill uses your logged-in session to walk
   your whole account and fetch hundreds or thousands of conversations, so there
   must first be an explicit turn-on.

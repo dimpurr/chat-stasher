@@ -218,16 +218,17 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
 
-    // ---- tick 1: the first list page + the 1st debt is cleared ----
+    // ---- tick 1: the first list page + the first two debts are cleared ----
     await bootAndDispatch(liveCapture());
     const listUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
     console.log('[C17-1] evidence A — the list pages actually requested:', listUrls);
     // 🔴 W10 · This was `listUrls.length === 2` ("the whole list runs inside one
-    //    tick"), and the whole point of this change is that it no longer does:
+    //    tick"), and the whole point of that change is that it no longer does:
     //    a tick reads **at most one page**, then spends its body budget, so the
-    //    first debt is delivered in the same tick that names it. The criterion —
+    //    debts it just named are delivered in the same tick. The criterion —
     //    enumerate → debts → fetch one by one → write down → the debts shrink —
     //    is unchanged; what changed is how many pages one tick may read.
+    //    ADR-033 doubled the body budget (1 → 2), so tick 1 now clears two debts.
     expect(listUrls.length).toBe(1);            // 1 page × pageSize 2 = 2 rows named so far
 
     const s1 = await stateOf();
@@ -240,18 +241,18 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     //    account was measured with total=901 while holding 7,391 conversations:
     //    a total that can be wrong cannot say "the list is finished".
     expect(s1.enumCursor.complete).toBe(false);
-    expect(s1.archived.length).toBe(1);
-    // 2 rows named on page 1, one of them already archived ⇒ 1 still owed.
-    expect(s1.pending.length).toBe(1);
+    expect(s1.archived.length).toBe(2);
+    // 2 rows named on page 1, both already archived ⇒ 0 still owed.
+    expect(s1.pending.length).toBe(0);
 
     console.log('[C17-1] evidence C — the body URLs tick1 actually fetched:', detailCalls(server.calls));
-    expect(detailCalls(server.calls).length).toBe(1);   // "one by one": a tick fetches exactly one
+    expect(detailCalls(server.calls).length).toBe(2);   // "one by one" still: two requests, each on its own paced gap
 
     console.log('[C17-1] evidence D — the final files tick1 wrote down:', finalWrites());
     console.log('[C17-1] evidence E — tick1 progress text:', mod.lastBackfillTick()?.report?.progress);
     console.log('[C17-1] evidence F — tick1 paceTrace:', mod.lastBackfillTick()?.report?.paceTrace);
 
-    // ---- ticks 2..4: clear the remaining 3 and watch the debts fall one by one ----
+    // ---- ticks 2..4: clear the remaining 2 and watch the debts fall ----
     const trail: Array<{ tick: number; pending: number; archived: number; progress: string }> = [];
     for (let i = 2; i <= 4; i += 1) {
       await bootAndDispatch(liveCapture());
@@ -262,8 +263,8 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
       });
     }
     console.log('[C17-1] evidence G — debts falling tick by tick, plus progress text:', trail);
-    expect(trail.map((t) => t.pending)).toEqual([2, 1, 0]);
-    expect(trail.map((t) => t.archived)).toEqual([2, 3, 4]);
+    expect(trail.map((t) => t.pending)).toEqual([0, 0, 0]);
+    expect(trail.map((t) => t.archived)).toEqual([4, 4, 4]);
     // 🔴 W10 · The list really did finish — and it finished on the **empty page**
     //    (tick 3), not on `offset >= total`: 4 rows are named, and the third tick
     //    is the one that asked for offset=4 and got nothing back. Ticks 1 and 2
@@ -304,7 +305,8 @@ describe('C17 task 2 · counter-case 1: a "browser restart" mid-way (in-memory s
     await bootAndDispatch(liveCapture());
     const before = await stateOf();
     console.log('[C17-2.1] before the restart:', { archived: before.archived, pending: before.pending });
-    expect(before.archived.length).toBe(2);
+    // ADR-033 · two ticks × DEFAULT_TICK_DETAILS (2) = the whole 4-conversation account.
+    expect(before.archived.length).toBe(4);
 
     // ---- "a browser restart": all module in-memory state cleared, storage left as it is ----
     vi.resetModules();
@@ -323,18 +325,20 @@ describe('C17 task 2 · counter-case 1: a "browser restart" mid-way (in-memory s
     console.log('[C17-2.1] after the restart:', { archived: after.archived, pending: after.pending });
 
     // The key assertion: after the restart it does not re-enumerate from the
-    // start, does not re-fetch what was archived, and carries on at the 3rd.
+    // start and does not re-fetch what was archived.
     // 🔴 W10 · `toEqual([])` became "exactly the continuation page", and that is
     //    the same criterion read more precisely: a tick reads one list page and
     //    the list is now closed by an **empty page** rather than by
     //    `offset >= total`, so the tick after the restart asks for offset=4 —
     //    the page after the ones tick 1 and tick 2 already read. A restart would
     //    have asked for offset=0 again, which is what this rules out.
+    //    ADR-033: the two ticks before the restart already cleared all four
+    //    bodies, so the restart tick issues **no body request at all**.
     const listAfterRestart = server2.calls.filter((u) => u.includes('/conversations'));
     expect(listAfterRestart).toHaveLength(1);
     expect(new URL(listAfterRestart[0]!).searchParams.get('offset')).toBe('4');
-    expect(detailCalls(server2.calls).map((u) => u.split('/').pop())).toEqual([UUIDS[2]]);
-    expect(after.archived).toEqual([UUIDS[0], UUIDS[1], UUIDS[2]]);
+    expect(detailCalls(server2.calls).map((u) => u.split('/').pop())).toEqual([]);
+    expect(after.archived).toEqual([UUIDS[0], UUIDS[1], UUIDS[2], UUIDS[3]]);
   });
 });
 
@@ -346,7 +350,7 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     mod.configureBackfillTransport(server.port);
     await bootAndDispatch(liveCapture());
     const beforeTrip = await stateOf();
-    expect(beforeTrip.archived.length).toBe(1);
+    expect(beforeTrip.archived.length).toBe(2);
 
     // 🔴 W2 · Really create this pause: the host goes entirely offline and the next debt cannot be delivered.
     //    This is not a "download stall" but a **non-delivery** in §1's sense —
@@ -398,7 +402,7 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     console.log('[C17-2.2] after resuming:', { reason: mod.lastBackfillTick()?.reason, archived: resumed.archived });
     expect(mod.lastBackfillTick()?.reason).toBe('ran');
     expect(store[HOST_PAUSE_KEY]).toBeNull();                        // the pause was cleared
-    expect(resumed.archived).toEqual([UUIDS[0], UUIDS[1]]);          // it carries on at the 2nd rather than starting over
+    expect(resumed.archived).toEqual([UUIDS[0], UUIDS[1], UUIDS[2], UUIDS[3]]); // it carries on from the breakpoint rather than starting over
   });
 });
 
@@ -587,26 +591,27 @@ describe('C17 task 3 · seam B: which wins, the pacer or the pause / pacing whil
 
     // Before C19: every trace was [0] (each runBackfill constructed a new Pacer with lastAt starting at null)
     //           ⇒ 4 bodies fetched back to back at zero interval.
-    // After C19: only the first is 0 (there really is no "previous one"), and every later one makes up the full 20 seconds —
-    //           the moment of the last fetch lives in state.lastFetchAt, surviving ticks and restarts.
-    expect(traces[0]!.detail).toEqual([0]);
+    // After C19: only the very first body is 0 (there really is no "previous one"), and **every**
+    //           later one makes up the full 20 seconds — the moment of the last fetch lives in
+    //           state.lastFetchAt, surviving ticks, restarts, and the second body inside one tick.
+    //    ADR-033: the budget is 2 bodies per tick now, so tick 1 carries two waits
+    //    ([0, 20_000]) and tick 2 carries two more ([20_000, 20_000]); four consecutive
+    //    bodies, each 20 s after the one before it, is the criterion read in full.
+    expect(traces[0]!.detail).toEqual([0, 20_000]);
     /**
-     * 🔴 W10 · Tick 2's body wait is 18,000 rather than 20,000, and it is not a
-     *    loosened interval — it is the same full interval, split between the two
-     *    segments by the clock. That tick also reads the **empty page that
-     *    confirms the list is finished** (the `offset >= total` stopping
-     *    condition is gone: a real account reported total=901 while holding
-     *    7,391 conversations), and the enumeration gate makes up its 2,000 ms
-     *    before the body gate does. 2,000 + 18,000 = the full 20,000, and the
-     *    body interval is still measured from the **persisted** anchor across
-     *    ticks, which is the whole point of BUG-3's fix. Both waits are pinned so
-     *    the split cannot drift unnoticed.
+     * 🔴 W10 · Tick 2's list wait is 0 rather than 2,000, and it is not a dropped
+     *    interval — the enumeration gate measures from the same persisted anchor,
+     *    and tick 1's two body fetches already advanced the clock 20,000 ms past it.
+     *    So there is nothing left to make up: `max(0, 2_000 - elapsed)` is 0. Both
+     *    segments still make up their own interval; the body interval is measured
+     *    from the **persisted** anchor across ticks, which is the whole point of
+     *    BUG-3's fix. Both waits are pinned so the split cannot drift unnoticed.
      */
-    expect(traces[1]!.enumerate).toEqual([2_000]);
-    expect(traces[1]!.detail).toEqual([18_000]);
-    // Ticks 3 and 4 have no page left to read ⇒ the body interval is made up in full.
+    expect(traces[1]!.enumerate).toEqual([0]);
+    expect(traces[1]!.detail).toEqual([20_000, 20_000]);
+    // Ticks 3 and 4 have no page and no body left to read.
     for (const t of traces.slice(2)) expect(t.enumerate).toEqual([]);
-    for (const t of traces.slice(2)) expect(t.detail).toEqual([20_000]);
+    for (const t of traces.slice(2)) expect(t.detail).toEqual([]);
     // All 4 bodies were still fetched; they are just spread over 60 seconds (3 intervals × 20 seconds).
     expect(detailCalls(server.calls).length).toBe(4);
     expect(fakeNow - 1_700_000_000_000).toBe(60_000);
@@ -620,10 +625,10 @@ describe('C17 task 3 · seam C: the progress denominator comes from enumeration 
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
 
-    // First let enumeration finish and clear 1 debt (normal)
+    // First let enumeration finish and clear 2 debts (a full tick's budget, normal)
     await bootAndDispatch(liveCapture());
     const ok = await stateOf();
-    expect(ok.archived.length).toBe(1);
+    expect(ok.archived.length).toBe(2);
 
     // Now the host goes offline ⇒ the next one cannot be delivered.
     // 🔴 This case's ancestor is C17-3.C "BUG-4": back then a sink that threw was swallowed whole,
@@ -640,8 +645,8 @@ describe('C17 task 3 · seam C: the progress denominator comes from enumeration 
       stopped: mod.lastBackfillTick()?.report?.stopped,
     });
     // The debt was not cleared (no data lost) — the side that matches the BUG-4 era.
-    expect(after.archived.length).toBe(1);
-    expect(after.pending[0]).toBe(UUIDS[1]);
+    expect(after.archived.length).toBe(2);
+    expect(after.pending[0]).toBe(UUIDS[2]);
     // The side that **differs** from the BUG-4 era: this tick's outcome is visible at runtime,
     // and it is named rather than a leftover from "the last success".
     expect(mod.lastBackfillTick()?.reason).toBe('ran');

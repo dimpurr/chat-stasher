@@ -160,7 +160,8 @@ describe('C21-1 · two different conversation ids must end up with different on-
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(server.port);
 
-    // One tick clears exactly 1 debt (DEFAULT_TICK_DETAILS=1), so kick it twice.
+    // One tick clears up to DEFAULT_TICK_DETAILS debts (2 as of ADR-033), so one kick could settle
+    // both; kick twice anyway to prove the criterion does not depend on how the budget splits them.
     await bootAndDispatch(liveCapture());
     await bootAndDispatch(liveCapture());
 

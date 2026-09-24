@@ -632,7 +632,7 @@ describe('W76b-4 · a scope whose next run would fetch nothing does not spend th
     expect(await archived(rows[0]!)).toBe(0);
     // …and the served one really did the work — an archive that grew is evidence
     // that exists in both revisions, not a field this fix introduced.
-    expect(await archived(rows[1]!)).toBe(1);
+    expect(await archived(rows[1]!)).toBe(2);   // one serve × DEFAULT_TICK_DETAILS (ADR-033: 2)
 
     const rec = await trace();
     console.log('[W76b-4a] schedule:', JSON.stringify(rec?.schedule));
@@ -759,7 +759,7 @@ describe('W76c · an idle skip after a scope question still ends the wake', () =
     const served = await servedByOneTick(mod, rows);
     console.log('[W76c-1b] served:', served, '· calls:', JSON.stringify(pageCalls));
     expect(served).toBe(B);
-    expect(await archived(rows[1]!)).toBe(1);
+    expect(await archived(rows[1]!)).toBe(2);   // one serve × DEFAULT_TICK_DETAILS (ADR-033: 2)
 
     const rec = await trace();
     console.log('[W76c-1b] schedule:', JSON.stringify(rec?.schedule));

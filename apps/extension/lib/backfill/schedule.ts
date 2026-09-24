@@ -13,12 +13,22 @@
  * a timer because the manifest had no 'alarms' then; C19 added it to permissions,
  * so that reason no longer holds.
  *
- * 🔴 Why exactly 1 debt per tick (DEFAULT_TICK_DETAILS):
+ * 🔴 Why exactly 2 debts per tick (DEFAULT_TICK_DETAILS):
  *    An MV3 service worker is reclaimed when idle, so one tick has to be short.
  *    The engine persists immediately after every debt it clears, so "short ticks ×
  *    many" and "one long tick" are equivalent in progress — but the former is
  *    friendly to the SW lifecycle and naturally gentler, which is exactly the
  *    product's "quietly finish over several days".
+ *
+ *    ADR-033 · The budget doubled from 1 to 2 on 2026-09-24; the two bodies are
+ *    **never back-to-back**. Each body passes the engine's own detail pacer
+ *    before it is fetched (engine.ts, `await detailPacer.gate()`), and that
+ *    pacer's anchor is persisted across requests and across ticks — so the gap
+ *    between the two bodies inside one tick is the same jittered 20–45 s the
+ *    between-tick case pays (pace.ts), not two requests in a burst. Only the
+ *    count per wake changed; the interval and the jitter did not.
+ *    The old value survives as `QUIET_TICK_DETAILS` for ADR-032's quiet preset;
+ *    the preset itself is not built here, and no caller reads it yet.
  */
 
 import { runBackfill, type BackfillOptions, type HttpPort, type RunReport } from './engine';
@@ -59,7 +69,10 @@ export async function setBackfillEnabled(store: BackfillStore | null, on: boolea
 }
 
 /** How many debts one tick may clear at most. */
-export const DEFAULT_TICK_DETAILS = 1;
+export const DEFAULT_TICK_DETAILS = 2;
+
+/** ADR-032 · The value the tick budget had before ADR-033 doubled it. The quiet preset's budget, kept for the future preset. */
+export const QUIET_TICK_DETAILS = 1;
 
 /**
  * Why one tick did or did not run.

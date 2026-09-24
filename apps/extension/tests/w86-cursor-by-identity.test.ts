@@ -73,10 +73,14 @@ import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host
 
 const PLATFORM = 'chatgpt';
 const ORIGIN = 'https://chatgpt.com';
-/** Enough conversations that no scope runs out of debts inside these tests. */
+/**
+ * Enough conversations that no scope runs out of debts inside these tests.
+ * ADR-033: a tick now clears 2 bodies, and the guard loop below serves one scope
+ * repeatedly, so the supply has to cover 2 × the largest number of serves.
+ */
 const IDS = Array.from(
-  { length: 8 },
-  (_unused, i) => `c1111111-0000-4000-8000-00000000000${i + 1}`,
+  { length: 16 },
+  (_unused, i) => `c1111111-0000-4000-8000-0000000000${String(i + 1).padStart(2, '0')}`,
 );
 /** Four scopes of one reachable platform. The registry order is set per case. */
 const SCOPES = ['acct-w86-a', 'acct-w86-b', 'acct-w86-c', 'acct-w86-d'] as const;
@@ -350,7 +354,8 @@ describe('W86-A · the rotation survives a registry that reorders under it', () 
     //    no single capture can make one scope take them all.
     expect(served).toEqual([A, B, C, A, B, C]);
     // Each runnable target is served twice — nobody is starved by the reorder.
-    expect(counts).toEqual([2, 2, 2]);
+    // ADR-033: each serve clears 2 bodies ⇒ 4 archived per scope.
+    expect(counts).toEqual([4, 4, 4]);
   });
 });
 

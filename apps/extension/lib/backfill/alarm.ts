@@ -76,9 +76,11 @@ export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
  *    times a day against a fixed cap of 200, so the cap was *always* what
  *    decided the rate and the alarm was pure overhead. With the gap drawn from
  *    `[5, 10]` the wake count is itself a random variable (144-288 a day, mean
- *    192) against a cap that is also a random variable (150-200, mean 175): on
- *    a day the cap drew 150 the alarm is the looser of the two, on a day it drew
- *    200 the cap is, and which one binds changes from day to day. That
+ *    192), and at `DEFAULT_TICK_DETAILS` bodies per wake (ADR-033: 2) the alarm's
+ *    daily capacity is 288-576 bodies (mean 384) against a cap that is also a
+ *    random variable (300-400, mean 350). A day that wakes 144 times is under
+ *    every cap draw, so the alarm binds; a day that wakes 288 times is over every
+ *    draw, so the cap binds; which one leads changes from day to day. That
  *    interleaving is the "the frequency must not be steady" the product asked
  *    for, expressed in the two places that govern the rate rather than
  *    cosmetically.
@@ -86,10 +88,12 @@ export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
  *    to 2 — plainly irregular to anyone watching, and impossible to distinguish
  *    from a person working through their own history.
  *  · **It still does not fight the per-item interval**: 300 seconds ≫ the
- *    20-second per-item minimum ⇒ on the alarm's path the interval gate is
- *    always a 0 wait; the interval only bites when the live leg kicks
+ *    20-second per-item minimum ⇒ the **first** body of an alarm tick has a
+ *    0 wait (the last fetch was minutes ago); the interval bites only on the
+ *    second body of the same tick (ADR-033), and when the live leg kicks
  *    repeatedly (C19 task 3).
- *  · Each wake still does one very small thing (read storage, fetch at most 1),
+ *  · Each wake still does one very small thing (read storage, fetch at most
+ *    `DEFAULT_TICK_DETAILS`),
  *    which is friendly to MV3's SW lifecycle.
  */
 export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
