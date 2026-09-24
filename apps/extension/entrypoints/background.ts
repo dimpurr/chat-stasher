@@ -1299,6 +1299,15 @@ export async function kickBackfill(
  *    stopped" — which is why it runs on *every* exit path, including the ones
  *    that did no work at all, and why it is in a `finally`-style position after
  *    the tick rather than inside the tick's own logic.
+ *
+ * 🔴 W90 · **The re-arm is a queued switch sync, not a bare `alarms.create`.**
+ *    It used to arm the one-shot directly, which made it the one alarm writer
+ *    that never read the switch: turning the backfill off while a tick was in
+ *    flight let the switch's sync clear both alarms and then the tick's `finally`
+ *    re-created `cs-backfill-tick`, so every later `disabled` tick re-armed again
+ *    and "off" never stuck. It now enters `alarmSyncQueue` like every other
+ *    switch-driven sync and reads the stored switch when it runs, so
+ *    off ⇒ nothing is armed and on ⇒ the same jittered one-shot as before.
  */
 export async function runAlarmTick(): Promise<TickResult> {
   try {
@@ -1309,18 +1318,54 @@ export async function runAlarmTick(): Promise<TickResult> {
 }
 
 /**
- * Arm the next jittered tick. Best-effort: the safety alarm below is the
- * guarantee, this is the fast path, and a failure here must never turn a tick
- * that did its work into a thrown error.
+ * Arm the next jittered tick **only if the switch is still on when this runs**.
+ *
+ * Best-effort: the safety alarm is the guarantee, this is the fast path, and a
+ * failure here must never turn a tick that did its work into a thrown error.
+ *
+ * 🔴 W90 · It goes through `alarmSyncQueue` (via
+ *    `rearmBackfillTickThroughQueue`) rather than calling `armBackfillTick`
+ *    itself, and reads the stored switch at the moment it runs. That is what puts
+ *    the re-arm behind every switch change already queued ahead of it — so an off
+ *    committed during the tick is the last decision, not an overwritten one.
  */
 async function rearmBackfillTick(): Promise<void> {
-  const alarms = alarmsApi();
-  if (!alarms) return;
+  if (!alarmsApi()) return;
   try {
-    await armBackfillTick(alarms, backfillRandom());
+    await rearmBackfillTickThroughQueue();
   } catch (err) {
     console.warn('[chat-stasher] backfill alarm re-arm failed', (err as Error).message);
   }
+}
+
+/**
+ * 🔴 W90 · Put one re-arm on the same serial chain every switch-driven alarm sync
+ * uses, so it is ordered with them and the last decision wins.
+ *
+ * This is the tick's re-arm and it keeps W16's shape: switch **on** ⇒
+ * `armBackfillTick` draws a fresh `[5, 10]`-minute one-shot exactly as it did
+ * before; switch **off** ⇒ both alarms are cleared (they already are, by the
+ * switch's own sync, so this is a no-op) and none is created. Reading the switch
+ * here, when the queued work runs, is the whole fix: the previous bare
+ * `alarms.create` never read it and so outlived an off committed mid-tick.
+ */
+function rearmBackfillTickThroughQueue(): Promise<void> {
+  const run = alarmSyncQueue.then(
+    () => runBackfillTickRearm(),
+    () => runBackfillTickRearm(),
+  );
+  alarmSyncQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function runBackfillTickRearm(): Promise<void> {
+  const alarms = alarmsApi();
+  if (!alarms) return;
+  if (!(await isBackfillEnabled(browserLocalStore()))) {
+    await syncBackfillAlarm(alarms, false, backfillRandom());
+    return;
+  }
+  await armBackfillTick(alarms, backfillRandom());
 }
 
 /**
@@ -2070,11 +2115,15 @@ function cancelledIdLike(id: string | null): boolean {
  *    one of the two random 5-10 minute draws was thrown away and which survived
  *    was decided by arrival order.
  *
- *    Deliberately **not** extended to the re-arm at the end of a tick
- *    (`rearmBackfillTick`), which stays outside the queue: it runs from the tick
- *    that already holds the single-flight lock, so it is ordered by that rather
- *    than by this, and queueing it would let a slow sync hold the tick's own
- *    promise open.
+ *    🔴 W90 · The re-arm at the end of a tick is one of these callers too.
+ *    `rearmBackfillTick` used to arm the one-shot directly, so it was the one
+ *    writer outside this chain and the switch did not bind it — an off during an
+ *    in-flight tick was overwritten by the tick's own `finally`, and the alarms
+ *    came back with the switch off. It now enters this queue through
+ *    `rearmBackfillTickThroughQueue` and reads the switch when it runs, so the
+ *    off is the last decision. The tick's promise does wait for that queued work;
+ *    the older note here that queueing would hold the tick open was the trade W82
+ *    chose, and W90 takes the ordering instead.
  *
  *    The trade, stated: a serial queue is head-of-line ordered, so a sync whose
  *    `alarms` call never settles would hold the ones behind it. That is not a new
