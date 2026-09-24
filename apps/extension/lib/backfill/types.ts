@@ -1007,6 +1007,74 @@ export function transientRetryDelayMs(
   return Math.min(uniformBetween(random, 0.5, 1) * exponential, max);
 }
 
+/**
+ * 🔴 W127 · **How far the platform's own `Retry-After` may move a rate-limited
+ * retry, in both directions.**
+ *
+ * The 429 ladder has always been ours alone (15 min base, 60 min cap); the task
+ * that added these numbers is the first time the *platform's* clock is read. The
+ * two bounds are what makes that safe rather than a new way to be aggressive:
+ *
+ *  · **floor 30 s** — a header of `0`, or a date already in the past, means "retry
+ *    now"; taking that literally would turn "the platform asked us to back off"
+ *    into an immediate retry. 30 s is above the 20 s detail floor, so even the
+ *    floor cannot make the leg denser than its ordinary body rhythm.
+ *  · **ceiling 15 min** — the `rate-limited` ladder's own base (`TRANSIENT_RETRY_BASE_MS`).
+ *    A header of an hour, or a date a day out, cannot pin the leg longer than the
+ *    ladder would have on its own, so a broken or hostile header degrades to the
+ *    schedule this leg already chose.
+ *
+ * Both are the same numbers the reference implementations converge on: pionxzh
+ * defaults to 30 s when the header is missing (src/api.ts:705-706), and Echoes
+ * clamps its aistudio `Retry-After` to a band (28-RATE-LIMITS §5 B4).
+ */
+export const RETRY_AFTER_MIN_MS = 30_000;
+export const RETRY_AFTER_MAX_MS = TRANSIENT_RETRY_BASE_MS['rate-limited'];
+
+/** Clamp a decided wait into the band above. `NaN` is not a wait; it degrades to the floor. */
+function clampRetryAfterMs(ms: number): number {
+  const finite = Number.isFinite(ms) ? ms : RETRY_AFTER_MIN_MS;
+  return Math.min(RETRY_AFTER_MAX_MS, Math.max(RETRY_AFTER_MIN_MS, finite));
+}
+
+/**
+ * 🔴 W127 · **Read an HTTP `Retry-After` value as a wait, or answer `null` so the
+ * caller falls back to its own ladder.**
+ *
+ * Handles the two forms RFC 9110 defines, and nothing else:
+ *  · **delta-seconds** (`Retry-After: 120`) — the form every platform measured so
+ *    far uses, and the only one this build has seen a real answer in;
+ *  · **HTTP-date** (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`) — a date already
+ *    in the past clamps to the floor ("retry now" is not "retry immediately").
+ *
+ * `null` is the honest answer for **absent** (nothing to read), **empty**, and
+ * **garbage** (not a number, not a parseable date) — three different inputs that
+ * all mean the same thing here: the header said nothing this leg can use, so the
+ * ladder decides. It is deliberately not `0`, which would be indistinguishable
+ * from a header that really said "now".
+ *
+ * `now` is a parameter rather than `Date.now()` so the date form is deterministic
+ * in tests; the delta-seconds form does not read it. The engine passes the same
+ * clock instant the halt record is stamped with.
+ */
+export function parseRetryAfterMs(raw: string | null | undefined, now: number = Date.now()): number | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  // delta-seconds: digits only (a sign, a decimal or a unit word is not this form).
+  if (/^\d+$/.test(trimmed)) {
+    return clampRetryAfterMs(Number(trimmed) * 1000);
+  }
+  // HTTP-date. The letter test is load-bearing: `Date.parse` is lenient enough to
+  // read numeric-looking garbage such as `12.5` as a real (past) date, which would
+  // turn "the header said nothing" into the floor. Every HTTP-date form carries a
+  // month name, so a string with no letter is not one and falls back to the ladder.
+  if (!/[A-Za-z]/.test(trimmed)) return null;
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return null;
+  return clampRetryAfterMs(at - now);
+}
+
 export interface HaltRecord {
   reason: HaltReason;
   /** When it happened (clock.now(), milliseconds) */

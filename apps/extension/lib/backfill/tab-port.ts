@@ -221,7 +221,7 @@ export type BackfillFetchReply =
    * so that a reply from any other wrapper, and every existing reply shape, stays what
    * it was.
    */
-  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean }
+  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean; retryAfter?: string }
   | { ok: false; error: string };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -763,7 +763,26 @@ export function isAllowedBackfillUrl(
 export type FetchLike = (
   url: string,
   init?: BackfillRequestInit,
-) => Promise<{ status: number; text: () => Promise<string>; survivedCredentialReread?: boolean }>;
+) => Promise<{
+  status: number;
+  text: () => Promise<string>;
+  survivedCredentialReread?: boolean;
+  /**
+   * 🔴 W127 · The platform's raw `Retry-After` response header, if the page-side
+   * fetch can see one (`Response.headers.get('retry-after')`). Carried as the raw
+   * value and parsed/clamped by the engine rather than here. Optional on every hop
+   * so a fixture — and an older content script — produces exactly the reply shape
+   * it did before.
+   */
+  retryAfter?: string | null;
+}>;
+
+/**
+ * 🔴 W127 · A `Retry-After` value worth forwarding: a delta-seconds header is a few
+ * characters and an HTTP-date is under 30. Anything longer is not a header this leg
+ * has a use for, and it is dropped at the boundary rather than carried.
+ */
+const RETRY_AFTER_HEADER_MAX_CHARS = 64;
 
 /**
  * The content-script-side fetch. **This code runs in the context of the page the
@@ -804,9 +823,20 @@ export async function serveBackfillFetch(
     // 🔴 W64c · The one fact the engine cannot derive is passed on here, and only when
     //    it is claimed (`true`). A response that carries nothing stays a reply of
     //    exactly the shape it was.
-    return res.survivedCredentialReread === true
-      ? { ok: true, status: res.status, text, survivedCredentialReread: true }
-      : { ok: true, status: res.status, text };
+    // 🔴 W127 · The platform's `Retry-After`, when the page-side fetch could read it,
+    //    is forwarded as the raw header value and bounded in length. The engine parses
+    //    and clamps it (`parseRetryAfterMs`, types.ts); a value that is not a short
+    //    string is left off, which the engine reads as "no header".
+    const retryAfter = typeof res.retryAfter === 'string' && res.retryAfter.length <= RETRY_AFTER_HEADER_MAX_CHARS
+      ? res.retryAfter
+      : null;
+    return {
+      ok: true,
+      status: res.status,
+      text,
+      ...(res.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
+      ...(retryAfter === null ? {} : { retryAfter }),
+    };
   } catch (err) {
     // Only the technical detail goes back, never the body.
     return { ok: false, error: (err as Error).message };
@@ -986,9 +1016,12 @@ export function tabHttpPort(
     //    content script, another platform's wrapper — produces the response it always
     //    did, with no field added, so the classifier sees "no evidence" and not a fact
     //    invented by the transport.
-    return reply.survivedCredentialReread === true
-      ? { status: reply.status, text: reply.text, survivedCredentialReread: true }
-      : { status: reply.status, text: reply.text };
+    // 🔴 W127 · Same rule for `Retry-After`: forwarded only when the page fetched a
+    //    string. The engine reads it on a 429/503 only (`retryAfterMsFor`).
+    const response: HttpResponse = { status: reply.status, text: reply.text };
+    if (reply.survivedCredentialReread === true) response.survivedCredentialReread = true;
+    if (typeof reply.retryAfter === 'string') response.retryAfter = reply.retryAfter;
+    return response;
   };
 }
 
