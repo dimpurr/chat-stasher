@@ -54,6 +54,8 @@ eprintln     crates/chat-stasher/src/config.rs:565  "warning: the `~` in a confi
 write        crates/chat-stasher/src/config.rs:808  "`{input}` starts with `~` but neither $HOME nor $USERPROFILE is set, so it cannot be expanded to a home directory"
 write        crates/chat-stasher/src/config.rs:812  "`{input}` is `~username` form; this tool only supports the current user's `~` (not another user's home); use an absolute path"
 write        crates/chat-stasher/src/config.rs:816  "`{path}` still contains a literal `~` component — almost certainly a tilde that was never expanded; start with `~/` or use an absolute path"
+anyhow       crates/chat-stasher/src/config.rs:1667  "`native_host.stage` is a dotted or implicit table, not a string; `stage` cannot be set while that shape is present"
+anyhow       crates/chat-stasher/src/config.rs:1722  "`native_host` section has no byte span; `stage` cannot be inserted"
 anyhow       crates/chat-stasher/src/destinit.rs:232  "{reason}"
 context      crates/chat-stasher/src/destinit.rs:499  "dump shards from the existing destination"
 eprintln     crates/chat-stasher/src/doctor.rs:966  "doctor: scan failed: {e}"
