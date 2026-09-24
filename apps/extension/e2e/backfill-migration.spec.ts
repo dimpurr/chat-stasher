@@ -187,6 +187,17 @@ async function loadFixturePage(ext: Extension): Promise<Page> {
 }
 
 test('a real tick carries a pre-W18 record over: ids in the debt database, header at v2, old key gone', async ({ ext }) => {
+  /**
+   * 🔴 W88 · A per-test budget, on top of the config's 90 s, for machine load only.
+   *
+   * The fixture here is deliberately small (40 ids) and there is no per-item write to
+   * batch, so unlike the Node suite this case has no cheap half to make cheaper: the
+   * cost is a real Chromium launch plus a page load, and it is irreducible. Measured
+   * at 1.3 s on an unloaded machine; the ticket saw it cross the 90 s config timeout
+   * while the same machine was loaded (load average 26–220). No assertion below
+   * changed — this only stops a busy machine from failing a case that is correct.
+   */
+  test.setTimeout(180_000);
   const { api, list } = await serveChatgpt(ext);
 
   // The user's storage, before anything of ours runs: the whole v1 debt set and

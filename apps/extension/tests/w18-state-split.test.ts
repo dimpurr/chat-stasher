@@ -48,8 +48,31 @@ const SCOPE = 'acct-w18';
 const LIST_PATH = '/backend-api/conversations';
 const DETAIL_PATH = '/backend-api/conversation/';
 
-/** The real account's shape: 7,391 pending ids was the measurement. 7,400 keeps the arithmetic round. */
+/**
+ * The real account's shape: 7,391 pending ids was the measurement. 7,400 keeps the
+ * arithmetic round.
+ *
+ * 🔴 Only the two W18-2 byte-cost tests use this size, because for them the size
+ *    **is** the assertion: a whole-state rewrite measured against a per-id one.
+ *    They keep it and carry an explicit timeout, because building it costs ~7,600
+ *    IndexedDB puts — see SMALL_PENDING.
+ */
 const PENDING = 7_400;
+
+/**
+ * The size the correctness tests use: migration, FIFO order, an interrupted
+ * migration, a kill mid-settle and the header recount.
+ *
+ * 🔴 Each of those asserts a property that does not change with the debt set's
+ *    size — every id exactly once and in order; a debt neither lost nor settled
+ *    twice; a header recomputed rather than trusted. Building the PENDING fixture
+ *    for them bought nothing and cost ~7,600 `put`s through the debt store
+ *    (`lib/backfill/debt-store.ts` writes one record per id), ≈1.1 s under
+ *    fake-indexeddb: the cost that pushed exactly these tests past vitest's 5 s
+ *    default on a loaded machine. 300 keeps every property at ≈0.1 s.
+ */
+const SMALL_PENDING = 300;
+
 /** Settled before this run started — the archive only ever grows, so it is part of the "before" size too. */
 const ARCHIVED = 200;
 
@@ -63,8 +86,8 @@ function uuid(n: number): string {
   return `${hex}-1111-4222-8333-${String(n).padStart(12, '0')}`;
 }
 
-function pendingIds(): string[] {
-  return Array.from({ length: PENDING }, (_, i) => uuid(i));
+function pendingIds(count: number = SMALL_PENDING): string[] {
+  return Array.from({ length: count }, (_, i) => uuid(i));
 }
 
 function archivedIds(): string[] {
@@ -81,15 +104,15 @@ function fixtureClock(): Clock {
  * debt set at one key, `enumCursor.complete` true (enumeration finished long ago),
  * and a halt record written before W13 (no `retryAt`).
  */
-function legacyRecord(): LegacyBackfillState {
+function legacyRecord(pendingCount: number = SMALL_PENDING): LegacyBackfillState {
   const state = {
     v: 1,
     platform: PLATFORM,
     scope: SCOPE,
     totalKnown: 901,
     totalSource: 'contradicted',
-    enumCursor: { offset: PENDING, complete: true },
-    pending: pendingIds(),
+    enumCursor: { offset: pendingCount, complete: true },
+    pending: pendingIds(pendingCount),
     archived: archivedIds(),
     detailOutcomes: [],
     detailToday: { day: '2026-09-14', count: 0 },
@@ -99,7 +122,7 @@ function legacyRecord(): LegacyBackfillState {
     halted: {
       reason: 'transport-error',
       at: Date.parse('2026-09-13T22:00:00.000Z'),
-      detail: `list offset=${PENDING}: message channel closed before a response was received`,
+      detail: `list offset=${pendingCount}: message channel closed before a response was received`,
     },
   };
   return state as LegacyBackfillState;
@@ -151,8 +174,9 @@ function tick(
 /** Run the migration once, with no bodies fetched, so the cost of a *settle* is what gets measured. */
 async function migrated(
   store: BackfillStore,
+  pendingCount: number = SMALL_PENDING,
 ): Promise<{ before: number; state: BackfillState }> {
-  const legacy = legacyRecord();
+  const legacy = legacyRecord(pendingCount);
   await store.save(legacyStateKey(PLATFORM, SCOPE), legacy);
   // The pre-W18 cost of one persist, on the same ruler as the new side.
   const before = serializedBytes(legacy);
@@ -172,7 +196,7 @@ afterEach(() => {
 // 1 · Migration
 // ===========================================================================
 describe('W18-1 · a pre-W18 record comes across whole', () => {
-  it('7,400 pending ids survive the move exactly once, in order, and the old key is gone only afterwards', async () => {
+  it('a pre-W18 record\'s pending ids survive the move exactly once, in order, and the old key is gone only afterwards', async () => {
     const store = memoryStore();
     const legacy = legacyRecord();
     await store.save(legacyStateKey(PLATFORM, SCOPE), legacy);
@@ -184,10 +208,12 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
 
     // Every id, exactly once, in the same order — the FIFO order is what "the next
     // debt to settle" is defined by, so a reordering would silently change which
-    // conversation is fetched next.
+    // conversation is fetched next. The fixture is SMALL_PENDING: this is a
+    // property of the move, not of its size, and the sizes the *bytes* depend on
+    // are pinned in W18-2.
     expect(opened.state.pending).toEqual(legacy.pending);
-    expect(opened.state.pending).toHaveLength(PENDING);
-    expect(new Set(opened.state.pending).size).toBe(PENDING);
+    expect(opened.state.pending).toHaveLength(SMALL_PENDING);
+    expect(new Set(opened.state.pending).size).toBe(SMALL_PENDING);
     expect(new Set(opened.state.archived).size).toBe(ARCHIVED);
     expect([...opened.state.archived].sort()).toEqual([...legacy.archived].sort());
     // And the rest of the record came with it, unchanged: this is a move, not a reset.
@@ -199,7 +225,7 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
     // The new layout really is what is on disk now...
     const header = await store.load(stateKey(PLATFORM, SCOPE));
     expect(isHeader(header)).toBe(true);
-    expect((header as { pendingCount: number }).pendingCount).toBe(PENDING);
+    expect((header as { pendingCount: number }).pendingCount).toBe(SMALL_PENDING);
     expect((header as { archivedCount: number }).archivedCount).toBe(ARCHIVED);
 
     // ...and the old key is gone. Nothing else ever writes that key.
@@ -270,7 +296,7 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
     expect(second.state.pending).toEqual(legacy.pending);
     expect(await store.load(legacyKey)).toBeNull();
     const back = await readDebtSet(PLATFORM, SCOPE);
-    expect(back?.pending).toHaveLength(PENDING);
+    expect(back?.pending).toHaveLength(SMALL_PENDING);
     expect(back?.archived).toHaveLength(ARCHIVED);
   });
 
@@ -306,10 +332,19 @@ describe('W18-1 · a pre-W18 record comes across whole', () => {
 // 2 · What one persist costs
 // ===========================================================================
 describe('W18-2 · settling one debt no longer rewrites the debt set', () => {
+  /**
+   * 🔴 The 7,400-id fixture is the point of this case — the ratio **is** its
+   *    assertion, so it is the one place the real account's size must stay. It is
+   *    also why the case carries its own timeout: building the fixture costs ~7,600
+   *    IndexedDB `put`s through `replaceDebtSet` (≈1.1 s under fake-indexeddb,
+   *    measured), which is fine at rest but crossed vitest's 5 s default on a loaded
+   *    machine (W88). The 50× bar below is unchanged; the timeout only buys headroom
+   *    for machine load, not for a slower code path.
+   */
   it('🔴 one settle with 7,400 pending: at least 50× fewer bytes than the whole-state rewrite', async () => {
     const store = memoryStore();
     (globalThis as any).indexedDB = new IDBFactory();
-    const { before, state } = await migrated(store);
+    const { before, state } = await migrated(store, PENDING);
 
     // Settle exactly one debt, through the production write path: out of pending,
     // into archived, counters moved — the whole of what `persist` does per settle.
@@ -342,12 +377,19 @@ describe('W18-2 · settling one debt no longer rewrites the debt set', () => {
     // And the debt set really was touched: exactly the deleted+written pair.
     expect(after.bytesByStore.debt).toBeGreaterThan(0);
     expect(after.bytesByStore.debt).toBeLessThan(before / 50);
-  });
+  }, 60_000);
 
+  /**
+   * 🔴 This case also needs the full-size fixture: its "after" is 100 records, so
+   *    the ratio only clears the 10× bar while the whole-state "before" is of the
+   *    real account's order. Like the settle case it carries an explicit timeout,
+   *    for machine load and not for a slower path (the fixture's ~7,600 `put`s are
+   *    ≈1.1 s at rest; W88).
+   */
   it('🔴 one list page adding 100 ids: at least 50× fewer bytes', async () => {
     const store = memoryStore();
     (globalThis as any).indexedDB = new IDBFactory();
-    const { before, state } = await migrated(store);
+    const { before, state } = await migrated(store, PENDING);
 
     const fresh = Array.from({ length: 100 }, (_, i) => uuid(500_000 + i));
     const next: BackfillState = {
@@ -366,14 +408,15 @@ describe('W18-2 · settling one debt no longer rewrites the debt set', () => {
      *    difference is arithmetic rather than a concession.
      *
      * A list page is the one operation where the *new* side's cost is proportional
-     * to the number of ids it adds: 100 records, each 93 bytes of JSON (scope + id +
-     * state + seq) plus the 64-byte framing this file charges every record, i.e.
-     * 15,700 B against a 296,913 B whole-state rewrite — measured 18.4×. The framing
-     * floor alone is 6.4 KB, so even a payload-free record would cap the ratio at
-     * 296,913 / 6,802 ≈ 44×; the payload is what brings it to 18.4×. The old layout,
-     * meanwhile, rewrote every id on the page *and* every id that was not on it.
-     * Settling is where the change pays off without a ceiling (one delete and one
-     * put, whatever the debt set's size), and that is the case the 50× bar is on.
+     * to the number of ids it adds: 100 records, each 114 bytes of JSON (platform +
+     * scope + id + state + seq) plus the 64-byte framing this file charges every
+     * record, i.e. 17,800 B against a 296,913 B whole-state rewrite — measured 16.3×.
+     * The framing floor alone is 6.4 KB and the header another 453 B, so even a
+     * payload-free record would cap the ratio at 296,913 / 6,853 ≈ 43×; the payload
+     * is what brings it to 16.3×. The old layout, meanwhile, rewrote every id on the
+     * page *and* every id that was not on it. Settling is where the change pays off
+     * without a ceiling (one delete and one put, whatever the debt set's size), and
+     * that is the case the 50× bar is on.
      */
     console.log('[W18-2] one list page adding 100 ids:');
     console.log('[W18-2]   before =', before, 'bytes · after =', after.bytes, 'bytes',
@@ -381,13 +424,13 @@ describe('W18-2 · settling one debt no longer rewrites the debt set', () => {
 
     expect(ratio).toBeGreaterThanOrEqual(10);
     // The per-record framing really is what caps it: 100 records × 64 bytes is
-    // 6.4 KB of the 16.1 KB the new side writes, i.e. two fifths of the total.
+    // 6.4 KB of the 17.8 KB the new side writes, i.e. a bit over a third of the total.
     expect(after.bytesByStore.debt).toBeGreaterThanOrEqual(100 * 64);
     const back = await readDebtSet(PLATFORM, SCOPE);
     expect(back?.pending).toHaveLength(PENDING + 100);
     // The 100 new ones went to the back of the FIFO, in the order they were listed.
     expect(back?.pending.slice(PENDING)).toEqual(fresh);
-  });
+  }, 60_000);
 });
 
 /**
@@ -417,6 +460,8 @@ describe('W18-3 · killed in the middle of a settle', () => {
   it('🔴 the debt set commits before the header, so a kill at the header loses nothing and settles nothing twice', async () => {
     const store = memoryStore();
     (globalThis as any).indexedDB = new IDBFactory();
+    // SMALL_PENDING: "one debt settles exactly once across a kill" is the same
+    // property at any size, and the size is not what this case measures.
     const { state } = await migrated(store);
     const victim = state.pending[0]!;
 
@@ -445,13 +490,13 @@ describe('W18-3 · killed in the middle of a settle', () => {
     expect(reopened!.pending).not.toContain(victim);      // it really was settled…
     expect(reopened!.archived).toContain(victim);         // …exactly once, not lost and not pending
     expect(reopened!.archived.filter((id) => id === victim)).toHaveLength(1);
-    expect(reopened!.pending).toHaveLength(PENDING - 1);
+    expect(reopened!.pending).toHaveLength(SMALL_PENDING - 1);
 
     // And the header's counts, which were never written, are recomputed rather than trusted.
     const after = await openLedger(store, PLATFORM, SCOPE);
     expect(after.ok).toBe(true);
     if (!after.ok) return;
-    expect(after.state.pending).toHaveLength(PENDING - 1);
+    expect(after.state.pending).toHaveLength(SMALL_PENDING - 1);
     expect(after.state.archived).toHaveLength(ARCHIVED + 1);
   });
 
@@ -580,6 +625,7 @@ describe('W18-5 · the header carries everything the popup draws', () => {
   it('the counts in the header are the debt set\'s own size, recomputed on every load', async () => {
     const store = memoryStore();
     (globalThis as any).indexedDB = new IDBFactory();
+    // SMALL_PENDING: "the counts are recomputed from the store" is size-independent.
     const { state } = await migrated(store);
 
     // A header whose counts disagree with the debt store — exactly what an
@@ -597,6 +643,6 @@ describe('W18-5 · the header carries everything the popup draws', () => {
     expect(opened.state.pending).toHaveLength(state.pending.length);
     expect(opened.state.archived).toHaveLength(ARCHIVED);
     // The progress line is drawn from those recomputed numbers, not from the lie.
-    expect(opened.state.pending).toHaveLength(PENDING);
+    expect(opened.state.pending).toHaveLength(SMALL_PENDING);
   });
 });
