@@ -11,7 +11,7 @@
 # If any of the three drifts, `brew install` will fetch a 404 or a mismatched
 # binary and the tap is broken.
 #
-# sha256 values below are the v0.4.0 release's SHA256SUMS (filled after publication). On every release,
+# sha256 values below are the v0.4.0 release's SHA256SUMS. On every release,
 # replace each with the digest from that release's SHA256SUMS (RELEASING.md step 8).
 
 class ChatStasher < Formula
@@ -27,12 +27,12 @@ class ChatStasher < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/dimpurr/chat-stasher/releases/download/v0.4.0/chat-stasher-darwin-arm64"
-      sha256 "bb16a8abfb9e6989d7545d9a5935708d7db5bdf2c0c28214d0bc1483f0a65375"
+      sha256 "6cd8e6dff82a15bbaf6e84fb92fe19315f7759b97981db11206fe70ce307400d"
     else
       # darwin-x86_64 is shipped alongside darwin-arm64. Filling this sha256 is
       # part of that release.
       url "https://github.com/dimpurr/chat-stasher/releases/download/v0.4.0/chat-stasher-darwin-x86_64"
-      sha256 "1aa8b8512118c0f2c4aaa0a9c5ab1d499a32360e4af5205b93b8cf89498fdfee"
+      sha256 "e1e3cd6d1e85d821a52b76f3bc3dc47ec910a705f9c3120e88539a8e38c02862"
     end
   end
 
