@@ -4,9 +4,13 @@ Version numbers here are the CLI's, and they match the `vX.Y.Z` git tags. The
 browser extension has its own version and ships on its own schedule; see
 [`RELEASING.md`](RELEASING.md) for what a release contains.
 
-The comparison point for the entry below is `v0.2.0`, tagged 2026-09-12.
+## Unreleased — 0.4.0
+
+Nothing yet.
 
 ## 0.3.0 — 2026-09-24
+
+Compared against `v0.2.0`, tagged 2026-09-12.
 
 ### Added
 

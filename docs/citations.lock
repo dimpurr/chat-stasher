@@ -343,10 +343,10 @@ apps/extension/wxt.config.ts:114-120  2a2b23999f5f  lines=7
   <- docs/threat-model.md:380  :: // 🔴 ADR-014: this pins the Chrome extension ID to
 apps/extension/wxt.config.ts:136  84787b717b3c  lines=1
   <- docs/privacy.md:221  :: data_collection_permissions: { required: ['none'] },
-crates/chat-stasher/Cargo.toml:1-6  105dbbb1a549  lines=6
+crates/chat-stasher/Cargo.toml:1-6  5519d4861bc9  lines=6
   <- docs/install.md:183  :: [package]
-crates/chat-stasher/Cargo.toml:3  97aef2132179  lines=1
-  <- SECURITY.md:47  :: version = "0.3.0"
+crates/chat-stasher/Cargo.toml:3  4cef9f3820fd  lines=1
+  <- SECURITY.md:47  :: version = "0.4.0-dev"
 crates/chat-stasher/Cargo.toml:5  53a903362b38  lines=1
   <- README.md:177  :: description = "Append-only archive for every LLM conversati…
 crates/chat-stasher/Cargo.toml:14-27  096bce56001a  lines=14
