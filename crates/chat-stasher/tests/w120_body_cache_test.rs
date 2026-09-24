@@ -639,3 +639,80 @@ fn the_cache_command_reports_and_clears() {
         "a cleared cache must fall back to the destination and return the same bytes"
     );
 }
+
+/// The second read of one session must fetch **no body bytes at all**: not
+/// "fewer", not "faster", but none — every body lookup hits.
+///
+/// This is the property criterion ① is really about. On a remote destination
+/// the 22.6 s a warm 107 MB read costs is the download (W117 measured ~4.7 MB/s
+/// against the Storage Box with zero cache involvement); if a second read
+/// reports zero body misses, those bytes did not cross the wire, and what is
+/// left is the fixed per-run cost of opening the repository — which this cache
+/// neither causes nor removes.
+#[test]
+fn a_second_read_fetches_no_body_bytes() {
+    let sandbox = Sandbox::new(1, 40_000);
+    sandbox.set_quota("10MB");
+
+    let first = sandbox.read(0);
+    assert_eq!(first.status.code(), Some(0));
+    assert!(cache_stat(&first, "misses") > 0, "a cold cache must fetch");
+
+    let second = sandbox.read(0);
+    assert_eq!(second.status.code(), Some(0));
+    assert!(
+        cache_stat(&second, "hits") > 0,
+        "the second read must be served from the cache"
+    );
+    assert_eq!(
+        cache_stat(&second, "misses"),
+        0,
+        "the second read of an unchanged session must not fetch a single body block"
+    );
+}
+
+/// The cache holds the destination's ciphertext, and nothing else.
+///
+/// ADR-034 forbids plaintext on the disk, and that is checkable: the fixture's
+/// shard body contains a long marker that would appear verbatim in any file
+/// holding the conversation, so the marker must be absent from every byte the
+/// cache wrote. (It is synthetic text, so searching for it reads nothing
+/// private.)
+#[test]
+fn the_cache_writes_ciphertext_and_no_plaintext() {
+    let sandbox = Sandbox::new(1, 40_000);
+    sandbox.set_quota("10MB");
+    let output = sandbox.read(0);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(cache_stat(&output, "stored") > 0);
+
+    // The fixture's alphabet soup is the plaintext; take a long slice of what
+    // the stage holds for that session and search every cache entry for it.
+    // The stage keeps shards in bucketed subdirectories, so walk the session
+    // directory and take its largest `.jsonl` file.
+    let session_dir = sandbox
+        .stage
+        .join("sessions")
+        .join(MACHINE)
+        .join(session_id(0));
+    let stage_file = entry_files(&session_dir)
+        .into_iter()
+        .filter(|(path, _)| path.extension().map(|x| x == "jsonl").unwrap_or(false))
+        .max_by_key(|(_, size)| *size)
+        .map(|(path, _)| path)
+        .expect("a sealed shard on disk");
+    let plaintext = fs::read(&stage_file).expect("read shard");
+    let marker = &plaintext[2..plaintext.len() - 2];
+
+    let mut checked = 0u64;
+    for (path, _) in entry_files(&sandbox.cache_dir()) {
+        let raw = fs::read(&path).expect("read entry");
+        assert!(
+            !raw.windows(marker.len()).any(|w| w == marker),
+            "an entry contains the conversation's plaintext: {}",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "the cache wrote no entries to check");
+}

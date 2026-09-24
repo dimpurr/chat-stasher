@@ -5921,11 +5921,11 @@ fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
 fn body_cache_state_line(availability: &chat_stasher::body_cache::Availability) -> String {
     use chat_stasher::body_cache::Availability;
     match availability {
-        Availability::On(cache) => format!(
-            "on (quota={} B, root={})",
-            cache.max_bytes(),
-            cache.root().display()
-        ),
+        // The location is deliberately not printed here: `read`'s report is
+        // pinned byte-for-byte by tests precisely because it must not depend on
+        // this machine, and a cache root is a per-run path. `chat-stasher cache`
+        // and `doctor` (D9) both name it.
+        Availability::On(cache) => format!("on (quota={} B)", cache.max_bytes()),
         Availability::Off => "off (cache.max_bytes = 0)".to_string(),
         Availability::Bulk => "not used (bulk read, ADR-034)".to_string(),
         Availability::Unresolved(why) => {
