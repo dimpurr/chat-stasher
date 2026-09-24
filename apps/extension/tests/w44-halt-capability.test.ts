@@ -409,9 +409,9 @@ describe('W44-2 · a record THIS build wrote is what must go on persisting', () 
     // The condition recurred, so the same stop comes back — naming the build that saw it.
     expect(r1.halted?.reason).toBe('detail-empty-unverified');
     expect(r1.halted?.build).toBe(TEST_BUILD_ID);
-    // The first K-1 empties were per-conversation failures; the Kth halted.
-    expect(r1.failedThisRun.map((f) => f.reason))
-      .toEqual(Array(DETAIL_EMPTY_HALT_STREAK - 1).fill('detail-empty'));
+    // 🔴 W92d · The K-1 empties before the halt are parked, not dropped: this run
+    //    claims no `detail-empty` failure, and the K-th empty is the halt.
+    expect(r1.failedThisRun).toEqual([]);
     expect(be.calls.length, 'the run reached the body it was told had come back empty').toBeGreaterThan(1);
 
     // ---- and the second run is the first one's equal: it refuses, and asks nothing.

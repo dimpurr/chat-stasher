@@ -165,9 +165,11 @@ describe('W92b · an empty body is a per-conversation outcome, not a leg-wide ha
     // Nothing was archived, and the conversation behind the third empty was not fetched.
     expect(out.archivedThisRun).toEqual([]);
     expect(out.fullIds).toEqual([empty1, empty2, empty3]);
-    // The first two left pending with receipts; the third is the halt, so it stays.
-    expect(out.pending).toEqual([empty3, full1]);
-    expect(out.failures).toEqual(['detail-empty', 'detail-empty']);
+    // 🔴 W92d · All three empties are parked and still owed (no `detail-empty`
+    //    failure is claimed while the endpoint is unproven), and `full1` is still
+    //    pending behind them — the halt fired before it could be fetched.
+    expect([...out.pending].sort()).toEqual([empty1, empty2, empty3, full1].sort());
+    expect(out.failures).toEqual([]);
     expect(out.detailOutcomes).toEqual([
       { sessionId: empty1, outcome: 'detail-empty-unverified', complete: false },
       { sessionId: empty2, outcome: 'detail-empty-unverified', complete: false },

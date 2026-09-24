@@ -1178,6 +1178,24 @@ export type HaltExpiry = HaltExpiredBecause & {
 /** Why one run ended. Everything other than `halted` is a normal "gentle pause". */
 export type StopReason =
   | 'queue-empty'
+  /**
+   * 🔴 W92d · **The run issued no request because every conversation still owed is
+   * a parked empty body.**
+   *
+   * Why it must not be `queue-empty`: the queue is not empty — the ids are on disk
+   * under `pending`, and they are exactly the ones an empty endpoint produced. Why
+   * it must not be `halted`: nothing is wrong that a human has to look at yet; the
+   * leg is waiting for the one thing that settles the question, namely a later body
+   * that proves the endpoint still answers with real content (archive one and the
+   * parked ids are dropped with `recordEmpty`; the guard's own halt at
+   * `DETAIL_EMPTY_HALT_STREAK` is the other ending).
+   *
+   * `budget-exhausted` would be false (no budget ran out) and `daily-cap` likewise.
+   * Reads as a normal gentle pause, like the other non-`halted` values; it is only
+   * named so that "we fetched nothing" and "there was nothing to fetch" stay two
+   * different facts (CLAUDE.md invariant 1).
+   */
+  | 'detail-empty-parked'
   | 'budget-exhausted'
   | 'daily-cap'
   | 'aborted'
@@ -1324,6 +1342,59 @@ export interface BackfillState {
    * be remembered only through a momentary line in the UI.
    */
   detailOutcomes?: DetailOutcomeRecord[];
+  /**
+   * 🔴 W92d · **How many `detail-empty-unverified` bodies in a row this scope has
+   * seen since the last body that was settled as real content.**
+   *
+   * W92b made the counter a run-local `let` and the review (R92b §1) measured the
+   * loss that caused: a run that ends before the third empty — a transport throw, a
+   * rate limit, the daily cap, `shouldAbort`, or a next-build re-decision — starts
+   * the next run at 0, so an endpoint answering empty for **every** conversation is
+   * never recognised as the contract change C28's guard exists for, and the whole
+   * queue is written off one `detail-empty` at a time. Measured shape: 184 bodies,
+   * every second request throwing, drops two per run forever.
+   *
+   * So the counter lives here, on the platform-scope state, and `persist` writes it
+   * with the rest of the header. It is incremented **only** on
+   * `detail-empty-unverified`, and reset to 0 **only** when a body is settled as
+   * real content (archived) — not by a new tick or run, not by a transient halt,
+   * not by `detail-too-long` / `detail-tree-incomplete` / `detail-paged-unsupported`
+   * / `detail-empty-confirmed`, and not by a new build's re-decision.
+   * `DETAIL_EMPTY_HALT_STREAK` consecutive values halt the leg with
+   * `detail-empty-unverified` and every empty id still in `pending`.
+   *
+   * Optional: a state written before W92d has no such field and reads back as 0,
+   * byte-identical to W92b, with no version bump and no progress invalidated.
+   */
+  emptyStreak?: number;
+  /**
+   * 🔴 W92d · **The ids parked because their body came back empty and nothing has
+   * yet proven the endpoint works.**
+   *
+   * An empty id is no longer dropped on sight (W92b did that, and R92b §2 measured
+   * that a dropped id is never retried: `dropDebt` splices it out of `pending`,
+   * `recordFailure` keeps only a short id in a list the engine never reads, and the
+   * enumeration cursor is already complete so nothing re-adds it). Instead the id is
+   * **parked**: moved from the head of `pending` to the tail so FIFO moves on to the
+   * next conversation, and remembered here.
+   *
+   * The parked ids are dropped with `recordFailure('detail-empty')` and this list is
+   * cleared **only** when a later body in the same scope is settled as real content
+   * — that is the proof the endpoint still answers with conversations, and only then
+   * is "this conversation really is empty" a supportable conclusion. Until then a
+   * parked id that reaches the head again is skipped (moved to the tail again)
+   * without a request; when every pending id is parked the run stops with
+   * `detail-empty-parked`, issuing nothing. On the K-th consecutive empty the leg
+   * halts with every parked id still in `pending`.
+   *
+   * 🔴 A subset of `pending`, never a second copy of the debt set: an id here is
+   *    always still owed, and its position among the parked ids is not order. The
+   *    bound is small by construction — the streak halts at K, so at most K-1 ids
+   *    are parked at any moment.
+   *
+   * Optional: reads back as `[]` for a state written before W92d.
+   */
+  parkedEmpty?: string[];
   /** How many bodies have been fetched today (valid across restarts). */
   detailToday: DailyCounter;
   /**
@@ -1425,6 +1496,8 @@ export function initialState(platform: string, scope: string): BackfillState {
     pending: [],
     archived: [],
     detailOutcomes: [],
+    emptyStreak: 0,
+    parkedEmpty: [],
     detailToday: { day: '', count: 0 },
     lastFetchAt: { enumerate: null, detail: null },
     failures: [],
@@ -1467,6 +1540,10 @@ export interface BackfillHeader {
   /** How many conversations had been settled when this header was written. */
   archivedCount: number;
   detailOutcomes?: DetailOutcomeRecord[];
+  /** W92d · Same meaning and same compatibility rule as `BackfillState.emptyStreak`; spelled out here so a change to one is forced to be a change to the other. */
+  emptyStreak?: number;
+  /** W92d · Same meaning and same compatibility rule as `BackfillState.parkedEmpty`; spelled out here so a change to one is forced to be a change to the other. */
+  parkedEmpty?: string[];
   detailToday: DailyCounter;
   lastFetchAt?: { enumerate: number | null; detail: number | null };
   failures?: import('./failures').FailureEntry[];
@@ -1505,6 +1582,8 @@ export function headerOf(state: BackfillState): BackfillHeader {
     pendingCount: state.pending.length,
     archivedCount: state.archived.length,
     detailOutcomes: state.detailOutcomes,
+    emptyStreak: state.emptyStreak,
+    parkedEmpty: state.parkedEmpty,
     detailToday: state.detailToday,
     lastFetchAt: state.lastFetchAt,
     failures: state.failures,
@@ -1533,6 +1612,17 @@ export function stateFrom(header: BackfillHeader, pending: string[], archived: s
     pending,
     archived,
     detailOutcomes: header.detailOutcomes ?? [],
+    // 🔴 W92d · A state written before these fields reads back as 0 / [] ("nothing has
+    //    been observed here yet"), never as a missing value that arithmetic would
+    //    turn into NaN. The parked list is filtered to strings for the same reason
+    //    the failure list is validated on read: what sits at a storage key can be
+    //    anything, and an id of unknown shape is not an id to skip.
+    emptyStreak: typeof header.emptyStreak === 'number' && Number.isFinite(header.emptyStreak) && header.emptyStreak > 0
+      ? Math.floor(header.emptyStreak)
+      : 0,
+    parkedEmpty: Array.isArray(header.parkedEmpty)
+      ? header.parkedEmpty.filter((id): id is string => typeof id === 'string')
+      : [],
     detailToday: header.detailToday,
     lastFetchAt: header.lastFetchAt,
     failures: header.failures,

@@ -88,29 +88,31 @@ describe('C28 · the empty-body guardrail', () => {
     expect(DETAIL_EMPTY_HALT_STREAK).toBe(3);
   });
 
-  it('one empty body is a per-conversation outcome: the debt leaves pending with a receipt, nothing is archived, and the leg does not halt', async () => {
+  it('one empty body is parked, not written off: nothing is archived, no failure is claimed, and the leg does not halt', async () => {
     const { report, persisted } = await run('detail-empty-unverified', 'acct-c28-unverified');
 
-    // 🔴 W92b changed this from a halt to a per-conversation outcome: an
-    //    opened-but-never-sent conversation has nothing to back up, and halting on
-    //    it left the id at the head of pending (FIFO), so the next run halted on
-    //    the same id and the platform archived nothing.
+    // 🔴 W92d changed this from W92b. W92b dropped the id as a `detail-empty`
+    //    failure on sight, and R92b §2 measured that as irreversible: enumeration is
+    //    already complete, so nothing ever re-enqueues it. The id is now **parked** —
+    //    it stays in `pending`, no failure is claimed, and the run stops only because
+    //    every remaining id is parked (`detail-empty-parked`). It is written off with
+    //    a `detail-empty` receipt only once a real body proves the endpoint works.
     expect(report.halted).toBeNull();
-    expect(report.stopped).toBe('queue-empty');
+    expect(report.stopped).toBe('detail-empty-parked');
     expect(report.archivedThisRun).toEqual([]);
     expect(report.state.archived).toEqual([]);
-    // The debt is neither archived nor left owed: it left pending with a named
-    // failure receipt, so the failure list — not the archive — says what happened.
-    expect(report.state.pending).toEqual([]);
-    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-empty']);
-    expect(report.state.failures?.map((f) => f.reason)).toEqual(['detail-empty']);
+    // Still owed, and named as parked in the report's stop reason.
+    expect(report.state.pending).toEqual([ID]);
+    expect(persisted.pending).toEqual([ID]);
+    // No failure is claimed while the endpoint is unproven: "empty" is a question.
+    expect(report.failedThisRun).toEqual([]);
+    expect(report.state.failures ?? []).toEqual([]);
     // C28's receipt is still written, and `complete:false` is the durable half:
     // "we saw nothing" is not "there was nothing".
     expect(report.detailOutcomes).toEqual([
       { sessionId: ID, outcome: 'detail-empty-unverified', complete: false, at: expect.any(Number) },
     ]);
     expect(report.state.detailOutcomes).toEqual(report.detailOutcomes);
-    expect(persisted.pending).toEqual([]);
     expect(persisted.archived).toEqual([]);
     expect(persisted.detailOutcomes).toEqual(report.detailOutcomes);
   });
@@ -125,12 +127,12 @@ describe('C28 · the empty-body guardrail', () => {
     expect(report.halted?.reason).not.toBe('shape-changed');
     expect(report.archivedThisRun).toEqual([]);
     expect(report.state.archived).toEqual([]);
-    // The first K-1 empties left pending with receipts; the Kth is the halt, so it
-    // stays owed — the leg has stopped rather than written it off.
-    expect(report.failedThisRun.map((f) => f.reason))
-      .toEqual(Array(DETAIL_EMPTY_HALT_STREAK - 1).fill('detail-empty'));
-    expect(report.state.pending).toEqual([ID3]);
-    expect(persisted.pending).toEqual([ID3]);
+    // 🔴 W92d · The K-1 empties before the halt are **parked, not dropped**: no
+    //    `detail-empty` failure is claimed while the endpoint is unproven, and every
+    //    empty id is still owed. R92b §1 measured the old write-off as permanent.
+    expect(report.failedThisRun).toEqual([]);
+    expect([...report.state.pending].sort()).toEqual([...ids].sort());
+    expect([...persisted.pending].sort()).toEqual([...ids].sort());
     expect(report.detailOutcomes).toEqual([
       { sessionId: ID, outcome: 'detail-empty-unverified', complete: false, at: expect.any(Number) },
       { sessionId: ID2, outcome: 'detail-empty-unverified', complete: false, at: expect.any(Number) },

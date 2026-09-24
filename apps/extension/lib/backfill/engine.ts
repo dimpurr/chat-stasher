@@ -733,6 +733,48 @@ async function recoverAndSay(
     + ' it will be listed again and its body fetched a second time';
 }
 
+/**
+ * 🔴 W92d · **Park an empty body's id instead of writing it off.**
+ *
+ * The id moves from the head of `pending` to the tail (so the FIFO moves on to the
+ * next conversation) and is remembered in `state.parkedEmpty`. It is **still owed**:
+ * it leaves the debt set only when a later real body proves the endpoint works (then
+ * it is dropped with a `detail-empty` receipt) or when the guard halts at
+ * `DETAIL_EMPTY_HALT_STREAK`, where every parked id stays in `pending`.
+ *
+ * 🔴 Why this replaced W92b's immediate `dropDebt`: R92b §2 measured that a dropped id
+ *    is never retried — the enumeration cursor is already `complete`, so nothing
+ *    re-enqueues it, and `recordFailure` keeps only a short id in a list the engine
+ *    never reads. A single empty conversation is indistinguishable from the first
+ *    body of a changed endpoint, so writing it off on sight is the exact loss this
+ *    fix-back exists to stop.
+ */
+function parkEmpty(state: BackfillState, id: string): void {
+  const at = state.pending.indexOf(id);
+  if (at >= 0) {
+    state.pending.splice(at, 1);
+    state.pending.push(id);
+  }
+  const parked = state.parkedEmpty ?? (state.parkedEmpty = []);
+  if (!parked.includes(id)) parked.push(id);
+}
+
+/**
+ * Move a parked id to the tail again, issuing **no request**. Reached when a parked id
+ * comes round to the head before any proof; it is the FIFO turning over, not a fetch.
+ */
+function rotatePendingToTail(state: BackfillState, id: string): void {
+  const at = state.pending.indexOf(id);
+  if (at < 0) return;
+  state.pending.splice(at, 1);
+  state.pending.push(id);
+}
+
+/** Is this id parked (an empty body waiting for either proof or the halt)? */
+function isParkedEmpty(state: BackfillState, id: string): boolean {
+  return (state.parkedEmpty ?? []).includes(id);
+}
+
 export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const clock = opts.clock ?? systemClock;
   const pace = opts.pace ?? DEFAULT_PACE;
@@ -855,6 +897,35 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       : { sessionId: id, outcome, complete: true, at };
     detailOutcomes.push(entry);
     return entry;
+  };
+
+  /**
+   * 🔴 W92d · **The proof arrived: a real body was archived in this scope, so the
+   * parked empties are finally written off and the streak resets.**
+   *
+   * This is the only place `detail-empty` becomes a conclusion rather than a parked
+   * question, and the only place `state.emptyStreak` goes back to 0. The ids are
+   * dropped with a receipt (no retry, the product decision `failures.ts` records),
+   * and `state.parkedEmpty` is cleared in the same mutation so the persisted header
+   * cannot hold ids that are no longer parked.
+   *
+   * 🔴 The request that produced the reply is counted once already; this function
+   *    must **not** touch `detailToday.count` — dropping a parked id settles no new
+   *    request, and counting one would open the daily-cap back door W16 closed.
+   */
+  const settleParkedEmpties = (at: number): void => {
+    const parked = state.parkedEmpty ?? [];
+    for (const parkedId of parked) {
+      // Guard rather than assume: `parkedEmpty` is a persisted subset of `pending`,
+      // but a hand-edited or half-migrated header must not make this drop an id that
+      // is not owed (there would be nothing to drop, and the receipt would name a
+      // conversation this run never saw).
+      if (!state.pending.includes(parkedId)) continue;
+      dropDebt(state, parkedId);
+      failedThisRun.push(recordFailure(state, { id: parkedId, reason: 'detail-empty', at }));
+    }
+    state.parkedEmpty = [];
+    state.emptyStreak = 0;
   };
 
   /**
@@ -1933,16 +2004,25 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const budget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
 
   /**
-   * 🔴 W92b · **How many detail bodies in a row have come back empty in this run.**
+   * 🔴 W92d · **The empty-body streak is persisted, not run-local.**
    *
-   * Run-local on purpose: C28's guard is about one wire answering empty right now,
-   * and a restart is a new observation window (the persisted receipts and failures
-   * are the durable trace, not this counter). See `DETAIL_EMPTY_HALT_STREAK` for
-   * the choice of K. It is incremented only on `detail-empty-unverified` and is
-   * reset to 0 the moment any body is not one — including a confirmed-empty body,
-   * whose whole meaning is "this much emptiness is legitimate".
+   * W92b kept it in a `let` for the life of one `runBackfill`, and R92b §1 measured
+   * the loss: an interleaved transient halt (transport-error / rate-limited /
+   * daily-cap / `shouldAbort`), or a per-conversation outcome between empties, or a
+   * next-build re-decision landing before the K-th empty, discards the count — so an
+   * endpoint answering empty for **every** conversation is never recognised and the
+   * whole queue is written off `detail-empty` one at a time. The count now lives on
+   * the platform-scope state (`state.emptyStreak`), is written by the same `persist`
+   * the empty branch already calls, and survives runs, ticks, worker restarts and
+   * re-decisions.
+   *
+   * Incremented **only** on `detail-empty-unverified`; reset to 0 **only** when a
+   * body is settled as real content (`settleParkedEmpties`). `detail-tree-incomplete`
+   * and `detail-paged-unsupported` are per-conversation facts that used to zero the
+   * counter (R92b §1's second split) and no longer do. A legacy state without the
+   * field reads as 0 (`stateFrom`), so no version bump and no progress invalidated.
    */
-  let emptyBodyStreak = 0;
+  const bumpEmptyStreak = (): number => (state.emptyStreak = (state.emptyStreak ?? 0) + 1);
 
   while (state.pending.length > 0) {
     if (opts.shouldAbort?.()) return finish('aborted');
@@ -1951,6 +2031,33 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
     const id = nextDebt(state);
     if (id === null) break;
+
+    /**
+     * 🔴 W92d · **A parked empty id is never fetched twice before proof.**
+     *
+     * The id reached the head again (either it was parked earlier in this run and
+     * the FIFO has come back round to it, or it was parked by a previous run and the
+     * debt store restored the original order). Two outcomes, both issuing **no
+     * request**:
+     *
+     *  · there is at least one un-parked id behind it ⇒ rotate it to the tail and go
+     *    on, so the proof a real body would give is what gets looked for first;
+     *  · every remaining pending id is parked ⇒ stop with the named non-halting
+     *    `detail-empty-parked`. There is nothing this run can do: the only thing that
+     *    settles these ids is a real body, and there is none left to fetch.
+     *
+     * It is placed before the pacer gate and before the pre-fetch `persist` so that a
+     * skip is genuinely "no request" — the review's objection was that a parked id
+     * fetched again would be counted (and paced) as fresh work.
+     */
+    if (isParkedEmpty(state, id)) {
+      const parked = new Set(state.parkedEmpty ?? []);
+      if (state.pending.every((pendingId) => parked.has(pendingId))) {
+        return finish('detail-empty-parked');
+      }
+      rotatePendingToTail(state, id);
+      continue;
+    }
 
     await detailPacer.gate();
     // 🔴 The moment is persisted **before the request goes out**. Body-fetching is
@@ -2119,6 +2226,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         step = pages.nextPage(next.text, id);
       }
       if (tooLong) {
+        // 🔴 W92d · This `continue` is above the empty-body branch, so it is also
+        //    above the line that used to zero the streak. It must **not** zero it:
+        //    "this one conversation is longer than this leg fetches" says nothing
+        //    about an endpoint that is answering empty for everything, and R92b §1
+        //    named `detail-too-long` as one of the outcomes the old run-local counter
+        //    was wrongly reset by. The debt leaves pending with its own receipt; the
+        //    empty streak and the parked empties are untouched.
         dropDebt(state, id);
         failedThisRun.push(
           recordFailure(state, { id, reason: 'detail-too-long', at: clock.now() }),
@@ -2174,24 +2288,32 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    platform's behaviour moves. Grok is the first production plan to declare
      *    one, and it exists for exactly the case this hook describes.
      *
-     * 🔴 W92b · **One empty body is a per-conversation outcome, not a leg-wide stop.**
-     *    C28's first version halted the whole leg the moment one body came back
-     *    empty, which left the debt at the head of pending (FIFO) and made every
-     *    later run halt on the same conversation — measured on Claude, where an
-     *    opened-but-never-sent conversation (HTTP 200, `chat_messages: []`) stopped
-     *    the platform from archiving anything (W92 §Task 5). So a single empty body
-     *    takes the same shape as `detail-paged-unsupported` below: the plan's answer
-     *    is written down as a receipt (`complete: false`), the debt leaves pending
-     *    with a `detail-empty` failure receipt, and the leg moves to the next
-     *    conversation. An empty conversation has nothing to back up; if the user
-     *    later writes in it, live capture takes it.
+     * 🔴 W92d · **One empty body is a per-conversation question that is parked, not
+     *    answered, and never written off on sight.**
      *
-     *    🔴 C28's original intent is kept by the streak: a whole endpoint answering
-     *       empty is a contract change, and `DETAIL_EMPTY_HALT_STREAK` consecutive
-     *       `detail-empty-unverified` bodies in one run still halt the leg with the
-     *       reason C28 introduced. Every other outcome resets the streak (the line
-     *       just below the branch), so one legitimate empty between two real bodies
-     *       cannot accumulate.
+     *    C28's first version halted the whole leg on one empty body and left the id
+     *    at the head of pending, so every later run halted on the same conversation
+     *    (measured on Claude: an opened-but-never-sent conversation, HTTP 200 with
+     *    `chat_messages: []`, stopped the platform from archiving anything — W92
+     *    §Task 5). W92b swung the other way and dropped the id immediately, and R92b
+     *    measured that as irreversible: nothing re-enqueues it (enumeration is
+     *    complete), so a changed endpoint answering empty for **every** conversation
+     *    writes the whole queue off, two ids per run.
+     *
+     *    W92d keeps the intent of both. The plan's answer still goes into the ledger
+     *    as a receipt (`complete:false`), but the id is **parked** — moved to the
+     *    tail of pending and remembered in `state.parkedEmpty` — and **no**
+     *    `detail-empty` failure is written yet. It is dropped with that receipt only
+     *    once a later body in the same scope is archived as real content, the proof
+     *    the endpoint still answers with conversations. If the user later writes in
+     *    an empty conversation, live capture still takes it.
+     *
+     *    🔴 C28's original intent is kept by a **persisted** streak: a whole endpoint
+     *       answering empty is a contract change, and `DETAIL_EMPTY_HALT_STREAK`
+     *       consecutive `detail-empty-unverified` bodies — counted across runs,
+     *       transient halts and next-build re-decisions — halt the leg with the
+     *       reason C28 introduced, leaving every parked id in `pending`. Only a real
+     *       body archived resets the streak (see `settleParkedEmpties`).
      *
      * 🔴 W22 added a third answer, handled in its own branch just below:
      *    'detail-paged-unsupported' — real content that the plan knows is
@@ -2203,30 +2325,38 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     if (detailParsed?.ok === true && detailParsed.outcome === 'detail-empty-unverified') {
       const entry = recordDetailOutcome(id, detailParsed.outcome, clock.now());
-      emptyBodyStreak += 1;
-      if (emptyBodyStreak >= DETAIL_EMPTY_HALT_STREAK) {
+      const streak = bumpEmptyStreak();
+      // The request really did go out, whether it leads to the halt or to a park, so
+      // it counts against the day's quota before either branch persists.
+      state.detailToday.count += 1;
+      if (streak >= DETAIL_EMPTY_HALT_STREAK) {
+        // 🔴 The K-th id is deliberately **not** parked: it stays at the head of
+        //    pending so a later build's re-decision re-fetches it, sees the same
+        //    empty body and lets the streak keep accumulating instead of the guard
+        //    quietly going silent because every id was already skipped.
+        await persist(state);
         return halt(
           'detail-empty-unverified',
           `detail returned HTTP ${deliveredStatus} with empty content for a pending`
-          + ` conversation, ${emptyBodyStreak} in a row this run; recorded ${entry.outcome}`
-          + ' with complete=false',
+          + ` conversation, ${streak} in a row since the last real body (across runs and`
+          + ` transient stops); recorded ${entry.outcome} with complete=false`,
         );
       }
-      dropDebt(state, id);
-      failedThisRun.push(recordFailure(state, { id, reason: 'detail-empty', at: clock.now() }));
-      state.detailToday.count += 1;
+      parkEmpty(state, id);
       await persist(state);
       console.warn(
         '[chat-stasher] backfill: this conversation\'s body came back empty'
-        + ` (${emptyBodyStreak} in a row this run, still below the ${DETAIL_EMPTY_HALT_STREAK}`
-        + ' that would look like a contract change); nothing was stored and the failure list names it',
+        + ` (${streak} since the last real body, still below the ${DETAIL_EMPTY_HALT_STREAK}`
+        + ' that would look like a contract change); the id is parked — it stays owed, and'
+        + ' is written off only once a later real body proves the endpoint still works',
       );
       continue;
     }
-    // 🔴 W92b · Any body that is not an unverified empty breaks the streak: real
-    //    content, a confirmed-empty body, and the two named "incomplete" outcomes
-    //    below all mean the wire is answering with something it recognises.
-    emptyBodyStreak = 0;
+    // 🔴 W92d · **Nothing below resets the streak.** A real body resets it where it
+    //    is archived (`settleParkedEmpties`); a confirmed-empty body, a too-long
+    //    body above, and the two named "incomplete" outcomes below are all
+    //    per-conversation facts and must not launder an endpoint that is answering
+    //    empty for everything back into a clean slate (R92b §1's second split).
     /**
      * 🔴 W22 · **A real body that is explicitly incomplete.**
      *
@@ -2363,6 +2493,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (verdict.ok) {
       settleDebt(state, id);
       archivedThisRun.push(id);
+      // 🔴 W92d · **A real body archived is proof the endpoint works, and only that
+      //    settles the parked empties.** The scope has just answered with a
+      //    conversation, so "these earlier bodies really were empty" is now
+      //    supportable: the parked ids leave pending with a `detail-empty` receipt
+      //    and the streak goes back to 0. Any other outcome leaves both untouched.
+      settleParkedEmpties(clock.now());
     } else {
       // 🔴 Taken out of pending but **not** put into archived: no retry is a product
       //    decision, and pretending it was archived would make the progress numerator

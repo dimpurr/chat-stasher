@@ -174,9 +174,21 @@ export type FailureReason =
    *
    * 🔴 What it is **not** used for: a whole endpoint answering empty for many
    *    conversations in a row. That is the contract change C28 warned about, and
-   *    the engine still halts the leg with `detail-empty-unverified` once
-   *    `DETAIL_EMPTY_HALT_STREAK` consecutive bodies are empty (engine.ts). So this
-   *    code appears at most `K - 1` times per run before the halt takes over.
+   *    under W92d it does **not** produce this code at all. Each empty id is parked
+   *    (kept in `pending`, remembered in `BackfillState.parkedEmpty`), the persisted
+   *    streak reaches `DETAIL_EMPTY_HALT_STREAK`, and the leg halts with
+   *    `detail-empty-unverified` leaving every parked id owed — no write-off while
+   *    the endpoint is unproven.
+   *
+   *    🔴 There is deliberately **no** "at most K-1 per run" bound, and W92b's
+   *       comment claiming one was wrong: that counted one call's empties before the
+   *       K-th. This code is written only when a later body in the same scope is
+   *       **archived as real content** — the proof the endpoint works — and then each
+   *       parked id is dropped with this receipt in one go. A run that alternates an
+   *       empty with a real body can therefore record this code once per real body,
+   *       with no K-1 ceiling. The bound that matters is scoped, not per-run: this
+   *       code is never written without a body actually archived in this scope
+   *       (`settleParkedEmpties`, engine.ts).
    */
   | 'detail-empty';
 

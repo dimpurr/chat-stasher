@@ -639,7 +639,7 @@ describe('W21-6 · one conversation, two requests, one body', () => {
     expect(be.calls).toHaveLength(2);
   });
 
-  it('one empty content answer is a per-conversation failure, not an empty conversation and not a leg halt', async () => {
+  it('one empty content answer is parked, not written off: nothing reached the sink and the leg does not halt', async () => {
     const clock = fakeClock();
     const be = backend(clock, {
       [GROK_LIST_PATH]: listPage([ID]),
@@ -653,24 +653,23 @@ describe('W21-6 · one conversation, two requests, one body', () => {
     });
 
     /**
-     * 🔴 W92b · **This assertion set changed, and the change is C28's, not a
-     *    weakening of it.** One empty body used to halt the leg; that left the debt
-     *    at the head of pending (FIFO), so every later run halted on the same
-     *    conversation and the platform archived nothing. Now the single empty body
-     *    is the per-conversation outcome `detail-empty`: the debt leaves pending
-     *    with a receipt, nothing is archived, and the leg carries on. C28's concern
-     *    (a whole endpoint answering empty) is pinned separately, by the
+     * 🔴 W92d · **This assertion set changed again, and it is C28's contract, not a
+     *    weakening of it.** One empty body used to halt the leg; W92b then dropped
+     *    the id as a `detail-empty` failure, which R92b §2 measured as irreversible.
+     *    The id is now parked: it stays owed in `pending`, no failure is claimed, and
+     *    the run stops as `detail-empty-parked` because it is the only id left.
+     *    C28's concern (a whole endpoint answering empty) is pinned by the
      *    K-consecutive test just below.
      */
     expect(report.halted).toBeNull();
-    expect(report.stopped).toBe('queue-empty');
+    expect(report.stopped).toBe('detail-empty-parked');
     // Nothing reached the sink: an empty body may not be handed on as a conversation.
     expect(captured).toHaveLength(0);
     expect(report.archivedThisRun).toEqual([]);
     expect(report.state.archived).toEqual([]);
-    // The debt left pending with a named receipt — neither archived nor still owed.
-    expect(report.state.pending).toEqual([]);
-    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-empty']);
+    // The id is still owed, and no failure is claimed while the endpoint is unproven.
+    expect(report.state.pending).toEqual([ID]);
+    expect(report.failedThisRun).toEqual([]);
     // The receipt is the durable half: `complete:false` is the difference between
     // "we saw nothing" and "there was nothing".
     expect(report.detailOutcomes).toEqual([
@@ -693,11 +692,10 @@ describe('W21-6 · one conversation, two requests, one body', () => {
     expect(report.stopped).toBe('halted');
     expect(report.halted?.reason).toBe('detail-empty-unverified');
     expect(report.archivedThisRun).toEqual([]);
-    // The first K-1 empties left pending with receipts; the Kth is the halt, so it
-    // stays owed rather than being written off.
-    expect(report.failedThisRun.map((f) => f.reason))
-      .toEqual(Array(DETAIL_EMPTY_HALT_STREAK - 1).fill('detail-empty'));
-    expect(report.state.pending).toEqual([ID3]);
+    // 🔴 W92d · The K-1 empties before the halt are parked, not dropped: no
+    //    `detail-empty` failure is claimed and every empty id is still owed.
+    expect(report.failedThisRun).toEqual([]);
+    expect([...report.state.pending].sort()).toEqual([...ids].sort());
     expect(report.detailOutcomes.map((d) => d.sessionId)).toEqual(ids);
   });
 
