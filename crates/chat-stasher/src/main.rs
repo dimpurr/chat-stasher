@@ -885,6 +885,9 @@ enum Command {
     /// rebuilt, and a new complete snapshot is appended. Existing snapshots
     /// remain immutable. No snapshot is written until the scan and every
     /// session restore finish, and only the named machine partition is pushed.
+    /// The rebuild is safe to re-run, but each run starts over and is not
+    /// resumable. A same-machine snapshot found before publication restarts the
+    /// rebuild so the appended snapshot cannot hide that newer session.
     ///
     /// The harness label is inferred from the session directory name: the
     /// canonical archived ids are `<source>.<machine>.<native-id>`, so the
@@ -1901,6 +1904,10 @@ fn redact_activity_index_paths(
     safe
 }
 
+fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
+    redact_activity_index_paths(message, &StoreConfig::default(), Some(stage))
+}
+
 /// Rebuild the activity index for one machine partition (ADR-017).
 ///
 /// Reads every sealed shard of every session under
@@ -2190,11 +2197,17 @@ fn cmd_activity_index(
             ExitCode::SUCCESS
         }
         Err(ActivityIndexError::Read(message)) => {
-            eprintln!("activity-index: {message}");
+            eprintln!(
+                "activity-index: {}",
+                redact_local_activity_index_message(&message, stage)
+            );
             ExitCode::from(3)
         }
         Err(ActivityIndexError::Write(message)) => {
-            eprintln!("activity-index: {message}");
+            eprintln!(
+                "activity-index: {}",
+                redact_local_activity_index_message(&message, stage)
+            );
             ExitCode::from(1)
         }
     }
@@ -2210,135 +2223,199 @@ fn rebuild_destination_partition(
     machine: &str,
     mk: &MasterKey,
 ) -> Result<(usize, store::PushSummary), ActivityIndexError> {
+    rebuild_destination_partition_with_hook(workspace, cfg, machine, mk, || {})
+}
+
+fn rebuild_destination_partition_with_hook<F>(
+    workspace: &Path,
+    cfg: &StoreConfig,
+    machine: &str,
+    mk: &MasterKey,
+    mut after_snapshot_list: F,
+) -> Result<(usize, store::PushSummary), ActivityIndexError>
+where
+    F: FnMut(),
+{
     if !workspace.is_dir() {
         return Err(ActivityIndexError::Read(
             "workspace must be an existing directory".into(),
         ));
     }
-    let temporary = tempfile::Builder::new()
-        .prefix("activity-index-rebuild-")
-        .tempdir_in(workspace)
-        .map_err(|e| ActivityIndexError::Write(format!("create temporary stage: {e}")))?;
 
+    loop {
+        let temporary = tempfile::Builder::new()
+            .prefix("activity-index-rebuild-")
+            .tempdir_in(workspace)
+            .map_err(|e| ActivityIndexError::Write(format!("create temporary stage: {e}")))?;
+        let backends = BackupStore::for_metadata_query(cfg.clone())
+            .backends()
+            .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
+        let repo = Repository::new(&cfg.repository_options(), &backends)
+            .and_then(|repo| repo.open(&Credentials::Masterkey(mk.clone())))
+            .and_then(|repo| repo.to_indexed())
+            .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
+        let mut snapshots = repo
+            .get_all_snapshots()
+            .map_err(|e| ActivityIndexError::Read(format!("list destination snapshots: {e:#}")))?;
+        snapshots.retain(|snapshot| snapshot.hostname == machine);
+        snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.time.clone()));
+        if snapshots.is_empty() {
+            return Err(ActivityIndexError::Read(
+                "the named machine has no archived snapshots; no snapshot was written".into(),
+            ));
+        }
+        let read_snapshot_ids: BTreeSet<String> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.id.to_hex().as_str().to_string())
+            .collect();
+        after_snapshot_list();
+
+        let mut seen_sessions = BTreeSet::new();
+        let mut sessions = 0usize;
+        for snapshot in &snapshots {
+            let root = repo
+                .node_from_snapshot_and_path(snapshot, "")
+                .map_err(|e| ActivityIndexError::Read(format!("read snapshot tree: {e:#}")))?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())
+                .and_then(|entries| entries.collect::<rustic_core::RusticResult<Vec<_>>>())
+                .map_err(|e| ActivityIndexError::Read(format!("list snapshot files: {e:#}")))?;
+            let mut shards: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
+            for (index, (path, node)) in entries.iter().enumerate() {
+                if node.node_type != NodeType::File {
+                    continue;
+                }
+                if let Some((found_machine, session, shard)) = readback::bucket_shard_path(path) {
+                    if found_machine == machine && !seen_sessions.contains(&session) {
+                        shards.entry(session).or_default().push((shard, index));
+                    }
+                }
+            }
+            for (session, mut session_shards) in shards {
+                if !seen_sessions.insert(session.clone()) {
+                    continue;
+                }
+                session_shards.sort_by(|(a, _), (b, _)| a.cmp(b));
+                for (_, index) in session_shards {
+                    let mut shard_bytes = Vec::new();
+                    repo.dump(&entries[index].1, &mut shard_bytes)
+                        .map_err(|e| {
+                            ActivityIndexError::Read(format!("read archived shard: {e:#}"))
+                        })?;
+                    store::write_sealed_shard_raw_with_cap(
+                        store::StageWriter::Restore,
+                        temporary.path(),
+                        machine,
+                        &session,
+                        &shard_bytes,
+                        store::DEFAULT_SHARD_BUCKET_CAP,
+                    )
+                    .map_err(|e| {
+                        ActivityIndexError::Write(format!("restore archived shard: {e:#}"))
+                    })?;
+                }
+                sessions += 1;
+            }
+        }
+        if sessions == 0 {
+            return Err(ActivityIndexError::Read(
+                "the named machine has no archived sessions; no snapshot was written".into(),
+            ));
+        }
+
+        // Carry the newest copy of every machine metadata path across snapshots.
+        // The activity index is rebuilt below and writer.json is refreshed.
+        let mut copied_metadata = BTreeSet::new();
+        for snapshot in &snapshots {
+            let root = repo
+                .node_from_snapshot_and_path(snapshot, "")
+                .map_err(|e| {
+                    ActivityIndexError::Read(format!("read snapshot metadata tree: {e:#}"))
+                })?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())
+                .and_then(|entries| entries.collect::<rustic_core::RusticResult<Vec<_>>>())
+                .map_err(|e| ActivityIndexError::Read(format!("list snapshot metadata: {e:#}")))?;
+            for (path, node) in entries {
+                if node.node_type != NodeType::File {
+                    continue;
+                }
+                let components: Vec<_> = path.components().collect();
+                let Some(meta_at) = components
+                    .iter()
+                    .position(|part| part.as_os_str() == "meta")
+                else {
+                    continue;
+                };
+                if components
+                    .get(meta_at + 1)
+                    .is_none_or(|part| part.as_os_str() != machine)
+                {
+                    continue;
+                }
+                let tail: PathBuf = components[meta_at + 1..].iter().collect();
+                if !copied_metadata.insert(tail.clone()) {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                repo.dump(&node, &mut bytes).map_err(|e| {
+                    ActivityIndexError::Read(format!("read machine metadata: {e:#}"))
+                })?;
+                let target = temporary.path().join("meta").join(tail);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        ActivityIndexError::Write(format!("create metadata directory: {e}"))
+                    })?;
+                }
+                fs::write(target, bytes).map_err(|e| {
+                    ActivityIndexError::Write(format!("write machine metadata: {e}"))
+                })?;
+            }
+        }
+        rebuild_activity_index(temporary.path(), machine, false)?;
+        record_writer_version(temporary.path(), machine)
+            .map_err(|e| ActivityIndexError::Write(format!("record writer version: {e:#}")))?;
+
+        // A same-machine push can land while the rebuild restores shards. Recheck
+        // immediately before publishing; if the read set is stale, throw this
+        // temporary stage away and rebuild from the new snapshot set. There is no
+        // existing local interprocess lock shared by `push` and `run-once` to take.
+        let latest_snapshot_ids = list_destination_machine_snapshot_ids(cfg, mk, machine)?;
+        let has_newer_snapshot = latest_snapshot_ids
+            .iter()
+            .any(|snapshot_id| !read_snapshot_ids.contains(snapshot_id));
+        if has_newer_snapshot {
+            continue;
+        }
+        let push = BackupStore::new(cfg.clone(), machine.to_string())
+            .push(temporary.path(), mk)
+            .map_err(|e| ActivityIndexError::Write(format!("push repaired snapshot: {e:#}")))?;
+        return Ok((sessions, push));
+    }
+}
+
+fn list_destination_machine_snapshot_ids(
+    cfg: &StoreConfig,
+    mk: &MasterKey,
+    machine: &str,
+) -> Result<BTreeSet<String>, ActivityIndexError> {
     let backends = BackupStore::for_metadata_query(cfg.clone())
         .backends()
         .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
     let repo = Repository::new(&cfg.repository_options(), &backends)
         .and_then(|repo| repo.open(&Credentials::Masterkey(mk.clone())))
         .and_then(|repo| repo.to_indexed())
-        .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
-    let mut snapshots = repo
+        .map_err(|e| {
+            ActivityIndexError::Read(format!("open destination for snapshot recheck: {e:#}"))
+        })?;
+    let snapshots = repo
         .get_all_snapshots()
-        .map_err(|e| ActivityIndexError::Read(format!("list destination snapshots: {e:#}")))?;
-    snapshots.retain(|snapshot| snapshot.hostname == machine);
-    snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.time.clone()));
-    if snapshots.is_empty() {
-        return Err(ActivityIndexError::Read(
-            "the named machine has no archived snapshots; no snapshot was written".into(),
-        ));
-    }
-
-    let mut seen_sessions = BTreeSet::new();
-    let mut sessions = 0usize;
-    for snapshot in &snapshots {
-        let root = repo
-            .node_from_snapshot_and_path(snapshot, "")
-            .map_err(|e| ActivityIndexError::Read(format!("read snapshot tree: {e:#}")))?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())
-            .and_then(|entries| entries.collect::<rustic_core::RusticResult<Vec<_>>>())
-            .map_err(|e| ActivityIndexError::Read(format!("list snapshot files: {e:#}")))?;
-        let mut shards: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
-        for (index, (path, node)) in entries.iter().enumerate() {
-            if node.node_type != NodeType::File {
-                continue;
-            }
-            if let Some((found_machine, session, shard)) = readback::bucket_shard_path(path) {
-                if found_machine == machine && !seen_sessions.contains(&session) {
-                    shards.entry(session).or_default().push((shard, index));
-                }
-            }
-        }
-        for (session, mut session_shards) in shards {
-            if !seen_sessions.insert(session.clone()) {
-                continue;
-            }
-            session_shards.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for (_, index) in session_shards {
-                let mut shard_bytes = Vec::new();
-                repo.dump(&entries[index].1, &mut shard_bytes)
-                    .map_err(|e| ActivityIndexError::Read(format!("read archived shard: {e:#}")))?;
-                store::write_sealed_shard_raw_with_cap(
-                    store::StageWriter::Restore,
-                    temporary.path(),
-                    machine,
-                    &session,
-                    &shard_bytes,
-                    store::DEFAULT_SHARD_BUCKET_CAP,
-                )
-                .map_err(|e| ActivityIndexError::Write(format!("restore archived shard: {e:#}")))?;
-            }
-            sessions += 1;
-        }
-    }
-    if sessions == 0 {
-        return Err(ActivityIndexError::Read(
-            "the named machine has no archived sessions; no snapshot was written".into(),
-        ));
-    }
-
-    // Carry the newest copy of every machine metadata path across snapshots.
-    // The activity index is rebuilt below and writer.json is refreshed.
-    let mut copied_metadata = BTreeSet::new();
-    for snapshot in &snapshots {
-        let root = repo
-            .node_from_snapshot_and_path(snapshot, "")
-            .map_err(|e| ActivityIndexError::Read(format!("read snapshot metadata tree: {e:#}")))?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())
-            .and_then(|entries| entries.collect::<rustic_core::RusticResult<Vec<_>>>())
-            .map_err(|e| ActivityIndexError::Read(format!("list snapshot metadata: {e:#}")))?;
-        for (path, node) in entries {
-            if node.node_type != NodeType::File {
-                continue;
-            }
-            let components: Vec<_> = path.components().collect();
-            let Some(meta_at) = components
-                .iter()
-                .position(|part| part.as_os_str() == "meta")
-            else {
-                continue;
-            };
-            if components
-                .get(meta_at + 1)
-                .is_none_or(|part| part.as_os_str() != machine)
-            {
-                continue;
-            }
-            let tail: PathBuf = components[meta_at + 1..].iter().collect();
-            if !copied_metadata.insert(tail.clone()) {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            repo.dump(&node, &mut bytes)
-                .map_err(|e| ActivityIndexError::Read(format!("read machine metadata: {e:#}")))?;
-            let target = temporary.path().join("meta").join(tail);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    ActivityIndexError::Write(format!("create metadata directory: {e}"))
-                })?;
-            }
-            fs::write(target, bytes)
-                .map_err(|e| ActivityIndexError::Write(format!("write machine metadata: {e}")))?;
-        }
-    }
-    rebuild_activity_index(temporary.path(), machine, false)?;
-    record_writer_version(temporary.path(), machine)
-        .map_err(|e| ActivityIndexError::Write(format!("record writer version: {e:#}")))?;
-    let push = BackupStore::new(cfg.clone(), machine.to_string())
-        .push(temporary.path(), mk)
-        .map_err(|e| ActivityIndexError::Write(format!("push repaired snapshot: {e:#}")))?;
-    Ok((sessions, push))
+        .map_err(|e| ActivityIndexError::Read(format!("re-list destination snapshots: {e:#}")))?;
+    Ok(snapshots
+        .iter()
+        .filter(|snapshot| snapshot.hostname == machine)
+        .map(|snapshot| snapshot.id.to_hex().as_str().to_string())
+        .collect())
 }
 
 /// Store the writer version in the stage so a successful push carries it in
@@ -6212,6 +6289,18 @@ mod decision_surface_tests {
     }
 
     #[test]
+    fn local_stage_rebuild_error_redacts_the_stage_shard_path() {
+        let stage = PathBuf::from("/home/private/stage");
+        let error = "/home/private/stage/sessions/machine/session/shard.jsonl: permission denied";
+        let safe = redact_local_activity_index_message(error, &stage);
+        assert!(
+            !safe.contains("/home/private"),
+            "message exposed a home path"
+        );
+        assert!(safe.contains("<private path>"));
+    }
+
+    #[test]
     fn destination_rebuild_unions_old_sessions_and_preserves_machine_metadata() {
         let dir = tempfile::TempDir::new().unwrap();
         let repo_path = dir.path().join("repo");
@@ -6323,6 +6412,36 @@ mod decision_surface_tests {
             Some(env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(versions[0].behind_newest_writer, Some(false));
+
+        let concurrent_session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09767";
+        let concurrent_stage = dir.path().join("source-stage-concurrent");
+        write_shard(
+            &concurrent_stage,
+            machine,
+            concurrent_session,
+            &[cc_line("2025-01-15T14:56:18Z")],
+        );
+        let mut landed = false;
+        let (sessions, _) =
+            rebuild_destination_partition_with_hook(&workspace, &cfg, machine, &mk, || {
+                if !landed {
+                    landed = true;
+                    BackupStore::new(cfg.clone(), machine.to_string())
+                        .push(&concurrent_stage, &mk)
+                        .unwrap();
+                }
+            })
+            .unwrap();
+        assert!(landed, "the simulated concurrent push must run");
+        assert_eq!(sessions, 3);
+        let after_race = chat_stasher::search::search_sessions(
+            &BackupStore::for_metadata_query(cfg.clone()),
+            &mk,
+            &selector,
+        )
+        .unwrap();
+        assert!(after_race.complete());
+        assert_eq!(after_race.hits.len(), 3);
     }
 
     #[test]

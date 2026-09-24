@@ -401,7 +401,7 @@ crates/chat-stasher/src/inbox.rs:853-881  81d263fdddc2  lines=29
   <- docs/install.md:310, docs/threat-model.md:393  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- README.md:3, docs/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:130-1044  29cb5e3905ec  lines=915
+crates/chat-stasher/src/main.rs:130-1044  a59c89741fc5  lines=915
   <- README.md:121, docs/install.md:568, docs/privacy.md:631, docs/threat-model.md:533  :: /// Subcommands. `push`/`read` are backed by the BackupStore
 crates/chat-stasher/src/main.rs:136-137  6f7da3119197  lines=2
   <- README.md:123, docs/install.md:194  :: /// Write a commented default config if none exists (non-de…
@@ -473,35 +473,35 @@ crates/chat-stasher/src/main.rs:809-851  00c9d6ccdc4b  lines=43
   <- README.md:139, docs/install.md:62  :: InstallNativeHost {
 crates/chat-stasher/src/main.rs:852-873  ebb71dce29b8  lines=22
   <- README.md:140  :: /// The Native Messaging host process itself.
-crates/chat-stasher/src/main.rs:1830-1840  91658be625f3  lines=11
+crates/chat-stasher/src/main.rs:1833-1843  91658be625f3  lines=11
   <- README.md:140  :: /// stdout, which is exactly what the browser launch path d…
-crates/chat-stasher/src/main.rs:3736-3749  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:3813-3826  6e297c93e74c  lines=14
   <- docs/install.md:366  :: Err(e) => {
-crates/chat-stasher/src/main.rs:3739-3747  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:3816-3824  7606cd68232e  lines=9
   <- docs/install.md:405  :: }
-crates/chat-stasher/src/main.rs:3751-3760  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:3828-3837  a14261353a59  lines=10
   <- docs/install.md:402  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:3772-3796  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:3849-3873  6d97af905715  lines=25
   <- docs/install.md:370  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:3932-3988  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:4009-4065  d1e3f53d40dc  lines=57
   <- docs/threat-model.md:491  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:5200-5207  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:5277-5284  f369ca3fd940  lines=8
   <- docs/threat-model.md:480  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:5228-5321  f4b26b9e403e  lines=94
+crates/chat-stasher/src/main.rs:5305-5398  f4b26b9e403e  lines=94
   <- docs/threat-model.md:478  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:5311-5320  fae6f081f82c  lines=10
+crates/chat-stasher/src/main.rs:5388-5397  fae6f081f82c  lines=10
   <- SECURITY.md:70  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:5557-5675  6179727696b7  lines=119
+crates/chat-stasher/src/main.rs:5634-5752  6179727696b7  lines=119
   <- README.md:155, README.md:206, docs/threat-model.md:538  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:6778-6779  a70af44131aa  lines=2
+crates/chat-stasher/src/main.rs:6897-6898  a70af44131aa  lines=2
   <- docs/install.md:467  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:6871-6878  e726e719a9a4  lines=8
+crates/chat-stasher/src/main.rs:6990-6997  e726e719a9a4  lines=8
   <- docs/install.md:496  :: Err(ActivityIndexError::Write(message)) => {
-crates/chat-stasher/src/main.rs:6926-7117  c9f1287ef8af  lines=192
+crates/chat-stasher/src/main.rs:7045-7236  c9f1287ef8af  lines=192
   <- README.md:148, README.md:155  :: fn cmd_status(
-crates/chat-stasher/src/main.rs:7073-7074  52b8c92908b4  lines=2
+crates/chat-stasher/src/main.rs:7193-7194  45ab8d39f01f  lines=2
   <- docs/install.md:462  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:7234-7525  44e8b605cec0  lines=292
+crates/chat-stasher/src/main.rs:7353-7644  44e8b605cec0  lines=292
   <- README.md:148, README.md:155, docs/install.md:483  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs/privacy.md:573, docs/threat-model.md:379  :: pub const HOST_NAME: &str = "com.chat_stasher.host";

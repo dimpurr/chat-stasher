@@ -237,6 +237,10 @@ pub struct SearchReport {
     /// Sessions an active filter could not evaluate. Non-empty means the
     /// answer is partial *even if every object was readable*.
     pub unplaced: Vec<UnplacedSession>,
+    /// Per-machine located and time-unknown counts before the query window is
+    /// applied. Used for recall warnings so a narrow day cannot inflate the
+    /// unknown share by excluding known-time sessions from its denominator.
+    pub all_recall: BTreeMap<String, (usize, usize)>,
     /// Session-count deltas: sessions every active filter evaluated and
     /// rejected. A measurement, not a fallback.
     pub not_matched: usize,
@@ -342,16 +346,75 @@ impl SearchReport {
     }
 
     pub fn machine_recall_warnings(&self) -> Vec<String> {
+        let overall: BTreeMap<String, MachineWindowSummary> = self
+            .machine_recall_summary()
+            .into_iter()
+            .map(|summary| (summary.machine.clone(), summary))
+            .collect();
         self.machine_window_summary()
             .into_iter()
-            .filter(MachineWindowSummary::should_warn)
-            .map(|summary| format!(
+            .filter_map(|window| {
+                overall
+                    .get(&window.machine)
+                    .cloned()
+                    .map(|summary| (window.machine, summary))
+            })
+            .filter(|(_, summary)| summary.should_warn())
+            .map(|(machine, summary)| format!(
                 "WARN: machine `{}` has high unknown-time share ({}/{} candidates); index_trusted={}. Repair with `chat-stasher activity-index --rebuild --destination <destination> --machine <machine> --stage <workspace>`.",
-                summary.machine,
+                machine,
                 summary.time_unknown,
                 summary.located + summary.time_unknown,
                 summary.index_trusted,
             ))
+            .collect()
+    }
+
+    /// Overall per-machine recall counts, independent of a query window.
+    pub fn machine_recall_summary(&self) -> Vec<MachineWindowSummary> {
+        let mut counts = self.all_recall.clone();
+        if counts.is_empty() {
+            // reason: manually constructed reports and old serialized fixtures do not
+            // carry the pre-window counters; their available candidate counts are the
+            // only measured values and remain explicit rather than inferred as zero.
+            for host in &self.hosts {
+                counts.entry(host.hostname.clone()).or_default();
+            }
+            for hit in &self.hits {
+                let count = counts.entry(hit.machine.clone()).or_default();
+                if hit.first_unix.is_some() && hit.last_unix.is_some() {
+                    count.0 += 1;
+                } else {
+                    count.1 += 1;
+                }
+            }
+            for unknown in self
+                .unplaced
+                .iter()
+                .filter(|u| u.dimension == UnplacedBy::Time)
+            {
+                counts.entry(unknown.machine.clone()).or_default().1 += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(machine, (located, time_unknown))| {
+                let index_trusted = self
+                    .hosts
+                    .iter()
+                    .any(|host| host.hostname == machine && host.index_trusted)
+                    && !self.machines_without_index.contains(&machine)
+                    && !self.unreadable.iter().any(|part| {
+                        part.contains(&format!("machine `{machine}`"))
+                            || part.contains(&format!("host `{machine}`"))
+                    });
+                MachineWindowSummary {
+                    machine,
+                    located,
+                    time_unknown,
+                    index_trusted,
+                }
+            })
             .collect()
     }
 
@@ -683,6 +746,7 @@ pub fn search_sessions(
         window: selector.window.clone(),
         hits: Vec::new(),
         unplaced: Vec::new(),
+        all_recall: BTreeMap::new(),
         not_matched: 0,
         machines_without_index: Vec::new(),
         hosts: Vec::new(),
@@ -867,6 +931,12 @@ pub fn search_sessions(
                     )
                 }
             };
+            let recall = report.all_recall.entry(machine.clone()).or_default();
+            if first_unix.is_some() && last_unix.is_some() {
+                recall.0 += 1;
+            } else {
+                recall.1 += 1;
+            }
             let meta = SessionMeta {
                 machine: &machine,
                 session_id: &session_id,
@@ -957,6 +1027,7 @@ mod tests {
             snapshots_scanned: 1,
             sessions_seen: 2,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: vec![located],
             unplaced: vec![UnplacedSession {
                 machine: "machine-a".into(),
@@ -999,6 +1070,61 @@ mod tests {
     }
 
     #[test]
+    fn recall_warning_uses_overall_unknown_share_for_a_day_query() {
+        let mut report = SearchReport {
+            destination: "fixture".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            sessions_seen: 101,
+            window: Some(TimeWindow {
+                since_unix: Some(1),
+                until_unix: Some(2),
+                how: crate::selector::WindowHow::LocalDays,
+                since_text: Some("2026-09-24".into()),
+                until_text: Some("2026-09-24".into()),
+            }),
+            all_recall: [("machine-a".to_string(), (100, 1))].into_iter().collect(),
+            hits: Vec::new(),
+            unplaced: vec![UnplacedSession {
+                machine: "machine-a".into(),
+                session_id: "claude-code.machine-a.unknown".into(),
+                harness: Some("claude-code".into()),
+                shard_count: 1,
+                bytes: 10,
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 10,
+                dimension: UnplacedBy::Time,
+                why: "no timestamp".into(),
+                line_count: 1,
+                time_source: ActivityTimeSource::Unknown {
+                    why: "no timestamp".into(),
+                },
+            }],
+            not_matched: 100,
+            machines_without_index: Vec::new(),
+            hosts: vec![HostSnapshot {
+                hostname: "machine-a".into(),
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 10,
+                has_activity_index: true,
+                index_read_ok: true,
+                index_trusted: true,
+            }],
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 1,
+        };
+        assert!(report.machine_window_summary()[0].should_warn());
+        assert!(report.machine_day_summary()[0].unknown_anywhere > 0);
+        assert!(
+            report.machine_recall_warnings().is_empty(),
+            "one unknown among 101 overall sessions is below the warning threshold"
+        );
+        report.all_recall.insert("machine-a".into(), (0, 1));
+        assert_eq!(report.machine_recall_warnings().len(), 1);
+    }
+
+    #[test]
     fn machine_day_summary_separates_unknown_anywhere_from_daily_activity() {
         let (start, _) = crate::selector::local_day_bounds("2026-09-24").unwrap();
         let (_, end) = crate::selector::local_day_bounds("2026-09-25").unwrap();
@@ -1017,6 +1143,7 @@ mod tests {
                 since_text: Some("2026-09-24".into()),
                 until_text: Some("2026-09-25".into()),
             }),
+            all_recall: BTreeMap::new(),
             hits: vec![located],
             unplaced: vec![UnplacedSession {
                 machine: "machine-a".into(),
@@ -1063,6 +1190,7 @@ mod tests {
             snapshots_scanned: 0,
             sessions_seen: 0,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: Vec::new(),
             unplaced: Vec::new(),
             not_matched: 0,
@@ -1086,6 +1214,7 @@ mod tests {
             snapshots_scanned: 3,
             sessions_seen: 7,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: Vec::new(),
             unplaced: Vec::new(),
             not_matched: 7,
@@ -1121,6 +1250,7 @@ mod tests {
             snapshots_scanned: 2,
             sessions_seen: 4,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: Vec::new(),
             unplaced: Vec::new(),
             not_matched: 4,
@@ -1162,6 +1292,7 @@ mod tests {
             snapshots_scanned: 1,
             sessions_seen: 2,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: vec![hit("m-1", "a", 10), hit("m-1", "b", 20)],
             unplaced: Vec::new(),
             not_matched: 0,
@@ -1267,6 +1398,7 @@ mod tests {
                 since_text: Some("100".into()),
                 until_text: Some("200".into()),
             }),
+            all_recall: BTreeMap::new(),
             hits: vec![SessionHit {
                 machine: "m-1".into(),
                 session_id: "claude-code.m-1.aaaaaaaa-0000-0000-0000-000000000001".into(),
@@ -1339,6 +1471,7 @@ mod tests {
             snapshots_scanned: 1,
             sessions_seen: 1,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: vec![SessionHit {
                 machine: "m".into(),
                 session_id: "codex.m.bbbbbbbb-0000-0000-0000-000000000002".into(),
@@ -1387,6 +1520,7 @@ mod tests {
             snapshots_scanned: 0,
             sessions_seen: 0,
             window: None,
+            all_recall: BTreeMap::new(),
             hits: Vec::new(),
             unplaced: Vec::new(),
             not_matched: 0,

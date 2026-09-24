@@ -1524,6 +1524,7 @@ pub(crate) mod fixture {
             snapshots_scanned: 2,
             sessions_seen: 4,
             window: None,
+            all_recall: Default::default(),
             hits: vec![
                 hit(
                     "m-1",
