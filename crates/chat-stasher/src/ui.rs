@@ -308,7 +308,23 @@ pub fn select<'a>(sessions: &'a [UiSession], selector: &Selector) -> Selection<'
         match selector.select(&s.meta()) {
             Verdict::Selected => out.matched.push(s),
             Verdict::NotSelected => out.not_matched += 1,
-            Verdict::Unevaluated { dimension, why } => out.unplaced.push((s, dimension, why)),
+            Verdict::Unevaluated { dimension, why } => {
+                // Same ADR-035 reclassification as `search`: a session with no
+                // conversation content is unplaceable for a different reason.
+                let (dimension, why) = if dimension == UnplacedBy::Time
+                    && s.time_source.is_no_conversation_content()
+                {
+                    (
+                        UnplacedBy::NoContent,
+                        "this session holds no conversation content (no user or assistant \
+                         message); there is nothing to place in a time bucket"
+                            .to_string(),
+                    )
+                } else {
+                    (dimension, why)
+                };
+                out.unplaced.push((s, dimension, why));
+            }
         }
     }
     out
@@ -1050,12 +1066,37 @@ fn render_heatmap(in_view: &[&UiSession], token: &str) -> String {
 }
 
 fn render_time_unknown(in_view: &[&UiSession], token: &str) -> String {
-    let unknown: Vec<&&UiSession> = in_view.iter().filter(|s| !s.has_known_time()).collect();
+    // ADR-035: sessions with no conversation content are a different claim from
+    // "a conversation whose time we could not find", so they are counted in
+    // their own list below rather than folded in here.
+    let no_content: Vec<&&UiSession> = in_view
+        .iter()
+        .filter(|s| s.time_source.is_no_conversation_content())
+        .collect();
+    let unknown: Vec<&&UiSession> = in_view
+        .iter()
+        .filter(|s| !s.has_known_time() && !s.time_source.is_no_conversation_content())
+        .collect();
     let mut pending_append = String::new();
     if unknown.is_empty() {
-        return "<section><h2>Time unknown</h2>\n<p class=ok>0 sessions — every session in view \
-                has a recorded conversation time.</p></section>\n"
-            .to_string();
+        if no_content.is_empty() {
+            pending_append.push_str(
+                "<section><h2>Time unknown</h2>\n<p class=ok>0 sessions — every session in view \
+                 has a recorded conversation time.</p></section>\n",
+            );
+        } else {
+            pending_append.push_str(
+                "<section><h2>Time unknown</h2>\n<p class=ok>0 sessions with conversation content \
+                 have an unknown conversation time.</p></section>\n",
+            );
+            pending_append.push_str(&format!(
+                "<section><h2>No conversation content</h2>\n<p>{} session(s) in view were archived \
+                 with no user or assistant message — an empty shard or metadata-only lines. They are \
+                 not in any time bucket, and are not counted as time-unknown.</p></section>\n",
+                no_content.len()
+            ));
+        }
+        return pending_append;
     }
     let mut by_reason: BTreeMap<String, Vec<&&UiSession>> = BTreeMap::new();
     for s in &unknown {
@@ -1087,6 +1128,14 @@ fn render_time_unknown(in_view: &[&UiSession], token: &str) -> String {
         pending_append.push_str("</tbody></table></div>\n");
     }
     pending_append.push_str("</section>\n");
+    if !no_content.is_empty() {
+        pending_append.push_str(&format!(
+            "<section><h2>No conversation content</h2>\n<p>{} session(s) in view were archived \
+             with no user or assistant message — an empty shard or metadata-only lines. They are \
+             not in any time bucket, and are not counted as time-unknown.</p></section>\n",
+            no_content.len()
+        ));
+    }
     pending_append
 }
 
@@ -1179,6 +1228,7 @@ fn page_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
                 dim = match dim {
                     UnplacedBy::Time => "conversation time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::NoContent => "no conversation content",
                 },
                 why = esc(why),
             ));
@@ -1201,12 +1251,17 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
             data.unreadable.len()
         );
     }
-    if !sel.unplaced.is_empty() {
+    let unplaced_blocking = sel
+        .unplaced
+        .iter()
+        .filter(|(_, dimension, _)| *dimension != UnplacedBy::NoContent)
+        .count();
+    if unplaced_blocking > 0 {
         return format!(
             "<div class=warn><b>UNKNOWN — not \"not there\".</b> 0 of {} session(s) matched, \
              but {} could not be placed (below), so this is not a proven absence.</div>\n",
             data.sessions.len(),
-            sel.unplaced.len()
+            unplaced_blocking
         );
     }
     format!(
@@ -1219,6 +1274,7 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
 fn list_row(s: &UiSession, token: &str) -> String {
     let time = |v: Option<i64>| match v {
         Some(unix) => esc(&fmt_unix(unix)),
+        None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<span class=bad title=\"unknown\">unknown</span>".to_string(),
     };
     format!(
@@ -1243,6 +1299,7 @@ fn list_row(s: &UiSession, token: &str) -> String {
 fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
     let time = |v: Option<i64>| match v {
         Some(unix) => esc(&fmt_unix(unix)),
+        None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<b class=bad>unknown</b>".to_string(),
     };
     let payload_bytes = s.bytes;
@@ -1379,7 +1436,7 @@ fn json_overview(data: &UiData) -> String {
             "matched": sel.matched.len(),
             "not_matched": sel.not_matched,
             "could_not_be_placed": sel.unplaced.len(),
-            "time_unknown": in_view.iter().filter(|s| !s.has_known_time()).count(),
+            "time_unknown": in_view.iter().filter(|s| !s.has_known_time() && !s.time_source.is_no_conversation_content()).count(),
         },
         "machines": machines,
         "machines_without_activity_index": data.machines_without_index,
@@ -1398,8 +1455,8 @@ fn json_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
             "session_short_id": s.short_id,
             "shards": s.shard_count,
             "bytes": s.bytes,
-            "first_unix": time_state(s.first_unix, s.time_why.as_deref()),
-            "last_unix": time_state(s.last_unix, s.time_why.as_deref()),
+            "first_unix": time_state(s.first_unix, s.time_why.as_deref(), &s.time_source),
+            "last_unix": time_state(s.last_unix, s.time_why.as_deref(), &s.time_source),
             "line_count": s.line_count,
             "archive_time_unix": s.archive_time_unix,
             "href": format!("/session?i={}&token={}", s.index, percent_encode(token)),
@@ -1424,7 +1481,7 @@ fn json_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
             "machine": s.machine,
             "source": s.source_label(),
             "session_short_id": s.short_id,
-            "dimension": match dim { UnplacedBy::Time => "time", UnplacedBy::Harness => "harness" },
+            "dimension": match dim { UnplacedBy::Time => "time", UnplacedBy::Harness => "harness", UnplacedBy::NoContent => "no_content" },
             "why": why,
         })).collect::<Vec<_>>(),
     });
@@ -1449,9 +1506,16 @@ fn json_filter_error(data: &UiData, e: &UsageError) -> String {
     }))
 }
 
-fn time_state(unix: Option<i64>, why: Option<&str>) -> crate::json_out::TimeState {
+fn time_state(
+    unix: Option<i64>,
+    why: Option<&str>,
+    source: &TimeSource,
+) -> crate::json_out::TimeState {
     match unix {
         Some(unix) => crate::json_out::TimeState::known(unix),
+        None if source.is_no_conversation_content() => {
+            crate::json_out::TimeState::no_conversation_content()
+        }
         None => crate::json_out::TimeState::unknown(
             why.unwrap_or("no conversation time was recorded for this session")
                 .to_string(),
@@ -1772,6 +1836,21 @@ mod tests {
                 || html.contains("UNKNOWN"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn no_content_does_not_make_a_time_filtered_absence_unknown() {
+        let mut d = fixture::data();
+        d.sessions.truncate(1);
+        d.archive_sessions = 1;
+        d.sessions[0].first_unix = None;
+        d.sessions[0].last_unix = None;
+        d.sessions[0].time_why = None;
+        d.sessions[0].time_source = TimeSource::NoConversationContent;
+
+        let html = req("/sessions?day=2030-01-01", &d, &NoContent).body;
+        assert!(html.contains("Not in this destination"), "{html}");
+        assert!(!html.contains("UNKNOWN"), "{html}");
     }
 
     /// A machine whose activity index is missing is named as such, and is never

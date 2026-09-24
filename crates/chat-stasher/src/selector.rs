@@ -146,6 +146,10 @@ pub enum UnplacedBy {
     Time,
     /// The harness filter.
     Harness,
+    /// The session holds no conversation content at all (ADR-035), so a time
+    /// window cannot place it — but for a different reason than a real
+    /// conversation with an unknown time.
+    NoContent,
 }
 
 /// What [`Selector::select`] decided about one session.

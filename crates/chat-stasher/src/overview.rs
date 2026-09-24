@@ -50,6 +50,9 @@ pub enum TimeSource {
     /// Web chat harness: span from the conversation list's update time only.
     #[serde(rename = "list-updated")]
     ListUpdated,
+    /// No conversation content at all (empty shard, or metadata-only lines);
+    /// distinct from `Unknown` per ADR-035.
+    NoConversationContent,
     Unknown {
         why: String,
     },
@@ -74,10 +77,19 @@ impl From<&crate::activity::TimeSource> for TimeSource {
                 TimeSource::Messages { exact: *exact }
             }
             crate::activity::TimeSource::ListUpdated => TimeSource::ListUpdated,
+            crate::activity::TimeSource::NoConversationContent => TimeSource::NoConversationContent,
             crate::activity::TimeSource::Unknown { why } => {
                 TimeSource::Unknown { why: why.clone() }
             }
         }
+    }
+}
+
+impl TimeSource {
+    /// True when the session holds no conversation content at all (ADR-035),
+    /// as opposed to a conversation whose time could not be found.
+    pub fn is_no_conversation_content(&self) -> bool {
+        matches!(self, TimeSource::NoConversationContent)
     }
 }
 
@@ -126,6 +138,13 @@ impl OverviewRow {
     fn anchor(&self) -> Option<i64> {
         self.first_unix.or(self.last_unix)
     }
+
+    /// True when this session was archived with no conversation content at all
+    /// (ADR-035): it is not a time bucket and not a time-unknown, it is a third
+    /// state.
+    pub fn is_no_conversation_content(&self) -> bool {
+        self.time_source.is_no_conversation_content()
+    }
 }
 
 /// Total lines across every row.
@@ -166,6 +185,8 @@ pub fn render_overview(rows: &[OverviewRow], width: usize) -> String {
     out.push_str(&render_matrix(rows, width));
     out.push('\n');
     out.push_str(&render_time_unknown(rows));
+    out.push('\n');
+    out.push_str(&render_no_conversation_content(rows));
     out.push('\n');
     out.push_str(&render_heatmap(rows, width, HeatmapAxis::Machine));
     out
@@ -213,7 +234,17 @@ pub fn overview_json(
             "harnesses": harness_count(rows),
             "sessions": rows.len(),
             "lines": total_lines(rows),
-            "unknown_time_sessions": rows.iter().filter(|r| !r.has_known_time()).count(),
+            // ADR-035: "time unknown" counts only real conversations whose time
+            // could not be obtained; "no conversation content" is a separate
+            // state and is never folded into it.
+            "unknown_time_sessions": rows
+                .iter()
+                .filter(|r| !r.has_known_time() && !r.is_no_conversation_content())
+                .count(),
+            "no_conversation_content_sessions": rows
+                .iter()
+                .filter(|r| r.is_no_conversation_content())
+                .count(),
         },
         "machines": {
             "with_snapshot": snapshot_machines.len(),
@@ -248,10 +279,12 @@ fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_
         TimeSource::Unknown { why } => Some(why.as_str()),
         _ => None,
     };
-    let boundary = |v: Option<i64>| match (v, why) {
-        (Some(unix), _) => crate::json_out::TimeState::known(unix),
-        (None, Some(why)) => crate::json_out::TimeState::unknown(why.to_string()),
-        (None, None) => crate::json_out::TimeState::unknown(
+    let no_content = r.is_no_conversation_content();
+    let boundary = |v: Option<i64>| match (v, why, no_content) {
+        (Some(unix), _, _) => crate::json_out::TimeState::known(unix),
+        (None, Some(why), _) => crate::json_out::TimeState::unknown(why.to_string()),
+        (None, None, true) => crate::json_out::TimeState::no_conversation_content(),
+        (None, None, false) => crate::json_out::TimeState::unknown(
             "this session recorded no time boundary on this end",
         ),
     };
@@ -311,7 +344,7 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
                     *e = b;
                 }
             }
-        } else {
+        } else if !r.is_no_conversation_content() {
             *unknown_by_machine.entry(r.machine.clone()).or_insert(0) += 1;
         }
     }
@@ -416,7 +449,7 @@ fn cell_text(
 pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
     let mut by_key: BTreeMap<(String, String), (usize, u64, String)> = BTreeMap::new();
     for r in rows {
-        if r.has_known_time() {
+        if r.has_known_time() || r.is_no_conversation_content() {
             continue;
         }
         let why = match &r.time_source {
@@ -446,6 +479,38 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
             format!(" ({why})")
         };
         out.push_str(&format!("  {m} / {h}: {s} sessions · {l} lines{reason}\n"));
+    }
+    out.push_str(&format!("  total: {total_s} sessions · {total_l} lines\n"));
+    out
+}
+
+/// A dedicated tally for sessions archived with **no conversation content**
+/// (ADR-035): empty shards or metadata-only lines. Listed separately so they
+/// are never read as time-unknown or as a missing session.
+pub fn render_no_conversation_content(rows: &[OverviewRow]) -> String {
+    let mut by_key: BTreeMap<(String, String), (usize, u64)> = BTreeMap::new();
+    for r in rows {
+        if !r.is_no_conversation_content() {
+            continue;
+        }
+        let e = by_key
+            .entry((r.machine.clone(), r.harness.clone()))
+            .or_insert((0, 0));
+        e.0 += 1;
+        e.1 += r.line_count;
+    }
+    if by_key.is_empty() {
+        return "no conversation content: 0 sessions\n".to_string();
+    }
+
+    let mut out = String::new();
+    out.push_str("sessions with no conversation content (no user/assistant message; not time-unknown, not in any bucket):\n");
+    let mut total_s = 0usize;
+    let mut total_l = 0u64;
+    for ((m, h), (s, l)) in &by_key {
+        total_s += s;
+        total_l += l;
+        out.push_str(&format!("  {m} / {h}: {s} sessions · {l} lines\n"));
     }
     out.push_str(&format!("  total: {total_s} sessions · {total_l} lines\n"));
     out
@@ -581,7 +646,7 @@ pub fn heatmap_data(
             if let Some(e) = r.last_unix {
                 hi = Some(hi.map_or(e, |m: i64| m.max(e)));
             }
-        } else {
+        } else if !r.is_no_conversation_content() {
             *unknown.entry(l.clone()).or_insert(0) += 1;
         }
     }
@@ -954,6 +1019,63 @@ mod tests {
     }
 
     #[test]
+    fn no_conversation_content_is_listed_separately_from_time_unknown() {
+        let rows = vec![
+            row(
+                "s1",
+                "air",
+                "claude-code",
+                None,
+                None,
+                0,
+                TimeSource::NoConversationContent,
+            ),
+            row(
+                "s2",
+                "air",
+                "claude-code",
+                None,
+                None,
+                1,
+                TimeSource::Unknown {
+                    why: "no timestamp".into(),
+                },
+            ),
+        ];
+        let json = overview_json(
+            &rows,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            0,
+        );
+        assert_eq!(
+            json["summary"]["no_conversation_content_sessions"]
+                .as_u64()
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            json["summary"]["unknown_time_sessions"].as_u64().unwrap(),
+            1,
+            "the no-content row must not be counted as time-unknown"
+        );
+        assert_eq!(
+            json["sessions"][0]["first_unix"]["kind"],
+            "no_conversation_content"
+        );
+        let unknown_tally = render_time_unknown(&rows);
+        assert!(
+            !unknown_tally.contains("no conversation content"),
+            "the unknown tally must not fold in the no-content row: {unknown_tally}"
+        );
+        assert!(unknown_tally.contains("total: 1 sessions"));
+        let no_content = render_no_conversation_content(&rows);
+        assert!(no_content.contains("1 sessions · 0 lines"), "{no_content}");
+    }
+
+    #[test]
     fn single_row_renders() {
         let rows = vec![row(
             "s1",
@@ -1220,6 +1342,7 @@ mod tests {
                 "harnesses",
                 "lines",
                 "machines",
+                "no_conversation_content_sessions",
                 "sessions",
                 "unknown_time_sessions",
             ]

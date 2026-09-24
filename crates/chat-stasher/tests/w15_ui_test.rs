@@ -433,6 +433,89 @@ fn the_overview_page_is_the_archive_at_a_glance() {
     assert_eq!(v["data_blobs_read"], serde_json::json!(0));
 }
 
+#[test]
+fn no_content_section_renders_when_time_unknown_is_zero() {
+    let sb = sandbox();
+    let machine = "m-metadata";
+    let session = "claude-code.m-metadata.aaaaaaaa-0000-0000-0000-000000000098";
+    let summary = r#"{"type":"summary","sessionId":"s","uuid":"u9","summary":"synthetic","timestamp":"2025-01-15T12:00:00Z"}"#.to_string();
+    let stage = stage_for(sb.path(), machine, &[(session, vec![summary])]);
+    let repo = sb.path().join("repo");
+    let key = sb.path().join("keys").join("masterkey.json");
+
+    let indexed = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        indexed.status.success(),
+        "activity-index failed: {indexed:?}"
+    );
+    let pushed = run(
+        sb.path(),
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(pushed.status.success(), "push failed: {pushed:?}");
+
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let (status, html) = ui.get("/");
+    assert_eq!(status, 200);
+    assert!(html.contains("<h2>No conversation content</h2>"), "{html}");
+    assert!(
+        !html.contains("every session in view has a recorded conversation time"),
+        "{html}"
+    );
+    let (status, sessions_page) = ui.get("/sessions");
+    assert_eq!(status, 200);
+    assert!(
+        sessions_page.contains("no conversation content"),
+        "{sessions_page}"
+    );
+    assert!(
+        !sessions_page.contains(">unknown</span>"),
+        "{sessions_page}"
+    );
+    let (status, session_page) = ui.get("/session?i=0");
+    assert_eq!(status, 200);
+    assert!(
+        session_page.contains("no conversation content"),
+        "{session_page}"
+    );
+    assert!(!session_page.contains(">unknown</b>"), "{session_page}");
+    let (status, json) = ui.get("/api/overview");
+    assert_eq!(status, 200);
+    let overview: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(overview["summary"]["time_unknown"], serde_json::json!(0));
+    let (status, sessions) = ui.get("/api/sessions");
+    assert_eq!(status, 200);
+    let sessions: serde_json::Value = serde_json::from_str(&sessions).unwrap();
+    assert_eq!(
+        sessions["sessions"][0]["first_unix"]["kind"],
+        "no_conversation_content"
+    );
+    assert_eq!(
+        sessions["sessions"][0]["last_unix"]["kind"],
+        "no_conversation_content"
+    );
+}
+
 /// **The pin.** A drill-down link and `chat-stasher search` with the same flags
 /// return the same sessions — because the page applies the shared selector to
 /// one unfiltered read, and `search` applies it to the same rows.

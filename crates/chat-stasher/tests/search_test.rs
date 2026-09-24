@@ -33,6 +33,7 @@ use rustic_core::repofile::MasterKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 const SHARD_BYTES: usize = 256 * 1024;
@@ -562,6 +563,85 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     }
     move_back(&quarantine2, &repo);
     let _ = readback::bucket_shard_path(Path::new("/x/sessions/m/s/000/000001.jsonl"));
+}
+
+#[test]
+fn no_content_activity_row_survives_real_search_index_read() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let repo = root.join("repo");
+    let mk = MasterKey::new();
+    let machine = "m-no-content";
+    let session = "claude-code.m-no-content.aaaaaaaa-0000-0000-0000-000000000099";
+    let stage = root.join("stage");
+
+    write_session_shards(&stage, machine, session, 99);
+    let mut row = index_row(machine, session, 0, 0);
+    row.first_unix = None;
+    row.last_unix = None;
+    row.line_count = 0;
+    row.time_source = TimeSource::NoConversationContent;
+    write_activity_index(&stage, machine, &[row]);
+    let key_path = root.join("key.json");
+    let store_config = cfg(&repo, &key_path);
+    store::persist_key_file(&store_config, &mk).unwrap();
+    let store = BackupStore::new(store_config, machine.to_string());
+    assert!(store.push(&stage, &mk).unwrap().files_new > 0);
+
+    let result = search_sessions(&store, &mk, &Selector::default()).unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(
+        result.hits[0].time_source,
+        TimeSource::NoConversationContent
+    );
+    assert_eq!(result.hits[0].time_why, None);
+    assert_eq!(result.machine_window_summary()[0].time_unknown, 0);
+    let json: serde_json::Value =
+        serde_json::from_str(&chat_stasher::search::report_json(&result, false)).unwrap();
+    assert_eq!(
+        json["sessions"][0]["first_unix"]["kind"],
+        "no_conversation_content"
+    );
+    assert_eq!(
+        json["sessions"][0]["last_unix"]["kind"],
+        "no_conversation_content"
+    );
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args(["search", "--repo"])
+        .arg(&repo)
+        .args(["--key-file"])
+        .arg(&key_path)
+        .args(["--machine", machine])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(cli.stdout).unwrap();
+    assert!(
+        cli.status.success(),
+        "search failed: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(
+        stdout.contains("active=no conversation content"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("unknown (no reason was recorded"),
+        "{stdout}"
+    );
+
+    let window = search_sessions(
+        &store,
+        &mk,
+        &Selector::default().window(window_from(1_704_067_200, 1_704_067_201)),
+    )
+    .unwrap();
+    assert_eq!(window.unplaced.len(), 1);
+    assert_eq!(
+        window.unplaced[0].dimension,
+        chat_stasher::selector::UnplacedBy::NoContent
+    );
+    assert_eq!(window.machine_window_summary()[0].time_unknown, 0);
 }
 
 /// Delete rustic's local metadata cache for this repository, if any.

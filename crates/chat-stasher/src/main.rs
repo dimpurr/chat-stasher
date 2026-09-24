@@ -3314,7 +3314,12 @@ fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> Exit
             hit.shard_count,
             hit.bytes,
             hit.short_snapshot(),
-            describe_span(hit.first_unix, hit.last_unix, hit.time_why.as_deref())
+            describe_span(
+                hit.first_unix,
+                hit.last_unix,
+                hit.time_why.as_deref(),
+                &hit.time_source,
+            )
         );
     }
     if !report.unplaced.is_empty() {
@@ -3371,7 +3376,15 @@ fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> Exit
 
 /// One line describing a session's conversation interval, with the unknown
 /// case spelled out instead of printed as an empty field.
-fn describe_span(first_unix: Option<i64>, last_unix: Option<i64>, why: Option<&str>) -> String {
+fn describe_span(
+    first_unix: Option<i64>,
+    last_unix: Option<i64>,
+    why: Option<&str>,
+    source: &activity::TimeSource,
+) -> String {
+    if source.is_no_conversation_content() {
+        return "no conversation content".to_string();
+    }
     match (first_unix, last_unix) {
         (Some(f), Some(l)) => format!("{f}..{l}"),
         _ => format!(

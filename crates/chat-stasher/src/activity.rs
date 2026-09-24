@@ -72,8 +72,26 @@ pub enum TimeSource {
     /// consumer can tell it from a message-derived interval.
     #[serde(rename = "list-updated")]
     ListUpdated,
+    /// The archived session holds no conversation content at all — zero lines,
+    /// or only metadata lines (summary / file-history-snapshot / bridge-session
+    /// / cost-state / journal / …) with no user or assistant message.
+    ///
+    /// This is deliberately **not** [`TimeSource::Unknown`] (ADR-035): there is
+    /// nothing to place in time, so it is a different claim from "a real
+    /// conversation whose time we could not find". It is counted separately and
+    /// excluded from the unknown tallies (`machine_recall`, the recall WARN).
+    NoConversationContent,
     /// Could not be obtained; why it could not.
     Unknown { why: String },
+}
+
+impl TimeSource {
+    /// True when the session was archived with no conversation content at all
+    /// (ADR-035). Distinct from [`TimeSource::Unknown`]: there is no
+    /// conversation to place in time, not a conversation whose time is missing.
+    pub fn is_no_conversation_content(&self) -> bool {
+        matches!(self, TimeSource::NoConversationContent)
+    }
 }
 
 /// Result of analysing one session's lines.
@@ -132,18 +150,22 @@ const WEB_HARNESSES: &[&str] = &[
 /// "there was nothing to find".
 pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     let mut line_count = 0u64;
-    let mut first: Option<i64> = None;
-    let mut last: Option<i64> = None;
-    let mut any_rfc3339 = false;
-    let mut any_messages = false;
-    let mut any_list = false;
-    let mut source_zone: Option<String> = None;
+    let mut fold = Fold::default();
 
     // Diagnosis counters for the Unknown branch: they keep "parse failure"
     // distinct from "this harness never records a time".
     let mut unparseable_json = 0u64;
     let mut invalid_timestamp = 0u64;
     let mut saw_timestamp_field = false;
+
+    // Conversation-content counters (ADR-035). Only claude-code lines have a
+    // shape we can classify without guessing: `user` / `assistant` are the
+    // conversation, every other `type` is metadata. An unparseable line, or a
+    // parsed line with no `type`, is *undetermined* rather than metadata, so a
+    // session is only ever called "no conversation content" when every line was
+    // positively classified as metadata.
+    let mut message_lines = 0u64;
+    let mut undetermined_lines = 0u64;
 
     for line in lines {
         let line = line.trim();
@@ -154,35 +176,36 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
 
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             unparseable_json += 1;
+            if harness == "claude-code" {
+                undetermined_lines += 1;
+            }
             continue;
         };
+        let is_claude_code_conversation_line = if harness == "claude-code" {
+            match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("user") | Some("assistant") => {
+                    message_lines += 1;
+                    true
+                }
+                Some(_) => false,
+                None => {
+                    undetermined_lines += 1;
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        // Claude Code metadata can carry timestamps too (for example summary
+        // shards). Those describe the metadata row, not conversation activity.
+        if !is_claude_code_conversation_line {
+            continue;
+        }
         match line_time(harness, &value) {
             // A single line can now span a whole session (opencode/cursor/
             // gemini export one session as one JSON object), so a line carries
             // its own first/last and the aggregation folds those in.
-            LineTime::Time {
-                first: f,
-                last: l,
-                rfc3339,
-                basis,
-                zone,
-            } => {
-                first = Some(first.map_or(f, |old| old.min(f)));
-                last = Some(last.map_or(l, |old| old.max(l)));
-                // Once any timestamp is unambiguous RFC 3339, the whole session
-                // is Exact; otherwise (numeric epochs only) it is Inferred.
-                if rfc3339 {
-                    any_rfc3339 = true;
-                }
-                match basis {
-                    Basis::Messages => any_messages = true,
-                    Basis::List => any_list = true,
-                    Basis::Local => {}
-                }
-                if source_zone.is_none() {
-                    source_zone = zone;
-                }
-            }
+            lt @ LineTime::Time { .. } => fold.add(lt),
             LineTime::Absent => {}
             LineTime::NoTimestampField => {
                 saw_timestamp_field = false;
@@ -194,21 +217,34 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
         }
     }
 
-    let time_source = if first.is_some() {
-        if any_messages {
-            TimeSource::Messages { exact: any_rfc3339 }
-        } else if any_list {
+    // gemini-cli stores a whole session as one **pretty-printed JSON
+    // document**, not JSONL, so its lines do not parse individually. When no
+    // line yielded a time, re-read the file as the single document it is.
+    if fold.first.is_none() && harness == "gemini-cli" {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(lines.join("\n").trim()) {
+            fold.add(gemini_time(&value));
+        }
+    }
+
+    let time_source = if fold.first.is_some() {
+        if fold.any_messages {
+            TimeSource::Messages {
+                exact: fold.any_rfc3339,
+            }
+        } else if fold.any_list {
             // A list-only span is low confidence by construction; it is never
             // reported as an exact/inferred message interval.
             TimeSource::ListUpdated
-        } else if any_rfc3339 {
+        } else if fold.any_rfc3339 {
             TimeSource::Exact
         } else {
             TimeSource::Inferred {
-                how: "in-line timestamps are numeric epochs: unit inferred from magnitude (values in the 2020–2100 seconds range treated as seconds; millis-range values divided by 1000 to get seconds)"
+                how: "in-line timestamps are numeric epochs: unit inferred from magnitude (values in the 2020–2100 seconds range treated as seconds; millis-range values divided by 1000, micros-range values divided by 1_000_000, to get seconds)"
                     .to_string(),
             }
         }
+    } else if no_conversation_content(harness, line_count, message_lines, undetermined_lines) {
+        TimeSource::NoConversationContent
     } else {
         TimeSource::Unknown {
             why: unknown_why(
@@ -221,11 +257,76 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     };
 
     TimeAnalysis {
-        first_unix: first,
-        last_unix: last,
+        first_unix: fold.first,
+        last_unix: fold.last,
         line_count,
         time_source,
-        source_zone,
+        source_zone: fold.source_zone,
+    }
+}
+
+/// Whether an archived session holds no conversation content at all (ADR-035).
+///
+/// * zero non-blank lines — the shard is empty;
+/// * a `claude-code` session whose every line is metadata (summary,
+///   file-history-snapshot, bridge-session, cost-state, agent-name, ai-title,
+///   last-prompt, journal, …): no line is a `user` / `assistant` message.
+///
+/// Only harnesses whose line shapes we know can answer this. An unsupported
+/// harness keeps its explicit "not implemented" [`TimeSource::Unknown`], and a
+/// harness whose conversation shape we do not classify is never called empty.
+fn no_conversation_content(
+    harness: &str,
+    line_count: u64,
+    message_lines: u64,
+    undetermined_lines: u64,
+) -> bool {
+    if !SUPPORTED_HARNESSES.contains(&harness) {
+        return false;
+    }
+    line_count == 0 || (harness == "claude-code" && message_lines == 0 && undetermined_lines == 0)
+}
+
+/// The accumulators a stream of [`LineTime`]s folds into.
+#[derive(Default)]
+struct Fold {
+    first: Option<i64>,
+    last: Option<i64>,
+    any_rfc3339: bool,
+    any_messages: bool,
+    any_list: bool,
+    source_zone: Option<String>,
+}
+
+impl Fold {
+    /// Fold one line's verdict into the session span. A non-`Time` verdict for
+    /// the multi-line gemini-cli document is simply ignored.
+    fn add(&mut self, line: LineTime) {
+        let LineTime::Time {
+            first: f,
+            last: l,
+            rfc3339,
+            basis,
+            zone,
+        } = line
+        else {
+            return;
+        };
+        self.first = Some(self.first.map_or(f, |old| old.min(f)));
+        self.last = Some(self.last.map_or(l, |old| old.max(l)));
+        // Once any timestamp is unambiguous RFC 3339, the whole session is
+        // Exact; otherwise (numeric epochs only) it is Inferred.
+        if rfc3339 {
+            self.any_rfc3339 = true;
+        }
+        match basis {
+            Basis::Messages => self.any_messages = true,
+            Basis::List => self.any_list = true,
+            Basis::Local => {}
+        }
+        if self.source_zone.is_none() {
+            self.source_zone = zone;
+        }
     }
 }
 
@@ -322,6 +423,12 @@ enum Basis {
 /// Web chat harnesses (`WEB_HARNESSES`) archive an inbox bundle per line; their
 /// payload is the raw HTTP body under `raw.text` and is read by [`web_time`].
 fn line_time(harness: &str, value: &serde_json::Value) -> LineTime {
+    // `grok` is two harnesses sharing one name: the browser-extension bundle
+    // (a web payload) and the grok **CLI**, whose archived line is a SQLite
+    // `session_docs` row carrying the session's own `updated_at`.
+    if harness == "grok" {
+        return grok_time(value);
+    }
     if WEB_HARNESSES.contains(&harness) {
         return web_time(harness, value);
     }
@@ -332,6 +439,26 @@ fn line_time(harness: &str, value: &serde_json::Value) -> LineTime {
         "gemini-cli" => gemini_time(value),
         _ => LineTime::NoTimestampField,
     }
+}
+
+/// grok: the CLI archives one `session_docs` SQLite row per session as
+/// `{schema, table:"session_docs", session:{…, updated_at}}`, where `updated_at`
+/// is the session's own **epoch-seconds** last-update time (measured in the
+/// registry's grok schema, `time_is_seconds: true`). It is a session-level
+/// instant, not a per-message timestamp, so it is `Inferred` (numeric epoch),
+/// never `Exact`. When the line is instead the browser-extension bundle (no
+/// `session.updated_at`), the web reader handles it.
+fn grok_time(value: &serde_json::Value) -> LineTime {
+    if let Some(updated) = value
+        .get("session")
+        .and_then(|session| session.get("updated_at"))
+    {
+        return match one_ts_value(updated) {
+            Some((t, rfc3339)) => local_time(t, t, rfc3339),
+            None => LineTime::Invalid,
+        };
+    }
+    web_time("grok", value)
 }
 
 /// Parse one timestamp value (RFC 3339 string, numeric epoch string, or numeric
@@ -534,6 +661,11 @@ fn plausible_seconds(v: i64) -> Option<i64> {
         Some(v)
     } else if (MIN_PLAUSIBLE_SECONDS * 1000..=MAX_PLAUSIBLE_SECONDS * 1000).contains(&v) {
         Some(v / 1000)
+    } else if (MIN_PLAUSIBLE_SECONDS * 1_000_000..=MAX_PLAUSIBLE_SECONDS * 1_000_000).contains(&v) {
+        // Microsecond epochs (perplexity's `*_us` fields): 1 s = 1_000_000 µs.
+        // The value is an absolute instant, so this stays an honest inference
+        // from magnitude, labelled `Inferred` by the caller.
+        Some(v / 1_000_000)
     } else {
         None
     }
@@ -882,6 +1014,13 @@ fn perplexity_span(payload: &serde_json::Value) -> WebSpan {
     let mut msg = Stamps::default();
     if let Some(entries) = payload.get("entries").and_then(serde_json::Value::as_array) {
         msg.add_field(entries.iter(), "updated_datetime", EpochMode::Rfc3339);
+        // `updated_datetime` is written without an offset (naive), which zone
+        // discipline refuses to read as UTC. The same entries also carry the
+        // absolute microsecond epochs `created_us` / `updated_us` — read those
+        // so the entry still gets a real instant instead of being lost.
+        for field in ["updated_us", "created_us"] {
+            msg.add_field(entries.iter(), field, EpochMode::Absolute);
+        }
     }
     if msg.has() {
         return WebSpan::Messages(msg);
@@ -1412,12 +1551,14 @@ mod tests {
     }
 
     #[test]
-    fn all_blank_lines_is_unknown() {
+    fn all_blank_lines_is_no_conversation_content() {
+        // ADR-035: a session with no lines at all is "no conversation content",
+        // a distinct claim from "a conversation whose time we could not find".
         let lines = ["", "   ", ""];
         let a = analyze_session("claude-code", &lines);
         assert_eq!(a.first_unix, None);
         assert_eq!(a.line_count, 0);
-        assert!(matches!(a.time_source, TimeSource::Unknown { .. }));
+        assert_eq!(a.time_source, TimeSource::NoConversationContent);
     }
 
     // -------------------------------------------------------------- RFC parser
@@ -1607,6 +1748,119 @@ mod tests {
             why.contains("timestamp"),
             "why should mention the missing field: {why}"
         );
+    }
+
+    /// The real gemini-cli source file is a **pretty-printed JSON document**
+    /// split across many lines, not JSONL: no single line parses, and the whole
+    /// document must be re-read. This is the W118 "format variant".
+    #[test]
+    fn gemini_pretty_printed_document_is_read_as_one() {
+        let doc = format!(
+            "{{\n  \"sessionId\": \"s1\",\n  \"projectHash\": \"h\",\n  \"startTime\": \"{RFC_T1}\",\n  \"lastUpdated\": \"{RFC_T2}\",\n  \"messages\": [\n    {{\n      \"id\": \"m1\",\n      \"timestamp\": \"{RFC_T1}\",\n      \"type\": \"user\"\n    }},\n    {{\n      \"id\": \"m2\",\n      \"timestamp\": \"{RFC_T2}\",\n      \"type\": \"gemini\"\n    }}\n  ],\n  \"kind\": \"main\"\n}}\n"
+        );
+        let lines: Vec<&str> = doc.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .all(|l| serde_json::from_str::<serde_json::Value>(l).is_err()),
+            "premise: no individual line parses"
+        );
+        let a = analyze_session("gemini-cli", &lines);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Exact);
+    }
+
+    // ------------------------------------------------------------------- grok
+    /// The grok **CLI** archives one `session_docs` SQLite row per session with
+    /// the session's own `updated_at` (epoch seconds). The web-extension grok
+    /// bundle is a different shape and must still go through the web reader.
+    #[test]
+    fn grok_cli_updated_at_is_inferred() {
+        let envelope = format!(
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{{"session_id":"s1","updated_at":{T2},"title":"t","content":"x"}}}}"#
+        );
+        let lines = [envelope.as_str()];
+        let a = analyze_session("grok", &lines);
+        assert_eq!(a.first_unix, Some(T2));
+        assert_eq!(a.last_unix, Some(T2));
+        assert!(matches!(a.time_source, TimeSource::Inferred { .. }));
+    }
+
+    #[test]
+    fn grok_web_bundle_still_reads_responses() {
+        let body = serde_json::json!({
+            "responses": [ { "createTime": RFC_T1 }, { "createTime": RFC_T2 } ],
+        })
+        .to_string();
+        let line = web_line("grok", &body);
+        let a = analyze_session("grok", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T1));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: true });
+    }
+
+    /// perplexity writes an offset-less `updated_datetime` (refused by zone
+    /// discipline) **and** an absolute microsecond epoch `updated_us`;
+    /// the microsecond value is the honest time source.
+    #[test]
+    fn perplexity_microsecond_epoch_is_inferred() {
+        let body = serde_json::json!({
+            "entries": [ { "updated_datetime": "2026-07-18T15:54:22.049009", "updated_us": T2 * 1_000_000 } ],
+        })
+        .to_string();
+        let line = web_line("perplexity", &body);
+        let a = analyze_session("perplexity", &[line.as_str()]);
+        assert_eq!(a.first_unix, Some(T2));
+        assert_eq!(a.last_unix, Some(T2));
+        assert_eq!(a.time_source, TimeSource::Messages { exact: false });
+    }
+
+    // --------------------------------------------------- no conversation content
+    #[test]
+    fn claude_code_summary_only_is_no_conversation_content() {
+        // A file whose every line is metadata: no user/assistant message.
+        let lines = [
+            r#"{"type":"summary","sessionId":"s","uuid":"u9","summary":"..."}"#,
+            r#"{"type":"file-history-snapshot","messageId":"m","snapshot":{},"isSnapshotUpdate":false}"#,
+            r#"{"type":"bridge-session","sessionId":"s","lastSequenceNum":3}"#,
+        ];
+        let a = analyze_session("claude-code", &lines);
+        assert_eq!(a.first_unix, None);
+        assert_eq!(a.time_source, TimeSource::NoConversationContent);
+    }
+
+    #[test]
+    fn claude_code_timestamped_summary_is_not_conversation_activity() {
+        let line = format!(
+            r#"{{"type":"summary","sessionId":"s","uuid":"u9","summary":"...","timestamp":"{RFC_T1}"}}"#
+        );
+        let a = analyze_session("claude-code", &[line.as_str()]);
+        assert_eq!(a.first_unix, None);
+        assert_eq!(a.last_unix, None);
+        assert_eq!(a.line_count, 1);
+        assert_eq!(a.time_source, TimeSource::NoConversationContent);
+    }
+
+    #[test]
+    fn claude_code_message_without_timestamp_stays_unknown() {
+        // The same file shape but one real user line: it is a conversation, so
+        // a missing timestamp is Unknown, never "no content".
+        let lines = [
+            r#"{"type":"summary","sessionId":"s","uuid":"u9","summary":"..."}"#,
+            r#"{"type":"user","message":{"role":"user","content":"x"},"uuid":"u1"}"#,
+        ];
+        let a = analyze_session("claude-code", &lines);
+        assert_eq!(a.first_unix, None);
+        assert!(matches!(a.time_source, TimeSource::Unknown { .. }));
+    }
+
+    #[test]
+    fn unsupported_harness_with_no_lines_stays_unknown() {
+        // ADR-035 "no content" is only asserted for harnesses whose shape we
+        // know; an unsupported harness keeps its explicit "not implemented".
+        let a = analyze_session("aider", &[]);
+        assert!(matches!(a.time_source, TimeSource::Unknown { .. }));
     }
 
     // --------------------------------------------------------- web chat harnesses

@@ -50,8 +50,16 @@ impl CountState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TimeState {
-    Known { unix: i64 },
-    Unknown { why: String },
+    Known {
+        unix: i64,
+    },
+    Unknown {
+        why: String,
+    },
+    /// The session was archived with no conversation content at all (ADR-035):
+    /// there is no time because there is no conversation, a claim distinct from
+    /// [`TimeState::Unknown`].
+    NoConversationContent,
 }
 
 impl TimeState {
@@ -61,5 +69,9 @@ impl TimeState {
 
     pub fn unknown(why: impl Into<String>) -> Self {
         TimeState::Unknown { why: why.into() }
+    }
+
+    pub fn no_conversation_content() -> Self {
+        TimeState::NoConversationContent
     }
 }

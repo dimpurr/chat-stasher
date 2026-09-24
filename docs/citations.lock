@@ -387,6 +387,8 @@ crates/chat-stasher/data/harness-registry-v1.json:165-211  584dd1dcf1bf  lines=4
   <- README.md:183  :: "id": "cursor",
 crates/chat-stasher/data/harness-registry-v1.json:362-397  6241552cd249  lines=36
   <- README.md:183  :: "notes": "project-level SQLite (data_directory defaults to …
+crates/chat-stasher/src/activity.rs:75-95  0bb29c5974a9  lines=21
+  <- README.md:152  :: /// The archived session holds no conversation content at a…
 crates/chat-stasher/src/config.rs:15  219b41f02316  lines=1
   <- docs/install.md:201  :: /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
 crates/chat-stasher/src/config.rs:95-100  0c4fcb3ab27a  lines=6
@@ -495,33 +497,33 @@ crates/chat-stasher/src/main.rs:852-873  ebb71dce29b8  lines=22
   <- README.md:160  :: /// The Native Messaging host process itself.
 crates/chat-stasher/src/main.rs:1833-1843  91658be625f3  lines=11
   <- README.md:160  :: /// stdout, which is exactly what the browser launch path d…
-crates/chat-stasher/src/main.rs:3813-3826  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:3826-3839  6e297c93e74c  lines=14
   <- docs/install.md:377  :: Err(e) => {
-crates/chat-stasher/src/main.rs:3816-3824  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:3829-3837  7606cd68232e  lines=9
   <- docs/install.md:416  :: }
-crates/chat-stasher/src/main.rs:3828-3837  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:3841-3850  a14261353a59  lines=10
   <- docs/install.md:413  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:3849-3873  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:3862-3886  6d97af905715  lines=25
   <- docs/install.md:381  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:4009-4065  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:4022-4078  d1e3f53d40dc  lines=57
   <- docs/threat-model.md:494  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:5277-5284  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:5290-5297  f369ca3fd940  lines=8
   <- docs/threat-model.md:483  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:5305-5398  f4b26b9e403e  lines=94
+crates/chat-stasher/src/main.rs:5318-5411  f4b26b9e403e  lines=94
   <- docs/threat-model.md:481  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:5388-5397  fae6f081f82c  lines=10
+crates/chat-stasher/src/main.rs:5401-5410  fae6f081f82c  lines=10
   <- SECURITY.md:70  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:5634-5752  6179727696b7  lines=119
+crates/chat-stasher/src/main.rs:5647-5765  6179727696b7  lines=119
   <- README.md:175, README.md:226, docs/threat-model.md:541  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:6897-6898  a70af44131aa  lines=2
+crates/chat-stasher/src/main.rs:6910-6911  a70af44131aa  lines=2
   <- docs/install.md:478  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:6990-6997  e726e719a9a4  lines=8
+crates/chat-stasher/src/main.rs:7003-7010  e726e719a9a4  lines=8
   <- docs/install.md:507  :: Err(ActivityIndexError::Write(message)) => {
-crates/chat-stasher/src/main.rs:7045-7236  c9f1287ef8af  lines=192
+crates/chat-stasher/src/main.rs:7058-7249  c9f1287ef8af  lines=192
   <- README.md:168, README.md:175  :: fn cmd_status(
-crates/chat-stasher/src/main.rs:7193-7194  45ab8d39f01f  lines=2
+crates/chat-stasher/src/main.rs:7206-7207  45ab8d39f01f  lines=2
   <- docs/install.md:473  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:7353-7644  44e8b605cec0  lines=292
+crates/chat-stasher/src/main.rs:7366-7657  44e8b605cec0  lines=292
   <- README.md:168, README.md:175, docs/install.md:494  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs/privacy.md:580, docs/threat-model.md:382  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
@@ -543,8 +545,10 @@ crates/chat-stasher/src/nativehost.rs:1139-1166  4ceba3a8d636  lines=28
   <- docs/privacy.md:137, docs/threat-model.md:41  :: match inbox::seal_payload(
 crates/chat-stasher/src/nativehost.rs:1162-1166  4520d3869c60  lines=5
   <- docs/install.md:327  :: Err(inbox::SealError::Lock(e)) => {
-crates/chat-stasher/src/nativehost.rs:1906-1940  6e78c5dd7bec  lines=35
+crates/chat-stasher/src/nativehost.rs:1909-1943  6e78c5dd7bec  lines=35
   <- docs/privacy.md:580, docs/threat-model.md:172, docs/threat-model.md:387  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
+crates/chat-stasher/src/overview.rs:490-513  5d2c4694e7fa  lines=24
+  <- README.md:152  :: pub fn render_no_conversation_content(rows: &[OverviewRow])…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs/threat-model.md:80, docs/threat-model.md:438  :: //! Connection reaping for remote SSH backends.
 crates/chat-stasher/src/remote_err.rs:101-112  8dc19707e181  lines=12
@@ -563,7 +567,7 @@ crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs/install.md:713  :: }
 crates/chat-stasher/src/search.rs:16-34  4c5924e38beb  lines=19
   <- docs/threat-model.md:560  :: //! * **metadata tier** (this module): snapshot files + ind…
-crates/chat-stasher/src/selector.rs:1-247  c9ab719fa3b6  lines=247
+crates/chat-stasher/src/selector.rs:1-299  4c5fdc0759f8  lines=299
   <- README.md:152  :: //! selector — the one filter vocabulary that `search` and …
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:67, docs/threat-model.md:455  :: //! Read-only guarantee: every connection opens with `mode=…
@@ -593,7 +597,7 @@ crates/chat-stasher/src/store.rs:1289-1297  2fd9234448bb  lines=9
   <- docs/install.md:356  :: }
 crates/chat-stasher/src/store.rs:1318-1322  e915d9a10309  lines=5
   <- docs/threat-model.md:525  :: }
-crates/chat-stasher/src/ui.rs:550  ce4bc09fc5d8  lines=1
+crates/chat-stasher/src/ui.rs:566  ce4bc09fc5d8  lines=1
   <- docs/threat-model.md:208  :: fn content_page(params: &Query, data: &UiData, content: &dy…
 crates/chat-stasher/src/view.rs:138-150  605bc65511cd  lines=13
   <- docs/threat-model.md:180  :: if status == 0 {

@@ -1232,6 +1232,9 @@ fn time_of(state: &crate::json_out::TimeState) -> serde_json::Value {
         crate::json_out::TimeState::Unknown { why } => {
             serde_json::json!({"kind": "unknown", "why": why})
         }
+        crate::json_out::TimeState::NoConversationContent => {
+            serde_json::json!({"kind": "no_conversation_content"})
+        }
     }
 }
 

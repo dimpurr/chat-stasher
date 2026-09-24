@@ -308,6 +308,11 @@ impl SearchReport {
             counts.entry(host.hostname.clone()).or_default();
         }
         for hit in &self.hits {
+            if hit.time_source.is_no_conversation_content() {
+                // ADR-035: no conversation content is a third state, not a
+                // time-unknown, so it must not inflate this machine's recall gap.
+                continue;
+            }
             let count = counts.entry(hit.machine.clone()).or_default();
             if hit.first_unix.is_some() && hit.last_unix.is_some() {
                 count.0 += 1;
@@ -381,6 +386,10 @@ impl SearchReport {
                 counts.entry(host.hostname.clone()).or_default();
             }
             for hit in &self.hits {
+                if hit.time_source.is_no_conversation_content() {
+                    // ADR-035: no conversation content is not a time-unknown.
+                    continue;
+                }
                 let count = counts.entry(hit.machine.clone()).or_default();
                 if hit.first_unix.is_some() && hit.last_unix.is_some() {
                     count.0 += 1;
@@ -500,8 +509,25 @@ impl SearchReport {
     /// conversation time is unknown. When that happens, `hits.is_empty()`
     /// proves nothing — hence the separate name, so a caller cannot pick the
     /// weaker one by accident.
+    ///
+    /// A session with **no conversation content** (ADR-035) does not block the
+    /// answer: there is no conversation to be in the window, so "not matched"
+    /// is a proven result for it, not an unproven absence.
     pub fn answer_complete(&self) -> bool {
-        self.complete() && self.unplaced.is_empty()
+        self.complete()
+            && self
+                .unplaced
+                .iter()
+                .all(|u| u.dimension == UnplacedBy::NoContent)
+    }
+
+    /// Unplaced sessions that actually leave the answer unproven (everything
+    /// except the no-conversation-content state, which is a proven non-match).
+    fn unplaced_leaving_answer_open(&self) -> usize {
+        self.unplaced
+            .iter()
+            .filter(|u| u.dimension != UnplacedBy::NoContent)
+            .count()
     }
 
     /// The one terminal line for "your query matched nothing". The two cases
@@ -514,12 +540,12 @@ impl SearchReport {
                 self.unreadable.len(),
                 self.snapshots_scanned
             )
-        } else if !self.unplaced.is_empty() {
+        } else if self.unplaced_leaving_answer_open() > 0 {
             format!(
                 "search: UNKNOWN — 0 of {} sessions matched in `{}`, but {} session(s) could not be placed (see the list below), so this is NOT \"not there\".",
                 self.sessions_seen,
                 self.destination,
-                self.unplaced.len()
+                self.unplaced_leaving_answer_open()
             )
         } else {
             format!(
@@ -563,8 +589,12 @@ impl SearchReport {
 /// Lives here rather than in the CLI so the shape is testable without a
 /// repository, exactly like [`crate::view::render_json`].
 pub fn report_json(report: &SearchReport, cost: bool) -> String {
-    let time_state = |unix: Option<i64>, why: Option<&str>| match unix {
+    let time_state = |unix: Option<i64>, why: Option<&str>, source: &ActivityTimeSource| match unix
+    {
         Some(unix) => crate::json_out::TimeState::known(unix),
+        None if source.is_no_conversation_content() => {
+            crate::json_out::TimeState::no_conversation_content()
+        }
         None => crate::json_out::TimeState::unknown(
             why.unwrap_or("no conversation time was recorded for this session")
                 .to_string(),
@@ -582,8 +612,8 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "bytes": h.bytes,
                 "snapshot_short_id": h.short_snapshot(),
                 "archive_time_unix": h.archive_time_unix,
-                "first_unix": time_state(h.first_unix, h.time_why.as_deref()),
-                "last_unix": time_state(h.last_unix, h.time_why.as_deref()),
+                "first_unix": time_state(h.first_unix, h.time_why.as_deref(), &h.time_source),
+                "last_unix": time_state(h.last_unix, h.time_why.as_deref(), &h.time_source),
             })
         })
         .collect();
@@ -602,6 +632,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "dimension": match u.dimension {
                     UnplacedBy::Time => "time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::NoContent => "no_content",
                 },
                 "why": u.why,
             })
@@ -678,6 +709,13 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     };
     let line_count = row.line_count;
     match (row.first_unix, row.last_unix, why) {
+        (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
+            first_unix: None,
+            last_unix: None,
+            why: None,
+            line_count,
+            source: ActivityTimeSource::NoConversationContent,
+        },
         (Some(first), Some(last), _) => IndexedTime {
             first_unix: Some(first),
             last_unix: Some(last),
@@ -931,10 +969,13 @@ pub fn search_sessions(
                     )
                 }
             };
+            let no_content = time_source.is_no_conversation_content();
             let recall = report.all_recall.entry(machine.clone()).or_default();
             if first_unix.is_some() && last_unix.is_some() {
                 recall.0 += 1;
-            } else {
+            } else if !no_content {
+                // ADR-035: a session with no conversation content is not a
+                // recall gap — there is nothing whose time we failed to find.
                 recall.1 += 1;
             }
             let meta = SessionMeta {
@@ -962,19 +1003,35 @@ pub fn search_sessions(
                     time_source,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
-                Verdict::Unevaluated { dimension, why } => report.unplaced.push(UnplacedSession {
-                    machine,
-                    session_id,
-                    harness,
-                    shard_count,
-                    bytes,
-                    snapshot_id: snapshot_id.clone(),
-                    archive_time_unix,
-                    dimension,
-                    why,
-                    line_count,
-                    time_source,
-                }),
+                Verdict::Unevaluated { dimension, why } => {
+                    // A time window cannot place a session with no conversation
+                    // content either, but that is a distinct reason from a real
+                    // conversation with an unreadable time (ADR-035), and it is
+                    // excluded from the unknown tallies.
+                    let (dimension, why) = if dimension == UnplacedBy::Time && no_content {
+                        (
+                            UnplacedBy::NoContent,
+                            "this session holds no conversation content (no user or assistant \
+                             message); there is nothing to place in a time bucket"
+                                .to_string(),
+                        )
+                    } else {
+                        (dimension, why)
+                    };
+                    report.unplaced.push(UnplacedSession {
+                        machine,
+                        session_id,
+                        harness,
+                        shard_count,
+                        bytes,
+                        snapshot_id: snapshot_id.clone(),
+                        archive_time_unix,
+                        dimension,
+                        why,
+                        line_count,
+                        time_source,
+                    })
+                }
             }
         }
         if machines_with_missing_rows.contains(&host) {
@@ -1067,6 +1124,74 @@ mod tests {
         report.machines_without_index.push("machine-a".into());
         assert!(!report.machine_window_summary()[0].index_trusted);
         assert!(report.machine_recall_warnings()[0].contains("--rebuild"));
+    }
+
+    #[test]
+    fn no_conversation_content_is_excluded_from_recall_and_unknown() {
+        let mut no_content = hit("machine-a", "claude-code.machine-a.empty", 10);
+        no_content.line_count = 0;
+        no_content.time_why = None;
+        no_content.time_source = ActivityTimeSource::NoConversationContent;
+        let report = SearchReport {
+            destination: "fixture".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            sessions_seen: 1,
+            window: Some(TimeWindow {
+                since_unix: Some(1),
+                until_unix: Some(2),
+                how: crate::selector::WindowHow::LocalDays,
+                since_text: Some("2026-09-24".into()),
+                until_text: Some("2026-09-24".into()),
+            }),
+            all_recall: BTreeMap::new(),
+            hits: vec![no_content],
+            unplaced: vec![UnplacedSession {
+                machine: "machine-a".into(),
+                session_id: "claude-code.machine-a.empty".into(),
+                harness: Some("claude-code".into()),
+                shard_count: 1,
+                bytes: 0,
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 10,
+                dimension: UnplacedBy::NoContent,
+                why: "no conversation content".into(),
+                line_count: 0,
+                time_source: ActivityTimeSource::NoConversationContent,
+            }],
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            hosts: vec![HostSnapshot {
+                hostname: "machine-a".into(),
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 10,
+                has_activity_index: true,
+                index_read_ok: true,
+                index_trusted: true,
+            }],
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 1,
+        };
+        assert_eq!(
+            report.machine_window_summary()[0].time_unknown,
+            0,
+            "no-conversation-content must not count as a time-unknown"
+        );
+        assert_eq!(
+            report.machine_recall_summary()[0].time_unknown,
+            0,
+            "the overall recall must exclude it too"
+        );
+        assert!(
+            report.machine_recall_warnings().is_empty(),
+            "no WARN for a destination whose only unplaceable session has no content"
+        );
+        assert_eq!(report.session_time_unknown(), 0, "dimension is no_content");
+        assert!(
+            report.answer_complete(),
+            "a no-content session does not leave the query unanswered"
+        );
     }
 
     #[test]
