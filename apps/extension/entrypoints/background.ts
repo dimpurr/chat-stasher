@@ -80,6 +80,7 @@ import { backfillCapabilityOf, backfillPlanFor, canBackfillDetail } from '../lib
 //    overrides it, and the daily-cap skip has to compare against the very number
 //    the engine would (`tickIdleReason`).
 import { DEFAULT_PACE } from '../lib/backfill/pace';
+import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/speed';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
 import { dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey, type HaltReason } from '../lib/backfill/types';
@@ -551,6 +552,18 @@ interface BackfillSeam {
   pace?: BackfillOptions['pace'];
   clock?: BackfillOptions['clock'];
   random?: RandomFn;
+  /**
+   * 🔴 W113 · **Which speed preset a test wants this tick to run at** (ADR-032 §3).
+   *
+   * The suite has two kinds of test and they want different things from this seam. The scheduling and
+   * end-to-end tests (W76/W86/C17/C19) were written against a specific bodies-per-tick number and count
+   * archived rows — for them the preset *is* an input, and naming it here is more honest than the
+   * literal they used to carry: an explicit `'standard'` says "this is the rate this test is about",
+   * where `[4, 4, 4]` only said "this is the rate today".
+   *
+   * Tests that do not set it get the shipped default, read from storage, exactly as production does.
+   */
+  preset?: SpeedPreset;
 }
 let backfillPaceOverride: BackfillSeam | null = null;
 
@@ -565,6 +578,32 @@ export function configureBackfillTransport(http: HttpPort | null): void {
 
 export function configureBackfillPace(override: BackfillSeam | null): void {
   backfillPaceOverride = override;
+}
+
+/**
+ * 🔴 W113 · **The speed preset this tick runs with** (ADR-032 §3, ADR-033).
+ *
+ * This is the only production reader of `lib/backfill/speed.ts`, and the *only* thing that turns a stored
+ * choice into a rate: everything downstream keeps taking `pace` and `maxDetails` exactly as it did before
+ * presets existed, so no engine, alarm or ledger path had to learn about them.
+ *
+ * 🔴 It is spread **before** `backfillPaceOverride` at every call site, on purpose: the seam is how a test
+ *    pins an exact pace, and a preset that out-ranked it would make the shipped rate the one thing the
+ *    suite could not hold still. Production never sets the seam, so this ordering is observable only in
+ *    tests — which is where it matters.
+ *
+ * One `storage.local` read per tick. It is not cached in a module variable: the SW is reclaimed between
+ * ticks, so a cache would mostly be a stale value, and the read is the same one the switch itself costs.
+ */
+async function presetTickOptions(
+  store: ReturnType<typeof browserLocalStore>,
+): Promise<{ pace: BackfillOptions['pace']; maxDetails: number }> {
+  // The seam's preset, when a test named one, is read here rather than at the spread below because the
+  // plan has to be resolved to get `maxDetails` out of it — the seam itself carries no `maxDetails`.
+  const plan = backfillPaceOverride?.preset
+    ? SPEED_PLANS[backfillPaceOverride.preset]
+    : await readSpeedPlan(store);
+  return { pace: plan.pace, maxDetails: plan.tickDetails };
 }
 
 /** The most recent tick's result (for tests and diagnosis, and for C18's popup). */
@@ -1279,6 +1318,8 @@ export async function kickBackfill(
     //    so the engine heard no objection and cleared the debt even when nothing
     //    had been stored.
     sink: (c) => deliverBackfillItem(c),
+    // W113 · The stored speed preset (ADR-032 §3), then the test seam over it.
+    ...(await presetTickOptions(store)),
     ...(backfillPaceOverride ?? {}),
   });
   lastTick = result;
@@ -1656,6 +1697,10 @@ async function runAlarmTickBody(): Promise<TickResult> {
     store,
     http: undefined,
     sink: (c) => deliverBackfillItem(c),
+    // W113 · Same preset as a real tick would use. This probe can only ever answer a gate reason — it has
+    // no port, so the engine is never entered — but passing the preset keeps the two call sites identical,
+    // and a future gate that did read the pace would then be reading the right one.
+    ...(await presetTickOptions(store)),
     ...(backfillPaceOverride ?? {}),
   });
 
@@ -1738,7 +1783,8 @@ async function runAlarmTickBody(): Promise<TickResult> {
       last = { ran: false, reason: 'scope-asked', report: null };
       return true;
     };
-    const tickOne = (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
+    // `async` since W113: the preset is read per tick, and a body-less arrow cannot await.
+    const tickOne = async (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
       tickBackfill({
         platform: target.platform,
         origin: target.origin,
@@ -1748,6 +1794,8 @@ async function runAlarmTickBody(): Promise<TickResult> {
         // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
         //    and one of them reporting while the other does not is not acceptable).
         sink: (c) => deliverBackfillItem(c),
+        // W113 · The alarm's path. Read once per tick, the same as the live leg's kick.
+        ...(await presetTickOptions(store)),
         ...(backfillPaceOverride ?? {}),
       });
     let http = await resolveHttpPort(target.origin);

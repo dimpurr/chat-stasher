@@ -2156,9 +2156,19 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    plan's `maxPerDay` stays the hard ceiling, so a cap drawn at 400 can never
    *    exceed a caller that asked for less, and a hand-edited or corrupt stored
    *    value cannot raise the rate either. `maxPerDay: null` draws nothing.
+   *
+   * 🔴 W113 · The roll is drawn from the plan's **own band** when it declares one
+   *    (`pace.detail.dailyCapBand`, lib/backfill/speed.ts), and from
+   *    `[DAILY_CAP_MIN, DAILY_CAP_MAX]` otherwise. A speed preset that only lowered
+   *    the ceiling would otherwise get a *fixed* cap for the whole day — see the
+   *    field's note in pace.ts.
    */
   if (state.detailToday.day !== today) {
-    state.detailToday = { day: today, count: 0, cap: drawDailyCap(pace.detail.maxPerDay, random) ?? undefined };
+    state.detailToday = {
+      day: today,
+      count: 0,
+      cap: drawDailyCap(pace.detail.maxPerDay, random, pace.detail.dailyCapBand) ?? undefined,
+    };
     // 🔴 Persist the draw **before acting on it**. Without this line the very
     //    first run of a new day that stops early (the cap was already reached, or
     //    the budget was 0) would return without ever writing the counter, the

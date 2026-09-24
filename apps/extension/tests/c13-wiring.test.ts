@@ -18,7 +18,7 @@ import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
-import { DEFAULT_TICK_DETAILS } from '../lib/backfill/schedule';
+import { DEFAULT_SPEED_PRESET, SPEED_PLANS } from '../lib/backfill/speed';
 
 // ---- Replace the engine with a spy (in this file only) ----
 const runBackfillSpy = vi.fn(async (opts: any) => ({
@@ -139,7 +139,12 @@ describe('C13 · the backfill leg wired into the runtime', () => {
     expect(opts.origin).toBe('https://chatgpt.com');
     expect(opts.platform).toBe('chatgpt');
     expect(typeof opts.sink).toBe('function');         // the archive exit does not fork
-    expect(opts.maxDetails).toBe(DEFAULT_TICK_DETAILS);   // pacing: one tick clears at most DEFAULT_TICK_DETAILS debts
+    // 🔴 W113 · The budget is the **default speed preset's**, not a bare constant any more: bodies per
+    //    wake is one of the two knobs ADR-032's presets own, and this storage was cleared by beforeEach,
+    //    so an install that has expressed no preference runs at `DEFAULT_SPEED_PRESET`. Asserting against
+    //    the plan keeps this about the wiring ("the tick's budget really reaches the engine") rather than
+    //    about which preset is the default — which is a product decision recorded in lib/backfill/speed.ts.
+    expect(opts.maxDetails).toBe(SPEED_PLANS[DEFAULT_SPEED_PRESET].tickDetails);
     // 🔴 W2: the pause gate is **not** in the engine. The engine only knows the exit's
     //    retryLater answer; "should it run right now" is answered by schedule.ts's gate —
     expect('downloadGuard' in opts).toBe(false);
