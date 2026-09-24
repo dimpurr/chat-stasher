@@ -79,6 +79,8 @@
  *       fragment — this is also how the segment is told apart, because this
  *       plan's two segments share one path (see `formSegmentFor`);
  *     · the form's field names are a closed set, each present exactly once;
+ *     · its byte ceiling is `MAX_FORM_REQUEST_BODY_BYTES`, not the JSON one —
+ *       the form kind is the one that carries a growing opaque platform cursor;
  *     · every field other than the batch must be **empty** — the credential
  *       field exists because the page's own request has it and is blank because
  *       only the page-context wrapper may fill it;
@@ -126,6 +128,7 @@ import {
   ALLOWED_BACKFILL_CONTENT_TYPES,
   ALLOWED_BACKFILL_METHODS,
   MAX_BODY_ARRAY_ITEMS,
+  MAX_FORM_REQUEST_BODY_BYTES,
   MAX_REQUEST_BODY_BYTES,
   type BackfillEnumPlan,
   type BackfillMethod,
@@ -652,8 +655,8 @@ function checkFormRequest(
   if (!formQueryMatches(post, u)) return refuseUrl('body url carries a query the plan did not declare');
 
   if (typeof spec.body !== 'string') return refuseRequest('refused: POST request has no string body');
-  if (new TextEncoder().encode(spec.body).byteLength > MAX_REQUEST_BODY_BYTES) {
-    return refuseRequest('refused: request body exceeds MAX_REQUEST_BODY_BYTES');
+  if (new TextEncoder().encode(spec.body).byteLength > MAX_FORM_REQUEST_BODY_BYTES) {
+    return refuseRequest('refused: request body exceeds MAX_FORM_REQUEST_BODY_BYTES');
   }
   if (spec.contentType !== post.contentType) {
     return refuseRequest('refused: content-type is not the one declared by the plan');
