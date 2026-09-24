@@ -129,6 +129,44 @@ describe('W127-A · parseRetryAfterMs is one place, and its three answers are di
 });
 
 // ===========================================================================
+// B · W127b P2 · only a strict HTTP-date is a date; what Date.parse tolerates is not
+// ===========================================================================
+
+describe('W127b-P2 · the date form is validated before Date.parse sees it', () => {
+  it('🔴 a garbage header Date.parse would read as a date is null, not the floor', () => {
+    const now = T0;
+    // This is the defect: `Date.parse('abc 2026-01-01')` is a real timestamp, so the
+    // old letter test let it through and the 30 s floor replaced the fallback ladder.
+    expect(Date.parse('abc 2026-01-01')).toBe(Date.parse('2026-01-01'));
+    expect(parseRetryAfterMs('abc 2026-01-01', now)).toBeNull();
+  });
+
+  it('🔴 ISO 8601 and other lenient shapes are not HTTP-dates', () => {
+    const now = T0;
+    for (const value of [
+      '2026-01-01T00:00:00Z',   // ISO 8601, not RFC 9110
+      'Thu, 01 Jan 2026',       // a date with no time-of-day
+      'Jan 1 2026',
+      '01/01/2026',
+      'abc 2026-01-01',
+    ]) {
+      expect(parseRetryAfterMs(value, now), value).toBeNull();
+    }
+  });
+
+  it('🔴 all three RFC 9110 forms are still read', () => {
+    // Five minutes after this instant, so each form lands inside the band.
+    const now = Date.parse('2026-01-06T00:00:00.000Z');
+    // IMF-fixdate (preferred).
+    expect(parseRetryAfterMs('Tue, 06 Jan 2026 00:05:00 GMT', now)).toBe(300_000);
+    // rfc850-date (obsolete) — a two-digit year.
+    expect(parseRetryAfterMs('Tuesday, 06-Jan-26 00:05:00 GMT', now)).toBe(300_000);
+    // asctime-date (obsolete) — a space-padded day.
+    expect(parseRetryAfterMs('Tue Jan  6 00:05:00 2026', now)).toBe(300_000);
+  });
+});
+
+// ===========================================================================
 // A · the engine: the status decides whether the header is read at all
 // ===========================================================================
 

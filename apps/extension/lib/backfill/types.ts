@@ -1038,6 +1038,35 @@ function clampRetryAfterMs(ms: number): number {
 }
 
 /**
+ * 🔴 W127b · **Is this string exactly one of the three HTTP-date forms RFC 9110
+ * §5.6.7 defines — IMF-fixdate, RFC 850, or asctime — and nothing else?**
+ *
+ * Why this exists rather than "does `Date.parse` accept it": `Date.parse` is a
+ * JavaScript date parser, not an HTTP-date validator. It reads `abc 2026-01-01`
+ * and `2026-01-01T00:00:00Z` as real timestamps, so a garbage `Retry-After` would
+ * produce the 30-second floor instead of falling back to the ladder (the P2 review
+ * finding on W127). The form is matched in full before the value reaches
+ * `Date.parse`; a day-of-week that disagrees with the date is still accepted,
+ * because date arithmetic is `Date.parse`'s job and this helper's only job is the
+ * syntactic form.
+ *
+ *  · **IMF-fixdate** (preferred) — `Sun, 06 Nov 1994 08:49:37 GMT`
+ *  · **rfc850-date** (obsolete) — `Sunday, 06-Nov-94 08:49:37 GMT`
+ *  · **asctime-date** (obsolete) — `Sun Nov  6 08:49:37 1994`
+ *
+ * The month and day-name sets are closed, so matching them case-insensitively is
+ * the ABNF grammar it encodes; the shape itself is still exact (the asctime day
+ * is `2DIGIT` or a space plus one digit, and the rfc850 year is exactly two).
+ */
+const IMF_FIXDATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/i;
+const RFC850_DATE = /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT$/i;
+const ASCTIME_DATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?:\d{2}| \d) \d{2}:\d{2}:\d{2} \d{4}$/i;
+
+function isHttpDate(value: string): boolean {
+  return IMF_FIXDATE.test(value) || RFC850_DATE.test(value) || ASCTIME_DATE.test(value);
+}
+
+/**
  * 🔴 W127 · **Read an HTTP `Retry-After` value as a wait, or answer `null` so the
  * caller falls back to its own ladder.**
  *
@@ -1048,10 +1077,14 @@ function clampRetryAfterMs(ms: number): number {
  *    in the past clamps to the floor ("retry now" is not "retry immediately").
  *
  * `null` is the honest answer for **absent** (nothing to read), **empty**, and
- * **garbage** (not a number, not a parseable date) — three different inputs that
- * all mean the same thing here: the header said nothing this leg can use, so the
+ * **garbage** (not a number, not an HTTP-date) — three different inputs that all
+ * mean the same thing here: the header said nothing this leg can use, so the
  * ladder decides. It is deliberately not `0`, which would be indistinguishable
  * from a header that really said "now".
+ *
+ * 🔴 W127b · The date form is validated by `isHttpDate` before `Date.parse` sees
+ *    it, so a string `Date.parse` merely tolerates falls back to the ladder
+ *    instead of becoming a real (and therefore floor-clamped) date.
  *
  * `now` is a parameter rather than `Date.now()` so the date form is deterministic
  * in tests; the delta-seconds form does not read it. The engine passes the same
@@ -1065,11 +1098,10 @@ export function parseRetryAfterMs(raw: string | null | undefined, now: number = 
   if (/^\d+$/.test(trimmed)) {
     return clampRetryAfterMs(Number(trimmed) * 1000);
   }
-  // HTTP-date. The letter test is load-bearing: `Date.parse` is lenient enough to
-  // read numeric-looking garbage such as `12.5` as a real (past) date, which would
-  // turn "the header said nothing" into the floor. Every HTTP-date form carries a
-  // month name, so a string with no letter is not one and falls back to the ladder.
-  if (!/[A-Za-z]/.test(trimmed)) return null;
+  // HTTP-date, but only after the form is exact: `Date.parse` reads `abc 2026-01-01`
+  // and `2026-01-01T00:00:00Z` as real dates, which would turn "the header said
+  // nothing" into the floor instead of the ladder.
+  if (!isHttpDate(trimmed)) return null;
   const at = Date.parse(trimmed);
   if (Number.isNaN(at)) return null;
   return clampRetryAfterMs(at - now);
