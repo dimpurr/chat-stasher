@@ -705,6 +705,13 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     };
     let line_count = row.line_count;
     match (row.first_unix, row.last_unix, why) {
+        (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
+            first_unix: None,
+            last_unix: None,
+            why: None,
+            line_count,
+            source: ActivityTimeSource::NoConversationContent,
+        },
         (Some(first), Some(last), _) => IndexedTime {
             first_unix: Some(first),
             last_unix: Some(last),
