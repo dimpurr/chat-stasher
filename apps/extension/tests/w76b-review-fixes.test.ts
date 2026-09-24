@@ -496,7 +496,9 @@ describe('W76b-2 · the cursor', () => {
     // on it. (W86: asserted as the identity rather than as "index 0"; the property
     // is the same one and is now the stricter claim — it must name the served row.)
     expect(served).toBe(A);
-    expect(store[CURSOR_KEY]).toEqual({ platform: CHATGPT, scope: A });
+    // (W86b: the byte is now a map of waiting-time stamps, and it names the target
+    // just served — the stricter claim of the original comment is unchanged.)
+    expect(store[CURSOR_KEY]).toEqual({ served: { [`${CHATGPT}\0${A}`]: expect.any(Number) } });
 
     // And the next wake really moves on: the cursor is honoured, not merely written.
     expect(await servedByOneTick(mod, rows)).toBe(B);

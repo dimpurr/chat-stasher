@@ -53,7 +53,6 @@ import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
-  cursorStartIndex,
   findUnreadableState,
   isBackfillChainArmed,
   loadTargets,
@@ -65,6 +64,7 @@ import {
   saveTickCursor,
   SWEEP_NOT_CONCLUDED,
   syncBackfillAlarm,
+  tickWalkOrder,
   type AlarmsApi,
   type BackfillTarget,
   type TabSweepNotConcluded,
@@ -1600,26 +1600,26 @@ async function runAlarmTickBody(): Promise<TickResult> {
     return await conclude();
   }
 
-  // 🔴 W76 · **The fair rotation.** Last tick served one target; this tick the
-  //    walk starts at the target **after** it and wraps around the registry. A
-  //    platform captured later (and so sitting higher in `cs_backfill_targets_v1`)
-  //    can no longer take every tick for itself.
+  // 🔴 W76 · **The fair rotation.** The tick before this one served some target;
+  //    this tick prefers the targets that have waited longest, so a platform that
+  //    sits high in `cs_backfill_targets_v1` (it was captured most recently) can
+  //    no longer take every tick for itself.
   //
-  // 🔴 W86 · **"After it" means after the target, not after the slot it sat in.**
-  //    The cursor stores the served target's platform+scope, and `cursorStartIndex`
-  //    finds that row wherever it now sits. Storing its index instead made the walk
-  //    start one row early whenever a live capture prepended a row ahead of the
-  //    cursor, which re-served the row the cursor stood for — with a stable
-  //    registry and a steady capture stream that degenerates into one scope taking
-  //    every wake. A `null` cursor — never served, an unreadable byte, the
-  //    pre-W86 positional shape, or a target no longer in the registry — starts at
-  //    the head, which is the old behaviour, examines every row, and so can never
-  //    skip a platform forever.
-  const n = targets.length;
+  // 🔴 W86b · **"Waited longest", not "the row after the one I served".** W86's
+  //    walk started at the row holding the served target's identity, plus one —
+  //    correct about *which* target was served, and still a rule about where that
+  //    row currently sits. `rememberTarget` prepends on every live capture, so a
+  //    registry churning under the cursor can keep a runnable row out of the "row
+  //    after the cursor" slot forever; forgetting the cursor's own row was worse
+  //    still, because the walk then restarted at the head. `tickWalkOrder` reads
+  //    the cursor's stamps instead and returns the targets least-recently-served
+  //    first (never-served before served, ties by registry order), which no
+  //    reordering can influence. A `null` cursor — never served, an unreadable
+  //    byte, either pre-W86b shape, or nothing pruned — is every target
+  //    never-served, i.e. the registry in its own order, which examines every row
+  //    and so can never skip a platform.
   const cursor = await loadTickCursor(store);
-  const orderStart = cursorStartIndex(targets, cursor);
-  const order: number[] = [];
-  for (let k = 0; k < n; k += 1) order.push((orderStart + k) % n);
+  const order = tickWalkOrder(targets, cursor);
 
   for (const idx of order) {
     // 🔴 `noUncheckedIndexedAccess`: `idx` is in `[0, n)` by construction (above),
@@ -1668,7 +1668,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
      */
     const endWalkIfAsked = async (): Promise<boolean> => {
       if (scopeResolution.request === 'none') return false;
-      await saveTickCursor(store, target.platform, target.scope);
+      await saveTickCursor(store, targets, target.platform, target.scope);
       schedule.served = target.platform;
       last = { ran: false, reason: 'scope-asked', report: null };
       return true;
@@ -1803,7 +1803,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
       last = result;
       break;
     }
-    await saveTickCursor(store, target.platform, target.scope);
+    await saveTickCursor(store, targets, target.platform, target.scope);
     schedule.served = target.platform;
     last = result;
     break;

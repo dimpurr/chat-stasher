@@ -1,0 +1,678 @@
+/**
+ * W86b · **The wake serves whoever has waited longest; registry order is only a
+ * tie-break, so no sequence of captures can starve a target.**
+ *
+ * ## The defect this file pins, from the code at `835d4f1`
+ *
+ * W86 replaced the positional cursor (`{served: <index>}`) with an identity
+ * (`{platform, scope}`) and `cursorStartIndex` then walked the registry **from
+ * the row after that identity**. That is still a decision about *order*: which
+ * row a wake reaches is decided by where the identity currently sits, and
+ * `rememberTarget` is a move-to-front — every live capture moves one row to the
+ * head and shifts the rows above it down by one.
+ *
+ * So the sequence "capture the row that was just served before each wake"
+ * degenerates. On `835d4f1`, with `[A, B, C]` all runnable:
+ *
+ *   | wake | capture before the wake | registry | start | served |
+ *   |------|-------------------------|----------|-------|--------|
+ *   | 1    | —                       | `[A,B,C]`| 0     | **A**  |
+ *   | 2    | —                       | `[A,B,C]`| 1     | **B**  |
+ *   | 3    | B (just served)         | `[B,A,C]`| 1     | **A**  |
+ *   | 4    | A (just served)         | `[A,B,C]`| 1     | **B**  |
+ *   | 5…   | alternate B, A          | —        | 1     | A, B, A, B, … |
+ *
+ * From wake 3 the cursor identity sits at index 0 every time, so the walk always
+ * starts at index 1 — and `C`, registered and runnable throughout, is never that
+ * row. One capture is enough to miss a cycle. A removal is the same defect from
+ * the other side: `cursorStartIndex` returns `0` when the identity is absent, the
+ * head takes the wake, and a row that is never the head waits forever.
+ *
+ * ## What decides a wake now
+ *
+ * The cursor is a **map from identity to the sequence number of the wake that
+ * last served it** (`{served: {'<platform>\0<scope>': <n>}}`). A wake walks the
+ * runnable targets in **least-recently-served-first** order — never-served
+ * before served, ties broken by registry order — and stamps the identity it
+ * really served. Registry order is a tie-break, not the schedule, so no prepend,
+ * removal or permutation can move a target out of its turn.
+ *
+ * ## How "who was served" is observed, and why it is observed that way
+ *
+ * **Each target's own `archived` set** (`loadState(...).archived.length`), read
+ * before and after every tick: the scope whose count rose is the one that tick
+ * served. Deliberately not `schedule.served`, for the two reasons
+ * `tests/w76-fair-tick-scheduling.test.ts` sets out at length — the trace names a
+ * platform and may not name a scope, and a test whose only evidence is a field
+ * this revision introduced cannot show the defect it claims to have found. The
+ * archive count exists in both revisions.
+ *
+ * ## The reorderings are performed by the real `rememberTarget` / `forgetTarget`
+ *
+ * A live capture is simulated by calling the shipped function that a live capture
+ * calls, on the real store — never by writing an array literal into the key. The
+ * registry the next wake reads is therefore whatever the product would have put
+ * there, and a change to the dedup rule or the prepend moves this file with it.
+ *
+ * ## Why every target is a scope of one reachable platform
+ *
+ * A port is per origin, so one live tab makes every `chatgpt` scope runnable and
+ * the walk's *order* is the only thing under test. `chatgpt`'s list/detail pair is
+ * the one the synthetic server answers faithfully.
+ *
+ * 🔴 W86b-A, B, C, D, E and H are red on `835d4f1` — as is the second case of
+ *    W86b-F, which pins the per-entry rule — the pasted runs are in the report.
+ *    The cases marked **guard** pass on `835d4f1` as well: they are the fallback
+ *    sides of the change, and they are labelled rather than dressed up as reds.
+ *    Zero real network, zero real browser profile, no conversation text.
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { withI18n } from './i18n-harness';
+import { IDBFactory } from 'fake-indexeddb';
+import { handleBackfillMessage, rememberTab, type TabQueryRow } from '../lib/backfill/tab-port';
+import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+
+const PLATFORM = 'chatgpt';
+const ORIGIN = 'https://chatgpt.com';
+/**
+ * Enough conversations that no scope runs out of debts inside these tests — the
+ * property loop below serves some scope a dozen times.
+ */
+const IDS = Array.from(
+  { length: 64 },
+  (_unused, i) => `c1111111-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
+);
+/** Five scopes of one reachable platform. The registry order is set per case. */
+const SCOPES = ['acct-w86b-a', 'acct-w86b-b', 'acct-w86b-c', 'acct-w86b-d', 'acct-w86b-e'] as const;
+const [A, B, C] = SCOPES;
+/**
+ * The literal cursor key, and the literal identity-key join, spelled out rather
+ * than imported: this file must test the byte and the shape that ship, not a
+ * constant the fix chose.
+ */
+const CURSOR_KEY = 'cs_backfill_cursor_v1';
+const idKey = (scope: string): string => `${PLATFORM}\0${scope}`;
+
+interface TargetRow { platform: string; origin: string; scope: string }
+const chatgpt = (scope: string): TargetRow => ({ platform: PLATFORM, origin: ORIGIN, scope });
+
+const store: Record<string, unknown> = {};
+const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
+const alarmListeners: Array<(a: any) => void> = [];
+const alarmBook = new Map<string, { periodInMinutes?: number }>();
+/** The platform tabs that are "open" right now. Delete one and its ping naturally fails. */
+const liveTabs = new Map<number, string>();
+/** What `tabs.query({})` returns — the recovery sweep's only view of the browser. */
+const queriedTabs: TabQueryRow[] = [];
+const contentFetches: string[] = [];
+let host: SyntheticHost;
+
+/**
+ * A synthetic server: a pure function, never the network. One page of
+ * conversations, then the empty page that confirms the list is finished.
+ */
+function syntheticPageFetch(url: string) {
+  contentFetches.push(url);
+  const u = new URL(url);
+  if (u.pathname === '/backend-api/conversations') {
+    const offset = Number(u.searchParams.get('offset') ?? '0');
+    return Promise.resolve({
+      status: 200,
+      text: async () => JSON.stringify({
+        items: IDS.slice(offset).map((id) => ({ id })),
+        total: IDS.length,
+      }),
+    });
+  }
+  const id = decodeURIComponent(u.pathname.replace('/backend-api/conversation/', ''));
+  return Promise.resolve({
+    status: 200,
+    text: async () => JSON.stringify({
+      mapping: { n1: { id: 'n1', message: { content: { parts: ['synthetic'] } } } },
+      current_node: 'n1',
+      account_id: id,
+    }),
+  });
+}
+
+const fakeBrowser: any = {
+  runtime: {
+    id: 'mock-extension-id',
+    onStartup: { addListener() {} },
+    onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
+    sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
+  },
+  storage: {
+    local: {
+      async get(defaults: Record<string, unknown> | null) {
+        if (defaults === null) return { ...store };
+        const out: Record<string, unknown> = {};
+        for (const k of Object.keys(defaults)) out[k] = k in store ? store[k] : defaults[k];
+        return out;
+      },
+      async set(values: Record<string, unknown>) { Object.assign(store, values); },
+      async remove(keys: string[]) { for (const k of keys) delete store[k]; },
+    },
+  },
+  action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
+  alarms: {
+    create(name: string, info: any) { alarmBook.set(name, info); },
+    async clear(name: string) { return alarmBook.delete(name); },
+    async get(name: string) { return alarmBook.get(name) ?? undefined; },
+    onAlarm: { addListener(fn: any) { alarmListeners.push(fn); } },
+  },
+  tabs: {
+    async query() { return queriedTabs.map((t) => ({ ...t })); },
+    async sendMessage(tabId: number, message: unknown) {
+      const origin = liveTabs.get(tabId);
+      if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
+      const pending = handleBackfillMessage(message, origin, syntheticPageFetch as any);
+      if (!pending) return undefined;
+      return await pending;
+    },
+  },
+};
+
+/** A fake clock through background's test seam, so the test does not really sleep. */
+let runtimeNow = 1_700_000_000_000;
+const runtimeClock = {
+  now: () => runtimeNow,
+  sleep: async (ms: number) => { runtimeNow += ms; },
+};
+
+async function bootBackground(): Promise<any> {
+  const mod: any = await import('../entrypoints/background');
+  mod.configureBackfillPace({ clock: runtimeClock, random: () => 0 });
+  if (runtimeListeners.length === 0) await mod.default();
+  return mod;
+}
+
+/** A service-worker reclaim: the module goes away, `storage.local` does not. */
+async function restartServiceWorker(): Promise<any> {
+  runtimeListeners.length = 0;
+  alarmListeners.length = 0;
+  vi.resetModules();
+  const { resetTickLockForTest } = await import('../lib/backfill/schedule');
+  resetTickLockForTest();
+  return bootBackground();
+}
+
+async function enableBackfill(): Promise<void> {
+  const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  await setBackfillEnabled(browserLocalStore(), true);
+}
+
+/** Seed the registry directly: array order **is** the walk's order. */
+function seedTargets(rows: TargetRow[]): void {
+  store['cs_backfill_targets_v1'] = rows.map((row) => ({ ...row, at: 1 }));
+}
+
+/** Give the chatgpt origin a live, logged-in tab: the row `resolveHttpPort` needs. */
+async function openTab(tabId: number): Promise<void> {
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  liveTabs.set(tabId, ORIGIN);
+  queriedTabs.push({ id: tabId });
+  await rememberTab(browserLocalStore(), { tabId, origin: ORIGIN, at: 1 });
+}
+
+/** **How many conversations this target has actually archived.** */
+async function archived(row: TargetRow): Promise<number> {
+  const { loadState } = await import('../lib/backfill/engine');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  const state = await loadState(browserLocalStore()!, row.platform, row.scope);
+  return state?.archived.length ?? 0;
+}
+
+/**
+ * 🔴 A live capture of an already-registered scope, performed by the shipped
+ *    `rememberTarget` on the real store. This is exactly what the content
+ *    script's capture path calls, and it is the only mechanism that reorders the
+ *    registry: the row moves to the head and the rows above it shift down by one.
+ *
+ * It takes a **scope**, not a row: every target in this file is a `chatgpt` row,
+ * and a row-shaped parameter would let a scope string be passed where a row was
+ * meant — an all-`undefined` write that changes nothing and makes the case
+ * silently vacuous.
+ */
+async function captureScope(scope: string): Promise<void> {
+  const { rememberTarget } = await import('../lib/backfill/alarm');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  await rememberTarget(browserLocalStore(), { ...chatgpt(scope), at: 1 });
+}
+
+/** The registry as storage holds it — read, never assumed, so drift shows up here. */
+async function registry(): Promise<TargetRow[]> {
+  const { loadTargets } = await import('../lib/backfill/alarm');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  return (await loadTargets(browserLocalStore())).map((t) => ({
+    platform: t.platform, origin: t.origin, scope: t.scope,
+  }));
+}
+
+/** Forget a scope, the way a re-scoped or collapsed row is dropped. */
+async function forgetScope(scope: string): Promise<void> {
+  const { forgetTarget } = await import('../lib/backfill/alarm');
+  const { browserLocalStore } = await import('../lib/backfill/store');
+  await forgetTarget(browserLocalStore(), PLATFORM, scope);
+}
+
+/**
+ * One alarm tick, and **which target it served** — read from the archives, not
+ * from the trace. `null` when no target's archive moved (a tick that ran nobody).
+ */
+async function servedByOneTick(mod: any, rows: TargetRow[]): Promise<TargetRow | null> {
+  const before: number[] = [];
+  for (const row of rows) before.push(await archived(row));
+  alarmListeners[0]!({ name: 'cs-backfill-tick' });
+  await mod.backfillTickSettled();
+  const moved: TargetRow[] = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    if ((await archived(rows[i]!)) !== before[i]) moved.push(rows[i]!);
+  }
+  // One tick may serve at most one platform (W76 design rule 3), so more than one
+  // moving count is itself a failure — said here rather than left to whichever
+  // assertion happens to read the counts next.
+  expect(moved.length, `one tick served ${JSON.stringify(moved.map((m) => m.scope))}`)
+    .toBeLessThanOrEqual(1);
+  return moved[0] ?? null;
+}
+
+/** The scope names served by `n` consecutive wakes. */
+async function servedSequence(mod: any, rows: TargetRow[], n: number): Promise<Array<string | null>> {
+  const out: Array<string | null> = [];
+  for (let i = 0; i < n; i += 1) out.push((await servedByOneTick(mod, rows))?.scope ?? null);
+  return out;
+}
+
+/** The raw byte at the cursor key — what the next wake will read. */
+function cursorByte(): any {
+  return store[CURSOR_KEY];
+}
+
+/** Its `served` map as a plain object, for a readable assertion. */
+function stamps(): Record<string, number> {
+  return { ...cursorByte()?.served };
+}
+
+beforeEach(async () => {
+  for (const k of Object.keys(store)) delete store[k];
+  runtimeListeners.length = 0;
+  alarmListeners.length = 0;
+  alarmBook.clear();
+  liveTabs.clear();
+  queriedTabs.length = 0;
+  contentFetches.length = 0;
+  runtimeNow = 1_700_000_000_000;
+  host = createSyntheticHost({ up: true });
+  (globalThis as any).indexedDB = new IDBFactory();
+  vi.stubGlobal('browser', withI18n(fakeBrowser));
+  vi.stubGlobal('chrome', fakeBrowser);
+  vi.stubGlobal('defineBackground', (cb: any) => cb);
+  vi.resetModules();
+  const { resetTickLockForTest } = await import('../lib/backfill/schedule');
+  resetTickLockForTest();
+});
+
+// ===========================================================================
+// W86b-A · the capture-before-every-wake table from the review
+// ===========================================================================
+
+describe('W86b-A · a capture between every wake reorders the registry under the cursor', () => {
+  it('🔴 capturing the just-served row before each wake must not reduce the rotation to two scopes', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(11);
+    const mod = await bootBackground();
+
+    const served: Array<string | null> = [];
+    let previous: string | null = null;
+    for (let i = 0; i < 6; i += 1) {
+      // The user switches back to the tab they were just looking at, so that
+      // scope is re-registered and `rememberTarget` prepends it. The registry
+      // holds the same three rows throughout — nothing was added and nothing was
+      // removed, it was only reordered — so there is no "new target" to excuse a
+      // missing turn.
+      if (i >= 2 && previous !== null) await captureScope(previous);
+      const s = (await servedByOneTick(mod, rows))?.scope ?? null;
+      served.push(s);
+      previous = s;
+    }
+    const counts: number[] = [];
+    for (const row of rows) counts.push(await archived(row));
+    console.log('[W86b-A] served per tick:', JSON.stringify(served), '· archived per scope:', JSON.stringify(counts));
+    console.log('[W86b-A] registry now:', JSON.stringify((await registry()).map((r) => r.scope)), '· cursor:', JSON.stringify(cursorByte()));
+
+    // 🔴 On `835d4f1` this is [A,B,A,B,A,B] with counts [3,3,0]: the cursor's
+    //    identity sits at index 0 from wake 3 on, so the walk always starts at
+    //    index 1 and C — registered and runnable the whole time — is never it.
+    expect(served).toEqual([A, B, C, A, B, C]);
+    expect(counts).toEqual([2, 2, 2]);
+  });
+});
+
+// ===========================================================================
+// W86b-B · one capture is enough to miss a cycle
+// ===========================================================================
+
+describe('W86b-B · one capture of the row the next wake is owed', () => {
+  it('🔴 a capture before the fifth wake must not push the owed row behind another', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(21);
+    const mod = await bootBackground();
+
+    const served = await servedSequence(mod, rows, 4);
+    console.log('[W86b-B] first four:', JSON.stringify(served), '· cursor:', JSON.stringify(cursorByte()));
+    expect(served).toEqual([A, B, C, A]);
+
+    // B is the row the next wake is owed, and the user captures it.
+    await captureScope(B);
+    const after = await servedSequence(mod, rows, 2);
+    console.log('[W86b-B] after capturing B (registry:', JSON.stringify((await registry()).map((r) => r.scope)), '):', JSON.stringify(after));
+
+    // 🔴 On `835d4f1` the next two are C then B — the walk starts at the row after
+    //    the cursor's position, and the capture moved B to the head so the row
+    //    after A is C. B's turn was skipped, not delayed.
+    expect(after).toEqual([B, C]);
+  });
+});
+
+// ===========================================================================
+// W86b-C · a removal plus a prepend on every wake
+// ===========================================================================
+
+describe('W86b-C · the row served is dropped from the registry and prepended again', () => {
+  it('🔴 a remove-then-re-register between every wake must not starve the rows that are never the head', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(31);
+    const mod = await bootBackground();
+
+    const served: Array<string | null> = [];
+    for (let i = 0; i < 6; i += 1) {
+      const s = (await servedByOneTick(mod, rows))?.scope ?? null;
+      served.push(s);
+      // A re-scope: the row really leaves the registry and really comes back, at
+      // the head. Both halves go through the shipped mutators.
+      if (s !== null) {
+        await forgetScope(s);
+        await captureScope(s);
+      }
+    }
+    console.log('[W86b-C] served per tick:', JSON.stringify(served), '· registry:', JSON.stringify((await registry()).map((r) => r.scope)));
+
+    // 🔴 On `835d4f1` this is [A,B,A,B,A,B]: the served row is prepended, so the
+    //    cursor's identity is at index 0 on the next wake and the walk starts at
+    //    index 1 — C sits at index 2 and is never reached.
+    expect(served).toEqual([A, B, C, A, B, C]);
+  });
+});
+
+// ===========================================================================
+// W86b-D · what is stored, and what is dropped from it
+// ===========================================================================
+
+describe('W86b-D · the stored cursor is a map of identities', () => {
+  it('🔴 each serve stamps its own identity, and an identity that leaves the registry is pruned', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(41);
+    const mod = await bootBackground();
+
+    const served = await servedSequence(mod, rows, 2);
+    console.log('[W86b-D] served:', JSON.stringify(served), '· cursor:', JSON.stringify(cursorByte()));
+    expect(served).toEqual([A, B]);
+    // 🔴 On `835d4f1` this byte is `{platform, scope}` — one identity, and no record
+    //    at all of how long anyone has waited.
+    expect(stamps()).toEqual({ [idKey(A)]: 1, [idKey(B)]: 2 });
+
+    // A is dropped for good (re-scoped onto another row, or collapsed). The two
+    // wakes after it stamp C and B; the map must not keep carrying A.
+    await forgetScope(A);
+    const after = await servedSequence(mod, rows, 2);
+    console.log('[W86b-D] after dropping A:', JSON.stringify(after), '· cursor:', JSON.stringify(cursorByte()));
+    expect(after).toEqual([C, B]);
+    expect(stamps()).toEqual({ [idKey(B)]: 4, [idKey(C)]: 3 });
+    expect(Object.keys(stamps())).not.toContain(idKey(A));
+  });
+});
+
+// ===========================================================================
+// W86b-E · a stored map is honoured, and it is what decides
+// ===========================================================================
+
+describe('W86b-E · a stored map decides who goes first', () => {
+  it('🔴 the identity that waited longest is served, wherever the registry puts it', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(51);
+    // A profile that has been running: A and C were served recently, B long ago.
+    store[CURSOR_KEY] = { served: { [idKey(A)]: 2, [idKey(B)]: 1, [idKey(C)]: 3 } };
+
+    const mod = await bootBackground();
+    const first = await servedByOneTick(mod, rows);
+    console.log('[W86b-E] served:', first?.scope, '· cursor:', JSON.stringify(cursorByte()));
+    // 🔴 On `835d4f1` this byte is not a cursor at all — no `platform`, no `scope` —
+    //    so the walk starts at the head and serves A, which waited 1 turn behind B.
+    expect(first?.scope).toBe(B);
+    expect(stamps()).toEqual({ [idKey(A)]: 2, [idKey(B)]: 4, [idKey(C)]: 3 });
+
+    // And it is a schedule, not a one-off: the next wake takes the next-longest.
+    expect((await servedByOneTick(mod, rows))?.scope).toBe(A);
+  });
+});
+
+// ===========================================================================
+// W86b-F · a byte that is not a map is not a cursor
+// ===========================================================================
+
+describe('W86b-F · a malformed or pre-W86 byte is an empty map, never a crash', () => {
+  it('guard · every shape this key has ever held, and every shape a partial write can make, starts at the head', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(61);
+
+    const notCursors: unknown[] = [
+      // The two shapes that really are in the wild on an upgrading profile.
+      { served: 1 },
+      { platform: PLATFORM, scope: B },
+      // A map field of the wrong type, or no map field at all.
+      { served: 'not-a-map' },
+      { served: 7 },
+      { served: null },
+      { served: [] },
+      {},
+      // Not an object.
+      'not-a-cursor',
+      42,
+      null,
+    ];
+    for (const byte of notCursors) {
+      store[CURSOR_KEY] = byte;
+      // A fresh worker, so no in-memory map can answer for the byte.
+      const fresh = await restartServiceWorker();
+      const served = await servedByOneTick(fresh, rows);
+      console.log('[W86b-F] byte', JSON.stringify(byte), '⇒ served', served?.scope, '· cursor now:', JSON.stringify(cursorByte()));
+      expect(served?.scope, `byte ${JSON.stringify(byte)} served nobody`).toBe(A);
+      // The bad byte is replaced by a real map, so the leg cannot stay stuck at the
+      // head on the strength of one corrupt value.
+      expect(stamps(), `byte ${JSON.stringify(byte)} was not replaced`).toEqual({ [idKey(A)]: 1 });
+    }
+  });
+
+  it('🔴 a single unreadable stamp is dropped on its own; the rest of the map still schedules', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(62);
+    // A and C hold usable stamps; B's is not a stamp. B is therefore never-served,
+    // which is the front of the queue — it must not cost A and C their own.
+    store[CURSOR_KEY] = { served: { [idKey(A)]: 5, [idKey(B)]: 'junk', [idKey(C)]: 5 } };
+
+    const mod = await bootBackground();
+    const first = await servedByOneTick(mod, rows);
+    console.log('[W86b-F2] served:', first?.scope, '· cursor:', JSON.stringify(cursorByte()));
+    // 🔴 On `835d4f1` the whole value is rejected — it has no `platform`/`scope` —
+    //    so the walk starts at the head and serves A.
+    expect(first?.scope).toBe(B);
+    expect((await servedByOneTick(mod, rows))?.scope).toBe(A);
+  });
+});
+
+// ===========================================================================
+// W86b-G · the write is best-effort, the in-memory map is not
+// ===========================================================================
+
+describe('W86b-G · a cursor write that keeps failing still rotates', () => {
+  it('guard · the rotation is carried in memory while storage.local refuses the key', async () => {
+    const rows = SCOPES.slice(0, 3).map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(71);
+    // The synthetic full quota: only the cursor key is refused, so what this case
+    // observes is the cursor's own best-effort failure and nothing else.
+    const realSet = fakeBrowser.storage.local.set;
+    fakeBrowser.storage.local.set = async (values: Record<string, unknown>) => {
+      if (Object.prototype.hasOwnProperty.call(values, CURSOR_KEY)) {
+        throw new Error('synthetic: storage.local refused the write');
+      }
+      await realSet(values);
+    };
+
+    const mod = await bootBackground();
+    const served = await servedSequence(mod, rows, 6);
+    console.log('[W86b-G] served per tick:', JSON.stringify(served), '· cursor key:', JSON.stringify(store[CURSOR_KEY]));
+    // The write really did fail — without this the case could pass because storage
+    // worked, which would prove nothing about the path it is here for.
+    expect(store[CURSOR_KEY]).toBeUndefined();
+    // The rotation is still a rotation for as long as this worker lives (W76b).
+    expect(served).toEqual([A, B, C, A, B, C]);
+  });
+});
+
+// ===========================================================================
+// W86b-H · the property, over random move-to-front / remove / prepend sequences
+// ===========================================================================
+
+/**
+ * One run of the property: `WAKES` wakes over an unchanged identity set, with a
+ * random reordering performed by the shipped registry mutators before each wake.
+ *
+ * Every mutation preserves the registry's identity **set** — a row moves, or
+ * leaves and comes straight back, but nothing new appears — and that is the
+ * premise the assertion needs, not a convenience:
+ *
+ *  · a run that registers a brand-new scope before every wake would hand every
+ *    turn to a newcomer, because "never served" is deliberately ahead of "served"
+ *    in the walk's order. That is the specified behaviour for a new target, and a
+ *    perpetual stream of new scopes is a different question (how many accounts a
+ *    profile can accumulate), which would hide this one behind it;
+ *  · 🩸 and a run that removes a row **for good** exempts that row from the very
+ *    assertion that would catch the defect. The first version of this loop kept a
+ *    plain `remove` op, and on `835d4f1` — where B and C alternated forever and A,
+ *    D and E were never served — the removals happened to land on exactly A, D
+ *    and E. The loop passed, on the code it was written to fail against, because
+ *    "every row that stays registered is served" is vacuously true for the rows
+ *    that left. The mutators below are therefore the ones a re-scope performs
+ *    (`forgetTarget` immediately followed by `rememberTarget`), and the run
+ *    asserts that no row ever left.
+ */
+async function propertyRun(
+  seed0: number,
+  WAKES: number,
+  rows: TargetRow[],
+  mod: any,
+): Promise<{ served: Array<string | null>; ops: string[]; registered: string[][] }> {
+  /** A deterministic LCG: the sequence is fixed, so a failure is reproducible. */
+  let seed = seed0;
+  const rnd = (): number => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  const pick = (xs: readonly string[]): string => xs[Math.floor(rnd() * xs.length)]!;
+
+  const registered: string[][] = [];
+  const served: Array<string | null> = [];
+  const ops: string[] = [];
+  for (let i = 0; i < WAKES; i += 1) {
+    const before = (await registry()).map((r) => r.scope);
+    registered.push(before);
+    const roll = rnd();
+    if (roll < 0.35) {
+      // The capture this whole revision is about: the row the last wake served is
+      // re-registered, which prepends it — the registry order the cursor used to
+      // be anchored to.
+      const s = served[served.length - 1] ?? pick(before);
+      await captureScope(s);
+      ops.push(`prepend-served ${s}`);
+    } else if (roll < 0.7) {
+      const s = pick(before);
+      await captureScope(s);
+      ops.push(`prepend ${s}`);
+    } else {
+      const s = pick(before);
+      await forgetScope(s);
+      await captureScope(s);
+      ops.push(`remove+prepend ${s}`);
+    }
+    const s = (await servedByOneTick(mod, rows))?.scope ?? null;
+    served.push(s);
+    if (s === null) ops.push('(served nobody)');
+  }
+  return { served, ops, registered };
+}
+
+describe('W86b-H · every row that stays registered is served within n wakes', () => {
+  it('🔴 random move-to-front, remove and prepend sequences cannot starve a registered row', async () => {
+    const rows = SCOPES.map(chatgpt);
+    seedTargets(rows);
+    await enableBackfill();
+    await openTab(81);
+    const mod = await bootBackground();
+
+    const n = SCOPES.length;
+    const WAKES = 24;
+    /** Two fixed streams, so the property is not a statement about one lucky seed. */
+    const SEEDS = [0x51eed, 0xbeef1];
+    for (const seed of SEEDS) {
+      const { served, ops, registered } = await propertyRun(seed, WAKES, rows, mod);
+      const histogram: Record<string, number> = {};
+      for (const row of rows) histogram[row.scope] = await archived(row);
+      console.log(`[W86b-H seed ${seed}] served:`, JSON.stringify(served));
+      console.log(`[W86b-H seed ${seed}] ops:`, JSON.stringify(ops));
+      console.log(`[W86b-H seed ${seed}] archived per scope:`, JSON.stringify(histogram));
+
+      // The run has to be worth asserting on: no wake served nobody, the registry
+      // really was reordered, and it never lost a row — so the exemption below
+      // cannot quietly absorb the rows the defect starves.
+      expect(served.filter((s) => s === null)).toEqual([]);
+      expect(ops.some((o) => o.startsWith('prepend-served '))).toBe(true);
+      expect(ops.some((o) => o.startsWith('remove+prepend '))).toBe(true);
+      for (const set of registered) expect([...set].sort()).toEqual([...SCOPES].sort());
+
+      const violations: string[] = [];
+      for (let i = 0; i + n <= WAKES; i += 1) {
+        const window = served.slice(i, i + n);
+        for (const scope of SCOPES) {
+          const throughout = registered.slice(i, i + n).every((set) => set.includes(scope));
+          if (!throughout) continue;
+          if (!window.includes(scope)) {
+            violations.push(`seed ${seed} wake ${i}: ${scope} was registered through wake ${i + n - 1} but not served in ${JSON.stringify(window)}`);
+          }
+        }
+      }
+      console.log(`[W86b-H seed ${seed}] windows checked:`, WAKES - n + 1, '· violations:', JSON.stringify(violations));
+      // 🔴 On `835d4f1` this is non-empty: a positional start plus a move-to-front
+      //    leaves rows that are never the row after the cursor.
+      expect(violations).toEqual([]);
+    }
+  });
+});

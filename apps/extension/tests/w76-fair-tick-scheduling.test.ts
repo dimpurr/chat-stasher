@@ -472,10 +472,12 @@ describe('W76-E · the cursor survives a service-worker restart and fails safe',
     //    `cs_backfill_targets_v1`; it is the served target's identity, which is the
     //    whole point of that revision (a prepend reorders the array, so a stored
     //    index names a different row afterwards — `w86-cursor-by-identity.test.ts`
-    //    is the file that measures it). The property asserted here is unchanged and
-    //    is now the stronger one: not "the byte became index 0" but "the byte became
-    //    the target just served".
-    expect(store[CURSOR_KEY]).toEqual({ platform: PLATFORM, scope: SCOPES[0] });
+    //    is the file that measures it). 🔴 W86b re-shapes it once more: the byte is
+    //    now a map of how long each identity has waited (least-recently-served
+    //    selection), not a single identity. The property asserted here is unchanged
+    //    and is still the stronger one: not "the byte became index 0" but "the byte
+    //    became the target just served".
+    expect(store[CURSOR_KEY]).toEqual({ served: { [`${PLATFORM}\0${SCOPES[0]}`]: expect.any(Number) } });
 
     // The next tick really does move on — the cursor is honoured, not merely written.
     const second = await serveOne(mod, rows);
