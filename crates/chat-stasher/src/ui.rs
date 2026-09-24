@@ -1251,12 +1251,17 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
             data.unreadable.len()
         );
     }
-    if !sel.unplaced.is_empty() {
+    let unplaced_blocking = sel
+        .unplaced
+        .iter()
+        .filter(|(_, dimension, _)| *dimension != UnplacedBy::NoContent)
+        .count();
+    if unplaced_blocking > 0 {
         return format!(
             "<div class=warn><b>UNKNOWN — not \"not there\".</b> 0 of {} session(s) matched, \
              but {} could not be placed (below), so this is not a proven absence.</div>\n",
             data.sessions.len(),
-            sel.unplaced.len()
+            unplaced_blocking
         );
     }
     format!(
@@ -1829,6 +1834,21 @@ mod tests {
                 || html.contains("UNKNOWN"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn no_content_does_not_make_a_time_filtered_absence_unknown() {
+        let mut d = fixture::data();
+        d.sessions.truncate(1);
+        d.archive_sessions = 1;
+        d.sessions[0].first_unix = None;
+        d.sessions[0].last_unix = None;
+        d.sessions[0].time_why = None;
+        d.sessions[0].time_source = TimeSource::NoConversationContent;
+
+        let html = req("/sessions?day=2030-01-01", &d, &NoContent).body;
+        assert!(html.contains("Not in this destination"), "{html}");
+        assert!(!html.contains("UNKNOWN"), "{html}");
     }
 
     /// A machine whose activity index is missing is named as such, and is never
