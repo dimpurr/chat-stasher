@@ -21,6 +21,7 @@ use rustic_core::repofile::{MasterKey, NodeType};
 use rustic_core::{Credentials, LsOptions, Repository};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -271,7 +272,8 @@ enum Command {
         keep_ssh_masters: bool,
     },
     /// Is the scheduled archive actually working? Plus what the local harness
-    /// scanner finds (read-only).
+    /// scanner finds (read-only). Add `--destination` to list archived writer
+    /// versions and identify machines behind the newest writer.
     ///
     /// The first line answers the question the timer cannot: it reads the
     /// `run-state.json` written by the last `run-once` pass. Three distinct
@@ -308,6 +310,24 @@ enum Command {
         /// `failed`. `exit_semantics` documents what the exit code means.
         #[arg(long)]
         json: bool,
+        /// Also list archived per-machine writer versions from a destination.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Repository path override for archived writer versions.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override for archived writer versions.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Keep ssh ControlMaster processes open after this run.
+        #[arg(long)]
+        keep_ssh_masters: bool,
     },
     /// Dump one session back from the repository (sequence-concatenated) and
     /// print its sha256 for verification — or, with `--all-machines`, merge
@@ -860,6 +880,12 @@ enum Command {
     /// `<stage>/meta/<machine>/activity-v1.jsonl` — the file the `overview`
     /// command reads back out of a destination.
     ///
+    /// With `--rebuild --destination`, every archived session for that machine
+    /// is restored to a temporary child of `--stage`, the full index is
+    /// rebuilt, and a new complete snapshot is appended. Existing snapshots
+    /// remain immutable. No snapshot is written until the scan and every
+    /// session restore finish, and only the named machine partition is pushed.
+    ///
     /// The harness label is inferred from the session directory name: the
     /// canonical archived ids are `<source>.<machine>.<native-id>`, so the
     /// harness is the leading dot-segment (`claude-code.<m>.<uuid>` ->
@@ -877,14 +903,40 @@ enum Command {
     /// `collect`/`search`: `3` means "did not finish / never started", `1`
     /// means "finished and then failed".
     ActivityIndex {
-        /// Stage directory that holds the sealed `sessions/` tree.
+        /// Local stage directory, or an existing workspace directory for a
+        /// destination rebuild. Temporary restored shards are removed after
+        /// the new snapshot is written.
         #[arg(long)]
-        stage: PathBuf,
+        stage: Option<PathBuf>,
         /// Machine partition for `sessions/<machine>/…`.
         /// Default: config `machine`, else this machine's identity (generated
         /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
+        /// Explicitly rebuild the complete partition index. The command has
+        /// always rebuilt rather than incrementally patched; this spelling is
+        /// provided for repair workflows and makes that intent visible.
+        #[arg(long)]
+        rebuild: bool,
+        /// Destination to rebuild from and append the repaired snapshot to.
+        /// Requires `--rebuild`; either this or `--repo` must be named.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Repository path override for destination rebuilds.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override for destination rebuilds.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override for destination rebuilds.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Keep ssh ControlMaster processes open after this run.
+        #[arg(long)]
+        keep_ssh_masters: bool,
     },
     /// Write this machine's display-name declaration (ADR-018).
     ///
@@ -1169,7 +1221,25 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
-        Command::Status { sessions, json } => cmd_status(sessions, json),
+        Command::Status {
+            sessions,
+            json,
+            destination,
+            repo,
+            key_file,
+            connections,
+            options,
+            keep_ssh_masters,
+        } => cmd_status(
+            sessions,
+            json,
+            destination,
+            repo,
+            key_file,
+            connections,
+            &options,
+            keep_ssh_masters,
+        ),
         Command::Read {
             stage,
             session,
@@ -1377,7 +1447,27 @@ fn run() -> ExitCode {
             stage,
         ),
         Command::NativeHost { self_test } => cmd_native_host(self_test),
-        Command::ActivityIndex { stage, machine } => cmd_activity_index(&stage, machine.as_deref()),
+        Command::ActivityIndex {
+            stage,
+            machine,
+            rebuild,
+            destination,
+            repo,
+            key_file,
+            connections,
+            options,
+            keep_ssh_masters,
+        } => cmd_activity_index(
+            stage.as_deref(),
+            machine.as_deref(),
+            rebuild,
+            destination,
+            repo,
+            key_file,
+            connections,
+            &options,
+            keep_ssh_masters,
+        ),
         Command::MachineDeclare {
             stage,
             display_name,
@@ -1929,7 +2019,7 @@ fn rebuild_activity_index(
     for row in &rows {
         content.push_str(&activity::to_jsonl(row));
     }
-    if let Err(e) = fs::write(&out_path, content) {
+    if let Err(e) = atomic_replace(&out_path, content.as_bytes()) {
         return Err(ActivityIndexError::Write(format!(
             "cannot write {}: {e}",
             out_path.display()
@@ -1944,6 +2034,42 @@ fn rebuild_activity_index(
     })
 }
 
+/// Replace a derived sidecar only after its complete contents have reached
+/// disk. The sibling temporary file keeps rename on the same filesystem, and
+/// readers see either the old complete index or the new complete index.
+fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output has no parent")
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output has no file name")
+    })?;
+    let mut temp_name = name.to_os_string();
+    temp_name.push(format!(".{}.tmp", std::process::id()));
+    let temp_path = parent.join(temp_name);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, path)
+    })();
+    if let Err(error) = result {
+        return match fs::remove_file(&temp_path) {
+            Ok(()) => Err(error),
+            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+            Err(cleanup) => Err(std::io::Error::new(
+                error.kind(),
+                format!("{error}; temporary file cleanup failed: {cleanup}"),
+            )),
+        };
+    }
+    Ok(())
+}
+
 /// `activity-index` — build the activity sidecar for one machine partition
 /// (ADR-017).
 ///
@@ -1952,11 +2078,75 @@ fn rebuild_activity_index(
 /// the index written; `3` = the stage could not be read (or reading was
 /// interrupted), so no complete index exists; `1` = every session was read but
 /// the output file could not be written; `2` = usage error (enforced by clap).
-fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
+#[allow(clippy::too_many_arguments)]
+fn cmd_activity_index(
+    stage: Option<&Path>,
+    machine: Option<&str>,
+    rebuild: bool,
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    keep_ssh_masters: bool,
+) -> ExitCode {
     let config = Config::load();
     let machine = match resolve_machine("activity-index", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
+    };
+    let remote_mode = destination.is_some() || repo.is_some();
+    if remote_mode {
+        if !rebuild {
+            eprintln!("activity-index: destination repair requires --rebuild");
+            return ExitCode::from(2);
+        }
+        let Some(workspace) = stage else {
+            eprintln!("activity-index: destination repair requires --stage <work-directory>");
+            return ExitCode::from(2);
+        };
+        if destination.is_none() && repo.is_none() {
+            eprintln!("activity-index: name the destination or pass --repo");
+            return ExitCode::from(2);
+        }
+        let cfg = resolve_store_config(
+            &config,
+            destination.as_deref(),
+            repo,
+            key_file,
+            connections,
+            options,
+        );
+        let mk = match store::load_key_file(&cfg) {
+            Ok(mk) => mk,
+            Err(e) => {
+                eprintln!("activity-index: {e:#}");
+                reap_remote(&cfg, keep_ssh_masters);
+                return ExitCode::from(3);
+            }
+        };
+        return match rebuild_destination_partition(workspace, &cfg, &machine, &mk) {
+            Ok((sessions, summary)) => {
+                println!("[activity-index] machine  : {machine}");
+                println!("[activity-index] sessions : {sessions}");
+                println!("[activity-index] snapshots: {}", summary.snapshots_in_repo);
+                println!("[activity-index] repaired snapshot appended");
+                reap_remote(&cfg, keep_ssh_masters);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("activity-index: destination rebuild failed: {e:#}");
+                reap_remote(&cfg, keep_ssh_masters);
+                match e {
+                    ActivityIndexError::Read(_) => ExitCode::from(3),
+                    ActivityIndexError::Write(_) => ExitCode::from(1),
+                }
+            }
+        };
+    }
+    let Some(stage) = stage else {
+        eprintln!("activity-index: pass --stage for a local stage rebuild");
+        return ExitCode::from(2);
     };
     match rebuild_activity_index(stage, &machine, true) {
         Ok(outcome) => {
@@ -1975,6 +2165,90 @@ fn cmd_activity_index(stage: &Path, machine: Option<&str>) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Rebuild one partition from the destination's newest machine snapshot, then
+/// append a complete replacement snapshot. Existing destination snapshots are
+/// immutable; the restored session shards and rebuilt index travel together.
+fn rebuild_destination_partition(
+    workspace: &Path,
+    cfg: &StoreConfig,
+    machine: &str,
+    mk: &MasterKey,
+) -> Result<(usize, store::PushSummary), ActivityIndexError> {
+    if !workspace.is_dir() {
+        return Err(ActivityIndexError::Read(
+            "workspace must be an existing directory".into(),
+        ));
+    }
+    let selector = chat_stasher::selector::Selector::default().machine(machine);
+    let query_store = BackupStore::for_metadata_query(cfg.clone());
+    let report = chat_stasher::search::search_sessions(&query_store, mk, &selector)
+        .map_err(|e| ActivityIndexError::Read(format!("{e:#}")))?;
+    if !report.complete() {
+        return Err(ActivityIndexError::Read(
+            "the destination scan was incomplete; no snapshot was written".into(),
+        ));
+    }
+    let wanted: BTreeSet<(String, String)> = report
+        .hits
+        .iter()
+        .map(|hit| (hit.machine.clone(), hit.session_id.clone()))
+        .collect();
+    if wanted.is_empty() {
+        return Err(ActivityIndexError::Read(
+            "the named machine partition has no archived sessions; no snapshot was written".into(),
+        ));
+    }
+    let sessions = query_store
+        .read_selected_sessions(mk, &wanted)
+        .map_err(|e| ActivityIndexError::Read(format!("{e:#}")))?;
+    if sessions.len() != wanted.len() {
+        return Err(ActivityIndexError::Read(
+            "not every indexed session shard could be restored; no snapshot was written".into(),
+        ));
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("activity-index-rebuild-")
+        .tempdir_in(workspace)
+        .map_err(|e| ActivityIndexError::Write(format!("create temporary stage: {e}")))?;
+    for ((session_machine, session_id), (bytes, _hashes)) in &sessions {
+        store::write_sealed_shard_raw_with_cap(
+            store::StageWriter::Restore,
+            temporary.path(),
+            session_machine,
+            session_id,
+            bytes,
+            store::DEFAULT_SHARD_BUCKET_CAP,
+        )
+        .map_err(|e| ActivityIndexError::Write(format!("restore archived shard: {e:#}")))?;
+    }
+    rebuild_activity_index(temporary.path(), machine, false)?;
+    record_writer_version(temporary.path(), machine)
+        .map_err(|e| ActivityIndexError::Write(format!("record writer version: {e:#}")))?;
+    let push = BackupStore::new(cfg.clone(), machine.to_string())
+        .push(temporary.path(), mk)
+        .map_err(|e| ActivityIndexError::Write(format!("push repaired snapshot: {e:#}")))?;
+    Ok((sessions.len(), push))
+}
+
+/// Store the writer version in the stage so a successful push carries it in
+/// the immutable snapshot. Existing snapshots stay untouched.
+fn record_writer_version(stage: &Path, machine: &str) -> anyhow::Result<()> {
+    let record = sidecar::WriterVersionRecord {
+        machine_id: machine.to_string(),
+        chat_stasher_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let path = stage.join("meta").join(machine).join("writer.json");
+    fs::create_dir_all(path.parent().context("writer metadata has no parent")?)?;
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    match fs::read(&path) {
+        Ok(existing) if existing == bytes => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    }
+    atomic_replace(&path, &bytes).with_context(|| format!("replace {}", path.display()))
 }
 
 /// `machine-declare` — write this machine's display-name declaration (ADR-018).
@@ -2176,6 +2450,105 @@ struct OverviewRead {
     /// Per-machine display metadata found while walking the snapshots.
     declarations: BTreeMap<String, identity::MachineDeclaration>,
     labels: BTreeMap<String, Vec<identity::LabelRecord>>,
+    writer_versions: BTreeMap<String, sidecar::WriterVersionRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct MachineWriterStatus {
+    machine: String,
+    chat_stasher_version: Option<String>,
+    version_recorded: bool,
+    behind_newest_writer: Option<bool>,
+}
+
+fn writer_statuses(
+    machines: &BTreeSet<String>,
+    writers: &BTreeMap<String, sidecar::WriterVersionRecord>,
+) -> Vec<MachineWriterStatus> {
+    let newest = writers
+        .values()
+        .map(|writer| writer.chat_stasher_version.as_str())
+        .max_by(|a, b| compare_versions(a, b));
+    machines
+        .iter()
+        .map(|machine| {
+            let version = writers.get(machine).map(|w| w.chat_stasher_version.clone());
+            let behind = version
+                .as_deref()
+                .zip(newest)
+                .map(|(v, n)| compare_versions(v, n).is_lt());
+            MachineWriterStatus {
+                machine: machine.clone(),
+                version_recorded: version.is_some(),
+                chat_stasher_version: version,
+                behind_newest_writer: behind,
+            }
+        })
+        .collect()
+}
+
+fn read_archive_writer_statuses(
+    cfg: &StoreConfig,
+    mk: &MasterKey,
+) -> anyhow::Result<Vec<MachineWriterStatus>> {
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let backends = store.backends()?;
+    let repo = Repository::new(&cfg.repository_options(), &backends)?
+        .open(&Credentials::Masterkey(mk.clone()))?
+        .to_indexed()?;
+    let mut machines = BTreeSet::new();
+    let mut writers = BTreeMap::new();
+    for snapshot in readback::newest_snapshot_per_host(repo.get_all_snapshots()?) {
+        machines.insert(snapshot.hostname.clone());
+        let root = repo.node_from_snapshot_and_path(&snapshot, "")?;
+        let entries = repo
+            .ls(&root, &LsOptions::default())?
+            .collect::<rustic_core::RusticResult<Vec<_>>>()?;
+        for (path, node) in entries {
+            let Some(machine) = sidecar::writer_machine(&path) else {
+                continue;
+            };
+            let mut bytes = Vec::new();
+            repo.dump(&node, &mut bytes)?;
+            let record: sidecar::WriterVersionRecord = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                record.machine_id == machine,
+                "writer record partition mismatch"
+            );
+            writers.insert(machine, record);
+        }
+    }
+    Ok(writer_statuses(&machines, &writers))
+}
+
+/// Compare numeric release components first, then prerelease suffixes; a
+/// release without a suffix sorts after its prereleases.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parts(version: &str) -> ([u64; 3], Option<&str>) {
+        let (release, suffix) = version
+            .split_once('-')
+            .map_or((version, None), |(a, b)| (a, Some(b)));
+        let mut nums = release.split('.').filter_map(|p| p.parse::<u64>().ok());
+        (
+            [
+                // reason: a missing semantic-version major component is the legacy zero component.
+                nums.next().unwrap_or(0),
+                // reason: a missing semantic-version minor component is zero by version syntax.
+                nums.next().unwrap_or(0),
+                // reason: a missing semantic-version patch component is zero by version syntax.
+                nums.next().unwrap_or(0),
+            ],
+            suffix,
+        )
+    }
+    let (av, asuffix) = parts(a);
+    let (bv, bsuffix) = parts(b);
+    av.cmp(&bv).then_with(|| match (asuffix, bsuffix) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(a), Some(b)) => a.cmp(b),
+    })
 }
 
 /// Open the destination and walk every newest-per-host snapshot for activity
@@ -2209,6 +2582,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         declared_machines: BTreeSet::new(),
         declarations: BTreeMap::new(),
         labels: BTreeMap::new(),
+        writer_versions: BTreeMap::new(),
     };
 
     for snap in newest {
@@ -2256,6 +2630,22 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
                     })?;
                 out.declared_machines.insert(machine.clone());
                 out.declarations.insert(machine, decl);
+                continue;
+            }
+            if let Some(machine) = sidecar::writer_machine(path) {
+                let mut buf = Vec::new();
+                repo.dump(node, &mut buf).with_context(|| {
+                    format!("host `{hostname}` machine `{machine}`: read writer version")
+                })?;
+                let record: sidecar::WriterVersionRecord = serde_json::from_slice(&buf)
+                    .with_context(|| {
+                        format!("host `{hostname}` machine `{machine}`: malformed writer version")
+                    })?;
+                anyhow::ensure!(
+                    record.machine_id == machine,
+                    "host `{hostname}` machine `{machine}`: writer version record names another partition"
+                );
+                out.writer_versions.insert(machine, record);
                 continue;
             }
             if let Some((machine, _writer)) = sidecar::label_record_machine(path) {
@@ -2358,7 +2748,9 @@ fn cmd_overview(
         declared_machines,
         declarations,
         labels,
+        writer_versions,
     } = read;
+    let writer_status = writer_statuses(&snapshot_machines, &writer_versions);
 
     // ADR-018 display names: a machine's name is its declaration, its labels
     // (latest wins) or an explicit unnamed marker — never the raw partition id
@@ -2376,7 +2768,7 @@ fn cmd_overview(
             .map(|machine| (machine.clone(), display(machine)))
             .collect();
         let exit_code = if rows.is_empty() { 1 } else { 0 };
-        let value = overview::overview_json(
+        let mut value = overview::overview_json(
             &rows,
             &snapshot_machines,
             &index_machines,
@@ -2384,6 +2776,12 @@ fn cmd_overview(
             &display_names,
             exit_code,
         );
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "writer_versions".to_string(),
+                serde_json::json!(writer_status),
+            );
+        }
         println!("{}", json_string(&value));
         reap_remote(&cfg, keep_ssh_masters);
         return ExitCode::from(exit_code);
@@ -2397,6 +2795,19 @@ fn cmd_overview(
         index_machines.len(),
         declared_machines.len()
     );
+    for writer in &writer_status {
+        println!(
+            "[overview] writer version: machine={} version={} behind-newest={}",
+            display(&writer.machine),
+            writer
+                .chat_stasher_version
+                .as_deref()
+                .unwrap_or("unknown (not recorded)"),
+            writer
+                .behind_newest_writer
+                .map_or("unknown", |behind| if behind { "yes" } else { "no" }),
+        );
+    }
 
     // A machine that has a snapshot but no activity index must be named — never
     // silently dropped, which would fold "no index" into "no sessions".
@@ -2628,6 +3039,9 @@ fn cmd_search(
     };
 
     let code = if json {
+        for warning in report.machine_recall_warnings() {
+            eprintln!("{warning}");
+        }
         print!("{}", chat_stasher::search::report_json(&report, cost));
         if report.answer_complete() {
             if report.hits.is_empty() {
@@ -2639,6 +3053,9 @@ fn cmd_search(
             ExitCode::from(3)
         }
     } else {
+        for warning in report.machine_recall_warnings() {
+            eprintln!("{warning}");
+        }
         search_human(&report, cost)
     };
 
@@ -2661,6 +3078,12 @@ fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> Exit
     println!("[search] sessions seen: {}", report.sessions_seen);
     println!("[search] data blobs read: {}", report.data_blobs_read);
     println!("[search] index files read: {}", report.index_files_read);
+    for machine in report.machine_window_summary() {
+        println!(
+            "[search] machine      : {} located={} time-unknown={} index-trusted={}",
+            machine.machine, machine.located, machine.time_unknown, machine.index_trusted,
+        );
+    }
     match &report.window {
         Some(w) => println!("[search] time window  : {}", w.describe()),
         None => println!("[search] time window  : none — every session matches, whatever its time"),
@@ -2855,6 +3278,9 @@ fn cmd_export(
             }
         };
 
+    for warning in report.machine_recall_warnings() {
+        eprintln!("{warning}");
+    }
     for line in chat_stasher::export::print_report(&report) {
         println!("{line}");
     }
@@ -3572,18 +3998,23 @@ fn cmd_dest_init(
             }
             Ok((mk, _)) => {
                 let store = BackupStore::new(target.clone(), machine.clone());
-                match store.push(stage, &mk) {
-                    Ok(summary) => println!(
-                        "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
-                        summary.stage_shards,
-                        summary.files_new,
-                        summary.files_unmodified,
-                        summary.data_added,
-                        summary.snapshots_in_repo,
-                    ),
-                    Err(e) => {
-                        chat_stasher::remote_err::eprint_remote_error("dest-init: push", &e, &target);
-                        push_failed = true;
+                if let Err(e) = record_writer_version(stage, &machine) {
+                    eprintln!("dest-init: cannot record writer version: {e:#}");
+                    push_failed = true;
+                } else {
+                    match store.push(stage, &mk) {
+                        Ok(summary) => println!(
+                            "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
+                            summary.stage_shards,
+                            summary.files_new,
+                            summary.files_unmodified,
+                            summary.data_added,
+                            summary.snapshots_in_repo,
+                        ),
+                        Err(e) => {
+                            chat_stasher::remote_err::eprint_remote_error("dest-init: push", &e, &target);
+                            push_failed = true;
+                        }
                     }
                 }
             }
@@ -4921,6 +5352,10 @@ fn cmd_push(
     );
     // Taken before the backup so that what gets recorded is exactly what this
     // push carried (see `metahash::record_pushed_meta_hash`).
+    if let Err(e) = record_writer_version(stage, &machine) {
+        eprintln!("push: cannot record writer version in stage: {e:#}");
+        return ExitCode::FAILURE;
+    }
     let meta_hash_before = match chat_stasher::metahash::compute_meta_hash(stage, &machine) {
         Ok(hash) => hash,
         Err(e) => {
@@ -5572,6 +6007,112 @@ mod decision_surface_tests {
     use std::fs;
 
     #[test]
+    fn writer_metadata_records_current_version_and_drift_is_ordered() {
+        let dir = tempfile::TempDir::new().unwrap();
+        record_writer_version(dir.path(), "machine-a").unwrap();
+        let recorded: sidecar::WriterVersionRecord = serde_json::from_slice(
+            &fs::read(dir.path().join("meta/machine-a/writer.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recorded.chat_stasher_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(recorded.machine_id, "machine-a");
+
+        let machines = ["machine-a", "machine-b", "machine-c"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let writers = [
+            (
+                "machine-a".into(),
+                sidecar::WriterVersionRecord {
+                    machine_id: "machine-a".into(),
+                    chat_stasher_version: "0.2.0".into(),
+                },
+            ),
+            (
+                "machine-b".into(),
+                sidecar::WriterVersionRecord {
+                    machine_id: "machine-b".into(),
+                    chat_stasher_version: "0.3.0".into(),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let statuses = writer_statuses(&machines, &writers);
+        assert_eq!(statuses[0].behind_newest_writer, Some(true));
+        assert_eq!(statuses[1].behind_newest_writer, Some(false));
+        assert_eq!(statuses[2].behind_newest_writer, None);
+        assert!(!statuses[2].version_recorded);
+        assert_eq!(
+            compare_versions("0.4.0", "0.4.0-rc.1"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn destination_rebuild_appends_full_idempotent_machine_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = dir.path().join("repo");
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let cfg = StoreConfig {
+            repo_root: repo_path.to_string_lossy().into_owned(),
+            key_file: dir.path().join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: false,
+        };
+        let machine = "fixture-machine";
+        let session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        let source_stage = dir.path().join("source-stage");
+        write_shard(
+            &source_stage,
+            machine,
+            session,
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        let mk = MasterKey::new();
+        BackupStore::new(cfg.clone(), machine.to_string())
+            .push(&source_stage, &mk)
+            .unwrap();
+
+        let (sessions, first) =
+            rebuild_destination_partition(&workspace, &cfg, machine, &mk).unwrap();
+        assert_eq!(sessions, 1);
+        assert_eq!(
+            first.snapshots_in_repo, 2,
+            "the old snapshot remains present"
+        );
+        let second = rebuild_destination_partition(&workspace, &cfg, machine, &mk).unwrap();
+        assert_eq!(second.0, 1);
+        assert_eq!(second.1.snapshots_in_repo, 3);
+
+        let selector = chat_stasher::selector::Selector::default().machine(machine);
+        let report = chat_stasher::search::search_sessions(
+            &BackupStore::for_metadata_query(cfg.clone()),
+            &mk,
+            &selector,
+        )
+        .unwrap();
+        assert!(report.complete());
+        assert_eq!(
+            report.hits.len(),
+            1,
+            "a full rebuild must not duplicate rows"
+        );
+        assert!(report.hits[0].first_unix.is_some());
+        let versions = read_archive_writer_statuses(&cfg, &mk).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            versions[0].chat_stasher_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(versions[0].behind_newest_writer, Some(false));
+    }
+
+    #[test]
     fn seal_help_and_active_guard_follow_decision() {
         let mut command = Cli::command();
         let seal_command = command
@@ -6032,6 +6573,35 @@ mod decision_surface_tests {
     }
 
     #[test]
+    fn failed_atomic_rebuild_preserves_the_previous_complete_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "fixture-machine";
+        write_shard(
+            &stage,
+            machine,
+            "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        fs::create_dir_all(index.parent().unwrap()).unwrap();
+        fs::write(&index, "previous-complete-index\n").unwrap();
+        let mut temp_name = index.file_name().unwrap().to_os_string();
+        temp_name.push(format!(".{}.tmp", std::process::id()));
+        fs::write(index.parent().unwrap().join(temp_name), "occupied").unwrap();
+
+        match rebuild_activity_index(&stage, machine, false) {
+            Err(ActivityIndexError::Write(_)) => {}
+            other => panic!("expected a Write error, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(index).unwrap(),
+            "previous-complete-index\n",
+            "a failed replacement must leave the last complete index intact"
+        );
+    }
+
+    #[test]
     fn rebuild_activity_index_counts_sessions_without_harness_as_skipped() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path().join("stage");
@@ -6143,7 +6713,17 @@ fn cmd_init() -> ExitCode {
     }
 }
 
-fn cmd_status(sessions: bool, json: bool) -> ExitCode {
+#[allow(clippy::too_many_arguments)]
+fn cmd_status(
+    sessions: bool,
+    json: bool,
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    keep_ssh_masters: bool,
+) -> ExitCode {
     let config = Config::load();
     if config.source.is_error_fallback() {
         eprintln!("config_source={}", config.source.label());
@@ -6216,7 +6796,7 @@ fn cmd_status(sessions: bool, json: bool) -> ExitCode {
     // thing on stdout, so `chat-stasher status --json | jq …` reports `jq`'s
     // status, not the binary's — read the integer through `$?` or
     // `${PIPESTATUS[0]}` instead.
-    let exit_code = match &scan {
+    let mut exit_code = match &scan {
         Ok(_) if info.verdict.healthy => 0,
         Ok(_) => 1,
         Err(e) => {
@@ -6225,17 +6805,58 @@ fn cmd_status(sessions: bool, json: bool) -> ExitCode {
         }
     };
 
+    let query_writer_versions = destination.is_some() || repo.is_some();
+    let mut writer_versions = None;
+    let mut writer_version_error = None;
+    if query_writer_versions {
+        if destination.is_none() && repo.is_none() {
+            writer_version_error = Some("name the destination or pass --repo".to_string());
+        } else {
+            let cfg = resolve_store_config(
+                &config,
+                destination.as_deref(),
+                repo,
+                key_file,
+                connections,
+                options,
+            );
+            match store::load_key_file(&cfg).and_then(|mk| read_archive_writer_statuses(&cfg, &mk))
+            {
+                Ok(statuses) => writer_versions = Some(statuses),
+                Err(e) => writer_version_error = Some(format!("{e:#}")),
+            }
+            reap_remote(&cfg, keep_ssh_masters);
+        }
+        if writer_version_error.is_some() {
+            exit_code = 3;
+        }
+    }
+
     if json {
         match &scan {
             Ok(report) => {
                 println!(
                     "{}",
-                    status_json(config.source, &info, Ok(report), exit_code)
+                    status_json(
+                        config.source,
+                        &info,
+                        Ok(report),
+                        exit_code,
+                        writer_versions.as_deref(),
+                        writer_version_error.as_deref(),
+                    )
                 )
             }
             Err(e) => println!(
                 "{}",
-                status_json(config.source, &info, Err(e.to_string()), exit_code)
+                status_json(
+                    config.source,
+                    &info,
+                    Err(e.to_string()),
+                    exit_code,
+                    writer_versions.as_deref(),
+                    writer_version_error.as_deref(),
+                )
             ),
         }
         return ExitCode::from(exit_code);
@@ -6243,6 +6864,24 @@ fn cmd_status(sessions: bool, json: bool) -> ExitCode {
 
     if let Ok(report) = &scan {
         eprint!("{}", render_status(report, sessions));
+    }
+    if let Some(error) = &writer_version_error {
+        eprintln!("[status] writer versions unavailable: {error}");
+    }
+    if let Some(versions) = &writer_versions {
+        for writer in versions {
+            eprintln!(
+                "[status] writer version: machine={} version={} behind-newest={}",
+                writer.machine,
+                writer
+                    .chat_stasher_version
+                    .as_deref()
+                    .unwrap_or("unknown (not recorded)"),
+                writer
+                    .behind_newest_writer
+                    .map_or("unknown", |behind| if behind { "yes" } else { "no" }),
+            );
+        }
     }
     ExitCode::from(exit_code)
 }
@@ -6324,11 +6963,21 @@ fn status_json(
     info: &RunStateInfo,
     scan: Result<&scanner::ScanReport, String>,
     exit_code: u8,
+    writer_versions: Option<&[MachineWriterStatus]>,
+    writer_version_error: Option<&str>,
 ) -> String {
-    let scanner_value = match scan {
+    let mut scanner_value = match scan {
         Ok(report) => scanner::scan_report_json(report),
         Err(why) => serde_json::json!({ "kind": "failed", "why": why }),
     };
+    let writer_version_status = match (writer_versions, writer_version_error) {
+        (Some(versions), _) => serde_json::json!({"kind":"known", "machines":versions}),
+        (None, Some(error)) => serde_json::json!({"kind":"failed", "why":error}),
+        (None, None) => serde_json::json!({"kind":"not_requested"}),
+    };
+    if let Some(scanner_object) = scanner_value.as_object_mut() {
+        scanner_object.insert("writer_versions".to_string(), writer_version_status);
+    }
     let value = serde_json::json!({
         "schema_version": 1,
         "command": "status",
@@ -6352,7 +7001,7 @@ fn status_exit_semantics(code: u8) -> &'static str {
     match code {
         0 => "0 = healthy: the timer is running, the last run succeeded and is not stale.",
         1 => "1 = unhealthy: never ran / timer stale / last run failed — for a script this is the \"go check the timer\" signal.",
-        _ => "3 = no conclusion possible: the scan failed (did not read, or did not finish), so the session counts above are all unknown, not 0.",
+        _ => "3 = no conclusion possible: the scan or requested destination read did not finish, so its counts and version state are unknown, not empty.",
     }
 }
 

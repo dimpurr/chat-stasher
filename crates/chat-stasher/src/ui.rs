@@ -1557,6 +1557,7 @@ pub(crate) mod fixture {
                     archive_time_unix: NOW - 3600,
                     has_activity_index: true,
                     index_read_ok: true,
+                    index_trusted: true,
                 },
                 HostSnapshot {
                     hostname: "m-3".into(),
@@ -1564,6 +1565,7 @@ pub(crate) mod fixture {
                     archive_time_unix: NOW - 40 * DAY,
                     has_activity_index: false,
                     index_read_ok: false,
+                    index_trusted: false,
                 },
             ],
             unreadable: Vec::new(),

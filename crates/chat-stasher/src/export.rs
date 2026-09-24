@@ -253,6 +253,10 @@ pub struct ExportReport {
     pub not_placed: Vec<NotPlacedSession>,
     /// Machines that hold sessions but no activity index beside them.
     pub machines_without_index: Vec<String>,
+    /// Per-machine recall accounting for the requested window.
+    pub machine_recall: Vec<crate::search::MachineWindowSummary>,
+    /// Per-machine, per-local-day recall counts for bounded calendar windows.
+    pub machine_recall_by_day: Vec<crate::search::MachineDaySummary>,
     /// Parts of the destination that could not be read.
     pub unreadable: Vec<String>,
     pub bytes_written: u64,
@@ -261,6 +265,20 @@ pub struct ExportReport {
 }
 
 impl ExportReport {
+    pub fn machine_recall_warnings(&self) -> Vec<String> {
+        self.machine_recall
+            .iter()
+            .filter(|machine| machine.should_warn())
+            .map(|machine| format!(
+                "WARN: machine `{}` has high unknown-time share ({}/{} candidates); index_trusted={}. Repair with `chat-stasher activity-index --rebuild --destination <destination> --machine <machine> --stage <workspace>`.",
+                machine.machine,
+                machine.time_unknown,
+                machine.located + machine.time_unknown,
+                machine.index_trusted,
+            ))
+            .collect()
+    }
+
     /// Whether the destination was read in full.
     pub fn complete(&self) -> bool {
         self.unreadable.is_empty()
@@ -407,6 +425,8 @@ impl ExportReport {
             "sessions_failed": failed,
             "sessions_not_placed": not_placed,
             "time_unknown": self.session_time_unknown(),
+            "machine_recall": self.machine_recall,
+            "machine_recall_by_day": self.machine_recall_by_day,
             "machines_without_activity_index": self.machines_without_index,
             "unreadable_parts": self.unreadable,
         });
@@ -741,6 +761,8 @@ pub fn export_sessions(
             })
             .collect(),
         machines_without_index: report.machines_without_index.clone(),
+        machine_recall: report.machine_window_summary(),
+        machine_recall_by_day: report.machine_day_summary(),
         unreadable: report.unreadable.clone(),
         bytes_written: 0,
         manifest_path: None,
@@ -1035,6 +1057,12 @@ pub fn print_report(report: &ExportReport) -> Vec<String> {
         report.selected,
         report.bytes_written
     ));
+    for machine in &report.machine_recall {
+        lines.push(format!(
+            "[export] machine      : {} located={} time-unknown={} index-trusted={}",
+            machine.machine, machine.located, machine.time_unknown, machine.index_trusted,
+        ));
+    }
     for s in &report.sessions {
         lines.push(format!(
             "  {}  machine={}  harness={}  shards={}  lines={}/{}  untimed={}  bytes={}  sha256={}  turns={}  trim={}",
@@ -1466,6 +1494,8 @@ mod tests {
                 })
                 .collect(),
             machines_without_index: Vec::new(),
+            machine_recall: Vec::new(),
+            machine_recall_by_day: Vec::new(),
             unreadable: (0..unreadable).map(|i| format!("part {i}")).collect(),
             bytes_written: 3 * written as u64,
             manifest_path: Some("/tmp/out/manifest.json".into()),
@@ -1580,5 +1610,26 @@ mod tests {
             "no activity index"
         );
         assert!(v["sessions"][0]["first_message"]["unix"].is_null());
+    }
+
+    #[test]
+    fn manifest_carries_per_machine_day_recall_counts() {
+        let mut report = report_with(0, 0, 0, 0);
+        report
+            .machine_recall_by_day
+            .push(crate::search::MachineDaySummary {
+                day: "2026-09-24".into(),
+                machine: "machine-a".into(),
+                located: 3,
+                time_unknown: 2,
+                index_trusted: false,
+            });
+        let json: serde_json::Value = serde_json::from_str(&report.manifest_json()).unwrap();
+        assert_eq!(json["machine_recall_by_day"][0]["day"], "2026-09-24");
+        assert_eq!(json["machine_recall_by_day"][0]["located"], 3);
+        assert_eq!(json["machine_recall_by_day"][0]["time_unknown"], 2);
+        assert!(!json["machine_recall_by_day"][0]["index_trusted"]
+            .as_bool()
+            .unwrap());
     }
 }
