@@ -705,6 +705,34 @@ function isTarget(v: unknown): v is BackfillTarget {
     && typeof t.at === 'number';
 }
 
+/** Every valid row in storage, before any channel filter. The write side needs these. */
+async function loadRawTargets(store: BackfillStore): Promise<BackfillTarget[]> {
+  const raw = await store.load(BACKFILL_TARGETS_KEY);
+  return Array.isArray(raw) ? raw.filter(isTarget) : [];
+}
+
+/**
+ * 🔴 W91b · Split stored rows into the ones this channel **serves** and the
+ * leftover rows owned by another channel.
+ *
+ * The filter must happen on **read** only: a stable build has to ignore an
+ * experimental platform's row without deleting it, so every writer below takes
+ * the raw rows, edits only the active half, and appends the leftover half back
+ * unchanged. Nothing in this module can then drop a row it did not own.
+ */
+function partitionTargetsByChannel(
+  targets: readonly BackfillTarget[],
+  channel: ReleaseChannel,
+): { active: BackfillTarget[]; leftover: BackfillTarget[] } {
+  const active: BackfillTarget[] = [];
+  const leftover: BackfillTarget[] = [];
+  for (const t of targets) {
+    if (isPlatformActiveInChannel(t.platform, channel)) active.push(t);
+    else leftover.push(t);
+  }
+  return { active, leftover };
+}
+
 /**
  * 🔴 W91 · The target registry, read for one release channel.
  *
@@ -712,19 +740,23 @@ function isTarget(v: unknown): v is BackfillTarget {
  * instead of relying on the build-time constant the suite pins to `dev`; every
  * production caller omits it and gets the active build's channel. The filter is
  * what makes a stable build **ignore** an experimental platform's leftover row
- * rather than serve it — the row is left in storage untouched.
+ * rather than serve it — the row is left in storage untouched (W91b).
  */
 export async function loadTargets(
   store: BackfillStore | null,
   channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<BackfillTarget[]> {
   if (!store) return [];
-  const raw = await store.load(BACKFILL_TARGETS_KEY);
-  const targets = Array.isArray(raw) ? raw.filter(isTarget) : [];
-  return targets.filter((t) => isPlatformActiveInChannel(t.platform, channel));
+  return (await loadRawTargets(store)).filter((t) => isPlatformActiveInChannel(t.platform, channel));
 }
 
-/** Record one target (deduplicated by platform+scope, most recent first). */
+/**
+ * Record one target (deduplicated by platform+scope, most recent first).
+ *
+ * 🔴 W91b · The cap is applied to the **active** rows only, and the leftover
+ * rows of the other channel are appended untouched: an experimental row must
+ * neither consume a stable slot nor be evicted when a stable row is recorded.
+ */
 export async function rememberTarget(
   store: BackfillStore | null,
   target: BackfillTarget,
@@ -734,14 +766,13 @@ export async function rememberTarget(
   if (!isPlatformActiveInChannel(target.platform, channel)) {
     return await loadTargets(store, channel);
   }
-  const raw = await store.load(BACKFILL_TARGETS_KEY);
-  const allTargets = Array.isArray(raw) ? raw.filter(isTarget) : [];
-  const rest = allTargets.filter(
+  const { active, leftover } = partitionTargetsByChannel(await loadRawTargets(store), channel);
+  const rest = active.filter(
     (t) => !(t.platform === target.platform && t.scope === target.scope),
   );
-  const next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
-  await store.save(BACKFILL_TARGETS_KEY, next);
-  return next.filter((t) => isPlatformActiveInChannel(t.platform, channel));
+  const nextActive = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
+  await store.save(BACKFILL_TARGETS_KEY, [...nextActive, ...leftover]);
+  return nextActive;
 }
 
 /**
@@ -761,6 +792,10 @@ export async function rememberTarget(
  *    `rememberTarget` cannot express. Dropping a *non-organization* Claude row
  *    goes through `rememberOrganizationScopedTarget`, which also removes that
  *    scope's local ledger header — see that function.
+ *
+ * 🔴 W91b · It reads the **raw** registry and removes only the named row, so
+ *    every other row — including an experimental platform's leftover — is
+ *    carried through the write byte-for-byte.
  */
 export async function forgetTarget(
   store: BackfillStore | null,
@@ -768,7 +803,7 @@ export async function forgetTarget(
   scope: string,
 ): Promise<void> {
   if (!store) return;
-  const next = (await loadTargets(store)).filter(
+  const next = (await loadRawTargets(store)).filter(
     (t) => !(t.platform === platform && t.scope === scope),
   );
   await store.save(BACKFILL_TARGETS_KEY, next);
@@ -801,14 +836,21 @@ export async function forgetTarget(
  *
  * The caller names what an organization looks like, because this module does
  * not know any platform's identifier shape.
+ *
+ * 🔴 W91b · Like `rememberTarget`, this reads the **raw** registry, splits it by
+ *    the active channel, edits only the active rows, and appends the leftover
+ *    rows back untouched. A stable build therefore cannot drop a dev build's
+ *    Perplexity/Kimi target — and their ledger headers are not touched either,
+ *    because only rows of the active platform are ever `dropped`.
  */
 export async function rememberOrganizationScopedTarget(
   store: BackfillStore | null,
   target: BackfillTarget,
   isOrganizationScope: (scope: string) => boolean,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<BackfillTarget[]> {
   if (!store) return [];
-  const current = await loadTargets(store);
+  const { active: current, leftover } = partitionTargetsByChannel(await loadRawTargets(store), channel);
   const incomingIsOrg = isOrganizationScope(target.scope);
   const dropped: BackfillTarget[] = [];
   const kept: BackfillTarget[] = [];
@@ -831,7 +873,7 @@ export async function rememberOrganizationScopedTarget(
     );
     next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
   }
-  await store.save(BACKFILL_TARGETS_KEY, next);
+  await store.save(BACKFILL_TARGETS_KEY, [...next, ...leftover]);
   const stillPresent = new Set(next.map((t) => `${t.platform}\0${t.scope}`));
   for (const t of dropped) {
     if (stillPresent.has(`${t.platform}\0${t.scope}`)) continue;
@@ -847,6 +889,9 @@ export async function rememberOrganizationScopedTarget(
  * Prefer `rememberOrganizationScopedTarget` when a row is being stored: that
  * path is one registry write and will not insert an unresolved row in front
  * of a live organization. This remains the drop-only form.
+ *
+ * 🔴 W91b · It reads the **raw** registry and drops only rows of the named
+ *    platform, so another channel's leftover rows survive the write untouched.
  */
 export async function forgetNonOrganizationTargets(
   store: BackfillStore | null,
@@ -854,7 +899,7 @@ export async function forgetNonOrganizationTargets(
   isOrganizationScope: (scope: string) => boolean,
 ): Promise<void> {
   if (!store) return;
-  const current = await loadTargets(store);
+  const current = await loadRawTargets(store);
   const dropped: BackfillTarget[] = [];
   const next: BackfillTarget[] = [];
   for (const t of current) {

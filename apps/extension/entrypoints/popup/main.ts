@@ -235,7 +235,10 @@ async function onClearFailures(): Promise<void> {
     console.warn('[chat-stasher] popup snapshot read failed', (err as Error).message);
     return;
   }
-  for (const { key, state } of backfillStateEntries(snapshot)) {
+  // 🔴 W91b · The active channel is passed in, so a stable build's clear only
+  //    walks the ledgers of the platforms it serves. An experimental platform's
+  //    leftover row is not touched, and stays for the dev build that owns it.
+  for (const { key, state } of backfillStateEntries(snapshot, currentReleaseChannel())) {
     if (state.failures === undefined && !state.failuresDropped) continue;
     clearFailures(state);
     await store.save(key, state);

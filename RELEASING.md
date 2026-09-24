@@ -160,6 +160,15 @@ The channel is chosen at build time. `build:dev` runs
 `stable`. `pnpm dev` and the e2e suite are `dev` because they are development
 commands, not because anything sets the variable for them.
 
+**Already-captured, still-undelivered bundles are delivered by either channel.**
+The outbox is user data, not platform state: a dev build that captured an
+experimental platform while the native host was down leaves the bundle queued
+(`<platform>-<session>.json`), and a stable build that later drains the outbox
+sends it rather than dropping it. The channel decides which platforms a build
+*serves*, never which already-captured conversations it is allowed to hand to the
+CLI; dropping a queued bundle would lose data the user already has
+(`apps/extension/lib/outbox.ts`, `runDrain`).
+
 **One list is the source of truth.** `ALL_PLATFORMS` in
 `apps/extension/lib/contract.ts` carries every platform row with a per-row
 `channel: 'stable' | 'experimental'`. A stable build derives its manifest matches
