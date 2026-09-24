@@ -17,6 +17,8 @@
  * that property, and `tests/build-version.test.ts` pins it.
  */
 
+import type { ReleaseChannel } from './contract';
+
 export interface VersionResult {
   /** The value for `manifest.version`. */
   version: string;
@@ -84,4 +86,30 @@ export function buildVersion(semver: string, buildNumber: number | undefined): V
  */
 export function buildStamp(nowMs: number): string {
   return `b${Math.trunc(nowMs).toString(36)}`;
+}
+
+/**
+ * 🔴 W91 · Parses `CS_RELEASE_CHANNEL`.
+ * Returns 'dev' if 'dev', 'stable' if 'stable', or undefined if unset/empty.
+ * Throws a clear error for anything that is not 'stable' or 'dev'.
+ */
+export function parseReleaseChannel(raw: string | undefined): ReleaseChannel | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  if (raw === 'stable' || raw === 'dev') return raw;
+  throw new Error(`CS_RELEASE_CHANNEL must be 'stable' or 'dev', got ${JSON.stringify(raw)}`);
+}
+
+/**
+ * 🔴 W91 · Resolves the release channel for WXT / Vite build.
+ * Explicit CS_RELEASE_CHANNEL environment variable takes precedence.
+ * Otherwise, WXT development mode or command maps to 'dev', production mode to 'stable'.
+ */
+export function resolveReleaseChannel(
+  rawEnv: string | undefined,
+  wxtEnv?: { mode?: string; command?: string },
+): ReleaseChannel {
+  const parsed = parseReleaseChannel(rawEnv);
+  if (parsed !== undefined) return parsed;
+  if (wxtEnv?.mode === 'development' || wxtEnv?.command === 'serve') return 'dev';
+  return 'stable';
 }

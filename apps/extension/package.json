@@ -8,12 +8,13 @@
     "dev": "wxt",
     "dev:firefox": "wxt -b firefox",
     "build": "wxt build",
+    "build:dev": "CS_RELEASE_CHANNEL=dev wxt build",
     "build:firefox": "wxt build -b firefox",
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
     "test": "node scripts/check-test-inventory.mjs",
-    "e2e": "pnpm run build && playwright test -c e2e/playwright.config.ts",
+    "e2e": "pnpm run build:dev && playwright test -c e2e/playwright.config.ts",
     "postinstall": "wxt prepare"
   },
   "devDependencies": {

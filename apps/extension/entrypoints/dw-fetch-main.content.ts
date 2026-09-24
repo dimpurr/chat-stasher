@@ -41,8 +41,9 @@ export default defineContentScript({
    *    does not take), but a frame the browser was never asked to inject into is
    *    a line of configuration.
    *
-   * The bound is the one CONTENT_MATCHES already draws — the eight origins of
-   * lib/contract.ts's platform table, never a wildcard — so the extra cost is a
+   * The bound is the one CONTENT_MATCHES already draws — the origins of
+   * lib/contract.ts's platform table for the active release channel (six in a
+   * stable build, eight in a dev one), never a wildcard — so the extra cost is a
    * second copy of this script and of the bridge in same-origin iframes of those
    * hosts only. `e2e/frame-capture.spec.ts` is the test that fails without it.
    */

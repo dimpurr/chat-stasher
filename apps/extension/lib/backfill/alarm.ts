@@ -30,6 +30,11 @@ import type { TickReason } from './schedule';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import { completeInterruptedMigration, openLedger, unreadableStateRefusal, type LedgerRefusal } from './ledger';
 import {
+  currentReleaseChannel,
+  isPlatformActiveInChannel,
+  type ReleaseChannel,
+} from '../contract';
+import {
   BACKFILL_STATE_VERSION,
   isHeader,
   isLegacyState,
@@ -700,24 +705,74 @@ function isTarget(v: unknown): v is BackfillTarget {
     && typeof t.at === 'number';
 }
 
-export async function loadTargets(store: BackfillStore | null): Promise<BackfillTarget[]> {
-  if (!store) return [];
+/** Every valid row in storage, before any channel filter. The write side needs these. */
+async function loadRawTargets(store: BackfillStore): Promise<BackfillTarget[]> {
   const raw = await store.load(BACKFILL_TARGETS_KEY);
   return Array.isArray(raw) ? raw.filter(isTarget) : [];
 }
 
-/** Record one target (deduplicated by platform+scope, most recent first). */
+/**
+ * 🔴 W91b · Split stored rows into the ones this channel **serves** and the
+ * leftover rows owned by another channel.
+ *
+ * The filter must happen on **read** only: a stable build has to ignore an
+ * experimental platform's row without deleting it, so every writer below takes
+ * the raw rows, edits only the active half, and appends the leftover half back
+ * unchanged. Nothing in this module can then drop a row it did not own.
+ */
+function partitionTargetsByChannel(
+  targets: readonly BackfillTarget[],
+  channel: ReleaseChannel,
+): { active: BackfillTarget[]; leftover: BackfillTarget[] } {
+  const active: BackfillTarget[] = [];
+  const leftover: BackfillTarget[] = [];
+  for (const t of targets) {
+    if (isPlatformActiveInChannel(t.platform, channel)) active.push(t);
+    else leftover.push(t);
+  }
+  return { active, leftover };
+}
+
+/**
+ * 🔴 W91 · The target registry, read for one release channel.
+ *
+ * `channel` exists so a test can drive the stable channel deterministically
+ * instead of relying on the build-time constant the suite pins to `dev`; every
+ * production caller omits it and gets the active build's channel. The filter is
+ * what makes a stable build **ignore** an experimental platform's leftover row
+ * rather than serve it — the row is left in storage untouched (W91b).
+ */
+export async function loadTargets(
+  store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<BackfillTarget[]> {
+  if (!store) return [];
+  return (await loadRawTargets(store)).filter((t) => isPlatformActiveInChannel(t.platform, channel));
+}
+
+/**
+ * Record one target (deduplicated by platform+scope, most recent first).
+ *
+ * 🔴 W91b · The cap is applied to the **active** rows only, and the leftover
+ * rows of the other channel are appended untouched: an experimental row must
+ * neither consume a stable slot nor be evicted when a stable row is recorded.
+ */
 export async function rememberTarget(
   store: BackfillStore | null,
   target: BackfillTarget,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<BackfillTarget[]> {
   if (!store) return [];
-  const rest = (await loadTargets(store)).filter(
+  if (!isPlatformActiveInChannel(target.platform, channel)) {
+    return await loadTargets(store, channel);
+  }
+  const { active, leftover } = partitionTargetsByChannel(await loadRawTargets(store), channel);
+  const rest = active.filter(
     (t) => !(t.platform === target.platform && t.scope === target.scope),
   );
-  const next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
-  await store.save(BACKFILL_TARGETS_KEY, next);
-  return next;
+  const nextActive = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
+  await store.save(BACKFILL_TARGETS_KEY, [...nextActive, ...leftover]);
+  return nextActive;
 }
 
 /**
@@ -737,6 +792,10 @@ export async function rememberTarget(
  *    `rememberTarget` cannot express. Dropping a *non-organization* Claude row
  *    goes through `rememberOrganizationScopedTarget`, which also removes that
  *    scope's local ledger header — see that function.
+ *
+ * 🔴 W91b · It reads the **raw** registry and removes only the named row, so
+ *    every other row — including an experimental platform's leftover — is
+ *    carried through the write byte-for-byte.
  */
 export async function forgetTarget(
   store: BackfillStore | null,
@@ -744,7 +803,7 @@ export async function forgetTarget(
   scope: string,
 ): Promise<void> {
   if (!store) return;
-  const next = (await loadTargets(store)).filter(
+  const next = (await loadRawTargets(store)).filter(
     (t) => !(t.platform === platform && t.scope === scope),
   );
   await store.save(BACKFILL_TARGETS_KEY, next);
@@ -777,14 +836,21 @@ export async function forgetTarget(
  *
  * The caller names what an organization looks like, because this module does
  * not know any platform's identifier shape.
+ *
+ * 🔴 W91b · Like `rememberTarget`, this reads the **raw** registry, splits it by
+ *    the active channel, edits only the active rows, and appends the leftover
+ *    rows back untouched. A stable build therefore cannot drop a dev build's
+ *    Perplexity/Kimi target — and their ledger headers are not touched either,
+ *    because only rows of the active platform are ever `dropped`.
  */
 export async function rememberOrganizationScopedTarget(
   store: BackfillStore | null,
   target: BackfillTarget,
   isOrganizationScope: (scope: string) => boolean,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<BackfillTarget[]> {
   if (!store) return [];
-  const current = await loadTargets(store);
+  const { active: current, leftover } = partitionTargetsByChannel(await loadRawTargets(store), channel);
   const incomingIsOrg = isOrganizationScope(target.scope);
   const dropped: BackfillTarget[] = [];
   const kept: BackfillTarget[] = [];
@@ -807,7 +873,7 @@ export async function rememberOrganizationScopedTarget(
     );
     next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
   }
-  await store.save(BACKFILL_TARGETS_KEY, next);
+  await store.save(BACKFILL_TARGETS_KEY, [...next, ...leftover]);
   const stillPresent = new Set(next.map((t) => `${t.platform}\0${t.scope}`));
   for (const t of dropped) {
     if (stillPresent.has(`${t.platform}\0${t.scope}`)) continue;
@@ -823,6 +889,9 @@ export async function rememberOrganizationScopedTarget(
  * Prefer `rememberOrganizationScopedTarget` when a row is being stored: that
  * path is one registry write and will not insert an unresolved row in front
  * of a live organization. This remains the drop-only form.
+ *
+ * 🔴 W91b · It reads the **raw** registry and drops only rows of the named
+ *    platform, so another channel's leftover rows survive the write untouched.
  */
 export async function forgetNonOrganizationTargets(
   store: BackfillStore | null,
@@ -830,7 +899,7 @@ export async function forgetNonOrganizationTargets(
   isOrganizationScope: (scope: string) => boolean,
 ): Promise<void> {
   if (!store) return;
-  const current = await loadTargets(store);
+  const current = await loadRawTargets(store);
   const dropped: BackfillTarget[] = [];
   const next: BackfillTarget[] = [];
   for (const t of current) {
@@ -970,7 +1039,10 @@ export function scopeFromStateKey(
  *    is new is that the reason is returned to the caller, which puts it in the
  *    tick trace and in the popup instead of dropping it on the floor.
  */
-export async function migrateLegacyScopes(store: BackfillStore | null): Promise<LegacyMigration> {
+export async function migrateLegacyScopes(
+  store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<LegacyMigration> {
   if (!store) return NOTHING_TO_MIGRATE;
 
   let keys: string[];
@@ -993,7 +1065,7 @@ export async function migrateLegacyScopes(store: BackfillStore | null): Promise<
   const report: LegacyMigration = { ...NOTHING_TO_MIGRATE };
   for (const key of keys.sort()) {
     const named = legacyScopeFromKey(key);
-    if (!named) continue;
+    if (!named || !isPlatformActiveInChannel(named.platform, channel)) continue;
     report.found += 1;
     // 🔴 One unreadable scope must not hide the ones behind it: `continue`, never
     //    `return`. (W36 returned here; a store that threw on the first key skipped
@@ -1063,6 +1135,7 @@ export async function migrateLegacyScopes(store: BackfillStore | null): Promise<
  */
 export async function findUnreadableState(
   store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<LedgerRefusal | null> {
   if (!store) return null;
 
@@ -1081,7 +1154,7 @@ export async function findUnreadableState(
 
   for (const key of keys.sort()) {
     const named = scopeFromStateKey(key, STATE_KEY_PREFIX);
-    if (!named) continue;
+    if (!named || !isPlatformActiveInChannel(named.platform, channel)) continue;
     let raw: unknown;
     try {
       raw = await store.load(key);

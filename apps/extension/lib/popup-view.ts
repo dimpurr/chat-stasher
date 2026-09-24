@@ -84,7 +84,10 @@ import {
   HOOK_REASON_DID_NOT_RUN,
   HOOK_REASON_DID_NOT_TAKE,
   HOOK_REASON_WAS_REPLACED,
+  currentReleaseChannel,
+  isPlatformActiveInChannel,
   type HookObservation,
+  type ReleaseChannel,
 } from './contract';
 import type { LastExport, OutboxEntry } from './outbox';
 import { OUTBOX_CAPACITY_BYTES } from './outbox';
@@ -1619,40 +1622,64 @@ function looksLikeState(value: unknown): value is BackfillHeader {
  * When the registry is present, a header whose scope is not a registered target
  * is not progress — it is a leftover. Snapshots without a registry (C18's
  * header-only fixtures) keep the previous "every agreeing header" rule.
+ *
+ * 🔴 W91b · The registry is filtered by the **release channel** before it is
+ *    read: in a stable build an experimental platform's target row is not a
+ *    registered scope, so its ledger header is not "live" here and the popup
+ *    neither shows it nor clears it. A registry that holds only experimental
+ *    rows returns an empty set (not null), so the old "no registry ⇒ show every
+ *    agreeing header" fallback cannot resurface those rows. A registry with no
+ *    usable row at all still returns null, exactly as before.
  */
-function registeredStateKeys(snapshot: Record<string, unknown>): Set<string> | null {
+function registeredStateKeys(
+  snapshot: Record<string, unknown>,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Set<string> | null {
   const raw = snapshot[BACKFILL_TARGETS_KEY];
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const keys = new Set<string>();
+  let sawValidRow = false;
   for (const row of raw) {
     if (!row || typeof row !== 'object') continue;
     const platform = (row as { platform?: unknown }).platform;
     const scope = (row as { scope?: unknown }).scope;
     if (typeof platform === 'string' && typeof scope === 'string') {
-      keys.add(stateKey(platform, scope));
+      sawValidRow = true;
+      if (isPlatformActiveInChannel(platform, channel)) keys.add(stateKey(platform, scope));
     }
   }
-  return keys.size > 0 ? keys : null;
+  return sawValidRow ? keys : null;
 }
 
 function isLiveBackfillHeader(
   key: string,
   value: unknown,
   registered: Set<string> | null,
+  channel: ReleaseChannel,
 ): value is BackfillHeader {
   if (!looksLikeState(value)) return false;
   if (stateKey(value.platform, value.scope) !== key) return false;
+  // 🔴 W91b · A header for a platform this channel does not serve is not live
+  //    progress — it belongs to the build that does serve it. This holds even
+  //    when the snapshot has no target registry at all, which is why it is a
+  //    separate test from `registered` below: without it, clear-failures would
+  //    still walk (and overwrite) an experimental ledger on a registry-less
+  //    snapshot.
+  if (!isPlatformActiveInChannel(value.platform, channel)) return false;
   if (registered && !registered.has(key)) return false;
   return true;
 }
 
-export function pickBackfillState(snapshot: Record<string, unknown> | null): BackfillHeader | null {
+export function pickBackfillState(
+  snapshot: Record<string, unknown> | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): BackfillHeader | null {
   if (!snapshot) return null;
-  const registered = registeredStateKeys(snapshot);
+  const registered = registeredStateKeys(snapshot, channel);
   let best: BackfillHeader | null = null;
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
-    if (!isLiveBackfillHeader(key, value, registered)) continue;
+    if (!isLiveBackfillHeader(key, value, registered, channel)) continue;
     if (!best || value.archivedCount > best.archivedCount) best = value;
   }
   return best;
@@ -1661,13 +1688,14 @@ export function pickBackfillState(snapshot: Record<string, unknown> | null): Bac
 /** Every valid debt set in the snapshot (those whose key and value agree). Failure aggregation and clearing walk it. */
 export function backfillStateEntries(
   snapshot: Record<string, unknown> | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Array<{ key: string; state: BackfillHeader }> {
   if (!snapshot) return [];
-  const registered = registeredStateKeys(snapshot);
+  const registered = registeredStateKeys(snapshot, channel);
   const out: Array<{ key: string; state: BackfillHeader }> = [];
   for (const [key, value] of Object.entries(snapshot)) {
     if (!key.startsWith(STATE_KEY_PREFIX)) continue;
-    if (!isLiveBackfillHeader(key, value, registered)) continue;
+    if (!isLiveBackfillHeader(key, value, registered, channel)) continue;
     out.push({ key, state: value });
   }
   return out;
@@ -1680,11 +1708,17 @@ export function backfillStateEntries(
  * was lost under another account would vanish from the UI — which is exactly
  * "showing a state with failures as if everything were fine".
  * Sort: newest first (the most recent is the most useful for diagnosis).
+ *
+ * 🔴 W91b · `channel` is forwarded to `backfillStateEntries`, so a stable build
+ *    does not fold an experimental platform's leftover failures into the note.
  */
-export function collectFailures(snapshot: Record<string, unknown> | null): FailureSummary {
+export function collectFailures(
+  snapshot: Record<string, unknown> | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): FailureSummary {
   const entries: FailureEntry[] = [];
   let dropped = 0;
-  for (const { state } of backfillStateEntries(snapshot)) {
+  for (const { state } of backfillStateEntries(snapshot, channel)) {
     entries.push(...failuresOf(state));
     dropped += droppedOf(state);
   }

@@ -106,7 +106,12 @@
  * path, the method, the structure and the size are all fixed.
  */
 
-import { getPlatformByOrigin, MAX_RAW_BYTES } from '../contract';
+import {
+  currentReleaseChannel,
+  getPlatformByOrigin,
+  MAX_RAW_BYTES,
+  type ReleaseChannel,
+} from '../contract';
 import type { OrgResolution } from './claude-org';
 import {
   backfillPlanFor,
@@ -1189,8 +1194,29 @@ export function resetTabRegistryMirrorForTest(): void {
   tabRegistryMirrors = new WeakMap();
 }
 
-export async function loadTabs(store: BackfillStore | null): Promise<TabEntry[]> {
+/**
+ * 🔴 W91 · The tab registry, read for one release channel.
+ *
+ * A stable build must ignore a row left behind by a dev build for an
+ * experimental platform rather than serve it. `channel` is the same test seam as
+ * `loadTargets`' — production callers omit it and get the active channel.
+ */
+export async function loadTabs(
+  store: BackfillStore | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<TabEntry[]> {
   if (!store) return [];
+  const raw = await store.load(BACKFILL_TABS_KEY);
+  const tabs = Array.isArray(raw) ? raw.filter(isTabEntry) : [];
+  return tabs.filter((t) => getPlatformByOrigin(t.origin, channel) !== undefined);
+}
+
+/**
+ * 🔴 W91b · Every valid stored row, before the channel filter. The write side
+ * needs these so a stable build can put back a dev build's leftover rows
+ * without a second storage read.
+ */
+async function loadRawTabs(store: BackfillStore): Promise<TabEntry[]> {
   const raw = await store.load(BACKFILL_TABS_KEY);
   return Array.isArray(raw) ? raw.filter(isTabEntry) : [];
 }
@@ -1199,29 +1225,60 @@ export async function loadTabs(store: BackfillStore | null): Promise<TabEntry[]>
  * The registry as this worker last saw it; reads storage only when the mirror is
  * cold, and warms it from that one read — otherwise every hello after a worker
  * restart would re-read until something happened to write.
+ *
+ * 🔴 W91b · The mirror holds the **raw** rows (the active ones and the leftover
+ * rows another channel owns). The channel filter is applied where the rows are
+ * returned, so a write can merge the leftover rows back without a second read.
  */
-async function readRegistry(store: BackfillStore): Promise<TabEntry[]> {
+async function readRawRegistry(store: BackfillStore): Promise<TabEntry[]> {
   const known = tabRegistryMirrors.get(store);
   if (known !== undefined) return known;
-  const loaded = await loadTabs(store);
+  const loaded = await loadRawTabs(store);
   tabRegistryMirrors.set(store, loaded);
   return loaded;
+}
+
+/** The rows this build's channel serves — the same mirror, filtered as it is read. */
+async function readRegistry(store: BackfillStore, channel: ReleaseChannel): Promise<TabEntry[]> {
+  return (await readRawRegistry(store)).filter(
+    (t) => getPlatformByOrigin(t.origin, channel) !== undefined,
+  );
 }
 
 /**
  * The one place the registry is written. Keeps the mirror equal to what was just
  * saved — a stale mirror must not be able to make `rememberTab` skip a write for a
  * tab the registry no longer holds.
+ *
+ * 🔴 W91b · `next` is the **active** rows only. The leftover rows of the other
+ * channel are appended back untouched, so a stable write never drops a dev
+ * build's row, and the caller's `MAX_TAB_ENTRIES` cap counts only the active
+ * rows — an experimental row neither consumes nor loses a stable slot.
  */
-async function writeRegistry(store: BackfillStore, next: TabEntry[]): Promise<void> {
-  tabRegistryMirrors.set(store, next);
-  await store.save(BACKFILL_TABS_KEY, next);
+async function writeRegistry(
+  store: BackfillStore,
+  next: TabEntry[],
+  channel: ReleaseChannel,
+): Promise<void> {
+  const leftover = (await readRawRegistry(store)).filter(
+    (t) => getPlatformByOrigin(t.origin, channel) === undefined,
+  );
+  const full = [...next, ...leftover];
+  tabRegistryMirrors.set(store, full);
+  await store.save(BACKFILL_TABS_KEY, full);
 }
 
 /** Record one (deduplicated by tabId, most recent first). */
-export async function rememberTab(store: BackfillStore | null, entry: TabEntry): Promise<TabEntry[]> {
+export async function rememberTab(
+  store: BackfillStore | null,
+  entry: TabEntry,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<TabEntry[]> {
   if (!store) return [];
-  const known = await readRegistry(store);
+  if (!getPlatformByOrigin(entry.origin, channel)) {
+    return await loadTabs(store, channel);
+  }
+  const known = await readRegistry(store, channel);
   const previous = known.find((t) => t.tabId === entry.tabId);
   if (
     previous !== undefined
@@ -1234,14 +1291,18 @@ export async function rememberTab(store: BackfillStore | null, entry: TabEntry):
   }
   const rest = known.filter((t) => t.tabId !== entry.tabId);
   const next = [entry, ...rest].slice(0, MAX_TAB_ENTRIES);
-  await writeRegistry(store, next);
+  await writeRegistry(store, next, channel);
   return next;
 }
 
-export async function forgetTab(store: BackfillStore | null, tabId: number): Promise<void> {
+export async function forgetTab(
+  store: BackfillStore | null,
+  tabId: number,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): Promise<void> {
   if (!store) return;
-  const next = (await readRegistry(store)).filter((t) => t.tabId !== tabId);
-  await writeRegistry(store, next);
+  const next = (await readRegistry(store, channel)).filter((t) => t.tabId !== tabId);
+  await writeRegistry(store, next, channel);
 }
 
 /**
@@ -1253,11 +1314,16 @@ export async function forgetTab(store: BackfillStore | null, tabId: number): Pro
  * the failure pattern — a change in behaviour with nothing to do with liveness.
  * The order of the registry is the user's tab order; a miss is not news about it.
  */
-async function setTabMisses(store: BackfillStore | null, tabId: number, misses: number): Promise<void> {
+async function setTabMisses(
+  store: BackfillStore | null,
+  tabId: number,
+  misses: number,
+  channel: ReleaseChannel,
+): Promise<void> {
   if (!store) return;
-  const tabs = await readRegistry(store);
+  const tabs = await readRegistry(store, channel);
   const next = tabs.map((t) => (t.tabId === tabId ? { ...t, misses } : t));
-  await writeRegistry(store, next);
+  await writeRegistry(store, next, channel);
 }
 
 /**
@@ -1288,15 +1354,20 @@ async function setTabMisses(store: BackfillStore | null, tabId: number, misses: 
  *
  * `pingTimeoutMs` is injectable **for tests only** — production callers pass no
  * fourth argument and get BACKFILL_PING_TIMEOUT_MS.
+ *
+ * 🔴 W91b · `channel` is the same test seam as `loadTabs`': omitted in production,
+ *    where it is the active build's channel; a test that pins the suite to `dev`
+ *    passes `'stable'` to prove a stable build serves none of the leftover rows.
  */
 export async function pickLiveTab(
   store: BackfillStore | null,
   origin: string | null,
   ping: (tabId: number) => Promise<unknown>,
   pingTimeoutMs: number = BACKFILL_PING_TIMEOUT_MS,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<TabEntry | null> {
   // Loaded once, so a write inside the loop cannot change what this pass iterates.
-  for (const entry of await loadTabs(store)) {
+  for (const entry of await loadTabs(store, channel)) {
     if (origin !== null && entry.origin !== origin) continue;
     let alive = false;
     try {
@@ -1316,12 +1387,12 @@ export async function pickLiveTab(
       // 🔴 A live tab clears its own record. Only written when there is something to
       //    clear, so the normal path (a healthy tab that was never missed) does not
       //    pay a storage write per tick.
-      if ((entry.misses ?? 0) !== 0) await setTabMisses(store, entry.tabId, 0);
+      if ((entry.misses ?? 0) !== 0) await setTabMisses(store, entry.tabId, 0, channel);
       return entry;
     }
     const misses = (entry.misses ?? 0) + 1;
-    if (misses >= TAB_PING_MISSES_BEFORE_FORGET) await forgetTab(store, entry.tabId);
-    else await setTabMisses(store, entry.tabId, misses);
+    if (misses >= TAB_PING_MISSES_BEFORE_FORGET) await forgetTab(store, entry.tabId, channel);
+    else await setTabMisses(store, entry.tabId, misses, channel);
   }
   return null;
 }
@@ -1387,13 +1458,14 @@ export type TabSweepReport =
 export async function forgetMissingTabs(
   store: BackfillStore | null,
   liveIds: ReadonlySet<number>,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<number> {
   if (!store) return 0;
-  const tabs = await readRegistry(store);
+  const tabs = await readRegistry(store, channel);
   const next = tabs.filter((t) => liveIds.has(t.tabId));
   const pruned = tabs.length - next.length;
   if (pruned === 0) return 0;
-  await writeRegistry(store, next);
+  await writeRegistry(store, next, channel);
   return pruned;
 }
 
@@ -1450,6 +1522,11 @@ function takeSweepPingBatch(candidates: readonly number[], now: number): { batch
  * found nobody, and not as `deferred` (that count is tabs never pinged).
  *
  * `now` and `pingTimeoutMs` are injectable **for tests only**.
+ *
+ * 🔴 W91b · `channel` is the same test seam as `loadTabs`'. A stable build pings
+ *    only its own rows (`forgetMissingTabs` / `readRegistry` are channel-filtered)
+ *    and refuses an answering tab whose origin the active channel does not carry,
+ *    so a dev build's experimental rows are neither pruned nor duplicated.
  */
 export async function sweepUnregisteredTabs(
   store: BackfillStore | null,
@@ -1457,6 +1534,7 @@ export async function sweepUnregisteredTabs(
   ping: (tabId: number) => Promise<unknown>,
   now: number = Date.now(),
   pingTimeoutMs: number = BACKFILL_PING_TIMEOUT_MS,
+  channel: ReleaseChannel = currentReleaseChannel(),
 ): Promise<TabSweepReport> {
   if (!store) return { looked: false };
 
@@ -1479,8 +1557,8 @@ export async function sweepUnregisteredTabs(
       liveIds.add(row.id);
     }
   }
-  const pruned = await forgetMissingTabs(store, liveIds);
-  const known = new Set((await readRegistry(store)).map((t) => t.tabId));
+  const pruned = await forgetMissingTabs(store, liveIds, channel);
+  const known = new Set((await readRegistry(store, channel)).map((t) => t.tabId));
 
   const candidates: number[] = [];
   for (const row of rows) {
@@ -1514,7 +1592,8 @@ export async function sweepUnregisteredTabs(
   let crowded = 0;
   for (const found of replies) {
     if (!found) continue;
-    const knownNow = await readRegistry(store);
+    if (!getPlatformByOrigin(found.origin, channel)) continue;
+    const knownNow = await readRegistry(store, channel);
     const before = knownNow.some((t) => t.tabId === found.tabId);
     // Prune already dropped ids the query does not list, so every remaining
     // row is live. rememberTab's prepend+slice would evict one of them for
@@ -1526,7 +1605,7 @@ export async function sweepUnregisteredTabs(
       crowded += 1;
       continue;
     }
-    await rememberTab(store, { tabId: found.tabId, origin: found.origin, at: now });
+    await rememberTab(store, { tabId: found.tabId, origin: found.origin, at: now }, channel);
     if (!before) {
       registered += 1;
       origins.push(found.origin);

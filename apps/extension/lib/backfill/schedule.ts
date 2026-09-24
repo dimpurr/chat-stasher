@@ -233,6 +233,13 @@ export interface TickDeps {
    * decided anywhere in a test.
    */
   random?: BackfillOptions['random'];
+  /**
+   * 🔴 W91 · The release channel this tick is judged in. Omitted ⇒ the active
+   * build's channel; only a test that pins the suite to `dev` needs to say
+   * `'stable'` to prove an experimental platform is refused. See
+   * `BackfillOptions.channel`.
+   */
+  channel?: BackfillOptions['channel'];
   shouldAbort?: () => boolean;
 }
 
@@ -314,6 +321,7 @@ export async function tickBackfill(deps: TickDeps): Promise<TickResult> {
       maxDetails: deps.maxDetails ?? DEFAULT_TICK_DETAILS,
       shouldAbort: deps.shouldAbort,
       sink: deps.sink,
+      channel: deps.channel,
     });
     return { ran: true, reason: 'ran', report };
   } finally {

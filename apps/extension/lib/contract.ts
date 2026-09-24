@@ -232,6 +232,43 @@ export const HOOK_SELF_CHECK_INTERVAL_MS = 5_000;
 export type PlatformId = string;
 export type CaptureConfidence = 'from-source' | 'unverified';
 
+/**
+ * 🔴 W91 · Extension release channels and platform channels.
+ *
+ * Build channels:
+ *  - 'stable': Store/release channel (default for `pnpm build`, release zip).
+ *  - 'dev': Developer/preview channel (`pnpm dev`, `pnpm build:dev`, e2e).
+ *
+ * Platform channels:
+ *  - 'stable': Platform is fully proven and enabled in stable builds.
+ *  - 'experimental': Platform is under active development or shelved, disabled in stable builds.
+ */
+export type ReleaseChannel = 'stable' | 'dev';
+export type PlatformChannel = 'stable' | 'experimental';
+
+declare const __CS_RELEASE_CHANNEL__: string | undefined;
+
+/**
+ * 🔴 W91 · The extension's baked or environment release channel.
+ *
+ * Priority:
+ * 1. Bundled constant `__CS_RELEASE_CHANNEL__` injected by Vite at build time.
+ * 2. `process.env.CS_RELEASE_CHANNEL` if running under Node/Vitest/scripts.
+ * 3. Defaults to 'stable' for production safety (least privilege).
+ */
+export function currentReleaseChannel(): ReleaseChannel {
+  if (typeof __CS_RELEASE_CHANNEL__ === 'string' && __CS_RELEASE_CHANNEL__ === 'dev') {
+    return 'dev';
+  }
+  if (typeof __CS_RELEASE_CHANNEL__ === 'string' && __CS_RELEASE_CHANNEL__ === 'stable') {
+    return 'stable';
+  }
+  if (typeof process !== 'undefined' && process.env?.CS_RELEASE_CHANNEL === 'dev') {
+    return 'dev';
+  }
+  return 'stable';
+}
+
 export interface ResponseShape {
   encoding: 'json' | 'text';
   /** Every listed path must be present for JSON responses. */
@@ -256,6 +293,12 @@ export interface ChatPlatform {
   /** Source-backed is not the same as live verified. */
   credibility: CaptureConfidence;
   /**
+   * 🔴 W91 · The release channel this platform belongs to.
+   * 'stable' = active in both stable and dev builds.
+   * 'experimental' = active only in dev builds; inert in stable builds.
+   */
+  channel: PlatformChannel;
+  /**
    * Opt-in, per row: "this platform carries conversation data over WebSocket".
    * Absent/false (the default for every row shipped today) means the MAIN-world
    * WebSocket wrapper observes NOTHING on that origin. Turning it on is how a
@@ -269,7 +312,7 @@ export interface ChatPlatform {
  * The platform table. Adding support means adding one row of data; the hook,
  * bridge, validator, and saver all consume these generic fields.
  */
-export const PLATFORMS: readonly ChatPlatform[] = [
+export const ALL_PLATFORMS: readonly ChatPlatform[] = [
   {
     id: 'deepseek',
     origins: ['https://chat.deepseek.com'],
@@ -314,6 +357,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // The external API route/shape differences may represent different entry
     // points or versions; this task changes credibility only, not match data.
     credibility: 'from-source',
+    channel: 'stable',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
@@ -384,6 +428,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // real route or envelope differs, the shape gate above rejects it and
     // page-hook.ts warns — it never guesses.
     credibility: 'from-source',
+    channel: 'experimental',
     webSocketCapture: false,
   },
   {
@@ -398,6 +443,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     },
     sessionIdPatterns: ['/backend-api/conversation/([0-9a-fA-F-]{8,})'],
     credibility: 'from-source',
+    channel: 'stable',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
@@ -439,6 +485,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     //    refusal, which is why a 400 here is never read as "you have no
     //    conversations".
     credibility: 'from-source',
+    channel: 'stable',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
@@ -497,6 +544,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     //  · A third documents the same GET route but ships NO licence, so it was
     //    read for architecture only and no code from it was used.
     credibility: 'from-source',
+    channel: 'stable',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
@@ -624,6 +672,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // fact that the LEGACY origin https://kimi.moonshot.cn used an unrelated
     // '/api/chat/...' route family, which is why that origin is not in `origins`.
     credibility: 'from-source',
+    channel: 'experimental',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
@@ -705,6 +754,7 @@ export const PLATFORMS: readonly ChatPlatform[] = [
     // No project name, licence identifier or URL is recorded here on purpose: the
     // public surface of this repository does not name third-party exporters.
     credibility: 'from-source',
+    channel: 'stable',
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     // 🔴 Grok is a case where this default was checked rather than assumed: the
@@ -717,18 +767,56 @@ export const PLATFORMS: readonly ChatPlatform[] = [
   },
 ];
 
-/** Content-script matches derived from the table — a closed set. */
-export const CONTENT_MATCHES: string[] = Array.from(
-  new Set(PLATFORMS.flatMap((platform) => platform.origins.map((origin) => `${origin}/*`))),
-);
+/**
+ * 🔴 W91 · Return platforms active in the specified release channel.
+ * In 'stable' builds, experimental platforms are omitted entirely.
+ * In 'dev' builds, all platforms are returned.
+ */
+export function platformsForChannel(channel: ReleaseChannel): readonly ChatPlatform[] {
+  return channel === 'dev'
+    ? ALL_PLATFORMS
+    : ALL_PLATFORMS.filter((platform) => platform.channel === 'stable');
+}
+
+/**
+ * 🔴 W91 · Check if a platform is active in the given release channel.
+ */
+export function isPlatformActiveInChannel(
+  platformOrId: ChatPlatform | PlatformId,
+  channel: ReleaseChannel,
+): boolean {
+  const id = typeof platformOrId === 'string' ? platformOrId : platformOrId.id;
+  const platform = ALL_PLATFORMS.find((p) => p.id === id);
+  if (!platform) return false;
+  return channel === 'dev' || platform.channel === 'stable';
+}
+
+/**
+ * 🔴 W91 · Content-script matches derived from the table for a given channel — a closed set.
+ */
+export function contentMatchesForChannel(channel: ReleaseChannel): string[] {
+  return Array.from(
+    new Set(platformsForChannel(channel).flatMap((platform) => platform.origins.map((origin) => `${origin}/*`))),
+  );
+}
+
+/**
+ * The platform table for the active build channel. Adding support means adding one row of data;
+ * the hook, bridge, validator, and saver all consume these generic fields.
+ */
+export const PLATFORMS: readonly ChatPlatform[] = platformsForChannel(currentReleaseChannel());
+
+/** Content-script matches derived from the table for the active channel — a closed set. */
+export const CONTENT_MATCHES: string[] = contentMatchesForChannel(currentReleaseChannel());
 
 /** Convenience back-compat alias for the incumbent platform origin. */
 export const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
 export const CHAT_PATH_HINTS = ['/api/v0/chat', '/chat/session'];
 
-/** Look up a platform by exact origin. */
-export function getPlatformByOrigin(origin: string): ChatPlatform | undefined {
-  return PLATFORMS.find((platform) => platform.origins.includes(origin));
+/** Look up a platform by exact origin in the specified or active channel. */
+export function getPlatformByOrigin(origin: string, channel?: ReleaseChannel): ChatPlatform | undefined {
+  const list = channel ? platformsForChannel(channel) : PLATFORMS;
+  return list.find((platform) => platform.origins.includes(origin));
 }
 
 /**
@@ -809,10 +897,10 @@ function hasUsablePath(value: unknown, path: string): boolean {
   return found !== undefined && found !== null;
 }
 
-export function findPlatformForUrl(url: string): ChatPlatform | null {
+export function findPlatformForUrl(url: string, channel?: ReleaseChannel): ChatPlatform | null {
   try {
     const origin = new URL(url).origin;
-    return getPlatformByOrigin(origin) ?? null;
+    return getPlatformByOrigin(origin, channel) ?? null;
   } catch {
     return null;
   }
@@ -930,10 +1018,11 @@ export function isChatTraffic(url: string, method: string): boolean {
   return platformForTraffic(url, method) !== null;
 }
 
-export function platformForTraffic(url: string, method: string): ChatPlatform | null {
+export function platformForTraffic(url: string, method: string, channel?: ReleaseChannel): ChatPlatform | null {
   try {
     const u = new URL(url);
-    return PLATFORMS.find(
+    const list = channel ? platformsForChannel(channel) : PLATFORMS;
+    return list.find(
       (platform) =>
         platform.origins.includes(u.origin) &&
         platform.methods.includes(method.toUpperCase()) &&

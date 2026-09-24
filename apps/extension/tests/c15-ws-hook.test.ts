@@ -61,6 +61,7 @@ function declaredOptions(): PageHookOptions {
         responseShape: { encoding: 'json', requiredPaths: ['chat_messages'] },
         sessionIdPatterns: ['/chathub/([0-9a-fA-F-]{8,})'],
         credibility: 'unverified',
+        channel: 'experimental',
         webSocketCapture: true,
       },
     ],

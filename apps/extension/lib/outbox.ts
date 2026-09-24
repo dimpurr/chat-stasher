@@ -563,6 +563,13 @@ export function drainOutbox(options: DrainOptions = {}): Promise<DrainReport> {
 }
 
 async function runDrain(options: DrainOptions): Promise<DrainReport> {
+  // 🔴 W91b · **This leg is deliberately not channel-filtered.** An entry here is
+  //    user data a build already captured, not a platform this build serves: a
+  //    dev build that captured Kimi while the native host was down leaves a
+  //    `kimi-*.json` bundle queued, and a stable build that later becomes active
+  //    must still deliver it. Dropping it because the platform is experimental in
+  //    this channel would lose a conversation the user already has on disk.
+  //    RELEASING.md states the same decision under "Release channel".
   const now = options.now ?? Date.now;
   const deliverFn: DeliveryFn = options.deliver ?? deliver;
 
