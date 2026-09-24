@@ -6,71 +6,58 @@ browser extension has its own version and ships on its own schedule; see
 
 ## Unreleased — 0.4.0
 
-### Added
+### CLI
 
-#### CLI
+#### Added
 
-- The web archive can now retain a conversation's time basis in export manifests,
-  and discovery can rebuild its activity index from all saved snapshots, including
-  sessions whose time was previously unknown.
-- Stage updates preserve the file's original line endings, including CRLF, and
-  refuse an implicit stage table rather than editing an ambiguous configuration.
+- `activity-index --rebuild --destination … --machine …` rebuilds that machine's
+  activity index from every archived snapshot. It is safe to rerun but starts
+  over rather than resuming, and restarts if the same machine pushes during the
+  rebuild. From issue #2.
+- `search --json` and export manifests report per-machine recall with
+  `located`, `time_unknown` and `index_trusted`; daily manifest entries also
+  report `unknown_anywhere`. A `WARN` goes to stderr when at least half of a
+  machine's candidate sessions have unknown time. From issue #2.
+- `overview` and `status --destination …` show each machine's last writer
+  version and flag versions behind the newest writer.
 
-#### Extension
+#### Changed
 
-- The stable release channel now includes the browser extension. Stable builds
-  activate the five platforms that have passed live acceptance; experimental
-  integrations remain inactive in stable builds.
-- History backfill now retrieves conversation bodies on an additional experimental
-  platform and refuses responses that do not establish that the body is complete.
-- A scoped history integration can authorize a freshly opened page and establish
-  its organization before requesting a history listing.
+- Conversation time is now derived from message timestamps for ChatGPT, Claude,
+  Gemini, DeepSeek, Grok, Perplexity and Kimi web captures. Export manifests
+  mark `time_source` as `messages` or `list-updated`, and numeric epochs are
+  interpreted as absolute timestamps. From issue #3.
 
-### Changed
+#### Fixed
 
-#### CLI
+- `install-native-host --stage …` appends with the file's dominant line ending
+  and refuses a dotted or implicit `stage` table.
 
-- The backfill scheduler now tracks service by target identity, re-arms through
-  its alarm synchronization queue, and preserves rotation across worker restarts.
-  Never-served targets are prioritized and service stamps are normalized on save.
-- A paginated conversation listing treats a list-only response as a time point,
-  and numeric web-archive timestamps are interpreted as absolute epochs.
+### Browser extension (first stable release, 0.2.0)
 
-#### Extension
+#### Added
 
-- Stable and development builds now have separate platform sets. A production
-  build with no channel override selects stable, while development and end-to-end
-  builds retain the development channel.
-- Body completeness failures are kept local to the affected conversation where
-  possible, so an empty or uncorroborated detail response does not halt unrelated
-  backfill work.
+- Stable releases now ship the extension for ChatGPT, Claude, DeepSeek, Gemini
+  and Grok; Perplexity and Kimi are available in development builds.
+- Perplexity conversation bodies can be archived in development builds when the
+  response proves the body is complete; incomplete or unproven bodies are
+  refused.
 
-### Fixed
+#### Changed
 
-#### CLI
+- Claude history backfill now archives verified active branches, re-lists once
+  to recover conversations an earlier walk dropped, and works from a newly
+  opened `claude.ai/new` page by resolving its organization from that page.
+- Gemini history listing now continues beyond the former request-body size cap.
+- Backfill rotates fairly across platforms and accounts by least-recent service.
+  Turning it off is honored during an active run, and the popup switch sends
+  alarm changes through the worker's single synchronization queue.
 
-- Activity-index rebuilds no longer use stale snapshots, and the appended stage
-  line uses the line ending already present in the file.
-- Backfill scheduling no longer starves targets because of registry order or a
-  stale positional cursor.
+#### Fixed
 
-#### Extension
-
-- A frame walker handles the corrected response shape, and a scoped backfill is
-  re-enumerated once after the detail-walk correction.
-- Empty detail identifiers remain pending until a real body proves the endpoint
-  works; one empty body is reported for that conversation instead of stopping the
-  full run. Uncorroborated branch roots and incomplete experimental bodies are
-  refused rather than archived as complete.
-- A stable build no longer removes or exposes state left by a development build.
-
-#### Repository and release tooling
-
-- Citation anchors can be relocated safely after rebasing, with a helper that
-  refuses ambiguous moves. The output inventory and citation lock were refreshed
-  where source line changes required it.
-- The Homebrew formula's release checksums were completed for the prior stable
-  release.
+- An empty conversation no longer stops platform backfill: its id stays owed
+  until a real body is archived, while three consecutive empty bodies halt the
+  run as a signal that the endpoint may have changed.
 
 ## 0.3.0 — 2026-09-24
 
