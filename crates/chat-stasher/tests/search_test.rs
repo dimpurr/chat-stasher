@@ -33,6 +33,7 @@ use rustic_core::repofile::MasterKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 const SHARD_BYTES: usize = 256 * 1024;
@@ -581,7 +582,10 @@ fn no_content_activity_row_survives_real_search_index_read() {
     row.line_count = 0;
     row.time_source = TimeSource::NoConversationContent;
     write_activity_index(&stage, machine, &[row]);
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), machine.to_string());
+    let key_path = root.join("key.json");
+    let store_config = cfg(&repo, &key_path);
+    store::persist_key_file(&store_config, &mk).unwrap();
+    let store = BackupStore::new(store_config, machine.to_string());
     assert!(store.push(&stage, &mk).unwrap().files_new > 0);
 
     let result = search_sessions(&store, &mk, &Selector::default()).unwrap();
@@ -601,6 +605,29 @@ fn no_content_activity_row_survives_real_search_index_read() {
     assert_eq!(
         json["sessions"][0]["last_unix"]["kind"],
         "no_conversation_content"
+    );
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args(["search", "--repo"])
+        .arg(&repo)
+        .args(["--key-file"])
+        .arg(&key_path)
+        .args(["--machine", machine])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(cli.stdout).unwrap();
+    assert!(
+        cli.status.success(),
+        "search failed: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(
+        stdout.contains("active=no conversation content"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("unknown (no reason was recorded"),
+        "{stdout}"
     );
 
     let window = search_sessions(

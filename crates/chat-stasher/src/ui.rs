@@ -1274,6 +1274,7 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
 fn list_row(s: &UiSession, token: &str) -> String {
     let time = |v: Option<i64>| match v {
         Some(unix) => esc(&fmt_unix(unix)),
+        None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<span class=bad title=\"unknown\">unknown</span>".to_string(),
     };
     format!(
@@ -1298,6 +1299,7 @@ fn list_row(s: &UiSession, token: &str) -> String {
 fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
     let time = |v: Option<i64>| match v {
         Some(unix) => esc(&fmt_unix(unix)),
+        None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<b class=bad>unknown</b>".to_string(),
     };
     let payload_bytes = s.bytes;

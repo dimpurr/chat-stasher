@@ -482,6 +482,23 @@ fn no_content_section_renders_when_time_unknown_is_zero() {
         !html.contains("every session in view has a recorded conversation time"),
         "{html}"
     );
+    let (status, sessions_page) = ui.get("/sessions");
+    assert_eq!(status, 200);
+    assert!(
+        sessions_page.contains("no conversation content"),
+        "{sessions_page}"
+    );
+    assert!(
+        !sessions_page.contains(">unknown</span>"),
+        "{sessions_page}"
+    );
+    let (status, session_page) = ui.get("/session?i=0");
+    assert_eq!(status, 200);
+    assert!(
+        session_page.contains("no conversation content"),
+        "{session_page}"
+    );
+    assert!(!session_page.contains(">unknown</b>"), "{session_page}");
     let (status, json) = ui.get("/api/overview");
     assert_eq!(status, 200);
     let overview: serde_json::Value = serde_json::from_str(&json).unwrap();
