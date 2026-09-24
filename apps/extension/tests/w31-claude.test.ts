@@ -13,9 +13,14 @@
  *  2. **A scoped plan never sends the `'default'` sentinel.** That word is this
  *     repository's spelling for "the account identifier cannot be told"; in a path
  *     segment it would be a request against an organization that does not exist.
- *  3. **A body that does not hold the whole branch is not a conversation.** The
- *     tree walk from `current_leaf_message_uuid` is what decides it, and a broken
- *     chain is a named receipt, never an archived conversation missing its middle.
+ *  3. **A body whose branch cannot be walked is not a conversation.** The tree walk
+ *     from `current_leaf_message_uuid` is what decides it, and a missing leaf or a
+ *     cycle is a named receipt, never an archived conversation missing its middle.
+ *     🔴 W92 · The **absent parent at the branch root is the root, not a break**:
+ *     the real wire ends every branch at a shared tree-root sentinel no body
+ *     carries (measured on 2026-09-24, see W92-OUT.md), so the walk ends there and
+ *     the body archives. Treating it as truncation made 100 % of real Claude
+ *     conversations fail.
  *  4. **The allowlist grew no wildcard.** Two path templates matched segment by
  *     segment with the resolved scope, one pinned query, and a resolution-only path
  *     that can carry nothing at all.
@@ -52,6 +57,7 @@ import {
   claudeParentKeyIn,
   expectedMethodFor,
   parseClaudeDetailPage,
+  parseClaudeDetailTree,
   parseClaudeListPage,
   pinnedQueryMatches,
   scopePathMatches,
@@ -143,6 +149,60 @@ function listPage(ids: string[]): string {
 }
 
 const GOOD_TREE = treeBody(['m1', 'm2', 'm3']);
+
+/**
+ * 🔴 W92 · The shared tree-root sentinel the real claude.ai wire uses as the parent
+ * of every branch root. It is carried by no `chat_messages` array. The value is a
+ * synthetic placeholder of the same 36-character shape the measurement showed.
+ */
+const ROOT_SENTINEL = '00000000-0000-0000-0000-000000000001';
+
+/**
+ * A body in the shape the real claude.ai `?tree=True` route returns, measured by W92
+ * on 2026-09-24 (one page-context GET plus two live captures; see W92-OUT.md): every
+ * message carries `index` / `sender` / `parent_message_uuid` / `truncated`, the leaf
+ * is named **and** carried, and the branch's first message names the shared root
+ * sentinel **which the response does not carry**. Every value below is invented.
+ */
+function realTreeBody(
+  chain: string[],
+  opts: { root?: string; leaf?: string } = {},
+): string {
+  const messages = chain.map((uuid, i) => ({
+    uuid,
+    index: i,
+    sender: i % 2 === 0 ? 'human' : 'assistant',
+    parent_message_uuid: i === 0 ? (opts.root ?? ROOT_SENTINEL) : chain[i - 1],
+    truncated: false,
+    created_at: '2026-09-01T10:00:00.000Z',
+    updated_at: '2026-09-01T10:00:00.000Z',
+    content: [{ type: 'text', text: `synthetic ${uuid}` }],
+    text: `synthetic ${uuid}`,
+    attachments: [],
+    files: [],
+    sync_sources: [],
+  }));
+  return JSON.stringify({
+    uuid: ID,
+    name: 'synthetic',
+    model: 'synthetic-model',
+    created_at: '2026-09-01T10:00:00.000Z',
+    updated_at: '2026-09-01T10:00:00.000Z',
+    summary: '',
+    platform: 'claude',
+    is_starred: false,
+    is_temporary: false,
+    is_archived: false,
+    is_wiggle_enabled: false,
+    workspace_upgraded: false,
+    effective_thinking_mode: 'extended',
+    settings: {},
+    current_leaf_message_uuid: opts.leaf ?? chain[chain.length - 1],
+    chat_messages: messages,
+  });
+}
+
+const REAL_TREE = realTreeBody(['m1', 'm2', 'm3']);
 
 interface Recorder {
   calls: { url: string; init: unknown }[];
@@ -537,20 +597,119 @@ describe('W31-5 · the body segment', () => {
     );
   });
 
-  it('a broken parent chain is a named per-conversation failure, and nothing is archived', async () => {
+  it('🔴 W92 · an absent parent at the branch root is the root, so a whole real-shaped body archives', async () => {
     const store = memoryStore();
-    // m2's parent is not in the response: the branch that starts at the leaf leaves
-    // the messages this response carries.
-    const broken = JSON.stringify({
-      uuid: ID,
-      chat_messages: [message('m2', 'missing-parent'), message('m3', 'm2')],
-      current_leaf_message_uuid: 'm3',
+    // The branch's first message names the shared root sentinel, which the response
+    // does not carry. On the real wire this is every conversation (197 consecutive
+    // detail-tree-incomplete receipts, 0 archives, W92-OUT.md), so it must be read
+    // as the branch root and the body must be delivered.
+    const parsed = parseClaudeDetailPage(REAL_TREE);
+    expect(parsed).toEqual({ ok: true, outcome: 'non-empty' });
+    expect(parseClaudeDetailTree(REAL_TREE)).toEqual({ ok: true, ordered: ['m1', 'm2', 'm3'] });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: REAL_TREE });
+    const saved: CapturedFetch[] = [];
+    const report = await run(store, be.http, ORG, {
+      sink: (captured: CapturedFetch): SinkOutcome => {
+        saved.push(captured);
+        return { saved: true, sessionId: captured.sessionId };
+      },
     });
-    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: broken });
-    const parsed = parseClaudeDetailPage(broken);
-    expect(parsed.ok).toBe(true);
+    // Every pending id ended archived, with no failure record.
+    expect(report.stopped).toBe('queue-empty');
+    expect(report.state.archived).toEqual([ID]);
+    expect(report.state.pending).toEqual([]);
+    expect(report.failedThisRun).toEqual([]);
+    expect(saved.length).toBe(1);
+    expect(saved[0]!.sessionId).toBe(ID);
+    // The body really was the plan's own three-parameter request.
+    expect(be.calls.find((c) => c.url.includes(DETAIL_PATH))!.url).toBe(
+      `${ORIGIN}${DETAIL_PATH}?tree=True&rendering_mode=messages&render_all_tools=true`,
+    );
+  });
+
+  it('🔴 W92 · a discarded sibling branch does not stop the active branch from resolving', async () => {
+    // The real-sanitized fixture's third body: the active branch starts at a message
+    // with index 1, and another branch-root with index 0 points at the same sentinel.
+    // W92c keeps this archiving: the active root's index is > 0, but a smaller-indexed
+    // carried message (the discarded sibling) names the same absent sentinel.
+    const branched = JSON.stringify({
+      uuid: ID,
+      current_leaf_message_uuid: 'm3',
+      chat_messages: [
+        { uuid: 'm1', index: 0, sender: 'human', parent_message_uuid: ROOT_SENTINEL },
+        { uuid: 'm2', index: 1, sender: 'human', parent_message_uuid: ROOT_SENTINEL },
+        { uuid: 'm3', index: 2, sender: 'assistant', parent_message_uuid: 'm2' },
+      ],
+    });
+    expect(parseClaudeDetailTree(branched)).toEqual({ ok: true, ordered: ['m2', 'm3'] });
+    expect(parseClaudeDetailPage(branched)).toEqual({ ok: true, outcome: 'non-empty' });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: branched });
+    const report = await run(memoryStore(), be.http, ORG);
+    expect(report.state.archived).toEqual([ID]);
+    expect(report.failedThisRun).toEqual([]);
+  });
+
+  it('🔴 W92c · Scenario A · a missing middle message is refused, not archived as complete', async () => {
+    // The real branch root (index 0, naming the sentinel) is still carried, but the
+    // leaf's own chain stops at `m2` in the middle: two absent parents (the sentinel
+    // and `m2`), so this cannot be the whole branch. Red on acfe800.
+    const middleMissing = JSON.stringify({
+      uuid: ID,
+      current_leaf_message_uuid: 'm4',
+      chat_messages: [
+        { uuid: 'm1', index: 0, sender: 'human', parent_message_uuid: ROOT_SENTINEL },
+        { uuid: 'm3', index: 2, sender: 'human', parent_message_uuid: 'm2' },
+        { uuid: 'm4', index: 3, sender: 'assistant', parent_message_uuid: 'm3' },
+      ],
+    });
+    const walked = parseClaudeDetailTree(middleMissing);
+    expect(walked.ok).toBe(false);
+    expect(walked.ok === false && walked.outcome).toBe('detail-tree-incomplete');
+    expect(parseClaudeDetailPage(middleMissing)).toEqual({ ok: true, outcome: 'detail-tree-incomplete' });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: middleMissing });
+    const report = await run(memoryStore(), be.http, ORG);
+    expect(report.state.archived).toEqual([]);
+    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-tree-incomplete']);
+    // A per-conversation fact, not a halt.
+    expect(report.stopped).not.toBe('halted');
+  });
+
+  it('🔴 W92c · Scenario B · a dropped prefix whose surviving root has index 2 is refused', async () => {
+    // Only the tail is carried: `m3` (index 2, parent `m2`) and the leaf (index 3,
+    // parent `m3`). One absent parent (`m2`), but the message treated as the root has
+    // index 2, and no smaller-indexed carried message names `m2`, so the prefix was
+    // dropped. Red on acfe800.
+    const droppedPrefix = JSON.stringify({
+      uuid: ID,
+      current_leaf_message_uuid: 'leaf',
+      chat_messages: [
+        { uuid: 'm3', index: 2, sender: 'human', parent_message_uuid: 'm2' },
+        { uuid: 'leaf', index: 3, sender: 'assistant', parent_message_uuid: 'm3' },
+      ],
+    });
+    const walked = parseClaudeDetailTree(droppedPrefix);
+    expect(walked.ok).toBe(false);
+    expect(walked.ok === false && walked.outcome).toBe('detail-tree-incomplete');
+    expect(parseClaudeDetailPage(droppedPrefix)).toEqual({ ok: true, outcome: 'detail-tree-incomplete' });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: droppedPrefix });
+    const report = await run(memoryStore(), be.http, ORG);
+    expect(report.state.archived).toEqual([]);
+    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-tree-incomplete']);
+    expect(report.stopped).not.toBe('halted');
+  });
+
+  it('a cycle is still a named per-conversation failure, and nothing is archived', async () => {
+    // A cycle is a shape this code cannot read; unlike an absent parent it is not a
+    // root. (Missing-leaf cases are covered by the next test's parse assertions.)
+    const cycle = JSON.stringify({
+      uuid: ID,
+      chat_messages: [message('a', 'b'), message('b', 'a')],
+      current_leaf_message_uuid: 'a',
+    });
+    const parsed = parseClaudeDetailPage(cycle);
     expect(parsed.ok === true && parsed.outcome).toBe('detail-tree-incomplete');
-    const report = await run(store, be.http, ORG);
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: cycle });
+    const report = await run(memoryStore(), be.http, ORG);
     expect(report.state.archived).toEqual([]);
     expect(report.state.pending).toEqual([]);
     expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-tree-incomplete']);

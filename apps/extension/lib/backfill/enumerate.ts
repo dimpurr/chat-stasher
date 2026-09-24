@@ -3641,20 +3641,116 @@ export function claudeParentKeyIn(text: string): string | null {
 }
 
 /**
+ * 🔴 W92c · **Is an absent parent the branch root, or a dropped message?**
+ *
+ * `absentParent` is the parent uuid the walk stopped at; `chain` is the walk's
+ * leaf-first list, whose last element `R` is the message that named it. Both
+ * conditions below are taken from R92's measurement of the real wire
+ * (R92-grok.log §1, W92-OUT.md 2026-09-24); a body that fails either could be a
+ * truncated branch, so it is refused rather than read as complete.
+ *
+ *  1. **One shared absent sentinel:** every parent uuid in `chat_messages` that is
+ *     not itself a carried message uuid equals `absentParent`. A body with a missing
+ *     middle names a second absent parent and fails here.
+ *  2. **The accepted root sits at the foot of the index counter:** `R.index === 0`,
+ *     or a numeric `R.index > 0` beside another carried message of a smaller index
+ *     that names `absentParent` (the discarded-sibling shape).
+ *
+ * A message carrying no parent field is not part of either check — the walk accepts
+ * that root before this is ever called.
+ */
+function claudeAbsentParentIsBranchRoot(
+  messages: readonly unknown[],
+  byUuid: Map<string, Record<string, unknown>>,
+  chain: readonly string[],
+  absentParent: string,
+): boolean {
+  // 1 · Every absent parent uuid in the body is the same value.
+  for (const message of messages) {
+    const record = message as Record<string, unknown>;
+    const parentKey = claudeParentKeyOf(record);
+    if (parentKey === null) continue;
+    const parent = record[parentKey] as string;
+    if (!byUuid.has(parent) && parent !== absentParent) return false;
+  }
+  const rootUuid = chain[chain.length - 1];
+  const root = rootUuid === undefined ? undefined : byUuid.get(rootUuid);
+  if (!root) return false;
+  // 2 · The last pushed message is at index 0, or a smaller-indexed sibling shares
+  //     the sentinel with it.
+  const index = root.index;
+  if (index === 0) return true;
+  if (typeof index !== 'number' || index <= 0) return false;
+  for (const message of messages) {
+    const record = message as Record<string, unknown>;
+    if (record.uuid === rootUuid) continue;
+    const parentKey = claudeParentKeyOf(record);
+    if (parentKey === null || record[parentKey] !== absentParent) continue;
+    const siblingIndex = record.index;
+    if (typeof siblingIndex === 'number' && siblingIndex < index) return true;
+  }
+  return false;
+}
+
+/**
  * 🔴 W31 · **Can this response prove it is the whole active branch?**
  *
  * The walk, and why it is the completeness check rather than a count: the
  * response is a **tree** (every message names its parent), and
  * `current_leaf_message_uuid` names the newest message of the branch the user was
  * looking at. So the branch is exactly the chain that starts at that leaf and
- * follows parent links upward. If every step of that chain resolves to a message
- * present in `chat_messages` and it ends at a root, the chain is complete.
+ * follows parent links upward.
  *
- * If a parent is **missing** from the response, the tree this response carries
- * does not hold the whole branch: the wire is truncated (a long conversation
- * capped server-side is the open question the research records and cannot
- * answer), and the honest outcome is a named, per-conversation failure — never an
- * archived conversation that is silently missing its middle.
+ * 🔴 W92 · **An absent parent can be the branch root, but only when the body's own
+ *    shape corroborates it.**
+ *
+ * W31 wrote the opposite rule ("a parent missing from the response means the wire
+ * is truncated"), on the unverified hypothesis that a long conversation might be
+ * capped server-side inside one `chat_messages` array. The real wire falsifies the
+ * blanket version: every observed Claude body ends its branch at a message whose
+ * `parent_message_uuid` is a **shared tree-root uuid that no response carries**:
+ * two independent real captures and a live page-context request (W92-OUT.md,
+ * 2026-09-24) show exactly one absent parent, and it is the same value across
+ * conversations and across every branch in one body. The old rule made the walk
+ * fail for 100 % of real conversations (197 consecutive `detail-tree-incomplete`
+ * receipts, 0 archives).
+ *
+ * 🔴 W92c · But the stop-at-first-absent-parent fix W92 first shipped was too
+ *    permissive, and R92's review measured it (R92-grok.log §1): a body with a
+ *    missing middle (Scenario A — the leaf's chain stops at `m2` while `m1`, naming
+ *    the sentinel, is still carried) or a dropped prefix (Scenario B — only the tail
+ *    is carried and the surviving root has `index` 2) also terminates at an absent
+ *    parent, and both were archived as complete. What separates the real root from
+ *    a dropped message is a property of the whole body, not of the stop alone, so
+ *    the walk now requires **both** of these before accepting an absent parent as
+ *    the branch root:
+ *
+ *      1. **one shared absent sentinel.** Every parent uuid in `chat_messages` that
+ *         is not itself a carried message uuid must equal that absent parent. A body
+ *         with a missing middle has a second absent parent — the dropped message's
+ *         own parent — and fails here.
+ *      2. **the accepted root sits at the foot of the index counter.** The last
+ *         message pushed, `R`, must have `index === 0`, or a numeric `index > 0`
+ *         alongside another carried message of a smaller index that names that same
+ *         absent parent — the discarded-sibling case the third measured body shows
+ *         (an index-0 sibling beside the index-1 active root). A dropped prefix
+ *         leaves `R` at `index > 0` with no smaller-indexed message naming the
+ *         sentinel, and fails here.
+ *
+ * A body that fails either condition is `detail-tree-incomplete`: real content in a
+ * shape this code cannot prove whole, so nothing is archived. What remains an
+ * unconditional refusal is a shape this code cannot read at all: a cycle among the
+ * parent links, no `current_leaf_message_uuid`, or a leaf that is not among the
+ * carried messages.
+ *
+ * 🔴 A message with **no parent field** ends the walk and is accepted
+ *    unconditionally: that is the 17-message capture whose root carries no
+ *    `parent_message_uuid` at all, and there is no absent-parent shape to test.
+ *
+ * ⚠️ **Residual, stated rather than hidden:** a server that dropped a prefix *and*
+ *    rewrote the survivor's `index` to 0 and its parent to the sentinel would still
+ *    look complete. No measurement shows that rewrite. W20 found no source for a
+ *    server-side cap at all.
  *
  * 🔴 The walk is bounded by the number of messages: a response whose parent links
  *    form a cycle would otherwise loop forever. A cycle is not "complete" — it is
@@ -3720,6 +3816,10 @@ export function parseClaudeDetailTree(
   const chain: string[] = [];
   const visited = new Set<string>();
   let current: string | null = leaf;
+  // Set when the loop stops at a parent uuid no carried message has. That parent is
+  // a candidate branch root; whether it may be accepted is decided after the loop
+  // (claudeAbsentParentIsBranchRoot), against the whole body — see the header.
+  let absentParent: string | null = null;
   while (current !== null) {
     if (visited.has(current)) {
       return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the parent chain revisits a message' };
@@ -3727,12 +3827,20 @@ export function parseClaudeDetailTree(
     visited.add(current);
     const message = byUuid.get(current);
     if (!message) {
-      return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the parent chain leaves the messages this response carries' };
+      absentParent = current;
+      break;
     }
     chain.push(current);
     const parentKey = claudeParentKeyOf(message);
     // No non-empty parent link ⇒ this is the root of the branch, and the chain is whole.
     current = parentKey === null ? null : (message[parentKey] as string);
+  }
+  if (absentParent !== null && !claudeAbsentParentIsBranchRoot(messages, byUuid, chain, absentParent)) {
+    return {
+      ok: false,
+      outcome: 'detail-tree-incomplete',
+      detail: 'the walk reached a parent the response does not carry that is not the shared branch root',
+    };
   }
   // Root first, i.e. not in the order the walk visited it. Nothing archives this
   // list (see the note above): it is the walk's own output, for a caller that
@@ -3798,11 +3906,15 @@ export function parseClaudeListPage(text: string): ParseResult {
  *     empty conversation is not something any source establishes for this route,
  *     and "we read an empty body" must not become "this conversation was empty";
  *  3. otherwise the branch is walked from `current_leaf_message_uuid` upward. A
- *     whole chain ⇒ 'non-empty' and the body is delivered. A chain that hits a
- *     missing parent, a missing leaf, or a cycle ⇒ **'detail-tree-incomplete'**:
- *     the response is real content and does not hold the whole conversation, so
- *     nothing is archived and the conversation gets a named receipt on the
- *     failure list.
+ *     parent the response does not carry ends the walk only when the body's own
+ *     shape proves it is the shared tree-root sentinel and not a dropped message —
+ *     one shared absent parent, and an accepted root at `index` 0 or beside a
+ *     smaller-indexed sibling naming that sentinel (W92c; see
+ *     `parseClaudeDetailTree`) — ⇒ 'non-empty' and the body is delivered. A missing
+ *     leaf, a cycle among the parent links, or an absent parent that fails that
+ *     check ⇒ **'detail-tree-incomplete'**: the response is real content in a shape
+ *     this code cannot prove whole, so nothing is archived and the conversation gets
+ *     a named receipt on the failure list.
  */
 export function parseClaudeDetailPage(text: string): DetailParseResult {
   let body: unknown;
@@ -3894,13 +4006,24 @@ export const CLAUDE_PLAN: BackfillEnumPlan = {
     + 'chat_messages: [{ uuid, parent_uuid, index, sender, created_at, content }] }; the same route '
     + 'the live capture row watches, which is why a debt key and a live capture are the same value. '
     + 'The tree is the completeness check: the active branch is the chain from current_leaf_message_uuid '
-    + 'up parent links, and a chain that reaches a root without a missing parent is the whole branch. '
+    + 'up parent links. 🔴 W92 MEASURED (2026-09-24, one page-context GET plus two live captures): the '
+    + 'branch always ends at a message whose parent_message_uuid is a shared tree-root sentinel that no '
+    + 'chat_messages array carries — the same value across conversations and across every branch in one '
+    + 'body — so "a missing parent means truncation" was wrong. 🔴 W92c (R92 review, same day): stopping '
+    + 'at ANY absent parent was too permissive, because a body with a missing middle or a dropped prefix '
+    + 'also stops there and was archived as complete. An absent parent is accepted as the branch root '
+    + 'only when (1) every parent uuid in chat_messages that is not itself a carried message uuid equals '
+    + 'it, and (2) the last carried message has index 0, or a numeric index > 0 beside a smaller-indexed '
+    + 'carried message naming the same absent parent (the discarded-sibling case). Otherwise the body is '
+    + 'detail-tree-incomplete, a per-conversation failure on the run. '
     + '⚠️ Sources disagree on parent_message_uuid vs parent_uuid (both accepted, and which one a '
     + 'response used is readable through claudeParentKeyIn) and on the casing of the tree flag '
     + '(the URL recorded above is pinned). Auth is cookies only, no bearer and no CSRF token; the '
     + 'organization is required in the path and is not in the page URL, which is why the resolver '
     + 'exists. Whether a very long conversation is capped server-side inside one chat_messages array '
-    + 'is not found in any source — detail-tree-incomplete refuses such a body instead of archiving it.',
+    + 'is still not established by any source; the two conditions above refuse the shape a dropped '
+    + 'prefix produces unless the server also rewrote the survivor to index 0 and the shared sentinel, '
+    + 'which no measurement shows.',
 };
 
 /**

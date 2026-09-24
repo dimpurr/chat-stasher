@@ -128,13 +128,15 @@ export type FailureReason =
   | 'detail-too-long'
   /**
    * 🔴 W31 · The body was fetched, HTTP succeeded, the shape was recognised — and
-   * **the response's own parent links do not reach a root**. Two platforms reach
-   * this reason, and both are trees with a named current leaf: claude.ai (the
-   * chain from `current_leaf_message_uuid` upward hits a message the response does
-   * not carry) and, since 🔴 W42, DeepSeek (the chain from
-   * `chat_session.current_message_id` upward along `parent_id` leaves the messages
-   * the response carries, revisits one, or starts at a leaf the response does not
-   * hold).
+   * **the response's own parent links do not form a chain this code can read**.
+   * Two platforms reach this reason, and both are trees with a named current leaf.
+   * For claude.ai the walk **ends at an absent parent as the branch root** (🔴 W92
+   * measured that the real wire's branch root names a shared sentinel no body
+   * carries), so claude reaches this reason only for a missing leaf or a cycle
+   * among the parent links. For DeepSeek (since 🔴 W42) the chain from
+   * `chat_session.current_message_id` upward along `parent_id` still counts an
+   * absent parent as incomplete: it leaves the messages the response carries,
+   * revisits one, or starts at a leaf the response does not hold.
    *
    * A fact we observed, phrased as one: it says "walking back from the leaf left
    * the messages this response holds". It is deliberately **not** phrased as "the
@@ -154,7 +156,41 @@ export type FailureReason =
    *    specific loss here is the *middle* of the branch, which no reader could
    *    even notice.
    */
-  | 'detail-tree-incomplete';
+  | 'detail-tree-incomplete'
+  /**
+   * 🔴 W92b · The body was fetched, HTTP succeeded, the shape was recognised — and
+   * the body **itself is empty** (Claude: `chat_messages: []` and no
+   * `current_leaf_message_uuid`; Perplexity: `entries: []`). This is a
+   * per-conversation fact: an opened-but-never-sent conversation really has
+   * nothing to back up, so the debt leaves pending with this receipt and the leg
+   * carries on with the next conversation.
+   *
+   * A fact we observed, phrased as one: it says "the response carried no content".
+   * It is deliberately **not** 'not-saved' (nothing was ever handed to a sink) and
+   * not a claim that the conversation never had content — from this one response
+   * alone "this conversation is empty" and "this response is a window with nothing
+   * in it" are not distinguishable, which is why the receipt, not the archive, is
+   * where it lands.
+   *
+   * 🔴 What it is **not** used for: a whole endpoint answering empty for many
+   *    conversations in a row. That is the contract change C28 warned about, and
+   *    under W92d it does **not** produce this code at all. Each empty id is parked
+   *    (kept in `pending`, remembered in `BackfillState.parkedEmpty`), the persisted
+   *    streak reaches `DETAIL_EMPTY_HALT_STREAK`, and the leg halts with
+   *    `detail-empty-unverified` leaving every parked id owed — no write-off while
+   *    the endpoint is unproven.
+   *
+   *    🔴 There is deliberately **no** "at most K-1 per run" bound, and W92b's
+   *       comment claiming one was wrong: that counted one call's empties before the
+   *       K-th. This code is written only when a later body in the same scope is
+   *       **archived as real content** — the proof the endpoint works — and then each
+   *       parked id is dropped with this receipt in one go. A run that alternates an
+   *       empty with a real body can therefore record this code once per real body,
+   *       with no K-1 ceiling. The bound that matters is scoped, not per-run: this
+   *       code is never written without a body actually archived in this scope
+   *       (`settleParkedEmpties`, engine.ts).
+   */
+  | 'detail-empty';
 
 export interface FailureEntry {
   /** The first 8 characters of the session id. 🔴 Not the full id. */
@@ -255,6 +291,8 @@ export function describeFailureReason(reason: string): string {
       return t('failure.detailTooLong');
     case 'detail-tree-incomplete':
       return t('failure.detailTreeIncomplete');
+    case 'detail-empty':
+      return t('failure.detailEmpty');
     default:
       return t('failure.unknownReason', { reason });
   }

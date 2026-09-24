@@ -38,7 +38,7 @@ import {
   type CapturedFetch,
 } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
-import { runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
+import { runBackfill, type HttpResponse, type SinkOutcome, DETAIL_EMPTY_HALT_STREAK } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import {
   GROK_DETAIL2_PATH,
@@ -60,6 +60,7 @@ const ORIGIN = 'https://grok.com';
 /** Synthetic ids in the shape the sources show (a long opaque token, here written as a UUID-like literal). */
 const ID = '00000000-0000-4000-8000-0000000000aa';
 const ID2 = '00000000-0000-4000-8000-0000000000bb';
+const ID3 = '00000000-0000-4000-8000-0000000000cc';
 const R1 = '11111111-0000-4000-8000-000000000001';
 const R2 = '11111111-0000-4000-8000-000000000002';
 const PAGE_URL = `${ORIGIN}/c/${ID}`;
@@ -638,7 +639,7 @@ describe('W21-6 · one conversation, two requests, one body', () => {
     expect(be.calls).toHaveLength(2);
   });
 
-  it('an empty content answer is recorded as unverified, not as an empty conversation', async () => {
+  it('one empty content answer is parked, not written off: nothing reached the sink and the leg does not halt', async () => {
     const clock = fakeClock();
     const be = backend(clock, {
       [GROK_LIST_PATH]: listPage([ID]),
@@ -651,15 +652,51 @@ describe('W21-6 · one conversation, two requests, one body', () => {
       sink: (c: CapturedFetch): SinkOutcome => { captured.push(c); return { saved: true, sessionId: c.sessionId }; },
     });
 
-    expect(report.stopped).toBe('halted');
-    expect(report.halted?.reason).toBe('detail-empty-unverified');
-    // Nothing reached the sink, the debt is still owed, and the receipt says complete:false.
+    /**
+     * 🔴 W92d · **This assertion set changed again, and it is C28's contract, not a
+     *    weakening of it.** One empty body used to halt the leg; W92b then dropped
+     *    the id as a `detail-empty` failure, which R92b §2 measured as irreversible.
+     *    The id is now parked: it stays owed in `pending`, no failure is claimed, and
+     *    the run stops as `detail-empty-parked` because it is the only id left.
+     *    C28's concern (a whole endpoint answering empty) is pinned by the
+     *    K-consecutive test just below.
+     */
+    expect(report.halted).toBeNull();
+    expect(report.stopped).toBe('detail-empty-parked');
+    // Nothing reached the sink: an empty body may not be handed on as a conversation.
     expect(captured).toHaveLength(0);
-    expect(report.state.pending).toEqual([ID]);
+    expect(report.archivedThisRun).toEqual([]);
     expect(report.state.archived).toEqual([]);
+    // The id is still owed, and no failure is claimed while the endpoint is unproven.
+    expect(report.state.pending).toEqual([ID]);
+    expect(report.failedThisRun).toEqual([]);
+    // The receipt is the durable half: `complete:false` is the difference between
+    // "we saw nothing" and "there was nothing".
     expect(report.detailOutcomes).toEqual([
       expect.objectContaining({ sessionId: ID, outcome: 'detail-empty-unverified', complete: false }),
     ]);
+  });
+
+  it(`🔴 ${DETAIL_EMPTY_HALT_STREAK} empty content answers in a row still halt the leg`, async () => {
+    const clock = fakeClock();
+    const ids = [ID, ID2, ID3];
+    const routes: Record<string, string> = { [GROK_LIST_PATH]: listPage(ids) };
+    for (const id of ids) {
+      routes[GROK_DETAIL_PATH.replace('{id}', id)] = responseNodeBody([R1]);
+      routes[GROK_DETAIL2_PATH.replace('{id}', id)] = loadResponsesBody([]);
+    }
+    const be = backend(clock, routes);
+    const report = await run(memoryStore(), be.http, 'w21-empty-streak', { clock });
+
+    // A whole endpoint answering empty is the contract change C28 exists for.
+    expect(report.stopped).toBe('halted');
+    expect(report.halted?.reason).toBe('detail-empty-unverified');
+    expect(report.archivedThisRun).toEqual([]);
+    // 🔴 W92d · The K-1 empties before the halt are parked, not dropped: no
+    //    `detail-empty` failure is claimed and every empty id is still owed.
+    expect(report.failedThisRun).toEqual([]);
+    expect([...report.state.pending].sort()).toEqual([...ids].sort());
+    expect(report.detailOutcomes.map((d) => d.sessionId)).toEqual(ids);
   });
 
   it('a content body whose shape drifted halts instead of being stored', async () => {
