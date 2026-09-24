@@ -278,7 +278,7 @@ pub struct MachineDaySummary {
     pub day: String,
     pub machine: String,
     pub located: usize,
-    pub time_unknown: usize,
+    pub unknown_anywhere: usize,
     pub index_trusted: bool,
 }
 
@@ -332,7 +332,7 @@ impl SearchReport {
                             || part.contains(&format!("host `{machine}`"))
                     });
                 MachineWindowSummary {
-                    machine,
+                    machine: machine.clone(),
                     located,
                     time_unknown,
                     index_trusted,
@@ -377,10 +377,10 @@ impl SearchReport {
         ) else {
             return Vec::new();
         };
-        let trusts: BTreeMap<String, bool> = self
+        let summaries: BTreeMap<String, MachineWindowSummary> = self
             .machine_window_summary()
             .into_iter()
-            .map(|summary| (summary.machine, summary.index_trusted))
+            .map(|summary| (summary.machine.clone(), summary))
             .collect();
         let mut result = Vec::new();
         while day <= end_day {
@@ -393,35 +393,30 @@ impl SearchReport {
                 day += ChronoDuration::days(1);
                 continue;
             };
-            let mut counts: BTreeMap<String, (usize, usize)> = trusts
+            let mut counts: BTreeMap<String, usize> = summaries
                 .keys()
-                .map(|machine| (machine.clone(), (0, 0)))
+                .map(|machine| (machine.clone(), 0))
                 .collect();
             for hit in &self.hits {
                 if hit.first_unix.is_some_and(|first| first <= until)
                     && hit.last_unix.is_some_and(|last| last >= since)
                 {
-                    counts.entry(hit.machine.clone()).or_default().0 += 1;
+                    *counts.entry(hit.machine.clone()).or_default() += 1;
                 }
             }
-            for unknown in self
-                .unplaced
-                .iter()
-                .filter(|u| u.dimension == UnplacedBy::Time)
-            {
-                counts.entry(unknown.machine.clone()).or_default().1 += 1;
-            }
-            result.extend(
-                counts
-                    .into_iter()
-                    .map(|(machine, (located, time_unknown))| MachineDaySummary {
-                        day: text.clone(),
-                        index_trusted: matches!(trusts.get(&machine), Some(true)),
-                        machine,
-                        located,
-                        time_unknown,
-                    }),
-            );
+            result.extend(counts.into_iter().map(|(machine, located)| {
+                MachineDaySummary {
+                    day: text.clone(),
+                    index_trusted: summaries
+                        .get(&machine)
+                        .is_some_and(|summary| summary.index_trusted),
+                    machine: machine.clone(),
+                    located,
+                    unknown_anywhere: summaries
+                        .get(&machine)
+                        .map_or(0, |summary| summary.time_unknown),
+                }
+            }));
             if is_last_day {
                 break;
             }
@@ -1004,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn machine_day_summary_keeps_unknown_candidates_on_each_requested_day() {
+    fn machine_day_summary_separates_unknown_anywhere_from_daily_activity() {
         let (start, _) = crate::selector::local_day_bounds("2026-09-24").unwrap();
         let (_, end) = crate::selector::local_day_bounds("2026-09-25").unwrap();
         let mut located = hit("machine-a", "claude-code.machine-a.located", 10);
@@ -1054,8 +1049,8 @@ mod tests {
         };
         let days = report.machine_day_summary();
         assert_eq!(days.len(), 2);
-        assert_eq!((days[0].located, days[0].time_unknown), (1, 1));
-        assert_eq!((days[1].located, days[1].time_unknown), (0, 1));
+        assert_eq!((days[0].located, days[0].unknown_anywhere), (1, 1));
+        assert_eq!((days[1].located, days[1].unknown_anywhere), (0, 1));
         let json: serde_json::Value = serde_json::from_str(&report_json(&report, false)).unwrap();
         assert_eq!(json["machine_recall_by_day"].as_array().unwrap().len(), 2);
     }

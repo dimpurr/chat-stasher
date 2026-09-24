@@ -1621,13 +1621,13 @@ mod tests {
                 day: "2026-09-24".into(),
                 machine: "machine-a".into(),
                 located: 3,
-                time_unknown: 2,
+                unknown_anywhere: 2,
                 index_trusted: false,
             });
         let json: serde_json::Value = serde_json::from_str(&report.manifest_json()).unwrap();
         assert_eq!(json["machine_recall_by_day"][0]["day"], "2026-09-24");
         assert_eq!(json["machine_recall_by_day"][0]["located"], 3);
-        assert_eq!(json["machine_recall_by_day"][0]["time_unknown"], 2);
+        assert_eq!(json["machine_recall_by_day"][0]["unknown_anywhere"], 2);
         assert!(!json["machine_recall_by_day"][0]["index_trusted"]
             .as_bool()
             .unwrap());

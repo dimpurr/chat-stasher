@@ -1850,8 +1850,8 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
 struct ActivityIndexOutcome {
     /// Number of sessions whose rows were written to the index.
     sessions_indexed: usize,
-    /// Number of sessions skipped because no harness could be inferred.
-    skipped_sessions: usize,
+    /// Number of sessions indexed with an unknown harness.
+    sessions_without_harness: usize,
     /// Absolute path of the written index.
     out_path: PathBuf,
     /// Wall-clock time the rebuild took.
@@ -1877,6 +1877,29 @@ impl std::fmt::Display for ActivityIndexError {
 }
 
 impl std::error::Error for ActivityIndexError {}
+
+fn redact_activity_index_paths(
+    message: &str,
+    cfg: &StoreConfig,
+    workspace: Option<&Path>,
+) -> String {
+    let mut safe = message.to_string();
+    for private in [
+        Some(cfg.key_file.as_path()),
+        workspace,
+        Some(Path::new(&cfg.repo_root)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| !path.as_os_str().is_empty())
+    {
+        safe = safe.replace(&private.to_string_lossy().to_string(), "<private path>");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        safe = safe.replace(&home.to_string_lossy().to_string(), "~");
+    }
+    safe
+}
 
 /// Rebuild the activity index for one machine partition (ADR-017).
 ///
@@ -1953,26 +1976,38 @@ fn rebuild_activity_index(
         }
     }
 
-    let mut rows = Vec::new();
-    let mut skipped_sessions = 0usize;
+    let meta_dir = stage.join("meta").join(machine);
+    if let Err(e) = fs::create_dir_all(&meta_dir) {
+        return Err(ActivityIndexError::Write(format!(
+            "cannot create {}: {e}",
+            meta_dir.display()
+        )));
+    }
+    let out_path = meta_dir.join("activity-v1.jsonl");
+    let mut index_temp = tempfile::Builder::new()
+        .prefix(".activity-index-")
+        .tempfile_in(&meta_dir)
+        .map_err(|e| ActivityIndexError::Write(format!("cannot create activity index: {e}")))?;
+    let mut rows_written = 0usize;
+    let mut sessions_without_harness = 0usize;
     for session_dir in session_dirs {
         let session_id = session_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             // reason: a read_dir entry always has a file_name; even the impossible
-            // empty id falls through infer_harness → None → counted in
-            // skipped_sessions, so an unknown id is tallied, never silently indexed.
+            // empty id falls through infer_harness → None → counted as unknown,
+            // so an unknown id is tallied, never silently indexed.
             .unwrap_or_default();
-        let Some(harness) = sidecar::infer_harness(&session_id) else {
-            skipped_sessions += 1;
+        let harness = sidecar::infer_harness(&session_id).unwrap_or_else(|| {
+            sessions_without_harness += 1;
             if print_skips {
                 eprintln!(
-                    "activity-index: session `{}` has no inferable harness — skipped",
+                    "activity-index: session `{}` has no inferable harness — indexed with unknown time",
                     chat_stasher::id::short_session_id(&session_id)
                 );
             }
-            continue;
-        };
+            "unknown".to_string()
+        });
 
         // Global sequence order across both legacy and bucketed layouts.
         let mut shards = match store::sealed_shard_entries(&session_dir) {
@@ -2001,34 +2036,26 @@ fn rebuild_activity_index(
             }
         }
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        rows.push(activity::build_row(&session_id, machine, &harness, &refs));
+        let row = activity::build_row(&session_id, machine, &harness, &refs);
+        index_temp
+            .write_all(activity::to_jsonl(&row).as_bytes())
+            .map_err(|e| ActivityIndexError::Write(format!("cannot append activity row: {e}")))?;
+        rows_written += 1;
     }
 
-    // Reading finished; writing is a separate failure family. The read
-    // completed, so "did not finish reading" (3) no longer applies — a write
-    // failure is a completed-read failure (1).
-    let meta_dir = stage.join("meta").join(machine);
-    if let Err(e) = fs::create_dir_all(&meta_dir) {
-        return Err(ActivityIndexError::Write(format!(
-            "cannot create {}: {e}",
-            meta_dir.display()
-        )));
-    }
-    let out_path = meta_dir.join("activity-v1.jsonl");
-    let mut content = String::new();
-    for row in &rows {
-        content.push_str(&activity::to_jsonl(row));
-    }
-    if let Err(e) = atomic_replace(&out_path, content.as_bytes()) {
-        return Err(ActivityIndexError::Write(format!(
-            "cannot write {}: {e}",
-            out_path.display()
-        )));
-    }
+    // A complete read is published only after every session row is on disk.
+    // Until persist succeeds, readers keep seeing the previous complete index.
+    index_temp
+        .as_file()
+        .sync_all()
+        .map_err(|e| ActivityIndexError::Write(format!("cannot sync activity index: {e}")))?;
+    index_temp.persist(&out_path).map_err(|e| {
+        ActivityIndexError::Write(format!("cannot publish activity index: {}", e.error))
+    })?;
 
     Ok(ActivityIndexOutcome {
-        sessions_indexed: rows.len(),
-        skipped_sessions,
+        sessions_indexed: rows_written,
+        sessions_without_harness,
         out_path,
         elapsed: started.elapsed(),
     })
@@ -2120,7 +2147,10 @@ fn cmd_activity_index(
         let mk = match store::load_key_file(&cfg) {
             Ok(mk) => mk,
             Err(e) => {
-                eprintln!("activity-index: {e:#}");
+                eprintln!(
+                    "activity-index: {}",
+                    redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+                );
                 reap_remote(&cfg, keep_ssh_masters);
                 return ExitCode::from(3);
             }
@@ -2135,7 +2165,10 @@ fn cmd_activity_index(
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("activity-index: destination rebuild failed: {e:#}");
+                eprintln!(
+                    "activity-index: destination rebuild failed: {}",
+                    redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+                );
                 reap_remote(&cfg, keep_ssh_masters);
                 match e {
                     ActivityIndexError::Read(_) => ExitCode::from(3),
@@ -2167,9 +2200,10 @@ fn cmd_activity_index(
     }
 }
 
-/// Rebuild one partition from the destination's newest machine snapshot, then
-/// append a complete replacement snapshot. Existing destination snapshots are
-/// immutable; the restored session shards and rebuilt index travel together.
+/// Rebuild one partition from the newest shard set of every session across all
+/// destination snapshots, then append a complete replacement snapshot.
+/// Existing destination snapshots are immutable; the restored session shards
+/// and rebuilt index travel together.
 fn rebuild_destination_partition(
     workspace: &Path,
     cfg: &StoreConfig,
@@ -2181,47 +2215,122 @@ fn rebuild_destination_partition(
             "workspace must be an existing directory".into(),
         ));
     }
-    let selector = chat_stasher::selector::Selector::default().machine(machine);
-    let query_store = BackupStore::for_metadata_query(cfg.clone());
-    let report = chat_stasher::search::search_sessions(&query_store, mk, &selector)
-        .map_err(|e| ActivityIndexError::Read(format!("{e:#}")))?;
-    if !report.complete() {
-        return Err(ActivityIndexError::Read(
-            "the destination scan was incomplete; no snapshot was written".into(),
-        ));
-    }
-    let wanted: BTreeSet<(String, String)> = report
-        .hits
-        .iter()
-        .map(|hit| (hit.machine.clone(), hit.session_id.clone()))
-        .collect();
-    if wanted.is_empty() {
-        return Err(ActivityIndexError::Read(
-            "the named machine partition has no archived sessions; no snapshot was written".into(),
-        ));
-    }
-    let sessions = query_store
-        .read_selected_sessions(mk, &wanted)
-        .map_err(|e| ActivityIndexError::Read(format!("{e:#}")))?;
-    if sessions.len() != wanted.len() {
-        return Err(ActivityIndexError::Read(
-            "not every indexed session shard could be restored; no snapshot was written".into(),
-        ));
-    }
     let temporary = tempfile::Builder::new()
         .prefix("activity-index-rebuild-")
         .tempdir_in(workspace)
         .map_err(|e| ActivityIndexError::Write(format!("create temporary stage: {e}")))?;
-    for ((session_machine, session_id), (bytes, _hashes)) in &sessions {
-        store::write_sealed_shard_raw_with_cap(
-            store::StageWriter::Restore,
-            temporary.path(),
-            session_machine,
-            session_id,
-            bytes,
-            store::DEFAULT_SHARD_BUCKET_CAP,
-        )
-        .map_err(|e| ActivityIndexError::Write(format!("restore archived shard: {e:#}")))?;
+
+    let backends = BackupStore::for_metadata_query(cfg.clone())
+        .backends()
+        .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
+    let repo = Repository::new(&cfg.repository_options(), &backends)
+        .and_then(|repo| repo.open(&Credentials::Masterkey(mk.clone())))
+        .and_then(|repo| repo.to_indexed())
+        .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
+    let mut snapshots = repo
+        .get_all_snapshots()
+        .map_err(|e| ActivityIndexError::Read(format!("list destination snapshots: {e:#}")))?;
+    snapshots.retain(|snapshot| snapshot.hostname == machine);
+    snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.time.clone()));
+    if snapshots.is_empty() {
+        return Err(ActivityIndexError::Read(
+            "the named machine has no archived snapshots; no snapshot was written".into(),
+        ));
+    }
+
+    let mut seen_sessions = BTreeSet::new();
+    let mut sessions = 0usize;
+    for snapshot in &snapshots {
+        let root = repo
+            .node_from_snapshot_and_path(snapshot, "")
+            .map_err(|e| ActivityIndexError::Read(format!("read snapshot tree: {e:#}")))?;
+        let entries = repo
+            .ls(&root, &LsOptions::default())
+            .and_then(|entries| entries.collect::<rustic_core::RusticResult<Vec<_>>>())
+            .map_err(|e| ActivityIndexError::Read(format!("list snapshot files: {e:#}")))?;
+        let mut shards: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
+        for (index, (path, node)) in entries.iter().enumerate() {
+            if node.node_type != NodeType::File {
+                continue;
+            }
+            if let Some((found_machine, session, shard)) = readback::bucket_shard_path(path) {
+                if found_machine == machine && !seen_sessions.contains(&session) {
+                    shards.entry(session).or_default().push((shard, index));
+                }
+            }
+        }
+        for (session, mut session_shards) in shards {
+            if !seen_sessions.insert(session.clone()) {
+                continue;
+            }
+            session_shards.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (_, index) in session_shards {
+                let mut shard_bytes = Vec::new();
+                repo.dump(&entries[index].1, &mut shard_bytes)
+                    .map_err(|e| ActivityIndexError::Read(format!("read archived shard: {e:#}")))?;
+                store::write_sealed_shard_raw_with_cap(
+                    store::StageWriter::Restore,
+                    temporary.path(),
+                    machine,
+                    &session,
+                    &shard_bytes,
+                    store::DEFAULT_SHARD_BUCKET_CAP,
+                )
+                .map_err(|e| ActivityIndexError::Write(format!("restore archived shard: {e:#}")))?;
+            }
+            sessions += 1;
+        }
+    }
+    if sessions == 0 {
+        return Err(ActivityIndexError::Read(
+            "the named machine has no archived sessions; no snapshot was written".into(),
+        ));
+    }
+
+    // Carry the newest copy of every machine metadata path across snapshots.
+    // The activity index is rebuilt below and writer.json is refreshed.
+    let mut copied_metadata = BTreeSet::new();
+    for snapshot in &snapshots {
+        let root = repo
+            .node_from_snapshot_and_path(snapshot, "")
+            .map_err(|e| ActivityIndexError::Read(format!("read snapshot metadata tree: {e:#}")))?;
+        let entries = repo
+            .ls(&root, &LsOptions::default())
+            .and_then(|entries| entries.collect::<rustic_core::RusticResult<Vec<_>>>())
+            .map_err(|e| ActivityIndexError::Read(format!("list snapshot metadata: {e:#}")))?;
+        for (path, node) in entries {
+            if node.node_type != NodeType::File {
+                continue;
+            }
+            let components: Vec<_> = path.components().collect();
+            let Some(meta_at) = components
+                .iter()
+                .position(|part| part.as_os_str() == "meta")
+            else {
+                continue;
+            };
+            if components
+                .get(meta_at + 1)
+                .is_none_or(|part| part.as_os_str() != machine)
+            {
+                continue;
+            }
+            let tail: PathBuf = components[meta_at + 1..].iter().collect();
+            if !copied_metadata.insert(tail.clone()) {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            repo.dump(&node, &mut bytes)
+                .map_err(|e| ActivityIndexError::Read(format!("read machine metadata: {e:#}")))?;
+            let target = temporary.path().join("meta").join(tail);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    ActivityIndexError::Write(format!("create metadata directory: {e}"))
+                })?;
+            }
+            fs::write(target, bytes)
+                .map_err(|e| ActivityIndexError::Write(format!("write machine metadata: {e}")))?;
+        }
     }
     rebuild_activity_index(temporary.path(), machine, false)?;
     record_writer_version(temporary.path(), machine)
@@ -2229,7 +2338,7 @@ fn rebuild_destination_partition(
     let push = BackupStore::new(cfg.clone(), machine.to_string())
         .push(temporary.path(), mk)
         .map_err(|e| ActivityIndexError::Write(format!("push repaired snapshot: {e:#}")))?;
-    Ok((sessions.len(), push))
+    Ok((sessions, push))
 }
 
 /// Store the writer version in the stage so a successful push carries it in
@@ -2451,6 +2560,7 @@ struct OverviewRead {
     declarations: BTreeMap<String, identity::MachineDeclaration>,
     labels: BTreeMap<String, Vec<identity::LabelRecord>>,
     writer_versions: BTreeMap<String, sidecar::WriterVersionRecord>,
+    unreadable_writer_versions: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2458,12 +2568,14 @@ struct MachineWriterStatus {
     machine: String,
     chat_stasher_version: Option<String>,
     version_recorded: bool,
+    version_unreadable: bool,
     behind_newest_writer: Option<bool>,
 }
 
 fn writer_statuses(
     machines: &BTreeSet<String>,
     writers: &BTreeMap<String, sidecar::WriterVersionRecord>,
+    unreadable: &BTreeSet<String>,
 ) -> Vec<MachineWriterStatus> {
     let newest = writers
         .values()
@@ -2473,13 +2585,17 @@ fn writer_statuses(
         .iter()
         .map(|machine| {
             let version = writers.get(machine).map(|w| w.chat_stasher_version.clone());
-            let behind = version
-                .as_deref()
-                .zip(newest)
-                .map(|(v, n)| compare_versions(v, n).is_lt());
+            let behind = if unreadable.contains(machine) {
+                None
+            } else if let Some(version) = version.as_deref() {
+                newest.map(|newest| compare_versions(version, newest).is_lt())
+            } else {
+                Some(true)
+            };
             MachineWriterStatus {
                 machine: machine.clone(),
                 version_recorded: version.is_some(),
+                version_unreadable: unreadable.contains(machine),
                 chat_stasher_version: version,
                 behind_newest_writer: behind,
             }
@@ -2498,6 +2614,7 @@ fn read_archive_writer_statuses(
         .to_indexed()?;
     let mut machines = BTreeSet::new();
     let mut writers = BTreeMap::new();
+    let mut unreadable = BTreeSet::new();
     for snapshot in readback::newest_snapshot_per_host(repo.get_all_snapshots()?) {
         machines.insert(snapshot.hostname.clone());
         let root = repo.node_from_snapshot_and_path(&snapshot, "")?;
@@ -2510,15 +2627,17 @@ fn read_archive_writer_statuses(
             };
             let mut bytes = Vec::new();
             repo.dump(&node, &mut bytes)?;
-            let record: sidecar::WriterVersionRecord = serde_json::from_slice(&bytes)?;
-            anyhow::ensure!(
-                record.machine_id == machine,
-                "writer record partition mismatch"
-            );
-            writers.insert(machine, record);
+            match serde_json::from_slice::<sidecar::WriterVersionRecord>(&bytes) {
+                Ok(record) if record.machine_id == machine => {
+                    writers.insert(machine, record);
+                }
+                _ => {
+                    unreadable.insert(machine);
+                }
+            }
         }
     }
-    Ok(writer_statuses(&machines, &writers))
+    Ok(writer_statuses(&machines, &writers, &unreadable))
 }
 
 /// Compare numeric release components first, then prerelease suffixes; a
@@ -2583,6 +2702,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         declarations: BTreeMap::new(),
         labels: BTreeMap::new(),
         writer_versions: BTreeMap::new(),
+        unreadable_writer_versions: BTreeSet::new(),
     };
 
     for snap in newest {
@@ -2637,15 +2757,14 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
                 repo.dump(node, &mut buf).with_context(|| {
                     format!("host `{hostname}` machine `{machine}`: read writer version")
                 })?;
-                let record: sidecar::WriterVersionRecord = serde_json::from_slice(&buf)
-                    .with_context(|| {
-                        format!("host `{hostname}` machine `{machine}`: malformed writer version")
-                    })?;
-                anyhow::ensure!(
-                    record.machine_id == machine,
-                    "host `{hostname}` machine `{machine}`: writer version record names another partition"
-                );
-                out.writer_versions.insert(machine, record);
+                match serde_json::from_slice::<sidecar::WriterVersionRecord>(&buf) {
+                    Ok(record) if record.machine_id == machine => {
+                        out.writer_versions.insert(machine, record);
+                    }
+                    _ => {
+                        out.unreadable_writer_versions.insert(machine);
+                    }
+                }
                 continue;
             }
             if let Some((machine, _writer)) = sidecar::label_record_machine(path) {
@@ -2749,8 +2868,13 @@ fn cmd_overview(
         declarations,
         labels,
         writer_versions,
+        unreadable_writer_versions,
     } = read;
-    let writer_status = writer_statuses(&snapshot_machines, &writer_versions);
+    let writer_status = writer_statuses(
+        &snapshot_machines,
+        &writer_versions,
+        &unreadable_writer_versions,
+    );
 
     // ADR-018 display names: a machine's name is its declaration, its labels
     // (latest wins) or an explicit unnamed marker — never the raw partition id
@@ -2802,7 +2926,11 @@ fn cmd_overview(
             writer
                 .chat_stasher_version
                 .as_deref()
-                .unwrap_or("unknown (not recorded)"),
+                .unwrap_or(if writer.version_unreadable {
+                    "unreadable"
+                } else {
+                    "behind (version not recorded — written by ≤0.3.0)"
+                }),
             writer
                 .behind_newest_writer
                 .map_or("unknown", |behind| if behind { "yes" } else { "no" }),
@@ -3243,6 +3371,24 @@ fn cmd_export(
         }
     };
 
+    if let Err(error) = chat_stasher::export::check_out(out, force) {
+        eprintln!("export: {error}");
+        reap_remote(&cfg, keep_ssh_masters);
+        return ExitCode::from(2);
+    }
+
+    let recall = match chat_stasher::search::search_sessions(&store, &mk, &selector) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("export: destination scan failed before planning: {error:#}");
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    for warning in recall.machine_recall_warnings() {
+        eprintln!("{warning}");
+    }
+
     let opts = chat_stasher::export::ExportOptions {
         out: out.to_path_buf(),
         turns: turns.to_turns(),
@@ -3278,9 +3424,6 @@ fn cmd_export(
             }
         };
 
-    for warning in report.machine_recall_warnings() {
-        eprintln!("{warning}");
-    }
     for line in chat_stasher::export::print_report(&report) {
         println!("{line}");
     }
@@ -4492,9 +4635,9 @@ fn run_once_pass(
     match rebuild_activity_index(stage, &machine_name, false) {
         Ok(outcome) => {
             println!(
-                "[run-once] activity-index: sessions={} skipped={} index={} elapsed={}ms",
+                "[run-once] activity-index: sessions={} unknown_harness={} index={} elapsed={}ms",
                 outcome.sessions_indexed,
-                outcome.skipped_sessions,
+                outcome.sessions_without_harness,
                 outcome.out_path.display(),
                 outcome.elapsed.as_millis()
             );
@@ -6039,19 +6182,37 @@ mod decision_surface_tests {
         ]
         .into_iter()
         .collect();
-        let statuses = writer_statuses(&machines, &writers);
+        let statuses = writer_statuses(&machines, &writers, &BTreeSet::new());
         assert_eq!(statuses[0].behind_newest_writer, Some(true));
         assert_eq!(statuses[1].behind_newest_writer, Some(false));
-        assert_eq!(statuses[2].behind_newest_writer, None);
+        assert_eq!(statuses[2].behind_newest_writer, Some(true));
         assert!(!statuses[2].version_recorded);
         assert_eq!(
             compare_versions("0.4.0", "0.4.0-rc.1"),
             std::cmp::Ordering::Greater
         );
+        let unreadable = ["machine-c".to_string()].into_iter().collect();
+        let statuses = writer_statuses(&machines, &writers, &unreadable);
+        assert!(statuses[2].version_unreadable);
+        assert_eq!(statuses[2].behind_newest_writer, None);
     }
 
     #[test]
-    fn destination_rebuild_appends_full_idempotent_machine_snapshot() {
+    fn activity_index_error_redaction_removes_private_paths() {
+        let cfg = StoreConfig {
+            repo_root: "/home/private/repo".into(),
+            key_file: PathBuf::from("/home/private/keys/masterkey.json"),
+            ..StoreConfig::default()
+        };
+        let workspace = PathBuf::from("/home/private/work");
+        let message = "/home/private/keys/masterkey.json /home/private/work/session/shard.jsonl";
+        let safe = redact_activity_index_paths(message, &cfg, Some(&workspace));
+        assert!(!safe.contains("/home/private"), "redacted message: {safe}");
+        assert!(safe.contains("<private path>"));
+    }
+
+    #[test]
+    fn destination_rebuild_unions_old_sessions_and_preserves_machine_metadata() {
         let dir = tempfile::TempDir::new().unwrap();
         let repo_path = dir.path().join("repo");
         let workspace = dir.path().join("workspace");
@@ -6065,29 +6226,74 @@ mod decision_surface_tests {
             no_cache: false,
         };
         let machine = "fixture-machine";
-        let session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
-        let source_stage = dir.path().join("source-stage");
+        let old_session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        let new_session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09766";
+        let source_stage = dir.path().join("source-stage-old");
         write_shard(
             &source_stage,
             machine,
-            session,
+            old_session,
             &[cc_line("2025-01-15T12:34:56.789Z")],
         );
+        fs::create_dir_all(source_stage.join("meta").join(machine)).unwrap();
+        fs::write(
+            source_stage.join("meta").join(machine).join("machine.json"),
+            serde_json::to_vec(&identity::MachineDeclaration {
+                machine_id: machine.to_string(),
+                display_name: "Fixture Machine".into(),
+                os: "test".into(),
+                first_seen_unix: 1,
+                declared_harnesses: vec!["claude-code".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            source_stage
+                .join("meta")
+                .join(machine)
+                .join("label-by-writer.json"),
+            serde_json::to_vec(&identity::LabelRecord {
+                target_machine_id: machine.into(),
+                label: "Fixture label".into(),
+                written_by_machine_id: "writer".into(),
+                written_at_unix: 2,
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let mk = MasterKey::new();
         BackupStore::new(cfg.clone(), machine.to_string())
             .push(&source_stage, &mk)
             .unwrap();
 
+        let latest_stage = dir.path().join("source-stage-new");
+        write_shard(
+            &latest_stage,
+            machine,
+            new_session,
+            &[cc_line("2025-01-15T13:45:07Z")],
+        );
+        fs::create_dir_all(latest_stage.join("meta").join(machine)).unwrap();
+        fs::copy(
+            source_stage.join("meta").join(machine).join("machine.json"),
+            latest_stage.join("meta").join(machine).join("machine.json"),
+        )
+        .unwrap();
+        BackupStore::new(cfg.clone(), machine.to_string())
+            .push(&latest_stage, &mk)
+            .unwrap();
+
         let (sessions, first) =
             rebuild_destination_partition(&workspace, &cfg, machine, &mk).unwrap();
-        assert_eq!(sessions, 1);
+        assert_eq!(sessions, 2);
         assert_eq!(
-            first.snapshots_in_repo, 2,
+            first.snapshots_in_repo, 3,
             "the old snapshot remains present"
         );
         let second = rebuild_destination_partition(&workspace, &cfg, machine, &mk).unwrap();
-        assert_eq!(second.0, 1);
-        assert_eq!(second.1.snapshots_in_repo, 3);
+        assert_eq!(second.0, 2);
+        assert_eq!(second.1.snapshots_in_repo, 4);
 
         let selector = chat_stasher::selector::Selector::default().machine(machine);
         let report = chat_stasher::search::search_sessions(
@@ -6099,10 +6305,17 @@ mod decision_surface_tests {
         assert!(report.complete());
         assert_eq!(
             report.hits.len(),
-            1,
+            2,
             "a full rebuild must not duplicate rows"
         );
         assert!(report.hits[0].first_unix.is_some());
+        let overview_read = read_overview_indexes(&cfg, &mk).unwrap();
+        assert!(overview_read.declared_machines.contains(machine));
+        assert_eq!(
+            overview_read.declarations[machine].display_name,
+            "Fixture Machine"
+        );
+        assert_eq!(overview_read.labels[machine].len(), 1);
         let versions = read_archive_writer_statuses(&cfg, &mk).unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(
@@ -6512,7 +6725,7 @@ mod decision_surface_tests {
         let outcome = rebuild_activity_index(&stage, machine, false)
             .expect("rebuild should succeed on a valid stage");
         assert_eq!(outcome.sessions_indexed, 1);
-        assert_eq!(outcome.skipped_sessions, 0);
+        assert_eq!(outcome.sessions_without_harness, 0);
         let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
         let content = fs::read_to_string(&index).unwrap();
         let rows: Vec<&str> = content.lines().collect();
@@ -6573,27 +6786,20 @@ mod decision_surface_tests {
     }
 
     #[test]
-    fn failed_atomic_rebuild_preserves_the_previous_complete_index() {
+    fn failed_atomic_sidecar_replace_preserves_the_previous_complete_file() {
         let dir = tempfile::TempDir::new().unwrap();
-        let stage = dir.path().join("stage");
-        let machine = "fixture-machine";
-        write_shard(
-            &stage,
-            machine,
-            "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
-            &[cc_line("2025-01-15T12:34:56.789Z")],
-        );
-        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        let index = dir
+            .path()
+            .join("meta")
+            .join("machine-a")
+            .join("activity-v1.jsonl");
         fs::create_dir_all(index.parent().unwrap()).unwrap();
         fs::write(&index, "previous-complete-index\n").unwrap();
         let mut temp_name = index.file_name().unwrap().to_os_string();
         temp_name.push(format!(".{}.tmp", std::process::id()));
         fs::write(index.parent().unwrap().join(temp_name), "occupied").unwrap();
 
-        match rebuild_activity_index(&stage, machine, false) {
-            Err(ActivityIndexError::Write(_)) => {}
-            other => panic!("expected a Write error, got {other:?}"),
-        }
+        assert!(atomic_replace(&index, b"replacement\n").is_err());
         assert_eq!(
             fs::read_to_string(index).unwrap(),
             "previous-complete-index\n",
@@ -6602,11 +6808,11 @@ mod decision_surface_tests {
     }
 
     #[test]
-    fn rebuild_activity_index_counts_sessions_without_harness_as_skipped() {
+    fn rebuild_activity_index_emits_unknown_row_without_harness_prefix() {
         let dir = tempfile::TempDir::new().unwrap();
         let stage = dir.path().join("stage");
         let machine = "mbp-test";
-        // A directory name with no inferable harness prefix is skipped.
+        // A directory name with no inferable harness prefix still gets a row.
         fs::create_dir_all(
             stage
                 .join(store::SESSIONS_DIR)
@@ -6622,14 +6828,17 @@ mod decision_surface_tests {
         );
         let outcome =
             rebuild_activity_index(&stage, machine, false).expect("rebuild should succeed");
-        assert_eq!(outcome.sessions_indexed, 1);
-        assert_eq!(outcome.skipped_sessions, 1);
+        assert_eq!(outcome.sessions_indexed, 2);
+        assert_eq!(outcome.sessions_without_harness, 1);
         let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
         assert_eq!(
             fs::read_to_string(&index).unwrap().lines().count(),
-            1,
-            "only the session with a harness is indexed"
+            2,
+            "each session receives exactly one index row"
         );
+        let indexed = fs::read_to_string(&index).unwrap();
+        assert!(indexed.contains("\"session_id\":\"~orphan\""));
+        assert!(indexed.contains("\"kind\":\"unknown\""));
     }
 
     #[test]
@@ -6876,7 +7085,11 @@ fn cmd_status(
                 writer
                     .chat_stasher_version
                     .as_deref()
-                    .unwrap_or("unknown (not recorded)"),
+                    .unwrap_or(if writer.version_unreadable {
+                        "unreadable"
+                    } else {
+                        "behind (version not recorded — written by ≤0.3.0)"
+                    }),
                 writer
                     .behind_newest_writer
                     .map_or("unknown", |behind| if behind { "yes" } else { "no" }),
