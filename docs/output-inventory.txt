@@ -165,7 +165,7 @@ eprintln     crates/chat-stasher/src/doctor.rs:2541  "  [registry] no probes —
 eprintln     crates/chat-stasher/src/doctor.rs:2548  "  [registry] driven table — platform={platform} · {hit}/{n} harnesses hit / scanned successfully"
 eprintln     crates/chat-stasher/src/doctor.rs:2613  "    {mark} {:<16} {conf:<26} sessions={:<4}{bytes:<0} {root}{extra}"
 eprintln     crates/chat-stasher/src/doctor.rs:2624  "    low-confidence (community claims only, scanned but cannot be treated as verified): {flagged}"
-with_context crates/chat-stasher/src/export.rs:887  "write manifest `{}`"
+with_context crates/chat-stasher/src/export.rs:894  "write manifest `{}`"
 bail         crates/chat-stasher/src/identity.rs:54  "machine identity must be exactly 32 hex characters, got {hex:?}"
 with_context crates/chat-stasher/src/identity.rs:89  "open /dev/urandom for a machine identity"
 with_context crates/chat-stasher/src/identity.rs:91  "read random bytes for a machine identity"
@@ -1277,8 +1277,8 @@ bail         crates/chat-stasher/src/nativehost.rs:602  "registry registration o
 with_context crates/chat-stasher/src/nativehost.rs:607  "run {}"
 bail         crates/chat-stasher/src/nativehost.rs:609  "{} exited {}"
 eprintln     crates/chat-stasher/src/nativehost.rs:726  "native-host: response of {} bytes exceeds the {} byte frame cap; sending a nack instead"
-eprintln     crates/chat-stasher/src/nativehost.rs:1991  "native-host: EOF before a whole request frame arrived (header or body was truncated); nothing was written to stdout"
-eprintln     crates/chat-stasher/src/nativehost.rs:2001  "native-host: cannot write the response frame: {e}"
+eprintln     crates/chat-stasher/src/nativehost.rs:1994  "native-host: EOF before a whole request frame arrived (header or body was truncated); nothing was written to stdout"
+eprintln     crates/chat-stasher/src/nativehost.rs:2004  "native-host: cannot write the response frame: {e}"
 eprintln     crates/chat-stasher/src/push_progress.rs:150  "{line}"
 context      crates/chat-stasher/src/readback.rs:153  "open repository for read-all"
 context      crates/chat-stasher/src/readback.rs:155  "index repository for read-all"
@@ -1327,28 +1327,28 @@ bail         crates/chat-stasher/src/seal.rs:97  "refusing seal: --active must b
 bail         crates/chat-stasher/src/seal.rs:122  "active file does not exist: {}"
 bail         crates/chat-stasher/src/seal.rs:130  "seal target already exists: {}"
 with_context crates/chat-stasher/src/seal.rs:133  "seal rename {} -> {}"
-context      crates/chat-stasher/src/search.rs:731  "open repository for search"
-context      crates/chat-stasher/src/search.rs:733  "index repository for search"
-context      crates/chat-stasher/src/search.rs:737  "list snapshots for search"
-help_doc     crates/chat-stasher/src/selector.rs:251  Filters shared by `search` and (later) `export`, flattened into each
-help_doc     crates/chat-stasher/src/selector.rs:252  command's argument struct so the two commands cannot drift apart.
-help_doc     crates/chat-stasher/src/selector.rs:253  
-help_doc     crates/chat-stasher/src/selector.rs:254  Conflicts are expressed here rather than re-implemented per command:
-help_doc     crates/chat-stasher/src/selector.rs:255  mixing a local-day flag with a unix-seconds flag is a usage error
-help_doc     crates/chat-stasher/src/selector.rs:256  regardless of which command asked.
-help_doc     crates/chat-stasher/src/selector.rs:259  Match sessions whose id starts with this prefix.
-help_doc     crates/chat-stasher/src/selector.rs:262  Match one machine partition exactly.
-help_doc     crates/chat-stasher/src/selector.rs:265  Match these harnesses, comma-separated (e.g. `--harness claude-code,codex`).
-help_doc     crates/chat-stasher/src/selector.rs:266  The harness is the leading `.`/`~` segment of the archived session id.
-help_doc     crates/chat-stasher/src/selector.rs:269  One local calendar day, `YYYY-MM-DD`. Identical to `--since D --until D`.
-help_doc     crates/chat-stasher/src/selector.rs:276  Earliest local calendar day to include, `YYYY-MM-DD`, from that day's
-help_doc     crates/chat-stasher/src/selector.rs:277  00:00:00 local time.
-help_doc     crates/chat-stasher/src/selector.rs:280  Latest local calendar day to include, `YYYY-MM-DD`, through that day's
-help_doc     crates/chat-stasher/src/selector.rs:281  23:59:59 local time.
-help_doc     crates/chat-stasher/src/selector.rs:284  DEPRECATED, use `--since`/`--until`/`--day`. Inclusive lower bound on the
-help_doc     crates/chat-stasher/src/selector.rs:285  session's conversation time, unix seconds.
-help_doc     crates/chat-stasher/src/selector.rs:288  DEPRECATED, use `--since`/`--until`/`--day`. Inclusive upper bound on the
+context      crates/chat-stasher/src/search.rs:758  "open repository for search"
+context      crates/chat-stasher/src/search.rs:760  "index repository for search"
+context      crates/chat-stasher/src/search.rs:764  "list snapshots for search"
+help_doc     crates/chat-stasher/src/selector.rs:255  Filters shared by `search` and (later) `export`, flattened into each
+help_doc     crates/chat-stasher/src/selector.rs:256  command's argument struct so the two commands cannot drift apart.
+help_doc     crates/chat-stasher/src/selector.rs:257  
+help_doc     crates/chat-stasher/src/selector.rs:258  Conflicts are expressed here rather than re-implemented per command:
+help_doc     crates/chat-stasher/src/selector.rs:259  mixing a local-day flag with a unix-seconds flag is a usage error
+help_doc     crates/chat-stasher/src/selector.rs:260  regardless of which command asked.
+help_doc     crates/chat-stasher/src/selector.rs:263  Match sessions whose id starts with this prefix.
+help_doc     crates/chat-stasher/src/selector.rs:266  Match one machine partition exactly.
+help_doc     crates/chat-stasher/src/selector.rs:269  Match these harnesses, comma-separated (e.g. `--harness claude-code,codex`).
+help_doc     crates/chat-stasher/src/selector.rs:270  The harness is the leading `.`/`~` segment of the archived session id.
+help_doc     crates/chat-stasher/src/selector.rs:273  One local calendar day, `YYYY-MM-DD`. Identical to `--since D --until D`.
+help_doc     crates/chat-stasher/src/selector.rs:280  Earliest local calendar day to include, `YYYY-MM-DD`, from that day's
+help_doc     crates/chat-stasher/src/selector.rs:281  00:00:00 local time.
+help_doc     crates/chat-stasher/src/selector.rs:284  Latest local calendar day to include, `YYYY-MM-DD`, through that day's
+help_doc     crates/chat-stasher/src/selector.rs:285  23:59:59 local time.
+help_doc     crates/chat-stasher/src/selector.rs:288  DEPRECATED, use `--since`/`--until`/`--day`. Inclusive lower bound on the
 help_doc     crates/chat-stasher/src/selector.rs:289  session's conversation time, unix seconds.
+help_doc     crates/chat-stasher/src/selector.rs:292  DEPRECATED, use `--since`/`--until`/`--day`. Inclusive upper bound on the
+help_doc     crates/chat-stasher/src/selector.rs:293  session's conversation time, unix seconds.
 with_context crates/chat-stasher/src/stagereclaim.rs:275  "generate manifest for machine {machine}"
 with_context crates/chat-stasher/src/stagereclaim.rs:281  "reclaim session `{}` on machine `{}`"
 with_context crates/chat-stasher/src/stagereclaim.rs:380  "remove reclaimed shard {}"

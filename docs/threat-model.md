@@ -169,7 +169,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:1906-1940`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:1909-1943`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -205,7 +205,7 @@ What that new path does and does not change:
 
 Two things worth stating plainly:
 
-- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui.rs:550`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
+- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui.rs:566`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
 - **Whether the macOS application firewall prompts for a server bound only to `127.0.0.1` is documented, not verified.** Apple's firewall documentation describes protection against connections from other computers and does not mention loopback either way; third-party documentation states that the application firewall does not filter loopback. We have not observed the behaviour on a machine with the firewall turned on.
 
 ### Someone with physical access to your machine, or your stolen disk
@@ -384,7 +384,7 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:1906-1940`).
+  (`crates/chat-stasher/src/nativehost.rs:1909-1943`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —

@@ -387,6 +387,8 @@ crates/chat-stasher/data/harness-registry-v1.json:165-211  584dd1dcf1bf  lines=4
   <- README.md:183  :: "id": "cursor",
 crates/chat-stasher/data/harness-registry-v1.json:362-397  6241552cd249  lines=36
   <- README.md:183  :: "notes": "project-level SQLite (data_directory defaults to …
+crates/chat-stasher/src/activity.rs:75-95  0bb29c5974a9  lines=21
+  <- README.md:152  :: /// The archived session holds no conversation content at a…
 crates/chat-stasher/src/config.rs:15  219b41f02316  lines=1
   <- docs/install.md:201  :: /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
 crates/chat-stasher/src/config.rs:95-100  0c4fcb3ab27a  lines=6
@@ -543,8 +545,10 @@ crates/chat-stasher/src/nativehost.rs:1139-1166  4ceba3a8d636  lines=28
   <- docs/privacy.md:137, docs/threat-model.md:41  :: match inbox::seal_payload(
 crates/chat-stasher/src/nativehost.rs:1162-1166  4520d3869c60  lines=5
   <- docs/install.md:327  :: Err(inbox::SealError::Lock(e)) => {
-crates/chat-stasher/src/nativehost.rs:1906-1940  6e78c5dd7bec  lines=35
+crates/chat-stasher/src/nativehost.rs:1909-1943  6e78c5dd7bec  lines=35
   <- docs/privacy.md:580, docs/threat-model.md:172, docs/threat-model.md:387  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
+crates/chat-stasher/src/overview.rs:490-513  5d2c4694e7fa  lines=24
+  <- README.md:152  :: pub fn render_no_conversation_content(rows: &[OverviewRow])…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs/threat-model.md:80, docs/threat-model.md:438  :: //! Connection reaping for remote SSH backends.
 crates/chat-stasher/src/remote_err.rs:101-112  8dc19707e181  lines=12
@@ -563,7 +567,7 @@ crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs/install.md:713  :: }
 crates/chat-stasher/src/search.rs:16-34  4c5924e38beb  lines=19
   <- docs/threat-model.md:560  :: //! * **metadata tier** (this module): snapshot files + ind…
-crates/chat-stasher/src/selector.rs:1-247  c9ab719fa3b6  lines=247
+crates/chat-stasher/src/selector.rs:1-299  4c5fdc0759f8  lines=299
   <- README.md:152  :: //! selector — the one filter vocabulary that `search` and …
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:67, docs/threat-model.md:455  :: //! Read-only guarantee: every connection opens with `mode=…
@@ -593,7 +597,7 @@ crates/chat-stasher/src/store.rs:1289-1297  2fd9234448bb  lines=9
   <- docs/install.md:356  :: }
 crates/chat-stasher/src/store.rs:1318-1322  e915d9a10309  lines=5
   <- docs/threat-model.md:525  :: }
-crates/chat-stasher/src/ui.rs:550  ce4bc09fc5d8  lines=1
+crates/chat-stasher/src/ui.rs:566  ce4bc09fc5d8  lines=1
   <- docs/threat-model.md:208  :: fn content_page(params: &Query, data: &UiData, content: &dy…
 crates/chat-stasher/src/view.rs:138-150  605bc65511cd  lines=13
   <- docs/threat-model.md:180  :: if status == 0 {
