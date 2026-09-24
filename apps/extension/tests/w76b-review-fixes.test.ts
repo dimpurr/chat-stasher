@@ -667,7 +667,7 @@ describe('W76c · an idle skip after a scope question still ends the wake', () =
    */
   async function writeCappedHeader(platform: string, scope: string): Promise<void> {
     const { initialState, dayKeyOf } = await import('../lib/backfill/types');
-    const { saveHeader } = await import('../lib/backfill/ledger');
+    const { saveHeader, REENUMERATE_MIGRATIONS } = await import('../lib/backfill/ledger');
     const { applyDebtDiff } = await import('../lib/backfill/debt-store');
     const { browserLocalStore } = await import('../lib/backfill/store');
     const owed = IDS.slice(0, 3);
@@ -681,6 +681,19 @@ describe('W76c · an idle skip after a scope question still ends the wake', () =
       enumCursor: { offset: owed.length, complete: true },
       pending: owed,
       detailToday: { day: dayKeyOf(runtimeNow), count: 0, cap: 0 },
+      // 🔴 W98 · This fixture is a scope whose one-time re-enumerations have already
+      //    run. Without the marker, a real Claude scope with a complete cursor and a
+      //    pre-W98 ledger is owed a fresh list read by the W98 migration, and the run
+      //    this file pins would fetch instead of idling at its quota — which is
+      //    precisely what W98 does on purpose, once, on upgrade. Recording every
+      //    migration this platform declares is what a real upgraded profile looks like
+      //    on its second tick; nothing else in this fixture, and no assertion below,
+      //    changes.
+      reenumerated: Object.fromEntries(
+        REENUMERATE_MIGRATIONS
+          .filter((migration) => migration.platform === platform)
+          .map((migration) => [migration.id, runtimeNow]),
+      ),
     });
   }
 

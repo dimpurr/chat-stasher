@@ -176,6 +176,105 @@ export class Ledger {
 }
 
 /**
+ * 🔴 W98 · **A versioned, one-time re-enumeration of a platform-scope, for a ledger
+ * that predates a parser fix.**
+ *
+ * The problem this exists to solve, measured: a detail parser that refused real
+ * bodies still enumerated the list and then **dropped** each id whose body it
+ * refused (`dropDebt`, lib/backfill/debts.ts). The enumeration cursor is
+ * consequently `complete`, so nothing ever reads the list again, and a dropped id
+ * is never retried — a permanent hole in backfill coverage. Fixing the parser does
+ * not, by itself, bring those ids back: the list has to be read once more.
+ *
+ * So a build that carries a parser fix declares a migration, and the first run of
+ * any scope on that platform whose ledger predates it resets that scope's cursor
+ * and records the migration as done. The reset is deliberately the **same two
+ * fields** `recoverLedgerLoss` resets, and nothing else:
+ *   · `enumCursor = { offset: 0, complete: false }` (this also clears `truncated`
+ *     and any cursor/token — every paging mode's own "read from the first page");
+ *   · the migration id is recorded on the header (`reenumerated`).
+ * `pending`, `archived`, `parkedEmpty`, `emptyStreak`, `failures` and any halt are
+ * untouched: this is not a repair for a lost debt set, it is a re-listing.
+ *
+ * 🔴 **It cannot become "re-list everything on every tick".** The marker is written
+ *    in the same header write as the cursor reset, and `migrationsDue` reads it, so
+ *    a scope that has run the migration is never due again — independent of what
+ *    the re-listing itself finds or how it ends. The only way a second run happens
+ *    is a **different** migration id (a later parser fix), which is the point of
+ *    keying by id rather than by a boolean.
+ *
+ * 🔴 **Nothing is duplicated and no archived body is refetched, and that is not a
+ *    property of this function — it is `enqueueDebts`'.** Re-listing hands the same
+ *    ids back to `enqueueDebts`, which skips any id already in `pending` **or**
+ *    `archived` (lib/backfill/debts.ts:16-27), so only the ids the old walk dropped
+ *    come back. That is the deliberate division of labour: this module resets a
+ *    cursor, and the debt set remains the authority on what is owed.
+ *
+ * 🔴 **Generic by construction.** The table is keyed by platform + migration id; the
+ *    platform half is checked against the header the record lives on, so a future
+ *    fix on another platform only adds a row and needs no change to the engine or to
+ *    the header shape. Only Claude uses it today. `why` is for the reader of this
+ *    file; it is never logged or shown (a migration id is not a fact about a
+ *    conversation, but only the id and the platform are ever named in a log line).
+ */
+export interface ReenumerateMigration {
+  /** Stable id recorded in the header once this migration has run for a scope. A later fix uses a new id. */
+  readonly id: string;
+  /** The platform whose scopes this applies to. The marker itself is stored per (platform, scope) on the header. */
+  readonly platform: string;
+  /** Why this platform's ledger must be listed once more. Documentation only; never logged. */
+  readonly why: string;
+}
+
+export const REENUMERATE_MIGRATIONS: readonly ReenumerateMigration[] = [
+  {
+    id: 'claude-detail-walk-w92',
+    platform: 'claude',
+    why: 'the pre-W92 Claude detail walk refused every real body (an absent branch-root parent was read as '
+      + 'a broken chain) and each refused id was dropped, while enumeration stayed complete; re-list once so '
+      + 'enqueueDebts can bring back the ids that are in neither pending nor archived.',
+  },
+];
+
+/**
+ * The migrations that apply to this scope and have **not** run here yet.
+ *
+ * The whole one-shot property lives on this comparison: a migration id present in
+ * `state.reenumerated` is never returned, and the field is persisted with the same
+ * header write that resets the cursor (see `applyReenumerations`).
+ */
+export function migrationsDue(
+  state: BackfillState,
+  migrations: readonly ReenumerateMigration[] = REENUMERATE_MIGRATIONS,
+): ReenumerateMigration[] {
+  const done = state.reenumerated ?? {};
+  return migrations.filter((migration) => migration.platform === state.platform && done[migration.id] === undefined);
+}
+
+/**
+ * Apply every migration due for this scope: reset the enumeration cursor and record
+ * each id, in memory. The caller persists the header (the engine does, once, before
+ * the enumeration loop) — this function performs no I/O, like the rest of the debt
+ * bookkeeping, so the one-shot decision is a pure function a unit test can pin.
+ *
+ * Returns the migrations applied, so the caller can say in a log line which one ran
+ * (id + platform only).
+ */
+export function applyReenumerations(
+  state: BackfillState,
+  at: number,
+  migrations: readonly ReenumerateMigration[] = REENUMERATE_MIGRATIONS,
+): ReenumerateMigration[] {
+  const due = migrationsDue(state, migrations);
+  if (due.length === 0) return [];
+  const done: Record<string, number> = { ...(state.reenumerated ?? {}) };
+  for (const migration of due) done[migration.id] = at;
+  state.reenumerated = done;
+  state.enumCursor = { offset: 0, complete: false };
+  return due;
+}
+
+/**
  * Write **only** the header, touching no debt record.
  *
  * Two callers, and neither is the engine: the migration, and a test that wants to
