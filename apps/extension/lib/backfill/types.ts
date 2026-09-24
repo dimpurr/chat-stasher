@@ -1336,21 +1336,28 @@ export interface BackfillState {
     token?: string | null;
     truncated?: EnumTruncation;
     /**
-     * 🔴 W124 · **The ids of the first page of the current enumeration pass**, for
-     * the repeat-page guard (engine.ts).
+     * 🔴 W124 / W124b · **The fingerprints of every non-empty page returned so far
+     * in the current enumeration pass**, for the repeat-page guard (engine.ts).
      *
-     * The guard has to tell "the server handed the first page back" (the parameter
-     * did not move ⇒ `shape-changed`) from "this page's ids are already owed"
-     * (which is normal during the W98 re-enumeration — its last page is the tail the
-     * previous run never finished). Only the first page of the pass settles that, so
-     * it is recorded here and compared against later pages.
+     * W124 first recorded only the *first* page's ids and halted when a later page
+     * contained a subset of them. A read-only review found the hole: a server that
+     * returns page A, then page B, then keeps returning B for larger offsets was
+     * never caught, because B is not the first page — the offset and the request
+     * count would grow across ticks with no end-of-list signal.
      *
-     * Optional: a header written before W124 carries none, and the guard is then off
-     * for the rest of that pass — the safe direction, since the halt is permanent and
-     * the pass still ends at the real short/empty page. A cursor reset (migration or
-     * `recoverLedgerLoss`) clears the field with the rest of `enumCursor`.
+     * So the guard records the **fingerprint** of every non-empty page of the pass
+     * (sha256 of the sorted id list, engine.ts `listPageFingerprint`) and halts when
+     * a page's fingerprint has already been seen. That catches the first page
+     * repeated, the previous page repeated, and any page repeated later in the pass,
+     * while a versioned re-enumeration — whose pages are pairwise-disjoint, hence all
+     * fingerprints distinct — is untouched.
+     *
+     * Optional: a header written before W124b carries none, and the pass then records
+     * from this tick on (a repeat of a page from here onward is still caught). A
+     * cursor reset (migration or `recoverLedgerLoss`) clears the field with the rest
+     * of `enumCursor`.
      */
-    firstPageIds?: string[];
+    pageFingerprints?: string[];
   };
   /** Debts: conversation ids that were enumerated but whose body has not been fetched. */
   pending: string[];
@@ -1573,8 +1580,8 @@ export interface BackfillHeader {
   scope: string;
   totalKnown: number | null;
   totalSource: TotalSource;
-  /** W124 · Same meaning and same compatibility rule as `BackfillState.enumCursor.firstPageIds`. */
-  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation; firstPageIds?: string[] };
+  /** W124b · Same meaning and same compatibility rule as `BackfillState.enumCursor.pageFingerprints`. */
+  enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation; pageFingerprints?: string[] };
   /** How many debts were still owed when this header was written. */
   pendingCount: number;
   /** How many conversations had been settled when this header was written. */

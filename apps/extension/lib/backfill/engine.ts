@@ -48,6 +48,7 @@ import {
 import { countsOf, formatProgress } from './progress';
 import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
+import { sha256Hex } from '../native-host';
 import type { BackfillStore } from './store';
 import { applyReenumerations, openLedger, recoverLedgerLoss, saveHeader, type Ledger } from './ledger';
 import {
@@ -790,6 +791,21 @@ function rotatePendingToTail(state: BackfillState, id: string): void {
 /** Is this id parked (an empty body waiting for either proof or the halt)? */
 function isParkedEmpty(state: BackfillState, id: string): boolean {
   return (state.parkedEmpty ?? []).includes(id);
+}
+
+/**
+ * 🔴 W124b · **The repeat-page guard's fingerprint of one list page.**
+ *
+ * sha256 over the page's ids **sorted**, so two pages naming the same set of
+ * conversations in a different order are the same page. `null` from `sha256Hex`
+ * (no WebCrypto in this context) falls back to the sorted id list itself: the
+ * comparison stays exact rather than becoming a silent no-check. `sha256Hex` is
+ * the same helper the delivery path trusts, so no second hash implementation
+ * enters the build.
+ */
+export async function listPageFingerprint(ids: readonly string[]): Promise<string> {
+  const sorted = JSON.stringify([...ids].sort());
+  return (await sha256Hex(sorted)) ?? sorted;
 }
 
 export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
@@ -1747,32 +1763,38 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    emits. The condition is `offset > 0` rather than "we hold a token", and
      *    everything else, including the halt and its reasoning, is shared.
      *
-     * 🔴 W124 · **The detector is "the page repeats the first page of this pass",
-     *    and it is no longer "every id is already owed".** The old detector —
-     *    `parsed.page.ids.every(id => archived ∪ pending ∪ seenThisRun has id)` —
-     *    was a proxy for "the parameter did not move", and the W98 versioned
-     *    re-enumeration (ADR-030 item 3) falsified it: a re-list deliberately
-     *    re-reads pages whose ids are already owed, and its **last** page is the
-     *    one the previous run never finished — every id on it is still `pending`.
-     *    Measured on the live Claude scope (W124): offset 200 of a 218-row list
-     *    returned the 18 never-dropped tail ids, all owed, and the leg wrote a
-     *    permanent `shape-changed` while the offset was in fact advancing (three
-     *    live GETs at offsets 0/100/200 returned pairwise-disjoint pages). The
-     *    re-list then could not finish and the dropped ids could not be reached.
+     * 🔴 W124 / W124b · **The detector is "the page has already been returned in
+     *    this pass", and it is no longer "every id is already owed".** The old
+     *    detector — `parsed.page.ids.every(id => archived ∪ pending ∪ seenThisRun
+     *    has id)` — was a proxy for "the parameter did not move", and the W98
+     *    versioned re-enumeration (ADR-030 item 3) falsified it: a re-list
+     *    deliberately re-reads pages whose ids are already owed, and its **last**
+     *    page is the one the previous run never finished — every id on it is still
+     *    `pending`. Measured on the live Claude scope (W124): offset 200 of a
+     *    218-row list returned the 18 never-dropped tail ids, all owed, and the leg
+     *    wrote a permanent `shape-changed` while the offset was in fact advancing
+     *    (three live GETs at offsets 0/100/200 returned pairwise-disjoint pages).
+     *    The re-list then could not finish and the dropped ids could not be reached.
      *
-     *    So the first page of a pass is remembered (`enumCursor.firstPageIds`), and
-     *    a later page is a repeat **only** when every id on it appeared on that
-     *    first page. A server that ignores the parameter hands the first page back
-     *    again and is caught; a re-list over an already-covered tail is not, because
-     *    its page is the list's other end and shares nothing with the first page.
-     *    A reset of the cursor (a migration or `recoverLedgerLoss`) starts a new
-     *    pass and clears the record with it.
+     *    W124 replaced that with "the page repeats the *first* page of this pass",
+     *    but a read-only review found the hole: first-page-only lets a server return
+     *    page A, then page B, then keep returning B for larger offsets — B is not
+     *    the first page, so the offset and the request count grow across ticks with
+     *    no end-of-list signal.
      *
-     *    🔴 A header written before W124 carries no `firstPageIds`, so the guard is
-     *    off for the rest of that pass — the safe direction, because the halt is
-     *    permanent and the pass is bounded (it ends at the real short/empty page).
-     *    The next pass records it. This is exactly the state the live Claude scope
-     *    is in: the fix has to let it finish, not re-halt it.
+     *    So the fingerprint of **every non-empty page of the pass** is recorded on
+     *    the cursor (`enumCursor.pageFingerprints`), and a non-empty page whose
+     *    fingerprint is already there is a repeat. This catches the first page
+     *    repeated, the previous page repeated, and any page repeated later; a
+     *    versioned re-enumeration is untouched because its pages are
+     *    pairwise-disjoint, so every fingerprint is new. A reset of the cursor (a
+     *    migration or `recoverLedgerLoss`) starts a new pass and clears the set.
+     *
+     *    🔴 A header written before W124b carries no `pageFingerprints`; the pass then
+     *    records from this tick on, so a repeat of a page returned from here is still
+     *    caught. (A page already returned before the upgrade cannot be fingerprinted
+     *    retroactively, but the halt is permanent and the pass is bounded by the real
+     *    short/empty page.)
      *
      * 🔴 It is halt('shape-changed') — a permanent, traced stop — and deliberately
      *    neither of the two things it resembles:
@@ -1788,26 +1810,22 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    nothing: its ids are already in pending/archived by construction (that is
      *    the premise of the check), so nothing can be lost by stopping here.
      */
-    const notFirstPage = tokenMode ? !!state.enumCursor.token : state.enumCursor.offset > 0;
     const guardApplies = tokenMode || plan.listOffsetInferred === true;
-    if (guardApplies && !notFirstPage) {
-      // The first page of the pass: remember it, so a later page can be told from
-      // the first page rather than from "already owed" (see W124 above).
-      state.enumCursor.firstPageIds = parsed.page.ids.slice();
-    } else if (guardApplies && parsed.page.ids.length > 0) {
-      const first = state.enumCursor.firstPageIds;
-      if (Array.isArray(first) && first.length > 0) {
-        const firstSet = new Set(first);
-        if (parsed.page.ids.every((id) => firstSet.has(id))) {
-          return halt(
-            'shape-changed',
-            `${listWhere()}: the page repeated the first page of this enumeration;`
-            + (tokenMode
-              ? ' the page cursor did not advance (the platform may not honour the cursor parameter)'
-              : ' the page offset did not advance (the platform may not honour the offset parameter)'),
-          );
-        }
+    if (guardApplies && parsed.page.ids.length > 0) {
+      const fingerprint = await listPageFingerprint(parsed.page.ids);
+      const recorded = Array.isArray(state.enumCursor.pageFingerprints)
+        ? state.enumCursor.pageFingerprints
+        : [];
+      if (recorded.includes(fingerprint)) {
+        return halt(
+          'shape-changed',
+          `${listWhere()}: the page repeated a page this enumeration already returned;`
+          + (tokenMode
+            ? ' the page cursor did not advance (the platform may not honour the cursor parameter)'
+            : ' the page offset did not advance (the platform may not honour the offset parameter)'),
+        );
       }
+      state.enumCursor.pageFingerprints = [...recorded, fingerprint];
     }
 
     // 🔴 W10 · The total the API gave is recorded, but it is **not** trusted as

@@ -1,6 +1,6 @@
 /**
- * W124 · The Claude web backfill halted `shape-changed`, and the repeat-page guard
- * was the wrong detector.
+ * W124 / W124b · The Claude web backfill halted `shape-changed`, and the repeat-page
+ * guard was the wrong detector.
  *
  * ## The measured failure this file reproduces
  * On the live Claude scope the list is 218 rows and the page size is 50. The W98
@@ -12,24 +12,35 @@
  * pairwise-disjoint pages, so the parameter *was* advancing; the guard's premise was
  * simply false during a re-enumeration.
  *
- * The fix: remember the first page of the pass (`enumCursor.firstPageIds`) and call a
- * page a repeat only when every id on it appeared on that first page.
+ * W124 first fixed this by comparing a later page with the *first* page of the pass.
+ * A read-only review found the remaining hole: a server that returns page A, then
+ * page B, then keeps returning B for larger offsets is never caught, because B is
+ * not the first page. W124b records the fingerprint (sha256 of the sorted id list) of
+ * **every** non-empty page of the pass and halts when a page repeats any of them.
  *
  * ## Why the scenarios below are the observed shape, scaled down
  * A list page has a fixed size for a plan, and a short page ends the enumeration
  * (`listOffsetInferred`). The live shape is "a `pending` tail returned at an offset
  * past the already-recovered ids"; the fixtures use a 2/3-row page and a small fake
- * list so the same three facts are exercised: a first page, a fully-owed tail page at
- * a later offset, and the real ending. Every value is invented, the http port throws
- * on any path it was not given, and no network is touched.
+ * list so the same facts are exercised: a first page, a later page (owed or not), a
+ * repeat, and the real ending. Every value is invented, the http port throws on any
+ * path it was not given, and no network is touched.
  *
- * 🔴 Red-before-green: with the pre-W124 guard (`every id is in archived ∪ pending`),
- *    the first and second scenarios halt `shape-changed` at the tail page instead of
- *    finishing the re-listing. `nm/W124-OUT.md` records the revert run.
+ * 🔴 Red-before-green: with the W124 guard (`every id on the page is on the first
+ *    page`), the W98 re-list scenarios halt `shape-changed` at the tail page instead
+ *    of finishing. With the pre-W124 guard (`every id is in archived ∪ pending`) the
+ *    same two halt. The W124b-specific case (a *later* page repeated) is the one both
+ *    earlier guards miss. `nm/W124b-OUT.md` records the revert run.
  */
 
 import { describe, expect, it } from 'vitest';
-import { loadState, runBackfill, type HttpResponse, type HttpPort } from '../lib/backfill/engine';
+import {
+  loadState,
+  listPageFingerprint,
+  runBackfill,
+  type HttpResponse,
+  type HttpPort,
+} from '../lib/backfill/engine';
 import { memoryStore, type BackfillStore } from '../lib/backfill/store';
 import { replaceDebtSet } from '../lib/backfill/debt-store';
 import { stateKey, type BackfillHeader } from '../lib/backfill/types';
@@ -129,11 +140,11 @@ function runClaude(
 }
 
 describe('W124 · the repeat-page guard does not fire on an already-owed re-list page', () => {
-  it('a legacy mid-pass header (no firstPageIds): the fully-owed tail page does not halt, the pass ends', async () => {
+  it('a legacy mid-pass header (no pageFingerprints): the fully-owed tail page does not halt, the pass ends', async () => {
     const scope = ORG;
     const store = memoryStore();
     // Exactly the live state after the partial re-list: cursor at the tail page, the
-    // tail ids still owed, and no firstPageIds because the header predates W124.
+    // tail ids still owed, and no pageFingerprints because the header predates W124b.
     // The W98 marker is present, so this run does NOT reset the cursor.
     const TAIL = ['t1-tail', 't2-tail'];
     await seed(store, scope, {
@@ -154,12 +165,15 @@ describe('W124 · the repeat-page guard does not fire on an already-owed re-list
     // The short page is the plan's own inference that the listing ends — untouched.
     expect(report.state.enumCursor.truncated).toBe('short-page-inferred');
     expect(report.state.enumCursor.offset).toBe(5);
+    // A header that predates W124b starts recording from this tick, so a repeat from
+    // here on would still be caught.
+    expect(report.state.enumCursor.pageFingerprints).toEqual([await listPageFingerprint(TAIL)]);
     // Nothing was duplicated and nothing was lost: the tail was already owed.
     expect([...report.state.pending].sort()).toEqual([...TAIL].sort());
     expect(report.newDebts).toBe(0);
   });
 
-  it('the W98 re-list records the first page and a fully-owed tail is not a repeat of it, so the pass completes', async () => {
+  it('the W98 re-list records each page and a fully-owed tail is not a repeat of the first page, so the pass completes', async () => {
     const scope = ORG;
     const store = memoryStore();
     // The migration has not run here: this run resets the cursor and re-lists.
@@ -187,8 +201,12 @@ describe('W124 · the repeat-page guard does not fire on an already-owed re-list
     expect(second.stopped).not.toBe('halted');
     expect(be.listOffsets).toEqual([0, 2]);
     expect(second.state.enumCursor.offset).toBe(4);
-    // The mechanism the fix uses: the pass's first page really was recorded.
-    expect(second.state.enumCursor.firstPageIds).toEqual(DROPPED);
+    // The mechanism the fix uses: both pages of the pass really were recorded, in
+    // order, and no fingerprint repeats.
+    expect(second.state.enumCursor.pageFingerprints).toEqual([
+      await listPageFingerprint(DROPPED),
+      await listPageFingerprint(TAIL),
+    ]);
 
     // Tick 3: the empty page is the real ending.
     const third = await runClaude(store, be.http, scope, 2);
@@ -199,7 +217,10 @@ describe('W124 · the repeat-page guard does not fire on an already-owed re-list
     // The re-list did its job: the dropped ids are owed, nothing duplicated.
     expect([...third.state.pending].sort()).toEqual([...DROPPED, ...TAIL].sort());
     const persisted = await loadState(store, 'claude', scope);
-    expect(persisted.enumCursor.firstPageIds).toEqual(DROPPED);
+    expect(persisted.enumCursor.pageFingerprints).toEqual([
+      await listPageFingerprint(DROPPED),
+      await listPageFingerprint(TAIL),
+    ]);
   });
 
   it('a server that really ignores the offset returns the first page again, and that IS a halt', async () => {
@@ -209,10 +230,10 @@ describe('W124 · the repeat-page guard does not fire on an already-owed re-list
     const be = claudeBackend({ 0: listPage(['x1', 'x2']), 2: listPage(['x1', 'x2']) });
     const first = await runClaude(store, be.http, scope, 2);
     expect(first.state.enumCursor.offset).toBe(2);
-    expect(first.state.enumCursor.firstPageIds).toEqual(['x1', 'x2']);
+    expect(first.state.enumCursor.pageFingerprints).toEqual([await listPageFingerprint(['x1', 'x2'])]);
     const between = await loadState(store, 'claude', scope);
     expect(between.enumCursor.offset).toBe(2);
-    expect(between.enumCursor.firstPageIds).toEqual(['x1', 'x2']);
+    expect(between.enumCursor.pageFingerprints).toEqual([await listPageFingerprint(['x1', 'x2'])]);
 
     const second = await runClaude(store, be.http, scope, 2);
     expect(second.stopped).toBe('halted');
@@ -224,20 +245,59 @@ describe('W124 · the repeat-page guard does not fire on an already-owed re-list
     expect(be.listOffsets).toEqual([0, 2]);
   });
 
-  it('a reset clears the remembered first page with the rest of the cursor', async () => {
+  it('a later page repeated (not the first page) halts instead of enumerating forever', async () => {
+    const scope = ORG;
+    const store = memoryStore();
+    // The reviewer's shape: page A at offset 0, page B at offset 2, then the full page
+    // B again at offset 4. B is neither the first page nor "already owed" on the W124
+    // pass (fresh scope), so only a fingerprint of *every* page catches it.
+    const A = ['a1-first', 'a2-first'];
+    const B = ['b1-later', 'b2-later'];
+    const be = claudeBackend({ 0: listPage(A), 2: listPage(B), 4: listPage(B) });
+
+    const first = await runClaude(store, be.http, scope, 2);
+    expect(first.halted).toBeNull();
+    expect(be.listOffsets).toEqual([0]);
+    const second = await runClaude(store, be.http, scope, 2);
+    expect(second.halted).toBeNull();
+    expect(be.listOffsets).toEqual([0, 2]);
+    expect(second.state.enumCursor.offset).toBe(4);
+    expect(second.state.enumCursor.pageFingerprints).toEqual([
+      await listPageFingerprint(A),
+      await listPageFingerprint(B),
+    ]);
+
+    // Tick 3: offset 4 hands B back. Under the W124 guard this was never a repeat
+    // (B is not the first page) and the offset would keep growing with no ending.
+    const third = await runClaude(store, be.http, scope, 2);
+    expect(third.stopped).toBe('halted');
+    expect(third.halted?.reason).toBe('shape-changed');
+    expect(third.halted?.detail).toContain('did not advance');
+    expect(be.listOffsets).toEqual([0, 2, 4]);
+    // Not an ending: the cursor is left where the repeated page was requested.
+    expect(third.state.enumCursor.complete).toBe(false);
+    expect(third.state.enumCursor.offset).toBe(4);
+  });
+
+  it('a reset clears the remembered fingerprints with the rest of the cursor', async () => {
     const scope = ORG;
     const store = memoryStore();
     const DROPPED = ['f1-dropped', 'f2-dropped'];
     await seed(store, scope, {
       pending: [],
       archived: [],
-      cursor: { offset: 2, complete: true, firstPageIds: ['stale-1', 'stale-2'] },
+      cursor: { offset: 2, complete: true, pageFingerprints: ['stale-1', 'stale-2'] },
     });
     const be = claudeBackend({ 0: listPage(DROPPED) });
     const report = await runClaude(store, be.http, scope, 2);
-    // The migration reset replaced the whole cursor, so the stale first page is gone
-    // and this pass's own first page is recorded instead.
-    expect(report.state.enumCursor.firstPageIds).toEqual(DROPPED);
+    // The migration reset replaced the whole cursor, so the stale fingerprints are gone
+    // and this pass's own page is recorded instead.
+    expect(report.state.enumCursor.pageFingerprints).toEqual([await listPageFingerprint(DROPPED)]);
     expect(be.listOffsets).toEqual([0]);
+  });
+
+  it('the fingerprint is order-independent: the same id set in any order is the same page', async () => {
+    expect(await listPageFingerprint(['b', 'a'])).toBe(await listPageFingerprint(['a', 'b']));
+    expect(await listPageFingerprint(['a', 'b'])).not.toBe(await listPageFingerprint(['a', 'c']));
   });
 });

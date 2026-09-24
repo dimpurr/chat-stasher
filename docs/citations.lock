@@ -81,31 +81,31 @@ apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs/privacy.md:274  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…
 apps/extension/lib/backfill/debt-store.ts:68-87  c2b9b363b155  lines=20
   <- docs/privacy.md:274  :: export const BACKFILL_DB_VERSION = 2;
-apps/extension/lib/backfill/engine.ts:109-112  fc50ac101905  lines=4
+apps/extension/lib/backfill/engine.ts:110-113  fc50ac101905  lines=4
   <- docs/privacy.md:429, docs/threat-model.md:62  :: async function sendVia(http: HttpPort, url: string, init: B…
-apps/extension/lib/backfill/engine.ts:1525-1537  026d25c05d0a  lines=13
+apps/extension/lib/backfill/engine.ts:1541-1553  026d25c05d0a  lines=13
   <- docs/privacy.md:355  :: if (plan.scopeInPath && (
-apps/extension/lib/backfill/engine.ts:1647-1663  72b5338c79fe  lines=17
+apps/extension/lib/backfill/engine.ts:1663-1679  72b5338c79fe  lines=17
   <- README.md:192  :: && state.enumCursor.truncated === undefined
-apps/extension/lib/backfill/engine.ts:1667-1676  67d65ac96649  lines=10
+apps/extension/lib/backfill/engine.ts:1683-1692  67d65ac96649  lines=10
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: /**
-apps/extension/lib/backfill/engine.ts:1733-1811  a7699f08b8d7  lines=79
+apps/extension/lib/backfill/engine.ts:1749-1829  7254a42550d4  lines=81
   <- README.md:188, docs/install.md:741, docs/privacy.md:560, docs/threat-model.md:302  :: /**
-apps/extension/lib/backfill/engine.ts:2142-2160  5aec5b245dbd  lines=19
+apps/extension/lib/backfill/engine.ts:2160-2178  5aec5b245dbd  lines=19
   <- docs/privacy.md:423  :: * 🔴 W31 · The scope reaches the body URL exactly as it reac…
-apps/extension/lib/backfill/engine.ts:2153-2157  88b6e1017f2f  lines=5
+apps/extension/lib/backfill/engine.ts:2171-2175  88b6e1017f2f  lines=5
   <- docs/threat-model.md:233, docs/threat-model.md:289  :: const init = detailRequestInit(plan, opts.origin, id);
-apps/extension/lib/backfill/engine.ts:2230-2303  b57370c0a578  lines=74
+apps/extension/lib/backfill/engine.ts:2248-2321  b57370c0a578  lines=74
   <- README.md:191, docs/privacy.md:450  :: /**
-apps/extension/lib/backfill/engine.ts:2259-2299  60b83f3f4051  lines=41
+apps/extension/lib/backfill/engine.ts:2277-2317  60b83f3f4051  lines=41
   <- docs/privacy.md:472, docs/privacy.md:539, docs/threat-model.md:302, docs/threat-model.md:618  :: if (!step2 && plan.detailPages) {
-apps/extension/lib/backfill/engine.ts:2260-2319  1b58e1dbdf05  lines=60
+apps/extension/lib/backfill/engine.ts:2278-2337  1b58e1dbdf05  lines=60
   <- docs/install.md:109  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:2437-2472  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:2455-2490  2cb492e06a56  lines=36
   <- docs/install.md:109  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
-apps/extension/lib/backfill/engine.ts:2459-2472  2cb6b4af719d  lines=14
+apps/extension/lib/backfill/engine.ts:2477-2490  2cb6b4af719d  lines=14
   <- README.md:189, docs/install.md:744, docs/privacy.md:539, docs/privacy.md:555, docs/threat-model.md:302, docs/threat-model.md:612  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
-apps/extension/lib/backfill/engine.ts:2523-2535  5b084f3234d8  lines=13
+apps/extension/lib/backfill/engine.ts:2541-2553  5b084f3234d8  lines=13
   <- docs/privacy.md:541  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
 apps/extension/lib/backfill/enumerate.ts:1301-1369  9034b1d0c6c2  lines=69
   <- docs/install.md:740, docs/privacy.md:306  :: const SHAPE_DEPTH = 2;
