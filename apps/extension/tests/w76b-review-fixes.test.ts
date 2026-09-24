@@ -17,6 +17,13 @@
  *     detail on another.
  *  2. **A non-integer cursor served nobody forever**, and a cursor write that
  *     keeps failing pinned the rotation's start.
+ *     🔴 W86 · The cursor stopped being an index at all — it now stores the served
+ *        target's identity (`{platform, scope}`), because `rememberTarget`
+ *        prepends and a stored index therefore names a different row after any
+ *        live capture. W76b-2's two findings are unchanged and both still bite
+ *        here: the byte below is now the pre-W86 positional shape, and the
+ *        write-failure case is the in-memory identity. The rest of W86's evidence
+ *        is in `tests/w86-cursor-by-identity.test.ts`.
  *  3. **The tick-global gates were asked lazily** — only when some target had no
  *     tab — so a wake whose every target had a tab and was held reported
  *     `no-runnable-target` while the switch was off or the host was paused, and
@@ -460,26 +467,39 @@ describe('W76b-1 · a wake that asked the platform stops there', () => {
 });
 
 // ===========================================================================
-// W76b-2 · the cursor is a position, and it moves
+// W76b-2 · the cursor is a target, and it moves
 // ===========================================================================
 
 describe('W76b-2 · the cursor', () => {
-  it('🔴 a non-integer cursor is not a position: the walk starts at the head instead of serving nobody', async () => {
+  it('🔴 a cursor that names nothing is not a position: the walk starts at the head instead of serving nobody', async () => {
     const rows = [chatgpt(A), chatgpt(B)];
     seedTargets(rows);
     await enableBackfill();
     await openTab(11, ORIGIN);
-    // A byte at the cursor key that satisfies "finite number ≥ 0" but indexes
-    // nothing: `(1.5 + 1) % 2` is not an integer and `targets[0.5]` does not exist.
+    // 🔴 W86 restates this byte without losing the finding it was written for. The
+    //    cursor is now the served target's identity (`{platform, scope}`) rather
+    //    than an index into `cs_backfill_targets_v1`, so `{ served: 1.5 }` is not a
+    //    half-valid position any more — it is the **pre-W86 shape**, which is
+    //    exactly what an upgrading profile has at this key, and it names no row.
+    //    Under the old keying `1.5` was the worst case W76b found: `(1.5 + 1) % n`
+    //    is not an integer, `targets[2.5]` is `undefined`, every slot `continue`d,
+    //    and because nobody ran, `saveTickCursor` was never reached — so one bad
+    //    byte served nobody *forever*. The bite below is the property that finding
+    //    protects, and it is asserted in full.
     store[CURSOR_KEY] = { served: 1.5 };
 
     const mod = await bootBackground();
     const served = await servedByOneTick(mod, rows);
     console.log('[W76b-2a] served:', served, '· cursor now:', JSON.stringify(store[CURSOR_KEY]));
-    // Somebody is served — and the unreadable byte is replaced by a real index, so
-    // the leg cannot stay stuck on it.
+    // Somebody is served — and the byte that names no row is replaced by a real
+    // cursor naming the target that was just served, so the leg cannot stay stuck
+    // on it. (W86: asserted as the identity rather than as "index 0"; the property
+    // is the same one and is now the stricter claim — it must name the served row.)
     expect(served).toBe(A);
-    expect(store[CURSOR_KEY]).toEqual({ served: 0 });
+    // (W86b: the byte is now a map of waiting-time stamps; 🔴 W86c: dense `0..k-1`
+    // naming the whole rotation, with the just-served A at the back — the stricter
+    // claim of the original comment is unchanged, it must name the served row.)
+    expect((store[CURSOR_KEY] as any).served).toEqual({ [`${CHATGPT}\0${B}`]: 0, [`${CHATGPT}\0${A}`]: 1 });
 
     // And the next wake really moves on: the cursor is honoured, not merely written.
     expect(await servedByOneTick(mod, rows)).toBe(B);

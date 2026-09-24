@@ -222,91 +222,418 @@ export const MAX_TARGET_ENTRIES = 8;
  * transient backoff, still returned a non-`no-http-port` result and consumed
  * the tick too, blocking everyone else forever.
  *
- * The cursor records the index of the target that was served last. The next
- * tick starts its walk at the target **after** it (round-robin over the
- * registry, wrapping around), so no platform can be starved by a more-recently
- * captured one. It is a single small `storage.local` value, in the same
- * `cs_backfill_*` key family; it is not the header, and it survives an MV3
- * service-worker reclaim exactly as the trace does.
+ * So the cursor records who has been served, and the next tick prefers the
+ * targets that have waited longest. It is a single small `storage.local` value,
+ * in the same `cs_backfill_*` key family; it is not the header, and it survives
+ * an MV3 service-worker reclaim exactly as the trace does.
  *
- * 🔴 Unreadable / absent ⇒ `null` ("no position has been served"): the walk
- * starts at the registry head. That is the safe fallback — it is the old
- * behaviour, it can never skip a platform forever, and a garbage byte at this
- * key must not be turned into "serve nothing".
+ * 🔴 W86 · **The cursor names a target, and it used to name a slot.** It was
+ *    `{ served: <index> }` — a position in `cs_backfill_targets_v1` — and that
+ *    array is not a fixed list: `rememberTarget` **prepends** on every live
+ *    capture, so a capture moves one row to the head and shifts the rows above it
+ *    down by one. An index read back after that names a *different row*, and the
+ *    walk starts one row too early. Where the captured row sat at or ahead of the
+ *    cursor, the row the cursor was standing for is served again — in the worst
+ *    arrangement, observed as the head being served on every single wake while the
+ *    other scopes were never reached at all (W79 recorded the reordering live: a
+ *    claude live capture prepended mid-run and persisted in the registry). A
+ *    removal has the same shape from the other side: the index then names the row
+ *    one *later* than intended, so the row directly behind the served one is
+ *    skipped for a cycle.
  *
- * 🔴 W76b · **And "a position" means an index the registry can be indexed by, so
- *    `Number.isInteger` is not a tidy-up.** `1.5` used to satisfy this predicate:
- *    `(1.5 + 1) % n` is not an integer, `targets[2.5]` is `undefined`, every slot
- *    `continue`s — and because nobody runs, `saveTickCursor` is never reached and
- *    the same `1.5` is loaded by every later wake. One bad byte served nobody
- *    *forever*, which is the one thing this fallback exists to prevent. A
- *    non-index value is therefore the same fact as an unreadable one: no position
- *    has been served, start at the head. (`NaN`/`Infinity`/negatives were already
- *    refused by the two lines below, and `isInteger` subsumes them.)
+ *    So the cursor stores the served target's **identity** — `platform` and
+ *    `scope`, which is exactly the pair `rememberTarget` dedups on and therefore a
+ *    unique key in the registry. Positional drift cannot happen because no
+ *    position is stored.
+ *
+ * 🔴 W86b · **But "the row after the target I served last" is still a rule about
+ *    order, and the registry's order is not ours to depend on.**
+ *
+ *    W86's walk started at the row holding the served identity, **plus one**. The
+ *    identity is looked up correctly; which row gets the tick is nonetheless
+ *    decided by where that identity *currently sits*, and `rememberTarget` is a
+ *    move-to-front. Let the registry be `[A, B, C]` with all three runnable, and
+ *    let the user re-capture the scope they were just served (the ordinary act of
+ *    switching back to a tab) before each wake: from the third wake on the served
+ *    identity is at index 0 every time, so the walk starts at index 1 every time
+ *    and the rotation degenerates to `A, B, A, B, …` while `C` — registered and
+ *    runnable throughout — is never that slot. A removal is the same defect from
+ *    the other side: with the stored identity absent the walk started at index 0,
+ *    the head took the wake, and a row that is never the head waited forever.
+ *    🩸 The bound W86 wrote on that fallback — "a cursor whose target just
+ *    disappeared can cost the other targets one turn. It cannot cost them more
+ *    than that" — was false: with `[A, B, C, D]` and the cursor's row forgotten,
+ *    `D`, the successor, waits two turns.
+ *
+ *    So the cursor stops describing **a row** and starts describing **how long
+ *    each identity has waited**: a small map from identity to the serve-order rank
+ *    of the wake that last served it, in the same key. A wake walks the runnable
+ *    targets **least recently served first** — the smallest rank wins, the row just
+ *    served goes to the back — and stamps the identity it really served. Registry
+ *    order is only a tie-break, so no prepend, removal or permutation can move a
+ *    target out of its turn.
+ *
+ *    🔴 🩸 W86c §1 · The bound that actually holds, and the one that did not.
+ *    The comment W86b wrote here — "every runnable target is served within *one
+ *    pass over the registry*" — and its ordering rule ("never-served before
+ *    served") together stated something false. Raking never-served targets at the
+ *    *front* means a brand-new identity takes the very next wake, so a stream of
+ *    newcomers — one freshly registered runnable scope before each wake — jumps
+ *    the queue forever and an old stamped row that stays registered is never
+ *    served (that is the R86b §1 defect, reproduced by the Grok run). So
+ *    **never-served now ranks at the back** (§1): a newcomer joins behind the rows
+ *    already waiting and is materialised there on its first save, so it rounds
+ *    forward like everyone else instead of ahead of them.
+ *
+ *    The bound that holds, stated exactly as the tests assert it: with `m`
+ *    registered runnable targets, `saveTickCursor` keeps the stamps dense (§2) and
+ *    puts the row just served at the back, so the walk is a round robin over the
+ *    whole set of `m` — **every row that stays registered is served within `m`
+ *    real-work wakes, regardless of how many newcomers arrive, and each newcomer
+ *    waits at most `m` wakes while at least one cursor mirror accepts writes.**
+ *    The session mirror carries successful writes across worker reclaims in one
+ *    browser session. If both session and local writes fail, a fresh worker can
+ *    reload a stale cursor, so this bound does not hold across reclaims until a
+ *    mirror accepts a write. Reorder never changes the smallest rank, and a
+ *    skipped non-runnable row keeps its rank, so neither can push out a runnable
+ *    row's turn.
+ *
+ *    The map is bounded by the registry: it is pruned to the registered
+ *    identities on every write, `MAX_TARGET_ENTRIES` caps that at 8, and since
+ *    W86c (§2) the stamps are dense `0..k-1` on every save — so no value ever
+ *    grows past the registry cap, and the `Number.MAX_SAFE_INTEGER` ceiling is
+ *    un-reachable (a stored ceiling is renormalised away on its first save).
+ *
+ * 🔴 Unreadable / absent / **not the map this build writes** ⇒ `null` ("nothing
+ * has been served"): every target is never-served and the walk is the registry in
+ * its own order. That is the safe fallback — it is the old behaviour, and it can
+ * never skip a platform, because with nothing stamped the walk still examines
+ * every row. A garbage byte at this key must not be turned into "serve nothing",
+ * and neither must a target that was forgotten, evicted by `MAX_TARGET_ENTRIES`,
+ * or renamed to a scope this build has not seen: none of those names an identity
+ * the registry holds, and a target the registry does not hold is simply not on
+ * the walk.
+ *
+ *    🩸 It also refuses the two shapes an upgrading profile can hold.
+ *    `{ served: <n> }` (pre-W86) names a slot in a registry that has since been
+ *    reordered, and `{ platform, scope }` (W86) is one identity with no record of
+ *    how long anyone has waited. Reading either of them as a map would invent a
+ *    whole schedule out of one value, so both read as no cursor at all and the
+ *    first wake after the upgrade starts with every target never-served — one
+ *    turn's cost, once, instead of a schedule that is wrong for everyone.
+ *
+ *    🔴 W76b's rule survives the re-shape unchanged: **a value that does not name
+ *    a target is not a cursor.** It was written when the cursor was an index,
+ *    because `1.5` satisfied "finite number ≥ 0": `(1.5 + 1) % n` is not an
+ *    integer, `targets[2.5]` is `undefined`, every slot `continue`d — and because
+ *    nobody ran, `saveTickCursor` was never reached, so the same `1.5` was loaded
+ *    by every later wake and one bad byte served nobody *forever*. What replaces
+ *    the index is a stamp, and a stamp that is not a non-negative safe integer is
+ *    not a stamp.
  */
 export const BACKFILL_CURSOR_KEY = 'cs_backfill_cursor_v1';
 
+/**
+ * 🔴 W86b · **How long each target has waited, as a serve-order rank.**
+ *
+ * A rank rather than a wall-clock time, deliberately: the walk only ever compares
+ * these values with each other, and a clock that steps backwards (an NTP
+ * correction, the user changing the system time) would make the target served
+ * last look like the one that has waited longest. Since W86c (§2) the ranks are
+ * **dense**: `saveTickCursor` renormalises every kept stamp to `0..k-1` on each
+ * write, and the row just served is placed at the highest rank, so the values
+ * never grow past the count of registered rows (and therefore never past
+ * `MAX_TARGET_ENTRIES`).
+ *
+ * An identity that is **absent** has never been served — a different fact from
+ * "served at the oldest rank 0" — so it sorts **behind** every stamp (at the back
+ * of the rotation, §1), not ahead of them.
+ */
 export interface TickCursor {
-  /** The index, in `cs_backfill_targets_v1` order, of the target served by the most recent tick. */
-  served: number;
-}
-
-function isTickCursor(v: unknown): v is TickCursor {
-  return typeof v === 'object' && v !== null
-    && typeof (v as { served?: unknown }).served === 'number'
-    && Number.isInteger((v as { served: number }).served)
-    && (v as { served: number }).served >= 0;
+  /**
+   * Identity key (`targetIdentityKey`) → the rank of the wake that last served
+   * that target, condensed to a dense `0..k-1` on every save. An identity that is
+   * **absent** has never been served and sorts at the back of the rotation.
+   */
+  served: Record<string, number>;
+  /** Write generation used to select the newer local/session mirror. */
+  revision?: number;
 }
 
 /**
- * 🔴 W76b · **The position this *worker* has already served, which is newer than
- * anything it can read back when the write is failing.**
+ * `platform`+`scope` as one map key: the pair `rememberTarget` dedups on, so it
+ * names exactly one registry row.
+ *
+ * 🔴 The separator is a NUL, as in `rememberOrganizationScopedTarget`, because a
+ *    platform id is one path segment that never contains one while a scope is an
+ *    opaque account identifier that can contain anything else — so no two
+ *    identities can produce the same key.
+ */
+function targetIdentityKey(platform: string, scope: string): string {
+  return `${platform}\0${scope}`;
+}
+
+/**
+ * The stored value as a map, or `null` when it is not one this build writes.
+ *
+ * Two rules, and they are deliberately not the same rule:
+ *  · the **outer** shape has to be the map. Anything else — a bare number, a
+ *    string, `{ served: 1 }`, an array, or either of the two shapes an upgrading
+ *    profile holds (the pre-W86 position and the W86 identity) — is not a cursor
+ *    at all, and reads as "nothing has been served" (`null`);
+ *  · a single **entry** whose stamp is not a non-negative safe integer is dropped
+ *    and the rest of the map is kept. One corrupt entry costs one target its
+ *    place in the rotation: its row reads as never-served and, since W86c (§1),
+ *    joins the rotation at the *back* — served within `k` wakes — so the cost is
+ *    bounded and safe, while discarding the whole map because of it would cost
+ *    every other target the schedule it has.
+ */
+function readTickCursor(raw: unknown): TickCursor | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const map = (raw as { served?: unknown }).served;
+  if (typeof map !== 'object' || map === null || Array.isArray(map)) return null;
+  const served: Record<string, number> = {};
+  for (const [key, stamp] of Object.entries(map as Record<string, unknown>)) {
+    // A key this build writes is always `<platform>\0<scope>`. A key without the
+    // separator names no target, so it is not a stamp — and requiring the
+    // separator also means no stored key can ever be `__proto__`.
+    if (!key.includes('\0')) continue;
+    if (typeof stamp !== 'number' || !Number.isSafeInteger(stamp) || stamp < 0) continue;
+    served[key] = stamp;
+  }
+  const revision = (raw as { revision?: unknown }).revision;
+  return {
+    served,
+    ...(typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+      ? { revision }
+      : {}),
+  };
+}
+
+const BACKFILL_CURSOR_SESSION_KEY = `${BACKFILL_CURSOR_KEY}:session`;
+
+type CursorSessionArea = {
+  get: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  set: (values: Record<string, unknown>) => Promise<void>;
+};
+
+/** The session mirror survives worker restarts and is cleared when the browser restarts. */
+function cursorSessionArea(): CursorSessionArea | null {
+  const g = globalThis as {
+    browser?: { storage?: { session?: CursorSessionArea } };
+    chrome?: { storage?: { session?: CursorSessionArea } };
+  };
+  const area = g.browser?.storage?.session ?? g.chrome?.storage?.session;
+  return area && typeof area.get === 'function' && typeof area.set === 'function' ? area : null;
+}
+
+/** The map restricted to the identities `targets` holds. */
+function pruneToRegistry(
+  cursor: TickCursor,
+  targets: readonly BackfillTarget[],
+): Record<string, number> {
+  const registered = new Set(targets.map((t) => targetIdentityKey(t.platform, t.scope)));
+  const served: Record<string, number> = {};
+  for (const [key, stamp] of Object.entries(cursor.served)) {
+    if (registered.has(key)) served[key] = stamp;
+  }
+  return served;
+}
+
+/**
+ * 🔴 W86b · **The order one wake walks the registry in: least recently served
+ * first.** ✓ W86c sharpens the never-served end of it (§1).
+ *
+ * A row with a stamp is ranked by that stamp; a row with **no** stamp — never
+ * served, a corrupt stamp dropped, or a brand-new identity — is ranked at the
+ * **back** (`Infinity`), not ahead of every stamp. This rotation survives worker
+ * reclaims when either cursor mirror accepts its write; if both writes fail, the
+ * in-worker rotation is lost at reclaim and a stale map can repeat. Ties (equal stamps, or the
+ * whole never-served group) are broken by the registry's own order. That is the
+ * whole selection rule, and it reads nothing but the stamps — no position, no
+ * stored order, no "after the last one" — so a registry that was prepended to,
+ * reordered or partially emptied since the previous wake cannot move a target
+ * out of its turn.
+ *
+ * 🩸 W86c §1 **Why never-served ranks at the back.** `-1` (ahead of every stamp)
+ * made each brand-new identity take the wake, so a stream of newcomers — one
+ * fresh registered scope before every wake — jumped the queue forever, and an
+ * old stamped row that stayed registered was never served. `Infinity` is the
+ * *back*: a newcomer joins behind the rows already waiting, so it cannot push
+ * them out of their turn. It is the back no matter how large the stored stamps
+ * are (not "max stamp + 1", which is what fails to round-trip for a stored
+ * `Number.MAX_SAFE_INTEGER` in §2) — so even a pre-§2 profile that stored the
+ * ceiling value is served safely here, before its first renormalising save.
+ *
+ * The **bound that holds** — what the property loop asserts: let `m` be the number
+ * of registered runnable targets. Because every save renormalises the stamps to
+ * dense ranks `0..m-1` and places the row just served at the back (§2), the
+ * rounds are a round robin over the whole registered set of `m`: each is served
+ * once in every `m` real-work wakes, **no matter how many newcomers arrive, while
+ * at least one storage mirror accepts cursor writes** (a newcomer is materialised
+ * at the back on its first save and then rounds forward like everyone else, so it
+ * waits at most `m` wakes). The session mirror preserves successful writes across
+ * worker reclaims in the browser session; if both mirror writes fail, the in-worker
+ * rotation is lost at reclaim and a stale map can repeat. Reorder never changes
+ * the smallest stamp, and a skipped non-runnable row keeps its stamp, so it cannot
+ * push out a runnable row's turn either.
+ *
+ * `null` — no stamp is known for anyone — is every target never-served, all at
+ * the back, tie-broken to the registry in its own order, which examines every
+ * row and so can never skip a platform.
+ *
+ * The result is the **indices** of `targets`, so the caller keeps its own
+ * per-row bookkeeping (the tick trace names the platform it examined) against the
+ * rows it already has.
+ *
+ * `Infinity` is deliberately never stored: it exists only in this transient
+ * ranking, and `readTickCursor` rejects any stored stamp that is not a safe
+ * integer, so a real byte can never contain it.
+ */
+export function tickWalkOrder(
+  targets: readonly BackfillTarget[],
+  cursor: TickCursor | null,
+): number[] {
+  const ranked = targets.map((target, index) => ({
+    index,
+    // `Infinity` rather than a missing field or `-1`: a never-served target must
+    // sort **after** every stamp (at the back of the rotation, §1), and every
+    // safe-integer stamp is < `Infinity`. `Infinity` is also immune to the size
+    // of the stamps, which `max+1` is not for a stored `MAX_SAFE_INTEGER` (§2).
+    stamp: cursor?.served?.[targetIdentityKey(target.platform, target.scope)] ?? Infinity,
+  }));
+  // Two `Infinity`s make `a.stamp - b.stamp` `NaN`, which is falsy in `||`, so
+  // the never-served group and every equal-stamp tie fall through to the index
+  // (registry order) tie-break — exactly the rule described above.
+  ranked.sort((a, b) => a.stamp - b.stamp || a.index - b.index);
+  return ranked.map((r) => r.index);
+}
+
+/**
+ * 🔴 W76b · **What this *worker* has read back or served, which is newer than
+ * anything it can read out of storage when the write is failing.**
  *
  * `saveTickCursor` is best-effort by design (a failed write must not fail the
- * tick), and it logged and moved on — but the walk's start is *only* read back
- * from storage, so a write that keeps failing pins the start at the last index
- * that ever landed. The first target from that stale start takes every wake: the
- * head monopoly W76 removed, restored by an unrelated storage fault, with nothing
- * in the trace to say so.
+ * tick), and it logged and moved on — but the walk's order used to be *only* read
+ * back from storage, so a write that keeps failing pinned it at the last value
+ * that ever landed: the head monopoly W76 removed, restored by an unrelated
+ * storage fault, with nothing in the trace to say so.
  *
- * So the same fact is kept in memory as well, and it is the one that decides:
- * it advances on every serve whether or not the byte reaches storage, so the
- * rotation makes progress for as long as this worker lives. Storage stays the
- * only thing that can carry the position *across* a reclaim (an MV3 service
- * worker is reclaimed routinely, and this variable dies with it — which is why it
- * is a fallback and not a replacement: with the writes working the two always
- * hold the same index, and with them failing, a reclaim costs exactly what it
- * costs today, the stale stored start, rather than a wrong answer).
+ * So the same fact is kept in memory as well, and it is the one that decides: it
+ * advances on every serve whether or not either storage write succeeds. The
+ * session mirror carries that map across worker reclaims within the browser
+ * session; local storage remains durable across browser restarts. Revisions let
+ * a worker select the newer mirror if only one write succeeds. If both areas
+ * reject writes, a fresh worker can reload only the last persisted map and may
+ * repeat a row until one area accepts a write.
  *
- * `null` = this worker has not served anyone yet, so storage is the only witness.
+ * `null` = this worker has neither read nor served any schedule yet, so storage
+ * is the only witness.
  */
-let servedThisWorker: number | null = null;
+let servedThisWorker: TickCursor | null = null;
 
 /**
- * Read the cursor. Unreadable / absent ⇒ `null` ("start at the head"), never a fabricated position.
+ * Read the cursor. Unreadable / absent / not the shape this build writes ⇒
+ * `null` ("nothing has been served"), never a fabricated schedule.
  *
- * 🔴 W76b · The in-memory position wins while it exists: it is the same value the
- *    successful writes store, and the only one that keeps advancing when they fail.
+ * 🔴 W76b · The in-memory map wins while it exists: it is the same value the
+ *    successful writes store, and the only one that keeps advancing when they
+ *    fail. Reading storage into it is also what lets a later `saveTickCursor`
+ *    write the whole schedule back rather than only the stamp it is adding.
  */
-export async function loadTickCursor(store: BackfillStore | null): Promise<number | null> {
-  if (servedThisWorker !== null) return servedThisWorker;
-  if (!store) return null;
-  const raw = await store.load(BACKFILL_CURSOR_KEY);
-  return isTickCursor(raw) ? raw.served : null;
+export async function loadTickCursor(store: BackfillStore | null): Promise<TickCursor | null> {
+  if (servedThisWorker === null && store !== null) {
+    let local: TickCursor | null = null;
+    let session: TickCursor | null = null;
+    try {
+      local = readTickCursor(await store.load(BACKFILL_CURSOR_KEY));
+    } catch {
+      // The session mirror can still preserve rotation during a local read fault.
+    }
+    const area = cursorSessionArea();
+    if (area) {
+      try {
+        const got = await area.get({ [BACKFILL_CURSOR_SESSION_KEY]: null });
+        session = readTickCursor(got[BACKFILL_CURSOR_SESSION_KEY]);
+      } catch {
+        // Session storage is optional; keep the local answer if the mirror is unavailable.
+      }
+    }
+    servedThisWorker = session && (!local || (session.revision ?? 0) > (local.revision ?? 0))
+      ? session
+      : local;
+  }
+  return servedThisWorker;
 }
 
-/** Write the cursor. Best-effort, same rule as the trace: a failed write is logged, never a reason to fail the tick. */
+/**
+ * 🔴 W86c · Rebuild the rotation after one serve: prune to the registry, **renormalise
+ * to dense ranks `0..k-1`**, and place the row just served at the back. Best-effort
+ * write, same rule as the trace: a failed write is logged, never a reason to fail
+ * the tick.
+ *
+ * The next map is built as a head-to-tail order, then collapsed to dense ranks:
+ *   · rows that were already stamped keep their relative order (smaller rank =
+ *     served longer ago — {@link saveTickCursor}'s direct expression of §1's
+ *     "least recently served first");
+ *   · registered rows with **no** stamp — the newcomers `tickWalkOrder` ranked at
+ *     the back — are materialised behind them, in registry order (§1: a newcomer
+ *     joins the rotation at the back, then rounds forward like everyone else, so
+ *     it waits at most `m` wakes without jumping anyone's queue);
+ *   · the row just served is moved to the very back (most recently served).
+ *
+ * Renormalising to `0..k-1` is the whole of §2: `k` is at most the number of
+ * registered rows, which `MAX_TARGET_ENTRIES` caps at 8, so **no stored value ever
+ * grows past the registry cap**, the `Number.MAX_SAFE_INTEGER` ceiling is
+ * un-reachable, and the byte round-trips indefnitely. The smaller-rank-waiting /
+ * served-to-back shape is preserved under the densification, so the round-robin
+ * each wake serves is unchanged by it.
+ *
+ * `targets` is the registry **as this wake read it**, and it is what the map is
+ * pruned against: an identity the registry no longer holds names no row, so its
+ * stamp could never decide anything again, and keeping it would grow the map for
+ * as long as scopes come and go. Pruning at the one place the map is written is
+ * what keeps it bounded by `MAX_TARGET_ENTRIES`.
+ */
 export async function saveTickCursor(
   store: BackfillStore | null,
-  served: number,
+  targets: readonly BackfillTarget[],
+  platform: string,
+  scope: string,
 ): Promise<void> {
+  const prev = pruneToRegistry(servedThisWorker ?? { served: {} }, targets);
+  const registered = targets.map((t) => targetIdentityKey(t.platform, t.scope));
+  const servedKey = targetIdentityKey(platform, scope);
+
+  // Head-to-tail order of the next rotation (smallest rank served soonest):
+  const order: string[] = Object.keys(prev).sort((a, b) => prev[a]! - prev[b]!);
+  for (const key of registered) {
+    if (!(key in prev)) order.push(key); // a newcomer (§1) joins the back
+  }
+  const servedAt = order.indexOf(servedKey);
+  if (servedAt !== -1) order.splice(servedAt, 1);
+  order.push(servedKey); // the row just served is the most recent → the back
+
+  // Dense ranks 0..k-1 in that order (§2): the served row carries the largest,
+  // k-1, so no value ever reaches k and none can exceed MAX_TARGET_ENTRIES.
+  const served: Record<string, number> = {};
+  for (let i = 0; i < order.length; i += 1) served[order[i]!] = i;
+
   // 🔴 Before the write, not after: a write that throws still happened as far as
   //    the walk is concerned, and the next wake must start after it (see
   //    `servedThisWorker`).
-  servedThisWorker = served;
+  servedThisWorker = { served, revision: (servedThisWorker?.revision ?? 0) + 1 };
+  const session = cursorSessionArea();
+  if (session) {
+    try {
+      await session.set({ [BACKFILL_CURSOR_SESSION_KEY]: servedThisWorker });
+    } catch (err) {
+      console.warn('[chat-stasher] backfill session cursor write failed', (err as Error).message);
+    }
+  }
   if (!store) return;
   try {
-    await store.save(BACKFILL_CURSOR_KEY, { served } satisfies TickCursor);
+    await store.save(BACKFILL_CURSOR_KEY, servedThisWorker);
   } catch (err) {
     console.warn('[chat-stasher] backfill tick cursor write failed', (err as Error).message);
   }
