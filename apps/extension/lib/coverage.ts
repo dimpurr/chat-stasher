@@ -222,7 +222,8 @@ export interface CoverageRow {
   months: CoverageMonth[];
   /**
    * Conversations with **no recorded time**, split archived/pending. Reported as its own bucket, never
-   * spread over the months — ADR-032 §6: 缺时间的部分单列「时间未知」，不猜.
+   * spread over the months — ADR-032 §6: the part with no time is listed on its own as "time unknown",
+ * and is not guessed at.
    */
   unknownTime: { archived: number; pending: number };
   /** How many ids we have a recorded time for, against how many exist. The denominator for `months`. */
@@ -569,7 +570,7 @@ export function stateNote(row: CoverageRow, now: number): string | null {
 /**
  * The speed and ETA sentence.
  *
- * 🔴 Three rules it holds, all of them ADR-032 §5 and its "估算值显式标「估算」":
+ * 🔴 Three rules it holds, all of them ADR-032 §5 and its "an estimate is explicitly labelled one":
  *  · an ETA is **always** labelled an estimate, and which rate produced it is named — a ceiling-based ETA
  *    is a floor on the time taken, and saying so is the difference between an estimate and a promise;
  *  · no ETA is printed when there is no rate to divide by, and the sentence says which number is missing
@@ -588,11 +589,19 @@ export function speedNote(row: CoverageRow, now: number): string {
     ? t('coverage.speed.etaNothingOwed')
     : speed.etaDays === null
       ? t('coverage.speed.etaUnknown')
-      : t('coverage.speed.eta', {
-        days: speed.etaDays < 1.5 ? speed.etaDays.toFixed(1) : String(Math.ceil(speed.etaDays)),
-        basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
-        pending: row.pending,
-      });
+      : speed.etaDays < 1
+        // 🔴 Under a day the sentence switches units rather than rounding to "0.0 days", which reads like
+        //    "no time at all" instead of "less than a day".
+        ? t('coverage.speed.etaHours', {
+          hours: Math.max(1, Math.round(speed.etaDays * 24)),
+          basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
+          pending: row.pending,
+        })
+        : t('coverage.speed.eta', {
+          days: speed.etaDays < 1.5 ? speed.etaDays.toFixed(1) : String(Math.ceil(speed.etaDays)),
+          basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
+          pending: row.pending,
+        });
   const idle = speed.minutesSinceLastBody === null
     ? t('coverage.speed.neverFetched')
     : t('coverage.speed.lastBody', { minutes: speed.minutesSinceLastBody });
@@ -602,7 +611,8 @@ export function speedNote(row: CoverageRow, now: number): string {
 /**
  * The list's own state, in plain words — and 🔴 the one place the `≥` rule is worded.
  *
- * ADR-032 §1: "已列完 = N" versus "仍在列 ≥ N". The distinction is `enumState`, not a guess from the
+ * ADR-032 §1: "listed to the end = N" versus "still listing ≥ N". The distinction is `enumState`, not a
+ * guess from the
  * numbers, and the renderer is handed the finished sentence so it cannot print `listed` bare while the
  * list is still being read.
  */

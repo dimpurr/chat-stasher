@@ -11,7 +11,8 @@
  *    language, so no model holds a language — which is also why `lib/coverage.ts` carries catalog keys and
  *    numbers rather than strings.
  *
- * 🔴 **Nothing here decides anything.** The six questions ADR-032 §"必须呈现的信息" asks are answered in
+ * 🔴 **Nothing here decides anything.** The six questions ADR-032's "information that must be shown" asks
+ * are answered in
  *    `lib/coverage.ts`; this file chooses the order and the wording. A rule implemented twice would be a
  *    rule that can disagree with itself, and the one that drifts is the one nobody is looking at.
  */
@@ -84,7 +85,8 @@ export function presetWhat(preset: SpeedPreset): string {
  * The speed control.
  *
  * 🔴 The risk note is a **block beside the control**, not a tooltip, and it appears with the preset that
- *    carries it (ADR-032 §3: 加速带风险提示). A warning the user has to hover to find is a warning about a
+ *    carries it (ADR-032 §3: the fast preset comes with a risk note). A warning the user has to hover to
+ *    find is a warning about a
  *    setting they have already changed.
  */
 export function speedBlocks(report: CoverageReport): CoverageBlock[] {
@@ -308,7 +310,13 @@ export function coverageCard(report: CoverageReport, now: number): { lines: Cove
   const lines = report.rows.map((row) => ({
     platform: row.platform,
     scope: row.scope,
+    // 🔴 Every placeholder the sentence carries is passed, and the platform and scope are two of them:
+    //    the card is a list of rows, and two accounts of one platform are two different histories. A
+    //    missing one does not fail loudly — it renders as the literal `{platform}`, which is how this was
+    //    found in a real browser after the unit tests were green.
     text: t('coverage.card.line', {
+      platform: row.platform,
+      scope: row.scope,
       archived: row.archived,
       pending: row.pending,
       state: stateNote(row, now) ?? t('coverage.card.running'),

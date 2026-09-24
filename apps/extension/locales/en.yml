@@ -833,7 +833,7 @@ coverage:
   card:
     open: Open the coverage page
     title: Coverage
-    line: "{platform} · stored {archived}, owed {pending} — {state}"
+    line: "{platform} · {scope} · stored {archived}, owed {pending} — {state}"
     running: running
   months:
     title: When the conversations are from

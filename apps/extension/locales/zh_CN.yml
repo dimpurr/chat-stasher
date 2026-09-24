@@ -541,7 +541,7 @@ coverage:
   card:
     open: 打开覆盖页
     title: 覆盖情况
-    line: "{platform} · 已存 {archived}、欠 {pending} —— {state}"
+    line: "{platform} · {scope} · 已存 {archived}、欠 {pending} —— {state}"
     running: 正在跑
   months:
     title: 对话是什么时候的

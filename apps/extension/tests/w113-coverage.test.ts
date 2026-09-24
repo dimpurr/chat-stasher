@@ -158,9 +158,9 @@ describe('W113 · item 3 — stored, owed, failed, parked', () => {
 
   it('failures are grouped by reason, commonest first, and the dropped count survives', () => {
     const failures = [
-      { id: 'aaaaaaaa', reason: 'detail-empty', at: 1 },
-      { id: 'bbbbbbbb', reason: 'detail-empty', at: 2 },
-      { id: 'cccccccc', reason: 'detail-too-long', at: 3 },
+      { shortId: 'aaaaaaaa', platform: PLATFORM, reason: 'detail-empty', at: 1 },
+      { shortId: 'bbbbbbbb', platform: PLATFORM, reason: 'detail-empty', at: 2 },
+      { shortId: 'cccccccc', platform: PLATFORM, reason: 'detail-too-long', at: 3 },
     ];
     const row = rowOf(input({ scopes: [scope({ header: header({ failures, failuresDropped: 4 }) })] }));
     expect(row.failures).toEqual([
@@ -304,7 +304,7 @@ describe('W113 · item 5 — speed and ETA', () => {
   it('nothing owed means no ETA to give, and the sentence says so', () => {
     const row = rowOf(input({
       presetRaw: 'standard',
-      scopes: [scope({ state: undefined as never, header: header({ detailToday: { day: '2026-09-24', count: 0, cap: 400 } }) })],
+      scopes: [scope({ header: header({ detailToday: { day: '2026-09-24', count: 0, cap: 400 } }) })],
     }));
     expect(row.speed.etaDays).toBeNull();
     expect(speedNote(row, NOW)).toContain('nothing is owed');
@@ -383,7 +383,7 @@ describe('W113 · the report as a whole', () => {
     const report = buildCoverage(input({
       scopes: [
         scope({ scope: 'clean' }),
-        scope({ scope: 'failed', header: header({ scope: 'failed', failures: [{ id: 'aaaaaaaa', reason: 'detail-empty', at: 1 }] }) }),
+        scope({ scope: 'failed', header: header({ scope: 'failed', failures: [{ shortId: 'aaaaaaaa', platform: PLATFORM, reason: 'detail-empty', at: 1 }] }) }),
         scope({ scope: 'stopped', header: header({ scope: 'stopped', halted: { reason: 'shape-changed', detail: 'x', at: 1 } }) }),
       ],
     }));
@@ -446,5 +446,90 @@ describe('W113 · the page offers the three presets and warns about one', () => 
     const fast = coverageView(buildCoverage(input({ presetRaw: 'faster' })), NOW);
     // The note lives beside the control (the page's own speed blocks), not buried in the sections.
     expect(fast.sections.length).toBeGreaterThan(0);
+  });
+});
+
+describe('W113 · no rendered sentence may keep a placeholder', () => {
+  /**
+   * 🔴 The guard for the defect the browser test found.
+   *
+   * A catalog sentence that names `{platform}` while the call passes only `{archived}` does not fail: the
+   * substitution is simply skipped and the reader is shown the literal braces. Every unit test here was
+   * green while the popup's card read `{platform} · stored 1, owed 1`. So the assertion is on the rendered
+   * *output* of every sentence this feature can produce, for a fixture chosen to make every branch fire.
+   */
+  const UNSUBSTITUTED = /\{[a-zA-Z][a-zA-Z0-9]*\}/;
+
+  function richReport() {
+    const times = new Map([
+      ['a1', { at: Date.UTC(2026, 6, 4), from: 'list-update' as const }],
+    ]);
+    return buildCoverage(input({
+      presetRaw: 'faster',
+      scopes: [
+        scope({
+          debt: { pending: ['p1', 'p2'], archived: ['a1'], times },
+          header: header({
+            enumCursor: { offset: 12, complete: true, truncated: 'has-more-missing' },
+            totalKnown: 3, totalSource: 'contradicted',
+            failures: [{ shortId: 'aaaaaaaa', platform: PLATFORM, reason: 'detail-empty', at: 1 }], failuresDropped: 2,
+            parkedEmpty: ['p1'], emptyStreak: 1,
+            halted: { reason: 'detail-empty-unverified', detail: 'body came back empty', at: 1, attempts: 2, retryAt: NOW + 60_000 },
+            relisted: { at: NOW - 1000, recorded: 9, held: 4 },
+          }),
+        }),
+        scope({ scope: 'second', registered: false, header: header({ scope: 'second' }) }),
+        scope({ scope: 'third', debt: null, skippedReason: 'daily-cap', header: header({ scope: 'third' }) }),
+      ],
+    }));
+  }
+
+  it('the page, every block of it, has no literal placeholder left', () => {
+    const view = coverageView(richReport(), NOW);
+    const texts = [
+      view.title,
+      view.subtitle,
+      view.legend,
+      ...view.banners.flatMap((b) => ('text' in b ? [b.text] : [])),
+      ...view.sections.flatMap((s) => s.blocks.flatMap((b) => ('text' in b ? [b.text] : []))),
+    ];
+    for (const text of texts) {
+      expect(text, `unsubstituted placeholder in: ${text}`).not.toMatch(UNSUBSTITUTED);
+    }
+  });
+
+  it('the facts and the table carry no placeholder either', () => {
+    const view = coverageView(richReport(), NOW);
+    const cells = view.sections.flatMap((s) => s.blocks.flatMap((b) => {
+      if (b.kind === 'facts') return b.rows.flatMap((r) => [r.label, r.value]);
+      if (b.kind === 'table') return [...b.headers, ...b.rows.flat()];
+      return [];
+    }));
+    expect(cells.length).toBeGreaterThan(0);
+    for (const cell of cells) {
+      expect(cell, `unsubstituted placeholder in: ${cell}`).not.toMatch(UNSUBSTITUTED);
+    }
+  });
+
+  it('the popup card names the platform and the scope, and has no placeholder left', () => {
+    const card = coverageCard(richReport(), NOW);
+    expect(card.lines).toHaveLength(3);
+    for (const line of card.lines) {
+      expect(line.text, line.text).not.toMatch(UNSUBSTITUTED);
+    }
+    // The two things the browser test caught: the platform is named, and the scope distinguishes two
+    // accounts of one platform.
+    expect(card.lines[0]!.text).toContain('chatgpt');
+    expect(card.lines.some((l) => l.text.includes('second'))).toBe(true);
+  });
+
+  it('the speed sentence and the state sentence are substituted in every preset', () => {
+    for (const presetRaw of ['gentle', 'standard', 'faster'] as const) {
+      const report = buildCoverage(input({ presetRaw, scopes: [scope({ debt: { pending: ['p'], archived: [], times: new Map() } })] }));
+      const row = report.rows[0]!;
+      expect(speedNote(row, NOW)).not.toMatch(UNSUBSTITUTED);
+      const note = stateNote(row, NOW);
+      if (note !== null) expect(note).not.toMatch(UNSUBSTITUTED);
+    }
   });
 });
