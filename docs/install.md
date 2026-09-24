@@ -102,7 +102,7 @@ that platform."** The extension has two legs; please read them separately:
 ### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
 
 The list below comes directly from the two tables in the code, not from
-marketing (`apps/extension/lib/backfill/enumerate.ts:4249-4276`):
+marketing (`apps/extension/lib/backfill/enumerate.ts:4343-4370`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
@@ -638,7 +638,7 @@ confirmed in the code, not a temporary disclaimer.
   (`apps/extension/entrypoints/background.ts:1394-1458`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
-  `apps/extension/lib/backfill/enumerate.ts:4249-4276`). The
+  `apps/extension/lib/backfill/enumerate.ts:4343-4370`). The
   middle tier is the one most likely to make you think "I've backed it up", so it
   gets its own bullet here.
 

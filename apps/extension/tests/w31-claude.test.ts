@@ -627,9 +627,11 @@ describe('W31-5 · the body segment', () => {
     );
   });
 
-  it('🔴 W92 · a discarded sibling branch does not stop the active branch from resolving', () => {
+  it('🔴 W92 · a discarded sibling branch does not stop the active branch from resolving', async () => {
     // The real-sanitized fixture's third body: the active branch starts at a message
     // with index 1, and another branch-root with index 0 points at the same sentinel.
+    // W92c keeps this archiving: the active root's index is > 0, but a smaller-indexed
+    // carried message (the discarded sibling) names the same absent sentinel.
     const branched = JSON.stringify({
       uuid: ID,
       current_leaf_message_uuid: 'm3',
@@ -641,6 +643,59 @@ describe('W31-5 · the body segment', () => {
     });
     expect(parseClaudeDetailTree(branched)).toEqual({ ok: true, ordered: ['m2', 'm3'] });
     expect(parseClaudeDetailPage(branched)).toEqual({ ok: true, outcome: 'non-empty' });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: branched });
+    const report = await run(memoryStore(), be.http, ORG);
+    expect(report.state.archived).toEqual([ID]);
+    expect(report.failedThisRun).toEqual([]);
+  });
+
+  it('🔴 W92c · Scenario A · a missing middle message is refused, not archived as complete', async () => {
+    // The real branch root (index 0, naming the sentinel) is still carried, but the
+    // leaf's own chain stops at `m2` in the middle: two absent parents (the sentinel
+    // and `m2`), so this cannot be the whole branch. Red on acfe800.
+    const middleMissing = JSON.stringify({
+      uuid: ID,
+      current_leaf_message_uuid: 'm4',
+      chat_messages: [
+        { uuid: 'm1', index: 0, sender: 'human', parent_message_uuid: ROOT_SENTINEL },
+        { uuid: 'm3', index: 2, sender: 'human', parent_message_uuid: 'm2' },
+        { uuid: 'm4', index: 3, sender: 'assistant', parent_message_uuid: 'm3' },
+      ],
+    });
+    const walked = parseClaudeDetailTree(middleMissing);
+    expect(walked.ok).toBe(false);
+    expect(walked.ok === false && walked.outcome).toBe('detail-tree-incomplete');
+    expect(parseClaudeDetailPage(middleMissing)).toEqual({ ok: true, outcome: 'detail-tree-incomplete' });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: middleMissing });
+    const report = await run(memoryStore(), be.http, ORG);
+    expect(report.state.archived).toEqual([]);
+    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-tree-incomplete']);
+    // A per-conversation fact, not a halt.
+    expect(report.stopped).not.toBe('halted');
+  });
+
+  it('🔴 W92c · Scenario B · a dropped prefix whose surviving root has index 2 is refused', async () => {
+    // Only the tail is carried: `m3` (index 2, parent `m2`) and the leaf (index 3,
+    // parent `m3`). One absent parent (`m2`), but the message treated as the root has
+    // index 2, and no smaller-indexed carried message names `m2`, so the prefix was
+    // dropped. Red on acfe800.
+    const droppedPrefix = JSON.stringify({
+      uuid: ID,
+      current_leaf_message_uuid: 'leaf',
+      chat_messages: [
+        { uuid: 'm3', index: 2, sender: 'human', parent_message_uuid: 'm2' },
+        { uuid: 'leaf', index: 3, sender: 'assistant', parent_message_uuid: 'm3' },
+      ],
+    });
+    const walked = parseClaudeDetailTree(droppedPrefix);
+    expect(walked.ok).toBe(false);
+    expect(walked.ok === false && walked.outcome).toBe('detail-tree-incomplete');
+    expect(parseClaudeDetailPage(droppedPrefix)).toEqual({ ok: true, outcome: 'detail-tree-incomplete' });
+    const be = backend({ [LIST_PATH]: listPage([ID]), [DETAIL_PATH]: droppedPrefix });
+    const report = await run(memoryStore(), be.http, ORG);
+    expect(report.state.archived).toEqual([]);
+    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-tree-incomplete']);
+    expect(report.stopped).not.toBe('halted');
   });
 
   it('a cycle is still a named per-conversation failure, and nothing is archived', async () => {
