@@ -359,8 +359,9 @@ impl Config {
     /// The config is a *hand-written* file — the shipped template is nothing
     /// but comments — so a serde round-trip (`toml::to_string`) is not an
     /// option: it would re-emit the file and delete every comment the user
-    /// wrote. `toml_edit` edits the parsed document in place and preserves
-    /// decor, ordering and comments.
+    /// wrote. When `[native_host]` already exists the new stage is spliced into
+    /// the file's own bytes, so comments, other sections, a BOM and even the
+    /// line endings (CRLF, LF or a mix) all survive untouched.
     ///
     /// Three outcomes, three states, and the caller prints which one happened:
     /// the key was absent and is now there, the key was there with a different
@@ -372,6 +373,10 @@ impl Config {
     /// A config file that exists but is not valid TOML is an error, never a
     /// silent overwrite: the parse failure is the user's text, and replacing it
     /// would delete whatever they were in the middle of writing.
+    ///
+    /// The two helpers below operate on a span-preserving [`toml_edit::Table`]
+    /// borrowed from the `ImDocument`, so the byte offsets they splice point
+    /// into the original `raw` text.
     pub fn set_native_host_stage(stage: &str) -> anyhow::Result<StageKeyWrite> {
         let path = config_path();
         let raw = match std::fs::read_to_string(&path) {
@@ -389,8 +394,14 @@ impl Config {
                 return Err(e).with_context(|| format!("read {}", path.display()));
             }
         };
-        let mut doc: toml_edit::DocumentMut = raw
-            .parse()
+        // Parsed into a span-preserving `ImDocument`, not a mutable
+        // `DocumentMut`. The immutable form keeps each key and value's byte
+        // span into `raw`, which is what lets the update below splice only the
+        // changed value instead of re-serialising the whole file — a
+        // `DocumentMut` can edit the tree but discards the spans, and
+        // `doc.to_string()` would then re-emit every line as LF and drop each
+        // `\r`.
+        let doc = toml_edit::ImDocument::parse(&raw)
             .with_context(|| format!("parse {} as TOML", path.display()))?;
 
         let previous = doc
@@ -407,21 +418,22 @@ impl Config {
             None => StageKeyWrite::Added,
         };
 
-        // Appended as text rather than inserted through `toml_edit`.
-        //
-        // `DocumentMut::insert` places a new root-level table correctly only
-        // when the root already has a key-value pair. The shipped template has
-        // none — every line of it is a comment — so an insert there lands the
-        // table *above* the file's own header comment: the bytes are preserved,
-        // but the result is a file nobody would have written. Appending is
-        // deterministic in both shapes, and the result is re-parsed below
-        // before anything is written, so the format is still checked.
-        let appended: Option<String> = match doc.get_mut("native_host") {
-            Some(section) => match section.as_table_mut() {
-                Some(table) => {
-                    table.insert("stage", toml_edit::value(stage));
-                    None
-                }
+        // The value spelled the way TOML spells it; both the splice and the
+        // append emit this same literal so the file speaks one form.
+        let literal = toml_edit::Value::from(stage).to_string();
+
+        // `[native_host]` present in the file: splice in only the stage's bytes.
+        // Absent: append the section as text at EOF — never `DocumentMut::insert`,
+        // which places a root table correctly only when the root already has a
+        // key-value pair, and the shipped template has none (every line is a
+        // comment), so an insert there would land the table *above* the file's
+        // header comment: bytes preserved, but a file nobody would have written.
+        // Appending is deterministic in both shapes and leaves every pre-existing
+        // byte alone; the result is re-parsed below, so the format is still
+        // checked.
+        let updated: String = match doc.get("native_host") {
+            Some(section) => match section.as_table() {
+                Some(table) => set_existing_section_stage(&raw, table, &literal),
                 // `native_host = 5`: saying so beats either silently replacing
                 // the user's value or panicking on an index.
                 None => anyhow::bail!(
@@ -430,7 +442,6 @@ impl Config {
                 ),
             },
             None => {
-                let literal = toml_edit::Value::from(stage).to_string();
                 let mut next = raw.clone();
                 if !next.ends_with('\n') {
                     next.push('\n');
@@ -442,10 +453,9 @@ impl Config {
                      # host never creates this directory; it refuses to run if it is gone.\n\
                      [native_host]\nstage = {literal}\n"
                 ));
-                Some(next)
+                next
             }
         };
-        let updated = appended.unwrap_or_else(|| doc.to_string());
 
         // The post-condition, checked rather than assumed: the text about to be
         // written must parse, and must parse back to exactly the value asked
@@ -1412,4 +1422,77 @@ key_file = "~/dest/key.json"
             "the init template must document the machine field"
         );
     }
+}
+
+/// Rewrite `[native_host]` inside an existing `raw` so that only the bytes of
+/// the `stage` value change, and return the new full text. The `table` is
+/// borrowed from a span-preserving `ImDocument` of `raw`, so the spans it
+/// exposes are byte offsets into `raw`.
+///
+/// Splices the new value's TOML literal over the old value's byte span, or,
+/// when the key is absent, inserts a line for it at the section's last line. In
+/// both cases every byte outside the changed span — comments, other sections, a
+/// BOM, and the line endings (CRLF, LF or a mix) — is preserved.
+fn set_existing_section_stage(raw: &str, table: &toml_edit::Table, literal: &str) -> String {
+    match table.get("stage") {
+        // The key is already there: replace exactly its bytes. The span covers
+        // the whole TOML literal including its quotes, so the splice swaps
+        // value-for-value and touches nothing else.
+        Some(stage_item) => {
+            let span = stage_item
+                .span()
+                .expect("a stage value parsed from text carries a byte span");
+            let mut out = String::with_capacity(raw.len() + literal.len().max(span.len()));
+            out.push_str(&raw[..span.start]);
+            out.push_str(literal);
+            out.push_str(&raw[span.end..]);
+            out
+        }
+        // The key is missing inside the section: append a line for it, reusing
+        // the line ending of the line it follows so a CRLF file stays CRLF and
+        // a mixed file stays mixed.
+        None => insert_missing_stage_line(raw, table, literal),
+    }
+}
+
+/// Insert `stage = <literal>` as a new line at the end of an existing, non-empty
+/// section (or straight under `[native_host]` when the section has no rows), so
+/// every pre-existing byte is kept. `table` is the same span-preserving borrow
+/// described on [`set_existing_section_stage`].
+fn insert_missing_stage_line(raw: &str, table: &toml_edit::Table, literal: &str) -> String {
+    // `base` is the byte offset of the end of the line the new one follows:
+    // the section's last row, or the `[native_host]` header when empty.
+    let base = match table.iter().last().and_then(|(_, item)| item.span()) {
+        Some(span) => span.end,
+        None => {
+            table
+                .span()
+                .expect("a section parsed from text carries its header span")
+                .end
+        }
+    };
+
+    // The character after `base`, past the line we are appending to.
+    let Some(newline) = raw[base..].find('\n') else {
+        // The line we follow is the file's last and carries no newline: our
+        // line gets its own separator, and the file's absent trailing newline
+        // stays absent.
+        let mut out = String::with_capacity(raw.len() + literal.len() + 1);
+        out.push_str(raw);
+        out.push('\n');
+        out.push_str(&format!("stage = {literal}"));
+        return out;
+    };
+    let nl = base + newline; // absolute offset of that newline
+    let ending = if raw[..nl].ends_with('\r') {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    let mut out = String::with_capacity(raw.len() + literal.len() + ending.len());
+    out.push_str(&raw[..nl + 1]);
+    out.push_str(&format!("stage = {literal}{ending}"));
+    out.push_str(&raw[nl + 1..]);
+    out
 }

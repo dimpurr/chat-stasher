@@ -231,6 +231,124 @@ fn changing_the_stage_prints_the_old_value_and_the_new_one() {
     assert!(after.contains("# chat-stasher configuration"));
 }
 
+/// When `[native_host]` already exists with an old stage, updating it must
+/// change only the value's bytes — not the line endings (CRLF, LF or a mix),
+/// not the comments or other sections, not a BOM, not the trailing newline or
+/// its absence. This is the sibling of the byte-preserving add path: the two
+/// halves of the same promise, exercised across the line-ending styles a
+/// hand-written file can carry.
+#[test]
+fn updating_an_existing_section_change_only_the_stage_value_bytes() {
+    // Spelled by the same renderer the writer uses, so the exact literal is
+    // matched both when it is written into the fixture and when the fixture
+    // rebuilds the expected file.
+    let old = "oldstage";
+    let old_lit = toml::Value::String(old.to_owned()).to_string();
+
+    let fixtures = [
+        (
+            "crlf",
+            format!("# c1\r\n[native_host]\r\nstage = {old_lit}\r\n# c2\r\nmachine = \"desk\"\r\n"),
+        ),
+        (
+            "lf",
+            format!("# c1\n[native_host]\nstage = {old_lit}\n# c2\nmachine = \"desk\"\n"),
+        ),
+        (
+            "mixed",
+            format!("# c1\r\n[native_host]\nstage = {old_lit}\r\n# c2\nmachine = \"desk\"\r\n"),
+        ),
+        (
+            "bom",
+            format!("\u{feff}# c1\r\n[native_host]\r\nstage = {old_lit}\r\n# c2\r\n"),
+        ),
+    ];
+
+    for (label, before) in fixtures {
+        let fixture = Fixture::new();
+        fixture.write_config(&before);
+        let stage = fixture.stage();
+        let new = stage.to_string_lossy().into_owned();
+        let new_lit = toml::Value::String(new.clone()).to_string();
+        let output = fixture.run(&["--stage", &stage.to_string_lossy()]);
+        assert_eq!(
+            Fixture::code(&output),
+            0,
+            "[{label}] stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let after = fixture.read_config();
+        let expected = before.replacen(&old_lit, &new_lit, 1);
+        assert_ne!(after, before, "[{label}] the stage value did not change");
+        assert_eq!(
+            after, expected,
+            "[{label}] the config must differ from the original only in the stage value\n--- before ---\n{before:?}\n--- after ---\n{after:?}\n--- expected ---\n{expected:?}"
+        );
+
+        // The independent half: the written config still reads back the new
+        // stage, so the assertion is about the value, not about which of TOML's
+        // string forms the writer happened to pick.
+        let doc: toml::Value = after
+            .parse()
+            .expect("[{label}] the config the command wrote must be valid TOML");
+        assert_eq!(
+            doc["native_host"]["stage"].as_str(),
+            Some(new.as_str()),
+            "[{label}] the recorded stage is not the path it was given"
+        );
+    }
+}
+
+/// The section is already in the file but the `stage` key is not: the new line
+/// lands at the end of the section (straight under `[native_host]` when the
+/// section has no other keys), reusing that line's ending so the CRLF file
+/// stays CRLF and every pre-existing byte survives.
+#[test]
+fn adding_stage_to_an_existing_section_keeps_the_rest_of_the_bytes() {
+    let fixtures = [
+        (
+            "non-empty section",
+            "# c1\r\n[native_host]\r\nmachine = \"desk\"\r\n# c2\r\n",
+            "# c1\r\n[native_host]\r\nmachine = \"desk\"\r\nstage = {lit}\r\n# c2\r\n",
+        ),
+        (
+            "empty section",
+            "# c1\r\n[native_host]\r\n# c2\r\n",
+            "# c1\r\n[native_host]\r\nstage = {lit}\r\n# c2\r\n",
+        ),
+    ];
+
+    for (label, before, expected_template) in fixtures {
+        let fixture = Fixture::new();
+        fixture.write_config(before);
+        let stage = fixture.stage();
+        let new_lit = toml::Value::String(stage.to_string_lossy().into_owned()).to_string();
+        let expected = expected_template.replace("{lit}", &new_lit);
+        let output = fixture.run(&["--stage", &stage.to_string_lossy()]);
+        assert_eq!(
+            Fixture::code(&output),
+            0,
+            "[{label}] stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let after = fixture.read_config();
+        assert_eq!(
+            after, expected,
+            "[{label}] the written config is not the original with only the stage line added\n--- before ---\n{before:?}\n--- after ---\n{after:?}\n--- expected ---\n{expected:?}"
+        );
+
+        let doc: toml::Value = after
+            .parse()
+            .expect("[{label}] the config the command wrote must be valid TOML");
+        assert_eq!(
+            doc["native_host"]["stage"].as_str(),
+            Some(stage.to_string_lossy().as_ref()),
+            "[{label}] the recorded stage is not the path it was given"
+        );
+    }
+}
+
 #[test]
 fn a_stage_path_that_does_not_exist_is_refused_and_the_config_is_untouched() {
     let fixture = Fixture::new();
