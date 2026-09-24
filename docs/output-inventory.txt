@@ -10,8 +10,8 @@
 # NOT covered: standalone format! (mostly construction), --json values, apps/extension.
 #
 # Format: <kind>  <file>:<line>  <text>   · sorted by file+line · deterministic
-write        crates/chat-stasher/src/body_cache.rs:155  "{bytes} B ({value:.1} {unit})"
-anyhow       crates/chat-stasher/src/body_cache.rs:259  "cache.dir `{raw}`: {e}"
+write        crates/chat-stasher/src/body_cache.rs:156  "{bytes} B ({value:.1} {unit})"
+anyhow       crates/chat-stasher/src/body_cache.rs:260  "cache.dir `{raw}`: {e}"
 with_context crates/chat-stasher/src/collect.rs:187  "read collector state {}"
 with_context crates/chat-stasher/src/collect.rs:191  "parse collector state {}"
 bail         crates/chat-stasher/src/collect.rs:194  "collector state {} is version {}, this build writes {STATE_VERSION}; its destination list cannot be trusted"

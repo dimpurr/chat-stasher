@@ -3,7 +3,8 @@
 //! **different keys**?
 //!
 //! ADR-034's body cache is specified as content-addressed by *data block id*,
-//! and its "开工前必须验证的前提" asks exactly this question, with a
+//! and its "premise that must be verified before starting work" asks exactly
+//! this question, with a
 //! documented fallback for either answer: same ids ⇒ one copy shared across
 //! destinations; different ids ⇒ still one global quota, but stored per
 //! `(remote + id)`.

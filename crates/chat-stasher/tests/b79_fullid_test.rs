@@ -16,8 +16,14 @@ use std::process::{Command, Output};
 const MACHINE: &str = "b79-fixture-machine";
 const SESSION: &str = "opencode.b79-fixture.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
 
+/// ADR-034 added one line to `read --all-machines`: the body-cache state line
+/// (`[read] body cache     : not used (bulk read, ADR-034)`). Bumping the pinned
+/// digest is the point of this constant — the addition could not be made
+/// quietly — and the delta was checked before it was bumped: removing exactly
+/// that one line from the canonical report reproduces the previous digest
+/// (`c378728e…`), so nothing else about the report moved.
 const READ_DEFAULT_REPORT_SHA256: &str =
-    "c378728e0e2b5abdeebe2563da39949c1646c112e7ffc1e04ee7033919916e20";
+    "a891cf802567c57b1d10aafcdfeb419d96394d48486518f7eae4d54da1312160";
 const VERIFY_DEFAULT_REPORT_SHA256: &str =
     "97a18d6a512cc34f9e7a678525ed0c61dec92e3a1d6fe30fd0205212965d6353";
 

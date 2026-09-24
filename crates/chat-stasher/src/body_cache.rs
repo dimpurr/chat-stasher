@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-/// Default quota: 2 GiB (ADR-034 decision 3, "默认 2 GB").
+/// Default quota: 2 GiB (ADR-034 decision 3: "a default of 2 GB").
 ///
 /// It is a starting point, not a measurement: the two machines this was built
 /// for are configured by hand (50 GB and 5–10 GB), and the value only decides
@@ -52,7 +52,8 @@ use std::time::{Duration, SystemTime};
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// A session larger than this fraction of the quota is never cached
-/// (ADR-034 decision 3, "单个会话超过额度 10% 不进缓存").
+/// (ADR-034 decision 3: "a single session larger than 10% of the quota is
+/// not cached").
 pub const SESSION_QUOTA_DENOMINATOR: u64 = 10;
 
 /// Magic bytes at the start of every entry file.
@@ -346,7 +347,8 @@ pub fn for_operation(config: &crate::config::Config, policy: Policy) -> Availabi
 /// ADR-034 rejects (no new keys, no new formats).
 ///
 /// So the key is the ciphertext's identity, which is the stricter half of
-/// ADR-034's own fallback ("若不同 ⇒ 仍一个总额度，但按「远端 + id」分开存"):
+/// ADR-034's own fallback ("if they differ, keep one shared quota but store
+/// entries per (remote + id) instead"):
 /// one global quota, and entries stored apart per destination because a pack id
 /// is a hash of the *encrypted* pack and therefore differs between two
 /// destinations that do not share a key. The measured cost is that two
@@ -771,7 +773,15 @@ fn remove_empty_dirs(root: &Path) {
             continue;
         };
         for entry in reader.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            // An entry whose type cannot be read is skipped: this pass only
+            // removes empty directories, so the only consequence of skipping
+            // one is that it stays. Treating "could not stat" as "is a
+            // directory" would instead try to remove something we know nothing
+            // about.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 let path = entry.path();
                 stack.push(path.clone());
                 dirs.push(path);
@@ -798,7 +808,8 @@ fn encode_entry(payload: &[u8]) -> Vec<u8> {
 /// Validate a whole entry file and return its payload, or `None` if it is not
 /// a well-formed entry whose bytes hash to what was recorded for them.
 ///
-/// This is the check ADR-034 requires on every hit ("命中时必重算哈希"). It
+/// This is the check ADR-034 requires on every hit ("the hash is recomputed
+/// on every hit"). It
 /// detects a truncated, bit-rotted or partially written file. It is not a
 /// check against the remote's own hash: the blob's ciphertext digest is not
 /// exposed at this layer, and the pack id covers the whole pack, which is not

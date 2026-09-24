@@ -100,14 +100,21 @@ echo
 echo "=============================================================="
 echo "Probe 2: leave the document alone and edit a line *inside* a cited"
 echo "  range."
-# Re-pointed after the Claude merge moved engine.ts: the probe must edit a line
-# that sits inside a range the lockfile actually holds, so it now looks the
-# range up first and fails loudly (void selftest) if the range is gone,
-# instead of editing an uncited line and "passing" while testing nothing.
-PROBE2_RANGE='crates/chat-stasher/src/store.rs:261-296'
+# Re-pointed twice: once after the Claude merge moved engine.ts, and again for
+# ADR-034, which inserted the body-cache code inside this range and moved the
+# docs' citation from 261-296 to 271-345. The probe must edit a line that sits
+# inside a range the lockfile actually holds, so it looks the range up first and
+# fails loudly (void selftest) if the range is gone, instead of editing an
+# uncited line and "passing" while testing nothing.
+#
+# The target line is picked as "inside the range, past its first line": the
+# snippet a human reads in the lockfile is the range's first non-empty line
+# (271, a closing brace), and that line must not be the one edited — otherwise
+# the check could pass by comparing snippets instead of hashing the range.
+PROBE2_RANGE='crates/chat-stasher/src/store.rs:271-345'
 PROBE2_FILE='crates/chat-stasher/src/store.rs'
-PROBE2_LINE=281
-echo "  Target: ${PROBE2_FILE}:${PROBE2_LINE}, inside the cited range 261-296."
+PROBE2_LINE=318
+echo "  Target: ${PROBE2_FILE}:${PROBE2_LINE}, inside the cited range 271-345."
 echo "  It sits in the middle, not on the first line: the snippet a human reads"
 echo "  in the lockfile is the range's first non-empty line, and that line does"
 echo "  not change."
