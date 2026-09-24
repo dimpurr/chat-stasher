@@ -359,8 +359,9 @@ impl Config {
     /// The config is a *hand-written* file — the shipped template is nothing
     /// but comments — so a serde round-trip (`toml::to_string`) is not an
     /// option: it would re-emit the file and delete every comment the user
-    /// wrote. `toml_edit` edits the parsed document in place and preserves
-    /// decor, ordering and comments.
+    /// wrote. When `[native_host]` already exists the new stage is spliced into
+    /// the file's own bytes, so comments, other sections, a BOM and even the
+    /// line endings (CRLF, LF or a mix) all survive untouched.
     ///
     /// Three outcomes, three states, and the caller prints which one happened:
     /// the key was absent and is now there, the key was there with a different
@@ -372,6 +373,10 @@ impl Config {
     /// A config file that exists but is not valid TOML is an error, never a
     /// silent overwrite: the parse failure is the user's text, and replacing it
     /// would delete whatever they were in the middle of writing.
+    ///
+    /// The two helpers below operate on a span-preserving [`toml_edit::Table`]
+    /// borrowed from the `ImDocument`, so the byte offsets they splice point
+    /// into the original `raw` text.
     pub fn set_native_host_stage(stage: &str) -> anyhow::Result<StageKeyWrite> {
         let path = config_path();
         let raw = match std::fs::read_to_string(&path) {
@@ -389,8 +394,14 @@ impl Config {
                 return Err(e).with_context(|| format!("read {}", path.display()));
             }
         };
-        let mut doc: toml_edit::DocumentMut = raw
-            .parse()
+        // Parsed into a span-preserving `ImDocument`, not a mutable
+        // `DocumentMut`. The immutable form keeps each key and value's byte
+        // span into `raw`, which is what lets the update below splice only the
+        // changed value instead of re-serialising the whole file — a
+        // `DocumentMut` can edit the tree but discards the spans, and
+        // `doc.to_string()` would then re-emit every line as LF and drop each
+        // `\r`.
+        let doc = toml_edit::ImDocument::parse(&raw)
             .with_context(|| format!("parse {} as TOML", path.display()))?;
 
         let previous = doc
@@ -407,21 +418,22 @@ impl Config {
             None => StageKeyWrite::Added,
         };
 
-        // Appended as text rather than inserted through `toml_edit`.
-        //
-        // `DocumentMut::insert` places a new root-level table correctly only
-        // when the root already has a key-value pair. The shipped template has
-        // none — every line of it is a comment — so an insert there lands the
-        // table *above* the file's own header comment: the bytes are preserved,
-        // but the result is a file nobody would have written. Appending is
-        // deterministic in both shapes, and the result is re-parsed below
-        // before anything is written, so the format is still checked.
-        let appended: Option<String> = match doc.get_mut("native_host") {
-            Some(section) => match section.as_table_mut() {
-                Some(table) => {
-                    table.insert("stage", toml_edit::value(stage));
-                    None
-                }
+        // The value spelled the way TOML spells it; both the splice and the
+        // append emit this same literal so the file speaks one form.
+        let literal = toml_edit::Value::from(stage).to_string();
+
+        // `[native_host]` present in the file: splice in only the stage's bytes.
+        // Absent: append the section as text at EOF — never `DocumentMut::insert`,
+        // which places a root table correctly only when the root already has a
+        // key-value pair, and the shipped template has none (every line is a
+        // comment), so an insert there would land the table *above* the file's
+        // header comment: bytes preserved, but a file nobody would have written.
+        // Appending is deterministic in both shapes and leaves every pre-existing
+        // byte alone; the result is re-parsed below, so the format is still
+        // checked.
+        let updated: String = match doc.get("native_host") {
+            Some(section) => match section.as_table() {
+                Some(table) => set_existing_section_stage(&raw, table, &literal)?,
                 // `native_host = 5`: saying so beats either silently replacing
                 // the user's value or panicking on an index.
                 None => anyhow::bail!(
@@ -430,7 +442,6 @@ impl Config {
                 ),
             },
             None => {
-                let literal = toml_edit::Value::from(stage).to_string();
                 let mut next = raw.clone();
                 if !next.ends_with('\n') {
                     next.push('\n');
@@ -442,10 +453,9 @@ impl Config {
                      # host never creates this directory; it refuses to run if it is gone.\n\
                      [native_host]\nstage = {literal}\n"
                 ));
-                Some(next)
+                next
             }
         };
-        let updated = appended.unwrap_or_else(|| doc.to_string());
 
         // The post-condition, checked rather than assumed: the text about to be
         // written must parse, and must parse back to exactly the value asked
@@ -1412,4 +1422,339 @@ key_file = "~/dest/key.json"
             "the init template must document the machine field"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // `set_existing_section_stage` and `insert_missing_stage_line` regression
+    // tests for defects found in R83 review (fixed in this worker branch).
+    // -----------------------------------------------------------------------
+
+    /// A `stage.flag = true` dotted key inside `[native_host]` makes
+    /// `toml_edit` produce an implicit table item with no byte span.  The
+    /// previous code called `.expect()` on that span and panicked.  After the
+    /// fix the function must return an error (not panic) and must not modify
+    /// any data.
+    #[test]
+    fn dotted_stage_key_returns_error_not_panic() {
+        let raw = "[native_host]\nmachine = \"desk\"\nstage.flag = true\n";
+        let doc = toml_edit::ImDocument::parse(raw).unwrap();
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture has [native_host]");
+        let literal = toml_edit::Value::from("C:/stage").to_string();
+        let result = set_existing_section_stage(raw, table, &literal);
+        assert!(
+            result.is_err(),
+            "a dotted stage key must return an error, not panic; got: {result:?}"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("dotted") || msg.contains("implicit") || msg.contains("table"),
+            "error message should mention the dotted/implicit-table shape; got: {msg}"
+        );
+    }
+
+    /// A `[native_host]` section with no `stage` key whose last line has no
+    /// trailing newline, inside a CRLF file.  The previous code inserted a lone
+    /// `\n` instead of `\r\n`.
+    ///
+    /// Fixture bytes: `# c1\r\n[native_host]\r\nmachine = "desk"` (no final
+    /// newline).
+    #[test]
+    fn insert_stage_in_crlf_file_with_no_trailing_newline_uses_crlf_separator() {
+        let raw = "# c1\r\n[native_host]\r\nmachine = \"desk\"";
+        let doc = toml_edit::ImDocument::parse(raw).unwrap();
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture has [native_host]");
+        let literal = toml_edit::Value::from("C:/stage").to_string();
+        let result =
+            set_existing_section_stage(raw, table, &literal).expect("insert should succeed");
+        assert!(
+            result.contains("\r\nstage = "),
+            "inserted stage line must be preceded by CRLF, not a lone LF; \
+             result bytes: {:?}",
+            result.as_bytes()
+        );
+        let lone_lf_count = result
+            .bytes()
+            .enumerate()
+            .filter(|&(i, b)| b == b'\n' && (i == 0 || result.as_bytes()[i - 1] != b'\r'))
+            .count();
+        assert_eq!(
+            lone_lf_count,
+            0,
+            "result must contain no lone LF bytes; result bytes: {:?}",
+            result.as_bytes()
+        );
+        let reparsed: toml_edit::DocumentMut = result.parse().expect("must parse back");
+        assert_eq!(
+            reparsed
+                .get("native_host")
+                .and_then(|s| s.get("stage"))
+                .and_then(|i| i.as_str()),
+            Some("C:/stage")
+        );
+    }
+
+    /// The root-level dotted spelling `native_host.stage.flag = true` produces
+    /// the same implicit `stage` table as the in-section form, so it must take
+    /// the same error path instead of panicking.
+    #[test]
+    fn root_dotted_stage_key_returns_error_not_panic() {
+        let raw = "native_host.stage.flag = true\n";
+        let doc = toml_edit::ImDocument::parse(raw).unwrap();
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture has an implicit native_host table");
+        let literal = toml_edit::Value::from("C:/stage").to_string();
+        let result = set_existing_section_stage(raw, table, &literal);
+        assert!(
+            result.is_err(),
+            "a root dotted stage key must return an error, not panic; got: {result:?}"
+        );
+    }
+
+    /// An empty `[native_host]` header as the file's last line with no trailing
+    /// newline, in a CRLF file, must get a `\r\n` before the inserted line.
+    #[test]
+    fn insert_stage_in_empty_crlf_section_at_eof_uses_crlf_separator() {
+        let raw = "# c1\r\n[native_host]";
+        let doc = toml_edit::ImDocument::parse(raw).unwrap();
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture has [native_host]");
+        let literal = toml_edit::Value::from("C:/stage").to_string();
+        let result =
+            set_existing_section_stage(raw, table, &literal).expect("insert should succeed");
+        assert!(
+            result.contains("[native_host]\r\nstage = "),
+            "empty section insert must be preceded by CRLF, not a lone LF; \
+             result bytes: {:?}",
+            result.as_bytes()
+        );
+        let lone_lf_count = result
+            .bytes()
+            .enumerate()
+            .filter(|&(i, b)| b == b'\n' && (i == 0 || result.as_bytes()[i - 1] != b'\r'))
+            .count();
+        assert_eq!(
+            lone_lf_count,
+            0,
+            "result must contain no lone LF bytes; result bytes: {:?}",
+            result.as_bytes()
+        );
+        let reparsed: toml_edit::DocumentMut = result.parse().expect("must parse back");
+        assert_eq!(
+            reparsed
+                .get("native_host")
+                .and_then(|s| s.get("stage"))
+                .and_then(|i| i.as_str()),
+            Some("C:/stage")
+        );
+    }
+
+    /// When `[native_host]` is followed by `[native_host.child]`, the stage
+    /// line must be inserted into `[native_host]`'s own key block (before the
+    /// child header), not after the child's last key.
+    #[test]
+    fn insert_stage_succeeds_when_native_host_has_child_subtable() {
+        let raw = "[native_host]\nmachine = \"desk\"\n[native_host.child]\nfoo = 1\n";
+        let doc = toml_edit::ImDocument::parse(raw).unwrap();
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture has [native_host]");
+        let literal = toml_edit::Value::from("/tmp/stage").to_string();
+        let result = set_existing_section_stage(raw, table, &literal)
+            .expect("insert with child subtable must succeed");
+        let stage_pos = result.find("stage =").expect("stage line must be present");
+        let child_pos = result
+            .find("[native_host.child]")
+            .expect("child header must be present");
+        assert!(
+            stage_pos < child_pos,
+            "stage must be inserted before [native_host.child]; \
+             stage_pos={stage_pos} child_pos={child_pos};\n{result}"
+        );
+        let reparsed: toml_edit::DocumentMut = result.parse().expect("must parse back");
+        assert_eq!(
+            reparsed
+                .get("native_host")
+                .and_then(|s| s.get("stage"))
+                .and_then(|i| i.as_str()),
+            Some("/tmp/stage")
+        );
+    }
+
+    /// Update path: an existing `stage` line with a CRLF ending, an inline
+    /// comment, a Windows backslash path, and no trailing newline at EOF.  Only
+    /// the value bytes may change; the comment, the CRLF and the absent trailing
+    /// newline must all survive untouched.
+    #[test]
+    fn update_stage_with_comment_crlf_backslash_no_trailing_newline() {
+        let raw = "[native_host]\r\nstage = 'C:\\Users\\old' # keep this comment";
+        let doc = toml_edit::ImDocument::parse(raw).unwrap();
+        let table = doc
+            .get("native_host")
+            .and_then(|s| s.as_table())
+            .expect("fixture has [native_host]");
+        let new_stage = "C:\\Users\\new";
+        let literal = toml_edit::Value::from(new_stage).to_string();
+        let result = set_existing_section_stage(raw, table, &literal).expect("update must succeed");
+        assert!(
+            result.contains("# keep this comment"),
+            "inline comment must survive the splice; result: {result:?}"
+        );
+        assert!(
+            !result.ends_with('\n'),
+            "absent trailing newline must remain absent; result: {result:?}"
+        );
+        let lone_lf_count = result
+            .bytes()
+            .enumerate()
+            .filter(|&(i, b)| b == b'\n' && (i == 0 || result.as_bytes()[i - 1] != b'\r'))
+            .count();
+        assert_eq!(
+            lone_lf_count,
+            0,
+            "result must not introduce a lone LF; result bytes: {:?}",
+            result.as_bytes()
+        );
+        let reparsed: toml_edit::DocumentMut = result.parse().expect("must parse back");
+        assert_eq!(
+            reparsed
+                .get("native_host")
+                .and_then(|s| s.get("stage"))
+                .and_then(|i| i.as_str()),
+            Some(new_stage)
+        );
+    }
+}
+
+/// Rewrite `[native_host]` inside an existing `raw` so that only the bytes of
+/// the `stage` value change, and return the new full text. The `table` is
+/// borrowed from a span-preserving `ImDocument` of `raw`, so the spans it
+/// exposes are byte offsets into `raw`.
+///
+/// Splices the new value's TOML literal over the old value's byte span, or,
+/// when the key is absent, inserts a line for it at the section's last line. In
+/// both cases every byte outside the changed span — comments, other sections, a
+/// BOM, and the line endings (CRLF, LF or a mix) — is preserved.
+///
+/// Returns an error when the `stage` key exists but is a dotted or implicit
+/// table (`stage.flag = true`), which has no byte span to splice. In that case
+/// the file is left untouched.
+fn set_existing_section_stage(
+    raw: &str,
+    table: &toml_edit::Table,
+    literal: &str,
+) -> anyhow::Result<String> {
+    match table.get("stage") {
+        // The key is already there: replace exactly its bytes. The span covers
+        // the whole TOML literal including its quotes, so the splice swaps
+        // value-for-value and touches nothing else.
+        Some(stage_item) => {
+            // An implicit dotted table (`stage.flag = true`) is represented as an
+            // Item::Table with no byte span. Splicing is impossible and the
+            // value cannot be read back as a string, so refuse without touching
+            // the file.
+            let span = stage_item.span().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`native_host.stage` is a dotted or implicit table, not a string; \
+                     `stage` cannot be set while that shape is present"
+                )
+            })?;
+            let mut out = String::with_capacity(raw.len() + literal.len().max(span.len()));
+            out.push_str(&raw[..span.start]);
+            out.push_str(literal);
+            out.push_str(&raw[span.end..]);
+            Ok(out)
+        }
+        // The key is missing inside the section: append a line for it, reusing
+        // the line ending of the line it follows so a CRLF file stays CRLF and
+        // a mixed file stays mixed.
+        None => insert_missing_stage_line(raw, table, literal),
+    }
+}
+
+/// Insert `stage = <literal>` as a new line at the end of an existing,
+/// non-empty section (or straight under `[native_host]` when the section has
+/// no rows), so every pre-existing byte is kept. `table` is the same
+/// span-preserving borrow described on [`set_existing_section_stage`].
+///
+/// When `[native_host]` is followed by a child subtable such as
+/// `[native_host.child]`, the child appears as a `Table` item in the iterator.
+/// Only direct key-value items (i.e. `item.is_value()`) are considered when
+/// locating the insertion point so the new line lands in `[native_host]`'s own
+/// key block, not under the child.
+fn insert_missing_stage_line(
+    raw: &str,
+    table: &toml_edit::Table,
+    literal: &str,
+) -> anyhow::Result<String> {
+    // `base` is the byte offset of the end of the line the new one follows:
+    // the section's last direct key-value row, or the `[native_host]` header
+    // when empty or when every child entry is a subtable.
+    //
+    // Only `is_value()` items are direct key-value pairs; a child subtable such
+    // as `[native_host.child]` is an `Item::Table` (`is_table() == true`) and
+    // its span covers the child's entire block — inserting there would put
+    // `stage` under the child, not under `[native_host]`.
+    let base = match table
+        .iter()
+        .filter(|(_, item)| item.is_value())
+        .last()
+        .and_then(|(_, item)| item.span())
+    {
+        Some(span) => span.end,
+        None => {
+            // Either the section has no direct key-value rows (empty or
+            // only subtables), or spans were not preserved. Insert straight
+            // after the section header.
+            table
+                .span()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "`native_host` section has no byte span; \
+                         `stage` cannot be inserted"
+                    )
+                })?
+                .end
+        }
+    };
+
+    // Detect the dominant line ending from the whole file so a CRLF file
+    // stays CRLF even when the line we follow is the last one and carries no
+    // newline of its own. We examine the whole `raw` rather than only the
+    // followed line because when the followed line is the last one there is no
+    // newline to look at.
+    let dominant_ending = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+
+    // The character after `base`, past the line we are appending to.
+    let Some(newline) = raw[base..].find('\n') else {
+        // The line we follow is the file's last and carries no newline: our
+        // line gets its own separator using the file's dominant ending, and the
+        // file's absent trailing newline stays absent.
+        let mut out = String::with_capacity(raw.len() + literal.len() + dominant_ending.len());
+        out.push_str(raw);
+        out.push_str(dominant_ending);
+        out.push_str(&format!("stage = {literal}"));
+        return Ok(out);
+    };
+    let nl = base + newline; // absolute offset of that newline
+    let ending = if raw[..nl].ends_with('\r') {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    let mut out = String::with_capacity(raw.len() + literal.len() + ending.len());
+    out.push_str(&raw[..nl + 1]);
+    out.push_str(&format!("stage = {literal}{ending}"));
+    out.push_str(&raw[nl + 1..]);
+    Ok(out)
 }

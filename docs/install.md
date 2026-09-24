@@ -193,7 +193,7 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:135-136`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,500-511`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,510-521`).
 
 ---
 
