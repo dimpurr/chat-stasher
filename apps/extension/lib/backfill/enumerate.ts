@@ -688,6 +688,27 @@ export type DetailParseOutcome =
   | DetailOutcome
   | 'detail-paged-unsupported'
   /**
+   * 🔴 W84b · **The body is real content, but it does not prove it is the whole
+   * conversation** — so it is never archived and its debt is never settled.
+   *
+   * The two sub-facts that land here, both stated rather than guessed:
+   *  · the completeness signal does not prove whole — only one of
+   *    `has_next_page` / `next_cursor` is present, or the pair is not exactly
+   *    `has_next_page === false` + `next_cursor === null` (`next_cursor: ""`,
+   *    a non-boolean `has_next_page`, a non-null-non-string `next_cursor`).
+   *    The observed no-more value is `next_cursor: null`, so any other reading
+   *    is unproven, not the stated end of the thread (parsePerplexityDetailPage);
+   *  · or an entry holds no readable content — it is `null`, not an object, or
+   *    its `blocks` is not a non-empty array while its `text` is not a non-empty
+   *    string.
+   *
+   * A per-conversation fact, exactly like 'detail-paged-unsupported': every other
+   * conversation in the same run is unaffected, it takes the failure path and the
+   * run carries on — never a halt of the leg and never an archived conversation
+   * (which would settle debt on a body that does not prove it is whole).
+   */
+  | 'detail-unverified'
+  /**
    * 🔴 W31 · The response is the platform's own tree, its shape is recognised,
    * and **the walk of the visible branch does not close**. The body is therefore
    * real content and may be missing messages, so it is not the conversation and
@@ -2113,8 +2134,8 @@ export function parsePerplexityListPage(text: string): ParseResult {
 }
 
 /**
- * 🔴 W84 · The completeness rule of one Perplexity body — an observation, not an
- * inference, and the reason the body leg can be written at all.
+ * 🔴 W84/W84b · The completeness rule of one Perplexity body — an observation,
+ * not an inference, and the reason the body leg can be written at all.
  *
  * Measured from the logged-in page's context on 2026-09-23 (raw CDP to
  * 127.0.0.1:9222, a fresh `GET /rest/thread/<slug>`): the envelope is
@@ -2127,35 +2148,40 @@ export function parsePerplexityListPage(text: string): ParseResult {
  * byte-identical body. So whether one response holds the whole thread is decided
  * by what the response *says*, not by "fewer entries than we asked for".
  *
- * Three outcomes, and the split keeps an unknown from being recorded as empty:
- *  · `entries` non-empty and the response declares no more → `non-empty` — the
- *    only shape that may be archived. This is W40 outcome (b): refuse whole
- *    unless the signal itself says "no more".
- *  · the response declares more (`has_next_page === true`, or a non-empty
- *    `next_cursor`) → `detail-paged-unsupported` — real content, explicitly
- *    incomplete, and this leg does not page the route; the engine records a
- *    per-conversation failure and stores nothing (engine.ts:2182).
- *  · `entries` empty and no-more → `detail-empty-unverified` — from one
- *    response "this conversation has no turns" and "a window with nothing in
- *    it" cannot be told apart, so no confirmed receipt (the same trade
- *    `parseKimiDetailPage` makes).
+ * 🔴 **Only one reading may be archived: both keys present, and exactly
+ * `has_next_page === false` + `next_cursor === null`.** The observed no-more
+ * value is `next_cursor: null`; a `""` cursor, a wrong-typed key, or a missing
+ * twin is **not** the stated end of the thread, so it must not settle debt on an
+ * unproven body. The four named outcomes:
+ *  · `next_cursor: null` + `has_next_page: false` with non-empty, readable
+ *    entries → `non-empty` — the only shape that may be archived (W40 outcome (b):
+ *    refuse whole unless the signal itself says "no more").
+ *  · it says more (`has_next_page === true`, or a non-empty `next_cursor`) →
+ *    `detail-paged-unsupported` — real content, explicitly incomplete, and this
+ *    leg does not page the route.
+ *  · `entries` empty with the confirmed-no-more pair → `detail-empty-unverified` —
+ *    from one response "this conversation has no turns" and "a window with
+ *    nothing in it" cannot be told apart, so no confirmed receipt (the same trade
+ *    `parseKimiDetailPage` makes, and the engine's reaction to it is W92b's to
+ *    change, not this parser's).
+ *  · any other signal reading, or an entry with no readable content (`blocks`
+ *    empty and no non-empty `text`) → `detail-unverified` — real content that
+ *    does not prove it is the whole conversation, so a per-conversation failure
+ *    and never an archive.
  *
- * 🔴 The completeness signal is **required**, not advisory: if neither
- * `has_next_page` nor `next_cursor` is present, the leg halts `shape-changed`.
- * A windowed body with no signal is exactly the silent truncation this project
- * exists to refuse, and both keys were present in every observed response, so
- * their joint absence is a wire change. A present-but-wrong-typed key is the
- * same call: `has_next_page` not a boolean, or `next_cursor` neither null nor a
- * string, is a type change, which means the shape moved.
+ * 🔴 The completeness signal is **required**, not advisory: only the *joint*
+ * absence of both keys halts `shape-changed`. A single present key means the
+ * completeness concept is still there but did not prove whole, so it is a
+ * per-conversation `detail-unverified` — not a halt — exactly so one
+ * unproven conversation never refuses the complete threads behind it.
  *
  * 🔴 The residual, named rather than left out: a server that truncates a long
- * thread **and** drops the "more" signal would be undetectable here. The
- * observed thread had one entry; whether a genuinely long thread answers
- * `has_next_page: true` / a non-null `next_cursor` when it truncates was not
- * directly observed (the 3-request budget), so that claim rests on the signal
- * being the platform's own stated semantics rather than on a long-thread
- * measurement. When it does declare more, the leg refuses — which is the honest
- * direction; when it does not, this parser treats the response as whole.
+ * thread **and** drops the "more" signal so that it answers `next_cursor: null`
+ * would be undetectable here. The observed thread had one entry; whether a
+ * genuinely long thread answers `has_next_page: true` / a non-null `next_cursor`
+ * when it truncates was not directly observed (the 3-request budget), so that
+ * claim rests on the signal being the platform's own stated semantics rather than
+ * on a long-thread measurement.
  */
 export function parsePerplexityDetailPage(text: string): DetailParseResult {
   let body: unknown;
@@ -2173,33 +2199,55 @@ export function parsePerplexityDetailPage(text: string): DetailParseResult {
     return { ok: false, detail: 'perplexity detail response has no `entries` array (shape changed?)' };
   }
 
-  // The completeness signal. Each key, when present, must be the type the probe
-  // measured; a non-matching type is a wire change and halts rather than being
-  // rounded into a definite reading.
-  let more = false;
-  if ('has_next_page' in record) {
-    const h = record.has_next_page;
-    if (typeof h !== 'boolean') {
-      return { ok: false, detail: 'perplexity detail response has a non-boolean `has_next_page` (wire shape changed?)' };
-    }
-    if (h) more = true;
-  }
-  if ('next_cursor' in record) {
-    const c = record.next_cursor;
-    if (c !== null && typeof c !== 'string') {
-      return { ok: false, detail: 'perplexity detail response has a non-null non-string `next_cursor` (wire shape changed?)' };
-    }
-    if (typeof c === 'string' && c.length > 0) more = true;
-  }
-  if (!('has_next_page' in record) && !('next_cursor' in record)) {
+  // 🔴 The completeness signal, read from its two observed spellings. Whether one
+  //    response holds the whole thread is decided by what the response *says*:
+  //    only `has_next_page === false` with `next_cursor === null` (both present)
+  //    is a confirmed end. A true `has_next_page` or a non-empty `next_cursor`
+  //    says "more exists". Every other reading — one key missing, `next_cursor:
+  //    ""`, a wrong-typed key — is unproven and lands on `detail-unverified`.
+  const hasHasNext = 'has_next_page' in record;
+  const hasCursor = 'next_cursor' in record;
+  const hasNextValue = record.has_next_page;
+  const cursorValue = record.next_cursor;
+
+  const saysMore =
+    (hasHasNext && hasNextValue === true)
+    || (hasCursor && typeof cursorValue === 'string' && cursorValue.length > 0);
+  const confirmedWhole =
+    hasHasNext && hasCursor && hasNextValue === false && cursorValue === null;
+
+  // Only the joint absence of both keys is a wire change (the completeness
+  // concept itself is gone — the silent-truncation failure this leg refuses).
+  if (!hasHasNext && !hasCursor) {
     return {
       ok: false,
       detail: 'perplexity detail response carries no completeness signal (no `has_next_page` and no `next_cursor`; wire shape changed?)',
     };
   }
 
-  if (more) return { ok: true, outcome: 'detail-paged-unsupported' };
+  if (saysMore) return { ok: true, outcome: 'detail-paged-unsupported' };
+  if (!confirmedWhole) return { ok: true, outcome: 'detail-unverified' };
+
+  // Confirmed whole — now the content test. A thread that was opened but never
+  // sent reads as empty; a non-empty thread must carry readable content, or its
+  // body is real-but-unproven and is not archived. (The probe saw two shapes:
+  // schematized entries carry `blocks`; the minimal query carries `text`; an
+  // entry satisfies the test if either is non-empty.)
   if (entries.length === 0) return { ok: true, outcome: 'detail-empty-unverified' };
+  for (const entry of entries) {
+    const readable =
+      entry !== null
+      && typeof entry === 'object'
+      && !Array.isArray(entry)
+      && ((
+        Array.isArray((entry as Record<string, unknown>).blocks)
+        && ((entry as Record<string, unknown>).blocks as unknown[]).length > 0
+      ) || (
+        typeof (entry as Record<string, unknown>).text === 'string'
+        && ((entry as Record<string, unknown>).text as string).length > 0
+      ));
+    if (!readable) return { ok: true, outcome: 'detail-unverified' };
+  }
   return { ok: true, outcome: 'non-empty' };
 }
 

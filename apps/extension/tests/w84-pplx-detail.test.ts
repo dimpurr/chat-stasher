@@ -44,6 +44,7 @@ import {
   PERPLEXITY_DETAIL_QUERY,
   PERPLEXITY_PLAN,
 } from '../lib/backfill/enumerate';
+import { describeFailureReason } from '../lib/backfill/failures';
 import type { Clock } from '../lib/backfill/pace';
 
 const ORIGIN = 'https://www.perplexity.ai';
@@ -144,6 +145,7 @@ function run(
   store: ReturnType<typeof memoryStore>,
   http: (url: string) => Promise<HttpResponse>,
   scope: string,
+  sink?: (captured: CapturedFetch) => SinkOutcome,
 ) {
   return runBackfill({
     platform: 'perplexity',
@@ -154,7 +156,7 @@ function run(
     clock: fakeClock(),
     pace: NO_WAIT,
     listLimit: 2,
-    sink: (captured: CapturedFetch): SinkOutcome => ({ saved: true, sessionId: captured.sessionId }),
+    sink: sink ?? ((captured: CapturedFetch): SinkOutcome => ({ saved: true, sessionId: captured.sessionId })),
   });
 }
 
@@ -191,13 +193,77 @@ describe('W84-1 · parsePerplexityDetailPage decides completeness from the signa
     expect(parsed.ok ? null : parsed.detail).toContain('no completeness signal');
   });
 
-  it('a present-but-wrong-typed signal key is a shape change', () => {
+  it('an empty `next_cursor` (with has_next_page false) is unproven, not the end: detail-unverified', () => {
+    // The observed no-more value is `next_cursor: null`; `""` is not null, so the
+    // pair is not a confirmed end and the body must not settle.
     expect(parsePerplexityDetailPage(
-      JSON.stringify({ entries: [{ uuid: 'e1' }], has_next_page: 'false', next_cursor: null }),
-    ).ok).toBe(false);
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], has_next_page: false, next_cursor: '' }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+  });
+
+  it('a single-key body (one of the two signal keys missing) is unproven: detail-unverified', () => {
+    // Only `has_next_page: false`, no `next_cursor`.
     expect(parsePerplexityDetailPage(
-      JSON.stringify({ entries: [{ uuid: 'e1' }], has_next_page: false, next_cursor: 7 }),
-    ).ok).toBe(false);
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], has_next_page: false }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+    // Only `next_cursor: null`, no `has_next_page`.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+    // Only `next_cursor: ""`, no `has_next_page`.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], next_cursor: '' }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+  });
+
+  it('a single present key that says more is detail-paged-unsupported, not unverified', () => {
+    // Only `has_next_page: true`.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], has_next_page: true }),
+    )).toEqual({ ok: true, outcome: 'detail-paged-unsupported' });
+    // Only a non-empty `next_cursor`.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], next_cursor: 'abc' }),
+    )).toEqual({ ok: true, outcome: 'detail-paged-unsupported' });
+  });
+
+  it('a present-but-wrong-typed signal key is unproven, not a halt: detail-unverified', () => {
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], has_next_page: 'false', next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], has_next_page: false, next_cursor: 7 }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+  });
+
+  it('an entry with no readable content is unproven: detail-unverified', () => {
+    // `blocks: []` and no `text` at all.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [] }], has_next_page: false, next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+    // A `null` entry.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [null], has_next_page: false, next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+    // A non-object entry.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: ['oops'], has_next_page: false, next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+    // An empty `text` string and no `blocks`.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', text: '' }], has_next_page: false, next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'detail-unverified' });
+  });
+
+  it('either non-empty `blocks` or non-empty `text` makes an entry readable: non-empty', () => {
+    // The schematized shape: blocks, no text.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', blocks: [{}] }], has_next_page: false, next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'non-empty' });
+    // The minimal shape: text, no blocks.
+    expect(parsePerplexityDetailPage(
+      JSON.stringify({ entries: [{ uuid: 'e1', text: 'hello' }], has_next_page: false, next_cursor: null }),
+    )).toEqual({ ok: true, outcome: 'non-empty' });
   });
 
   it('a body that is not the entries envelope is a shape change', () => {
@@ -205,6 +271,14 @@ describe('W84-1 · parsePerplexityDetailPage decides completeness from the signa
     expect(parsePerplexityDetailPage(JSON.stringify({ data: { entries: [] } })).ok).toBe(false);
     expect(parsePerplexityDetailPage('[]').ok).toBe(false);
     expect(parsePerplexityDetailPage(JSON.stringify({ entries: 'oops' })).ok).toBe(false);
+  });
+});
+
+describe('W84-6 · the `detail-unverified` failure reason reads as a named fact', () => {
+  it('the sentence is the observed fact, not the raw reason code', () => {
+    const sentence = describeFailureReason('detail-unverified');
+    expect(sentence).toContain('nothing was stored');
+    expect(sentence).not.toContain('detail-unverified');
   });
 });
 
@@ -261,9 +335,10 @@ describe('W84-3 · the allowlist admits exactly this body request', () => {
 });
 
 describe('W84-4 · end to end: a listed conversation is archived once its body reads complete', () => {
-  it('list, then one GET /rest/thread/{slug}, then the sink — under the list id', async () => {
+  it('list, then exactly one GET /rest/thread/{slug} per id, and each stored body is its own', async () => {
     const store = memoryStore();
     const calls: string[] = [];
+    const storedText: Record<string, string> = {};
     const http = async (url: string): Promise<HttpResponse> => {
       calls.push(url);
       const u = new URL(url);
@@ -273,19 +348,53 @@ describe('W84-4 · end to end: a listed conversation is archived once its body r
           ? { status: 200, text: pageBody([SLUG, SLUG2]) }
           : { status: 200, text: '[]' };
       }
-      // A body request: named by the listed slug, so return the same two.
-      return { status: 200, text: completeBody(SLUG, SLUG2) };
+      // A body request: return the body for exactly the asked slug, so the two
+      // threads carry distinct text.
+      const slug = decodeURIComponent(u.pathname.split('/').pop() ?? '');
+      return { status: 200, text: completeBody(slug) };
     };
 
-    const report = await run(store, http, 'w84-e2e');
+    const report = await run(store, http, 'w84-e2e', (captured) => {
+      storedText[captured.sessionId ?? ''] = captured.text;
+      return { saved: true, sessionId: captured.sessionId ?? '' };
+    });
 
     // The list was read (to its end), then both bodies were fetched by slug.
     expect(report.state.archived).toEqual(expect.arrayContaining([SLUG, SLUG2]));
-    // The body URLs are the plan's own builder output, fed the listed slugs.
+    // 🔴 Exactly ONE body request per id — a second request would re-request a
+    //    thread whose completeness leg was not finished, and must fail this test.
     for (const slug of [SLUG, SLUG2]) {
-      expect(calls).toContain(detailUrlFor(slug));
+      expect(calls.filter((c) => c === detailUrlFor(slug)).length).toBe(1);
     }
+    // Stored text is per-thread: each slug archived the body that answered it,
+    // and the two stored bodies are distinct from each other.
+    expect(storedText[SLUG]).toContain(`synthetic question for ${SLUG}`);
+    expect(storedText[SLUG2]).toContain(`synthetic question for ${SLUG2}`);
+    expect(storedText[SLUG]).not.toBe(storedText[SLUG2]);
     // Neither leg halted: this is a full platform now, not list-only.
+    expect(report.stopped).not.toBe('halted');
+  });
+
+  it('a body that is not proven whole is a named failure, never archived', async () => {
+    const store = memoryStore();
+    let bodyCalls = 0;
+    const http = async (url: string): Promise<HttpResponse> => {
+      const u = new URL(url);
+      if (u.pathname === PERPLEXITY_PLAN.listPath) {
+        return { status: 200, text: pageBody([SLUG]) };
+      }
+      // The body declares the confirmed pair but its only entry has no readable
+      // content (`blocks: []`, no `text`) — so it is detail-unverified.
+      bodyCalls += 1;
+      return { status: 200, text: JSON.stringify({ entries: [{ uuid: 'e1', blocks: [] }], has_next_page: false, next_cursor: null }) };
+    };
+
+    const report = await run(store, http, 'w84-unverified');
+
+    expect(bodyCalls).toBe(1);
+    expect(report.state.archived).not.toContain(SLUG);
+    // A named per-conversation failure — the leg keeps going, nothing stored.
+    expect(report.failedThisRun.map((f) => f.reason)).toEqual(['detail-unverified']);
     expect(report.stopped).not.toBe('halted');
   });
 });

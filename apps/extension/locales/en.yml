@@ -690,6 +690,10 @@ failure:
     message reached a message the reply did not carry — so nothing was stored
   detailEmpty: >-
     the conversation came back with no content at all, so nothing was stored
+  detailUnverified: >-
+    this conversation did not prove it was complete — the reply left its
+    no-more signal absent, empty or wrong-typed, or held an entry with no
+    readable content — so nothing was stored
   unknownReason: "reason code {reason}"
   shortIdEmpty: (empty)
 
