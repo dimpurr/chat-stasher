@@ -443,6 +443,15 @@ fn parse_local_day(text: &str) -> Result<(i32, u32, u32), UsageError> {
     Ok((y, m, d))
 }
 
+/// Resolve one validated `YYYY-MM-DD` value to its inclusive local-day bounds.
+pub fn local_day_bounds(text: &str) -> Result<(i64, i64), UsageError> {
+    let (year, month, day) = parse_local_day(text)?;
+    Ok((
+        local_day_start(year, month, day)?,
+        local_day_end(year, month, day)?,
+    ))
+}
+
 /// The first instant of a local calendar day.
 ///
 /// Walks forward a minute at a time from local 00:00:00 and takes the first

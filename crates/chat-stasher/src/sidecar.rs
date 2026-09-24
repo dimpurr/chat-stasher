@@ -91,6 +91,27 @@ pub fn declaration_machine(path: &Path) -> Option<String> {
     Some(machine.to_string())
 }
 
+/// Match the archived `meta/<machine>/writer.json` marker.
+pub fn writer_machine(path: &Path) -> Option<String> {
+    let comps: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let n = comps.len();
+    if n < 3 || comps[n - 1] != "writer.json" || comps[n - 3] != "meta" {
+        return None;
+    }
+    let machine = comps[n - 2];
+    (!machine.is_empty()).then(|| machine.to_string())
+}
+
+/// Last chat-stasher version that pushed this machine partition.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WriterVersionRecord {
+    pub machine_id: String,
+    pub chat_stasher_version: String,
+}
+
 /// Match an archived path against the `meta/<machine>/label-by-<writer>.json`
 /// marker (ADR-018), returning `(machine, writer)`.
 ///
