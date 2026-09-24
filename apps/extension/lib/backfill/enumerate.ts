@@ -3647,14 +3647,33 @@ export function claudeParentKeyIn(text: string): string | null {
  * response is a **tree** (every message names its parent), and
  * `current_leaf_message_uuid` names the newest message of the branch the user was
  * looking at. So the branch is exactly the chain that starts at that leaf and
- * follows parent links upward. If every step of that chain resolves to a message
- * present in `chat_messages` and it ends at a root, the chain is complete.
+ * follows parent links upward.
  *
- * If a parent is **missing** from the response, the tree this response carries
- * does not hold the whole branch: the wire is truncated (a long conversation
- * capped server-side is the open question the research records and cannot
- * answer), and the honest outcome is a named, per-conversation failure — never an
- * archived conversation that is silently missing its middle.
+ * 🔴 W92 · **The branch ends where a parent is not among the messages this
+ *    response carries, and that is the branch root — not truncation.**
+ *
+ * W31 wrote the opposite rule ("a parent missing from the response means the wire
+ * is truncated"), on the unverified hypothesis that a long conversation might be
+ * capped server-side inside one `chat_messages` array. The real wire falsifies it.
+ * Every observed Claude body ends its branch at a message whose
+ * `parent_message_uuid` is a **shared tree-root uuid that no response carries**:
+ * two independent real captures and a live page-context request (W92-OUT.md,
+ * 2026-09-24) all show exactly one absent parent, and it is the same value across
+ * conversations and across every branch in one body. A body built only of branches
+ * whose roots name that sentinel is therefore **a complete body**, and the old rule
+ * made the walk fail for 100 % of real conversations (197 consecutive
+ * `detail-tree-incomplete` receipts, 0 archives).
+ *
+ * So the walk now stops *at* the absent parent and treats the chain walked so far
+ * as the whole active branch. What remains a named refusal is a shape this code
+ * cannot read at all: a cycle among the parent links, no `current_leaf_message_uuid`,
+ * or a leaf that is not among the carried messages.
+ *
+ * ⚠️ **Residual, stated rather than hidden:** if the server ever did cap a body by
+ *    dropping the earliest messages of the branch, the surviving chain would also
+ *    terminate at an absent parent and be archived. W20 found no source for such a
+ *    cap, and it is not detectable from the body alone — the absent parent of a
+ *    dropped message and the absent root sentinel are structurally identical.
  *
  * 🔴 The walk is bounded by the number of messages: a response whose parent links
  *    form a cycle would otherwise loop forever. A cycle is not "complete" — it is
@@ -3727,7 +3746,11 @@ export function parseClaudeDetailTree(
     visited.add(current);
     const message = byUuid.get(current);
     if (!message) {
-      return { ok: false, outcome: 'detail-tree-incomplete', detail: 'the parent chain leaves the messages this response carries' };
+      // 🔴 W92 · A parent not among the carried messages is the branch root (the
+      //    shared tree-root sentinel the response does not carry), so the chain
+      //    walked so far is the whole active branch. See this function's header for
+      //    the real-wire evidence and the residual it accepts.
+      break;
     }
     chain.push(current);
     const parentKey = claudeParentKeyOf(message);
@@ -3797,12 +3820,13 @@ export function parseClaudeListPage(text: string): ParseResult {
  *  2. an **empty** `chat_messages` is `detail-empty-unverified`: a legitimate
  *     empty conversation is not something any source establishes for this route,
  *     and "we read an empty body" must not become "this conversation was empty";
- *  3. otherwise the branch is walked from `current_leaf_message_uuid` upward. A
- *     whole chain ⇒ 'non-empty' and the body is delivered. A chain that hits a
- *     missing parent, a missing leaf, or a cycle ⇒ **'detail-tree-incomplete'**:
- *     the response is real content and does not hold the whole conversation, so
- *     nothing is archived and the conversation gets a named receipt on the
- *     failure list.
+ *  3. otherwise the branch is walked from `current_leaf_message_uuid` upward. The
+ *     walk ends at the branch root, which the real wire represents as a parent the
+ *     response does not carry (a shared tree-root sentinel — see
+ *     `parseClaudeDetailTree`), ⇒ 'non-empty' and the body is delivered. A missing
+ *     leaf or a cycle among the parent links ⇒ **'detail-tree-incomplete'**: the
+ *     response is real content in a shape this code cannot read, so nothing is
+ *     archived and the conversation gets a named receipt on the failure list.
  */
 export function parseClaudeDetailPage(text: string): DetailParseResult {
   let body: unknown;
@@ -3894,13 +3918,18 @@ export const CLAUDE_PLAN: BackfillEnumPlan = {
     + 'chat_messages: [{ uuid, parent_uuid, index, sender, created_at, content }] }; the same route '
     + 'the live capture row watches, which is why a debt key and a live capture are the same value. '
     + 'The tree is the completeness check: the active branch is the chain from current_leaf_message_uuid '
-    + 'up parent links, and a chain that reaches a root without a missing parent is the whole branch. '
+    + 'up parent links. 🔴 W92 MEASURED (2026-09-24, one page-context GET plus two live captures): the '
+    + 'branch always ends at a message whose parent_message_uuid is a shared tree-root sentinel that no '
+    + 'chat_messages array carries — the same value across conversations and across every branch in one '
+    + 'body — so "a missing parent means truncation" was wrong and is no longer a refusal; the walk ends '
+    + 'at that absent parent as the branch root. '
     + '⚠️ Sources disagree on parent_message_uuid vs parent_uuid (both accepted, and which one a '
     + 'response used is readable through claudeParentKeyIn) and on the casing of the tree flag '
     + '(the URL recorded above is pinned). Auth is cookies only, no bearer and no CSRF token; the '
     + 'organization is required in the path and is not in the page URL, which is why the resolver '
     + 'exists. Whether a very long conversation is capped server-side inside one chat_messages array '
-    + 'is not found in any source — detail-tree-incomplete refuses such a body instead of archiving it.',
+    + 'is still not established by any source; a body so capped is not distinguishable from a complete '
+    + 'one by this walk (W92), so it is archived rather than refused.',
 };
 
 /**

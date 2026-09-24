@@ -128,13 +128,15 @@ export type FailureReason =
   | 'detail-too-long'
   /**
    * 🔴 W31 · The body was fetched, HTTP succeeded, the shape was recognised — and
-   * **the response's own parent links do not reach a root**. Two platforms reach
-   * this reason, and both are trees with a named current leaf: claude.ai (the
-   * chain from `current_leaf_message_uuid` upward hits a message the response does
-   * not carry) and, since 🔴 W42, DeepSeek (the chain from
-   * `chat_session.current_message_id` upward along `parent_id` leaves the messages
-   * the response carries, revisits one, or starts at a leaf the response does not
-   * hold).
+   * **the response's own parent links do not form a chain this code can read**.
+   * Two platforms reach this reason, and both are trees with a named current leaf.
+   * For claude.ai the walk **ends at an absent parent as the branch root** (🔴 W92
+   * measured that the real wire's branch root names a shared sentinel no body
+   * carries), so claude reaches this reason only for a missing leaf or a cycle
+   * among the parent links. For DeepSeek (since 🔴 W42) the chain from
+   * `chat_session.current_message_id` upward along `parent_id` still counts an
+   * absent parent as incomplete: it leaves the messages the response carries,
+   * revisits one, or starts at a leaf the response does not hold.
    *
    * A fact we observed, phrased as one: it says "walking back from the leaf left
    * the messages this response holds". It is deliberately **not** phrased as "the

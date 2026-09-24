@@ -102,7 +102,7 @@ that platform."** The extension has two legs; please read them separately:
 ### 1.1 🔴 History backfill: three tiers, not a "supported / unsupported" binary
 
 The list below comes directly from the two tables in the code, not from
-marketing (`apps/extension/lib/backfill/enumerate.ts:4220-4247`):
+marketing (`apps/extension/lib/backfill/enumerate.ts:4249-4276`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
@@ -618,8 +618,11 @@ confirmed in the code, not a temporary disclaimer.
   implementations rather than from a logged-in claude.ai session, every request is
   addressed by an account-scoped organization the page URL does not carry (resolved
   from evidence, and the leg stops rather than choosing when an account has
-  several), and a conversation whose body does not hold its whole branch is refused
-  and listed as a failure rather than archived. That organization is asked for
+  several), and each conversation's body is walked from its newest message back to
+  the branch root — a parent the response does not carry is that root (the shared
+  tree-root id every real body omits, measured 2026-09-24), so the body archives;
+  only a missing newest message or a cycle in the parent links is refused and
+  listed as a failure rather than archived. That organization is asked for
   **in the claude.ai page**, over the same channel the backfill fetches through,
   and only when it is actually needed: when you press the start button for that
   platform, and on a wake-up whose recorded scope is not an organization yet.
@@ -635,7 +638,7 @@ confirmed in the code, not a temporary disclaimer.
   (`apps/extension/entrypoints/background.ts:1394-1458`). Perplexity **only lists
   conversations, saving none of their content**. See section 1.1 for
   the list and the detailed explanation (list from
-  `apps/extension/lib/backfill/enumerate.ts:4220-4247`). The
+  `apps/extension/lib/backfill/enumerate.ts:4249-4276`). The
   middle tier is the one most likely to make you think "I've backed it up", so it
   gets its own bullet here.
 

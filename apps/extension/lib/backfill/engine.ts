@@ -2194,11 +2194,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       continue;
     }
     /**
-     * 🔴 W31 · **A recognised body whose own parent links do not reach a root.**
+     * 🔴 W31 · **A recognised body whose own parent links cannot be walked.**
      *
-     * claude.ai's body is a tree: the active branch is the chain that starts at
-     * `current_leaf_message_uuid` and follows parent links upward, and a chain that
-     * hits a parent the response does not carry is **not the whole conversation**.
+     * Both platforms that reach this are trees with a named current leaf, and the
+     * fact recorded is that the branch could not be resolved — not why. For claude.ai
+     * the walk ends at an absent parent as the branch root (🔴 W92: the real wire's
+     * branch root names a shared sentinel no body carries), so it reaches this only
+     * for a missing leaf or a cycle; for DeepSeek an absent parent still counts.
      *
      * This is the same shape of decision as the branch above — a per-conversation
      * fact, a named receipt, nothing archived, and the run carries on — and it is
@@ -2218,8 +2220,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       state.detailToday.count += 1;
       await persist(state);
       console.warn(
-        '[chat-stasher] backfill: this conversation\'s body does not hold the whole branch'
-        + ' (walking back from the current leaf reached a message the response does not carry);'
+        '[chat-stasher] backfill: this conversation\'s branch could not be walked'
+        + ' (the current leaf is missing, or its parent links do not form a readable chain);'
         + ' nothing was stored and the failure list names it',
       );
       continue;
