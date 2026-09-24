@@ -20,7 +20,7 @@ set -euo pipefail
 #    one, so a prerelease here would hand every new user an unreleased build.
 #    Asking for a prerelease by name is exactly what the override is for.
 # ---------------------------------------------------------------------------
-VERSION="${CHAT_STASHER_VERSION:-0.3.0}"
+VERSION="${CHAT_STASHER_VERSION:-0.4.0}"
 
 # Where the binary + SHA256SUMS live. The default is the tagged GitHub release
 # (https only). Override with CHAT_STASHER_BASE_URL, e.g. to test against a

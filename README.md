@@ -104,6 +104,26 @@ browser extension), the one-time setup list — including registering the Native
 Messaging host with `chat-stasher install-native-host --stage <path>` — how to
 confirm the archive is actually running, and what does not exist yet.
 
+### Browser extension from a release (no store listing yet)
+
+Each release from 0.4.0 on attaches `chat-stasher-extension-X.Y.Z.zip`, built for
+the stable channel (ChatGPT, Claude, DeepSeek, Gemini, Grok). It is not in any
+extension store yet; load it yourself:
+
+1. Install the CLI from the same release and register the Native Messaging host:
+   `chat-stasher install-native-host --stage <your-stage>`. Without it the
+   extension has nowhere to deliver captures.
+2. Download the zip from the release page and unzip it into a folder you will keep
+   (the browser loads it from there; deleting the folder removes the extension).
+3. Open `chrome://extensions` (or your Chromium browser's equivalent), turn on
+   **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
+4. Reload any AI chat tab that was already open, so the page picks up the
+   extension. Then open the extension's popup to check it can reach the host.
+
+To update, unzip the new release over the same folder and press the reload
+button on the extension's card; reload open chat tabs again. Full details, and
+building from source: [`docs/install.md`](docs/install.md).
+
 The developer path, using your own repository URL and a directory you choose:
 
 ```sh

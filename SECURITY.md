@@ -44,11 +44,11 @@ leave the report open indefinitely.
 
 | Version | Supported |
 |---|---|
-| `main` — the dev channel, versioned `0.4.0-dev` (`crates/chat-stasher/Cargo.toml:3`) | Yes — this is the only line that receives fixes |
-| `0.3.0` — the current stable release (`v0.3.0`, tagged 2026-09-24) | No — fixes land on `main` and ship in the next stable release |
+| `main` — the dev channel; between a release commit and the next `-dev` bump it briefly carries the released version (`crates/chat-stasher/Cargo.toml:3`) | Yes — this is the only line that receives fixes |
+| `0.4.0` — the current stable release (`v0.4.0`, tagged 2026-09-24; CLI + browser extension 0.2.0) | No — fixes land on `main` and ship in the next stable release |
 
-Stable releases are the git tags `vX.Y.Z`; the newest is `v0.3.0`, tagged and
-released on 2026-09-24 (`v0.2.0` on 2026-09-12, `v0.1.0` on 2026-08-28). There is no maintained older
+Stable releases are the git tags `vX.Y.Z`; the newest is `v0.4.0`, tagged and
+released on 2026-09-24 (`v0.3.0` earlier the same day, `v0.2.0` on 2026-09-12, `v0.1.0` on 2026-08-28). There is no maintained older
 line and therefore nothing to backport to: `main` carries a `-dev` version and
 is never published, and a fix reaches users in the next stable tag. If you are
 running this, you are running either a checkout of `main` or one of those
