@@ -697,7 +697,9 @@ async function openFromLegacy(
     return {
       ok: true,
       state: fresh,
-      ledger: new Ledger(store, platform, scope, { pending: [], archived: [], nextSeq: 1 }),
+      // 🔴 W113 · No times: this scope has never been enumerated, so the platform's list has never given
+      //    us a time for anything here. An empty map is the measurement, not a default.
+      ledger: new Ledger(store, platform, scope, { pending: [], archived: [], nextSeq: 1, times: new Map() }),
     };
   }
 
@@ -764,6 +766,9 @@ async function migrate(
     pending,
     archived,
     nextSeq: pending.length + archived.length + 1,
+    // 🔴 W113 · A pre-W18 record predates the time field, so it carries none — a fact about that layout,
+    //    not a value that was lost in the move.
+    times: new Map(),
   });
   if (!written) {
     return refusal(

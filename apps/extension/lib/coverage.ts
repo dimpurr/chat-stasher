@@ -53,23 +53,21 @@ import {
   type TotalSource,
 } from './backfill/types';
 import type { BackfillTickRecord, TickSkipReason } from './backfill/alarm';
+import type { DebtTime } from './backfill/debt-store';
 
 /**
- * 🔴 The source of a conversation time, named on the row that carries one.
+ * 🔴 A conversation time, as it is stored on the debt row.
  *
- * W113 records the time the **list response itself** gave for a conversation (`list-update` / `list-create`).
- * It is a real timestamp from the platform, not a file time — ADR-035 refused file mtimes outright, and
- * this is not that — but it is *the list's* view of the conversation, which is why the source is carried
- * rather than assumed: a page that said "by conversation time" about a list's `update_time` would be
- * claiming more than the data supports.
+ * The type is the store's own (`lib/backfill/debt-store.ts`) rather than a parallel one, so the two halves
+ * of this feature cannot drift about what a time *is*: a value that gains a field there must be read here.
+ *
+ * W113 records the time the **list response itself** gave for a conversation (`list-update` /
+ * `list-create`). It is a real timestamp from the platform, not a file time — ADR-035 refused file mtimes
+ * outright and this is not that — but it is *the list's* view of the conversation, which is why the source
+ * is carried rather than assumed: a page that said "by conversation time" about a list's `updated_at`
+ * would be claiming more than the data supports.
  */
-export type CoverageTimeSource = 'list-update' | 'list-create';
-
-/** One conversation's recorded time, or nothing. */
-export interface CoverageTime {
-  at: number;
-  source: CoverageTimeSource;
-}
+export type CoverageTime = DebtTime;
 
 /** How the list segment stands. `truncated` is not a kind of `complete` — see `EnumTruncation`. */
 export type CoverageEnumState = 'complete' | 'in-progress' | 'truncated';

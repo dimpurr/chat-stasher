@@ -30,6 +30,7 @@ import {
 } from '../contract';
 import { runningBuildId } from '../extension-build';
 import { isClaudeOrgId } from './claude-org';
+import { recordDebtTimes } from './debt-store';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import {
@@ -1933,6 +1934,27 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       else if (pendingSet.has(id)) skippedAlreadyPending += 1;
     }
     newDebts += enqueueDebts(state, parsed.page.ids).length;
+
+    /**
+     * 🔴 W113 · **Keep the time the list gave for each conversation** (ADR-032 §6).
+     *
+     * Written here, immediately after the ids are owed, and as a **separate operation** from the debt
+     * diff — `recordDebtTimes` touches `at`/`atFrom` and nothing else about the debt set, so the
+     * invariants the ledger is built on (a debt on disk before it is worked on, a drop is not a settle)
+     * are untouched by this line. It is also idempotent and never overwrites a time that is already
+     * there, so a re-listing cannot move a conversation to another month.
+     *
+     * 🔴 Its answer is deliberately not acted on beyond a log line. A missing time costs the coverage
+     *    page a bucket it already has a name for ("time unknown"); failing the run over it would trade a
+     *    cosmetic gap for an unenumerated account. `null` (the store refused) is logged as the different
+     *    fact it is.
+     */
+    if (parsed.page.times && parsed.page.times.size > 0) {
+      const recorded = await recordDebtTimes(opts.platform, opts.scope, parsed.page.times);
+      if (recorded === null) {
+        console.warn('[chat-stasher] the list gave conversation times, but the debt store refused the write; they will be counted as time-unknown');
+      }
+    }
 
     // Offset mode normally advances by the number of rows read; Perplexity's three
     // sources state explicitly that the client does `offset += limit` itself, so

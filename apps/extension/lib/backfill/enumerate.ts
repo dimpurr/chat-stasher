@@ -191,6 +191,7 @@ import {
   readDetailResponse,
   readListResponse,
 } from '../gemini-rpc';
+import type { DebtTime } from './debt-store';
 import type { BackfillCapability, DetailOutcome } from './types';
 
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
@@ -201,6 +202,16 @@ export const DEFAULT_LIST_LIMIT = 100;
 
 export interface EnumPage {
   ids: string[];
+  /**
+   * 🔴 W113 · **The time the list gave for each conversation on this page**, by id (ADR-032 §6).
+   *
+   * Optional, and absent on every plan whose list response carries no per-conversation time this
+   * repository has a **measurement** for. That is the point rather than an omission: the same rule the
+   * platform table follows for request URLs applies here — a field name we have not measured is a field
+   * name we do not read, because getting it wrong produces no error, only a month that is quietly wrong.
+   * A plan that declares nothing here contributes rows the coverage page counts as "time unknown".
+   */
+  times?: Map<string, DebtTime>;
   /** The total the API gave us directly; null when it did not. */
   total: number | null;
   /**
@@ -1195,6 +1206,35 @@ export interface UnsupportedBackfill {
 // ---------------------------------------------------------------------------
 
 /**
+ * 🔴 W113 · **A platform's list timestamp, turned into milliseconds — or refused.**
+ *
+ * The fields we read are epoch numbers, and a number without a unit is not a time: `1755123456` and
+ * `1755123456789` are the same instant in seconds and in milliseconds, and a coverage page that guessed
+ * wrong would put a conversation in a month 55,000 years away — silently, because a wrong month renders
+ * exactly like a right one.
+ *
+ * The rule is a **range test, not a heuristic**: a plausible conversation time lies between 2000-01-01 and
+ * 2100-01-01, and the two candidate readings of that window do not overlap at all
+ * (`946_684_800 … 4_102_444_800` as seconds, `946_684_800_000 … 4_102_444_800_000` as milliseconds). So **at
+ * most one** interpretation can be in range for any value, and when neither is, the answer is `null` —
+ * "no recorded time" — rather than a guess between them. Nothing here rounds, clamps or picks the nearer.
+ *
+ * Exported because `tests/w113-*` pins both ends of both windows and the ambiguous middle, and because the
+ * next platform that records a list time must use this rather than restate it.
+ */
+export const EPOCH_MS_MIN = 946_684_800_000; // 2000-01-01T00:00:00Z
+export const EPOCH_MS_MAX = 4_102_444_800_000; // 2100-01-01T00:00:00Z
+
+export function epochMsFrom(raw: number): number | null {
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  // Milliseconds first: if it is in that window it cannot also be in the seconds window.
+  if (raw >= EPOCH_MS_MIN && raw < EPOCH_MS_MAX) return raw;
+  const asSeconds = raw * 1000;
+  if (raw >= EPOCH_MS_MIN / 1000 && raw < EPOCH_MS_MAX / 1000) return asSeconds;
+  return null;
+}
+
+/**
  * Parse one page of a conversation list (ChatGPT shape).
  * Strict: `items` must be an array and every element must have a string `id`;
  * `total` is only accepted when it is a non-negative integer, otherwise
@@ -1694,6 +1734,22 @@ export function parseDeepSeekListPage(text: string): ParseResult {
   let minSeqId: number | null = null;
   let seqIdMissing = false;
   let newestUpdatedAt: number | null = null;
+  /**
+   * 🔴 W113 · The same `updated_at` read for the page maximum is also kept **per conversation**, because
+   * ADR-032 §6 needs to say which month a stored conversation is from and this is the only place the
+   * platform ever tells us.
+   *
+   * The field is the one this parser already reads — `updated_at`, a number, three sources, and the
+   * `newestUpdatedAt` test at `tests/c26-dslist.test.ts:359` fixes its shape. Nothing new is guessed here;
+   * the only thing that changes is that the value is no longer thrown away after the maximum is taken.
+   *
+   * 🔴 It is `list-update`, not "the conversation time": this is the list's own notion of when the
+   *    conversation last changed, so the coverage page may say when a conversation is *from* by that
+   *    field, and may not claim it is when the conversation was written.
+   * 🔴 Unit: `epochMsFrom` refuses a value whose unit is ambiguous, and a refused value is simply absent
+   *    from this map — which the page counts as "time unknown" rather than spreading over a month.
+   */
+  const times = new Map<string, DebtTime>();
 
   for (const item of sessions) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
@@ -1732,6 +1788,8 @@ export function parseDeepSeekListPage(text: string): ParseResult {
         };
       }
       newestUpdatedAt = newestUpdatedAt === null ? updatedAt : Math.max(newestUpdatedAt, updatedAt);
+      const at = epochMsFrom(updatedAt);
+      if (at !== null) times.set(id, { at, from: 'list-update' });
     }
   }
 
@@ -1740,6 +1798,7 @@ export function parseDeepSeekListPage(text: string): ParseResult {
     ok: true,
     page: {
       ids,
+      times,
       // 🔴 There is **no** source for a total field in DeepSeek's list response
       //    ⇒ total is always null ⇒ progress takes the "total unknown" branch and
       //    never shows a percentage. ids.length must not be passed off as a denominator.

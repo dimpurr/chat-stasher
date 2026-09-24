@@ -86,6 +86,9 @@ async function seed(store: BackfillStore, scope: string, s: Seed): Promise<void>
     pending: s.pending,
     archived: s.archived,
     nextSeq: s.pending.length + s.archived.length + 1,
+    // 🔴 W113 · These fixtures are about the re-enumeration, not about times. No time is recorded for any
+    //    id here, which is exactly what a ledger written before the time field existed looks like.
+    times: new Map(),
   });
   const header: BackfillHeader = {
     v: 2,
@@ -194,7 +197,7 @@ describe('W98 · other platforms are untouched', () => {
   it('a complete ChatGPT scope issues no list request and gains no Claude marker', async () => {
     const scope = 'w98-chatgpt-scope';
     const store = memoryStore();
-    await replaceDebtSet('chatgpt', scope, { pending: ['c1-aaaaaaaa'], archived: ['c2-aaaaaaaa'], nextSeq: 3 });
+    await replaceDebtSet('chatgpt', scope, { pending: ['c1-aaaaaaaa'], archived: ['c2-aaaaaaaa'], nextSeq: 3, times: new Map() });
     await store.save(stateKey('chatgpt', scope), {
       v: 2,
       platform: 'chatgpt',

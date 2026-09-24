@@ -322,7 +322,7 @@ describe('W92d · a legacy state reads the new fields as 0 / []', () => {
     const store = memoryStore();
     // Exactly the pre-W92d layout on disk: header without the two fields, and the
     // pending id in the debt store (the authority for what is owed).
-    await replaceDebtSet('chatgpt', scope, { pending: [id], archived: [], nextSeq: 2 });
+    await replaceDebtSet('chatgpt', scope, { pending: [id], archived: [], nextSeq: 2, times: new Map() });
     await store.save(stateKey('chatgpt', scope), legacyHeader(scope));
     const be = taggedBackend([id], ['empty']);
 
