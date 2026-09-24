@@ -54,6 +54,7 @@ import {
   BACKFILL_ALARM_NAME,
   BACKFILL_SAFETY_ALARM_NAME,
   findUnreadableState,
+  forgetTarget,
   isBackfillChainArmed,
   loadTargets,
   loadTickCursor,
@@ -1406,7 +1407,17 @@ async function resolveScopeForTick(
   //    sentinel, and a conversation title is the same kind of fact: it names no
   //    account. Treating either as an organization would substitute it into
   //    `/api/organizations/<scope>/…`.
-  if (isClaudeOrgId(target.scope)) return { scope: target.scope, request: 'none' };
+  if (isClaudeOrgId(target.scope)) {
+    const prior = store ? await store.load(stateKey(target.platform, target.scope)) : null;
+    if (!isHeader(prior) || prior.halted?.reason !== 'scope-mismatch') {
+      return { scope: target.scope, request: 'none' };
+    }
+    // The page refused this stored scope because its active organization changed.
+    // Re-enter the existing sentinel resolver so the next tick asks the page and
+    // replaces the stale target with the page's answer.
+    await forgetTarget(store, target.platform, target.scope);
+    target = { ...target, scope: UNRESOLVED_SCOPE };
+  }
   // 🔴 W49b · Collapse through the one-write path. If a live organization is
   //    already registered, that path drops the title (and its ledger) *without*
   //    inserting `'default'`, and this tick runs under the organization rather

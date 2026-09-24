@@ -21,6 +21,7 @@ import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 import {
   BACKFILL_TAB_HELLO_MESSAGE,
   handleBackfillMessage,
+  isBackfillFetchRequest,
   serveBackfillFetch,
   type FetchLike,
 } from '../lib/backfill/tab-port';
@@ -675,9 +676,9 @@ export default defineContentScript({
         //    all when it is null, which is why a resolved organization alone would
         //    not have been enough. Every other platform's plan declares no scope, so
         //    the value is not read for them and their URLs are unchanged.
-        const pending = handleBackfillMessage(
-          message, pageOrigin, pageFetch, backfillPlanFor, claudePage.allowedScope(),
-        );
+        const pending = isBackfillFetchRequest(message)
+          ? claudePage.handleBackfill(message)
+          : handleBackfillMessage(message, pageOrigin, pageFetch, backfillPlanFor, claudePage.allowedScope());
         if (!pending) return;   // not a message for me; leave it to the other listeners
         pending
           .then(sendResponse)

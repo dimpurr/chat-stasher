@@ -595,15 +595,16 @@ a real limitation of the current code.
    organization's history (`apps/extension/lib/backfill/claude-org.ts:211-265`).
    That resolution is asked for **in the claude.ai page** over the channel
    backfill already fetches through, and only when it is needed — at the popup's
-   start button for that platform, and on a wake-up whose recorded scope is not
-   an organization yet; it costs at most one `GET /api/organizations` request,
+   start button, on an unresolved-scope wake-up, or when a fresh page receives a
+   stored-scope fetch before establishing its own scope; it costs at most one
+   `GET /api/organizations` request,
    sent only when the page's own requests and the cookie both named none, and a
    "several organizations, no signal" that **this build** recorded is not asked
    again — one an earlier build recorded is re-asked exactly once, since a
    judgement written by another build is not this one's, and the attempt is
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
-   (`apps/extension/lib/backfill/claude-page.ts:62-143`;
+   (`apps/extension/lib/backfill/claude-page.ts:68-173`;
    `apps/extension/entrypoints/background.ts:926-970`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:258-295`); a body

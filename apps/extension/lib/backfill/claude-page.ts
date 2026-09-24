@@ -35,7 +35,13 @@
 import { getPlatformByOrigin } from '../contract';
 import { backfillPlanFor } from './enumerate';
 import { orgFromRequestUrl, resolveClaudeOrgOnPage, type OrgResolution } from './claude-org';
-import { isClaudeOrgRequest, serveBackfillFetch, type FetchLike } from './tab-port';
+import {
+  isBackfillFetchRequest,
+  isClaudeOrgRequest,
+  serveBackfillFetch,
+  type BackfillRequestSpec,
+  type FetchLike,
+} from './tab-port';
 
 export interface ClaudePageScopeDeps {
   /** The page's own origin, and the origin every request below is checked against. */
@@ -57,6 +63,8 @@ export interface ClaudePageScope {
    * message type, exactly like `handleBackfillMessage`).
    */
   handleMessage(message: unknown): Promise<OrgResolution> | null;
+  /** Authorize a background fetch after establishing this page's scope if needed. */
+  handleBackfill(message: unknown): ReturnType<typeof serveBackfillFetch> | null;
 }
 
 export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScope {
@@ -138,6 +146,30 @@ export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScop
         if (resolved.ok) allowed = resolved.org;
         return resolved;
       });
+    },
+
+    handleBackfill(message: unknown) {
+      if (!isBackfillFetchRequest(message)) return null;
+      const spec: BackfillRequestSpec = {
+        url: message.url,
+        method: typeof message.method === 'string' ? message.method : undefined,
+        body: typeof message.body === 'string' ? message.body : undefined,
+        contentType: typeof message.contentType === 'string' ? message.contentType : undefined,
+      };
+      const requestOrg = orgFromRequestUrl(message.url);
+      if (requestOrg !== null && allowed === null) {
+        return (async () => {
+          const resolved = await resolveClaudeOrgOnPage(
+            { seen, cookie: deps.readCookie() ?? '' },
+            fetchOrganizations,
+          );
+          if (!resolved.ok) return { ok: false as const, error: resolved.halt };
+          allowed = resolved.org;
+          if (requestOrg !== allowed) return { ok: false as const, error: 'scope-mismatch' };
+          return serveBackfillFetch(spec, deps.pageOrigin, deps.fetchImpl, undefined, allowed);
+        })();
+      }
+      return serveBackfillFetch(spec, deps.pageOrigin, deps.fetchImpl, undefined, allowed);
     },
   };
 }

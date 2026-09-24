@@ -123,7 +123,9 @@ function contentScriptListener(message: unknown): Promise<unknown> | null {
   if (!tab) return null;
   const orgPending = tab.scope.handleMessage(message);
   if (orgPending) return orgPending;
-  return handleBackfillMessage(message, tab.origin, pageFetch, undefined, tab.scope.allowedScope());
+  return isBackfillFetchRequest(message)
+    ? backfillFromPage(tab.scope, message)
+    : handleBackfillMessage(message, tab.origin, pageFetch, undefined, tab.scope.allowedScope());
 }
 
 /** The one live tab the test is driving. */
@@ -204,6 +206,11 @@ async function dispatch(message: unknown): Promise<any> {
 
 /** Dispatch a message the way a content script does (sender.tab.id is filled in by the browser). */
 async function dispatchFromTab(message: unknown, tabId: number): Promise<any> {
+  const tab = tabs.get(tabId);
+  if (tab && message && typeof message === 'object' && 'payload' in message) {
+    const payload = (message as { payload?: { url?: unknown } }).payload;
+    if (typeof payload?.url === 'string') tab.scope.rememberRequest(payload.url);
+  }
   return await new Promise((resolve) => {
     const ret = backgroundListeners[0]!(message, { id: 'cs', tab: { id: tabId } }, resolve);
     if (ret !== true) resolve(undefined);
@@ -230,6 +237,15 @@ function openTab(tabId: number, opts: { cookie?: string; seen?: string } = {}): 
   tabs.set(tabId, entry);
   currentTab = entry;
   return scope;
+}
+
+function backfillFromPage(scope: ClaudePageScope, message: unknown): Promise<unknown> | null {
+  const current = scope as ClaudePageScope & {
+    handleBackfill?: (m: unknown) => Promise<unknown> | null;
+  };
+  return current.handleBackfill
+    ? current.handleBackfill(message)
+    : handleBackfillMessage(message, CLAUDE_ORIGIN, pageFetch, undefined, scope.allowedScope());
 }
 
 /** A content script checking in. This is what "there is an open claude.ai page" looks like. */
@@ -544,6 +560,76 @@ describe('W31c-3 · the allowlist compares the path segment against the page\'s 
 // 4 · The alarm retries a transient failure, and does not poll a permanent one
 // ---------------------------------------------------------------------------
 describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
+  it('reproduces W99: a stored resolved scope reaches a fresh /new page and the page establishes its own allowlist', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { cookie: `lastActiveOrg=${ORG}` });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1 });
+
+    const result = await mod.runAlarmTick();
+    expect(result.report?.stopped).toBe('queue-empty');
+    expect(conversationRequests()).toHaveLength(1);
+    expect(conversationRequests()[0]).toContain(`/api/organizations/${ORG}/chat_conversations`);
+    expect(pageCalls).toHaveLength(1);
+    expect(pageCalls[0]).toContain(`/api/organizations/${ORG}/chat_conversations`);
+    expect(tabs.get(7)?.scope.allowedScope()).toBe(ORG);
+  });
+
+  it('uses one organizations request when the cookie is absent and refuses ambiguous or mismatched scopes', async () => {
+    const page = openTab(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    const allowed = await backfillFromPage(page, { type: BACKFILL_FETCH_MESSAGE, url: LIST_URL });
+    expect(await allowed).toMatchObject({ ok: true, status: 200 });
+    expect(pageCalls).toEqual([RESOLVE_URL, LIST_URL]);
+
+    pageCalls.length = 0;
+    const mismatchPage = openTab(8, { cookie: `lastActiveOrg=${ORG2}` });
+    const mismatch = await backfillFromPage(mismatchPage, { type: BACKFILL_FETCH_MESSAGE, url: LIST_URL });
+    expect(await mismatch).toEqual({ ok: false, error: 'scope-mismatch' });
+    expect(pageCalls).toEqual([]);
+    expect(mismatchPage.allowedScope()).toBe(ORG2);
+
+    pageCalls.length = 0;
+    const ambiguousPage = openTab(9);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG, ORG2]);
+    const ambiguous = await backfillFromPage(ambiguousPage, { type: BACKFILL_FETCH_MESSAGE, url: LIST_URL });
+    expect(await ambiguous).toMatchObject({ ok: false, error: 'org-ambiguous' });
+    expect(pageCalls).toEqual([RESOLVE_URL]);
+  });
+
+  it('re-resolves a stored target on the next tick after the page reports scope-mismatch', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { cookie: `lastActiveOrg=${ORG2}` });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    routes[`/api/organizations/${ORG2}/chat_conversations`] = jsonRoute(() => '[]');
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const s = browserLocalStore();
+    await rememberTarget(s, { platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1 });
+    const { recordBackfillHalt } = await import('../lib/backfill/engine');
+    await recordBackfillHalt(s, {
+      platform: 'claude', scope: ORG, reason: 'scope-mismatch',
+      detail: 'synthetic active organization changed',
+    });
+
+    // The prior run refused the page's mismatched scope. Its persisted reason
+    // makes this next alarm tick ask with the unresolved sentinel.
+    expect(conversationRequests()).toEqual([]);
+
+    const resolved = await mod.runAlarmTick();
+    expect(resolved.reason).toBe('ran');
+    expect(resolved.report?.stopped).toBe('queue-empty');
+    expect(await targetsInRegistry()).toMatchObject([{ platform: 'claude', scope: ORG2 }]);
+    expect(pageCalls).toHaveLength(1);
+    expect(pageCalls[0]).toContain(`/api/organizations/${ORG2}/chat_conversations`);
+  });
+
   it('🔴 a transient halt is not re-asked before its backoff, and is re-asked after it', async () => {
     const { recordBackfillHalt } = await import('../lib/backfill/engine');
     const { scopeRetryDue, UNRESOLVED_SCOPE } = await import('../entrypoints/background');
@@ -1076,16 +1162,12 @@ describe('W31c-5 · the content script really asks, really remembers, and really
     new URL('../lib/backfill/claude-page.ts', import.meta.url), 'utf8',
   );
 
-  it('🔴 the page builds the scope object, hands it the message, and hands the fetch channel its scope', () => {
+  it('🔴 the page builds the scope object and routes backfill fetches through its own scope resolver', () => {
     expect(source).toContain('createClaudePageScope({');
     expect(source).toContain('readCookie: () => (typeof document === \'undefined\' ? null : document.cookie)');
     expect(source).toContain('const orgPending = claudePage.handleMessage(message);');
-    // 🔴 The fetch channel is handed `allowedScope()` — without it, every claude.ai
-    //    request is refused at the page (`scopePathMatches` matches nothing
-    //    against null), however well the organization was resolved.
-    expect(source).toMatch(
-      /handleBackfillMessage\(\s*message, pageOrigin, pageFetch, backfillPlanFor, claudePage\.allowedScope\(\),\s*\)/,
-    );
+    expect(source).toContain('claudePage.handleBackfill(message)');
+    expect(pageModule).toContain("if (requestOrg !== null && allowed === null)");
   });
 
   it('🔴 the page\'s own requests are remembered — the resolver\'s strongest source', () => {

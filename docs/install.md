@@ -637,12 +637,14 @@ confirmed in the code, not a temporary disclaimer.
   when the page's own requests and the cookie both named none — and an account
   belonging to several organizations stops with a sentence telling you to open a
   conversation in the one you want archived, rather than picking one
-  (`apps/extension/lib/backfill/claude-page.ts:62-143`). 🔴 **A Claude backfill
-  keeps the organization it was started with:** switching organizations on
-  claude.ai does not move it, and starting one for another organization means
-  opening a conversation in that organization and pressing start there — the two
-  then run as separate progress records
-  (`apps/extension/entrypoints/background.ts:1394-1464`). Perplexity now lists
+  (`apps/extension/lib/backfill/claude-page.ts:68-173`). 🔴 **A Claude backfill
+  checks every request against the organization established by the page. On a
+  fresh `/new` page, it resolves that scope from an observed page request, the
+  active-org cookie, or one unambiguous organizations response before allowing
+  the list fetch. If the active organization differs from the stored target, that
+  request is refused as `scope-mismatch`; the next tick asks the page again and
+  adopts its answer. Separate organization targets keep separate progress records
+  (`apps/extension/entrypoints/background.ts:1395-1475`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4521-4548`) is covered.
