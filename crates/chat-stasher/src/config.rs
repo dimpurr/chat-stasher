@@ -542,6 +542,13 @@ impl Config {
             expand_opt_field("native_host.stage", &mut native_host.stage, problems);
         }
 
+        if let Some(cache) = self.cache.as_mut() {
+            // `[cache] dir` is a path like any other, so it goes through the
+            // same `~` handling. `max_bytes` is a size, not a path, and is
+            // deliberately not touched here.
+            expand_opt_field("cache.dir", &mut cache.dir, problems);
+        }
+
         let mut bad_harness_roots: Vec<String> = Vec::new();
         for (id, root) in &mut self.harness_roots {
             match expand_and_verify(root) {
@@ -1031,6 +1038,41 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Default: ~/.codex/sessions
 # codex_sessions_dir = "~/.codex/sessions"
 
+# ----------------------------------------------------------------- cache
+# This machine's *body* cache (ADR-034). Separate from `rustic_cache_dir`
+# above, which is rustic's own metadata cache: this one holds the conversation
+# bodies themselves, the bytes that otherwise come down the wire again on every
+# read (a 107 MB session measured 22.6 s warm on a remote destination).
+#
+# What it stores is the destination's own ciphertext, byte for byte, under a
+# content address. Nothing is decrypted to store it, no second key is
+# introduced, no plaintext is written, and nothing here is ever read back
+# without being re-hashed first — a damaged entry is discarded and re-fetched,
+# so the cache can only ever cost speed. Deleting the directory is always safe:
+# `chat-stasher cache clear` does exactly that, and `doctor` reports how much it
+# currently occupies.
+#
+# One quota per machine, shared by every destination: there is no per-destination
+# allowance to divide up. Least-recently-used entries are evicted when the quota
+# is reached; a session larger than a tenth of the quota is read through without
+# being stored, so one oversized conversation cannot sweep the cache.
+#
+# Bulk work — `verify`, `export`, `dest-init`, `push`, `read --all-machines` —
+# never enters the cache, in either direction. `verify` in particular reads to
+# prove the *destination* is intact, and a cache answering for it would move the
+# verdict onto the wrong disk.
+#
+# [cache]
+# How much disk the cache may occupy. Write plain bytes or a unit: "50GB" is
+# 50 x 10^9, "50GiB" is 50 x 2^30. 0 turns the cache off entirely (reads then
+# go to the destination every time). Default: 2 GiB.
+# max_bytes = "10GiB"
+#
+# Where the entries live. Default: this platform's cache directory
+# (~/Library/Caches/chat-stasher/body on macOS), chosen so that no sync or
+# backup tool treats it as data worth carrying.
+# dir = "~/Library/Caches/chat-stasher/body"
+
 # ---------------------------------------------------------------- harness_roots
 # Tell the tool where a harness actually keeps its sessions, keyed by the
 # registry harness id. Use this when your install is not where the shipped path
@@ -1400,6 +1442,105 @@ no_cache = false
         let cfg: Config = toml::from_str("[destinations.d1]\nrepo = \"x\"\n").unwrap();
         assert_eq!(cfg.destinations["d1"].cache_dir, None);
         assert_eq!(cfg.destinations["d1"].no_cache, None);
+    }
+
+    /// The `[cache]` section is a *new* key family (the body cache of
+    /// ADR-034), and it must not be confused with the `rustic_*` metadata-cache
+    /// knobs above: both may be present in one config, and each keeps its own
+    /// value and location.
+    #[test]
+    fn body_cache_section_parses_alongside_the_metadata_cache_knobs() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", home.path());
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+        env::remove_var("USERPROFILE");
+
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            r#"
+rustic_cache_dir = "~/caches/rustic"
+
+[cache]
+dir = "~/caches/bodies"
+max_bytes = "50GB"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        let h = home.path();
+        assert_eq!(
+            cfg.rustic_cache_dir.as_deref(),
+            Some(h.join("caches/rustic").to_str().unwrap()),
+            "the metadata cache root must be untouched by the new section"
+        );
+        let cache = cfg.cache.as_ref().expect("[cache] present");
+        assert_eq!(
+            cache.dir.as_deref(),
+            Some(h.join("caches/bodies").to_str().unwrap()),
+            "cache.dir goes through the same `~` expansion as every other path"
+        );
+        let settings =
+            crate::body_cache::settings_for(&cfg).expect("body cache settings must resolve");
+        assert_eq!(settings.max_bytes, 50_000_000_000);
+        assert_eq!(settings.root, h.join("caches/bodies"));
+
+        // A plain integer is the other accepted spelling, and both must mean
+        // exactly what they say.
+        let cfg: Config = toml::from_str("[cache]\nmax_bytes = 5368709120\n").unwrap();
+        assert_eq!(
+            crate::body_cache::settings_for(&cfg)
+                .expect("resolve")
+                .max_bytes,
+            5_368_709_120
+        );
+        // `"0"` is the documented way to switch the cache off, and it must
+        // arrive as a real zero rather than as "unset".
+        let cfg: Config = toml::from_str("[cache]\nmax_bytes = \"0\"\n").unwrap();
+        let settings = crate::body_cache::settings_for(&cfg).expect("resolve");
+        assert_eq!(settings.max_bytes, 0);
+        assert!(!settings.enabled());
+    }
+
+    /// An absent `[cache]` section, or a section without `max_bytes`, means the
+    /// documented default quota — never an error and never "off".
+    #[test]
+    fn body_cache_defaults_when_absent() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.cache.is_none());
+        let settings = crate::body_cache::settings_for(&cfg).expect("resolve");
+        assert_eq!(settings.max_bytes, crate::body_cache::DEFAULT_MAX_BYTES);
+        assert!(settings.enabled());
+
+        let cfg: Config = toml::from_str("[cache]\n").unwrap();
+        let settings = crate::body_cache::settings_for(&cfg).expect("resolve");
+        assert_eq!(settings.max_bytes, crate::body_cache::DEFAULT_MAX_BYTES);
+        // The default root is this platform's cache directory, which is never
+        // inside the data or config directory an archive lives in.
+        assert!(
+            !settings
+                .root
+                .starts_with(crate::config::default_data_root()),
+            "the body cache must not default into the archive's own directory"
+        );
+    }
+
+    /// A size the parser does not understand is an error. A config file that
+    /// silently fell back to the default would report a quota the user never
+    /// asked for as if they had asked for it.
+    #[test]
+    fn an_unparsable_body_cache_size_is_a_config_error() {
+        let err = toml::from_str::<Config>("[cache]\nmax_bytes = \"50G\"\n")
+            .expect_err("an unknown unit must not be read as a number");
+        let text = err.to_string();
+        assert!(
+            text.contains("50G"),
+            "the error must quote the value the user wrote: {text}"
+        );
     }
 
     #[test]

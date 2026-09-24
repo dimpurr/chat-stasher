@@ -22,7 +22,6 @@
 //! deterministic byte stream, no real archive, key or destination is touched,
 //! and assertions read only exit codes, counts, byte lengths and sha256.
 
-use chat_stasher::body_cache;
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
 use rustic_core::repofile::MasterKey;
 use std::collections::BTreeMap;
@@ -259,7 +258,9 @@ fn entry_files(root: &Path) -> Vec<(PathBuf, u64)> {
         };
         for entry in reader.flatten() {
             let path = entry.path();
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_dir() {
                 stack.push(path);
                 continue;
@@ -304,7 +305,10 @@ fn a_second_read_is_served_from_the_cache() {
     let first = sandbox.read(0);
     assert_eq!(first.status.code(), Some(0));
     assert_eq!(cache_stat(&first, "hits"), 0, "a cold cache cannot hit");
-    assert!(cache_stat(&first, "stored") > 0, "the first read must fill it");
+    assert!(
+        cache_stat(&first, "stored") > 0,
+        "the first read must fill it"
+    );
     assert!(cache_stat(&first, "misses") > 0);
 
     let entries = entry_files(&sandbox.cache_dir());
@@ -347,7 +351,10 @@ fn a_corrupt_entry_is_refetched_not_served() {
     // Flip one bit in the last byte of every entry, so whichever blob the
     // session's bytes live in is corrupt.
     let entries = entry_files(&sandbox.cache_dir());
-    assert!(!entries.is_empty(), "the first read must have filled the cache");
+    assert!(
+        !entries.is_empty(),
+        "the first read must have filled the cache"
+    );
     for (path, _) in &entries {
         let mut raw = fs::read(path).expect("read entry");
         let last = raw.len() - 1;
@@ -379,8 +386,8 @@ fn eviction_keeps_the_cache_inside_its_quota() {
     // Quota 400 kB, 20 sessions of 30 kB: a tenth of the quota is 40 kB, so
     // every session is allowed in, and together they are 50% over.
     let sandbox = Sandbox::new(20, 30_000);
-    sandbox.set_quota("400kB");
-    let reference = uncached_sha(&sandbox, 0);
+    // The reference reads happen inside the loop, one per session: each one
+    // turns the cache off, so the quota is restored after each.
     sandbox.set_quota("400kB");
 
     for n in 0..20 {
@@ -562,6 +569,73 @@ fn several_processes_read_through_one_cache_at_once() {
 
     // The entries the concurrent writers left behind are usable, which is what
     // the digest check on every hit proves from the inside.
-    let hits: u64 = (0..4u32).map(|n| cache_stat(&sandbox.read(n), "hits")).sum();
+    let hits: u64 = (0..4u32)
+        .map(|n| cache_stat(&sandbox.read(n), "hits"))
+        .sum();
     assert!(hits > 0, "the concurrent fills must leave usable entries");
+}
+
+/// `cache` reports where the cache is, what it may use and what it holds — and
+/// `cache clear` empties it without touching anything else.
+///
+/// The three "no cache here" states are worded apart on purpose: a machine with
+/// no cache directory yet, a cache switched off in the config, and a cache that
+/// could not be measured are different findings, and only the first is the
+/// normal state of a machine that has not read a session yet.
+#[test]
+fn the_cache_command_reports_and_clears() {
+    let sandbox = Sandbox::new(1, 40_000);
+
+    // The uncached reference read first: it also leaves the cache directory
+    // untouched, which is what the "unknown" assertion below depends on.
+    let reference = uncached_sha(&sandbox, 0);
+
+    // Nothing has been cached yet: the occupancy is unknown, not zero.
+    sandbox.set_quota("10MB");
+    let fresh = sandbox.command().arg("cache").output().expect("run cache");
+    assert_eq!(fresh.status.code(), Some(0));
+    let text = stdout(&fresh);
+    assert!(
+        text.contains("unknown (no cache directory yet)"),
+        "a cache that was never written must read as unknown, not as 0 B:\n{text}"
+    );
+
+    // Fill it, then ask again.
+    assert_eq!(sandbox.read(0).status.code(), Some(0));
+    let filled = sandbox.command().arg("cache").output().expect("run cache");
+    let text = stdout(&filled);
+    assert!(
+        text.contains(&format!("quota          : {}", 10_000_000)),
+        "the report must name the quota:\n{text}"
+    );
+    assert!(
+        !text.contains("unknown (no cache directory yet)"),
+        "an existing cache must be measured:\n{text}"
+    );
+    let bytes_before = total_entry_bytes(&sandbox.cache_dir());
+    assert!(bytes_before > 0);
+
+    // Clear it: the entries go, and the archive is not consulted at all.
+    let cleared = sandbox
+        .command()
+        .args(["cache", "clear"])
+        .output()
+        .expect("run cache clear");
+    assert_eq!(cleared.status.code(), Some(0), "{}", stdout(&cleared));
+    assert!(
+        stdout(&cleared).contains("cleared 1 entries"),
+        "the clear must report what it removed:\n{}",
+        stdout(&cleared)
+    );
+    assert_eq!(total_entry_bytes(&sandbox.cache_dir()), 0);
+
+    // And the session still reads back correctly, from the destination.
+    sandbox.set_quota("10MB");
+    let after = sandbox.read(0);
+    assert_eq!(after.status.code(), Some(0), "{}", stdout(&after));
+    assert_eq!(
+        concat_sha(&after),
+        reference,
+        "a cleared cache must fall back to the destination and return the same bytes"
+    );
 }

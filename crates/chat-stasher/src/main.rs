@@ -1043,6 +1043,30 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
+    /// Manage this machine's body cache (ADR-034).
+    ///
+    /// The body cache holds the conversation bodies a read would otherwise pull
+    /// from a destination again, as the destination's own ciphertext. It is
+    /// disposable by design: nothing here is part of the archive, and deleting
+    /// all of it changes nothing except how long the next read takes. Without a
+    /// subcommand it prints the location, the quota and the current occupancy,
+    /// so a cache you never meant to have is visible before you clear it.
+    Cache {
+        /// What to do; omit to see the current occupancy.
+        #[command(subcommand)]
+        action: Option<CacheAction>,
+    },
+}
+
+/// `cache` subcommands.
+#[derive(Clone, Copy, clap::Subcommand)]
+enum CacheAction {
+    /// Delete every cached body block.
+    ///
+    /// Only the cache directory is touched — never the archive, never a
+    /// destination, never a key. Entries are re-fetched from the destination
+    /// the next time a session is read.
+    Clear,
 }
 
 /// export `--turns` selector. A value enum rather than a string so an unknown
@@ -1269,6 +1293,7 @@ fn run() -> ExitCode {
             keep_ssh_masters,
         ),
         Command::Doctor { json } => cmd_doctor(json),
+        Command::Cache { action } => cmd_cache(action),
         Command::Verify {
             level,
             stage,
@@ -5796,6 +5821,94 @@ fn cmd_read(
     };
     reap_remote(&cfg, keep_ssh_masters);
     code
+}
+
+/// `cache` — report or clear this machine's body cache (ADR-034).
+///
+/// Read-only apart from `clear`, which touches the cache directory and nothing
+/// else: no destination is contacted, no key is read, and no archive content
+/// exists here to lose.
+///
+/// Exit codes follow the family the rest of the CLI uses, with one deliberate
+/// difference: a cache that cannot be *measured* is not a failure to report, it
+/// is an unknown — the occupancy line says so and the command still exits 0,
+/// the same way `doctor` reports an unmeasurable metadata cache.
+fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
+    let config = Config::load();
+    let settings = match chat_stasher::body_cache::settings_for(&config) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("cache: {e:#}");
+            eprintln!(
+                "cache: the configured location could not be resolved, so nothing was read or \
+                 deleted. Fix `[cache] dir` in the config and re-run."
+            );
+            // 2, not 1: nothing was attempted, so this is a usage error in the
+            // configured path, not "cleared and failed".
+            return ExitCode::from(2);
+        }
+    };
+    let root = settings.root.clone();
+
+    if let Some(CacheAction::Clear) = action {
+        if !root.exists() {
+            println!(
+                "cache: nothing to clear — no cache directory at {}",
+                root.display()
+            );
+            return ExitCode::SUCCESS;
+        }
+        return match settings.open().clear() {
+            Ok(removed) => {
+                println!(
+                    "cache: cleared {} entries ({} B) from {}",
+                    removed.entries,
+                    removed.bytes,
+                    root.display()
+                );
+                println!(
+                    "cache: the destination still holds every archive byte; the next read of a \
+                     session fetches it again"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!(
+                    "cache: could not clear the cache at {}: {e}",
+                    root.display()
+                );
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    println!("cache: root           : {}", root.display());
+    println!(
+        "cache: quota          : {} B{}",
+        settings.max_bytes,
+        if settings.max_bytes == 0 {
+            " (cache off: every read goes to the destination)"
+        } else {
+            ""
+        }
+    );
+    if !root.exists() {
+        println!("cache: occupancy      : unknown (no cache directory yet)");
+        return ExitCode::SUCCESS;
+    }
+    match chat_stasher::body_cache::measure(&root) {
+        Ok(Some(usage)) => {
+            println!(
+                "cache: occupancy      : {} B in {} entries",
+                usage.bytes, usage.entries
+            );
+        }
+        // The directory exists but could not be measured. Reported as an
+        // unknown, never as `0 B`, which would read as "the cache is empty".
+        Ok(None) => println!("cache: occupancy      : unknown (no cache directory yet)"),
+        Err(e) => println!("cache: occupancy      : unreadable ({e})"),
+    }
+    ExitCode::SUCCESS
 }
 
 /// One line saying whether this run used the body cache — and if not, which of
