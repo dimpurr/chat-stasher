@@ -499,7 +499,7 @@ jobs:
           # `awk -v a="$ARTIFACT" '$2 == a { print $1 }'` (install.sh:115), i.e.
           # one "<hex>  <filename>" line per asset. `shasum -a 256` emits the
           # same two-space separator release-artifacts.sh produces locally
-          # (scripts/release-artifacts.sh:62).
+          # (scripts/release-artifacts.sh:72).
           # shellcheck disable=SC2086  # word splitting is the list of assets
           ( cd dist && shasum -a 256 $BINARIES "$EXT_ASSET" > SHA256SUMS )
 
