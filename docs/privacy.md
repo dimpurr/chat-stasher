@@ -103,7 +103,8 @@ the sentence.
    `apps/extension/entrypoints/dw-bridge.content.ts:613-639`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
-   ChatGPT's own `/api/auth/session` on the same origin. The token is held only
+   ChatGPT's own `/api/auth/session` on the same origin
+   (`apps/extension/lib/platform-auth.ts:47`, `:90-105`). The token is held only
    in the page's content-script memory: it is never written to storage, never
    logged, never sent to the `chat-stasher` host, and never attached to any
    other request (`apps/extension/lib/platform-auth.ts:61-71`, `:111-130`).
