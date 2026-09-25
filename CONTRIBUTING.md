@@ -63,6 +63,7 @@ bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
 node --test npm/test/*.test.mjs
 bash scripts/release-gate.sh
+bash scripts/smoke/linux-smoke.sh
 ```
 
 `test-reload-extension.sh` drives `reload-extension.sh` against a throwaway temp
@@ -115,6 +116,16 @@ The release gate builds `target/debug/chat-stasher` if it is missing and
 generates its own synthetic fixtures, so it needs no arguments and no setup. It
 prints only privacy-preserving summary fields and should end with `GATE: PASS`
 and exit 0 on the happy path.
+
+The smoke test does the same for the *installed* CLI: it builds the binary if it
+is missing, plants synthetic histories for every harness the shipped registry can
+be seeded for, and drives `doctor` → `init` → `run-once` → `read` → `overview` →
+`schedule` against a throwaway HOME. It needs no arguments, touches no network
+and should end with `SMOKE: PASS` and exit 0. It runs wherever bash and python3
+do; the CI job that carries it alongside `release-gate.sh` is the ubuntu cell, so
+a Windows contributor is not expected to run this one (which is a stated gap, not
+a silent skip). `--platform <name>` is a development aid that replays a foreign
+platform's registry cells locally; CI never passes it.
 
 Five of these checks guard properties that are easy to break without noticing:
 
