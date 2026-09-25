@@ -94,7 +94,21 @@ fn page_reader(
         t = percent_encode(token),
         d = esc(&data.destination_label),
     ));
-    out.push_str(&reader_provenance(conversation));
+    out.push_str(&reader_provenance(s, token, conversation));
+    // A harness this build has no extractor for is served whole by the raw
+    // route and interpreted here not at all. The page stops at the statement:
+    // no window, no counts — the zeros would be unread, not measured, and
+    // none of the zero-message sentences below is true of this body ("no
+    // conversation content" is a claim about the archive, and "nothing could
+    // be rendered" is a claim about a reader that never ran).
+    if matches!(
+        conversation.provenance,
+        crate::normalize::Provenance::RawOnly { .. }
+    ) {
+        out.push_str(&footer(data));
+        out.push_str("</body></html>\n");
+        return out;
+    }
     if conversation.branch_nodes > 0 || !conversation.canonical_follows_active {
         if conversation.canonical_follows_active {
             out.push_str(&format!(
@@ -160,19 +174,34 @@ fn page_reader(
     out
 }
 
-fn reader_provenance(conversation: &crate::normalize::Conversation) -> String {
-    let text = match &conversation.provenance {
-        crate::normalize::Provenance::Known { source } => {
-            format!(
-                "<p class=sub>Provenance: archived {} records.</p>\n",
-                esc(source)
-            )
-        }
-        crate::normalize::Provenance::Unknown { why } => {
+/// The provenance line names whose records the conversation came from, or —
+/// in the two states where no reader claim is possible — states that as
+/// itself. The raw-only state carries a link down to the bytes, because it
+/// is the only route that can show this session.
+fn reader_provenance(
+    s: &UiSession,
+    token: &str,
+    conversation: &crate::normalize::Conversation,
+) -> String {
+    use crate::normalize::Provenance;
+    match &conversation.provenance {
+        Provenance::Known { source } => format!(
+            "<p class=sub>Provenance: archived {} records.</p>\n",
+            esc(source)
+        ),
+        Provenance::Unknown { why } => {
             format!("<div class=warn>Provenance unknown: {}</div>\n", esc(why))
         }
-    };
-    text
+        Provenance::RawOnly { why } => format!(
+            "<div class=warn>No reader for this harness in this build: {}. \
+             This page makes no claim about the conversation — the body may hold \
+             one this build did not parse. The raw view is the only view: \
+             <a href=\"/content?i={i}&token={t}\">open the raw shards</a>.</div>\n",
+            esc(why),
+            i = s.index,
+            t = percent_encode(token),
+        ),
+    }
 }
 
 /// Window links, in the order the design's wireframe draws them: previous,
