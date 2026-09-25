@@ -177,7 +177,16 @@ fn deprecated_unix_flags_warn_on_stderr() {
 fn config_parse_failure_is_visible_to_status_and_doctor() {
     let sandbox = tempfile::tempdir().unwrap();
     let registry = registry_for_empty_fixture(sandbox.path());
-    let config = sandbox.path().join("xdg-config/chat-stasher/config.toml");
+    // One component per join, not one `"xdg-config/chat-stasher/config.toml"`
+    // literal: this path is compared below against the one the tool prints, and
+    // a literal keeps its `/` on Windows where the tool prints `\`. Same file
+    // either way — the assertion is about the file being named, not the
+    // separator used to name it.
+    let config = sandbox
+        .path()
+        .join("xdg-config")
+        .join("chat-stasher")
+        .join("config.toml");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(&config, "this is not valid TOML = [\n").unwrap();
 

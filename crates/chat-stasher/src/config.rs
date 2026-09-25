@@ -1144,11 +1144,24 @@ fn recover_windows_paths(raw: &str) -> Option<String> {
 /// user's home directory. `std::env::home_dir` is deprecated in favour of
 /// reading `HOME` directly; both are shelled out with [`std::env::home_dir`]
 /// avoided because it is no longer guaranteed on macOS.
+///
+/// `CONFIG_RELATIVE_PATH` is split into its components before being joined,
+/// rather than handed to `Path::join` as one literal. `join` does not translate
+/// the separator it is given, so on Windows the single literal came back out as
+/// `…\chat-stasher/config.toml` — a spelling no Windows tool prints, in the one
+/// message that tells the user which file to go and fix. Joining component by
+/// component yields the path in the platform's own spelling, and it is the same
+/// file either way: `/` is a separator to the Windows file APIs too, which is
+/// exactly why the wrong spelling survived — it opened the right file while
+/// naming it wrong.
 pub fn config_path() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join(CONFIG_RELATIVE_PATH);
-    }
-    home_dir().join(".config").join(CONFIG_RELATIVE_PATH)
+    let config_home = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(xdg) => PathBuf::from(xdg),
+        None => home_dir().join(".config"),
+    };
+    Path::new(CONFIG_RELATIVE_PATH)
+        .components()
+        .fold(config_home, |path, part| path.join(part.as_os_str()))
 }
 
 /// Best-effort `$HOME` / user home directory.
@@ -2228,6 +2241,31 @@ max_bytes = "50G"
         assert!(
             text.contains("connections"),
             "the refusal must point at the offending key: {text}"
+        );
+    }
+
+    /// The config path is spelled with this platform's separator all the way
+    /// through — asserted on the printed string, not on `Path` equality.
+    ///
+    /// `PathBuf` compares component-wise, so on Windows
+    /// `…\chat-stasher/config.toml` and `…\chat-stasher\config.toml` are *equal
+    /// paths*: the file opens either way, which is why the wrong spelling
+    /// survived unnoticed. It is not invisible, though. This is the string the
+    /// refusal message sends the user to go and fix, and a Windows shell does
+    /// not accept it. The comparison is therefore on `display()` — the form the
+    /// user is shown — against a path built by joining the same components the
+    /// tool joins.
+    #[test]
+    fn config_path_is_spelled_with_this_platforms_separator() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+
+        let expected = xdg.path().join("chat-stasher").join("config.toml");
+        assert_eq!(
+            config_path().display().to_string(),
+            expected.display().to_string(),
+            "the path the tool prints must be the one this platform spells"
         );
     }
 
