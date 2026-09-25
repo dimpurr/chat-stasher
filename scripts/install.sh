@@ -55,6 +55,17 @@ RELEASES_URL="https://github.com/dimpurr/chat-stasher/releases"
 # ---------------------------------------------------------------------------
 INSTALL_DIR="${CHAT_STASHER_INSTALL_DIR:-$HOME/.local/bin}"
 
+# `.../bin/` and `.../bin` are the same directory, but only the second is a
+# component of a `:`-separated PATH. Comparing the raw string would therefore
+# answer "not on PATH" for a directory that is on it — printing the hint to a
+# reader who does not need it — and would report the install as
+# `.../bin//chat-stasher`. Normalised once, here, at the only place the value is
+# read. A value of `/` is left alone: it is a directory, and stripping to the
+# empty string would not be.
+while [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ] && [ -n "${INSTALL_DIR%/}" ]; do
+  INSTALL_DIR="${INSTALL_DIR%/}"
+done
+
 # ---------------------------------------------------------------------------
 # 6. Detect platform. macOS and Linux ship prebuilt binaries; anything else
 #    gets a clear "unsupported" message instead of a silently broken install.
@@ -347,17 +358,37 @@ case ":$PATH:" in
 esac
 
 if [ "$ON_PATH" -eq 0 ]; then
+  # The advice names the directory the binary is actually in. With
+  # CHAT_STASHER_INSTALL_DIR set elsewhere, `~/.local/bin` is a directory it is
+  # not in: the reader would add that to their PATH and the command would still
+  # not be found. When the directory IS the default, the hint keeps `$HOME`
+  # unexpanded — pasted into a shell profile that stores a line which survives
+  # the home directory moving or syncing to another machine, where this
+  # machine's absolute path would store one that does not.
+  if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
+    HINT_DIR="\$HOME/.local/bin"
+  else
+    HINT_DIR="$INSTALL_DIR"
+  fi
   cat >&2 <<EOF
 
 Note: ${INSTALL_DIR} is not on your PATH yet.
 Add it yourself (for example) with one of:
 
-  echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.zshrc
-  echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.bashrc
+  echo 'export PATH="${HINT_DIR}:\$PATH"' >> ~/.zshrc
+  echo 'export PATH="${HINT_DIR}:\$PATH"' >> ~/.bashrc
 
 Your shell config was not modified.
 EOF
 fi
 
 echo "Installed chat-stasher v${VERSION} to ${DEST}"
-echo "Run 'chat-stasher doctor' to verify the install."
+# Name the command the reader can actually run. Off PATH, `chat-stasher doctor`
+# is the line we tell them to run next and the one line that would not be found
+# — the hint above says why, and this is the same fact where their eye already
+# is. On PATH the bare name is correct and shorter.
+if [ "$ON_PATH" -eq 0 ]; then
+  echo "Run '${DEST} doctor' to verify the install."
+else
+  echo "Run 'chat-stasher doctor' to verify the install."
+fi

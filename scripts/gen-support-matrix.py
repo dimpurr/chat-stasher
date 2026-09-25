@@ -46,6 +46,16 @@ and must not collapse into one glyph:
 A registry cell whose confidence is `unascertained` is never rendered as
 "supported": the scanner skips it, and this script says so.
 
+Absent values. A cell field with nothing recorded — no verification date, no
+format, no source URL — renders as a single plain ASCII hyphen, `ABSENT` below.
+It is a placeholder and nothing more: it is NOT a status, and it never stands in
+for a status word. Two reasons it is not an em dash. The table is data copied
+into other documents, so the glyph has to survive whatever font and pipeline it
+lands in, and U+2014 does not exist in every one of them. And an em dash is
+punctuation; used as a field value it reads as prose to a reader and is not
+something anyone can grep for. The README's own prose calls this mark "a dash",
+which is the word for the glyph this emits.
+
 Usage:
     python3 scripts/gen-support-matrix.py                    # print both tables
     python3 scripts/gen-support-matrix.py --emit short       # one of them
@@ -104,6 +114,11 @@ STATUS_SUPPORTED = "supported"
 STATUS_EXPERIMENTAL = "experimental"
 STATUS_UNCERTAIN = "uncertain (unverified)"
 STATUS_UNSUPPORTED = "not supported"
+
+# The one placeholder for "nothing is recorded here". Defined once so the
+# renderings and the probes that guard them cannot disagree about the glyph; see
+# the module docstring for why it is a plain ASCII hyphen and not an em dash.
+ABSENT = "-"
 
 
 class SupportMatrixError(Exception):
@@ -294,7 +309,7 @@ def web_status(p: dict[str, Any]) -> str:
 
 def verified_date(status: str) -> str:
     m = re.search(r"\(([^)]+)\)$", status)
-    return m.group(1) if m and status.startswith(STATUS_VERIFIED) else "—"
+    return m.group(1) if m and status.startswith(STATUS_VERIFIED) else ABSENT
 
 
 # --------------------------------------------------------------------------
@@ -348,7 +363,8 @@ def render_full(harnesses: list[dict[str, Any]], platforms: list[dict[str, Any]]
             status = cell_status(cell, verified)
             if cell is None:
                 out.append(
-                    f"| {esc(name)} | {OS_LABEL[os_name]} | — | — | — | {esc(status)} | — |"
+                    f"| {esc(name)} | {OS_LABEL[os_name]} | {ABSENT} | {ABSENT} | {ABSENT} "
+                    f"| {esc(status)} | {ABSENT} |"
                 )
                 continue
             source = first_url(cell.get("source", "")) or first_url(ref)
@@ -357,10 +373,10 @@ def render_full(harnesses: list[dict[str, Any]], platforms: list[dict[str, Any]]
                     name=esc(name),
                     os=OS_LABEL[os_name],
                     template=code(cell.get("template", "")),
-                    fmt=esc(cell.get("format", "—") or "—"),
-                    conf=esc(cell.get("confidence", "—") or "—"),
+                    fmt=esc(cell.get("format", ABSENT) or ABSENT),
+                    conf=esc(cell.get("confidence", ABSENT) or ABSENT),
                     status=esc(status),
-                    src=esc(source or "—"),
+                    src=esc(source or ABSENT),
                 )
             )
     out.append("")
@@ -716,6 +732,66 @@ def selftest() -> int:
         ))
         probe("full table carries a path template", "~/.alpha/<uuid>.jsonl" in full)
         probe("full table carries the verified date", "(2026-09)" in full)
+
+        # The rendered tables are DATA that gets copied into other documents, so
+        # a glyph has to survive whatever font and pipeline it lands in. The
+        # placeholder for "no value recorded" is therefore plain ASCII, defined
+        # once as ABSENT, and a typographic dash must not appear anywhere in a
+        # rendering — U+2014 as a field value reads as punctuation and is not
+        # something a reader can grep for. These probes are the only guard: the
+        # gate byte-compares the committed tables against this renderer, so a
+        # dash emitted here would be committed and checked-in green.
+        probe(
+            "no rendered table contains an em or en dash",
+            not any(ch in (short + full) for ch in ("—", "–")),
+        )
+        probe("the absent-value placeholder is plain ASCII", ABSENT.isascii() and ABSENT.isprintable())
+        probe("the placeholder is a single documented glyph", ABSENT == "-")
+
+        # Rows are selected by their Surface column, not by position: the
+        # separator row `|---|---|` matches a `startswith("| ")` filter only by
+        # accident of spacing, and slicing around it silently drops a row.
+        data_rows = [
+            ln for ln in short.splitlines()
+            if ln.startswith("| Local | ") or ln.startswith("| Web | ")
+        ]
+        probe(
+            "every short-table row without a verification date ends in the placeholder",
+            bool(data_rows) and all(ln.endswith(f"| {ABSENT} |") for ln in data_rows if "2026-09" not in ln),
+        )
+        probe(
+            "a verified row keeps its date instead of the placeholder",
+            any(ln.endswith("| 2026-09 |") for ln in data_rows),
+        )
+        probe(
+            "a full-table cell with no registry entry renders the placeholder",
+            f"| Alpha | Linux | {ABSENT} | {ABSENT} | {ABSENT} | not supported | {ABSENT} |" in full,
+        )
+        probe(
+            "a full-table cell whose source carries no URL renders the placeholder",
+            f"| Beta | macOS | `~/Library/Beta/sessions` | sqlite | community-claim-unverified "
+            f"| uncertain (unverified) | {ABSENT} |" in full,
+        )
+        # `format` and `confidence` fall back separately, so each needs its own
+        # cell; a harness whose only OS cell lacks either one exercises them.
+        sparse_full = render_full(
+            [
+                {"id": "s-fmt", "display_name": "S-Fmt",
+                 "paths": {"macos": {"template": "~/.s-fmt", "confidence": "source-confirmed"}}},
+                {"id": "s-conf", "display_name": "S-Conf",
+                 "paths": {"macos": {"template": "~/.s-conf", "format": "jsonl"}}},
+            ],
+            [],
+        )
+        probe(
+            "a cell with no format recorded renders the placeholder",
+            f"| S-Fmt | macOS | `~/.s-fmt` | {ABSENT} | source-confirmed | supported | {ABSENT} |"
+            in sparse_full,
+        )
+        probe(
+            "a cell with no confidence recorded renders the placeholder",
+            f"| S-Conf | macOS | `~/.s-conf` | jsonl | {ABSENT} |" in sparse_full,
+        )
 
         # --update-fixtures makes a fresh checkout pass the check.
         probe("fixtures update cleanly", update_fixtures(tmp) == 0)

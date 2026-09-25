@@ -22,11 +22,12 @@ The coding agents and web AI chats you already use, in one archive ([status per 
 
 ```sh
 curl -fsSL https://chatstasher.com/install.sh | sh
-chat-stasher doctor                                   # read-only: is anything deleting your history?
+export PATH="$HOME/.local/bin:$PATH"                   # the line the installer prints if this folder is not on PATH
+chat-stasher doctor                                    # read-only: is anything deleting your history?
 chat-stasher init && chat-stasher run-once --stage ~/stash/chat-stasher/stage
 ```
 
-The first command installs the CLI into `~/.local/bin` (checksum-verified, no `sudo`). `doctor` changes nothing; `run-once` makes your first local, encrypted archive.
+The first command installs the CLI into `~/.local/bin` (checksum-verified, no `sudo`); the `export` is the line the installer prints when that folder is not already on your `PATH`, and running it twice is harmless. `doctor` changes nothing; `run-once` makes your first local, encrypted archive.
 
 The install script places a prebuilt macOS binary today. Linux and Windows builds arrive with **0.5.0**; until then those platforms build from source. All of it is in [Install](#install), and backups to a remote and scheduling are in [Your first archive](#your-first-archive).
 
@@ -71,7 +72,7 @@ macOS (Apple Silicon and Intel):
 curl -fsSL https://chatstasher.com/install.sh | sh
 ```
 
-The script downloads a pinned release and checks its SHA-256 before installing. It puts `chat-stasher` in `~/.local/bin`, never uses `sudo`, and tells you if that folder is not on your `PATH`.
+The script downloads a pinned release and checks its SHA-256 before installing. It puts `chat-stasher` in `~/.local/bin`, never uses `sudo`, and prints the one line to add if that folder is not on your `PATH`.
 
 **Linux and Windows:** there is no prebuilt binary in a stable release yet. Both arrive with 0.5.0, a statically linked Linux binary for x86-64 and arm64 and an `.exe` for Windows. Until then, build from source with `cargo build --release`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
 
@@ -150,25 +151,25 @@ This table is generated from the registry that ships inside the CLI and from the
 
 | Surface | Platform | Status | Last verified |
 |---|---|---|---|
-| Local | Claude Code | supported | — |
-| Local | OpenAI Codex CLI | supported | — |
-| Local | Gemini CLI | supported | — |
-| Local | opencode | supported | — |
-| Local | Cursor | supported | — |
-| Local | Grok (xAI CLI) | supported | — |
-| Local | GitHub Copilot CLI | supported | — |
-| Local | aider | supported | — |
-| Local | crush | supported | — |
-| Local | Zed | supported | — |
-| Local | Continue | supported | — |
-| Local | Kimi Code | supported | — |
-| Web | deepseek | supported | — |
-| Web | perplexity | experimental | — |
-| Web | chatgpt | supported | — |
-| Web | gemini | supported | — |
-| Web | claude | supported | — |
-| Web | kimi | experimental | — |
-| Web | grok | supported | — |
+| Local | Claude Code | supported | - |
+| Local | OpenAI Codex CLI | supported | - |
+| Local | Gemini CLI | supported | - |
+| Local | opencode | supported | - |
+| Local | Cursor | supported | - |
+| Local | Grok (xAI CLI) | supported | - |
+| Local | GitHub Copilot CLI | supported | - |
+| Local | aider | supported | - |
+| Local | crush | supported | - |
+| Local | Zed | supported | - |
+| Local | Continue | supported | - |
+| Local | Kimi Code | supported | - |
+| Web | deepseek | supported | - |
+| Web | perplexity | experimental | - |
+| Web | chatgpt | supported | - |
+| Web | gemini | supported | - |
+| Web | claude | supported | - |
+| Web | kimi | experimental | - |
+| Web | grok | supported | - |
 
 Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check.
 <!-- support-matrix:short:end -->

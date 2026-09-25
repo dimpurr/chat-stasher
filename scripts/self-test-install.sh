@@ -438,7 +438,22 @@ run_suite() {
     pass "an install dir already on PATH gets no PATH hint"
   fi
 
+  # The hint is not the only line that has to be right. With the directory on
+  # PATH the bare name is correct and is what the reader should be told to run,
+  # so this guards the branch 13's counterpart takes.
+  if printf '%s' "$ONPATH_OUT" | grep -qF "'chat-stasher doctor'"; then
+    pass "an on-PATH install is told to run the bare command"
+  else
+    fail "an on-PATH install is not told the command it can run"
+  fi
+
   # 13) ... and a directory that is not on PATH still gets it -------------------
+  #
+  # The hint has to name the directory the binary was actually installed into,
+  # and the command line after it has to be one the reader can run. Both were
+  # wrong for a custom CHAT_STASHER_INSTALL_DIR: the advice named ~/.local/bin
+  # regardless, and the closing line named a bare `chat-stasher` that is by
+  # definition not on PATH in this case.
   local NOTON_DIR="$WORK/not-on-path-bin"
   local NOTON_OUT="" NOTON_RC=0
   mkdir -p "$NOTON_DIR"
@@ -452,6 +467,75 @@ run_suite() {
     pass "a directory that is not on PATH still gets the hint"
   else
     fail "the PATH hint is gone for a directory that is not on PATH"
+  fi
+  if printf '%s' "$NOTON_OUT" | grep -qF "export PATH=\"$NOTON_DIR:"; then
+    pass "the hint names the directory the binary went into"
+  else
+    fail "the hint names a directory the binary is not in"
+  fi
+  if printf '%s' "$NOTON_OUT" | grep -qF "$NOTON_DIR/chat-stasher doctor"; then
+    pass "the closing line names a command that works off PATH"
+  else
+    fail "the closing line names a command that cannot be found"
+  fi
+
+  # 14) the same directory, written with a trailing slash -----------------------
+  # `.../bin/` and `.../bin` are one directory, but only the second is a
+  # component of a `:`-separated PATH — so comparing the raw string answers
+  # "not on PATH" for a directory that is on it and prints the hint to a reader
+  # who does not need it. That is case 12's hazard from the other direction, and
+  # it is why the install dir is normalised once, where it is read.
+  local SLASH_OUT="" SLASH_RC=0
+  SLASH_OUT="$(PATH="$ONPATH_PATH" \
+     CHAT_STASHER_BASE_URL="$BASE" \
+     CHAT_STASHER_INSTALL_DIR="$ONPATH_DIR/" \
+     "$SHELL_UNDER_TEST" "$INSTALL_SH" 2>&1)" || SLASH_RC=$?
+
+  if [ "$SLASH_RC" != 0 ]; then
+    fail "install with a trailing-slash dir returned non-zero"
+  elif printf '%s' "$SLASH_OUT" | grep -q 'is not on your PATH yet'; then
+    fail "a trailing slash made an on-PATH dir look off-PATH"
+  else
+    pass "a trailing slash on an on-PATH dir still gets no hint"
+  fi
+  # One slash, not two: `.../bin//chat-stasher` is the same file, but it is a
+  # path the reader has to squint at, and it is the visible half of the same
+  # missing normalisation.
+  if printf '%s' "$SLASH_OUT" | grep -qF "$ONPATH_DIR/chat-stasher"; then
+    pass "the trailing slash is normalised in the reported install path"
+  else
+    fail "the reported install path still carries a doubled slash"
+  fi
+
+  # 15) the default install dir, off PATH, keeps the advice portable ------------
+  # This is the case the README's Quick start puts a new reader in, and it is the
+  # one that may not stop at `chat-stasher doctor`. HOME is redirected into this
+  # run's private directory so the default dir is certainly not on PATH. The hint
+  # must name the default dir without expanding `$HOME`, so a reader who pastes
+  # it into a shell profile stores a line that survives their home directory
+  # moving or syncing to another machine.
+  local DEF_HOME="$WORK/default-home"
+  local DEF_OUT="" DEF_RC=0
+  mkdir -p "$DEF_HOME"
+  DEF_OUT="$(HOME="$DEF_HOME" CHAT_STASHER_BASE_URL="$BASE" \
+     "$SHELL_UNDER_TEST" "$INSTALL_SH" 2>&1)" || DEF_RC=$?
+
+  if [ "$DEF_RC" != 0 ]; then
+    fail "install into a redirected HOME returned non-zero"
+  elif printf '%s' "$DEF_OUT" | grep -q 'is not on your PATH yet'; then
+    pass "the default install dir off PATH gets the hint"
+  else
+    fail "the default install dir off PATH got no hint"
+  fi
+  if printf '%s' "$DEF_OUT" | grep -qF 'export PATH="$HOME/.local/bin:$PATH"'; then
+    pass "the default-dir hint names \$HOME rather than this machine's path"
+  else
+    fail "the default-dir hint does not name \$HOME/.local/bin"
+  fi
+  if [ -x "$DEF_HOME/.local/bin/chat-stasher" ]; then
+    pass "the binary landed in the default dir under the redirected HOME"
+  else
+    fail "nothing was installed under the redirected HOME"
   fi
 }
 
