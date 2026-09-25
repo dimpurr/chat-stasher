@@ -162,6 +162,10 @@ pub fn to_overview_row(row: &ActivityRow) -> OverviewRow {
             }
             ActivityTimeSource::ListUpdated => OverviewTimeSource::ListUpdated,
             ActivityTimeSource::NoConversationContent => OverviewTimeSource::NoConversationContent,
+            ActivityTimeSource::PartialRange { how, why } => OverviewTimeSource::PartialRange {
+                how: how.clone(),
+                why: why.clone(),
+            },
             ActivityTimeSource::Unknown { why } => OverviewTimeSource::Unknown { why: why.clone() },
         },
     }

@@ -42,7 +42,7 @@ use crate::activity::TimeSource;
 use crate::overview::{self, Granularity, HeatmapAxis, OverviewRow};
 use crate::search::{HostSnapshot, SearchReport};
 use crate::selector::{
-    Resolved, Selector, SelectorArgs, SessionMeta, UnplacedBy, UsageError, Verdict,
+    Resolved, Selector, SelectorArgs, SessionMeta, TimeBounds, UnplacedBy, UsageError, Verdict,
 };
 use crate::view::Response;
 
@@ -126,6 +126,12 @@ impl UiSession {
             harness: self.harness.as_deref(),
             first_unix: self.first_unix,
             last_unix: self.last_unix,
+            // The index's own answer, never re-derived from the bounds.
+            time_bounds: if self.time_source.bounds_are_partial() {
+                TimeBounds::Partial
+            } else {
+                TimeBounds::Complete
+            },
             time_why: self.time_why.as_deref(),
         }
     }
@@ -1102,6 +1108,9 @@ fn render_time_unknown(in_view: &[&UiSession], token: &str) -> String {
     for s in &unknown {
         let why = match &s.time_source {
             TimeSource::Unknown { why } => why.clone(),
+            // A range that is only part of the span: it has measured bounds, so
+            // "no time" is the wrong reason — the variant's own reason stands.
+            TimeSource::PartialRange { why, .. } => why.clone(),
             // A session whose source attests a time but carries no bound. Named
             // as its own case rather than folded into a reason it does not have.
             _ => "the activity index attests a time but recorded no bound for it".to_string(),
@@ -1109,9 +1118,10 @@ fn render_time_unknown(in_view: &[&UiSession], token: &str) -> String {
         by_reason.entry(why).or_default().push(s);
     }
     pending_append.push_str(&format!(
-        "<section><h2>Time unknown</h2>\n<p>{} session(s) in view have no known conversation \
-         time. They are <b>not</b> in any bucket above, and they are not \"no sessions\" — each \
-         carries the reason the time could not be obtained.</p>\n",
+        "<section><h2>Time unknown</h2>\n<p>{} session(s) in view have no conversation time \
+         that could be <b>fully</b> placed — either none was recorded, or only part of the span \
+         could be read. They are <b>not</b> in any bucket above, and they are not \"no sessions\" \
+         — each carries its own reason.</p>\n",
         unknown.len()
     ));
     for (why, rows) in &by_reason {
@@ -1273,6 +1283,11 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
 
 fn list_row(s: &UiSession, token: &str) -> String {
     let time = |v: Option<i64>| match v {
+        // A bound that is only *part* of the span says so where it is shown: a
+        // bare date here would read as the session's whole extent.
+        Some(unix) if s.time_source.bounds_are_partial() => {
+            format!("{} (partial)", esc(&fmt_unix(unix)))
+        }
         Some(unix) => esc(&fmt_unix(unix)),
         None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<span class=bad title=\"unknown\">unknown</span>".to_string(),
@@ -1298,6 +1313,11 @@ fn list_row(s: &UiSession, token: &str) -> String {
 
 fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
     let time = |v: Option<i64>| match v {
+        // Same rule as the list row: a partial bound is labelled where it is
+        // shown, so it is never read as the session's whole extent.
+        Some(unix) if s.time_source.bounds_are_partial() => {
+            format!("{} (partial)", esc(&fmt_unix(unix)))
+        }
         Some(unix) => esc(&fmt_unix(unix)),
         None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<b class=bad>unknown</b>".to_string(),

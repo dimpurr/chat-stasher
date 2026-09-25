@@ -52,10 +52,36 @@ pub struct SessionMeta<'a> {
     pub first_unix: Option<i64>,
     /// Latest conversation time, unix seconds. `None` is *unknown*.
     pub last_unix: Option<i64>,
-    /// Why the conversation time is unknown. Present whenever either bound is
-    /// `None`, so the reason survives to the terminal instead of being
-    /// re-invented there.
+    /// What those two bounds are bounds **of** — see [`TimeBounds`].
+    pub time_bounds: TimeBounds,
+    /// Why the conversation time is unknown, or why the bounds are only part of
+    /// the span ([`TimeBounds::Partial`]). Present whenever either bound is
+    /// `None` or the bounds are partial, so the reason survives to the terminal
+    /// instead of being re-invented there.
     pub time_why: Option<&'a str>,
+}
+
+/// What a session's two bounds are bounds *of*.
+///
+/// This exists because "the interval is `[first, last]`" and "the interval
+/// *contains* `[first, last]`" answer a window question differently, and only
+/// one of the two is a proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeBounds {
+    /// `[first_unix, last_unix]` is the conversation span: the archive holds
+    /// every conversation time this session has.
+    Complete,
+    /// The bounds are an **inner** bound of the span: the session also holds
+    /// conversation records that could not be placed in time, so the real span
+    /// may be wider on either end. An overlap with the query window is still
+    /// proof the session was active in it; a non-overlap is not proof that it
+    /// was not, and must be reported as unplaceable rather than as a
+    /// non-match.
+    ///
+    /// Set from a row whose time state is
+    /// [`crate::activity::TimeSource::PartialRange`]; every other time state
+    /// carries either the whole span or no bounds at all.
+    Partial,
 }
 
 impl<'a> SessionMeta<'a> {
@@ -72,6 +98,8 @@ impl<'a> SessionMeta<'a> {
             harness,
             first_unix: None,
             last_unix: None,
+            // No bounds at all, so there is no span for them to be part of.
+            time_bounds: TimeBounds::Complete,
             time_why: Some(why),
         }
     }
@@ -231,6 +259,20 @@ impl Selector {
                 let before_end = window.until_unix.is_none_or(|u| first <= u);
                 if after_start && before_end {
                     Verdict::Selected
+                } else if meta.time_bounds == TimeBounds::Partial {
+                    // The bounds are only *part* of the span, so a window they
+                    // do not reach is a window the rest of the session may
+                    // still be in. Same "we do not know" verdict as a missing
+                    // bound — never a proven non-match.
+                    Verdict::Unevaluated {
+                        dimension: UnplacedBy::Time,
+                        why: meta
+                            .time_why
+                            .unwrap_or(
+                                "only part of this session's conversation could be placed in time and no reason was recorded",
+                            )
+                            .to_string(),
+                    }
                 } else {
                     Verdict::NotSelected
                 }
@@ -523,6 +565,7 @@ mod tests {
             harness: harness_of(session),
             first_unix: span.map(|s| s.0),
             last_unix: span.map(|s| s.1),
+            time_bounds: TimeBounds::Complete,
             time_why: span
                 .is_none()
                 .then_some("no timestamps in this session's lines"),
@@ -660,6 +703,7 @@ mod tests {
             harness: Some("claude-code"),
             first_unix: Some(1_500),
             last_unix: None,
+            time_bounds: TimeBounds::Complete,
             time_why: Some("only one timestamp in the whole session".into()),
         };
         assert_eq!(
@@ -669,6 +713,47 @@ mod tests {
                 why: "only one timestamp in the whole session".into()
             }
         );
+    }
+
+    /// A span whose bounds are only *part* of the session's conversation must
+    /// not answer "not in the window": an unrecognised record may carry the
+    /// conversation into it. Same third verdict as a missing bound — never a
+    /// proven non-match.
+    #[test]
+    fn a_partial_span_outside_the_window_is_not_excluded() {
+        let s = Selector::default().window(window(5_000, 6_000));
+        let partial = SessionMeta {
+            time_bounds: TimeBounds::Partial,
+            time_why: Some("the recorded span is only part of this session's conversation"),
+            ..meta("m", "kimi-code.m.abc", Some((1_000, 2_000)))
+        };
+        assert_eq!(
+            s.select(&partial),
+            Verdict::Unevaluated {
+                dimension: UnplacedBy::Time,
+                why: "the recorded span is only part of this session's conversation".into()
+            },
+            "a partial span must be reported as unplaceable, never as a non-match"
+        );
+        // The control: the same bounds, complete, *are* excluded — so the test
+        // measures the partiality flag and not the bounds.
+        assert_eq!(
+            s.select(&meta("m", "kimi-code.m.abc", Some((1_000, 2_000)))),
+            Verdict::NotSelected
+        );
+    }
+
+    /// An overlap with the recorded bounds is still a proof: the recorded
+    /// interval is a sub-interval of the span, so the session really was active
+    /// in the window. Partiality must not throw that away.
+    #[test]
+    fn a_partial_span_overlapping_the_window_is_selected() {
+        let s = Selector::default().window(window(1_500, 1_600));
+        let partial = SessionMeta {
+            time_bounds: TimeBounds::Partial,
+            ..meta("m", "kimi-code.m.abc", Some((1_000, 2_000)))
+        };
+        assert_eq!(s.select(&partial), Verdict::Selected);
     }
 
     /// With no window there is nothing to evaluate, so an unknown time is not

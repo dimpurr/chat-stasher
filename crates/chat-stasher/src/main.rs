@@ -3386,6 +3386,14 @@ fn describe_span(
         return "no conversation content".to_string();
     }
     match (first_unix, last_unix) {
+        // A bound that is only part of the span says so where it is shown,
+        // rather than reading as the session's whole extent.
+        (Some(f), Some(l)) if source.bounds_are_partial() => {
+            format!(
+                "{f}..{l} (partial: {})",
+                why.unwrap_or("no reason recorded")
+            )
+        }
         (Some(f), Some(l)) => format!("{f}..{l}"),
         _ => format!(
             "unknown ({})",

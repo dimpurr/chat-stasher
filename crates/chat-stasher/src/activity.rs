@@ -81,6 +81,23 @@ pub enum TimeSource {
     /// conversation whose time we could not find". It is counted separately and
     /// excluded from the unknown tallies (`machine_recall`, the recall WARN).
     NoConversationContent,
+    /// The recorded `[first_unix, last_unix]` is only an **inner** bound of this
+    /// session's conversation span: the session also holds records that could not
+    /// be placed in time — a record of a type this module does not classify, or a
+    /// conversation record whose own timestamp could not be read — and such a
+    /// record may be conversation activity *outside* the recorded interval.
+    ///
+    /// The bounds are measured, so this is not [`TimeSource::Unknown`]; but they
+    /// are not the span, so it is not `Exact`/`Inferred` either. `how` records
+    /// how the bounds we do have were read (the same vocabulary `Inferred` uses),
+    /// `why` records the reason the range is partial.
+    ///
+    /// A consumer asking "was this session active in this window?" may treat an
+    /// **overlap** with the recorded bounds as proof (the recorded interval is a
+    /// sub-interval of the span), but must treat a **non**-overlap as "may be
+    /// outside" rather than as a proven absence. See
+    /// [`crate::selector::TimeBounds::Partial`].
+    PartialRange { how: String, why: String },
     /// Could not be obtained; why it could not.
     Unknown { why: String },
 }
@@ -91,6 +108,14 @@ impl TimeSource {
     /// conversation to place in time, not a conversation whose time is missing.
     pub fn is_no_conversation_content(&self) -> bool {
         matches!(self, TimeSource::NoConversationContent)
+    }
+
+    /// True when the carried bounds are only **part** of the conversation span —
+    /// see [`TimeSource::PartialRange`]. Every other state's bounds are either
+    /// the whole span or absent, so a consumer must not answer "outside the
+    /// window" from this state's bounds without also asking this.
+    pub fn bounds_are_partial(&self) -> bool {
+        matches!(self, TimeSource::PartialRange { .. })
     }
 }
 
@@ -223,6 +248,62 @@ const WEB_HARNESSES: &[&str] = &[
     "kimi",
 ];
 
+/// The `how` recorded for bounds read from **numeric epoch** timestamps, whose
+/// unit the reader had to infer. One constant, shared by [`TimeSource::Inferred`]
+/// and [`TimeSource::PartialRange`], so the two can never describe the same
+/// inference in two different ways.
+const EPOCH_HOW: &str = "in-line timestamps are numeric epochs: unit inferred from magnitude (values in the 2020–2100 seconds range treated as seconds; millis-range values divided by 1000, micros-range values divided by 1_000_000, to get seconds)";
+
+/// The `how` recorded for bounds read from explicit RFC 3339 strings, used when
+/// the range is partial. The complete case is [`TimeSource::Exact`], which
+/// carries no `how` because there is nothing to explain.
+const RFC3339_HOW: &str =
+    "the records that carry a time do so as explicit RFC 3339 strings, which are unambiguous";
+
+/// Why the recorded span is only *part* of the session's conversation, or
+/// `None` when nothing in the session failed to be placed in time.
+///
+/// Only a harness whose line shapes we classify can answer this at all: for the
+/// others, "a line we could not classify" is not a state we can distinguish from
+/// "a line that carries no time", so no partiality is claimed there.
+///
+/// The text carries **no numbers of its own** (no timestamps): the human views
+/// group sessions by this string, so a per-session value would put every session
+/// in its own group. The measured bounds are the row's `first_unix`/`last_unix`.
+fn partial_range_why(
+    harness: &str,
+    undetermined_lines: u64,
+    conversation_without_time: u64,
+    conversation_invalid_time: u64,
+) -> Option<String> {
+    if !CLASSIFIED_HARNESSES.contains(&harness) {
+        return None;
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    if undetermined_lines > 0 {
+        reasons.push(format!(
+            "{undetermined_lines} record(s) of a type this module does not recognise"
+        ));
+    }
+    if conversation_without_time > 0 {
+        reasons.push(format!(
+            "{conversation_without_time} conversation record(s) that carry no timestamp field"
+        ));
+    }
+    if conversation_invalid_time > 0 {
+        reasons.push(format!(
+            "{conversation_invalid_time} conversation record(s) whose timestamp could not be read"
+        ));
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "the recorded span is only part of this session's conversation — {} may carry activity outside it",
+        reasons.join("; ")
+    ))
+}
+
 /// Analyse a session's lines and pull out the earliest/latest conversation time.
 ///
 /// Every non-blank line is counted in [`TimeAnalysis::line_count`] regardless
@@ -251,6 +332,15 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     let mut conversation_lines = 0u64;
     let mut undetermined_lines = 0u64;
 
+    // Records that are positively conversation but could not be placed in time,
+    // counted apart from the outcome counters above because they do not change
+    // the "no conversation content" verdict — they *are* conversation. They do
+    // change what the recorded span means: a conversation record whose own time
+    // we could not read may have happened outside it (see
+    // [`TimeSource::PartialRange`]).
+    let mut conversation_without_time = 0u64;
+    let mut conversation_invalid_time = 0u64;
+
     for line in lines {
         let line = line.trim();
         if line.is_empty() {
@@ -265,7 +355,13 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             }
             continue;
         };
-        match classify_line(harness, &value) {
+        let line_class = classify_line(harness, &value);
+        // Whether this line is positively a conversation record, needed by the
+        // time-match below to tell "a conversation record we could not place in
+        // time" (which makes the span partial) from "a line of a harness we do
+        // not classify" (which is read for a time and nothing else).
+        let is_conversation_line = matches!(line_class, LineClass::Conversation);
+        match line_class {
             LineClass::Conversation => conversation_lines += 1,
             // A metadata record can carry a timestamp too (Claude Code summary
             // shards; kimi-code's config and tool-discovery records). Those
@@ -284,13 +380,20 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             // gemini export one session as one JSON object), so a line carries
             // its own first/last and the aggregation folds those in.
             lt @ LineTime::Time { .. } => fold.add(lt),
-            LineTime::Absent => {}
+            LineTime::Absent => {
+                if is_conversation_line {
+                    conversation_without_time += 1;
+                }
+            }
             LineTime::NoTimestampField => {
                 saw_timestamp_field = false;
             }
             LineTime::Invalid => {
                 saw_timestamp_field = true;
                 invalid_timestamp += 1;
+                if is_conversation_line {
+                    conversation_invalid_time += 1;
+                }
             }
         }
     }
@@ -305,7 +408,26 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     }
 
     let time_source = if fold.first.is_some() {
-        if fold.any_messages {
+        // A record that could not be placed in time makes the recorded interval
+        // an inner bound of the span, so it is reported as such **instead of**
+        // the confidence the read records alone would support (see
+        // [`TimeSource::PartialRange`]). Checked first: it is a statement about
+        // what the bounds are, and it is true whatever the bounds were read from.
+        if let Some(why) = partial_range_why(
+            harness,
+            undetermined_lines,
+            conversation_without_time,
+            conversation_invalid_time,
+        ) {
+            TimeSource::PartialRange {
+                how: if fold.any_rfc3339 {
+                    RFC3339_HOW.to_string()
+                } else {
+                    EPOCH_HOW.to_string()
+                },
+                why,
+            }
+        } else if fold.any_messages {
             TimeSource::Messages {
                 exact: fold.any_rfc3339,
             }
@@ -317,8 +439,7 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             TimeSource::Exact
         } else {
             TimeSource::Inferred {
-                how: "in-line timestamps are numeric epochs: unit inferred from magnitude (values in the 2020–2100 seconds range treated as seconds; millis-range values divided by 1000, micros-range values divided by 1_000_000, to get seconds)"
-                    .to_string(),
+                how: EPOCH_HOW.to_string(),
             }
         }
     } else if no_conversation_content(harness, line_count, conversation_lines, undetermined_lines) {
@@ -2031,6 +2152,121 @@ mod tests {
             "an unclassified op must stay Unknown, got {:?}",
             a.time_source
         );
+    }
+
+    /// The W116 review finding: one recognised, timestamped conversation record
+    /// does **not** license a complete range while an unrecognised record is
+    /// present, because that record may be conversation carrying a time outside
+    /// the recorded one. The bounds stay (they are measured); what changes is
+    /// what they claim to be.
+    #[test]
+    fn kimi_code_unrecognised_record_makes_the_range_partial() {
+        let user = kimi_user(T1 * 1000);
+        let step = kimi_loop(T2 * 1000, "step.begin");
+        // An op added by a future release: undetermined, timestamped after the
+        // recorded span ends.
+        let future = kimi_bookkeeping("some.future_op", (T2 + 3600) * 1000);
+        let lines = [user.as_str(), step.as_str(), future.as_str()];
+        let a = analyze_session("kimi-code", &lines);
+
+        assert_eq!(
+            (a.first_unix, a.last_unix),
+            (Some(T1), Some(T2)),
+            "the measured bounds are kept — withdrawing them would delete a measurement"
+        );
+        let TimeSource::PartialRange { how, why } = &a.time_source else {
+            panic!("expected PartialRange, got {:?}", a.time_source);
+        };
+        assert!(
+            how.contains("millis"),
+            "the bounds we do have must still say how they were read: {how}"
+        );
+        assert!(
+            why.contains("does not recognise"),
+            "the reason must name the unclassified record: {why}"
+        );
+        assert!(
+            !why.contains(&T2.to_string()) && !why.contains(&T1.to_string()),
+            "the reason is a grouping key in the human views, so it must not carry \
+             per-session numbers: {why}"
+        );
+        assert!(
+            !a.time_source.is_no_conversation_content(),
+            "this session does hold conversation, so it is not the ADR-035 class B state"
+        );
+        assert!(
+            a.time_source.bounds_are_partial(),
+            "consumers must be able to ask this without reading the variant"
+        );
+    }
+
+    /// The same hole, one field over: a record we positively classified as
+    /// conversation whose own timestamp cannot be read is just as unplaceable as
+    /// an op we do not know, so it must not be folded into a complete range.
+    #[test]
+    fn kimi_code_conversation_record_without_a_time_makes_the_range_partial() {
+        let user = kimi_user(T1 * 1000);
+        // `restore(record)` in the installed implementation reads
+        // `record.time ?? Date.now()`, so a stored conversation record may have
+        // no `time` at all — this is a real shape, not a hypothetical.
+        let untimed = r#"{"type":"context.append_message","message":{"role":"user","origin":{"kind":"user"}}}"#;
+        let a = analyze_session("kimi-code", &[user.as_str(), untimed]);
+
+        assert_eq!(a.first_unix, Some(T1));
+        let TimeSource::PartialRange { why, .. } = &a.time_source else {
+            panic!("expected PartialRange, got {:?}", a.time_source);
+        };
+        assert!(why.contains("no timestamp field"), "{why}");
+    }
+
+    /// And the unreadable-timestamp end of it.
+    #[test]
+    fn kimi_code_conversation_record_with_an_unreadable_time_makes_the_range_partial() {
+        let user = kimi_user(T1 * 1000);
+        // Out of the plausible window: never clamped, never used, and never
+        // allowed to look like a bound that is the whole span.
+        let bogus = kimi_loop(1_736_944, "step.begin");
+        let a = analyze_session("kimi-code", &[user.as_str(), bogus.as_str()]);
+
+        assert_eq!(a.first_unix, Some(T1));
+        let TimeSource::PartialRange { why, .. } = &a.time_source else {
+            panic!("expected PartialRange, got {:?}", a.time_source);
+        };
+        assert!(why.contains("could not be read"), "{why}");
+    }
+
+    /// Claude Code has the same classification (`Some(_)` metadata, `None`
+    /// undetermined), so the rule is the harness's shape, not Kimi's, and the
+    /// `how` names the RFC 3339 read rather than the epoch-millis one.
+    #[test]
+    fn claude_code_untyped_record_makes_the_range_partial() {
+        let user = cc_user(RFC_T1);
+        let junk = r#"{"sessionId":"s","uuid":"u9"}"#;
+        let a = analyze_session("claude-code", &[user.as_str(), junk]);
+
+        assert_eq!(a.first_unix, Some(T1));
+        let TimeSource::PartialRange { how, why } = &a.time_source else {
+            panic!("expected PartialRange, got {:?}", a.time_source);
+        };
+        assert!(how.contains("RFC 3339"), "{how}");
+        assert!(why.contains("does not recognise"), "{why}");
+    }
+
+    /// The control: with every record classified and timestamped, the range is
+    /// still the plain inferred one. A partial range must not become the answer
+    /// for the ordinary case.
+    #[test]
+    fn kimi_code_fully_recognised_records_stay_inferred() {
+        let user = kimi_user(T1 * 1000);
+        let step = kimi_loop(T2 * 1000, "step.begin");
+        let a = analyze_session("kimi-code", &[user.as_str(), step.as_str()]);
+
+        assert!(
+            matches!(a.time_source, TimeSource::Inferred { .. }),
+            "no unplaceable record here, so nothing licenses a partial range: {:?}",
+            a.time_source
+        );
+        assert!(!a.time_source.bounds_are_partial());
     }
 
     /// The journal's own reader warns about corrupted lines, so a line that

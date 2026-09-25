@@ -34,6 +34,10 @@ const TALKING_SESSION: &str = "kimi-code.mbp-kimi.w116talk0000000000000000000000
 /// this machine's three real sessions: an opening metadata record plus config
 /// and MCP tool-discovery records only.
 const SILENT_SESSION: &str = "kimi-code.mbp-kimi.w116quiet0000000000000000000001";
+/// W116b: a session that mixes recognised, timestamped records with a record
+/// whose type this reader does not classify. Its two recorded bounds are real,
+/// but they are only *part* of the session's span.
+const MIXED_SESSION: &str = "kimi-code.mbp-kimi.w116mixed0000000000000000000001";
 
 fn run(sandbox: &Path, args: &[&str]) -> Output {
     let home = sandbox.join("home");
@@ -317,5 +321,204 @@ fn kimi_code_time_parses_and_selects_by_day() {
         Some(1),
         "an unrelated day must select nothing:\n{}",
         String::from_utf8_lossy(&none.stdout)
+    );
+}
+
+/// W116b — a session that mixes recognised, timestamped records with a record
+/// this reader cannot classify must not keep a range that reads as complete.
+///
+/// The mixed session's last record is an op added by a future release, one day
+/// after the recorded span ends: if it is conversation, the session reaches into
+/// the **next** day. A day search must therefore report it as unplaceable
+/// (exit 3, "may be outside") rather than as a proven absence (exit 1), while
+/// the day the recorded bounds actually cover is still a real match — the
+/// recorded interval is a sub-interval of the span, so an overlap is a proof.
+#[test]
+fn kimi_code_mixed_records_do_not_make_the_range_look_complete() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-kimi";
+    let next_day = "2025-01-16";
+
+    write_shard(
+        &stage,
+        machine,
+        TALKING_SESSION,
+        &[
+            metadata(T1 * 1000 - 5),
+            bookkeeping("config.update", T1 * 1000 - 3),
+            user_message(T1 * 1000),
+            loop_event(T2 * 1000, "step.begin"),
+        ],
+    );
+    write_shard(
+        &stage,
+        machine,
+        MIXED_SESSION,
+        &[
+            metadata(T1 * 1000 - 5),
+            user_message(T1 * 1000),
+            loop_event(T2 * 1000, "step.begin"),
+            // A record type this module does not classify, stamped one day
+            // later: unplaceable, and possibly conversation.
+            bookkeeping("some.future_op", (T2 + 86_400) * 1000),
+        ],
+    );
+
+    // 1. The index keeps the measured bounds and says what they are: part of
+    //    the span, not all of it. The fully-recognised session beside it is
+    //    untouched, so this is not a blanket reclassification.
+    let idx = run_cmd(
+        sb.path(),
+        [
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        idx.status.success(),
+        "activity-index failed: {:?}",
+        idx.status
+    );
+    let index =
+        fs::read_to_string(stage.join("meta").join(machine).join("activity-v1.jsonl")).unwrap();
+    let mixed = index
+        .lines()
+        .find(|l| l.contains("w116mixed"))
+        .unwrap_or_else(|| panic!("the mixed session must have a row:\n{index}"));
+    assert!(
+        mixed.contains(r#""kind":"partial_range""#),
+        "an unclassifiable record must not leave a complete-looking range:\n{mixed}"
+    );
+    assert!(
+        mixed.contains(&format!(r#""first_unix":{T1}"#))
+            && mixed.contains(&format!(r#""last_unix":{T2}"#)),
+        "the measured bounds are kept — they are the part of the span we did read:\n{mixed}"
+    );
+    assert!(
+        mixed.contains("does not recognise"),
+        "the row must say why the range is partial:\n{mixed}"
+    );
+    let talking = index
+        .lines()
+        .find(|l| l.contains("w116talk"))
+        .unwrap_or_else(|| panic!("the talking session must have a row:\n{index}"));
+    assert!(
+        talking.contains(r#""kind":"inferred""#),
+        "a session whose every record is recognised keeps its plain inferred span:\n{talking}"
+    );
+
+    // 2. Push, then read the same answer back through the real commands.
+    let repo = sb.path().join("repo");
+    let key = sb.path().join("keys").join("masterkey.json");
+    let push = run_cmd(
+        sb.path(),
+        [
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(push.status.success(), "push failed: {:?}", push.status);
+
+    // 3. `overview` does not bucket it: its bounds cannot back the claim "this
+    //    session happened in this bucket". It is listed as unplaceable instead.
+    let ov_json = run_cmd(
+        sb.path(),
+        [
+            "overview",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    let ov_out = String::from_utf8_lossy(&ov_json.stdout);
+    let doc = ov_out.lines().next().unwrap_or_default();
+    let value: serde_json::Value =
+        serde_json::from_str(doc).unwrap_or_else(|e| panic!("not JSON ({e}):\n{ov_out}"));
+    assert_eq!(value["summary"]["sessions"], 2, "{ov_out}");
+    assert_eq!(
+        value["summary"]["unknown_time_sessions"], 1,
+        "the partial session has no time that can be bucketed:\n{ov_out}"
+    );
+    assert_eq!(
+        value["summary"]["no_conversation_content_sessions"], 0,
+        "it does hold conversation, so it is not the ADR-035 class B state:\n{ov_out}"
+    );
+
+    // 4. The day the recorded bounds cover is still a real match — for both
+    //    sessions (the partial one by proven overlap).
+    let day = run_cmd(
+        sb.path(),
+        [
+            "search",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--day",
+            DAY,
+            "--keep-ssh-masters",
+        ],
+    );
+    let day_out = String::from_utf8_lossy(&day.stdout);
+    assert_eq!(
+        day.status.code(),
+        Some(0),
+        "search --day failed:\n{day_out}"
+    );
+    assert!(
+        day_out.contains("[search] matched      : 2"),
+        "a window the recorded bounds overlap is answered for both sessions:\n{day_out}"
+    );
+
+    // 5. The day after the recorded span is NOT a proven absence: the
+    //    unclassifiable record may be conversation there. Exit 3 is
+    //    "may be outside"; exit 1 would be "we read everything and it is not
+    //    there", which is the finding.
+    let after = run_cmd(
+        sb.path(),
+        [
+            "search",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--day",
+            next_day,
+            "--keep-ssh-masters",
+        ],
+    );
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    assert_ne!(
+        after.status.code(),
+        Some(1),
+        "a day outside the recorded bounds must not be a proven absence:\n{after_out}"
+    );
+    assert_eq!(
+        after.status.code(),
+        Some(3),
+        "expected UNKNOWN:\n{after_out}"
+    );
+    assert!(
+        after_out.contains("could not be placed"),
+        "the partial session must be listed rather than dropped:\n{after_out}"
+    );
+    assert!(
+        !after_out.contains("[search] not in this destination"),
+        "the answer is not a real absence:\n{after_out}"
     );
 }
