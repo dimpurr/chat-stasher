@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::activity::TimeSource;
 use crate::overview::{Granularity, HeatmapAxis, OverviewRow};
 
+use super::facets::{self, PlatformGroup};
 use super::html::{
     completeness_banner, describe_selector, esc, fmt_age, fmt_bytes, fmt_unix, footer, head,
     launch_banner, machines_without_index_banner,
@@ -182,21 +183,103 @@ fn render_machines(
     out
 }
 
+/// Order the matrix's source columns by group (UIA-3, 29-UI-DESIGN §3.1):
+/// web platforms, then coding agents, then the ungrouped bucket — each sorted
+/// alphabetically within itself so the order is stable across launches — and
+/// the no-harness column last, a *rowspan* header of its own rather than a
+/// group member, because it is the absence of a classifiable source, not one
+/// more group. `BTreeSet` iteration is already sorted, so grouping is a
+/// three-way stable partition of it.
+fn grouped_sources(
+    sources: &BTreeSet<String>,
+    no_harness: &str,
+) -> Vec<(String, Option<PlatformGroup>)> {
+    let mut out: Vec<(String, Option<PlatformGroup>)> = Vec::new();
+    for group in [
+        PlatformGroup::WebPlatforms,
+        PlatformGroup::CodingAgents,
+        PlatformGroup::Ungrouped,
+    ] {
+        out.extend(
+            sources
+                .iter()
+                .filter(|s| s.as_str() != no_harness)
+                .filter(|s| facets::group_of(s) == group)
+                .map(|s| (s.clone(), Some(group))),
+        );
+    }
+    if sources.contains(no_harness) {
+        out.push((no_harness.to_string(), None));
+    }
+    out
+}
+
+/// The two header rows of the machine × source matrix: the group cells — one
+/// `<th colspan=n>` per contiguous group run, coloured the group's colour —
+/// above the per-source `<th>`s that carry the runs' sources. The machine and
+/// total header cells span both rows, which is what keeps their meaning where
+/// it already was; the no-harness column is a single `rowspan=2` cell, because
+/// no group claims it and saying so twice would invent a label for it.
+fn matrix_header(sources: &[(String, Option<PlatformGroup>)]) -> String {
+    let mut runs: Vec<(PlatformGroup, usize)> = Vec::new();
+    for (_, group) in sources.iter().filter_map(|(s, g)| {
+        // The no-harness column is not part of any run; it renders as its own
+        // spanning cell in the first row.
+        if g.is_none() {
+            None
+        } else {
+            Some((s, *g))
+        }
+    }) {
+        let group = group.expect("the no-harness column was filtered out above");
+        match runs.last_mut() {
+            Some((last, n)) if *last == group => *n += 1,
+            _ => runs.push((group, 1)),
+        }
+    }
+    let mut top = String::from("<tr><th rowspan=2>machine</th>");
+    for (group, n) in &runs {
+        top.push_str(&format!(
+            "<th colspan={n} class=\"ghead {}\">{}</th>",
+            group.css(),
+            group.label()
+        ));
+    }
+    let mut bottom = String::from("<tr>");
+    for (source, group) in sources {
+        match group {
+            Some(group) => bottom.push_str(&format!(
+                "<th class=\"n {}\">{}</th>",
+                group.css(),
+                esc(source)
+            )),
+            None => {
+                // The rowspan cell belongs in the *first* row, beside the
+                // group cells, not the second: a cell spanning both header
+                // rows is one header, not a group with one member.
+                top.push_str(&format!("<th rowspan=2 class=n>{}</th>", esc(source)));
+            }
+        }
+    }
+    top.push_str("<th rowspan=2 class=n>total</th></tr>\n");
+    bottom.push_str("</tr>\n");
+    format!("<thead>{top}{bottom}</thead>\n<tbody>\n")
+}
+
 fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> String {
     let mut sources: BTreeSet<String> = BTreeSet::new();
     for s in in_view {
         sources.insert(s.source_label());
     }
-    let sources: Vec<String> = sources.into_iter().collect();
+    let sources = grouped_sources(&sources, NO_HARNESS);
     let mut out = String::from(
         "<section><h2>Machine × source</h2>\n<p class=sub>Session counts. A cell links to that \
-         machine and source; the row label links to the whole machine.</p>\n\
-         <div class=scroll><table>\n<thead><tr><th>machine</th>",
+         machine and source; the row label links to the whole machine. Columns are grouped by \
+         the facet bar's platform groups (web platforms, coding agents, then any source this \
+         build does not classify).</p>\n\
+         <div class=scroll><table>\n",
     );
-    for h in &sources {
-        out.push_str(&format!("<th class=n>{}</th>", esc(h)));
-    }
-    out.push_str("<th class=n>total</th></tr></thead>\n<tbody>\n");
+    out.push_str(&matrix_header(&sources));
 
     for m in machines {
         out.push_str(&format!(
@@ -206,7 +289,7 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
             m = esc(m),
         ));
         let mut row_total = 0usize;
-        for h in &sources {
+        for (h, group) in &sources {
             let n = in_view
                 .iter()
                 .filter(|s| s.machine == *m && s.source_label() == *h)
@@ -214,7 +297,7 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
             row_total += n;
             if n == 0 {
                 out.push_str("<td class=n>·</td>");
-            } else if *h == NO_HARNESS {
+            } else if group.is_none() {
                 // Not expressible as a `--harness` filter: the shared selector's
                 // harness constraint needs a harness to compare against, and
                 // these ids have none. Linking to something that would return a
@@ -223,6 +306,16 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
                 out.push_str(&format!(
                     "<td class=n title=\"not expressible as a harness filter — see the list \
                      below\">{n}</td>"
+                ));
+            } else if !facets::is_expressible_as_filter_value(h) {
+                // A harness containing the value-list separator cannot be
+                // named by any `--harness` filter — the grammar would split
+                // it into ids that do not exist, so the link would return a
+                // different set than the count promises. Same rule as the
+                // no-prefix cells: a count that says why, never a lying link.
+                out.push_str(&format!(
+                    "<td class=n title=\"this source's id contains the harness list separator, \
+                     so no harness filter can select it\">{n}</td>"
                 ));
             } else {
                 out.push_str(&format!(
@@ -236,7 +329,10 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
         out.push_str(&format!("<td class=n><b>{row_total}</b></td></tr>\n"));
     }
     out.push_str("</tbody></table></div>\n");
-    if sources.iter().any(|s| s == NO_HARNESS) {
+    // Two independent reasons a cell is a count rather than a link, each
+    // said only when its column is on the page — a note about a column this
+    // table does not hold would be a claim about nothing.
+    if sources.iter().any(|(_, group)| group.is_none()) {
         out.push_str(&format!(
             "<p class=sub>Sessions counted under <code>{}</code> cannot be selected with \
              <code>--harness</code>: the archived id carries no harness prefix, so the filter \
@@ -244,6 +340,16 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
              listed below.</p>\n",
             esc(NO_HARNESS)
         ));
+    }
+    let has_inexpressible = sources
+        .iter()
+        .any(|(source, group)| group.is_some() && !facets::is_expressible_as_filter_value(source));
+    if has_inexpressible {
+        out.push_str(
+            "<p class=sub>A source whose id contains the harness list separator cannot be \
+             named by any <code>--harness</code> filter — the filter would split it into ids \
+             that do not exist. Those cells are counts, not links.</p>\n",
+        );
     }
     out.push_str("</section>\n");
     out

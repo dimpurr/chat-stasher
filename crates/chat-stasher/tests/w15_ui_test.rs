@@ -1525,3 +1525,306 @@ fn paging_cannot_page_out_of_the_launch_filter() {
     assert_eq!(v2["matched"], serde_json::json!(0), "{body}");
     assert_eq!(rows_of(&body).len(), 0, "{body}");
 }
+
+// -------------------------------------------------- UIA-3 · platform groups
+//
+// The grouping map, its facet bar and its JSON column over a real loopback
+// socket and real binary. The fixture is the shape the task spec names: one
+// machine holding a coding agent session, a web-platform session, a session
+// from a platform id NO build classifies (`omega-web` — the "new platform
+// lands in ungrouped" case), and one id with no harness prefix at all.
+
+/// A platform id no release of this tool has ever classified. It arrives in
+/// the archive exactly the way a real extension platform would: as the
+/// leading segment of an extension-delivered session id.
+const GROUP_NEW_PLATFORM: &str = "omega-web.grp-0002";
+const GROUP_AGENT: &str = "claude-code.mbp-grp.019bf00d-97b6-7eb2-9bf8-eacbacc09871";
+const GROUP_WEB: &str = "deepseek.grp-0001";
+const GROUP_NO_PREFIX: &str = ".no-prefix-grp";
+
+/// One machine, one snapshot, four sessions — one per platform-group state
+/// the facet bar counts, all synthetic.
+fn build_grouped_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let pairs = [
+        (GROUP_AGENT, vec![cc_line("2025-04-01T12:00:00Z")]),
+        (GROUP_WEB, vec![ext_line()]),
+        (GROUP_NEW_PLATFORM, vec![ext_line()]),
+        // `.no-prefix-grp` renders `(no harness prefix)`: nothing before its
+        // leading `.`, so `infer_harness` has no head to return.
+        (GROUP_NO_PREFIX, vec![cc_line("2025-04-02T09:30:00Z")]),
+    ];
+    let stage = stage_for(sandbox, "mbp-grp", &pairs);
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let indexed = run(
+        sandbox,
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "mbp-grp",
+        ],
+    );
+    assert!(indexed.status.success(), "activity-index: {indexed:?}");
+    let pushed = run(
+        sandbox,
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-grp",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(
+        pushed.status.success(),
+        "push failed: {:?}\n{}",
+        pushed.status,
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    (repo, key)
+}
+
+/// The facet bar's link cells as `(href, label)` pairs. The nav block is
+/// rendered by the server itself in one stable shape, so simple string
+/// splitting reads the links back without a parser.
+fn facet_bar_links(html: &str) -> Vec<(String, String)> {
+    let start = html
+        .find("<nav class=sub aria-label=\"platform groups\">")
+        .expect("the platform-group bar must be on the page");
+    let bar = &html[start..];
+    let end = bar.find("</nav>").expect("the bar must close");
+    let bar = &bar[..end];
+    let mut out = Vec::new();
+    let mut rest = bar;
+    while let Some(at) = rest.find("<a href=\"") {
+        let after = &rest[at + 9..];
+        let (href, tail) = after
+            .split_once("\">")
+            .unwrap_or_else(|| panic!("a facet cell without its label in {bar}"));
+        let label = tail
+            .split_once("</a>")
+            .unwrap_or_else(|| panic!("a facet cell that never closes in {bar}"))
+            .0;
+        out.push((href.to_string(), label.to_string()));
+        rest = &after[href.len()..];
+    }
+    out
+}
+
+/// **The pin, both directions.** Every facet-bar link is a plain `--harness`
+/// list the shared selector can read: turning the link's query back into
+/// command-line flags and running `search` must return the same sessions the
+/// dashboard's own `/api/sessions` returns — including the "counts" that are
+/// not match results (no-prefix rows appear as `could_not_be_placed` on both
+/// sides, never as absent). And the count a link advertises is the matched
+/// count its own page reports, so the bar can never promise a set the click
+/// does not show.
+#[test]
+fn facet_bar_links_are_the_shared_selector_and_their_counts_do_not_lie() {
+    let sb = sandbox();
+    let (repo, key) = build_grouped_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    let (status, html) = ui.get("/sessions");
+    assert_eq!(status, 200, "{html}");
+    // The bar names the fixture's hand-counted groups: All 4, one web
+    // platform, one coding agent, one unclassified id — with All current.
+    assert!(
+        html.contains("<b aria-current=\"true\">All 4</b>"),
+        "the bar's All count is the four sessions: {html}"
+    );
+    assert!(
+        html.contains("Sources this build does not classify sit under <i>ungrouped</i>"),
+        "the bar explains the ungrouped bucket: {html}"
+    );
+    let links = facet_bar_links(&html);
+    assert_eq!(links.len(), 3, "web, agents, ungrouped: {html}");
+    let ungrouped = links
+        .iter()
+        .find(|(href, _)| href.contains("omega-web"))
+        .unwrap_or_else(|| panic!("the ungrouped link must name the unclassified id: {links:?}"));
+    assert_eq!(ungrouped.1, "ungrouped 1", "the bar counts it honestly");
+
+    for (href, label) in &links {
+        // 1. The advertised count is the matched count of the link's own page.
+        let query = href
+            .split_once('?')
+            .map(|(_, q)| q)
+            .unwrap_or("")
+            .to_string();
+        let without_token: Vec<&str> = query
+            .split('&')
+            .filter(|kv| !kv.starts_with("token="))
+            .collect();
+        let (status, body) = ui.get(&format!("/api/sessions?{}", without_token.join("&")));
+        assert_eq!(status, 200, "{href}: {body}");
+        let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let advertised: u64 = label
+            .rsplit_once(' ')
+            .and_then(|(_, n)| n.parse().ok())
+            .unwrap_or_else(|| panic!("`{label}` carries a count"));
+        let matched = page["matched"].as_u64().unwrap();
+        assert_eq!(
+            matched, advertised,
+            "`{href}` matched {matched}, the bar advertised {advertised}"
+        );
+
+        // 2. The same query as command-line flags is the same list — the
+        // same equality `a_drill_down_returns_exactly_what_search_returns`
+        // pins for hand-written queries, now for the ones the server itself
+        // emits, multi-value `--harness` lists included.
+        let mut args: Vec<String> = vec!["search".into(), "--json".into()];
+        args.push("--repo".into());
+        args.push(repo.to_str().unwrap().into());
+        args.push("--key-file".into());
+        args.push(key.to_str().unwrap().into());
+        args.push("--keep-ssh-masters".into());
+        for kv in &without_token {
+            let (k, v) = kv.split_once('=').unwrap();
+            assert_ne!(k, "token", "the token is not a selector flag");
+            args.push(format!("--{k}"));
+            args.push((*v).to_string());
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(sb.path(), &arg_refs);
+        let searched = first_json(&out.stdout);
+        let from_ui: Vec<String> = page["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["session_short_id"].as_str().unwrap().to_string())
+            .collect();
+        let from_search: Vec<String> = searched["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["session_short_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            from_ui, from_search,
+            "`{href}`: the dashboard list and search disagree"
+        );
+        // And the non-matches agree too — a group link's no-prefix rows are
+        // `could_not_be_placed` on both sides, never silently dropped.
+        assert_eq!(
+            page["could_not_be_placed"].as_u64().unwrap_or(0),
+            searched["could_not_be_placed"].as_u64().unwrap_or(0),
+            "`{href}`: the two sides disagree about the unplaceable rows"
+        );
+        assert_eq!(
+            page["not_matched"].as_u64().unwrap_or(0),
+            searched["not_matched"].as_u64().unwrap_or(0),
+            "`{href}`"
+        );
+    }
+
+    // Following the ungrouped link (a new platform's own filter, no release
+    // needed) is the one session it promises — and the no-prefix session is
+    // listed as could-not-be-placed there, with the reason it can never be
+    // evaluated against.
+    let (status, body) = ui.get("/api/sessions?harness=omega-web");
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["matched"], serde_json::json!(1), "{body}");
+    assert_eq!(v["could_not_be_placed"], serde_json::json!(1), "{body}");
+    assert!(
+        body.contains("archived id carries no harness prefix"),
+        "the unplaceable reason must name the lack of a prefix: {body}"
+    );
+}
+
+/// Platform groups reach both surfaces on the real server: the overview's
+/// matrix columns grouped and ordered web → agents → ungrouped → no-prefix,
+/// and `/api/sessions` rows carrying the `platform_group` a consumer filters
+/// on — `ungrouped` for the new platform, `null` for the no-prefix row.
+#[test]
+fn platform_groups_reach_the_matrix_and_the_json_rows() {
+    let sb = sandbox();
+    let (repo, key) = build_grouped_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    let (status, html) = ui.get("/");
+    assert_eq!(status, 200, "{html}");
+    let matrix = html
+        .split("<h2>Machine × source</h2>")
+        .nth(1)
+        .and_then(|rest| rest.split("</section>").next())
+        .expect("the matrix section");
+    assert!(
+        matrix.contains("<th colspan=1 class=\"ghead g-web\">Web platforms</th>"),
+        "one web platform, one group cell: {matrix}"
+    );
+    assert!(
+        matrix.contains("<th colspan=1 class=\"ghead g-agents\">Coding agents</th>"),
+        "{matrix}"
+    );
+    assert!(
+        matrix.contains("<th colspan=1 class=\"ghead g-ungrouped\">ungrouped</th>"),
+        "the unclassified platform is grouped as itself: {matrix}"
+    );
+    assert!(
+        matrix.contains("<th rowspan=2 class=n>(no harness prefix)</th>"),
+        "the no-prefix column is its own spanning header, not a group: {matrix}"
+    );
+    let order: Vec<usize> = ["deepseek", "claude-code", "omega-web"]
+        .iter()
+        .map(|label| {
+            matrix
+                .find(&format!(">{}</th>", label))
+                .unwrap_or_else(|| panic!("`{label}` must be a matrix header: {matrix}"))
+        })
+        .collect();
+    let mut ascending = order.clone();
+    ascending.sort();
+    assert_eq!(
+        order, ascending,
+        "web platforms, then agents, then ungrouped — in that header row"
+    );
+    // The ungrouped id's cell is a real link: a single unclassified id is a
+    // perfectly ordinary one-value harness filter.
+    assert!(
+        matrix.contains("harness=omega-web&"),
+        "the new platform's own cell filters on its own id: {matrix}"
+    );
+
+    let (status, body) = ui.get("/api/sessions");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = v["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{body}");
+    for row in rows {
+        let source = row["source"].as_str().unwrap();
+        // The wire words of UIA-3's grouping map, plus its null rule: a row
+        // with no harness carries no group either — never a nearest guess.
+        let expect = match source {
+            "claude-code" => Some("coding-agents"),
+            "deepseek" => Some("web-platforms"),
+            "omega-web" => Some("ungrouped"),
+            "(no harness prefix)" => None,
+            other => panic!("unexpected source `{other}`: {body}"),
+        };
+        match expect {
+            Some(word) => {
+                assert_eq!(
+                    row["platform_group"],
+                    serde_json::json!(word),
+                    "`{source}`: {body}"
+                );
+                assert!(!row["harness"].is_null(), "`{source}`: {body}");
+            }
+            None => {
+                assert!(
+                    row["harness"].is_null() && row["platform_group"].is_null(),
+                    "no harness ⇒ no group, never a guess: {row}"
+                );
+            }
+        }
+    }
+}

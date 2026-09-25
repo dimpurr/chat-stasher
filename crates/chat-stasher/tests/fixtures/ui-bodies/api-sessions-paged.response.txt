@@ -36,6 +36,7 @@ content-type: application/json; charset=utf-8
       },
       "line_count": 10,
       "machine": "m-1",
+      "platform_group": "coding-agents",
       "session_short_id": "claude-c~e58aa6",
       "shards": 2,
       "source": "claude-code",

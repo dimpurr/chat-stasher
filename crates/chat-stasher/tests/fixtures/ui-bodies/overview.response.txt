@@ -38,6 +38,13 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+/* UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns grouped and coloured
+   by platform group — labels first, colour second (the group name sits in the
+   header row), and drawn only from the variables above (§8.1: no new colours). */
+th.ghead{font-weight:400;font-size:.78rem;padding-bottom:.05rem}
+.g-web{color:var(--link)}
+.g-agents{color:var(--ok)}
+.g-ungrouped{color:var(--muted)}
 footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;
 border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
@@ -68,12 +75,14 @@ nav.sub{display:flex;gap:1rem}
 <p class=sub>Health is one of four measured states — a snapshot age against a 14-day threshold, or an index that is missing or unreadable. There is no health percentage: nothing here measures a denominator that would make one mean anything.</p>
 </section>
 <section><h2>Machine × source</h2>
-<p class=sub>Session counts. A cell links to that machine and source; the row label links to the whole machine.</p>
+<p class=sub>Session counts. A cell links to that machine and source; the row label links to the whole machine. Columns are grouped by the facet bar's platform groups (web platforms, coding agents, then any source this build does not classify).</p>
 <div class=scroll><table>
-<thead><tr><th>machine</th><th class=n>(no harness prefix)</th><th class=n>claude-code</th><th class=n>deepseek</th><th class=n>total</th></tr></thead>
+<thead><tr><th rowspan=2>machine</th><th colspan=1 class="ghead g-web">Web platforms</th><th colspan=1 class="ghead g-agents">Coding agents</th><th rowspan=2 class=n>(no harness prefix)</th><th rowspan=2 class=n>total</th></tr>
+<tr><th class="n g-web">deepseek</th><th class="n g-agents">claude-code</th></tr>
+</thead>
 <tbody>
-<tr><td class=mono><a href="/sessions?machine=m-1&token=golden-token">m-1</a></td><td class=n>·</td><td class=n><a href="/sessions?machine=m-1&harness=claude-code&token=golden-token">1</a></td><td class=n><a href="/sessions?machine=m-1&harness=deepseek&token=golden-token">1</a></td><td class=n><b>2</b></td></tr>
-<tr><td class=mono><a href="/sessions?machine=m-2&token=golden-token">m-2</a></td><td class=n title="not expressible as a harness filter — see the list below">1</td><td class=n><a href="/sessions?machine=m-2&harness=claude-code&token=golden-token">1</a></td><td class=n>·</td><td class=n><b>2</b></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-1&token=golden-token">m-1</a></td><td class=n><a href="/sessions?machine=m-1&harness=deepseek&token=golden-token">1</a></td><td class=n><a href="/sessions?machine=m-1&harness=claude-code&token=golden-token">1</a></td><td class=n>·</td><td class=n><b>2</b></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-2&token=golden-token">m-2</a></td><td class=n>·</td><td class=n><a href="/sessions?machine=m-2&harness=claude-code&token=golden-token">1</a></td><td class=n title="not expressible as a harness filter — see the list below">1</td><td class=n><b>2</b></td></tr>
 <tr><td class=mono><a href="/sessions?machine=m-3&token=golden-token">m-3</a></td><td class=n>·</td><td class=n>·</td><td class=n>·</td><td class=n><b>0</b></td></tr>
 </tbody></table></div>
 <p class=sub>Sessions counted under <code>(no harness prefix)</code> cannot be selected with <code>--harness</code>: the archived id carries no harness prefix, so the filter has nothing to compare. Those cells are counts, not links, and the sessions are listed below.</p>

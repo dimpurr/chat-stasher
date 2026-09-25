@@ -13,6 +13,7 @@ use crate::activity::TitleSource;
 use crate::search::SessionLabel;
 use crate::selector::{Resolved, UnplacedBy};
 
+use super::facets;
 use super::html::{completeness_banner, describe_selector, esc, fmt_bytes, fmt_unix, footer, head};
 use super::{
     index_param, page_from_query, page_window, percent_encode, select, selector_from_query,
@@ -108,6 +109,11 @@ fn page_sessions(
     }
     out.push_str(&completeness_banner(data));
     out.push_str(&label_coverage_note(sel, data));
+    // The facet bar (29-UI-DESIGN §2.3) renders for every state the page can
+    // be in — a zero-match page most of all, because a facet typed wrong is
+    // exactly what the bar is for switching, and a page with no way to
+    // correct the query would trap the typo (§4.1's OQ-2 rationale).
+    out.push_str(&facets::facet_bar(resolved, params, token, data));
 
     if sel.matched.is_empty() {
         // The three "nothing matched" sentences are triggered by the matched

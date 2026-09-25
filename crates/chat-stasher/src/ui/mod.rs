@@ -46,7 +46,8 @@
 //! * [`sessions`] — `/sessions`, `/session` and the raw `/content` view.
 //! * [`reader`] — `/reader` and the message-block rendering.
 //! * [`json`] — `/api/overview` and `/api/sessions`.
-//! * [`facets`] — skeleton for the facet bar (29-UI-DESIGN §2, not yet built).
+//! * [`facets`] — the platform/agent grouping table (29-UI-DESIGN §2), the
+//!   `/sessions` facet bar, and the group any harness id falls into.
 //!
 //! Everything below is the shared model, the selector bridge, the paging
 //! window and the router.
@@ -1116,6 +1117,93 @@ pub(crate) mod fixture {
                 data_blobs_read: 0,
                 index_files_read: 0,
             },
+            "dest-under-test",
+            Selector::default(),
+            NOW,
+        )
+    }
+
+    /// Seven rows covering every bucket the facet bar counts (UIA-3), laid
+    /// out by hand so every count the bar shows is derivable from this table
+    /// alone:
+    ///
+    /// | row | machine | archived id        | harness     | group     | time     |
+    /// |-----|---------|--------------------|-------------|-----------|----------|
+    /// | 0   | m-1     | claude-code.m-1.…  | claude-code | agents    | known    |
+    /// | 1   | m-1     | deepseek.m-1.aaaa  | deepseek    | web       | unknown  |
+    /// | 2   | m-2     | grok.m-2.0009      | grok       | web       | known    |
+    /// | 3   | m-2     | omega-web.m-2.0042 | omega-web  | ungrouped | known    |
+    /// | 4   | m-2     | claude-code.m-2.…  | claude-code | agents    | known    |
+    /// | 5   | m-2     | .groups-no-prefix  | (none)      | (none)    | unknown  |
+    /// | 6   | m-2     | we,ird.m-2.0001    | we,ird      | ungrouped | known    |
+    ///
+    /// `omega-web` is the "a platform the extension learns tomorrow" row: an
+    /// id no build classifies, whose facet link must carry it as itself. Row
+    /// 6's harness contains the selector's list separator, so no
+    /// `--harness` filter can name it — the CLI's own grammar has the same
+    /// limit, which is exactly why the bar must count it under `All` and say
+    /// so instead of linking it.
+    pub fn groups_report() -> SearchReport {
+        let rows = [
+            (
+                "m-1",
+                "claude-code.m-1.019bf00d-97b6-7eb2-9bf8-eacbacc09871",
+                100,
+                2,
+                true,
+            ),
+            ("m-1", "deepseek.m-1.d41f6a2b9c0e47aaaa3333", 50, 1, false),
+            ("m-2", "grok.m-2.0009", 60, 1, true),
+            ("m-2", "omega-web.m-2.0042", 40, 1, true),
+            (
+                "m-2",
+                "claude-code.m-2.019bf00d-97b6-7eb2-9bf8-eacbacc09872",
+                200,
+                3,
+                true,
+            ),
+            ("m-2", ".groups-no-prefix", 20, 1, false),
+            // The session id is honest here: a first id segment containing
+            // the harness list's separator is a legal archived directory
+            // name and an unnameable harness filter value at once.
+            ("m-2", "we,ird.m-2.0001", 30, 1, true),
+        ];
+        let hits = rows
+            .iter()
+            .map(|(machine, id, bytes, shards, known)| {
+                let span = if *known {
+                    Some((
+                        (NOW - 2000 + (*bytes as i64) * 100),
+                        (NOW - 2000 + (*bytes as i64) * 100 + 60),
+                    ))
+                } else {
+                    None
+                };
+                hit(machine, id, *bytes, *shards, span)
+            })
+            .collect();
+        SearchReport {
+            destination: "dest-under-test".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            sessions_seen: rows.len(),
+            window: None,
+            all_recall: Default::default(),
+            hits,
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
+            hosts: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 1,
+        }
+    }
+
+    pub fn groups_data() -> UiData {
+        UiData::from_report(
+            &groups_report(),
             "dest-under-test",
             Selector::default(),
             NOW,
@@ -2204,6 +2292,142 @@ mod tests {
         );
         assert!(r.selector.window.is_some());
         assert!(r.warnings.is_empty());
+    }
+
+    /// UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns are grouped —
+    /// web platforms, then coding agents, then the ungrouped bucket, each
+    /// sorted within itself, with the no-harness column last and outside any
+    /// group — and the header carries the group cells above the source cells.
+    /// The groupings the fixture lays out by hand: deepseek and grok are web,
+    /// claude-code is an agent, omega-web and the separator id are ungrouped.
+    #[test]
+    fn the_matrix_columns_are_grouped_by_platform_group() {
+        let d = fixture::groups_data();
+        let html = req("/", &d, &NoContent).body;
+        let matrix = html
+            .split("<h2>Machine × source</h2>")
+            .nth(1)
+            .and_then(|rest| rest.split("</section>").next())
+            .expect("the matrix section must exist");
+        let header = matrix
+            .split("<thead>")
+            .nth(1)
+            .and_then(|rest| rest.split("</thead>").next())
+            .expect("the matrix must carry a header");
+        assert!(
+            header.contains("<th colspan=2 class=\"ghead g-web\">Web platforms</th>"),
+            "the two web platforms span one group cell: {header}"
+        );
+        assert!(
+            header.contains("<th colspan=1 class=\"ghead g-agents\">Coding agents</th>"),
+            "{header}"
+        );
+        assert!(
+            header.contains("<th colspan=2 class=\"ghead g-ungrouped\">ungrouped</th>"),
+            "omega-web and the separator id are the ungrouped run: {header}"
+        );
+        assert!(
+            header.contains(&format!(
+                "<th rowspan=2 class=n>{}</th>",
+                html::esc(NO_HARNESS)
+            )),
+            "the no-prefix column is one spanning header of its own, not a group member: \
+             {header}"
+        );
+        // The source cells keep their group's colour class, and the column
+        // order is the group order — web, agents, ungrouped, no-prefix last —
+        // regardless of alphabetical order.
+        let bottom = header
+            .split_once("</tr>\n<tr>")
+            .map(|(_, rest)| rest)
+            .expect("the source header row must exist");
+        let order: Vec<usize> = ["deepseek", "grok", "claude-code", "omega-web", "we,ird"]
+            .iter()
+            .map(|label| {
+                let at = bottom
+                    .find(&format!(">{}</th>", html::esc(label)))
+                    .unwrap_or_else(|| panic!("`{label}` must be a source header: {bottom}"));
+                at
+            })
+            .collect();
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(
+            order, sorted,
+            "web platforms, then agents, then ungrouped — not alphabetical"
+        );
+        assert!(
+            bottom.contains("<th class=\"n g-web\">deepseek</th>"),
+            "source headers carry their group's class: {bottom}"
+        );
+        // The separator-carrying id's cell is a count, never a link: the
+        // filter grammar would splice the id, so the link would promise the
+        // count and deliver a different set.
+        assert!(
+            matrix.contains(
+                "title=\"this source's id contains the harness list separator, so no harness \
+                 filter can select it\""
+            ),
+            "{matrix}"
+        );
+        assert!(
+            !matrix.contains("harness=we%2Cird") && !matrix.contains("harness=we,ird"),
+            "no link may name the separator-carrying id: {matrix}"
+        );
+    }
+
+    /// UIA-3: `/api/sessions` rows report the platform group of each row's
+    /// harness, `ungrouped` included — a new platform reads as unclassified,
+    /// never as the nearest classified guess — and mirror `harness: null`
+    /// with `platform_group: null` instead of inventing a group for an id
+    /// with no prefix at all. Keyed by source rather than row order: the
+    /// list's own sort decides order, not this fixture's index.
+    #[test]
+    fn the_api_rows_report_the_platform_group() {
+        use std::collections::BTreeMap;
+        let d = fixture::groups_data();
+        let body = req("/api/sessions", &d, &NoContent).body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}"));
+        let rows = v["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 7, "{body}");
+        let by_source: BTreeMap<String, serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let source = row["source"].as_str().unwrap_or("?");
+                let group = row
+                    .get("platform_group")
+                    .expect("every row carries platform_group")
+                    .clone();
+                (source.to_string(), group)
+            })
+            .collect();
+        assert_eq!(
+            by_source["claude-code"],
+            serde_json::json!("coding-agents"),
+            "{body}"
+        );
+        for (source, group) in [
+            ("deepseek", "web-platforms"),
+            ("grok", "web-platforms"),
+            ("omega-web", "ungrouped"),
+            // The wire shape is not bound by the URL grammar: the separator
+            // id's group is a fact about the source, not a filter value.
+            ("we,ird", "ungrouped"),
+        ] {
+            assert_eq!(
+                by_source[source],
+                serde_json::json!(group),
+                "`{source}` carries the wrong group: {body}"
+            );
+        }
+        let no_prefix: Vec<&serde_json::Value> =
+            rows.iter().filter(|row| row["harness"].is_null()).collect();
+        assert_eq!(no_prefix.len(), 1, "{body}");
+        assert!(
+            no_prefix[0]["platform_group"].is_null(),
+            "no harness ⇒ no group, never a guess: {}",
+            no_prefix[0]
+        );
     }
 
     // ------------------------------------------------------------- the page
