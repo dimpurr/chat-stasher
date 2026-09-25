@@ -143,7 +143,7 @@ the sentence.
    `apps/extension/lib/outbox.ts:379-394`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:257-294`;
+   (`crates/chat-stasher/src/main.rs:274-311`;
    `crates/chat-stasher/src/store.rs:271-345`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
@@ -270,7 +270,7 @@ timestamp, not its content. We do not delete it; `ingest` retires it to
 The CLI makes one plaintext copy too, and it is not a capture but an archive
 session: `chat-stasher export --out <dir>` writes the sessions it selected back
 out **decrypted**, one file per session, into the directory you name
-(`crates/chat-stasher/src/main.rs:562-642`). Nothing moves those files on and
+(`crates/chat-stasher/src/main.rs:579-659`). Nothing moves those files on and
 we keep no record of where they went, so deleting the directory is yours to do.
 The CLI writes no archive content anywhere you did not name.
 
@@ -648,8 +648,8 @@ Retention on **your** machine is under your control:
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:562-642`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list is `init`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`, `activity-index`, `machine-declare`, `machine-label`, `overview` (`crates/chat-stasher/src/main.rs:144-1087`). Selective per-conversation deletion inside an archive is not implemented. |
+| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:579-659`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list is `init`, `setup`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`, `activity-index`, `machine-declare`, `machine-label`, `overview` (`crates/chat-stasher/src/main.rs:148-1104`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension stops all capture immediately** and removes its
 local storage, which is where the outbox lives — so uninstalling also deletes
