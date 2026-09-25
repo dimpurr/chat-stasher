@@ -143,6 +143,32 @@ fi
 # ---------------------------------------------------------------------------
 chmod +x "$TMP_DIR/$ARTIFACT"
 
+# ---------------------------------------------------------------------------
+# 9. Start it, before it is installed. The checksum proved these are the bytes
+#    the release published; it did not prove they run here, and those are two
+#    different claims. The release workflow starts each binary on the runner
+#    that built it, which is a native machine of the same architecture — so
+#    what is left unproven is this machine's kernel and libc, and a musl build
+#    is chosen precisely so that nothing about the distribution matters.
+#
+#    A binary that already exists at the destination is only overwritten once
+#    the replacement is known to work, so a failed check leaves a working
+#    install untouched rather than replacing it with one that cannot start.
+#
+#    This runs from $TMP_DIR, so a machine that mounts its temp directory
+#    noexec would fail here rather than in the binary; the message says so and
+#    names the way out.
+# ---------------------------------------------------------------------------
+SMOKE_OUTPUT=""
+if ! SMOKE_OUTPUT="$("$TMP_DIR/$ARTIFACT" --version 2>&1)"; then
+  echo "error: ${ARTIFACT} matched its checksum but did not run on this machine:" >&2
+  printf '  %s\n' "${SMOKE_OUTPUT:-<no output>}" >&2
+  echo "Nothing was installed." >&2
+  echo "If you are sure this platform is the one the artifact is for, check" >&2
+  echo "that your temp directory allows executables (TMPDIR) and re-run." >&2
+  exit 1
+fi
+
 if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
   echo "error: cannot create install directory: ${INSTALL_DIR}" >&2
   echo "       (set CHAT_STASHER_INSTALL_DIR to a writable path)" >&2

@@ -14,6 +14,7 @@
 #   6. linux-x86_64 / linux-arm64 -> installs that architecture's artifact
 #   7. windows (mingw/msys/cygwin uname) -> refuses and names the .exe asset
 #   8. darwin-x86_64 -> the same install as the host's own darwin target
+#   9. payload that does not run -> refused, and a working install is kept
 #
 # Cases 1-4 are driven by the host's own platform, so on a macOS machine they
 # cover the darwin path and only the darwin path. Cases 6-8 exist because that
@@ -225,6 +226,50 @@ if PATH="$(make_uname darwin x86_64):$PATH" \
 else
   fail "installing chat-stasher-darwin-x86_64 returned non-zero"
 fi
+
+# 9) a payload that matched its checksum and still does not run ---------------
+# "The bytes are the ones the release published" and "they start on this
+# machine" are two claims, and the checksum only makes the first. On Linux the
+# second one has no other guard: a musl binary is built for the architecture,
+# but nothing had started it on the machine it was installed to.
+BROKEN_DIST="$TMP/dist-wont-run"
+mkdir -p "$BROKEN_DIST"
+BROKEN_ARTIFACT="chat-stasher-$HOST_TARGET"
+# A payload that is genuinely executable and genuinely fails: a shebang script
+# that exits 7. Its checksum matches, so the only thing that can refuse it is
+# having run it.
+printf '#!/bin/sh\nexit 7\n' > "$BROKEN_DIST/$BROKEN_ARTIFACT"
+chmod +x "$BROKEN_DIST/$BROKEN_ARTIFACT"
+printf '%s  %s\n' "$(shasum -a 256 "$BROKEN_DIST/$BROKEN_ARTIFACT" | awk '{print $1}')" \
+  "$BROKEN_ARTIFACT" > "$BROKEN_DIST/SHA256SUMS"
+
+BROKEN_DIR="$TMP/wont-run-install"
+BROKEN_RC=0
+BROKEN_OUT="$(CHAT_STASHER_BASE_URL="file://$BROKEN_DIST" \
+   CHAT_STASHER_INSTALL_DIR="$BROKEN_DIR" \
+   bash "$INSTALL_SH" 2>&1)" || BROKEN_RC=$?
+
+if [ "$BROKEN_RC" = 0 ]; then
+  fail "a payload that does not run was installed anyway"
+else
+  pass "a payload that does not run is refused"
+  if [ -e "$BROKEN_DIR/chat-stasher" ]; then fail "failed smoke test still wrote a binary"
+  else pass "failed smoke test wrote nothing"; fi
+fi
+
+# The same failure over an install that already works: the check runs before
+# the move, so what is on disk must be byte-for-byte what was there before.
+KEEP_DIR="$TMP/keep-install"
+mkdir -p "$KEEP_DIR"
+printf '#!/bin/sh\necho already-installed\n' > "$KEEP_DIR/chat-stasher"
+chmod +x "$KEEP_DIR/chat-stasher"
+KEEP_BEFORE="$(shasum -a 256 "$KEEP_DIR/chat-stasher" | awk '{print $1}')"
+CHAT_STASHER_BASE_URL="file://$BROKEN_DIST" \
+  CHAT_STASHER_INSTALL_DIR="$KEEP_DIR" \
+  bash "$INSTALL_SH" >/dev/null 2>&1 || true
+if [ "$(shasum -a 256 "$KEEP_DIR/chat-stasher" | awk '{print $1}')" = "$KEEP_BEFORE" ]; then
+  pass "a refused install left the existing binary untouched"
+else fail "a refused install replaced a working binary"; fi
 
 echo
 printf '[selftest] RESULT: %s passed, %s failed\n' "$PASSED" "$FAILED"
