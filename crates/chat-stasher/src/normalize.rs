@@ -150,17 +150,66 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
         };
         normalize_value(harness, &value, &mut conversation);
     }
+    // `gemini-cli` does not archive JSONL: its body is pretty-printed JSON
+    // documents run together, so none of its lines parse on their own and
+    // every one of them is counted as unreadable. That count would be a claim
+    // about the body when it is really a claim about the framing we chose, so
+    // the body is read as the stream of values it is. The stream reader
+    // accepts whitespace between values, which covers one document, several
+    // concatenated documents, and JSONL alike. `activity::analyze_session`
+    // special-cases the same harness for the same reason.
+    //
+    // Only a body that yielded no message at all is re-read, so no bytes that
+    // already became a message are read twice.
+    if harness == "gemini-cli"
+        && conversation.messages.is_empty()
+        && conversation.unrecognized_lines > 0
+    {
+        let line_unrendered = conversation.unrendered_lines;
+        let line_unrecognized = conversation.unrecognized_lines;
+        let documents = serde_json::Deserializer::from_str(body)
+            .into_iter::<Value>()
+            .collect::<Result<Vec<_>, _>>();
+        match documents {
+            Ok(documents) => {
+                // The framing is solved, so the line pass's counts described
+                // the framing we chose rather than the body, and keeping them
+                // would report our own reading as the body's defect — "52
+                // lines were not valid JSON" about a body that is valid JSON.
+                // What replaces them is the documents' own accounting:
+                // `normalize_gemini_cli` counts a document that holds no
+                // message, and each record inside one that it cannot read.
+                conversation.unrendered_lines = 0;
+                conversation.unrecognized_lines = 0;
+                for document in &documents {
+                    normalize_gemini_cli(document, &mut conversation);
+                }
+            }
+            Err(_) => {
+                // Neither framing reads this body. The line counts are then the
+                // only measurement there is, and a clean zero would turn
+                // "unreadable" into "empty".
+                conversation.unrendered_lines = line_unrendered;
+                conversation.unrecognized_lines = line_unrecognized;
+            }
+        }
+    }
     conversation
 }
 
 fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation) {
     match harness {
         "claude-code" | "kimi-code" => normalize_cli_line(harness, value, conversation),
-        "codex" | "opencode" | "cursor" => normalize_codex_line(harness, value, conversation),
+        "codex" => normalize_codex_line(value, conversation),
         "gemini-cli" => normalize_gemini_cli(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),
+        // `opencode` and `cursor` were routed to the codex extractor, which is
+        // a claim that they are recorded in codex's shape. They are not: both
+        // archive a session *summary* document, and `opencode`'s carries a
+        // `messages` array. The generic reader is the design's fallback for a
+        // harness with no extractor of its own, so they go there.
         _ => normalize_generic(value, conversation),
     }
 }
@@ -226,9 +275,23 @@ fn normalize_cli_line(harness: &str, value: &Value, conversation: &mut Conversat
     });
 }
 
-fn normalize_codex_line(harness: &str, value: &Value, conversation: &mut Conversation) {
+/// One archived codex line.
+///
+/// The archived body is `{"timestamp":…, "type":…, "payload":{…}}` and it is
+/// `payload.type` that names the record. `response_item` holds the transcript
+/// the model saw — `message`, `reasoning`, `function_call`,
+/// `function_call_output` — and is what this renders. `event_msg` is the same
+/// turn recorded a second time at the application level (`user_message`,
+/// `agent_message`, `agent_reasoning`, `token_count`), so rendering it too
+/// would show every turn twice; it is counted as not rendered, along with
+/// `session_meta` and `turn_context`, which are session metadata rather than
+/// conversation.
+///
+/// The minimal `{"payload":{"message":…}}` shape is kept because
+/// `activity::analyze_session`'s fixture uses it (`activity.rs:1717`).
+fn normalize_codex_line(value: &Value, conversation: &mut Conversation) {
+    let time = message_time(value.get("timestamp"));
     if let Some(message) = value.pointer("/payload/message") {
-        let time = message_time(value.get("timestamp"));
         if let Some(message) = message_from_value(message, time, conversation) {
             conversation.push_message(message);
         } else {
@@ -236,19 +299,16 @@ fn normalize_codex_line(harness: &str, value: &Value, conversation: &mut Convers
         }
         return;
     }
-    if value.get("type").and_then(Value::as_str) == Some("response_item") {
-        if let Some(item) = value.pointer("/payload/item") {
-            let time = message_time(value.get("timestamp"));
-            if let Some(message) = message_from_value(item, time, conversation) {
-                conversation.push_message(message);
-            } else {
-                conversation.unrendered_lines += 1;
-            }
-            return;
+    let kind = value.get("type").and_then(Value::as_str);
+    if kind == Some("response_item") {
+        if let Some(item) = codex_item(value.get("payload"), time, conversation) {
+            conversation.push_message(item);
+        } else {
+            conversation.unrendered_lines += 1;
         }
+        return;
     }
     if let Some(item) = value.get("item") {
-        let time = message_time(value.get("timestamp"));
         if let Some(message) = message_from_value(item, time, conversation) {
             conversation.push_message(message);
         } else {
@@ -256,8 +316,82 @@ fn normalize_codex_line(harness: &str, value: &Value, conversation: &mut Convers
         }
         return;
     }
-    let _ = harness;
     conversation.unrendered_lines += 1;
+}
+
+/// Turn one codex `response_item` payload into a message, or `None` when the
+/// record is not part of the conversation (metadata, a token count, or a
+/// reasoning record whose text was archived encrypted).
+fn codex_item(
+    payload: Option<&Value>,
+    time: MessageTime,
+    conversation: &mut Conversation,
+) -> Option<Message> {
+    let payload = payload?;
+    match payload.get("type").and_then(Value::as_str)? {
+        "message" => {
+            let role = payload
+                .get("role")
+                .and_then(Value::as_str)
+                .and_then(Role::from_str)?;
+            let blocks =
+                blocks_from_content(payload.get("content").unwrap_or(payload), conversation);
+            (!blocks.is_empty()).then_some(Message { role, time, blocks })
+        }
+        "reasoning" => {
+            // The readable part of a reasoning record is its `summary`; the
+            // `content` it also carries is archived encrypted, and the reader
+            // does not pretend to have read it.
+            let text = payload
+                .get("summary")
+                .and_then(Value::as_array)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .filter(|text| !text.is_empty())?;
+            Some(Message {
+                role: Role::Assistant,
+                time,
+                blocks: vec![Block::Thinking(text)],
+            })
+        }
+        "function_call" | "custom_tool_call" | "local_shell_call" | "web_search_call" => {
+            Some(Message {
+                role: Role::Tool,
+                time,
+                blocks: vec![Block::ToolCall {
+                    name: payload
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    input_summary: compact_json(
+                        payload.get("arguments").or_else(|| payload.get("action")),
+                    ),
+                    // The result arrives as its own `function_call_output`.
+                    output_bytes: None,
+                }],
+            })
+        }
+        "function_call_output" | "custom_tool_call_output" => Some(Message {
+            role: Role::Tool,
+            time,
+            blocks: vec![Block::ToolCall {
+                name: payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                input_summary: "tool result".to_string(),
+                output_bytes: payload
+                    .get("output")
+                    .map(|value| compact_json(Some(value)).len()),
+            }],
+        }),
+        _ => None,
+    }
 }
 
 fn normalize_gemini_cli(value: &Value, conversation: &mut Conversation) {
@@ -710,6 +844,146 @@ mod tests {
         let gemini = r#"{"messages":[{"type":"user","timestamp":"2026-09-25T10:00:00Z","content":[{"text":"hi"}]},{"type":"gemini","content":[{"text":"hello"}]}]}"#;
         let result = normalize("gemini-cli", gemini);
         assert_eq!(result.messages.len(), 2);
+        assert!(matches!(result.messages[1].role, Role::Assistant));
+    }
+
+    /// The archived codex body is `payload.type`-tagged, and `event_msg`
+    /// records the same turn a second time at the application level. Rendering
+    /// both would show every turn twice, so the transcript comes from
+    /// `response_item` and the mirror is counted as not rendered.
+    #[test]
+    fn codex_renders_the_transcript_once_not_the_mirrored_event() {
+        let body = concat!(
+            r#"{"timestamp":1736944496,"type":"session_meta","payload":{"id":"s","cli_version":"1"}}"#,
+            "\n",
+            r#"{"timestamp":1736944497,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"q"}]}}"#,
+            "\n",
+            r#"{"timestamp":1736944497,"type":"event_msg","payload":{"type":"user_message","message":"q"}}"#,
+            "\n",
+            r#"{"timestamp":1736944498,"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"weighing"}],"content":[{"encrypted_content":"opaque"}]}}"#,
+            "\n",
+            r#"{"timestamp":1736944499,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"c1"}}"#,
+            "\n",
+            r#"{"timestamp":1736944500,"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"3 files"}}"#,
+            "\n",
+            r#"{"timestamp":1736944501,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            "\n",
+            r#"{"timestamp":1736944501,"type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
+            "\n",
+            r#"{"timestamp":1736944502,"type":"event_msg","payload":{"type":"token_count","info":{}}}"#,
+            "\n",
+        );
+        let result = normalize("codex", body);
+        // user, reasoning, call, call output, assistant — five, not eight.
+        assert_eq!(result.messages.len(), 5);
+        assert!(matches!(result.messages[0].role, Role::User));
+        assert!(matches!(result.messages[1].blocks[0], Block::Thinking(_)));
+        assert!(matches!(result.messages[2].role, Role::Tool));
+        assert!(matches!(
+            result.messages[2].blocks[0],
+            Block::ToolCall {
+                output_bytes: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            result.messages[3].blocks[0],
+            Block::ToolCall {
+                output_bytes: Some(7),
+                ..
+            }
+        ));
+        assert!(matches!(result.messages[4].role, Role::Assistant));
+        // session_meta, event_msg (mirror) and token_count are not messages.
+        assert_eq!(result.unrendered_lines, 4);
+    }
+
+    /// `gemini-cli` does not archive JSONL: its body is pretty-printed JSON
+    /// documents run together, so line-by-line parsing reads nothing at all.
+    /// The body has to be re-read as the stream of documents it is, and the
+    /// lines must not then be reported as unreadable content.
+    #[test]
+    fn a_gemini_cli_document_is_read_as_documents_not_as_lines() {
+        let body = concat!(
+            "{\n",
+            "  \"sessionId\": \"s1\",\n",
+            "  \"messages\": [\n",
+            "    {\"id\": \"m1\", \"timestamp\": \"2026-09-25T10:00:00Z\",\n",
+            "     \"type\": \"user\", \"content\": [{\"text\": \"hi\"}]},\n",
+            "    {\"id\": \"m2\", \"type\": \"gemini\", \"content\": [{\"text\": \"hello\"}]}\n",
+            "  ],\n",
+            "  \"kind\": \"main\"\n",
+            "}\n",
+            // A second document in the same body, which is what the archive
+            // actually holds: the walk above has to reach it too.
+            "{\n",
+            "  \"sessionId\": \"s1\",\n",
+            "  \"messages\": [\n",
+            "    {\"id\": \"m3\", \"type\": \"user\", \"content\": [{\"text\": \"again\"}]}\n",
+            "  ],\n",
+            "  \"kind\": \"summary\"\n",
+            "}\n",
+        );
+        let result = normalize("gemini-cli", body);
+        assert_eq!(result.messages.len(), 3, "both documents must be read");
+        assert!(matches!(result.messages[0].role, Role::User));
+        assert!(matches!(result.messages[1].role, Role::Assistant));
+        assert!(matches!(result.messages[2].role, Role::User));
+        assert_eq!(
+            result.unrecognized_lines, 0,
+            "the framing is ours to solve, not the body's defect"
+        );
+        assert_eq!(
+            result.unrendered_lines, 0,
+            "no record in either document went unrendered"
+        );
+    }
+
+    /// A body that reads as documents but yields no message must not report
+    /// the lines as invalid JSON: the framing is solved and the residue is a
+    /// document with nothing readable in it, which is the honest thing to
+    /// count.
+    #[test]
+    fn a_readable_gemini_cli_body_with_no_message_does_not_blame_the_json() {
+        let body = "{\n  \"sessionId\": \"s1\",\n  \"kind\": \"main\"\n}\n";
+        let result = normalize("gemini-cli", body);
+        assert_eq!(result.messages.len(), 0);
+        assert_eq!(
+            result.unrecognized_lines, 0,
+            "the body is valid JSON; it simply holds no message"
+        );
+        assert_eq!(
+            result.unrendered_lines, 1,
+            "one document was framed and held no message"
+        );
+    }
+
+    /// A body whose lines do not parse and whose document stream does not read
+    /// either keeps the line counts: they are the only measurement there is,
+    /// and replacing them with a clean zero would turn "unreadable" into
+    /// "empty".
+    #[test]
+    fn an_unreadable_gemini_cli_body_keeps_its_counts() {
+        // A document, then something that is not part of any document.
+        let body = "{\n  \"nothing\": [\n    1, 2\n  ]\n}\nnot json at all\n";
+        let result = normalize("gemini-cli", body);
+        assert_eq!(result.messages.len(), 0);
+        assert_eq!(
+            result.unrecognized_lines, 6,
+            "every line of an unreadable body stays counted as unreadable"
+        );
+        assert_eq!(result.unrendered_lines, 0);
+    }
+
+    /// `opencode` archives a session summary whose `messages` array the
+    /// generic reader can already read. Routing it to the codex extractor
+    /// claimed a shape it does not have.
+    #[test]
+    fn an_opencode_summary_is_read_by_the_generic_reader() {
+        let body = r#"{"schema":"opencode/v1","session":{"agent":"build"},"orphan_parts":[],"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a"}]}"#;
+        let result = normalize("opencode", body);
+        assert_eq!(result.messages.len(), 2);
+        assert!(matches!(result.messages[0].role, Role::User));
         assert!(matches!(result.messages[1].role, Role::Assistant));
     }
 
