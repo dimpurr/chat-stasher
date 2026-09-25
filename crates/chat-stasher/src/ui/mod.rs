@@ -1301,27 +1301,47 @@ mod tests {
         let body = req("/api/sessions", &d, &NoContent).body;
         let v: serde_json::Value = serde_json::from_str(&body).expect("the route must send JSON");
         let sessions = v["sessions"].as_array().unwrap();
+        // The rows come back in the page's own order — `last-desc` by default —
+        // so a row is found by the `index` the API carries (the same handle
+        // `/session?i=` takes), never by its position in this array. Position
+        // carries no promise here on purpose: `paging.sort` is what names the
+        // order, and `paging` is why a consumer can walk the pages at all.
+        let row = |index: u64| {
+            sessions
+                .iter()
+                .find(|s| s["index"].as_u64() == Some(index))
+                .unwrap_or_else(|| panic!("the page carries row {index}: {v}"))
+        };
+        let with_provenance = row(0);
         assert_eq!(
-            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            with_provenance["provenance"]["captured"]["project"], "unknown",
             "the capture-time fact must travel unchanged, marker included"
         );
         assert_eq!(
-            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            with_provenance["provenance"]["effectiveProject"]["name"], "Synthetic Project",
             "the later attribution is what the API shows as the project"
         );
         assert_eq!(
-            sessions[0]["provenance"]["supplement"]["source"],
+            with_provenance["provenance"]["supplement"]["source"],
             "project-list"
         );
         assert_eq!(
-            sessions[0]["provenance"]["supplement"]["observedAt"],
+            with_provenance["provenance"]["supplement"]["observedAt"],
             "2026-09-25T12:00:00.000Z"
         );
-        assert!(
-            sessions[1].get("provenance").is_none(),
-            "a session with no provenance record carries no key at all, never null: {}",
-            sessions[1]
-        );
+        // Every other row of this fixture has no provenance record, and none of
+        // them may grow a key to say so. All of them, not one: a key that
+        // appears on one row and not another is exactly the ambiguity the
+        // absent-key rule exists to prevent.
+        for s in sessions {
+            if s["index"].as_u64() == Some(0) {
+                continue;
+            }
+            assert!(
+                s.get("provenance").is_none(),
+                "a session with no provenance record carries no key at all, never null: {s}"
+            );
+        }
     }
 
     /// The byte total is the sum of the rows in view — pinned by construction so
@@ -2782,6 +2802,12 @@ mod tests {
                 line_count: 10,
                 time_source: s.time_source.clone(),
                 title: crate::search::SessionLabel::NoLabelRecorded,
+                // `UiData::from_report` takes a session's provenance from its
+                // hit, so copying it here round-trips the same value the
+                // fixture put in. `None` would be equal only while
+                // `fixture::hit` happens to set none, and would silently drop
+                // a provenance this rebuild is meant to reproduce.
+                provenance: s.provenance.clone(),
             })
             .collect();
         r.sessions_seen = r.hits.len();
