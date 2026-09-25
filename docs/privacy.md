@@ -211,7 +211,9 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:698`, `:559-576`). The one feature that does
+  (`apps/extension/lib/page-hook.ts:698`, `:559-576`; the extra request and the
+  token it carries: `apps/extension/entrypoints/dw-bridge.content.ts:613-639`,
+  `apps/extension/lib/platform-auth.ts:47`, `:90-105`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
   [section 4](#4-who-your-data-is-shared-with).
 - **Check the code for a tracker.** Searching the extension and CLI sources for
