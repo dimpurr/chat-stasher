@@ -41,8 +41,19 @@ fn isolated_env(sandbox: &Path, args: &[&str]) -> Output {
 }
 
 /// Write a config file at the location the tool reads, and return its path.
+///
+/// Joined one component at a time so the returned path is spelled the way this
+/// platform spells it. The assertions below compare it against the path the tool
+/// *prints*, and `Path::join` does not translate the separator it is handed: a
+/// single `"xdg-config/chat-stasher/config.toml"` literal would come back with
+/// the same `/` while the tool prints `\`, so the two spellings would differ on
+/// Windows while naming the same file. Building it the same way the tool does is
+/// what keeps that assertion about the file rather than about the separator.
 fn write_config(sandbox: &Path, body: &str) -> PathBuf {
-    let path = sandbox.join("xdg-config/chat-stasher/config.toml");
+    let path = sandbox
+        .join("xdg-config")
+        .join("chat-stasher")
+        .join("config.toml");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, body).unwrap();
     path

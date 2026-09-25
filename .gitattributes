@@ -1,0 +1,18 @@
+# Line endings, declared for the files whose bytes are the assertion.
+#
+# `ui::golden::every_route_body_is_byte_identical_to_the_recorded_capture` reads
+# each `<route>.response.txt` and compares it to the response the UI module
+# renders right now, with `assert_eq!` on the whole string. The rendered side
+# always uses `\n` — Rust writes `\n` on every platform — so the recorded side
+# has to be `\n` too. Without this line the captures are checked out with
+# whatever the checkout's `core.autocrlf` says: `true` on a Git for Windows
+# install, which is the state of a `windows-latest` runner with no settings
+# touched. The recorded side then arrives as `\r\n`, and the comparison stops at
+# the first case with a diff that names the route rather than the line ending.
+#
+# `eol=lf` rather than `-text`: the captures stay text, so they still diff and
+# merge as text, and `\r` never enters the index from a Windows commit either.
+# The scope is the golden captures alone, not `tests/fixtures/**`: the other
+# fixtures there are parsed (JSON, TOML) rather than compared byte-for-byte, so
+# pinning them would be a claim about their bytes that nothing checks.
+crates/chat-stasher/tests/fixtures/ui-bodies/*.response.txt text eol=lf

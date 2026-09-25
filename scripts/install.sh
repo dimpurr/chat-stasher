@@ -69,8 +69,14 @@ INSTALL_DIR="${CHAT_STASHER_INSTALL_DIR:-$HOME/.local/bin}"
 #    binary is a release asset, so that branch points at the asset instead of
 #    pretending this script can install it.
 # ---------------------------------------------------------------------------
-OS="$(uname -s | tr 'A-Z' 'a-z')"
-ARCH="$(uname -m | tr 'A-Z' 'a-z')"
+# `tr '[:upper:]' '[:lower:]'` rather than `tr 'A-Z' 'a-z'`: both are POSIX and
+# the two agree on every string this script lowercases (`uname -s`, `uname -m`,
+# a hex digest), but only the first says what it means. `A-Z` is a range over
+# whatever collation the locale defines, which is the case shellcheck SC2018 /
+# SC2019 describe — and in `--shell=sh` mode, the mode this file is checked in,
+# an info-level finding is a failing exit code.
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m | tr '[:upper:]' '[:lower:]')"
 [ "$ARCH" = "aarch64" ] && ARCH="arm64"
 TARGET="$OS-$ARCH"
 
@@ -264,7 +270,7 @@ fi
 # "  <hex>  <filename>": the digest is everything before the first space.
 ACTUAL="${DIGEST_OUT%% *}"
 
-if [ "$(printf '%s' "$ACTUAL" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$EXPECTED" | tr 'A-Z' 'a-z')" ]; then
+if [ "$(printf '%s' "$ACTUAL" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$EXPECTED" | tr '[:upper:]' '[:lower:]')" ]; then
   echo "error: sha256 mismatch for ${ARTIFACT}" >&2
   echo "  expected  ${EXPECTED}" >&2
   echo "  actual    ${ACTUAL}" >&2
