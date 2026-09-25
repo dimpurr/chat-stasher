@@ -1,10 +1,13 @@
 # Release — build the installable binaries and attach them to the tagged Release.
 #
-# Runs ONLY when a version tag (`v*`) is pushed. A release is an event — the
-# tag — not a manual toggle, so there is no workflow_dispatch here. `v*` is
-# wider than "a release tag", so the tag's shape is the first thing checked
-# below: a tag that is not `vX.Y.Z` or `vX.Y.Z-rc.N` fails the run before
-# anything is built.
+# Runs when a version tag (`v*`) is pushed, or manually for a registry publish
+# retry or dry run. The manual trigger takes a *tag* and nothing else: the first
+# gate ends a run against any other ref, because `workflow_dispatch` also offers
+# a branch and a branch may be named exactly like a release tag. `v*` is wider
+# than "a release tag" as well, so the tag's shape is checked in that same gate:
+# a tag that is not `vX.Y.Z` or `vX.Y.Z-rc.N` fails the run before anything is
+# built. That gate is scripts/release-tag-gate.sh, which is also what decides
+# the npm dist-tag the registry job publishes under.
 #
 # The workflow builds one prebuilt binary per supported platform, each on a
 # runner whose architecture is the binary's architecture (no cross-emulation,
@@ -36,6 +39,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate npm and crates.io packages without publishing'
+        required: true
+        type: boolean
+        default: true
 
 # A tag pushed twice in a row cancels its own earlier run.
 concurrency:
@@ -66,6 +76,12 @@ jobs:
       # string. A job output is the only carrier that survives the job
       # boundary; $GITHUB_ENV does not cross jobs.
       prerelease: ${{ steps.tag.outputs.prerelease }}
+      # The npm dist-tag every package in this release is published under, for
+      # the same reason: `latest` is npm's default for *every* version,
+      # prerelease included, so an rc must be published with an explicit `next`
+      # or `npm install chat-stasher` starts resolving a release candidate. Only
+      # the tag shape knows which of the two a run is.
+      npm_tag: ${{ steps.tag.outputs.npm_tag }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -74,86 +90,35 @@ jobs:
       # FIRST gate, because the tag is the release's whole identity and because
       # a wrong tag is the one failure nothing downstream can notice.
       #
-      # Exactly two tag shapes are release tags (RELEASING.md, "Channels"):
+      # The rule itself is scripts/release-tag-gate.sh: the ref must be a tag,
+      # exactly two tag shapes are release tags (RELEASING.md, "Channels"), and
+      # the tag must name the exact version Cargo.toml carries. For an rc a
+      # disagreement is worse than cosmetic — an rc and the stable it is a
+      # candidate for would then print the same version, which is why the rc
+      # carries its `-rc.N` suffix in Cargo.toml too.
       #
-      #   v0.3.0        a stable release  -> published as the repository's "latest"
-      #   v0.3.0-rc.1   a candidate       -> published as a GitHub *prerelease*
+      #   v0.3.0        a stable release  -> the repository's "latest", npm `latest`
+      #   v0.3.0-rc.1   a candidate       -> a GitHub *prerelease*,   npm `next`
       #
-      # The trigger above is `v*`, which is wider: `v0.3.0rc1`, `v0.3.0-rc` and
-      # `v0.3.0-beta.1` all match it too. Each is a plausible typo for a tag
-      # someone meant, and under the previous "does the version contain a
-      # hyphen?" rule the first published as a *normal* release and took the
-      # "latest" slot — which is what a reader of the Releases page means by
-      # stable — and the other two published as prereleases. So the shape is asserted here, before the gates and
-      # before the build, and a tag that is not one of the two ends the run.
+      # It is a script rather than a here-doc so the rule has one owner and can
+      # be exercised without pushing a tag: scripts/selftest-release-tag-gate.sh
+      # drives that same file against synthetic refs, and
+      # scripts/commit-message-range.sh is the same arrangement for the same
+      # reason — a second copy of a gate drifts from the copy under test.
       #
-      # The tag must also name the exact version Cargo.toml carries, for both
-      # shapes. The binary embeds CARGO_PKG_VERSION (built below; RELEASING.md
-      # step 7 checks `chat-stasher --version`), so a tag that disagrees with
-      # Cargo.toml ships a Release titled after the tag whose binary reports the
-      # other string. For an rc the disagreement is worse than cosmetic: an rc
-      # and the stable it is a candidate for would then print the same version,
-      # which is why the rc carries its `-rc.N` suffix in Cargo.toml too.
-      - name: Gate — tag shape and version agreement
+      # The tag is read out of `$GITHUB_REF`, never `$GITHUB_REF_NAME`. The
+      # trigger above is `v*`, and `workflow_dispatch` also accepts a *branch*:
+      # a branch named `v0.3.0` has `ref_name` == `v0.3.0`, which is the whole
+      # of what the shape rule looks at, so a manual run on that branch reached
+      # this point looking exactly like a release. `ref` is the only thing that
+      # says whether the run is a tag at all, which is why the script refuses a
+      # bare name: passing `ref_name` here would go red instead of unnoticed.
+      #
+      # The script prints two machine-readable lines and nothing else, appended
+      # verbatim to this step's outputs.
+      - name: Gate — the ref is a release tag, and Cargo.toml agrees
         id: tag
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          if printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            KIND="stable"
-            PRERELEASE=0
-          elif printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then
-            KIND="release candidate"
-            PRERELEASE=1
-          else
-            {
-              echo "error: '${TAG}' is not a release tag."
-              echo "       a release tag is exactly one of:"
-              echo "         vMAJOR.MINOR.PATCH        a stable release"
-              echo "         vMAJOR.MINOR.PATCH-rc.N   a release candidate"
-              echo "       Nothing was built and nothing was published by this run."
-            } >&2
-            exit 1
-          fi
-
-          VERSION="${TAG#v}"
-
-          # The `[package]` version, which is the string CARGO_PKG_VERSION gets.
-          # Scoped to the `[package]` table so a `version =` under
-          # `[dependencies]` can never be the one that answers.
-          CARGO_VERSION="$(awk '
-            /^\[/ { section = $0 }
-            section == "[package]" && /^version[ ]*=/ {
-              line = $0
-              sub(/^[^"]*"/, "", line)
-              sub(/".*$/, "", line)
-              print line
-              exit
-            }
-          ' crates/chat-stasher/Cargo.toml)"
-
-          if [ -z "$CARGO_VERSION" ]; then
-            echo "error: no version found under [package] in crates/chat-stasher/Cargo.toml" >&2
-            exit 1
-          fi
-
-          if [ "$CARGO_VERSION" != "$VERSION" ]; then
-            {
-              echo "error: the tag and Cargo.toml disagree."
-              echo "       tag:                             ${TAG} -> ${VERSION} (${KIND})"
-              echo "       crates/chat-stasher/Cargo.toml:  ${CARGO_VERSION}"
-              echo "       The binary embeds the Cargo.toml version, so this Release"
-              echo "       would ship a binary reporting '${CARGO_VERSION}'."
-              echo "       Set Cargo.toml (and Cargo.lock) on main first — RELEASING.md."
-            } >&2
-            exit 1
-          fi
-
-          echo "tag OK: ${TAG} — ${KIND}; Cargo.toml agrees at ${CARGO_VERSION}"
-
-          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+        run: bash scripts/release-tag-gate.sh --ref "$GITHUB_REF" >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
       # Verify BEFORE building anything that could be published.
@@ -801,3 +766,272 @@ jobs:
           The two \`sha256\` values and the \`vX.Y.Z\` URL segments come from this
           release's \`SHA256SUMS\`. Review, then run \`brew audit --strict --online\`
           and \`brew style\` before merging."
+
+  # Registry publication follows the GitHub Release and the Homebrew tap PR.
+  # One sequential job preserves the required order: platform npm packages,
+  # launcher package, then crates.io. Each registry checks the exact version
+  # before publishing so dispatch retries do not duplicate immutable versions.
+  #
+  # 🔴 The npm dist-tag is not a constant, and `latest` is npm's default for
+  #    *every* version, prerelease included. An rc published without an
+  #    explicit `--tag` therefore becomes the version `npm install chat-stasher`
+  #    resolves — the opposite of what a candidate is for. The tag shape decides
+  #    which tag a run publishes under (scripts/release-tag-gate.sh), and this
+  #    job reads the answer off `needs.gates.outputs.npm_tag` instead of
+  #    re-deriving it from the tag string.
+  #
+  # 🔴 Each registry publishes with whichever credential this run has, and the
+  #    token secrets are OPTIONAL. RELEASING.md has the owner remove each one
+  #    after trusted publishing is configured; a step that required the secret
+  #    would then fail on the very next release, which is the failure the
+  #    removal was supposed to prevent.
+  registry-publish:
+    name: publish npm packages and crate
+    # `gates` is named here for its `npm_tag` output — `needs.<job>` reaches only
+    # the jobs listed, even when one is already an ancestor through another.
+    needs: [gates, release, tap-guard, homebrew-tap]
+    # Homebrew is optional (no token or an rc tag); its skip must not suppress
+    # registry publication. The Release itself must have completed successfully.
+    #
+    # The ref must be a TAG, asserted here as well as in `gates`. This is the
+    # job that holds the `release` environment's secrets and writes to two
+    # public registries, and `workflow_dispatch` accepts a branch: `gates` is
+    # what refuses one, and this line is what keeps a later edit to that gate
+    # from handing this job a branch. `always()` is deliberately not enough on
+    # its own — it is here so a *skipped* Homebrew job cannot suppress a
+    # publish, not so an unrelated ref can reach one.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.release.result == 'success' && needs.tap-guard.result == 'success' && (needs.homebrew-tap.result == 'success' || needs.homebrew-tap.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      # What both registries exchange for a short-lived publish credential on
+      # the trusted-publishing path, where no token secret is configured.
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23.10.0
+          registry-url: https://registry.npmjs.org
+
+      # npm's own OIDC trusted-publishing support landed in npm 11.5.1
+      # (docs.npmjs.com/trusted-publishers, which also puts the floor at Node
+      # 22.14.0), and that is newer than the npm bundled with the Node pinned
+      # above — so without this step the OIDC path has no client that speaks it.
+      # Pinned rather than `npm@latest`: a release must not change because npm
+      # published something overnight.
+      - name: Install the npm that can do trusted publishing
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.5.1
+          npm --version
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # One place decides which credential each registry gets, so the two
+      # publish steps below read a decision rather than each re-testing a
+      # secret. A secret that is absent and a secret that is empty are the same
+      # thing to Actions, and both mean "trusted publishing".
+      - name: Resolve registry credentials
+        id: creds
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CARGO_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "npm=token" >> "$GITHUB_OUTPUT"
+            echo "npm credential: the NPM_TOKEN secret (bootstrap path)"
+          else
+            echo "npm=oidc" >> "$GITHUB_OUTPUT"
+            echo "npm credential: trusted publishing (OIDC)"
+          fi
+          if [ -n "${CARGO_TOKEN:-}" ]; then
+            echo "cargo=token" >> "$GITHUB_OUTPUT"
+            echo "crates.io credential: the CARGO_REGISTRY_TOKEN secret (bootstrap path)"
+          else
+            echo "cargo=oidc" >> "$GITHUB_OUTPUT"
+            echo "crates.io credential: trusted publishing (OIDC)"
+          fi
+
+      - name: Download this release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D dist
+
+      - name: Assemble checksum-verified npm packages
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-dev*) echo "error: refusing to publish a -dev version" >&2; exit 1 ;;
+          esac
+          # `npm-packages/` is a SIBLING of `dist/`, never a child: assemble.mjs
+          # refuses an `--out` under `--assets`, because package *directories*
+          # among the release assets are what break the asset-set equality the
+          # release job asserts. `dist/` holds this Release's assets and nothing
+          # else, and every step below that reads a package dir reads this path.
+          node scripts/npm/assemble.mjs --version "$VERSION" --assets dist --out npm-packages
+
+      - name: Publish npm platform packages, then launcher
+        env:
+          NPM_CREDENTIAL: ${{ steps.creds.outputs.npm }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          NPM_TAG: ${{ needs.gates.outputs.npm_tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-dev*) echo "error: refusing to publish a -dev version" >&2; exit 1 ;;
+          esac
+          # Every spec below is written `./…` for a reason that has nothing to do
+          # with the publish itself. A two-segment RELATIVE path is a GitHub
+          # shorthand to npm, not a directory: `npm publish foo/bar` resolves to
+          # `github:foo/bar`, runs `git ls-remote` against it, and fails with
+          # "Repository not found" for a name that was only ever a local
+          # directory. `npm-packages/chat-stasher` is exactly that shape, and
+          # `npm-packages/@dimpurr/…` is not — so without the `./` the launcher
+          # would fail while the five platform packages succeeded, which reads
+          # as a publishing problem rather than a path problem. `./` says
+          # folder whatever the path's shape.
+          # (`dist/npm/chat-stasher`, the path this replaced, was three segments
+          # deep and so escaped the shorthand by accident.)
+          if [ -z "${NPM_TAG:-}" ]; then
+            echo "error: no npm dist-tag for this run; the tag gate did not answer" >&2
+            exit 1
+          fi
+
+          # `actions/setup-node` with `registry-url` writes
+          # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into its .npmrc.
+          # On the trusted-publishing path that variable is unset, and npm reads
+          # the placeholder as "auth is configured, but empty" rather than "no
+          # auth, so try OIDC" — it never exchanges the OIDC token and fails
+          # with ENEEDAUTH, or a 404 that looks like a missing trusted publisher
+          # (actions/setup-node#1551). Removing the line is what lets npm find
+          # ACTIONS_ID_TOKEN_REQUEST_TOKEN and do the exchange.
+          if [ "$NPM_CREDENTIAL" = "token" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+            echo "npm credential: the NPM_TOKEN secret (bootstrap path)."
+          else
+            npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+            if [ -f "$npmrc" ]; then
+              # Plain `sed` into a file and a rename, not `sed -i`: `sed -i`
+              # with no argument after it is GNU-only, and BSD sed reads the
+              # next word as the backup suffix and dies with "invalid command
+              # code". The runner is Linux, but a step that cannot be replayed
+              # on the machine this is developed on cannot be checked there
+              # either — this one was — and a failure here is silent ENEEDAUTH
+              # at publish time. Reading into a new file also means a sed that
+              # cannot read the original exits non-zero and stops the step,
+              # rather than leaving an emptied .npmrc behind.
+              sed '/_authToken/d' "$npmrc" > "$npmrc.stripped"
+              mv "$npmrc.stripped" "$npmrc"
+            fi
+            echo "npm credential: trusted publishing (OIDC)."
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            for package_dir in npm-packages/@dimpurr/*; do
+              npm publish "./$package_dir" --dry-run --access public --tag "$NPM_TAG"
+            done
+            npm publish ./npm-packages/chat-stasher --dry-run --access public --tag "$NPM_TAG"
+            exit 0
+          fi
+
+          publish_if_missing() {
+            package_dir="$1"
+            package_name="$(node -p "require('./' + process.argv[1] + '/package.json').name" "$package_dir")"
+            if output="$(npm view "${package_name}@${VERSION}" version 2>&1)"; then
+              echo "${package_name}@${VERSION} already exists; skipping."
+            elif printf '%s\n' "$output" | grep -q 'E404'; then
+              npm publish "./$package_dir" --access public --provenance --tag "$NPM_TAG"
+            else
+              echo "error: could not determine whether ${package_name}@${VERSION} exists" >&2
+              printf '%s\n' "$output" >&2
+              return 1
+            fi
+          }
+
+          for package_dir in npm-packages/@dimpurr/*; do
+            publish_if_missing "$package_dir"
+          done
+          publish_if_missing npm-packages/chat-stasher
+
+      # crates.io trusted publishing: exchange the run's OIDC token for a
+      # short-lived registry token, which the action also revokes in its post
+      # step. It runs only when no bootstrap secret is configured, because a
+      # trusted publisher cannot be set up for a crate that does not exist yet —
+      # the first publish of each registry necessarily uses its token.
+      - name: Get a crates.io token through OIDC
+        id: crates-auth
+        if: ${{ steps.creds.outputs.cargo == 'oidc' }}
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate to crates.io
+        env:
+          # Exactly one of these is set: the step above runs only when the
+          # secret is absent.
+          OIDC_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          TOKEN_SECRET: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-dev*) echo "error: refusing to publish a -dev version" >&2; exit 1 ;;
+          esac
+          # A dry run uploads nothing, so it needs no credential at all.
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo publish --dry-run --locked -p chat-stasher
+            exit 0
+          fi
+
+          if [ -n "${OIDC_TOKEN:-}" ]; then
+            CARGO_REGISTRY_TOKEN="$OIDC_TOKEN"
+            echo "crates.io credential: trusted publishing (OIDC)."
+          else
+            CARGO_REGISTRY_TOKEN="${TOKEN_SECRET:-}"
+            echo "crates.io credential: the CARGO_REGISTRY_TOKEN secret (bootstrap path)."
+          fi
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            {
+              echo "error: no crates.io credential for this run."
+              echo "       Neither the OIDC exchange nor CARGO_REGISTRY_TOKEN"
+              echo "       produced a token, and the crate cannot be published"
+              echo "       without one. See RELEASING.md, 'Registry credentials'."
+            } >&2
+            exit 1
+          fi
+          export CARGO_REGISTRY_TOKEN
+
+          status="$(curl -sS -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/chat-stasher/${VERSION}")"
+          case "$status" in
+            200) echo "chat-stasher ${VERSION} already exists; skipping." ;;
+            404) cargo publish --locked -p chat-stasher ;;
+            *) echo "error: crates.io version lookup returned HTTP ${status}" >&2; exit 1 ;;
+          esac
+
+# Each registry publishes with the `release` environment's token secret when it
+# has one, and with GitHub OIDC trusted publishing when it does not:
+#
+#   npm        NPM_TOKEN              trusted publisher on npmjs.com, for
+#                                     dimpurr/chat-stasher and this filename
+#   crates.io  CARGO_REGISTRY_TOKEN   trusted publisher on crates.io, for the
+#                                     same repository, filename and environment
+#
+# Neither bootstrap can be skipped: a trusted publisher can be configured only
+# for a package that already exists, so each registry's first publish uses its
+# token and the secret is removed afterwards (RELEASING.md, "Registry
+# credentials"). From then on this job runs on OIDC alone, which is why the
+# token paths above are optional rather than required.
