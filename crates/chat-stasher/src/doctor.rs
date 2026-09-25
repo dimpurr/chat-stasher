@@ -2664,6 +2664,25 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
 
     // D3
+    // Checked before `scan_failed`, which `config_unreadable` also sets: the two
+    // situations are different, and the line below is only true of one. A config
+    // this run could not read means the registry was never opened — "unknown",
+    // not "missing/unparseable" — and the note the `scan_failed` text points at
+    // ("Refusing to scan with hardcoded roots") was never printed on this path
+    // either. Reporting a registry fault here would answer a question nobody
+    // asked with a cause that is not the user's (CLAUDE.md invariant 1). The
+    // report ends here rather than falling through: every section after D3 in
+    // the `scan_failed` branch is config-derived, and `not_checked` above has
+    // already named all of it — an empty "D4 · Risk summary" heading under a
+    // "did not look" banner reads as "no risks", which is the same mistake.
+    if r.config_error.is_some() {
+        eprintln!(
+            "D3 · Coverage — NOT CHECKED: the config file could not be read, so this run never reached the path registry. Its state is unknown, not missing."
+        );
+        eprintln!();
+        return;
+    }
+
     if r.scan_failed {
         eprintln!("D3 · Coverage — 🔴 registry missing / unparseable, session coverage unknown.");
         eprintln!(

@@ -243,6 +243,48 @@ fn doctor_reports_the_error_and_what_it_could_not_check() {
     );
 }
 
+/// A broken config must not be reported as a broken *registry*.
+///
+/// `config_unreadable` also sets `scan_failed` (see the JSON test below for why
+/// that stays), and D3 used to print its `scan_failed` text on this path too:
+/// "🔴 registry missing / unparseable", followed by a pointer to a stderr note
+/// ("Refusing to scan with hardcoded roots") that this run never printed. Both
+/// sentences claim the run opened the path registry and found it at fault. It
+/// never got that far — the config is what failed — and "did not look" is not
+/// "found it missing", which is CLAUDE.md invariant 1 stated as text. What the
+/// run skipped is asserted as *absent* as well, not just relabelled: a section
+/// heading printed under a "did not look" banner reads as a finding with
+/// nothing in it ("no risks"), which is the same mistake one line further down.
+#[test]
+fn doctor_blames_the_config_not_the_registry() {
+    let sandbox = tempfile::tempdir().unwrap();
+    write_config(sandbox.path(), "this is not valid TOML = [\n");
+
+    let out = isolated_env(sandbox.path(), &["doctor"]);
+    assert_eq!(code(&out), 3, "{}", combined(&out));
+    let text = combined(&out);
+    assert!(
+        !text.contains("registry missing"),
+        "the registry was never opened on this path, so it must not be blamed:\n{text}"
+    );
+    assert!(
+        !text.contains("Refusing to scan with hardcoded roots"),
+        "the report must not point at a stderr note this run never printed:\n{text}"
+    );
+    assert!(
+        !text.contains("D4 · Risk summary"),
+        "a skipped section must not print a heading that reads as an empty finding:\n{text}"
+    );
+    assert!(
+        text.contains("D3 · Coverage — NOT CHECKED"),
+        "D3 must say it did not run, on the same line a reader looks for a verdict:\n{text}"
+    );
+    assert!(
+        text.contains("never reached the path registry"),
+        "D3 must say the registry was never read, not that it was read and is bad:\n{text}"
+    );
+}
+
 /// The machine-readable half of the same report: `--json` names the error, lists
 /// the skipped checks, and turns every config-derived object into
 /// `{"checked": false}` rather than an empty finding.
@@ -257,6 +299,10 @@ fn doctor_json_marks_the_checks_it_did_not_perform() {
         serde_json::from_slice(&out.stdout).expect("stdout must be one JSON object");
 
     assert_eq!(v["config_source"], serde_json::json!("unreadable"));
+    // Still `true`, and deliberately: a consumer that predates `config_error`
+    // reads only this field, and "coverage unknown" is the honest answer here
+    // too. `config_error` is what names *why* — which is why the text report no
+    // longer derives its D3 line from this flag (see the test above).
     assert_eq!(v["scan_failed"], serde_json::json!(true));
     let error = v["config_error"]
         .as_str()
