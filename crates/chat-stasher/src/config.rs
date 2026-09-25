@@ -695,6 +695,11 @@ fn salvage_unreadable_cache(text: &str) -> Option<Config> {
 
 /// Characters that may legally follow a backslash inside a TOML basic string,
 /// excluding the two hex escapes (`\uXXXX` / `\UXXXXXXXX`) handled separately.
+///
+/// Seven, and five of them stand for a **control character**: `\b` (0x08), `\t`,
+/// `\n`, `\f`, `\r`. That is why they are the ambiguous half of the table, and
+/// why [`repair_basic_string`] rewrites them too once a string is known to be
+/// carrying a Windows path: no path contains a control character.
 const TOML_SIMPLE_ESCAPES: [char; 7] = ['b', 't', 'n', 'f', 'r', '"', '\\'];
 
 /// String-literal state while walking a config file. Only basic (double-quoted)
@@ -743,6 +748,115 @@ fn is_toml_escape(chars: &[char], i: usize) -> bool {
             .all(|c| c.is_ascii_hexdigit())
 }
 
+/// Whether the basic string at `chars[start..end]` holds a backslash that is not
+/// a TOML escape — which is the same statement as "this string carries a raw
+/// Windows path", because a backslash that is not an escape is a separator.
+///
+/// Walks escape by escape rather than character by character: the second
+/// backslash of a `\\` is not a separator, and reading it as one would put a
+/// string that is spelled correctly into the case [`repair_basic_string`] calls
+/// `strong`.
+fn string_carries_a_raw_path(chars: &[char], start: usize, end: usize) -> bool {
+    let mut i = start;
+    while i < end {
+        if chars[i] != '\\' {
+            i += 1;
+            continue;
+        }
+        if is_toml_escape(chars, i) {
+            i += 2;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Rewrite the basic string at `chars[start..end]` as the literal text the user
+/// wrote, and say whether anything had to be doubled.
+///
+/// `strong` is set for a string that is already known to carry a raw Windows
+/// path ([`string_carries_a_raw_path`]). It is what makes `\b`, `\t`, `\n`, `\f`
+/// and `\r` separators too, and the reason is one sentence long: those five are
+/// the escapes that stand for a control character, and no path contains a
+/// control character. So in a string that is already a raw path,
+/// `C:\Users\me\body-cache` is a path and `C:` + backspace + `ody-cache` is not
+/// anything the user can have meant. Leaving them alone is exactly how a
+/// repaired `[cache] dir` reached the body cache as a name Windows refuses
+/// (`ERROR_INVALID_NAME`, "The filename, directory name, or volume label syntax
+/// is incorrect", `os error 123`).
+///
+/// The three escapes that do **not** stand for one are still left alone even
+/// here. `\\` is already a single literal backslash and doubling it would make
+/// two; `\"` is the string's own delimiter and doubling it would end the string
+/// early; `\uXXXX` / `\UXXXXXXXX` spell their payload out digit by digit, so a
+/// separator is not what one looks like. (A control character written that way —
+/// `\u0008` — therefore still survives a repair. It is reachable only by writing
+/// those digits where a path separator belongs, which is not something a path
+/// spells, and it is a value the strict parse already accepted as text.)
+///
+/// Every backslash that is not an escape, and every control escape in a `strong`
+/// string, is doubled: the escape machinery of the *repair* is the same as the
+/// one TOML reads, so `\\b` is a separator followed by the letter `b`.
+fn repair_basic_string(chars: &[char], start: usize, end: usize, strong: bool) -> (String, bool) {
+    let mut out = String::with_capacity(end - start + 8);
+    let mut rewrote = false;
+    let mut i = start;
+    while i < end {
+        let c = chars[i];
+        if c != '\\' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let next = chars.get(i + 1).copied();
+        let doubles = !is_toml_escape(chars, i)
+            || (strong && matches!(next, Some('b' | 't' | 'n' | 'f' | 'r')));
+        if doubles {
+            // Two backslashes, then the character after this one is read as
+            // ordinary text — which is what turns `\b` into one separator.
+            out.push('\\');
+            out.push('\\');
+            rewrote = true;
+            i += 1;
+            continue;
+        }
+        // An escape TOML defines, copied whole so its payload is never
+        // re-examined as if it were text.
+        out.push('\\');
+        match next {
+            Some(next) => {
+                out.push(next);
+                i += 2;
+            }
+            None => i += 1,
+        }
+    }
+    (out, rewrote)
+}
+
+/// Emit one basic string — the text between its delimiters, `chars[start..end]` —
+/// into `out`, repaired.
+///
+/// Whether the strong rule applies is decided here, once, at the end of the
+/// string: it is a property of *this* string, so a file recovered for one path
+/// keeps every other string's escapes exactly as they were.
+fn emit_basic_string(
+    out: &mut String,
+    chars: &[char],
+    start: usize,
+    end: usize,
+    rewrote: &mut bool,
+) {
+    if start >= end {
+        return;
+    }
+    let strong = string_carries_a_raw_path(chars, start, end);
+    let (fixed, changed) = repair_basic_string(chars, start, end, strong);
+    *rewrote |= changed;
+    out.push_str(&fixed);
+}
+
 /// Second chance for a config whose only problem is a Windows path pasted
 /// verbatim into a basic string.
 ///
@@ -759,11 +873,24 @@ fn is_toml_escape(chars: &[char], i: usize) -> bool {
 ///
 /// This is strictly a *recovery* path: it only runs after a strict parse has
 /// already failed, and it can never change the meaning of an escape sequence
-/// TOML defines, because those are the ones it leaves alone.
+/// TOML defines — with one boundary, which is the whole point of the second
+/// half of this walk. A basic string that is *already* carrying a raw Windows
+/// path (see [`string_carries_a_raw_path`]) has its control escapes read as
+/// separators as well, because a control character cannot appear in a path and
+/// the file did not parse as written anyway. Everything outside such a string —
+/// and every escape in every string that needed no repair — is copied as it is.
+///
+/// The repair is decided per string and only at its closing delimiter, so each
+/// basic string's text is held in `chars[start..]` until then rather than
+/// emitted as it is read. Holding it is also what makes the rule checkable
+/// rather than cumulative: one string's repair cannot reach into the next one.
 fn recover_windows_paths(raw: &str) -> Option<String> {
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len() + 32);
     let mut span = TomlSpan::Outside;
+    // Where the basic string being walked begins: the index just past its
+    // opening delimiter. Only meaningful while `span` is `Basic`/`MultiBasic`.
+    let mut start = 0;
     let mut rewrote = false;
     let mut i = 0;
 
@@ -785,10 +912,12 @@ fn recover_windows_paths(raw: &str) -> Option<String> {
                     if chars[i + 1..].starts_with(&['"', '"']) {
                         out.push_str("\"\"\"");
                         i += 3;
+                        start = i;
                         span = TomlSpan::MultiBasic;
                         continue;
                     }
                     span = TomlSpan::Basic;
+                    start = i + 1;
                 }
             }
             TomlSpan::Comment => {
@@ -812,39 +941,51 @@ fn recover_windows_paths(raw: &str) -> Option<String> {
                 }
             }
             TomlSpan::Basic | TomlSpan::MultiBasic => {
-                if c == '\\' {
-                    if is_toml_escape(&chars, i) {
-                        // Copy the escape lead-in whole so its payload is never
-                        // re-examined as if it were text.
-                        out.push('\\');
-                        out.push(chars[i + 1]);
-                        i += 2;
-                        continue;
+                // The closing delimiter, and with it the end of the string this
+                // call has been holding: one repair decision, made once.
+                let delimiters = if span == TomlSpan::MultiBasic {
+                    (c == '"' && chars[i + 1..].starts_with(&['"', '"'])).then_some(3)
+                } else {
+                    (c == '"').then_some(1)
+                };
+                if let Some(delimiters) = delimiters {
+                    emit_basic_string(&mut out, &chars, start, i, &mut rewrote);
+                    for _ in 0..delimiters {
+                        out.push('"');
                     }
-                    out.push_str("\\\\");
-                    rewrote = true;
+                    i += delimiters;
+                    span = TomlSpan::Outside;
+                    continue;
+                }
+                if c == '\n' && span == TomlSpan::Basic {
+                    // Unterminated basic string; the strict error stands.
+                    emit_basic_string(&mut out, &chars, start, i, &mut rewrote);
+                    out.push(c);
+                    span = TomlSpan::Outside;
                     i += 1;
                     continue;
                 }
-                if c == '"' {
-                    if span == TomlSpan::MultiBasic {
-                        if chars[i + 1..].starts_with(&['"', '"']) {
-                            out.push_str("\"\"\"");
-                            i += 3;
-                            span = TomlSpan::Outside;
-                            continue;
-                        }
-                    } else {
-                        span = TomlSpan::Outside;
-                    }
-                } else if c == '\n' && span == TomlSpan::Basic {
-                    // Unterminated basic string; the strict error stands.
-                    span = TomlSpan::Outside;
-                }
+                // A backslash takes the character after it with it, whatever
+                // that character is: that is what makes `\"` not close the
+                // string, and finding the end of the string is the only thing
+                // this walk needs to know TOML's escape syntax for. Whether the
+                // bytes mean an escape or a separator is decided at the end.
+                i += if c == '\\' && chars.get(i + 1).is_some() {
+                    2
+                } else {
+                    1
+                };
+                continue;
             }
         }
         out.push(c);
         i += 1;
+    }
+    // A string still open at the end of the file is emitted the same way, so the
+    // text handed back is never missing a span. It cannot parse either way, and
+    // the caller reports the original error when it does not.
+    if let TomlSpan::Basic | TomlSpan::MultiBasic = span {
+        emit_basic_string(&mut out, &chars, start, chars.len(), &mut rewrote);
     }
 
     rewrote.then_some(out)
@@ -1278,6 +1419,77 @@ mod tests {
             Some("C:\\missing\\store.sqlite")
         );
         assert!(!Path::new(cfg.explicit_harness_root("grok").unwrap()).exists());
+    }
+
+    /// A repaired path keeps **every** separator a separator, including the ones
+    /// that collide with a TOML control escape.
+    ///
+    /// This is the shape that shipped broken, verbatim from `w120_body_cache_test`
+    /// on `windows-latest`: the cache root is `<tmp>\.tmpXXXXXX\body-cache`, every
+    /// separator but the last is a backslash TOML does not define (so the file is
+    /// repaired), and `\b` is one it does. Left alone, the last separator became a
+    /// backspace, the repaired text parsed, and the body cache was handed a path
+    /// Windows refuses (`os error 123`) and reported itself unavailable with an
+    /// error nobody can act on. A path separator is one backslash; a control
+    /// character is never a path.
+    #[test]
+    fn a_repaired_path_keeps_every_separator() {
+        let raw = "[cache]\ndir = \"C:\\Users\\me\\AppData\\Local\\Temp\\.tmpC2DdfN\\body-cache\"\nmax_bytes = \"10MB\"\n";
+        assert!(
+            toml::from_str::<Config>(raw).is_err(),
+            "precondition: the raw file must fail strict parsing, or this repair would not run"
+        );
+        let fixed = recover_windows_paths(raw).expect("unescaped backslashes must be repaired");
+        let cfg: Config = toml::from_str(&fixed).expect("the repaired file must parse");
+        let dir = cfg
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.dir.as_deref())
+            .expect("`cache.dir` survives the repair");
+        assert_eq!(
+            dir, "C:\\Users\\me\\AppData\\Local\\Temp\\.tmpC2DdfN\\body-cache",
+            "every separator of a repaired Windows path must stay a separator"
+        );
+        assert!(
+            !dir.chars().any(char::is_control),
+            "the repaired path carries a control character, which no path can"
+        );
+    }
+
+    /// The strong rule is a property of one string, not of the file: repairing a
+    /// Windows path must not re-read the escapes in a string that needed no
+    /// repair. Same file, one raw path and one ordinary string.
+    #[test]
+    fn a_repair_does_not_reach_another_string() {
+        let raw = "[cache]\ndir = \"C:\\Users\\me\\body-cache\"\n[harness_roots]\ngrok = \"first\\nsecond\"\n";
+        let fixed = recover_windows_paths(raw).expect("the raw path needs repair");
+        let cfg: Config = toml::from_str(&fixed).expect("the repaired file must parse");
+        assert_eq!(
+            cfg.cache.as_ref().and_then(|cache| cache.dir.as_deref()),
+            Some("C:\\Users\\me\\body-cache")
+        );
+        assert_eq!(
+            cfg.explicit_harness_root("grok"),
+            Some("first\nsecond"),
+            "a string that needed no repair keeps the escape it was written with"
+        );
+    }
+
+    /// The other half of the same rule: a separator that is already spelled
+    /// correctly (`\\`) is left alone, because it is one literal backslash and
+    /// doubling it again would make two. The strong rule is about the
+    /// *ambiguous* escapes, not about every backslash it meets — and a correct
+    /// separator next to a raw one does not rescue the raw one.
+    #[test]
+    fn an_already_escaped_separator_is_not_doubled_again() {
+        let raw = "[harness_roots]\ncursor = \"C:\\Users\\me\\\\other\\body\"\n";
+        let fixed = recover_windows_paths(raw).expect("the raw separators need repair");
+        let cfg: Config = toml::from_str(&fixed).expect("the repaired file must parse");
+        assert_eq!(
+            cfg.explicit_harness_root("cursor"),
+            Some("C:\\Users\\me\\other\\body"),
+            "one correctly escaped separator stays one separator"
+        );
     }
 
     /// The boundary this recovery deliberately does **not** cross: a path whose
