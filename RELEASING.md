@@ -79,6 +79,14 @@ automation creates one.
    workflow checks".) The `Release` workflow runs from the tag push — it does
    not run on a branch — and its first gate ends the run unless the tag is
    exactly `vX.Y.Z` or `vX.Y.Z-rc.N` **and** agrees with `Cargo.toml`.
+   The workflow then publishes the checksum-verified npm platform packages,
+   the `chat-stasher` npm launcher, and the crate to crates.io, in that order.
+   Each package version is checked first and an existing version is skipped,
+   so a failed run can be retried from the Actions `workflow_dispatch` control
+   on the same tag. `dry_run` defaults to true and runs `npm publish --dry-run`
+   for the assembled npm packages and `cargo publish --dry-run --locked`; set
+   it to false to publish. The dry-run flag covers registry publication; the
+   normal release and Homebrew workflow steps still run.
 7. **Verify the published release** before telling anyone it exists:
    - the Release is marked **latest**, and the seven uploaded assets are exactly
      `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64`,
@@ -229,6 +237,18 @@ deleted.
 The native host and the CLI side need no change for any of this: the channel only
 decides what the extension itself builds and serves.
 
+## Registry credentials
+
+The registry job uses the `release` GitHub Actions environment. Before the
+first publish, configure `NPM_TOKEN` and `CARGO_REGISTRY_TOKEN` as secrets on
+that environment. npm packages are published in platform-first order and each
+publish uses `--provenance`; the crate follows with `cargo publish --locked`.
+The workflow comments identify these tokens as the bootstrap path: after each
+registry's first successful publish, configure trusted publishing (GitHub OIDC)
+for `dimpurr/chat-stasher` and `.github/workflows/release.yml`, then remove the
+corresponding token secret. A retry checks the exact package version and skips
+one that is already present, while continuing with later packages.
+
 ## What the workflow checks
 
 A rule here is worth writing down only if something can tell when it is broken,
@@ -272,6 +292,14 @@ thing it does not.
   A failure inside the job still marks the workflow *run* red — the Release
   itself is already published at that point, so that red is a report on the tap
   update, not a failed release.
+- **The package registries publish in order.** After the Release and Homebrew
+  job finish, the workflow assembles npm packages from the Release assets,
+  verifies their checksums, publishes each platform package before the launcher
+  with npm provenance, then publishes the crate. Existing exact versions are
+  skipped; failed lookups other than a confirmed not-found stop the job. A
+  `workflow_dispatch` run can dry-run both registries or retry publication.
+- **Development versions are refused.** Registry steps reject any version
+  containing `-dev`; the tag gate also accepts only `vX.Y.Z` and `vX.Y.Z-rc.N`.
 
 It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
 every check above, so `git tag -a` in step 6 is a step the owner follows and not

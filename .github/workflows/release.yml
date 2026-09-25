@@ -1,7 +1,7 @@
 # Release — build the installable binaries and attach them to the tagged Release.
 #
-# Runs ONLY when a version tag (`v*`) is pushed. A release is an event — the
-# tag — not a manual toggle, so there is no workflow_dispatch here. `v*` is
+# Runs when a version tag (`v*`) is pushed, or manually against a tag for a
+# registry publish retry or dry run. `v*` is
 # wider than "a release tag", so the tag's shape is the first thing checked
 # below: a tag that is not `vX.Y.Z` or `vX.Y.Z-rc.N` fails the run before
 # anything is built.
@@ -36,6 +36,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate npm and crates.io packages without publishing'
+        required: true
+        type: boolean
+        default: true
 
 # A tag pushed twice in a row cancels its own earlier run.
 concurrency:
@@ -801,3 +808,120 @@ jobs:
           The two \`sha256\` values and the \`vX.Y.Z\` URL segments come from this
           release's \`SHA256SUMS\`. Review, then run \`brew audit --strict --online\`
           and \`brew style\` before merging."
+
+  # Registry publication follows the GitHub Release and the Homebrew tap PR.
+  # One sequential job preserves the required order: platform npm packages,
+  # launcher package, then crates.io. Each registry checks the exact version
+  # before publishing so dispatch retries do not duplicate immutable versions.
+  registry-publish:
+    name: publish npm packages and crate
+    needs: [release, tap-guard, homebrew-tap]
+    # Homebrew is optional (no token or an rc tag); its skip must not suppress
+    # registry publication. The Release itself must have completed successfully.
+    if: ${{ always() && needs.release.result == 'success' && needs.tap-guard.result == 'success' && (needs.homebrew-tap.result == 'success' || needs.homebrew-tap.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23.10.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download this release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D dist
+
+      - name: Assemble checksum-verified npm packages
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-dev*) echo "error: refusing to publish a -dev version" >&2; exit 1 ;;
+          esac
+          node scripts/npm/assemble.mjs --version "$VERSION" --assets dist --out dist/npm
+
+      - name: Publish npm platform packages, then launcher
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-dev*) echo "error: refusing to publish a -dev version" >&2; exit 1 ;;
+          esac
+          if [ "$DRY_RUN" = "true" ]; then
+            for package_dir in dist/npm/@dimpurr/*; do
+              npm publish "$package_dir" --dry-run --access public
+            done
+            npm publish dist/npm/chat-stasher --dry-run --access public
+            exit 0
+          fi
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "error: NPM_TOKEN is required in the release environment" >&2
+            exit 1
+          fi
+
+          publish_if_missing() {
+            package_dir="$1"
+            package_name="$(node -p "require('./' + process.argv[1] + '/package.json').name" "$package_dir")"
+            if output="$(npm view "${package_name}@${VERSION}" version 2>&1)"; then
+              echo "${package_name}@${VERSION} already exists; skipping."
+            elif printf '%s\n' "$output" | grep -q 'E404'; then
+              npm publish "$package_dir" --access public --provenance
+            else
+              echo "error: could not determine whether ${package_name}@${VERSION} exists" >&2
+              printf '%s\n' "$output" >&2
+              return 1
+            fi
+          }
+
+          for package_dir in dist/npm/@dimpurr/*; do
+            publish_if_missing "$package_dir"
+          done
+          publish_if_missing dist/npm/chat-stasher
+
+      - name: Publish crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-dev*) echo "error: refusing to publish a -dev version" >&2; exit 1 ;;
+          esac
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo publish --dry-run --locked -p chat-stasher
+            exit 0
+          fi
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "error: CARGO_REGISTRY_TOKEN is required in the release environment" >&2
+            exit 1
+          fi
+          status="$(curl -sS -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/chat-stasher/${VERSION}")"
+          case "$status" in
+            200) echo "chat-stasher ${VERSION} already exists; skipping." ;;
+            404) cargo publish --locked -p chat-stasher ;;
+            *) echo "error: crates.io version lookup returned HTTP ${status}" >&2; exit 1 ;;
+          esac
+
+# First publish uses NPM_TOKEN and CARGO_REGISTRY_TOKEN secrets in the `release`
+# environment. After each registry's first successful publish, configure trusted
+# publishing for dimpurr/chat-stasher and this workflow, then remove that token.
