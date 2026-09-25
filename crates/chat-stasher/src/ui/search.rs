@@ -41,7 +41,7 @@ use super::html::{
 use super::{
     archive_document_ids, count_by_machine_id, page_from_query, page_href, paging_nav, param,
     percent_encode, select, selector_from_query, window_of, IndexState, Page, Query, QueryResult,
-    Response, TextIndex, UiData, UiSession, SEARCH_CARRY,
+    Response, TextIndex, UiData, UiSession, EXPLICIT_REPO_LABEL, SEARCH_CARRY,
 };
 
 /// The selector keys a `/search` URL may carry, in the order the form writes
@@ -459,6 +459,24 @@ fn result_body(request: &Request, answer: &Answer, token: &str, data: &UiData) -
     out
 }
 
+/// The CLI command that builds or clears this page's index, naming the target
+/// this dashboard is actually reading.
+///
+/// The target matters: when the dashboard is opened with `--repo`, the label is
+/// [`EXPLICIT_REPO_LABEL`] — the words "(explicit --repo)" — and printing it
+/// after `--destination` would put an argument on the page that nobody can
+/// type. A suggestion that cannot be run is worse than no suggestion.
+fn index_command(data: &UiData, action: &str) -> String {
+    if data.destination_label == EXPLICIT_REPO_LABEL {
+        format!("chat-stasher index {action} --repo <this dashboard's repository>")
+    } else {
+        format!(
+            "chat-stasher index {action} --destination {}",
+            data.destination_label
+        )
+    }
+}
+
 /// The two states with no index to query, each naming the command that changes
 /// it: a missing index has one to build, an unreadable one has a repair. They
 /// are different sentences because they are different actions.
@@ -467,16 +485,16 @@ fn no_index_html(answer: &Answer, data: &UiData) -> String {
         IndexState::Missing => format!(
             "<div class=warn><b>No index.</b> No local index has been built for this destination, \
              so this query was never run — any count here would be a measurement of nothing. \
-             Build one with <code>chat-stasher index build --destination {}</code>, then reload \
-             this page.</div>\n",
-            esc(&data.destination_label)
+             Build one with <code>{}</code>, then reload this page.</div>\n",
+            esc(&index_command(data, "build"))
         ),
         IndexState::Unreadable(reason) => format!(
             "<div class=warn><b>The index could not be read.</b> {}. Nothing was searched: this \
-             is not a zero-result, and it is not \"not there\". <code>chat-stasher index \
-             clear</code> followed by <code>chat-stasher index build</code> rebuilds it from the \
-             archive.</div>\n",
-            esc(reason)
+             is not a zero-result, and it is not \"not there\". <code>{clear}</code> followed by \
+             <code>{build}</code> rebuilds it from the archive.</div>\n",
+            esc(reason),
+            clear = esc(&index_command(data, "clear")),
+            build = esc(&index_command(data, "build")),
         ),
         // Unreachable by construction (`NoIndex` is only set when there is no
         // readable index) — but stated rather than asserted, so a future state
@@ -845,9 +863,10 @@ fn no_hit_html(
             "<div class=warn><b>UNKNOWN — not \"not there\".</b> The index matched {not_in_view} \
              document(s) that this dashboard's session list does not hold, and nothing else. \
              They may belong to a different or older read of the archive, so nothing here proves \
-             the text is absent. Rebuild with <code>chat-stasher index build</code> if this \
-             destination's sessions changed machine or were re-collected.</div>\n",
-            not_in_view = hits.not_in_view
+             the text is absent. Rebuild with <code>{build}</code> if this destination's sessions \
+             changed machine or were re-collected.</div>\n",
+            not_in_view = hits.not_in_view,
+            build = esc(&index_command(data, "build")),
         ),
         // No readable index at all: the coverage line above already named the
         // command that changes it, and this sentence states only the verdict.
@@ -944,6 +963,40 @@ mod tests {
             "an unbuilt index must never render as a proven absence: {html}"
         );
         assert!(html.contains("index coverage: <b>none</b>"), "{html}");
+    }
+
+    /// A suggestion the reader cannot run is worse than none: the label of a
+    /// dashboard opened with `--repo` is a placeholder, and pasting it after
+    /// `--destination` names no destination at all.
+    #[test]
+    fn the_printed_index_commands_name_a_target_that_can_be_typed() {
+        // The explicit-repo label is what `ui --repo` sets, so the page reached
+        // that way must not print a command containing it.
+        let mut data = fixture::data();
+        data.destination_label = crate::ui::EXPLICIT_REPO_LABEL.to_string();
+        for (index, phrase) in [
+            (StubIndex::missing(), "index build"),
+            (StubIndex::unreadable("corrupt"), "index clear"),
+        ] {
+            let html = page_with("/search?q=synthetic", &data, &index).body;
+            assert!(html.contains(phrase), "{html}");
+            assert!(
+                !html.contains("--destination (explicit --repo)"),
+                "the page printed an argument nobody can type: {html}"
+            );
+            // The placeholder's apostrophe is escaped in the HTML (`&#39;`), so
+            // the assertion is on the part of the command that is not.
+            assert!(
+                html.contains(&format!("{phrase} --repo")),
+                "the command must name the repository instead: {html}"
+            );
+        }
+        // A named destination keeps the flag the design specifies (§6.4).
+        let html = page("/search?q=synthetic", &StubIndex::missing()).body;
+        assert!(
+            html.contains("index build --destination dest-under-test") && !html.contains("--repo"),
+            "{html}"
+        );
     }
 
     /// An index that exists and cannot be read is a different state from one
