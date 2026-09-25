@@ -2665,111 +2665,16 @@ struct OverviewRead {
     unreadable_writer_versions: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-struct MachineWriterStatus {
-    machine: String,
-    chat_stasher_version: Option<String>,
-    version_recorded: bool,
-    version_unreadable: bool,
-    behind_newest_writer: Option<bool>,
-}
-
-fn writer_statuses(
-    machines: &BTreeSet<String>,
-    writers: &BTreeMap<String, sidecar::WriterVersionRecord>,
-    unreadable: &BTreeSet<String>,
-) -> Vec<MachineWriterStatus> {
-    let newest = writers
-        .values()
-        .map(|writer| writer.chat_stasher_version.as_str())
-        .max_by(|a, b| compare_versions(a, b));
-    machines
-        .iter()
-        .map(|machine| {
-            let version = writers.get(machine).map(|w| w.chat_stasher_version.clone());
-            let behind = if unreadable.contains(machine) {
-                None
-            } else if let Some(version) = version.as_deref() {
-                newest.map(|newest| compare_versions(version, newest).is_lt())
-            } else {
-                Some(true)
-            };
-            MachineWriterStatus {
-                machine: machine.clone(),
-                version_recorded: version.is_some(),
-                version_unreadable: unreadable.contains(machine),
-                chat_stasher_version: version,
-                behind_newest_writer: behind,
-            }
-        })
-        .collect()
-}
-
 fn read_archive_writer_statuses(
     cfg: &StoreConfig,
     mk: &MasterKey,
-) -> anyhow::Result<Vec<MachineWriterStatus>> {
-    let store = BackupStore::for_metadata_query(cfg.clone());
-    let backends = store.backends()?;
-    let repo = Repository::new(&cfg.repository_options(), &backends)?
-        .open(&Credentials::Masterkey(mk.clone()))?
-        .to_indexed()?;
-    let mut machines = BTreeSet::new();
-    let mut writers = BTreeMap::new();
-    let mut unreadable = BTreeSet::new();
-    for snapshot in readback::newest_snapshot_per_host(repo.get_all_snapshots()?) {
-        machines.insert(snapshot.hostname.clone());
-        let root = repo.node_from_snapshot_and_path(&snapshot, "")?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())?
-            .collect::<rustic_core::RusticResult<Vec<_>>>()?;
-        for (path, node) in entries {
-            let Some(machine) = sidecar::writer_machine(&path) else {
-                continue;
-            };
-            let mut bytes = Vec::new();
-            repo.dump(&node, &mut bytes)?;
-            match serde_json::from_slice::<sidecar::WriterVersionRecord>(&bytes) {
-                Ok(record) if record.machine_id == machine => {
-                    writers.insert(machine, record);
-                }
-                _ => {
-                    unreadable.insert(machine);
-                }
-            }
-        }
-    }
-    Ok(writer_statuses(&machines, &writers, &unreadable))
-}
-
-/// Compare numeric release components first, then prerelease suffixes; a
-/// release without a suffix sorts after its prereleases.
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    fn parts(version: &str) -> ([u64; 3], Option<&str>) {
-        let (release, suffix) = version
-            .split_once('-')
-            .map_or((version, None), |(a, b)| (a, Some(b)));
-        let mut nums = release.split('.').filter_map(|p| p.parse::<u64>().ok());
-        (
-            [
-                // reason: a missing semantic-version major component is the legacy zero component.
-                nums.next().unwrap_or(0),
-                // reason: a missing semantic-version minor component is zero by version syntax.
-                nums.next().unwrap_or(0),
-                // reason: a missing semantic-version patch component is zero by version syntax.
-                nums.next().unwrap_or(0),
-            ],
-            suffix,
-        )
-    }
-    let (av, asuffix) = parts(a);
-    let (bv, bsuffix) = parts(b);
-    av.cmp(&bv).then_with(|| match (asuffix, bsuffix) {
-        (None, None) => std::cmp::Ordering::Equal,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (Some(a), Some(b)) => a.cmp(b),
-    })
+) -> anyhow::Result<Vec<sidecar::MachineWriterStatus>> {
+    let archived = BackupStore::for_metadata_query(cfg.clone()).read_archived_writers(mk)?;
+    Ok(sidecar::writer_statuses(
+        &archived.machines,
+        &archived.records,
+        &archived.unreadable,
+    ))
 }
 
 /// Open the destination and walk every newest-per-host snapshot for activity
@@ -2972,7 +2877,7 @@ fn cmd_overview(
         writer_versions,
         unreadable_writer_versions,
     } = read;
-    let writer_status = writer_statuses(
+    let writer_status = sidecar::writer_statuses(
         &snapshot_machines,
         &writer_versions,
         &unreadable_writer_versions,
@@ -4599,6 +4504,121 @@ fn cmd_run_once(
     code
 }
 
+/// Rebuild **this machine's** archived activity index when the archive says it
+/// was written by an older chat-stasher than the one running.
+///
+/// Why this exists: the index and the writer version travel in the same
+/// snapshot, written by the same binary, so a recorded version behind the
+/// running one means the archived index is that older build's reading — and
+/// `overview`, `search` and `ui` all read the archive's index, not the stage's.
+/// `run-once` normally refreshes it on the way to a push, but a pass that has
+/// nothing to push never gets there, which is how a machine can sit on an
+/// out-of-date index for weeks after an upgrade. The writer version is read
+/// first precisely so this does **not** fire on every quiet pass.
+///
+/// Bounded by construction, in four ways that each matter:
+///   * only the resolved local machine's partition — never another machine's,
+///     because another machine may be pushing it right now (ADR-016: there is
+///     no cross-process lock), and a partition is only repairable by replaying
+///     its own shards;
+///   * at most once per pass, and only on a pass that pushes nothing (the push
+///     path rebuilds the index itself);
+///   * only when the archive's own writer record says "behind" — an unreadable
+///     record is `unknown` and is left alone rather than guessed at;
+///   * never fatal: the pass has already done its job, so a failed repair is a
+///     warning that names the command to run by hand.
+#[allow(clippy::too_many_arguments)]
+fn repair_stale_archive_index(
+    config: &Config,
+    destination: Option<&str>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    machine: &str,
+    workspace: &Path,
+    keep_ssh_masters: bool,
+) {
+    let cfg = resolve_store_config(config, destination, repo, key_file, connections, options);
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!(
+                "[run-once] activity-index: cannot read the destination's masterkey, so whether \
+                 this machine's archived index is current is UNKNOWN (not \"current\"): {}",
+                redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+            );
+            return;
+        }
+    };
+    let statuses = match read_archive_writer_statuses(&cfg, &mk) {
+        Ok(statuses) => statuses,
+        Err(e) => {
+            eprintln!(
+                "[run-once] activity-index: cannot read the archive's writer versions, so \
+                 whether this machine's archived index is current is UNKNOWN (not \"current\"): {}",
+                redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+            );
+            reap_remote(&cfg, keep_ssh_masters);
+            return;
+        }
+    };
+    // No snapshot for this machine yet: there is nothing archived to repair, and
+    // the next pass that has something to push will create it.
+    let Some(status) = statuses.iter().find(|status| status.machine == machine) else {
+        return;
+    };
+    match sidecar::index_writer_is_behind(
+        status.chat_stasher_version.as_deref(),
+        status.version_unreadable,
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Some(false) => {}
+        None => {
+            eprintln!(
+                "[run-once] activity-index: the writer record for machine {machine} could not be \
+                 read, so whether its archived index is current is UNKNOWN — leaving it alone \
+                 rather than rebuilding on a guess"
+            );
+        }
+        Some(true) => {
+            println!(
+                "[run-once] activity-index: machine {machine} archived writer version={} running={} \
+                 — rebuilding this machine's partition only (never another machine's)",
+                status
+                    .chat_stasher_version
+                    .as_deref()
+                    .unwrap_or("not recorded (written by ≤0.3.0)"),
+                env!("CARGO_PKG_VERSION")
+            );
+            let started = std::time::Instant::now();
+            match rebuild_destination_partition_with_hook(workspace, &cfg, machine, &mk, || {}) {
+                Ok((sessions, summary)) => {
+                    println!(
+                        "[run-once] activity-index: repaired snapshot appended sessions={} \
+                         snapshots={} elapsed={}ms",
+                        sessions,
+                        summary.snapshots_in_repo,
+                        started.elapsed().as_millis()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[run-once] warning: activity-index repair failed, continuing — rebuild it \
+                         by hand with `{}`: {}",
+                        chat_stasher::doctor::activity_index_repair_command(
+                            destination.unwrap_or("<destination>"),
+                            machine
+                        ),
+                        redact_activity_index_paths(&format!("{e}"), &cfg, Some(workspace))
+                    );
+                }
+            }
+        }
+    }
+    reap_remote(&cfg, keep_ssh_masters);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_once_pass(
     stage: &Path,
@@ -4705,6 +4725,21 @@ fn run_once_pass(
         println!(
             "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}",
             changed, only_if_changed, stage_shards
+        );
+        // A pass that pushes rebuilds the index on the way (see below), so the
+        // archived index can only be stale when the pass pushes nothing — which
+        // is exactly what happens after an upgrade on a quiet machine, and what
+        // used to need a hand-run `activity-index --rebuild`. Repair it here.
+        repair_stale_archive_index(
+            &config,
+            destination.as_deref(),
+            repo.clone(),
+            key_file.clone(),
+            connections,
+            options,
+            &machine_name,
+            stage,
+            keep_ssh_masters,
         );
         if verify {
             let cfg = resolve_store_config(
@@ -6546,17 +6581,17 @@ mod decision_surface_tests {
         ]
         .into_iter()
         .collect();
-        let statuses = writer_statuses(&machines, &writers, &BTreeSet::new());
+        let statuses = sidecar::writer_statuses(&machines, &writers, &BTreeSet::new());
         assert_eq!(statuses[0].behind_newest_writer, Some(true));
         assert_eq!(statuses[1].behind_newest_writer, Some(false));
         assert_eq!(statuses[2].behind_newest_writer, Some(true));
         assert!(!statuses[2].version_recorded);
         assert_eq!(
-            compare_versions("0.4.0", "0.4.0-rc.1"),
+            sidecar::compare_versions("0.4.0", "0.4.0-rc.1"),
             std::cmp::Ordering::Greater
         );
         let unreadable = ["machine-c".to_string()].into_iter().collect();
-        let statuses = writer_statuses(&machines, &writers, &unreadable);
+        let statuses = sidecar::writer_statuses(&machines, &writers, &unreadable);
         assert!(statuses[2].version_unreadable);
         assert_eq!(statuses[2].behind_newest_writer, None);
     }
@@ -7582,7 +7617,7 @@ fn status_json(
     info: &RunStateInfo,
     scan: Result<&scanner::ScanReport, String>,
     exit_code: u8,
-    writer_versions: Option<&[MachineWriterStatus]>,
+    writer_versions: Option<&[sidecar::MachineWriterStatus]>,
     writer_version_error: Option<&str>,
 ) -> String {
     let mut scanner_value = match scan {

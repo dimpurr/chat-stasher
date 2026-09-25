@@ -112,6 +112,113 @@ pub struct WriterVersionRecord {
     pub chat_stasher_version: String,
 }
 
+/// One machine partition's archived writer version, judged against the newest
+/// writer seen across the archive.
+///
+/// Three states are kept apart: a version that was read, a version that was
+/// never recorded (any push from ≤0.3.0 carried none), and a record that exists
+/// but could not be read. Only the first two are comparisons; the third is
+/// `behind_newest_writer: None` — "unknown" must never be answered as "behind"
+/// or as "fine".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MachineWriterStatus {
+    pub machine: String,
+    pub chat_stasher_version: Option<String>,
+    pub version_recorded: bool,
+    pub version_unreadable: bool,
+    pub behind_newest_writer: Option<bool>,
+}
+
+/// Judge every machine that has a snapshot against the newest recorded writer.
+pub fn writer_statuses(
+    machines: &std::collections::BTreeSet<String>,
+    writers: &std::collections::BTreeMap<String, WriterVersionRecord>,
+    unreadable: &std::collections::BTreeSet<String>,
+) -> Vec<MachineWriterStatus> {
+    let newest = writers
+        .values()
+        .map(|writer| writer.chat_stasher_version.as_str())
+        .max_by(|a, b| compare_versions(a, b));
+    machines
+        .iter()
+        .map(|machine| {
+            let version = writers.get(machine).map(|w| w.chat_stasher_version.clone());
+            let behind = if unreadable.contains(machine) {
+                None
+            } else if let Some(version) = version.as_deref() {
+                newest.map(|newest| compare_versions(version, newest).is_lt())
+            } else {
+                Some(true)
+            };
+            MachineWriterStatus {
+                machine: machine.clone(),
+                version_recorded: version.is_some(),
+                version_unreadable: unreadable.contains(machine),
+                chat_stasher_version: version,
+                behind_newest_writer: behind,
+            }
+        })
+        .collect()
+}
+
+/// Was one machine's archived activity index written by a CLI **older than
+/// `running`**?
+///
+/// The writer version and the index travel in the same snapshot, written by the
+/// same binary ([`crate::sidecar`]'s counterpart in the CLI rebuilds the index
+/// and then records the version), so a version behind `running` is what makes
+/// the archived index provably stale — that is the state `overview` renders as
+/// `behind (version not recorded — written by ≤0.3.0)` for a record that is
+/// simply absent.
+///
+/// Returns `None` when the record could not be read: an unreadable record says
+/// nothing about freshness in either direction.
+pub fn index_writer_is_behind(
+    recorded: Option<&str>,
+    unreadable: bool,
+    running: &str,
+) -> Option<bool> {
+    if unreadable {
+        return None;
+    }
+    Some(match recorded {
+        Some(recorded) => compare_versions(recorded, running).is_lt(),
+        // No record at all: every version that could have written it predates
+        // writer-version recording, so it is behind whatever is running now.
+        None => true,
+    })
+}
+
+/// Compare numeric release components first, then prerelease suffixes; a
+/// release without a suffix sorts after its prereleases.
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parts(version: &str) -> ([u64; 3], Option<&str>) {
+        let (release, suffix) = version
+            .split_once('-')
+            .map_or((version, None), |(a, b)| (a, Some(b)));
+        let mut nums = release.split('.').filter_map(|p| p.parse::<u64>().ok());
+        (
+            [
+                // reason: a missing semantic-version major component is the legacy zero component.
+                nums.next().unwrap_or(0),
+                // reason: a missing semantic-version minor component is zero by version syntax.
+                nums.next().unwrap_or(0),
+                // reason: a missing semantic-version patch component is zero by version syntax.
+                nums.next().unwrap_or(0),
+            ],
+            suffix,
+        )
+    }
+    let (av, asuffix) = parts(a);
+    let (bv, bsuffix) = parts(b);
+    av.cmp(&bv).then_with(|| match (asuffix, bsuffix) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(a), Some(b)) => a.cmp(b),
+    })
+}
+
 /// Match an archived path against the `meta/<machine>/label-by-<writer>.json`
 /// marker (ADR-018), returning `(machine, writer)`.
 ///
@@ -384,5 +491,40 @@ mod tests {
             label_record_machine(Path::new("/stage/meta/abc/label-by-w.txt")),
             None
         );
+    }
+
+    // ------------------------------------------------------- writer staleness
+
+    /// The three answers must stay three: behind, current, and "could not be
+    /// read". An unreadable record is `None` — folding it into `false` would
+    /// let a machine sit on a stale index while the check reports it as fine,
+    /// and folding it into `true` would rebuild on a guess.
+    #[test]
+    fn index_writer_staleness_keeps_unknown_apart() {
+        // No record at all: every push that could have written it predates
+        // writer-version recording (≤0.3.0), so it is behind.
+        assert_eq!(index_writer_is_behind(None, false, "0.4.0"), Some(true));
+        assert_eq!(
+            index_writer_is_behind(Some("0.3.0"), false, "0.4.0"),
+            Some(true)
+        );
+        assert_eq!(
+            index_writer_is_behind(Some("0.4.0-rc.1"), false, "0.4.0"),
+            Some(true)
+        );
+        // Same version, and a newer one, are both "not behind": this asks
+        // whether the index was written by an *older* CLI, not whether some
+        // other machine runs a newer build.
+        assert_eq!(
+            index_writer_is_behind(Some("0.4.0"), false, "0.4.0"),
+            Some(false)
+        );
+        assert_eq!(
+            index_writer_is_behind(Some("0.5.0"), false, "0.4.0"),
+            Some(false)
+        );
+        // Unreadable wins over everything else, even an absent record.
+        assert_eq!(index_writer_is_behind(Some("0.1.0"), true, "0.4.0"), None);
+        assert_eq!(index_writer_is_behind(None, true, "0.4.0"), None);
     }
 }

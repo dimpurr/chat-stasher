@@ -142,7 +142,64 @@ pub fn sort_shards<T>(entries: &mut Vec<(PathBuf, T)>) {
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 }
 
+/// Machine partitions' writer-version records, as read out of a destination.
+///
+/// `machines` holds every host that has a snapshot; `records` holds the ones
+/// whose `meta/<machine>/writer.json` was read *and* names its own machine;
+/// `unreadable` holds those whose record could not be read at all. The third
+/// set exists so "the record is missing" (written by ≤0.3.0, which recorded
+/// none) and "the record is there but unreadable" stay different answers —
+/// [`crate::sidecar::writer_statuses`] renders them as `behind` and `unknown`.
+#[derive(Debug, Default)]
+pub struct ArchivedWriters {
+    pub machines: BTreeSet<String>,
+    pub records: BTreeMap<String, crate::sidecar::WriterVersionRecord>,
+    pub unreadable: BTreeSet<String>,
+}
+
 impl BackupStore {
+    /// Read every machine's `meta/<machine>/writer.json` from its newest
+    /// snapshot, for the writer-version comparison `overview`, `status` and the
+    /// stale-index check all make.
+    ///
+    /// The archived paths carry each machine's own absolute stage prefix, so
+    /// the file is matched by its trailing `meta` / `<machine>` / `writer.json`
+    /// marker ([`crate::sidecar::writer_machine`]) — never by a local path.
+    pub fn read_archived_writers(&self, mk: &MasterKey) -> anyhow::Result<ArchivedWriters> {
+        let backends = self.backends()?;
+        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
+            .open(&Credentials::Masterkey(mk.clone()))
+            .context("open repository for writer versions")?
+            .to_indexed()
+            .context("index repository for writer versions")?;
+        let mut out = ArchivedWriters::default();
+        for snapshot in newest_snapshot_per_host(repo.get_all_snapshots()?) {
+            out.machines.insert(snapshot.hostname.clone());
+            let root = repo.node_from_snapshot_and_path(&snapshot, "")?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())?
+                .collect::<rustic_core::RusticResult<Vec<_>>>()?;
+            for (path, node) in entries {
+                let Some(machine) = crate::sidecar::writer_machine(&path) else {
+                    continue;
+                };
+                let mut bytes = Vec::new();
+                repo.dump(&node, &mut bytes)?;
+                match serde_json::from_slice::<crate::sidecar::WriterVersionRecord>(&bytes) {
+                    // A record whose own `machine_id` disagrees with its path is
+                    // not a version for either machine: it is unreadable.
+                    Ok(record) if record.machine_id == machine => {
+                        out.records.insert(machine, record);
+                    }
+                    _ => {
+                        out.unreadable.insert(machine);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Read only the newest snapshot per machine.
     ///
     /// Used by `stagereclaim` to prove candidates that are still currently on stage.
