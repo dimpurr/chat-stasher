@@ -149,6 +149,30 @@ pub(super) fn completeness_banner(data: &UiData) -> String {
     )
 }
 
+/// R9 (29-UI-DESIGN §3.1/§4.1): machines that hold sessions but no activity
+/// index — the same list the `/api/overview` field
+/// `machines_without_activity_index` carries, which before W172 surfaced only
+/// there and on one `search` hint line. Their conversation times were never
+/// recorded, so their week cells and any time filter are unknown, not empty,
+/// and the banner says which machines and what repairs them.
+pub(super) fn machines_without_index_banner(data: &UiData) -> String {
+    if data.machines_without_index.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<div class=warn><b>Machines without an activity index.</b> {} machine(s) hold \
+         sessions but no activity index beside the snapshot, so their conversation times \
+         were never recorded: their heatmap rows, and any time filter below, are \
+         <i>UNKNOWN</i> for them, not empty. Run <code>chat-stasher activity-index</code> \
+         on that machine to record one.<ul>{}</ul></div>\n",
+        data.machines_without_index.len(),
+        data.machines_without_index
+            .iter()
+            .map(|m| format!("<li class=mono>{}</li>", esc(m)))
+            .collect::<String>()
+    )
+}
+
 pub(super) fn launch_banner(data: &UiData) -> String {
     let text = describe_selector(&data.launch);
     match text {

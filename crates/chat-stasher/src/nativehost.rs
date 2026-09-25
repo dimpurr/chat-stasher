@@ -1634,7 +1634,15 @@ fn describe_status(status: std::process::ExitStatus) -> String {
     match status.code() {
         Some(0) => "it exited successfully without ever listening".to_string(),
         Some(1) => {
-            "it exited 1: it read the destination in full and there was nothing to show".to_string()
+            // A defensive branch kept for an impossible status: `ui` no longer
+            // exits 1 (W172/OQ-2 — an archive that holds nothing serves its
+            // honest empty page and exits 0). Older builds exited 1 here, and
+            // the sentence says which older behaviour was observed rather
+            // than narrating a live path that cannot happen.
+            "it exited 1 — a status this build's `ui` does not produce (an older build \
+             exited 1 when the destination was read in full and held nothing to show; \
+             it now serves that destination's empty page instead)"
+                .to_string()
         }
         Some(2) => {
             "it exited 2 (usage error): the destination it was given is not usable as-is — most \

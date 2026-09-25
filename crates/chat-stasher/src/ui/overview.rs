@@ -12,7 +12,7 @@ use crate::overview::{Granularity, HeatmapAxis, OverviewRow};
 
 use super::html::{
     completeness_banner, describe_selector, esc, fmt_age, fmt_bytes, fmt_unix, footer, head,
-    launch_banner,
+    launch_banner, machines_without_index_banner,
 };
 use super::{
     health_of, percent_encode, select, Health, UiData, UiSession, NO_HARNESS, STALE_AFTER_DAYS,
@@ -34,6 +34,7 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     ));
     out.push_str(&launch_banner(data));
     out.push_str(&completeness_banner(data));
+    out.push_str(&machines_without_index_banner(data));
 
     let total_bytes: u64 = in_view.iter().map(|s| s.bytes).sum();
     let sources: BTreeSet<String> = in_view.iter().map(|s| s.source_label()).collect();
@@ -71,10 +72,29 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
             sel.unplaced.len()
         ));
     }
+    // OQ-2 (29-UI-DESIGN §4.1/§12, landed by W172): the empty page is a served
+    // screen, never an exit. Only the archive that truly holds nothing gets
+    // the absence sentence, and only a complete read may claim it — a read
+    // with unreadable parts keeps the zero a floor, because "held nothing
+    // that we could see" is not "held nothing". A launch filter that matched
+    // everything away is neither: its zero is scoped to the view, which the
+    // headline above already says.
+    if in_view.is_empty() && data.archive_sessions == 0 {
+        if data.complete() {
+            out.push_str("<p>(this destination holds no sessions)</p>\n");
+        } else {
+            out.push_str(&format!(
+                "<p>(this destination holds no sessions in the parts this read could reach — \
+                 with {} part(s) it could not, 0 is a floor, not a proof that none \
+                 exist)</p>\n",
+                data.unreadable.len()
+            ));
+        }
+    }
 
     out.push_str(&render_machines(&machines, &in_view, data, token));
     out.push_str(&render_matrix(&machines, &in_view, token));
-    out.push_str(&render_heatmap(&in_view, token));
+    out.push_str(&render_heatmap(&in_view, data, token));
     out.push_str(&render_time_unknown(&in_view, token));
     out.push_str(&footer(data));
     out.push_str("</body></html>\n");
@@ -229,22 +249,67 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
     out
 }
 
-fn render_heatmap(in_view: &[&UiSession], token: &str) -> String {
+/// The machines R9 exists for: in [`UiData::machines_without_index`] — the
+/// same list `machines_without_activity_index` carries in `/api/overview` —
+/// and holding at least one in-view session whose conversation time is
+/// unknown, which is the shape the heatmap draws as a whole row of `?`.
+///
+/// A machine in the no-index list with no in-view session (filtered away, or
+/// this page's launch filter matched another machine) is not drawn here at
+/// all; the banner above still names it, exactly as the JSON field does.
+fn no_index_machines_in_view(in_view: &[&UiSession], data: &UiData) -> Vec<String> {
+    data.machines_without_index
+        .iter()
+        .filter(|m| {
+            in_view.iter().any(|s| {
+                &s.machine == *m
+                    && !s.has_known_time()
+                    && !s.time_source.is_no_conversation_content()
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// R9 (29-UI-DESIGN §3.1): the heatmap's reason line — one per no-index
+/// machine the table actually shows a row for. Same vocabulary as the `search`
+/// hint line ("no activity index for machine `X` — its sessions cannot be
+/// placed in time"), and it names the repair command the way the list page's
+/// legacy-label note does.
+fn no_index_reason_lines(machines: &[String]) -> String {
+    machines
+        .iter()
+        .map(|m| {
+            format!(
+                "<p class=sub>Machine <span class=mono>{m}</span> has no activity index, so \
+                 its sessions cannot be placed in time: every week cell in its row is \
+                 <i>UNKNOWN</i>, not empty. Run <code>chat-stasher activity-index</code> on \
+                 that machine to record one.</p>\n",
+                m = esc(m)
+            )
+        })
+        .collect()
+}
+
+fn render_heatmap(in_view: &[&UiSession], data: &UiData, token: &str) -> String {
     let rows: Vec<OverviewRow> = in_view.iter().map(|s| s.overview_row()).collect();
     let axis = HeatmapAxis::Machine;
     // Weekly, always: the dashboard is read at a weekly cadence, so a day column
     // would show mostly-empty columns and a hundred of them.
     let hd = crate::overview::heatmap_data(&rows, 80, axis, Some(Granularity::Week));
+    let no_index = no_index_machines_in_view(in_view, data);
     let mut out = String::from("<section><h2>Activity, by week</h2>\n");
     if hd.rows.is_empty() {
-        out.push_str("<p>(no sessions)</p></section>\n");
+        out.push_str("<p>(no sessions in view)</p></section>\n");
         return out;
     }
     if !hd.has_time_axis {
         out.push_str(
             "<p>No session in view has a known conversation time, so there is no time axis \
-             to draw. The weekly columns are UNKNOWN, not empty.</p></section>\n",
+             to draw. The weekly columns are UNKNOWN, not empty.</p>\n",
         );
+        out.push_str(&no_index_reason_lines(&no_index));
+        out.push_str("</section>\n");
         return out;
     }
     out.push_str(
@@ -270,7 +335,24 @@ fn render_heatmap(in_view: &[&UiSession], token: &str) -> String {
             t = percent_encode(token),
             m = esc(&r.label),
         ));
+        // R9: a machine listed in `machines_without_index` had its row's weeks
+        // never measured, and an unmeasured week must not read — or link — as
+        // an empty one. Its cells carry the unknown marker with the reason in
+        // the title, and no time-filter link: a link promises "the sessions in
+        // this week", and no week of this row was ever measured.
+        let no_index_row = no_index.iter().any(|m| m == &r.label);
         for b in &hd.buckets {
+            if no_index_row {
+                out.push_str(&format!(
+                    "<td class=cell><span title=\"{}\">{}</span></td>",
+                    esc(&format!(
+                        "{}..{}: UNKNOWN — no activity index for this machine",
+                        b.label, b.last_day
+                    )),
+                    esc(&crate::overview::heatmap_unknown_char().to_string())
+                ));
+                continue;
+            }
             // reason: the horizontal axis spans the full activity range, so a
             // bucket with no sessions for this machine is a true empty bucket;
             // 0 is that measurement, not a fallback.
@@ -299,11 +381,17 @@ fn render_heatmap(in_view: &[&UiSession], token: &str) -> String {
         } else {
             "<span class=sub>·</span>".to_string()
         };
+        let uk_title = if no_index_row {
+            "time unknown — no activity index for this machine"
+        } else {
+            "time unknown"
+        };
         out.push_str(&format!(
-            "<td class=uk title=\"time unknown\">{uk}</td></tr>\n"
+            "<td class=uk title=\"{uk_title}\">{uk}</td></tr>\n"
         ));
     }
     out.push_str("</tbody></table></div>\n");
+    out.push_str(&no_index_reason_lines(&no_index));
     out.push_str(&format!(
         "<p class=sub>Last column: sessions with no known time, never merged into a week. \
          Ramp {} (fewest) to {} (most). Week boundaries are UTC days; the link's filter is a \

@@ -182,6 +182,55 @@ fn build_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (repo, key)
 }
 
+/// A repository whose only snapshot holds machine metadata and no sessions —
+/// the ADR-021 shape of a declared machine, the stage shape `push` accepts
+/// with meta files and no shards. This is the archive that used to stop `ui`
+/// before it served anything (OQ-2's empty state, W172).
+fn empty_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let stage = sandbox.join("stage-meta");
+    let meta = stage.join("meta").join("mbp-empty");
+    fs::create_dir_all(&meta).unwrap();
+    // Schema-correct by construction: every `MachineDeclaration` field
+    // (identity.rs) is present, so no reader can fail on it rather than read.
+    fs::write(
+        meta.join("machine.json"),
+        concat!(
+            "{\n",
+            "  \"machine_id\": \"mbp-empty\",\n",
+            "  \"display_name\": \"mbp-empty\",\n",
+            "  \"os\": \"synthetic\",\n",
+            "  \"first_seen_unix\": 0,\n",
+            "  \"declared_harnesses\": []\n",
+            "}\n"
+        ),
+    )
+    .unwrap();
+    let repo = sandbox.join("repo-empty");
+    let key = sandbox.join("keys-empty").join("masterkey.json");
+    let push = run(
+        sandbox,
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-empty",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(
+        push.status.success(),
+        "meta-only push failed: {:?}\n{}",
+        push.status,
+        String::from_utf8_lossy(&push.stderr)
+    );
+    (repo, key)
+}
+
 // ----------------------------------------------------------------- socket
 
 /// One `GET`, with the `Host` header the server's allowlist expects.
@@ -431,6 +480,142 @@ fn the_overview_page_is_the_archive_at_a_glance() {
     );
     assert_eq!(v["payload_loaded"], serde_json::json!(false));
     assert_eq!(v["data_blobs_read"], serde_json::json!(0));
+}
+
+/// W172 / R9: the machine that never ran `activity-index` (the `mbp-c` stage
+/// above is the repro fixture) must reach the HTML exactly the way it already
+/// reaches the JSON — a banner naming the machines
+/// `machines_without_activity_index` lists, and a heatmap row that reads
+/// unknown, not empty, with the reason and the repair command on the page.
+#[test]
+fn a_machine_without_an_index_surfaces_on_the_page_as_it_does_in_the_json() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    let (status, html) = ui.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        html.contains("Machines without an activity index."),
+        "the banner must render: {html}"
+    );
+    assert!(
+        html.contains("1 machine(s) hold sessions but no activity index"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<li class=mono>mbp-c</li>"),
+        "the machine list must name each one: {html}"
+    );
+    assert!(
+        html.contains("chat-stasher activity-index"),
+        "the banner must name the repair command: {html}"
+    );
+
+    let (status, json) = ui.get("/api/overview");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["machines_without_activity_index"],
+        serde_json::json!(["mbp-c"]),
+        "the banner and the JSON field must name the same machines: {json}"
+    );
+
+    // The heatmap: mbp-c's row is unknown-marked, with the reason on the page
+    // instead of a row of empty cells.
+    let heat = html
+        .split("<h2>Activity, by week</h2>")
+        .nth(1)
+        .expect("the heatmap section must exist");
+    assert!(
+        heat.contains("UNKNOWN — no activity index for this machine"),
+        "the week cells must not read as empty: {heat}"
+    );
+    assert!(
+        heat.contains(
+            "<span class=mono>mbp-c</span> has no activity index, so its sessions cannot be \
+             placed in time"
+        ),
+        "the reason line must name the machine in the CLI's own words: {heat}"
+    );
+    assert!(
+        !heat.contains("machine=mbp-c&since="),
+        "an unmeasured week must not link a time filter: {heat}"
+    );
+}
+
+/// W172 / OQ-2: a metadata read that finished with nothing to show still
+/// serves. This archive used to stop `ui` before any socket existed ("nothing
+/// to show, so no server was started", exit 1); the honest empty page is what
+/// you get now, and the exit is 0 once the server idles out.
+#[test]
+fn an_archive_that_holds_nothing_still_serves_its_honest_empty_page() {
+    let sb = sandbox();
+    let (repo, key) = empty_repo(sb.path());
+
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let (status, html) = ui.get("/");
+    assert_eq!(status, 200, "{html}");
+    assert!(
+        html.contains("(this destination holds no sessions)"),
+        "the empty page must state the measured absence: {html}"
+    );
+    let (status, json) = ui.get("/api/overview");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["summary"]["sessions_in_view"],
+        serde_json::json!(0),
+        "{json}"
+    );
+    assert_eq!(v["snapshots_scanned"], serde_json::json!(1), "{json}");
+    assert_eq!(
+        v["machines_without_activity_index"],
+        serde_json::json!([]),
+        "mbp-empty holds no sessions, so it is not the no-index state: {json}"
+    );
+    drop(ui);
+
+    // And run one to completion: served, then exited 0 — with the URL printed
+    // and the shared selector's own no-hit line, never the pre-bind stop.
+    let out = run(
+        sb.path(),
+        &[
+            "ui",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--no-open",
+            "--idle-timeout",
+            "1",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "a served empty dashboard exits 0: {:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("http://"),
+        "the URL must still be printed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("no server was started"),
+        "the pre-socket exit is gone: {stdout}"
+    );
+    assert!(
+        stdout.contains("0 of 0 sessions matched"),
+        "the shared selector's no-hit line keeps the honest distinction: {stdout}"
+    );
+    assert!(
+        stdout.contains("in view / 0 in the archive"),
+        "the narration must quote the archive, not the launch-filtered set: {stdout}"
+    );
 }
 
 #[test]

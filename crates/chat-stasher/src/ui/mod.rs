@@ -746,6 +746,33 @@ pub(crate) mod fixture {
         UiData::from_report(&r, "dest-under-test", Selector::default(), NOW)
     }
 
+    /// `m-3` as `search` can actually report it — a machine only enters the
+    /// no-index list once it holds sessions (search.rs fills the same field
+    /// the JSON field `machines_without_activity_index` carries). One session
+    /// whose conversation time is unknown *because the machine has no
+    /// activity index*: the why string rebuilt the same way `search_sessions`
+    /// builds it.
+    pub fn no_index_data() -> UiData {
+        let mut r = report();
+        let machine = "m-3";
+        let why = format!(
+            "machine `{machine}` has no activity index (`meta/{machine}/activity-v1.jsonl`) \
+             in this snapshot, so its conversation time was never recorded"
+        );
+        let mut h = hit(
+            machine,
+            "claude-code.m-3.019bf00d-97b6-7eb2-9bf8-eacbacc09767",
+            80,
+            1,
+            None,
+        );
+        h.time_why = Some(why.clone());
+        h.time_source = ActivityTimeSource::Unknown { why };
+        r.hits.push(h);
+        r.sessions_seen += 1;
+        UiData::from_report(&r, "dest-under-test", Selector::default(), NOW)
+    }
+
     /// A `ContentSource` that records every fetch and refuses none. The record
     /// is how a test proves *which* routes reached the payload tier.
     #[derive(Default)]
@@ -1406,6 +1433,167 @@ mod tests {
         assert!(
             html.contains("index missing"),
             "health must say why, not just colour a cell: {html}"
+        );
+    }
+
+    /// R9 (W172): the banner names exactly the machines the JSON field
+    /// `machines_without_activity_index` carries — same list, same count, with
+    /// the repair command on the page.
+    #[test]
+    fn the_banner_names_exactly_the_machines_the_json_field_names() {
+        let d = fixture::data();
+        let html = req("/", &d, &NoContent).body;
+        assert!(
+            html.contains("Machines without an activity index."),
+            "the banner must render: {html}"
+        );
+        assert!(
+            html.contains("1 machine(s) hold sessions but no activity index"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<li class=mono>m-3</li>"),
+            "the machine list must name each one: {html}"
+        );
+        assert!(
+            html.contains("chat-stasher activity-index"),
+            "the banner must name the repair command: {html}"
+        );
+        // …and it mirrors the JSON field set for set, not in its own wording
+        // alone.
+        let (path, params) = split_target("/api/overview");
+        let v: serde_json::Value =
+            serde_json::from_str(&handle(path, &params, "t", &d, &NoContent).unwrap().body)
+                .unwrap();
+        assert_eq!(
+            v["machines_without_activity_index"],
+            serde_json::json!(["m-3"]),
+        );
+        // An empty list renders no banner at all: a warning about nothing is a
+        // lie about the object it describes.
+        let mut d = fixture::data();
+        d.machines_without_index.clear();
+        assert!(!req("/", &d, &NoContent)
+            .body
+            .contains("Machines without an activity index."));
+    }
+
+    /// R9 (W172): a machine that holds sessions but no index is a whole row of
+    /// unknown in the heatmap — never a row of empty cells — and the reason is
+    /// on the page where the '?' appears.
+    #[test]
+    fn a_heatmap_row_without_an_index_reads_unknown_never_empty() {
+        let d = fixture::no_index_data();
+        let html = req("/", &d, &NoContent).body;
+        let heat = html
+            .split("<h2>Activity, by week</h2>")
+            .nth(1)
+            .expect("the heatmap section must exist");
+        let m3 = heat
+            .split("<tr><td class=mono><a href=\"/sessions?machine=m-3")
+            .nth(1)
+            .expect("the m-3 row must be in the heatmap")
+            .split("</tr>")
+            .next()
+            .expect("the row must close");
+        assert!(
+            m3.contains("UNKNOWN — no activity index for this machine"),
+            "every week cell must carry the unknown reason: {m3}"
+        );
+        assert!(
+            !m3.contains(": no sessions"),
+            "an unmeasured week must not read as an empty one: {m3}"
+        );
+        assert!(
+            !m3.contains("since="),
+            "no week may link a time filter for a machine whose weeks were never \
+             measured: {m3}"
+        );
+        assert!(
+            m3.contains("time unknown — no activity index for this machine"),
+            "the '?' column must say why: {m3}"
+        );
+        assert!(
+            heat.contains(
+                "<span class=mono>m-3</span> has no activity index, so its sessions cannot \
+                 be placed in time"
+            ),
+            "the reason line must use the CLI's own words: {heat}"
+        );
+        assert!(
+            heat.contains("chat-stasher activity-index"),
+            "the reason line must name the repair command: {heat}"
+        );
+    }
+
+    /// The pure R9 repro at page level: no in-view session has a known time
+    /// *because the machine has no index* — there is no axis to draw, and the
+    /// reason line must still name the machine instead of leaving a blank wall.
+    #[test]
+    fn a_heatmap_without_a_time_axis_still_names_the_no_index_machines() {
+        let mut d = fixture::no_index_data();
+        d.sessions.retain(|s| s.machine == "m-3");
+        let html = req("/", &d, &NoContent).body;
+        assert!(
+            html.contains("No session in view has a known conversation time"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<span class=mono>m-3</span> has no activity index, so its sessions cannot \
+                 be placed in time"
+            ),
+            "the no-axis page must still carry the reason: {html}"
+        );
+    }
+
+    /// OQ-2 (W172): an archive that holds nothing is a served, honest page —
+    /// the state that used to exit before any socket was bound. Only a
+    /// complete read may claim absence; a partial one keeps the zero a floor,
+    /// and a launch filter that matches nothing is not an empty archive.
+    #[test]
+    fn an_archive_that_holds_nothing_is_an_honest_page_not_an_exit() {
+        let mut d = fixture::data();
+        d.sessions.clear();
+        d.archive_sessions = 0;
+        let r = req("/", &d, &NoContent);
+        assert_eq!(r.status, 200);
+        assert!(
+            r.body.contains("(this destination holds no sessions)"),
+            "the measured absence must be stated: {}",
+            r.body
+        );
+        assert!(
+            r.body.contains("(no sessions in view)"),
+            "the heatmap's empty paragraph must stay scoped to the view: {}",
+            r.body
+        );
+
+        // The same zero, with parts of the destination unreadable: a claim of
+        // absence would record an unknown as empty.
+        d.unreadable
+            .push("host `m-9`: snapshot cccccccc tree walk failed".into());
+        let r = req("/", &d, &NoContent);
+        assert!(
+            !r.body.contains("(this destination holds no sessions)"),
+            "{}",
+            r.body
+        );
+        assert!(r.body.contains("floor"), "{}", r.body);
+
+        // A launch filter that matched everything away is a filtered view, not
+        // an empty archive: the absence sentence must not appear.
+        let mut filtered = Selector::default();
+        filtered.machine = Some("m-zz".into());
+        let d = UiData::from_report(&fixture::report(), "dest-under-test", filtered, NOW);
+        let html = req("/", &d, &NoContent).body;
+        assert!(
+            !html.contains("(this destination holds no sessions)"),
+            "a filter, not an archive, is why this set is empty: {html}"
+        );
+        assert!(
+            html.contains("<span class=v>0</span><span class=l>sessions in view</span>"),
+            "the headline must stay scoped to the view: {html}"
         );
     }
 

@@ -679,8 +679,10 @@ enum Command {
     /// (at most 100 characters, recorded in the activity index); a session's
     /// full conversation is fetched and decrypted only when you click it and
     /// then click "load", and the byte cost is printed before you do. Exit
-    /// codes match `search`: 0 served the dashboard, 1 read it all and there
-    /// was nothing, 3 could not finish reading (or no key), 2 usage error.
+    /// codes: 0 served the dashboard — even an archive that holds nothing,
+    /// which is served as an honest empty page rather than not starting; 3
+    /// could not finish reading (or no key), and is also the exit status after
+    /// serving an archive that could not be read in full; 2 is a usage error.
     Ui(UiArgs),
     /// Deprecated alias for `ui`; prints a one-line notice on stderr and behaves
     /// identically. Kept for one release.
@@ -3735,14 +3737,16 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     for path in &report.unreadable {
         say!("  !! unreadable: {path}");
     }
+    // OQ-2 (29-UI-DESIGN §5.4/§12, landed by W172): a metadata read that
+    // finished serves even when it matched nothing — the empty page is one of
+    // the honest states, and the one screen on which a wrong launch filter can
+    // be seen to be wrong and corrected. The shared selector's no-hit line
+    // keeps "not there" and "UNKNOWN" separate on stdout (it says "search:",
+    // the same pass-through the filter warnings use below), and the exit code
+    // is decided by the read's completeness after serving (bottom of this
+    // function), never by emptiness.
     if report.hits.is_empty() {
         say!("{}", report.no_hit_line());
-        say!("ui: nothing to show, so no server was started");
-        return if report.complete() {
-            ExitCode::from(1)
-        } else {
-            ExitCode::from(3)
-        };
     }
 
     let now_unix = now_unix();
@@ -3791,7 +3795,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     );
     say!(
         "[ui] sessions     : {listed} in view / {} in the archive",
-        data.sessions.len()
+        data.archive_sessions
     );
     if let Some(text) = chat_stasher::ui::describe_selector(&data.launch) {
         say!("[ui] filter       : {text}");
