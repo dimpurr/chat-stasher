@@ -339,6 +339,38 @@ jobs:
       - name: Support matrix check self-test
         run: python3 scripts/check-support-matrix.py --selftest
 
+      # The four workflows under .github/workflows/ are the only programs in
+      # this repository that cannot be run before they ship: GitHub finds their
+      # syntax errors, unknown keys and misspelled step outputs when it runs
+      # them, and for release.yml "when it runs" means a release is being
+      # published with the `release` environment's secrets in scope. actionlint
+      # reads them statically instead.
+      #
+      # `--require` rather than a bare run: the script can also skip when it
+      # cannot obtain actionlint, which is right on a laptop and wrong here, so
+      # in CI a tool it cannot get is a failure rather than a green skip. The
+      # version is pinned by the script and its digest is checked, so this step
+      # does not depend on what the runner image happens to carry — which is
+      # also why the integration with shellcheck is off: that one IS whatever
+      # the image has (0.9.0 here, 0.11.0 upstream), and a gate whose answer
+      # changes with the runner's optional tools is not a gate.
+      - name: Workflows lint clean
+        run: bash scripts/check-workflows.sh --require
+
+      # A gate that cannot prove it still catches anything is worth nothing, so
+      # the linter's own four branches are exercised here: the skip, the
+      # require-failure, a failed download, and — the one the pinned digest
+      # exists for — bytes that do not match the pin.
+      - name: Workflow lint self-test
+        run: bash scripts/check-workflows.sh --selftest
+
+      # The tag gate is what decides whether a `Release` run may build anything,
+      # and it is the only thing standing between a branch named `v0.3.0` and a
+      # publication. Its probes build their own refs and Cargo.toml files, so
+      # they need no tag and no history.
+      - name: Release tag gate self-test
+        run: bash scripts/selftest-release-tag-gate.sh
+
       # CONTRIBUTING.md lists this as a local check, so CI has to run it too, and
       # it belongs in this job rather than the extension one: it exercises the
       # reload script against a temp repository and a stub build command, so it

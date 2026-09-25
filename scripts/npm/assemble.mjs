@@ -24,11 +24,13 @@
 // separate, deliberate step (RELEASING.md).
 //
 // Usage:
-//   node scripts/npm/assemble.mjs --version 0.4.0 --assets dist --out dist/npm
+//   node scripts/npm/assemble.mjs --version 0.4.0 --assets dist --out npm-packages
 //
 //   --version V    required. The release's version, no leading `v`.
 //   --assets DIR   required. The directory holding the release assets.
-//   --out DIR      required. Where the package dirs are written.
+//   --out DIR      required. Where the package dirs are written. It must NOT be
+//                  inside --assets: package directories among the release
+//                  assets break the asset-set equality release.yml asserts.
 //   --sha256sums P optional. Defaults to <assets>/SHA256SUMS.
 //
 // Exit codes: 0 = wrote every package · 1 = refused or failed · 2 = usage error.

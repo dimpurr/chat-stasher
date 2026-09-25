@@ -76,17 +76,24 @@ automation creates one.
    ```
    `-a`, because an annotated tag is the one artifact that records who cut the
    release and when. (The workflow does not check that, though — see "What the
-   workflow checks".) The `Release` workflow runs from the tag push — it does
-   not run on a branch — and its first gate ends the run unless the tag is
-   exactly `vX.Y.Z` or `vX.Y.Z-rc.N` **and** agrees with `Cargo.toml`.
+   workflow checks".) The `Release` workflow runs from the tag push. It can also
+   be started by hand, for a retry or a dry run, but **only against a tag**: its
+   first gate reads the full ref and ends the run unless it is under
+   `refs/tags/`, and unless the tag is exactly `vX.Y.Z` or `vX.Y.Z-rc.N`
+   **and** agrees with `Cargo.toml`. So the manual form asks for the tag, never
+   a branch — a branch named `v0.3.0` is refused there rather than treated as
+   one (see "What the workflow checks").
    The workflow then publishes the checksum-verified npm platform packages,
    the `chat-stasher` npm launcher, and the crate to crates.io, in that order.
    Each package version is checked first and an existing version is skipped,
    so a failed run can be retried from the Actions `workflow_dispatch` control
-   on the same tag. `dry_run` defaults to true and runs `npm publish --dry-run`
-   for the assembled npm packages and `cargo publish --dry-run --locked`; set
-   it to false to publish. The dry-run flag covers registry publication; the
-   normal release and Homebrew workflow steps still run.
+   on the same tag. An rc publishes every npm package under the `next`
+   dist-tag and a stable release under `latest`; the tag shape decides which,
+   so an rc never becomes what `npm install chat-stasher` resolves.
+   `dry_run` defaults to true and runs `npm publish --dry-run` for the assembled
+   npm packages and `cargo publish --dry-run --locked`; set it to false to
+   publish. The dry-run flag covers registry publication; the normal release
+   and Homebrew workflow steps still run.
 7. **Verify the published release** before telling anyone it exists:
    - the Release is marked **latest**, and the seven uploaded assets are exactly
      `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64`,
@@ -239,15 +246,33 @@ decides what the extension itself builds and serves.
 
 ## Registry credentials
 
-The registry job uses the `release` GitHub Actions environment. Before the
-first publish, configure `NPM_TOKEN` and `CARGO_REGISTRY_TOKEN` as secrets on
-that environment. npm packages are published in platform-first order and each
-publish uses `--provenance`; the crate follows with `cargo publish --locked`.
-The workflow comments identify these tokens as the bootstrap path: after each
-registry's first successful publish, configure trusted publishing (GitHub OIDC)
-for `dimpurr/chat-stasher` and `.github/workflows/release.yml`, then remove the
-corresponding token secret. A retry checks the exact package version and skips
-one that is already present, while continuing with later packages.
+The registry job uses the `release` GitHub Actions environment, and each
+registry accepts exactly one of two credentials. The job uses the token secret
+when the environment has one and GitHub OIDC trusted publishing when it does
+not, so **both are supported at once and neither is required**.
+
+- **The bootstrap token.** `NPM_TOKEN` for npm, `CARGO_REGISTRY_TOKEN` for
+  crates.io, configured as secrets on the `release` environment. A trusted
+  publisher can only be configured for a package that already exists, so the
+  first publish of each registry has to use one.
+- **Trusted publishing (OIDC).** With no secret configured, the job asks GitHub
+  for an OIDC token and trades it for a short-lived publish credential: npm does
+  the exchange itself once the `_authToken` line `actions/setup-node` writes has
+  been removed from its `.npmrc`, and crates.io goes through
+  `rust-lang/crates-io-auth-action`. npm's client for this is npm 11.5.1 or
+  later, so the job installs a pinned npm rather than using the one Node bundles.
+
+So removing the token is part of the sequence, not an optional cleanup — and it
+is why neither registry step demands the secret. After each registry's first
+successful publish, configure trusted publishing for `dimpurr/chat-stasher`,
+workflow `.github/workflows/release.yml`, environment `release` (both registries
+match on all three, filename included), then delete that token from the
+environment's secrets. The next release runs on OIDC alone.
+
+npm packages are published in platform-first order and each publish carries
+`--provenance`; the crate follows with `cargo publish --locked`. A retry checks
+the exact package version and skips one that is already present, while
+continuing with later packages.
 
 ## What the workflow checks
 
@@ -255,6 +280,14 @@ A rule here is worth writing down only if something can tell when it is broken,
 so this is the list of what `release.yml` refuses — and, at the end, the one
 thing it does not.
 
+- **That the ref is a tag at all.** Before anything else, because nothing below
+  means anything about a branch. A `workflow_dispatch` run can be started
+  against a branch, and a branch may be named exactly like a release tag, so the
+  gate reads the full ref and ends the run unless it is under `refs/tags/`. The
+  publishing job asserts the same condition in its own `if:`, so a later edit to
+  the gate cannot hand the job that holds the registry secrets a branch.
+  (`scripts/release-tag-gate.sh` — the gate is a script so that this refusal can
+  be exercised without pushing a tag; `scripts/selftest-release-tag-gate.sh`.)
 - **The tag's shape.** Before the gates and before the build, the tag must be
   exactly `vX.Y.Z` or `vX.Y.Z-rc.N`. The workflow is triggered by `v*`, which is
   wider than that, and each of the other shapes is a plausible typo:
@@ -296,8 +329,11 @@ thing it does not.
   job finish, the workflow assembles npm packages from the Release assets,
   verifies their checksums, publishes each platform package before the launcher
   with npm provenance, then publishes the crate. Existing exact versions are
-  skipped; failed lookups other than a confirmed not-found stop the job. A
-  `workflow_dispatch` run can dry-run both registries or retry publication.
+  skipped; failed lookups other than a confirmed not-found stop the job. An rc
+  publishes under npm's `next` dist-tag and a stable release under `latest` —
+  the tag shape decides which, and the publish step passes it through rather
+  than choosing. A `workflow_dispatch` run can dry-run both registries or retry
+  publication.
 - **Development versions are refused.** Registry steps reject any version
   containing `-dev`; the tag gate also accepts only `vX.Y.Z` and `vX.Y.Z-rc.N`.
 

@@ -59,6 +59,9 @@ python3 scripts/output-inventory.py --check
 python3 scripts/check-support-matrix.py
 python3 scripts/check-support-matrix.py --selftest
 python3 scripts/check-commit-messages.py --selftest
+bash scripts/check-workflows.sh
+bash scripts/check-workflows.sh --selftest
+bash scripts/selftest-release-tag-gate.sh
 bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
 bash scripts/self-test-install.sh
@@ -91,6 +94,28 @@ on macOS, where it is bash under another name and accepts the same bashism.
 assumes bash and passes the construct. Both are skipped in as many words when
 the tool is missing locally, and CI asserts both are present so the skip cannot
 become the normal case in the one place meant to catch it.
+
+`check-workflows.sh` is the only check here that reads the workflows
+themselves. GitHub is the first thing that parses a workflow, and for
+`release.yml` that parse happens while a release is being published with the
+`release` environment's secrets in scope — so the four files that decide what
+this project publishes had no check at all before it. It runs a pinned
+actionlint: the one on `PATH` if there is one, otherwise a download whose
+sha256 is pinned in the script, and it skips in as many words when it can get
+neither. CI passes `--require`, so that skip cannot become the normal case in
+the one place meant to catch it. Integration with shellcheck is deliberately
+off — actionlint would run whatever shellcheck the machine happens to have
+(0.9.0 on ubuntu-24.04, 0.11.0 upstream), which would make the verdict depend on
+the runner rather than on the pinned version.
+
+`selftest-release-tag-gate.sh` drives the gate `release.yml` calls before it
+builds anything. That gate is a script rather than a step's here-doc for exactly
+this reason: `scripts/release-tag-gate.sh` is both what runs and what is tested,
+so the refusals that matter — a ref that is not a tag, a tag that is not one of
+the two release shapes, a tag that disagrees with `Cargo.toml` — can be
+exercised without pushing a tag. `scripts/commit-message-range.sh` is the same
+arrangement for the same reason: a second copy of a gate drifts from the copy
+under test.
 
 The npm launcher's tests need no toolchain either: they run against a fake
 platform package built in a temp directory, and they force the platform they
