@@ -215,6 +215,24 @@ already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:149-150`)
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
 `XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,611-622`).
 
+🔴 **A config file that exists has to be valid, and the tool will not pretend
+otherwise.** If it does not parse, if a value has the wrong type, or if a path in
+it cannot be resolved, every command that reads it stops with **exit code `3`**
+and prints the file, the position and the reason
+(`crates/chat-stasher/src/config.rs:345-357,708-715`). It does **not** warn
+and continue on the built-in defaults: those defaults declare no destination, so a
+scheduled `push` would then run exactly as if you had never declared one, and the
+archive would quietly stop being copied anywhere
+(`crates/chat-stasher/src/main.rs:7581-7593`).
+
+Two exceptions, and only two. `doctor` is the one command that keeps going — it
+reports the error and lists the checks it therefore could not perform, so "no
+destination declared" is never printed as a finding about a config nobody read
+(`crates/chat-stasher/src/doctor.rs:1153-1181,1186-1192`). And an **absent** config file is a
+different state altogether, not an error: that is the normal first run, and it
+does use the defaults (`crates/chat-stasher/src/config.rs:345-352`). If you want
+the defaults back, move the file aside rather than leaving a broken one in place.
+
 ---
 
 ## 3. Install the browser extension
@@ -531,7 +549,10 @@ Its four exit codes are: `0` = the timer is judged healthy · `1` = the scan
 finished, but the timer is judged unhealthy (including **never having run**) ·
 `3` = the scan did not complete at all (the registry could not be read, for
 example; in that case it has no conclusion about your machine) · `2` = usage
-error. **Note:** the entire report goes to **stderr**, so a pipeline like
+error. A config file it could not read is the same case, not a fifth one: nothing
+was scanned, so nothing is claimed
+(`crates/chat-stasher/src/main.rs:7628-7643`). **Note:** the entire report goes to
+**stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`.
 
