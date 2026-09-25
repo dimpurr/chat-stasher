@@ -42,7 +42,7 @@ If the command is missing, ask the user before installing anything. On macOS and
 curl -fsSL https://chatstasher.com/install.sh | sh
 ```
 
-The script installs to `~/.local/bin` without `sudo`, and prints a line to add if that folder is not on `PATH`. It installs the newest **stable** release, which may predate the Linux binaries; if it refuses for that reason, name a version that carries one. The variable has to reach `sh`, which means setting it on the **right-hand side of the pipe** — `sh` is what reads the script, so the assignment belongs to it, and `curl` still fetches the same script:
+The script installs to `~/.local/bin` without `sudo`, and prints a line to add if that folder is not on `PATH`. It installs the newest **stable** release, which may predate the Linux binaries; if it refuses for that reason, name a version that carries one. The variable has to reach `sh`, which means setting it on the **right-hand side of the pipe**: `sh` is what reads the script, so the assignment belongs to it, and `curl` still fetches the same script:
 
 ```sh
 curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=<version> sh
@@ -84,7 +84,7 @@ chat-stasher setup
 
 A non-TTY run does the same work from named flags and prints one JSON object, including any missing named parameters. The destination step writes a `[destinations.<name>]` block and then runs `dest-init`. The scheduler step is still a stub: it plans and prints, and installs nothing, so do [Step 3](#step-3-hourly-archiving) yourself.
 
-Otherwise, do it by hand — but know that this is **less** than `setup` does, not the same work. `setup` runs the pass twice and reads a session back out; the manual path runs **one** pass and reads nothing back, so it gives you no evidence that the archive can be opened again. If the user needs that proof, use `setup`.
+Otherwise, do it by hand, but know that this is **less** than `setup` does, not the same work. `setup` runs the pass twice and reads a session back out; the manual path runs **one** pass and reads nothing back, so it gives you no evidence that the archive can be opened again. If the user needs that proof, use `setup`.
 
 ```sh
 chat-stasher init
@@ -101,7 +101,7 @@ chat-stasher run-once --stage <stage>
 
 With no destination declared, this archives to `~/.local/share/chat-stasher/repo`. Success ends with `result: COMPLETED` on the first run, and `result: NOOP` when nothing changed. Both exit `0`.
 
-**Human step: the master key — only if the run actually created one.** The key is made by the step that writes a snapshot, so a `NOOP` run creates neither the repository nor `~/.local/share/chat-stasher/masterkey.json`: there was nothing to archive, and `push` never ran. In that case there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there. The step applies to the first run that archives something — read the `result:` line, and treat `COMPLETED` as "a key now exists".
+**Human step: the master key (only if the run actually created one).** The key is made by the step that writes a snapshot, so a `NOOP` run creates neither the repository nor `~/.local/share/chat-stasher/masterkey.json`: there was nothing to archive, and `push` never ran. In that case there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there. The step applies to the first run that archives something. Read the `result:` line, and treat `COMPLETED` as "a key now exists".
 
 When a key does exist, tell the user to copy `~/.local/share/chat-stasher/masterkey.json` somewhere off this disk, such as a password manager or an external drive, and say plainly that it is the only key to the archive and that a lost key cannot be recovered. Do not read or print the file.
 
