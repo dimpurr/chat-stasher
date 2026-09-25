@@ -22,6 +22,11 @@
 //! * The pre-label machine is explained **once per machine** in a note at the
 //!   top of the list, with the real destination-side repair command; its rows
 //!   just say `label unknown`, and the note follows the machine filter.
+//! * The rows beside the label carry the `msgs` count and the time-state mark
+//!   the design's §3.2 legend decodes (W192): a session the index measured
+//!   shows that count — the pre-label machine's row too, because its old index
+//!   did measure lines — and every conversation time of these fixtures is
+//!   `exact`, so every cell pairs with the legend's `✔`.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -697,5 +702,124 @@ fn the_session_page_shows_the_label_row() {
     assert!(
         !page.contains("<th>label source</th>"),
         "no provenance row for an unknown label: {page}"
+    );
+}
+
+// ----------------------------------------------------------------- W192 list
+
+/// One session's row on the `/sessions` page, sliced from its session link to
+/// the end of the row: the label, count and time cells of that one session,
+/// so a cell assertion cannot pass on some other row's text.
+fn row_html(html: &str, index: u64) -> &str {
+    let start = html
+        .find(&format!("href=\"/session?i={index}&token="))
+        .unwrap_or_else(|| panic!("row {index} must be on the list:\n{html}"));
+    let end = start + html[start..].find("</tr>").expect("the row must close");
+    &html[start..end]
+}
+
+/// The rows beside the label column carry the `msgs` count and the time-state
+/// mark the §3.2 legend decodes (W192). Known answers come from the fixtures
+/// themselves: TITLED holds three non-blank lines (two user lines and the
+/// `ai-title` line), SPARSE holds the one metadata line, the pre-title
+/// machine's hand-written index counted one line — and the counts shown in
+/// the HTML are asserted against the same server's `/api/sessions`
+/// measurement, so the two surfaces cannot drift apart unnoticed.
+#[test]
+fn the_list_carries_the_msgs_column_and_the_time_state_legend() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(
+        sb.path(),
+        &[
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+        ],
+    );
+
+    let (status, body) = ui.get("/api/sessions");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = v["sessions"].as_array().expect("rows");
+    let find = |pred: &dyn Fn(&serde_json::Value) -> bool| {
+        rows.iter()
+            .find(|r| pred(r))
+            .unwrap_or_else(|| panic!("the row must exist: {body}"))
+    };
+    let titled = find(&|r| r["title"]["text"] == TITLED_LABEL);
+    let sparse = find(&|r| {
+        r["machine"] == "mbp-w156"
+            && r["harness"] == "claude-code"
+            && r["title"]["state"] == "no_label"
+    });
+    let legacy = find(&|r| r["machine"] == "mbp-legacy");
+    assert_eq!(titled["line_count"], serde_json::json!(3), "{titled}");
+    assert_eq!(sparse["line_count"], serde_json::json!(1), "{sparse}");
+    assert_eq!(legacy["line_count"], serde_json::json!(1), "{legacy}");
+
+    let (status, html) = ui.get("/sessions");
+    assert_eq!(status, 200);
+    assert!(
+        html.contains(
+            "<th class=n title=\"count of non-blank lines in the archived session record, \
+             measured by the activity index\">msgs</th>"
+        ),
+        "the count column must say what it counts: {html}"
+    );
+    assert_eq!(
+        count(
+            &html,
+            "time-state legend: \u{2714} exact · ~ inferred, interpreted, a conversation-list \
+             update, or a partial range · ? unknown · \u{2205} no conversation content",
+        ),
+        1,
+        "the legend that decodes the marks, exactly once: {html}"
+    );
+
+    let titled_row = row_html(&html, titled["index"].as_u64().unwrap());
+    assert_eq!(
+        count(titled_row, "<td class=n>3</td>"),
+        1,
+        "the measured count of the fixture's three lines: {titled_row}"
+    );
+    assert_eq!(
+        titled_row.match_indices("time source: exact").count(),
+        2,
+        "both time cells name their source: {titled_row}"
+    );
+    assert_eq!(
+        titled_row.match_indices("\u{2714}</td>").count(),
+        2,
+        "both time cells carry the exact mark the legend names first: {titled_row}"
+    );
+
+    let sparse_row = row_html(&html, sparse["index"].as_u64().unwrap());
+    assert_eq!(
+        count(sparse_row, "<td class=n>1</td>"),
+        2,
+        "the metadata line was counted (msgs) alongside its one shard, not hidden by the \
+         no-content state: {sparse_row}"
+    );
+    assert_eq!(
+        sparse_row
+            .match_indices("\u{2205} no conversation content")
+            .count(),
+        2,
+        "the no-content state shows where a conversation time cannot come from: {sparse_row}"
+    );
+
+    // The pre-label row: label unknown, but the count its old index measured
+    // is still shown — a label state and a count state are different facts.
+    let legacy_row = row_html(&html, legacy["index"].as_u64().unwrap());
+    assert!(
+        legacy_row.contains(">label unknown</td>"),
+        "the label state is unknown, in the design's words: {legacy_row}"
+    );
+    assert_eq!(
+        count(legacy_row, "<td class=n>1</td>"),
+        2,
+        "the old index's own measured count travels with the row: {legacy_row}"
     );
 }

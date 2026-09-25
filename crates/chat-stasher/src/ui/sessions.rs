@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::activity::TitleSource;
+use crate::activity::{TimeSource, TitleSource};
 use crate::search::SessionLabel;
 use crate::selector::{Resolved, UnplacedBy};
 
@@ -153,7 +153,9 @@ fn page_sessions(
         } else {
             out.push_str(
                 "<div class=scroll><table>\n<thead><tr><th>machine</th><th>source</th>\
-                 <th>session (short)</th><th>label</th><th class=n>shards</th>\
+                 <th>session (short)</th><th>label</th>\
+                 <th class=n title=\"count of non-blank lines in the archived session record, \
+                 measured by the activity index\">msgs</th><th class=n>shards</th>\
                  <th class=n>bytes</th>\
                  <th>first message</th><th>last message</th><th>snapshot time</th>\
                  </tr></thead>\n<tbody>\n",
@@ -162,6 +164,17 @@ fn page_sessions(
                 out.push_str(&list_row(s, token));
             }
             out.push_str("</tbody></table></div>\n");
+            // The legend goes with the table it explains: it names the marks
+            // the rows above it carry, so it renders beside them and not on a
+            // page whose table a zero-hit or an empty window replaced with a
+            // sentence.
+            out.push_str(&format!(
+                "<p class=sub>time-state legend: {GLYPH_EXACT} exact · \
+                 {GLYPH_INTERPRETED} inferred, interpreted, a conversation-list update, or a \
+                 partial range · {GLYPH_UNKNOWN} unknown · {GLYPH_NO_CONTENT} no conversation \
+                 content · \"(partial)\" = the bounds cover only part of the conversation span — \
+                 a time cell's tooltip names where its time came from</p>\n"
+            ));
         }
     }
     if !sel.unplaced.is_empty() {
@@ -443,32 +456,138 @@ fn label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
 }
 
 fn list_row(s: &UiSession, token: &str) -> String {
-    let time = |v: Option<i64>| match v {
-        // A bound that is only *part* of the span says so where it is shown: a
-        // bare date here would read as the session's whole extent.
-        Some(unix) if s.time_source.bounds_are_partial() => {
-            format!("{} (partial)", esc(&fmt_unix(unix)))
-        }
-        Some(unix) => esc(&fmt_unix(unix)),
-        None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
-        None => "<span class=bad title=\"unknown\">unknown</span>".to_string(),
-    };
-    let label = label_cell_html(s);
+    let msgs = msgs_cell_html(s);
+    let f = time_cell_html(s, s.first_unix);
+    let l = time_cell_html(s, s.last_unix);
     format!(
         "<tr><td class=mono>{m}</td><td>{h}</td>\
-         <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{label}\
-         <td class=n>{sh}</td><td class=n>{b}</td><td>{f}</td><td>{l}</td><td>{snap}</td></tr>\n",
+         <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{label}{msgs}\
+         <td class=n>{sh}</td><td class=n>{b}</td>{f}{l}<td>{snap}</td></tr>\n",
         m = esc(&s.machine),
         h = esc(&s.source_label()),
         i = s.index,
         t = percent_encode(token),
         sid = esc(&s.short_id),
+        label = label_cell_html(s),
+        msgs = msgs,
         sh = s.shard_count,
         b = esc(&fmt_bytes(s.bytes)),
-        f = time(s.first_unix),
-        l = time(s.last_unix),
+        f = f,
+        l = l,
         snap = esc(&fmt_unix(s.archive_time_unix)),
     )
+}
+
+// -------------------------------------------------------------- time states
+
+/// The marks the list writes beside a conversation time (29-UI-DESIGN §3.2's
+/// legend). One mark per honesty class, not per `TimeSource` variant: `✔`
+/// for a time recorded as-is, `~` for one this pipeline had to interpret or
+/// read only in part, `?` for unknown, `Ø` for a session with no conversation
+/// content. The variant-exact word travels on each cell's tooltip, so a mark
+/// is a pointer into the legend, never the only claim a row makes.
+const GLYPH_EXACT: &str = "\u{2714}";
+const GLYPH_INTERPRETED: &str = "~";
+const GLYPH_UNKNOWN: &str = "?";
+const GLYPH_NO_CONTENT: &str = "\u{2205}";
+
+/// The tooltip word for one row's time: the same vocabulary the reader names
+/// a message's timestamp with (`ui::reader::time_source_label`), so the list
+/// and the reader cannot drift into naming one state two ways. Like that
+/// function, the interpolated `how` is escaped here and the result is used
+/// raw — it must not be escaped a second time by the caller.
+fn time_source_words(source: &TimeSource) -> String {
+    match source {
+        TimeSource::Exact => "time source: exact".to_string(),
+        TimeSource::Messages { exact: true } => "time source: from messages, exact".to_string(),
+        TimeSource::Messages { exact: false } => {
+            "time source: from messages, interpreted".to_string()
+        }
+        TimeSource::Inferred { how } => format!("time source: inferred ({})", esc(how)),
+        TimeSource::ListUpdated => "time source: the conversation list update time".to_string(),
+        TimeSource::PartialRange { how, .. } => {
+            format!("time source: partial range ({})", esc(how))
+        }
+        TimeSource::Unknown { .. } => "unknown".to_string(),
+        TimeSource::NoConversationContent => "no conversation content".to_string(),
+    }
+}
+
+/// The legend mark one `TimeSource` renders beside its time.
+fn mark_of(source: &TimeSource) -> &'static str {
+    match source {
+        TimeSource::Exact | TimeSource::Messages { exact: true } => GLYPH_EXACT,
+        TimeSource::Inferred { .. }
+        | TimeSource::Messages { exact: false }
+        | TimeSource::ListUpdated
+        | TimeSource::PartialRange { .. } => GLYPH_INTERPRETED,
+        TimeSource::Unknown { .. } => GLYPH_UNKNOWN,
+        TimeSource::NoConversationContent => GLYPH_NO_CONTENT,
+    }
+}
+
+/// One conversation-time cell (first or last message). The mark and the
+/// tooltip are decided by the session's own [`TimeSource`], never re-derived
+/// from whether a bound happens to be present: `unknown` and
+/// `no conversation content` are states the conversation itself is in, and a
+/// cell that showed only its bound would hide them — the label column's rule
+/// (see [`SessionLabel`]) applied to time.
+fn time_cell_html(s: &UiSession, unix: Option<i64>) -> String {
+    if s.time_source.is_no_conversation_content() {
+        return format!("<td>{} no conversation content</td>", GLYPH_NO_CONTENT);
+    }
+    let words = time_source_words(&s.time_source);
+    match unix {
+        // A bound that is only *part* of the span says so where it is
+        // shown: a bare date here would read as the session's whole extent.
+        Some(unix) if s.time_source.bounds_are_partial() => format!(
+            "<td title=\"{words}\">{} (partial) {GLYPH_INTERPRETED}</td>",
+            esc(&fmt_unix(unix))
+        ),
+        Some(unix) => format!(
+            "<td title=\"{words}\">{} {}</td>",
+            esc(&fmt_unix(unix)),
+            mark_of(&s.time_source)
+        ),
+        None => {
+            // The reader sees the reason on hover; the legend's `?` is the
+            // same state at a glance.
+            let why = esc(s.time_why.as_deref().unwrap_or("unknown"));
+            format!("<td><span class=bad title=\"{why}\">{GLYPH_UNKNOWN} unknown</span></td>")
+        }
+    }
+}
+
+/// The `msgs` cell (29-UI-DESIGN §3.2): the count the activity index measured
+/// for this session. The discriminator is the label column's own state, not
+/// the time's: a row the index holds was counted even when its conversation
+/// time could not be read, while a session with **no row** (any
+/// [`SessionLabel::Unknown`] label) was never counted — there, `0` would be a
+/// claim no one measured (invariant 1: a count of zero is a measurement, not
+/// a fallback), so the cell carries the unknown state and the recorded
+/// reason instead of a number.
+fn msgs_cell_html(s: &UiSession) -> String {
+    if matches!(s.title, SessionLabel::Unknown { .. }) {
+        return format!(
+            "<td class=n><span class=bad title=\"{}\">unknown</span></td>",
+            esc(&why_of_never_counted(s))
+        );
+    }
+    format!("<td class=n>{}</td>", s.line_count)
+}
+
+/// What the never-counted `msgs` cell says on hover. The label column's `why`
+/// names the real case (`search` writes it: a machine whose index has no row
+/// for this session, or a machine with no index at all), so the reasons
+/// cannot drift between the label cell and the count cell.
+fn why_of_never_counted(s: &UiSession) -> String {
+    let why = match &s.title {
+        SessionLabel::Unknown { why } => why.clone(),
+        _ => "the activity index holds no row for this session, so its lines were never \
+              counted"
+            .to_string(),
+    };
+    format!("no line count was measured — {why}")
 }
 
 // -------------------------------------------------------------- session page

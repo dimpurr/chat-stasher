@@ -3481,6 +3481,244 @@ mod tests {
             "the row's title attribute says why: {legacy}"
         );
     }
+
+    // ------------------------------------------------------ W192 list wiring
+
+    /// One session's row, sliced out of the list page: everything from the
+    /// row's session link to the end of the row, so a cell assertion speaks
+    /// about one session and not about whatever the page says elsewhere.
+    fn row_html(html: &str, index: usize) -> &str {
+        let start = html
+            .find(&format!("href=\"/session?i={index}&token="))
+            .unwrap_or_else(|| panic!("row {index} must be on the page:\n{html}"));
+        let end = start
+            + html[start..]
+                .find("</tr>")
+                .expect("the row must close itself");
+        &html[start..end]
+    }
+
+    /// One row per time state, and the mark, tooltip and words the two time
+    /// cells must then carry (29-UI-DESIGN §3.2's legend is what decodes the
+    /// marks, so every mark a row can carry is pinned against it here). The
+    /// `(partial)` bound suffix is pinned too, because it is the one mark the
+    /// legend explains in words rather than with a glyph.
+    #[test]
+    fn a_row_carries_the_mark_of_its_time_state() {
+        let cases: Vec<(crate::activity::TimeSource, Option<(i64, i64)>, &str, &str)> = vec![
+            (
+                crate::activity::TimeSource::Exact,
+                Some((NOW - 7200, NOW - 7000)),
+                "\u{2714}",
+                "time source: exact",
+            ),
+            (
+                crate::activity::TimeSource::Messages { exact: true },
+                Some((NOW - 7200, NOW - 7000)),
+                "\u{2714}",
+                "time source: from messages, exact",
+            ),
+            (
+                crate::activity::TimeSource::Messages { exact: false },
+                Some((NOW - 7200, NOW - 7000)),
+                "~",
+                "time source: from messages, interpreted",
+            ),
+            (
+                crate::activity::TimeSource::Inferred {
+                    how: "the numeric epoch".into(),
+                },
+                Some((NOW - 7200, NOW - 7000)),
+                "~",
+                "time source: inferred (the numeric epoch)",
+            ),
+            (
+                crate::activity::TimeSource::ListUpdated,
+                Some((NOW - 7200, NOW - 7000)),
+                "~",
+                "time source: the conversation list update time",
+            ),
+            (
+                crate::activity::TimeSource::PartialRange {
+                    how: "the numeric epoch".into(),
+                    why: "one conversation line carried no readable time".into(),
+                },
+                Some((NOW - 7200, NOW - 7000)),
+                "(partial) ~",
+                "time source: partial range (the numeric epoch)",
+            ),
+            (
+                crate::activity::TimeSource::NoConversationContent,
+                None,
+                "\u{2205} no conversation content",
+                "\u{2205} no conversation content",
+            ),
+        ];
+        for (source, span, mark, words) in cases {
+            let mut d = fixture::data();
+            let (first_unix, last_unix, time_why) = match span {
+                Some((f, l)) => (Some(f), Some(l), None),
+                None => (None, None, None),
+            };
+            d.sessions[0].time_source = source.clone();
+            d.sessions[0].first_unix = first_unix;
+            d.sessions[0].last_unix = last_unix;
+            d.sessions[0].time_why = time_why;
+            let html = req("/sessions", &d, &NoContent).body;
+            let row = row_html(&html, 0);
+            // Two time cells, and every one of them the same mark and words:
+            // a mark on one cell and a bare date on the other would let a
+            // row's own cells disagree about its state.
+            if source.is_no_conversation_content() {
+                assert_eq!(
+                    // The mark is matched against the cell's closing tag so a
+                    // `~` inside a short id cannot count as a mark.
+                    row.match_indices(&format!("{mark}</td>")).count(),
+                    2,
+                    "both time cells must name the no-content state: {row}"
+                );
+            } else {
+                for cell in [
+                    (&format!("{mark}</td>"), "mark"),
+                    (&words.to_string(), "words"),
+                ] {
+                    assert_eq!(
+                        row.match_indices(cell.0).count(),
+                        2,
+                        "both time cells must carry the {} `{}`: {row}",
+                        cell.1,
+                        cell.0
+                    );
+                }
+            }
+            // The legend that decodes this mark is on the page with the table.
+            assert!(
+                html.contains("time-state legend:"),
+                "the page with the table must have the legend: {html}"
+            );
+        }
+    }
+
+    /// The unknown state carries the recorded reason on its tooltip, and the
+    /// two cells agree with each other and with the label column's own
+    /// honesty rule: `? unknown`, never a bare date or a bare word.
+    #[test]
+    fn an_unknown_time_row_carries_the_reason_on_both_cells() {
+        let mut d = fixture::data();
+        let why = "this session's lines recorded no timestamp".to_string();
+        d.sessions[0].time_source = crate::activity::TimeSource::Unknown { why: why.clone() };
+        d.sessions[0].first_unix = None;
+        d.sessions[0].last_unix = None;
+        d.sessions[0].time_why = Some(why.clone());
+        let html = req("/sessions", &d, &NoContent).body;
+        let row = row_html(&html, 0);
+        assert_eq!(
+            row.match_indices("? unknown</span>").count(),
+            2,
+            "both time cells must say it: {row}"
+        );
+        // `esc` turns the apostrophe into an entity; the assertion reads the
+        // escaped form out of the same esc that rendered it.
+        assert_eq!(
+            row.match_indices(&format!(
+                "<span class=bad title=\"{}\">? unknown</span>",
+                crate::view::esc(&why)
+            ))
+            .count(),
+            2,
+            "the reason must travel on both cells: {row}"
+        );
+    }
+
+    /// The `msgs` column: a row the index holds shows the count it measured,
+    /// and a row whose session the index holds no row for says `unknown` with
+    /// the recorded reason — the same discriminator the label column uses,
+    /// because `TimeSource::Unknown` alone cannot tell a timestamp-less row
+    /// (counted) from a missing row (never counted).
+    #[test]
+    fn the_msgs_column_shows_the_measured_count_and_names_the_unmeasured_one() {
+        let mut d = fixture::data();
+        // deepseek row: the index holds a row, so the count is measured even
+        // though the time is unknown.
+        d.sessions[1].title = crate::search::SessionLabel::Known {
+            text: "a counted row with no readable time".into(),
+            source: TitleSource::FirstUserLine,
+            truncated: false,
+        };
+        let html = req("/sessions", &d, &NoContent).body;
+        assert!(
+            html.contains(
+                "<th class=n title=\"count of non-blank lines in the archived session record, \
+                 measured by the activity index\">msgs</th>"
+            ),
+            "{html}"
+        );
+        let counted = row_html(&html, 1);
+        assert!(
+            counted.contains("<td class=n>10</td>"),
+            "a row the index holds shows the measured count: {counted}"
+        );
+        // The same session again, but with no index row: the label column's
+        // unknown state is the evidence, and the count must follow it.
+        let mut d = fixture::data();
+        let why = "machine `m-1`'s activity index in this snapshot has no row for this session"
+            .to_string();
+        d.sessions[1].title = crate::search::SessionLabel::Unknown { why: why.clone() };
+        let html = req("/sessions", &d, &NoContent).body;
+        let never = row_html(&html, 1);
+        assert!(
+            never.contains(&format!(
+                "<td class=n><span class=bad title=\"no line count was measured — \
+                 {}\">unknown</span></td>",
+                crate::view::esc(&why)
+            )),
+            "the never-counted cell must carry the reason, not a number: {never}"
+        );
+        assert!(
+            !never.contains("<td class=n>10</td>"),
+            "an unmeasured count must not print the carrier value: {never}"
+        );
+        // A legacy index row predates labels but did count lines: its msgs
+        // cell is the old index's own measured count, not unknown.
+        let mut d = fixture::data();
+        d.sessions[1].title = crate::search::SessionLabel::LegacyIndex;
+        d.sessions[1].line_count = 7;
+        let html = req("/sessions", &d, &NoContent).body;
+        let legacy = row_html(&html, 1);
+        assert!(
+            legacy.contains("<td class=n>7</td>"),
+            "a pre-label row still carries its measured count: {legacy}"
+        );
+    }
+
+    /// The legend renders with the table it explains and nowhere else: a
+    /// zero-hit page and an empty window show no glyph, so they must not
+    /// carry a legend for marks nothing on the page shows.
+    #[test]
+    fn the_time_state_legend_goes_with_the_table_and_nothing_else() {
+        let d = fixture::data();
+        let html = req("/sessions", &d, &NoContent).body;
+        assert!(
+            html.contains(
+                "time-state legend: \u{2714} exact · ~ inferred, interpreted, a conversation-list \
+                 update, or a partial range · ? unknown · \u{2205} no conversation content · \
+                 \"(partial)\" = the bounds cover only part of the conversation span — a time \
+                 cell's tooltip names where its time came from"
+            ),
+            "{html}"
+        );
+        let zero_hit = req("/sessions?machine=none", &d, &NoContent).body;
+        assert!(
+            !zero_hit.contains("time-state legend:"),
+            "no table, no legend: {zero_hit}"
+        );
+        let past_end = req("/sessions?offset=999", &d, &NoContent).body;
+        assert!(past_end.contains("No rows on this page."), "{past_end}");
+        assert!(
+            !past_end.contains("time-state legend:"),
+            "an empty window has no marks to decode: {past_end}"
+        );
+    }
 }
 
 // ---------------------------------------------------- byte-identity capture
