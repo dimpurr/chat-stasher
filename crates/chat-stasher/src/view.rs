@@ -300,7 +300,7 @@ pub fn route(
         None => Response::text(
             404,
             "Not Found",
-            "ui: no such route (/, /sessions, /session, /content, /api/overview, /api/sessions)\n",
+            "ui: no such route (/, /sessions, /session, /reader, /content, /api/overview, /api/sessions)\n",
         ),
     }
 }
@@ -504,10 +504,11 @@ mod tests {
 
     /// Every route the dashboard serves. Kept in one place so a route added
     /// without a token check cannot pass by being absent from a list.
-    const ROUTES: [&str; 6] = [
+    const ROUTES: [&str; 7] = [
         "/",
         "/sessions",
         "/session",
+        "/reader",
         "/content",
         "/api/overview",
         "/api/sessions",
