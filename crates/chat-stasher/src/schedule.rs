@@ -650,6 +650,8 @@ pub fn uninstall_systemd_units(home: &Path, timers: &[String], systemctl: &Path)
 fn systemctl_run(systemctl: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new(systemctl)
         .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| format!("run {}", systemctl.display()))?;
     if status.success() {
@@ -673,6 +675,8 @@ fn launchctl_status(launchctl: &Path, target: &str) -> Result<bool> {
 fn launchctl_run(launchctl: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new(launchctl)
         .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| format!("run {}", launchctl.display()))?;
     if status.success() {

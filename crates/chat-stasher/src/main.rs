@@ -9084,7 +9084,7 @@ fn cmd_setup(
     let mut next_run = None;
 
     if interactive {
-        if !install_schedule {
+        if !install_schedule && !uninstall_schedule {
             let mut input = String::new();
             match prompt_setup_value("Install the scheduler now? [y/N]: ", &mut input) {
                 Ok(()) => {
@@ -9128,7 +9128,46 @@ fn cmd_setup(
                 "installed"
             };
             if install_schedule {
-                next_run = setup_next_run(&config).ok();
+                // Exercise the exact scheduled command once after installation.
+                // Keep its output private: setup's non-TTY contract is one JSON
+                // object, and a run-once pass may print operational details.
+                let binary = std::env::var_os("CHAT_STASHER_SCHEDULE_BINARY")
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::current_exe().ok());
+                let mut check_destinations = destination.clone().into_iter().collect::<Vec<_>>();
+                if check_destinations.is_empty() {
+                    check_destinations.extend(config.destinations.keys().cloned());
+                    check_destinations.sort_unstable();
+                }
+                if check_destinations.is_empty() {
+                    check_destinations.push(String::new());
+                }
+                let checked = binary.is_some_and(|binary| {
+                    check_destinations.iter().all(|destination| {
+                        let mut command = std::process::Command::new(&binary);
+                        command
+                            .args(["run-once", "--stage"])
+                            .arg(&stage)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        if !destination.is_empty() {
+                            command.args(["--destination", destination]);
+                        }
+                        command.status().is_ok_and(|status| status.success())
+                    })
+                });
+                if checked {
+                    schedule_status = "installed_and_checked";
+                } else {
+                    schedule_status = "self_check_failed";
+                    incomplete.push("schedule");
+                    exit_code = setup_exit_code(&missing, &incomplete, &remote_gaps.unread);
+                }
+                // The scheduler owns the next deadline. systemd adds randomized
+                // delay and may catch up after sleep; launchd exposes no stable
+                // next-fire timestamp. Do not turn the configured cadence into
+                // a timestamp that claims more precision than either provides.
+                next_run = None;
             }
         } else {
             schedule_status = "failed";
@@ -11256,13 +11295,6 @@ fn setup_schedule_format() -> schedule::Format {
     } else {
         schedule::Format::Systemd
     }
-}
-
-fn setup_next_run(config: &Config) -> anyhow::Result<String> {
-    let interval = schedule::interval_secs(config)?;
-    let interval = i64::try_from(interval).context("scheduler interval exceeds timestamp range")?;
-    let next = chrono::Local::now() + chrono::Duration::seconds(interval);
-    Ok(next.to_rfc3339_opts(chrono::SecondsFormat::Secs, false))
 }
 
 fn print_setup_summary(

@@ -373,7 +373,7 @@ fn setup_without_a_stage_names_the_parameter_and_writes_nothing() {
 
 #[cfg(unix)]
 #[test]
-fn setup_installs_scheduler_idempotently_and_reports_next_run() {
+fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     use std::os::unix::fs::PermissionsExt;
 
     let sandbox = Sandbox::new(true);
@@ -382,12 +382,12 @@ fn setup_installs_scheduler_idempotently_and_reports_next_run() {
     let state = sandbox.root.path().join("scheduler-active");
     let script = if cfg!(target_os = "macos") {
         format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
             calls.display(), state.display(), state.display(), state.display()
         )
     } else {
         format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\n",
             calls.display(), state.display(), state.display(), state.display()
         )
     };
@@ -397,6 +397,12 @@ fn setup_installs_scheduler_idempotently_and_reports_next_run() {
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+
+    let scheduled_binary = sandbox.root.path().join("installed/chat-stasher");
+    fs::create_dir_all(scheduled_binary.parent().expect("binary parent"))
+        .expect("create installed binary directory");
+    fs::copy(env!("CARGO_BIN_EXE_chat-stasher"), &scheduled_binary)
+        .expect("copy CLI to installed path for scheduler self-check");
 
     let stage = sandbox.stage();
     let args = [
@@ -421,10 +427,7 @@ fn setup_installs_scheduler_idempotently_and_reports_next_run() {
                 "CHAT_STASHER_REGISTRY",
                 sandbox.root.path().join("registry.json"),
             )
-            .env(
-                "CHAT_STASHER_SCHEDULE_BINARY",
-                "/usr/local/bin/chat-stasher",
-            )
+            .env("CHAT_STASHER_SCHEDULE_BINARY", &scheduled_binary)
             .env("CHAT_STASHER_LAUNCHCTL", &scheduler)
             .env("CHAT_STASHER_SYSTEMCTL", &scheduler)
             .output()
@@ -435,11 +438,11 @@ fn setup_installs_scheduler_idempotently_and_reports_next_run() {
         let output = run(&args);
         let value = json_of(&output);
         assert_eq!(exit_code(&output), 0, "value={value}");
-        assert_eq!(value["steps"]["schedule"], "installed");
-        assert_eq!(value["schedule"]["status"], "installed");
-        assert!(value["schedule"]["next_run"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()));
+        assert_eq!(value["steps"]["schedule"], "installed_and_checked");
+        assert_eq!(value["schedule"]["status"], "installed_and_checked");
+        assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("scheduler-noise"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("scheduler-error"));
     }
     let uninstall_args = [
         "setup",
