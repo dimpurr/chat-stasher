@@ -30,6 +30,12 @@
     },
     {
       "$ref": "#/$defs/dashboardResponse"
+    },
+    {
+      "$ref": "#/$defs/hasRequest"
+    },
+    {
+      "$ref": "#/$defs/hasResponse"
     }
   ],
   "$defs": {
@@ -165,9 +171,93 @@
         "sha256": {
           "$ref": "#/$defs/sha256",
           "description": "SHA-256 of the UTF-8 bytes of payload."
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/sha256",
+          "description": "Optional. The content fingerprint of the capture this payload was built from, recorded on the sealed shard and answered back by `has` (§6.6). Not required: an extension that does not send it, and every shard sealed before this field existed, is recognised by its exact bytes alone (§7)."
         }
       },
       "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
+    },
+    "hasRequest": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type",
+        "request_id",
+        "platform",
+        "session_id",
+        "fingerprint"
+      ],
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "has"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The bundle's raw `platform`. The host sanitises it exactly as `deliver` does, so the lookup names the directory the delivery would be written into."
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The bundle's raw `sessionId`, sanitised the same way."
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/sha256",
+          "description": "The content fingerprint to look for, compared as an opaque string."
+        }
+      },
+      "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
+    },
+    "hasResponse": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type",
+        "ok",
+        "request_id",
+        "held",
+        "shard"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "has"
+        },
+        "ok": {
+          "const": true
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "held": {
+          "type": "boolean",
+          "description": "true: a shard in that conversation's directory carries this fingerprint. false: the question was asked and answered — the stage holds nothing under it. A question that could not be asked is a `nack`, never `held: false`."
+        },
+        "shard": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The shard the fingerprint was found in, or null when `held` is false."
+        }
+      }
     },
     "helloResponse": {
       "type": "object",

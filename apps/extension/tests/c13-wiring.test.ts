@@ -189,7 +189,17 @@ describe('C13 · the backfill leg wired into the runtime', () => {
     await bootBackgroundAndDispatch(fakeCapture());
 
     expect(runBackfillSpy).toHaveBeenCalledTimes(1);
-    expect(host.helloCount()).toBe(beforeHello + 1);  // the resume action really asked the host once
+    // 🔴 One `hello`, and it is named because a bare total would hide it stopping:
+    //     · 1 — the §10 resume action, which is this test's subject: without a
+    //           successful `hello` there is no resuming, so it really did ask.
+    //    The live capture this boot dispatched contributes none. W50b added one here
+    //    (the ack recorded *where* the copy went, via `probeDestination`); W50c
+    //    removed that probe, because "where" is now answered by the host from its
+    //    stage when a capture is *skipped* — and a first-time capture is not: it has
+    //    no record to be worth a round trip. The backfill leg contributes none
+    //    either: its transport answers zero items below, so `deliverBackfillItem`
+    //    never runs.
+    expect(host.helloCount()).toBe(beforeHello + 1);
     expect(store[HOST_PAUSE_KEY]).toBeNull();         // it answered ⇒ the pause was cleared
     console.log('[C13] host answered -> pause cleared, tick reason =', mod.lastBackfillTick()?.reason);
   });

@@ -155,3 +155,19 @@ export async function resumeBackfill(
   await clearHostPause(store);
   return { resumed: true, status };
 }
+
+/**
+ * 🔴 W50b · **`probeDestination` lived here and is gone, deliberately.**
+ *
+ * It asked the host where it writes so the recapture guard could compare that with
+ * the destination a remembered delivery named. W50c removed the comparison and the
+ * remembered destination with it: the guard now asks the host one question — §6.6
+ * `has`, "do you already hold this content?" — and the host answers it **from the
+ * stage it is writing to**. A destination the extension holds is therefore a second
+ * copy of an answer the archive gives directly, and the weaker copy: it is a string
+ * captured at ack time, and the event it cannot see (the archive replaced at the same
+ * path) is exactly the one the guard exists for.
+ *
+ * Nothing here replaces it. `checkHost` above is unaffected and still serves the
+ * popup; the guard no longer reads the host's identity at all.
+ */

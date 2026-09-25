@@ -210,7 +210,7 @@ fn pattern_matches(pattern: &str, text: &str) -> bool {
 }
 
 /// Assert a value satisfies the whole committed schema, and that the top level
-/// is still the `oneOf` of the five message shapes.
+/// is still the `oneOf` over the message shapes the protocol defines.
 #[track_caller]
 fn assert_matches_schema(value: &Value) {
     let root = schema();
@@ -594,6 +594,409 @@ fn a_payload_that_is_not_a_bundle_is_an_invalid_bundle_nack() {
     );
 }
 
+// ------------------------------------------------------------------ §6.6 has
+
+/// A content fingerprint. The host compares it as an opaque string, so any 64
+/// lowercase hex characters would do — but it is derived rather than written out
+/// so that a test which changes its seed changes its value, the way a real
+/// fingerprint tracks the body it came from.
+fn fingerprint_of(seed: &str) -> String {
+    sha256_hex(seed.as_bytes())
+}
+
+fn has_request(request_id: &str, platform: &str, session: &str, fingerprint: &str) -> Value {
+    json!({
+        "protocol": 1,
+        "type": "has",
+        "request_id": request_id,
+        "platform": platform,
+        "session_id": session,
+        "fingerprint": fingerprint,
+    })
+}
+
+/// One `has` question, run through the real binary and schema-checked.
+#[track_caller]
+fn ask_has(fixture: &Fixture, request: &Value) -> Value {
+    let output = fixture.chrome(&frame(request));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    response
+}
+
+/// `deliver` a bundle whose request carries a `fingerprint` — the shape a W50c
+/// extension sends. `deliver_request` deliberately leaves it out, so the tests
+/// that use this one are the ones asking about fingerprints.
+#[track_caller]
+fn deliver_with_fingerprint(
+    fixture: &Fixture,
+    request_id: &str,
+    session: &str,
+    text: &str,
+    fingerprint: &str,
+) -> Value {
+    let payload = bundle(session, text);
+    let mut request = deliver_request(request_id, &format!("deepseek-{session}.json"), &payload);
+    request["fingerprint"] = json!(fingerprint);
+    let output = fixture.chrome(&frame(&request));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    response
+}
+
+/// Every path under `root`, relative and sorted — used to prove a read-only
+/// request wrote nothing, without having to name what it might have written.
+fn tree(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            out.push(
+                path.strip_prefix(root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if entry.file_type().expect("file type").is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn a_delivered_fingerprint_is_held_and_the_answer_names_the_shard() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let fingerprint = fingerprint_of("sess-a body v1");
+
+    let ack = deliver_with_fingerprint(&fixture, "req-1", "sess-a", "hello a", &fingerprint);
+    assert_eq!(
+        ack["type"], "ack",
+        "the fingerprint must not change delivery"
+    );
+
+    let response = ask_has(
+        &fixture,
+        &has_request("req-has-1", "deepseek", "sess-a", &fingerprint),
+    );
+    assert_eq!(response["type"], "has");
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["request_id"], "req-has-1");
+    assert_eq!(response["held"], true);
+    assert_eq!(response["shard"], ack["shard"]);
+}
+
+#[test]
+fn a_fingerprint_no_shard_carries_is_answered_not_held() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    // Nothing at all has been delivered for this conversation.
+    let response = ask_has(
+        &fixture,
+        &has_request("req-has-1", "deepseek", "sess-never", &fingerprint_of("x")),
+    );
+    assert_eq!(response["held"], false, "an empty stage holds nothing");
+    assert_eq!(response["shard"], Value::Null);
+
+    // A conversation that *was* delivered, asked about a different body.
+    deliver_with_fingerprint(
+        &fixture,
+        "req-1",
+        "sess-a",
+        "hello a",
+        &fingerprint_of("the body that was stored"),
+    );
+    let other = ask_has(
+        &fixture,
+        &has_request(
+            "req-has-2",
+            "deepseek",
+            "sess-a",
+            &fingerprint_of("a body nobody stored"),
+        ),
+    );
+    assert_eq!(other["held"], false);
+    assert_eq!(other["shard"], Value::Null);
+
+    // `held: false` is a measurement, not an absence: the shard it answered about
+    // is still there, untouched.
+    assert_eq!(
+        fixture.shard_names(&machine, "deepseek.sess-a"),
+        ["000001.jsonl"]
+    );
+}
+
+/// 🔴 The answer comes from the archive, so a delivery's fingerprint can only
+/// answer for the conversation whose directory the delivery went into. This is
+/// the property that makes "a replaced archive at the same path" survivable: a
+/// lookup that finds nothing says so instead of falling back to a remembered
+/// record of the delivery.
+#[test]
+fn the_lookup_is_scoped_to_the_conversation_that_delivered_it() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let fingerprint = fingerprint_of("one body, one conversation");
+
+    deliver_with_fingerprint(&fixture, "req-1", "sess-a", "hello a", &fingerprint);
+
+    let elsewhere = ask_has(
+        &fixture,
+        &has_request("req-has-1", "deepseek", "sess-b", &fingerprint),
+    );
+    assert_eq!(
+        elsewhere["held"], false,
+        "another conversation's directory must not answer for this one"
+    );
+
+    let other_platform = ask_has(
+        &fixture,
+        &has_request("req-has-2", "chatgpt", "sess-a", &fingerprint),
+    );
+    assert_eq!(other_platform["held"], false);
+
+    let here = ask_has(
+        &fixture,
+        &has_request("req-has-3", "deepseek", "sess-a", &fingerprint),
+    );
+    assert_eq!(
+        here["held"], true,
+        "and the conversation that did deliver it still answers yes"
+    );
+}
+
+/// 🔴 A shard sealed without a fingerprint — every shard from before this field
+/// existed, and every one sealed from an inbox file or an export line — is not
+/// matched by one. The answer is `held: false`, so the conversation is delivered
+/// once more and the shard written then carries its fingerprint. Stated as a
+/// cost rather than hidden: the alternative would be to guess a fingerprint for
+/// content that has none, and a guess here skips a conversation.
+#[test]
+fn a_shard_sealed_without_a_fingerprint_is_not_matched_by_one() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+
+    let response = deliver(&fixture, "req-1", "sess-a", "hello a");
+    assert_eq!(response["status"], "stored");
+
+    let machine = first_machine(&fixture);
+    let records = fixture.shard_records(&machine, "deepseek.sess-a");
+    assert!(
+        records[0].get("fingerprint").is_none(),
+        "a delivery without a fingerprint must not record one: {}",
+        records[0]
+    );
+
+    let asked = ask_has(
+        &fixture,
+        &has_request(
+            "req-has-1",
+            "deepseek",
+            "sess-a",
+            &fingerprint_of("anything"),
+        ),
+    );
+    assert_eq!(asked["held"], false);
+}
+
+/// 🔴 The review finding, at the level the host can see: the record of a
+/// delivery lives in the shard, so an archive that is replaced or recreated at
+/// the same path holds nothing and says so. Nothing here is remembered.
+#[test]
+fn a_recreated_session_directory_holds_nothing() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let fingerprint = fingerprint_of("the body that was stored");
+    deliver_with_fingerprint(&fixture, "req-1", "sess-a", "hello a", &fingerprint);
+
+    let machine = first_machine(&fixture);
+    let dir = fixture.session_dir(&machine, "deepseek.sess-a");
+    assert_eq!(
+        ask_has(
+            &fixture,
+            &has_request("req-has-1", "deepseek", "sess-a", &fingerprint)
+        )["held"],
+        true
+    );
+
+    // The same path, emptied and recreated — a restored or rebuilt archive.
+    fs::remove_dir_all(&dir).expect("remove the session directory");
+    fs::create_dir_all(&dir).expect("recreate it, empty");
+
+    let after = ask_has(
+        &fixture,
+        &has_request("req-has-2", "deepseek", "sess-a", &fingerprint),
+    );
+    assert_eq!(
+        after["held"], false,
+        "a recreated archive at the same path must not answer for content it does not hold"
+    );
+    assert_eq!(after["shard"], Value::Null);
+}
+
+#[test]
+fn has_writes_nothing_at_all() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    deliver_with_fingerprint(
+        &fixture,
+        "req-1",
+        "sess-a",
+        "hello a",
+        &fingerprint_of("stored"),
+    );
+
+    let before = tree(&fixture.stage);
+    assert!(
+        !before.is_empty(),
+        "the fixture must have something to preserve"
+    );
+
+    for request in [
+        has_request("req-has-1", "deepseek", "sess-a", &fingerprint_of("stored")),
+        has_request("req-has-2", "deepseek", "sess-b", &fingerprint_of("never")),
+    ] {
+        let response = ask_has(&fixture, &request);
+        assert_eq!(response["ok"], true);
+    }
+
+    assert_eq!(
+        tree(&fixture.stage),
+        before,
+        "`has` is read-only: the stage must be byte-identical in shape afterwards"
+    );
+}
+
+/// 🔴 "Could not look" is not "nothing is held". A directory that cannot be read
+/// is a `nack`, which the extension reads as "not known to be held" ⇒ deliver.
+/// Answering `held: false` here would be the invariant this repository treats as
+/// least acceptable, inverted: an unknown recorded as a measurement.
+#[test]
+fn a_lookup_that_cannot_read_the_directory_is_a_nack_not_a_not_held() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    // A *file* where the conversation's directory would be: the path exists, and
+    // it cannot be listed. Portable, unlike a permission bit.
+    let dir = fixture.session_dir(&machine, "deepseek.sess-a");
+    fs::create_dir_all(dir.parent().expect("parent")).expect("sessions dir");
+    fs::write(&dir, b"not a directory").expect("write the blocker");
+
+    let response = ask_has(
+        &fixture,
+        &has_request("req-has-1", "deepseek", "sess-a", &fingerprint_of("x")),
+    );
+    assert_eq!(response["type"], "nack");
+    assert_eq!(response["kind"], "io");
+    assert_eq!(response["retryable"], true);
+    assert_eq!(response["request_id"], "req-has-1");
+}
+
+#[test]
+fn a_malformed_has_request_is_a_bad_request() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let fingerprint = fingerprint_of("x");
+
+    for (why, request) in [
+        (
+            "fingerprint is not 64 lowercase hex",
+            json!({"protocol": 1, "type": "has", "request_id": "r",
+                   "platform": "deepseek", "session_id": "s", "fingerprint": "nope"}),
+        ),
+        (
+            "session_id is missing",
+            json!({"protocol": 1, "type": "has", "request_id": "r",
+                   "platform": "deepseek", "fingerprint": fingerprint}),
+        ),
+        (
+            "platform is empty",
+            json!({"protocol": 1, "type": "has", "request_id": "r",
+                   "platform": "", "session_id": "s", "fingerprint": fingerprint}),
+        ),
+        (
+            "request_id is malformed",
+            json!({"protocol": 1, "type": "has", "request_id": "has spaces",
+                   "platform": "deepseek", "session_id": "s", "fingerprint": fingerprint}),
+        ),
+    ] {
+        let output = fixture.chrome(&frame(&request));
+        assert_eq!(exit_code(&output), 0, "{why}");
+        let response = one_frame(&output.stdout);
+        assert_matches_schema(&response);
+        assert_eq!(response["kind"], "bad-request", "{why}");
+        assert_eq!(response["retryable"], false, "{why}");
+    }
+}
+
+/// A delivery request that carries a malformed `fingerprint` must not be archived
+/// as if it had carried none: the field is checked the same way `sha256` is, and
+/// a shard whose fingerprint nobody can read is one that can never answer `has`.
+#[test]
+fn a_malformed_fingerprint_on_a_delivery_is_a_bad_request() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    let payload = bundle("sess-a", "hello a");
+    let mut request = deliver_request("req-1", "deepseek-sess-a.json", &payload);
+    request["fingerprint"] = json!("NOT-HEX");
+
+    let output = fixture.chrome(&frame(&request));
+    assert_eq!(exit_code(&output), 0);
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["kind"], "bad-request");
+    assert_eq!(response["retryable"], false);
+    assert!(
+        !fixture.session_dir(&machine, "deepseek.sess-a").exists(),
+        "a refused delivery must seal nothing"
+    );
+}
+
+#[test]
+fn the_shapes_the_has_message_produces_match_the_committed_schema() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let fingerprint = fingerprint_of("stored");
+    deliver_with_fingerprint(&fixture, "req-1", "sess-a", "hello a", &fingerprint);
+
+    // Both answers, and both are run through `assert_matches_schema` inside
+    // `ask_has`. The explicit assertion here is that the response carries exactly
+    // the fields §6.6 lists — `additionalProperties: false` is what makes an
+    // extra field a red test rather than an ignored one.
+    let held = ask_has(
+        &fixture,
+        &has_request("req-has-1", "deepseek", "sess-a", &fingerprint),
+    );
+    // Sorted, because `serde_json::Map` is a `BTreeMap` in this build: the point
+    // is the *set* of fields, not the order they were serialised in.
+    let mut keys: Vec<String> = held
+        .as_object()
+        .expect("an object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["held", "ok", "protocol", "request_id", "shard", "type"]
+    );
+}
+
 // -------------------------------------------------------------- bad requests
 
 #[test]
@@ -663,6 +1066,15 @@ fn a_config_without_the_stage_key_is_a_config_nack_naming_the_fix() {
         detail.contains("install-native-host --stage"),
         "the fix command must be in the detail: {detail}"
     );
+
+    // §6.6's refusal of the same situation, for the same reason: a host with no
+    // stage cannot answer the question, and must not answer it with "not held".
+    let asked = ask_has(
+        &fixture,
+        &has_request("req-has-1", "deepseek", "sess-a", &fingerprint_of("x")),
+    );
+    assert_eq!(asked["type"], "nack");
+    assert_eq!(asked["kind"], "config");
 }
 
 #[test]
@@ -677,6 +1089,10 @@ fn a_missing_stage_is_stage_unavailable_and_is_still_missing_afterwards() {
     for request in [
         json!({"protocol": 1, "type": "hello"}),
         deliver_request("req-1", "deepseek-sess-a.json", &bundle("sess-a", "hi")),
+        // §6.6 resolves the target exactly as `deliver` does, so "the stage is
+        // not there" must reach the extension as the same refusal rather than as
+        // `held: false` — which would read as "asked, nothing held".
+        has_request("req-2", "deepseek", "sess-a", &fingerprint_of("x")),
     ] {
         let output = fixture.chrome(&frame(&request));
         assert_eq!(exit_code(&output), 0);

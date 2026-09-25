@@ -44,8 +44,20 @@ export interface SyntheticHostOptions {
    * covers every shape the extension must survive.
    */
   summary?: unknown;
-  /** true ⇒ `summary`/`open_dashboard` get the nack an older host sends. */
+  /**
+   * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack an older host
+   * sends. `has` belongs here because a host that predates §6.4 predates §6.6 too,
+   * and the fallback it must produce is the same one: every question it cannot
+   * answer reads as "not held" ⇒ deliver.
+   */
   unsupported?: boolean;
+  /**
+   * Empty this host's stage while keeping its path and machine — the review's
+   * finding, as a stub primitive: an archive that was replaced or restored where it
+   * always was. What the extension may not do is skip on the strength of a record
+   * that survived it.
+   */
+  replaceStage?: () => void;
   /** The §6.5 answer's URL. Omitted ⇒ a well-formed loopback URL. */
   dashboardUrl?: string;
   /** Non-null ⇒ every `open_dashboard` gets this nack instead of a URL. */
@@ -75,6 +87,10 @@ export interface SyntheticHost {
   names(): string[];
   /** Session ids decoded from the delivered bundles. */
   sessionIds(): string[];
+  /** How many §6.6 `has` questions the extension actually sent. */
+  hasCount(): number;
+  /** Empty the stage at the same path — see `SyntheticHostOptions.replaceStage`. */
+  replaceStage(): void;
 }
 
 export async function sha256Of(text: string): Promise<string> {
@@ -90,16 +106,37 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
   const deliveries: SyntheticDelivery[] = [];
   const sealed = new Set<string>();
+  /**
+   * What this stage holds for §6.6, keyed exactly as the host keys it:
+   * `<platform>.<sessionId>|<fingerprint>` — the conversation a shard was sealed
+   * under, and the fingerprint recorded on it.
+   *
+   * 🔴 Deliberately **not** keyed by delivery `name`, and not a copy of the
+   *    extension's own record: this is the *stage*, and the whole point of §6.6 is
+   *    that the answer comes from here. A stub that answered from what the extension
+   *    remembered would let every test in the suite pass while the defect the
+   *    question exists to close stayed open.
+   */
+  const held = new Set<string>();
   const requests: Array<Record<string, unknown>> = [];
   let hellos = 0;
   let summaries = 0;
   let dashboards = 0;
+  let hasQuestions = 0;
+
+  const holdKey = (platform: unknown, sessionId: unknown, fingerprint: unknown): string =>
+    `${String(platform)}.${String(sessionId)}|${String(fingerprint)}`;
 
   return {
     deliveries,
     helloCount: () => hellos,
     summaryCount: () => summaries,
     dashboardCount: () => dashboards,
+    hasCount: () => hasQuestions,
+    replaceStage: () => {
+      held.clear();
+      sealed.clear();
+    },
     requests: () => [...requests],
     names: () => deliveries.map((d) => d.name),
     sessionIds: () => deliveries.map((d) => {
@@ -115,16 +152,36 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
       const msg = message as Record<string, unknown>;
       requests.push(msg);
 
-      // An older host answers both §6.4/§6.5 messages with this, exactly as
+      // An older host answers §6.4/§6.5 messages with this, exactly as
       // `nativehost.rs` does for an unknown `type`.
-      if (
-        options.unsupported &&
-        (msg.type === 'summary' || msg.type === 'open_dashboard')
-      ) {
+      if (options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard')) {
         return {
           protocol: 1, type: 'nack', request_id: null,
           kind: 'bad-request', retryable: false,
           detail: `unknown message type ${JSON.stringify(String(msg.type))}`,
+        };
+      }
+
+      if (msg.type === 'has') {
+        // Counted **before** the old-host branch below: this counter answers "how
+        // many times did the extension put the question", and a host that refuses to
+        // hear it was still asked. Counting only the answered ones would make the
+        // old-host fallback untestable — "was it even asked?" is the question there.
+        hasQuestions += 1;
+        if (options.unsupported) {
+          return {
+            protocol: 1, type: 'nack', request_id: null,
+            kind: 'bad-request', retryable: false,
+            detail: `unknown message type ${JSON.stringify(String(msg.type))}`,
+          };
+        }
+        const key = holdKey(msg.platform, msg.session_id, msg.fingerprint);
+        const isHeld = held.has(key);
+        return {
+          protocol: 1, type: 'has', ok: true,
+          request_id: String(msg.request_id),
+          held: isHeld,
+          shard: isHeld ? `000001-${String(msg.session_id)}.jsonl` : null,
         };
       }
 
@@ -194,6 +251,18 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
       const duplicate = sealed.has(sha256);
       sealed.add(sha256);
       const status = duplicate ? 'duplicate' : 'stored';
+      // W50c · the shard records the fingerprint the delivery carried. The
+      // conversation it is filed under is the one the *bundle* names, which is how
+      // the host derives its session directory — so a fingerprint can only ever
+      // answer for the conversation that delivered it.
+      if (typeof msg.fingerprint === 'string') {
+        try {
+          const bundle = JSON.parse(payload) as { platform?: unknown; sessionId?: unknown };
+          held.add(holdKey(bundle.platform, bundle.sessionId, msg.fingerprint));
+        } catch {
+          /* a payload this stub cannot read seals nothing it can answer about */
+        }
+      }
       deliveries.push({ name: String(msg.name), payload, sha256, requestId, status });
       return {
         protocol: 1, type: 'ack', request_id: requestId,
