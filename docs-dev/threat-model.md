@@ -518,9 +518,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6012-6108`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6010-6106`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:5984-5991`).
+  (`crates/chat-stasher/src/main.rs:5982-5989`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -578,7 +578,7 @@ a real limitation of the current code.
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:402-404,6344-6483`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:402-404,6342-6481`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:611-691`) — see exposure 5

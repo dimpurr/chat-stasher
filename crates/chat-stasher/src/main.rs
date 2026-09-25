@@ -5332,17 +5332,9 @@ fn cmd_schedule(
         action,
         Some(ScheduleAction::Uninstall | ScheduleAction::Install)
     ) {
-        if destinations.is_empty() {
-            if config.destinations.is_empty() {
-                vec![None]
-            } else {
-                let mut names: Vec<_> = config.destinations.keys().cloned().collect();
-                names.sort_unstable();
-                names.into_iter().map(Some).collect()
-            }
-        } else {
-            destinations.into_iter().map(Some).collect()
-        }
+        let mut declared: Vec<String> = config.destinations.keys().cloned().collect();
+        declared.sort_unstable();
+        schedule::install_targets(&declared, &destinations)
     } else if destinations.is_empty() {
         vec![None]
     } else {
@@ -5364,9 +5356,7 @@ fn cmd_schedule(
             .collect::<Vec<_>>();
         let result = match format {
             schedule::Format::Launchd => {
-                let launchctl = std::env::var_os("CHAT_STASHER_LAUNCHCTL")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("launchctl"));
+                let launchctl = scheduler_tool_path(schedule::Format::Launchd);
                 let domain = match launchd_domain() {
                     Ok(domain) => domain,
                     Err(error) => {
@@ -5382,9 +5372,7 @@ fn cmd_schedule(
                 )
             }
             schedule::Format::Systemd => {
-                let systemctl = std::env::var_os("CHAT_STASHER_SYSTEMCTL")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("systemctl"));
+                let systemctl = scheduler_tool_path(schedule::Format::Systemd);
                 let timers = selected_destinations
                     .iter()
                     .map(|destination| {
@@ -5464,9 +5452,7 @@ fn cmd_schedule(
     if matches!(action, Some(ScheduleAction::Install)) {
         let result = match format {
             schedule::Format::Launchd => {
-                let launchctl = std::env::var_os("CHAT_STASHER_LAUNCHCTL")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("launchctl"));
+                let launchctl = scheduler_tool_path(schedule::Format::Launchd);
                 let domain = match launchd_domain() {
                     Ok(domain) => domain,
                     Err(error) => {
@@ -5477,9 +5463,7 @@ fn cmd_schedule(
                 schedule::install_launchd_agents(&config::home_dir(), &files, &launchctl, &domain)
             }
             schedule::Format::Systemd => {
-                let systemctl = std::env::var_os("CHAT_STASHER_SYSTEMCTL")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("systemctl"));
+                let systemctl = scheduler_tool_path(schedule::Format::Systemd);
                 schedule::install_systemd_units(&config::home_dir(), &files, &systemctl)
             }
         };
@@ -5549,6 +5533,20 @@ fn cmd_schedule(
         println!("{}", schedule::install_command(unit, format, &paths));
     }
     ExitCode::SUCCESS
+}
+
+/// The scheduler binary to run, honouring the environment override the tests
+/// (and a wrapper) inject through. One place names each variable, so the
+/// install, the uninstall and the next-run probe can never disagree about
+/// which scheduler they are addressing.
+fn scheduler_tool_path(format: schedule::Format) -> PathBuf {
+    let (variable, default) = match format {
+        schedule::Format::Launchd => ("CHAT_STASHER_LAUNCHCTL", "launchctl"),
+        schedule::Format::Systemd => ("CHAT_STASHER_SYSTEMCTL", "systemctl"),
+    };
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(default))
 }
 
 fn launchd_domain() -> anyhow::Result<String> {
@@ -7251,7 +7249,10 @@ mod decision_surface_tests {
             None,
             false,
             "skipped",
-            None,
+            &schedule::NextRun::Unknown(
+                "no scheduler timer was installed by this run, so there is no next run to report"
+                    .to_string(),
+            ),
             None,
             None,
             &setup_remote_not_attempted(None, "no stage was given"),
@@ -8858,7 +8859,12 @@ fn cmd_setup(
                     None,
                     install_schedule,
                     "not_attempted",
-                    None,
+                    // No scheduler was reached, so no next run was asked for.
+                    &schedule::NextRun::Unknown(
+                        "no scheduler timer was installed by this run, so there is no next run \
+                         to report"
+                            .to_string(),
+                    ),
                     None,
                     None,
                     // No stage means no pass ran, so the remote step never got
@@ -9081,7 +9087,10 @@ fn cmd_setup(
     } else {
         "skipped"
     };
-    let mut next_run = None;
+    let mut next_run = schedule::NextRun::Unknown(
+        "no scheduler timer was installed by this run, so there is no next run to report"
+            .to_string(),
+    );
 
     if interactive {
         if !install_schedule && !uninstall_schedule {
@@ -9102,6 +9111,15 @@ fn cmd_setup(
             ScheduleAction::Uninstall
         } else {
             ScheduleAction::Install
+        };
+        // The units this run installs, resolved exactly as `cmd_schedule`
+        // resolves them (same helper), so the self-check below and the
+        // next-run probe ask about the units that were just written rather
+        // than about a second, separately derived list.
+        let schedule_targets = {
+            let mut declared: Vec<String> = config.destinations.keys().cloned().collect();
+            declared.sort_unstable();
+            schedule::install_targets(&declared, &destination.iter().cloned().collect::<Vec<_>>())
         };
         // Resolve once and hand this exact path to both the scheduler template
         // and the post-install check. In particular, when setup itself is a
@@ -9151,23 +9169,15 @@ fn cmd_setup(
                 // Exercise the exact scheduled command once after installation.
                 // Keep its output private: setup's non-TTY contract is one JSON
                 // object, and a run-once pass may print operational details.
-                let mut check_destinations = destination.clone().into_iter().collect::<Vec<_>>();
-                if check_destinations.is_empty() {
-                    check_destinations.extend(config.destinations.keys().cloned());
-                    check_destinations.sort_unstable();
-                }
-                if check_destinations.is_empty() {
-                    check_destinations.push(String::new());
-                }
                 let checked = resolved_schedule_binary.is_some_and(|binary| {
-                    check_destinations.iter().all(|destination| {
+                    schedule_targets.iter().all(|destination| {
                         let mut command = std::process::Command::new(&binary);
                         command
                             .args(["run-once", "--stage"])
                             .arg(&stage)
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null());
-                        if !destination.is_empty() {
+                        if let Some(destination) = destination {
                             command.args(["--destination", destination]);
                         }
                         command.status().is_ok_and(|status| status.success())
@@ -9180,11 +9190,18 @@ fn cmd_setup(
                     incomplete.push("schedule");
                     exit_code = setup_exit_code(&missing, &incomplete, &remote_gaps.unread);
                 }
-                // The scheduler owns the next deadline. systemd adds randomized
-                // delay and may catch up after sleep; launchd exposes no stable
-                // next-fire timestamp. Keep the machine-readable timestamp
-                // unknown rather than turning cadence into a false deadline.
-                next_run = None;
+                // Ask the scheduler that was just given these units. The
+                // answer is reported verbatim, or not at all: the deadline is
+                // never recomputed from the cadence here, because a cadence is
+                // not a time (`schedule::next_run`).
+                next_run = schedule::next_run(
+                    schedule::Unit::RunOnce,
+                    setup_schedule_format(),
+                    &schedule_targets,
+                    &config::home_dir(),
+                    &scheduler_tool_path(setup_schedule_format()),
+                    chrono::Local::now(),
+                );
             }
         } else {
             schedule_status = "failed";
@@ -9195,7 +9212,7 @@ fn cmd_setup(
     if interactive {
         print_setup_summary(
             schedule_status,
-            next_run.as_deref(),
+            &next_run,
             install_schedule,
             uninstall_schedule,
         );
@@ -9237,7 +9254,7 @@ fn cmd_setup(
             Some(stage),
             install_schedule,
             schedule_status,
-            next_run,
+            &next_run,
             Some(&local),
             Some(&chain),
             &remote_report,
@@ -11314,9 +11331,22 @@ fn setup_schedule_format() -> schedule::Format {
     }
 }
 
+/// The `next run` row of the interactive summary.
+///
+/// One row either way — a time when a source that knows one reported it, and
+/// otherwise the sentence saying why there is none. A summary that simply
+/// omits the row is how "the scheduler never told us" becomes "there is no
+/// next run", which is the reading the empty value must not be left open to.
+fn setup_next_run_line(next_run: &schedule::NextRun) -> String {
+    match next_run {
+        schedule::NextRun::Known(value) => format!("next run: {value}"),
+        schedule::NextRun::Unknown(note) => format!("next run: {note}"),
+    }
+}
+
 fn print_setup_summary(
     schedule_status: &str,
-    next_run: Option<&str>,
+    next_run: &schedule::NextRun,
     install_schedule: bool,
     uninstall_schedule: bool,
 ) {
@@ -11324,11 +11354,7 @@ fn print_setup_summary(
     println!("setup: local archive: see observed status above");
     println!("setup: destination: see measured status above");
     println!("setup: scheduler: {schedule_status}");
-    if let Some(next_run) = next_run {
-        println!("setup: next run (estimated): {next_run}");
-    } else if schedule_status == "installed_and_checked" {
-        println!("setup: next run: scheduler-managed; exact deadline unavailable");
-    }
+    println!("setup: {}", setup_next_run_line(next_run));
     if !install_schedule && !uninstall_schedule {
         println!("setup: scheduler was skipped; run `chat-stasher setup --install-schedule` to install it");
     }
@@ -11507,6 +11533,28 @@ fn setup_remote_json(report: &SetupRemoteReport) -> serde_json::Value {
     value
 }
 
+/// The `schedule` object of `setup --json`.
+///
+/// `next_run_note` is present exactly when `next_run` is null, so the empty
+/// value never reaches a reader without its reason: "the scheduler did not
+/// report a next run" and "there is no next run" are different states, and a
+/// bare `null` would be read as the second.
+fn setup_schedule_json(
+    schedule_status: &str,
+    next_run: &schedule::NextRun,
+    install_schedule: bool,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "status": schedule_status,
+        "next_run": next_run.value(),
+        "requested": install_schedule,
+    });
+    if let Some(note) = next_run.note() {
+        value["next_run_note"] = serde_json::Value::String(note.to_string());
+    }
+    value
+}
+
 /// The `setup --json` object. `exit_code` is passed in rather than recomputed
 /// here, so the number in the object and the process exit status are the same
 /// decision.
@@ -11516,7 +11564,7 @@ fn setup_json_payload(
     stage: Option<&PathBuf>,
     install_schedule: bool,
     schedule_status: &str,
-    next_run: Option<String>,
+    next_run: &schedule::NextRun,
     local: Option<&SetupLocalSaveReport>,
     chain: Option<&SetupChain>,
     remote: &SetupRemoteReport,
@@ -11601,11 +11649,7 @@ fn setup_json_payload(
                         saved",
             }),
         },
-        "schedule": {
-            "status": schedule_status,
-            "next_run": next_run,
-            "requested": install_schedule,
-        },
+        "schedule": setup_schedule_json(schedule_status, next_run, install_schedule),
     });
     json_string(&value)
 }
@@ -12331,6 +12375,70 @@ mod narration_tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "[ui] sessions     : 3 in view\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod setup_scheduler_tests {
+    use super::*;
+
+    /// The summary row exists in both states. A row that only appears when a
+    /// time is known is how "the scheduler did not report one" reads as "there
+    /// is none" — the reader cannot tell an omitted row from a missing one.
+    #[test]
+    fn the_summary_row_names_a_time_or_says_why_there_is_none() {
+        assert_eq!(
+            setup_next_run_line(&schedule::NextRun::Known(
+                "Sun 2026-09-27 03:17:00 CEST".to_string()
+            )),
+            "next run: Sun 2026-09-27 03:17:00 CEST"
+        );
+        assert_eq!(
+            setup_next_run_line(&schedule::NextRun::Unknown(
+                "launchd interval jobs expose no next fire time; the job runs every 60 minutes \
+                 after load"
+                    .to_string()
+            )),
+            "next run: launchd interval jobs expose no next fire time; the job runs every 60 \
+             minutes after load"
+        );
+    }
+
+    /// `next_run_note` is present exactly when `next_run` is null, so a reader
+    /// never sees an empty value without the reason it is empty.
+    #[test]
+    fn the_json_note_accompanies_the_empty_value_only() {
+        let known = setup_schedule_json(
+            "installed_and_checked",
+            &schedule::NextRun::Known("Sun 2026-09-27 03:17:00 CEST".to_string()),
+            true,
+        );
+        assert_eq!(
+            known["next_run"],
+            serde_json::json!("Sun 2026-09-27 03:17:00 CEST")
+        );
+        assert_eq!(known["status"], "installed_and_checked");
+        assert_eq!(known["requested"], true);
+        assert!(
+            known.get("next_run_note").is_none(),
+            "a reported next run carries no excuse: {known}"
+        );
+
+        let unknown = setup_schedule_json(
+            "skipped",
+            &schedule::NextRun::Unknown(
+                "no scheduler timer was installed by this run, so there is no next run to report"
+                    .to_string(),
+            ),
+            false,
+        );
+        assert_eq!(unknown["next_run"], serde_json::Value::Null);
+        assert_eq!(
+            unknown["next_run_note"],
+            serde_json::json!(
+                "no scheduler timer was installed by this run, so there is no next run to report"
+            )
         );
     }
 }

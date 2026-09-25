@@ -386,8 +386,12 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
             calls.display(), state.display(), state.display(), state.display()
         )
     } else {
+        // `$3` is the verb of `systemctl --user --no-pager status <timer>`,
+        // the one call whose output the next-run probe reads. It answers with a
+        // fixed `Trigger:` line: the probe must pass the scheduler's own text
+        // through, never recompute it from the interval it was given.
         format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\ncase \"$3\" in\nstatus) echo '    Trigger: Sun 2026-09-27 03:17:00 UTC; 3 days left' ;;\nesac\n",
             calls.display(), state.display(), state.display(), state.display()
         )
     };
@@ -439,7 +443,28 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
         assert_eq!(exit_code(&output), 0, "value={value}");
         assert_eq!(value["steps"]["schedule"], "installed_and_checked");
         assert_eq!(value["schedule"]["status"], "installed_and_checked");
-        assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
+        if cfg!(target_os = "linux") {
+            // The exact string the scheduler reported, not the hourly cadence
+            // this run installed.
+            assert_eq!(
+                value["schedule"]["next_run"],
+                serde_json::json!("Sun 2026-09-27 03:17:00 UTC")
+            );
+            assert!(
+                value["schedule"].get("next_run_note").is_none(),
+                "a reported next run carries no excuse: {value}"
+            );
+        } else {
+            assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
+            assert_eq!(
+                value["schedule"]["next_run_note"],
+                serde_json::json!(
+                    "launchd interval jobs expose no next fire time; the job runs every 60 \
+                     minutes after load"
+                ),
+                "an empty next run has to arrive with the sentence saying why: {value}"
+            );
+        }
         assert!(!String::from_utf8_lossy(&output.stdout).contains("scheduler-noise"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("scheduler-error"));
     }
@@ -456,6 +481,14 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     assert_eq!(exit_code(&output), 0, "value={value}");
     assert_eq!(value["steps"]["schedule"], "uninstalled");
     assert_eq!(value["schedule"]["status"], "uninstalled");
+    assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
+    assert_eq!(
+        value["schedule"]["next_run_note"],
+        serde_json::json!(
+            "no scheduler timer was installed by this run, so there is no next run to report"
+        ),
+        "a removed timer is a different state from a timer nobody could ask: {value}"
+    );
     let calls = fs::read_to_string(calls).expect("read fake scheduler calls");
     assert_eq!(
         calls.matches("enable --now").count(),
@@ -543,8 +576,22 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
     assert_eq!(
         value["schedule"]["next_run"],
         serde_json::Value::Null,
-        "the timestamp remains unknown when the scheduler does not expose it"
+        "a next run the scheduler did not report must not be invented"
     );
+    let note = value["schedule"]["next_run_note"]
+        .as_str()
+        .expect("an empty next run arrives with the sentence saying why");
+    if cfg!(target_os = "macos") {
+        assert!(
+            note.contains("launchd interval jobs expose no next fire time"),
+            "note={note}"
+        );
+    } else {
+        // This fake answers `is-active` and `enable` only, so the probe gets no
+        // `Trigger:` line at all — which is not the same as a timer systemd
+        // says has no next elapse, and both must be reported as an absence.
+        assert!(note.contains("did not report a next run"), "note={note}");
+    }
 }
 
 #[test]
