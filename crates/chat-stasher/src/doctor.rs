@@ -824,6 +824,114 @@ pub struct DestinationProbe {
     pub name: String,
     pub repo_root: String,
     pub outcome: DestinationOutcome,
+    /// W158 — how fresh the activity indexes in this destination are against
+    /// the running CLI. `None` means **not checked** (the destination was not
+    /// reached, is not configured, or holds no repository yet) — never "fresh".
+    pub activity_index: Option<ActivityIndexFreshness>,
+}
+
+/// Whether the activity indexes a destination carries were written by the
+/// running CLI. The three answers are kept apart for the same reason the rest
+/// of this file keeps its tri-states apart: an archive that could not be read
+/// is not an archive that is up to date.
+#[derive(Debug, Clone)]
+pub enum ActivityIndexFreshness {
+    /// Every machine with a snapshot records a writer version at or above the
+    /// running one, so every index it carries was built by this build or newer.
+    Current { machines: usize },
+    /// At least one machine's index was written by an older CLI — or before
+    /// writer versions were recorded at all (≤0.3.0), which is the same thing
+    /// seen from here.
+    Behind {
+        /// Machines behind the running CLI, each with the exact repair command.
+        stale: Vec<StaleActivityIndex>,
+        /// Machines with a snapshot in this destination (the denominator).
+        machines: usize,
+    },
+    /// The destination's writer records could not be read: UNKNOWN, not fresh.
+    Unknown { detail: String },
+}
+
+/// One machine whose archived activity index predates the running CLI.
+#[derive(Debug, Clone)]
+pub struct StaleActivityIndex {
+    pub machine: String,
+    /// The recorded writer version; `None` = no record at all (≤0.3.0 wrote
+    /// none), which is *not* the same as a version read as empty.
+    pub recorded_version: Option<String>,
+    /// The command that rebuilds this machine's index **on the destination**,
+    /// ready to paste. It names the machine, so it can never silently target
+    /// another partition.
+    pub repair_command: String,
+}
+
+/// The exact command that repairs one machine's archived activity index.
+///
+/// Kept in one place so the line `doctor` prints, the warning `search`/`export`
+/// emit, and the README can never drift into three different spellings of it.
+pub fn activity_index_repair_command(destination: &str, machine: &str) -> String {
+    format!(
+        "chat-stasher activity-index --rebuild --destination {destination} --machine {machine} \
+         --stage <workspace>"
+    )
+}
+
+/// How fresh this destination's activity indexes are, judged against
+/// `crate::sidecar::index_writer_is_behind` for every machine it holds.
+///
+/// Read-only: it lists snapshots and reads each machine's small `writer.json`
+/// out of its newest snapshot, exactly like `overview` and `status` do.
+pub fn probe_activity_index(cfg: &StoreConfig, name: &str) -> ActivityIndexFreshness {
+    let mk = match store::load_key_file(cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            return ActivityIndexFreshness::Unknown {
+                detail: format!("cannot read the destination's masterkey: {e:#}"),
+            };
+        }
+    };
+    let archived = match crate::store::BackupStore::for_metadata_query(cfg.clone())
+        .read_archived_writers(&mk)
+    {
+        Ok(archived) => archived,
+        Err(e) => {
+            return ActivityIndexFreshness::Unknown {
+                detail: format!("cannot read the destination's writer versions: {e:#}"),
+            };
+        }
+    };
+    let running = env!("CARGO_PKG_VERSION");
+    let mut stale = Vec::new();
+    for status in
+        crate::sidecar::writer_statuses(&archived.machines, &archived.records, &archived.unreadable)
+    {
+        // `None` is "could not be read" — the machine is neither listed as
+        // behind nor counted as fresh, and `Unknown` below is not raised for
+        // it either: one unreadable record must not turn a readable archive's
+        // whole answer into "unknown".
+        if crate::sidecar::index_writer_is_behind(
+            status.chat_stasher_version.as_deref(),
+            status.version_unreadable,
+            running,
+        ) == Some(true)
+        {
+            stale.push(StaleActivityIndex {
+                repair_command: activity_index_repair_command(name, &status.machine),
+                recorded_version: status.chat_stasher_version.clone(),
+                machine: status.machine.clone(),
+            });
+        }
+    }
+    if stale.is_empty() {
+        ActivityIndexFreshness::Current {
+            machines: archived.machines.len(),
+        }
+    } else {
+        ActivityIndexFreshness::Behind {
+            stale,
+            machines: archived.machines.len(),
+        }
+    }
 }
 
 /// The answers a destination can give, kept apart for the same reason the rest
@@ -906,20 +1014,42 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
                                  attempted and nothing about it is known"
                             .to_string(),
                     },
+                    activity_index: None,
                 };
             };
             let repo_root = cfg.repo_root.clone();
-            let outcome = match crate::remote_err::probe_destination_connectivity(&cfg) {
-                Ok(repository_exists) => DestinationOutcome::Reached { repository_exists },
-                Err(e) => DestinationOutcome::Unreachable {
-                    kind: crate::remote_err::classify_error_str(&format!("{e:#}")),
-                    detail: crate::remote_err::format_remote_error("doctor", &e, &cfg),
-                },
-            };
+            let (outcome, activity_index) =
+                match crate::remote_err::probe_destination_connectivity(&cfg) {
+                    Ok(repository_exists) => {
+                        // The index check only means something once there is a
+                        // repository to read; with none, "fresh" would be a
+                        // statement about an archive that does not exist.
+                        let activity_index = if repository_exists {
+                            Some(probe_activity_index(&cfg, name))
+                        } else {
+                            None
+                        };
+                        (
+                            DestinationOutcome::Reached { repository_exists },
+                            activity_index,
+                        )
+                    }
+                    Err(e) => (
+                        DestinationOutcome::Unreachable {
+                            kind: crate::remote_err::classify_error_str(&format!("{e:#}")),
+                            detail: crate::remote_err::format_remote_error("doctor", &e, &cfg),
+                        },
+                        // The connection failed, so nothing was read. Saying
+                        // nothing here is "not checked", which the field
+                        // already means.
+                        None,
+                    ),
+                };
             DestinationProbe {
                 name: name.clone(),
                 repo_root,
                 outcome,
+                activity_index,
             }
         })
         .collect()
@@ -932,6 +1062,10 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
             "name": p.name,
             "repo_root": p.repo_root,
             "kind": if *repository_exists { "repository_present" } else { "repository_absent" },
+            // `null` when nothing was checked (no repository yet, or the
+            // connection failed) — a script must not read "not checked" as
+            // "every index is current".
+            "activity_index": p.activity_index.as_ref().map(activity_index_json),
         }),
         DestinationOutcome::Unreachable { kind, detail } => serde_json::json!({
             "name": p.name,
@@ -946,6 +1080,34 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
             "name": p.name,
             "repo_root": p.repo_root,
             "kind": "not_configured",
+            "detail": detail,
+        }),
+    }
+}
+
+/// JSON shape for the activity-index freshness of one destination. `recorded`
+/// is `null` when no writer version was recorded at all (≤0.3.0) — an absent
+/// record, never an empty version string.
+fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value {
+    match freshness {
+        ActivityIndexFreshness::Current { machines } => serde_json::json!({
+            "kind": "current",
+            "machines": machines,
+        }),
+        ActivityIndexFreshness::Behind { stale, machines } => serde_json::json!({
+            "kind": "behind",
+            "machines": machines,
+            "stale": stale
+                .iter()
+                .map(|s| serde_json::json!({
+                    "machine": s.machine,
+                    "recorded_version": s.recorded_version,
+                    "repair_command": s.repair_command,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+        ActivityIndexFreshness::Unknown { detail } => serde_json::json!({
+            "kind": "unknown",
             "detail": detail,
         }),
     }
@@ -2639,6 +2801,9 @@ fn print_destinations(probes: &[DestinationProbe]) {
                         "NOT there yet (nothing has been pushed to it)"
                     }
                 );
+                if let Some(freshness) = &p.activity_index {
+                    print_activity_index(freshness);
+                }
             }
             DestinationOutcome::Unreachable { kind, detail } => {
                 eprintln!(
@@ -2667,6 +2832,44 @@ fn print_destinations(probes: &[DestinationProbe]) {
         }
     }
     eprintln!();
+}
+
+/// W158 printing — how fresh this destination's activity indexes are, and the
+/// exact command that repairs the ones written by an older CLI.
+///
+/// Only shown once there is something to say: a destination whose indexes are
+/// current gets no line, and one that could not be read says so rather than
+/// staying silent (silence would read as "fine").
+fn print_activity_index(freshness: &ActivityIndexFreshness) {
+    match freshness {
+        ActivityIndexFreshness::Current { machines } => {
+            eprintln!(
+                "               activity index: current on all {machines} machine(s) — every \
+                 archived index was written by this build or newer"
+            );
+        }
+        ActivityIndexFreshness::Behind { stale, machines } => {
+            eprintln!(
+                "               activity index: ⚠ {} of {machines} machine(s) carry an index \
+                 written by an older chat-stasher — the times those machines show are that \
+                 older build's reading, not this one's:",
+                stale.len()
+            );
+            for s in stale {
+                eprintln!(
+                    "                 • {} — writer version {}",
+                    s.machine,
+                    s.recorded_version
+                        .as_deref()
+                        .unwrap_or("not recorded (written by ≤0.3.0)")
+                );
+                eprintln!("                   rebuild it with: {}", s.repair_command);
+            }
+        }
+        ActivityIndexFreshness::Unknown { detail } => {
+            eprintln!("               activity index: UNKNOWN — {detail}");
+        }
+    }
 }
 
 /// D6 printing — shared by the normal path and the scan-failed early return.
@@ -3079,6 +3282,39 @@ mod tests {
     fn date_formatting() {
         let t = UNIX_EPOCH + std::time::Duration::from_secs(1752105600); // 2025-07-10
         assert_eq!(format_date(t), "2025-07-10");
+    }
+
+    /// W158 — the JSON shape a script reads to find a stale index. The
+    /// repair command is the point of the field, so it must be present
+    /// verbatim, and an absent writer record must render `null` rather than an
+    /// empty string (which would read as "a version we read as blank").
+    #[test]
+    fn activity_index_freshness_json_names_the_repair_command() {
+        let behind = ActivityIndexFreshness::Behind {
+            machines: 3,
+            stale: vec![StaleActivityIndex {
+                machine: "dims-macbook-pro-17".to_string(),
+                recorded_version: None,
+                repair_command: activity_index_repair_command("storagebox", "dims-macbook-pro-17"),
+            }],
+        };
+        let v = activity_index_json(&behind);
+        assert_eq!(v["kind"], "behind");
+        assert_eq!(v["machines"], 3);
+        assert_eq!(v["stale"][0]["machine"], "dims-macbook-pro-17");
+        assert_eq!(v["stale"][0]["recorded_version"], serde_json::Value::Null);
+        assert_eq!(
+            v["stale"][0]["repair_command"],
+            "chat-stasher activity-index --rebuild --destination storagebox \
+             --machine dims-macbook-pro-17 --stage <workspace>"
+        );
+
+        let current = ActivityIndexFreshness::Current { machines: 3 };
+        assert_eq!(activity_index_json(&current)["kind"], "current");
+        let unknown = ActivityIndexFreshness::Unknown {
+            detail: "unreachable".to_string(),
+        };
+        assert_eq!(activity_index_json(&unknown)["kind"], "unknown");
     }
 }
 
