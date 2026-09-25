@@ -13,7 +13,7 @@
 # 默认模式只校验、不写这个文件。要接受一次真实变化, 显式跑:
 #   python3 scripts/check-citation-drift.py --update
 
-./.gitignore:15  a182dd2acb58  lines=1
+.gitignore:15  a182dd2acb58  lines=1
   <- docs/install.md:243  :: apps/extension/.output/
 apps/extension/.gitignore:11  6ef40595ec0a  lines=1
   <- docs/install.md:244  :: .output
