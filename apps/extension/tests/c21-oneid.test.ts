@@ -260,4 +260,36 @@ describe('C21-3 · the live leg (with no id from the enumerator) is unchanged ch
     console.log('[C21-3b] the sessionId-carrying payload passes the check:', isCapturedFetchShape(spoofed));
     expect(isCapturedFetchShape(spoofed)).toBe(false);
   });
+
+  it('🔴 a page may **not** author its own project provenance: payloads carrying provenance or its supplement are rejected', async () => {
+    // Same guard, same reason as the sessionId case above: provenance is the
+    // archive's record of *where the capture leg got this conversation*, and it
+    // is authored by the extension's enumeration machinery. A page able to fill
+    // it could label any conversation with any project — or overwrite the
+    // capture-time `unknown` marker that exists precisely because the page's
+    // view is not evidence about the archive.
+    const { isCapturedFetchShape } = await import('../lib/contract');
+    const clean = liveCapture();
+    console.log('[C21-3c] the clean payload passes the check:', isCapturedFetchShape(clean));
+    expect(isCapturedFetchShape(clean)).toBe(true);
+
+    const withProvenance = {
+      ...clean,
+      provenance: { workspace: 'personal', project: null, archived: false },
+    };
+    console.log('[C21-3c] the provenance-carrying payload passes the check:', isCapturedFetchShape(withProvenance));
+    expect(isCapturedFetchShape(withProvenance)).toBe(false);
+
+    const withSupplement = {
+      ...clean,
+      provenanceSupplement: {
+        workspace: 'personal',
+        project: { id: 'project-fixture', name: 'Synthetic Project' },
+        source: 'project-list',
+        observedAt: '2026-09-25T12:00:00.000Z',
+      },
+    };
+    console.log('[C21-3c] the supplement-carrying payload passes the check:', isCapturedFetchShape(withSupplement));
+    expect(isCapturedFetchShape(withSupplement)).toBe(false);
+  });
 });

@@ -1829,6 +1829,76 @@ mod tests {
         );
     }
 
+    /// A hit's project provenance must reach `search --json`, the surface the
+    /// dashboard reads (ADR-043's "shown by the CLI / UI"). The capture-time fact and the
+    /// later supplement travel as two fields, and a hit whose archive recorded
+    /// no provenance carries **no key at all** — never a `null` one, which
+    /// would collapse "we never wrote it down" into "no project".
+    #[test]
+    fn report_json_carries_project_provenance() {
+        let mut known = hit("m-1", "chatgpt.m-1.aaaaaaaa-0000-0000-0000-000000000001", 5);
+        known.provenance = Some(crate::activity::ProjectProvenance {
+            captured: Some(serde_json::json!({
+                "workspace": "unknown",
+                "project": "unknown",
+                "archived": false,
+            })),
+            effective_project: Some(serde_json::json!({
+                "id": "project-fixture",
+                "name": "Synthetic Project",
+            })),
+            supplement: Some(serde_json::json!({
+                "workspace": "workspace-fixture",
+                "project": {"id": "project-fixture", "name": "Synthetic Project"},
+                "source": "project-list",
+                "observedAt": "2026-09-25T12:00:00.000Z",
+            })),
+        });
+        let report = SearchReport {
+            destination: "d".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            sessions_seen: 2,
+            window: None,
+            all_recall: BTreeMap::new(),
+            hits: vec![
+                known,
+                hit("m-1", "chatgpt.m-1.aaaaaaaa-0000-0000-0000-000000000002", 6),
+            ],
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
+            hosts: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 0,
+        };
+        let v: serde_json::Value = serde_json::from_str(&report_json(&report, false)).unwrap();
+        let sessions = v["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            "the capture-time fact must travel unchanged, marker included"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            "the later attribution is what a consumer shows as the project"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["source"],
+            "project-list"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["observedAt"],
+            "2026-09-25T12:00:00.000Z"
+        );
+        assert!(
+            sessions[1].get("provenance").is_none(),
+            "a hit with no provenance record carries no key at all, never null: {}",
+            sessions[1]
+        );
+    }
+
     /// An index row that contradicts itself (`Exact` but no bounds) is unknown,
     /// not "starts at zero". `inbox.rs`'s `modified_ns` is the precedent.
     #[test]

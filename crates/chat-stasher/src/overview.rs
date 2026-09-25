@@ -1472,6 +1472,73 @@ mod tests {
         assert_eq!(v["summary"]["unknown_time_sessions"], serde_json::json!(1));
     }
 
+    /// `overview --json` carries each session's project provenance, and a row
+    /// whose archive recorded none carries **no key at all** rather than a
+    /// `null` — the JSON half of the same three-state rule `row_json` keeps for
+    /// time.
+    #[test]
+    fn overview_json_carries_project_provenance() {
+        let (snap, idx, decl) = machines(&["air"], &["air"], &["air"]);
+        let display = BTreeMap::new();
+        let mut known = row(
+            "s1",
+            "air",
+            "chatgpt",
+            Some(D1),
+            Some(D1),
+            5,
+            TimeSource::Exact,
+        );
+        known.provenance = Some(crate::activity::ProjectProvenance {
+            captured: Some(serde_json::json!({
+                "workspace": "unknown",
+                "project": "unknown",
+                "archived": false,
+            })),
+            effective_project: Some(serde_json::json!({
+                "id": "project-fixture",
+                "name": "Synthetic Project",
+            })),
+            supplement: Some(serde_json::json!({
+                "workspace": "workspace-fixture",
+                "project": {"id": "project-fixture", "name": "Synthetic Project"},
+                "source": "project-list",
+                "observedAt": "2026-09-25T12:00:00.000Z",
+            })),
+        });
+        let rows = vec![
+            known,
+            row(
+                "s2",
+                "air",
+                "chatgpt",
+                Some(D1),
+                Some(D1),
+                5,
+                TimeSource::Exact,
+            ),
+        ];
+        let v = overview_json(&rows, &snap, &idx, &decl, &display, 0);
+        let sessions = v["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            "the capture-time fact must travel unchanged, marker included"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            "the later attribution is what the overview shows as the project"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["source"],
+            "project-list"
+        );
+        assert!(
+            sessions[1].get("provenance").is_none(),
+            "a row with no provenance record carries no key at all, never null: {}",
+            sessions[1]
+        );
+    }
+
     /// The exit-1 shape (read the whole repo, no index anywhere) is the same
     /// object with `no_index_anywhere: true`, empty sessions and exit_code 1.
     #[test]

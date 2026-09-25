@@ -263,7 +263,27 @@ in the extension with a random per-install salt
 distinguishable in your archive; unlike the identity, it cannot be turned back
 into the account id, and when no account id is available the bundle says so
 explicitly rather than carrying a value
-(`apps/extension/lib/contract.ts:1054-1062`). The database is named
+(`apps/extension/lib/contract.ts:1054-1062`).
+
+A ChatGPT bundle also carries **project provenance**: the workspace the
+conversation was fetched under and the project it belongs to, as the capture leg
+recorded them (`contracts/inbox.schema.json:162-186`). 🔴 A capture taken before
+the project was known records the literal `unknown` rather than leaving the field
+out — "not learned yet" and "this conversation belongs to no project" are
+different facts and stay different. A later observation may add a **supplement**
+beside that record: the project a source reported, the source's name, and the
+time it was observed; it never replaces what the capture recorded, so the archive
+shows both what was known then and what was learned afterwards
+(`crates/chat-stasher/src/activity.rs:1887-1937`). A project name is a label from
+the platform rather than conversation text, but it is still **yours** and still
+plaintext: it sits in the bundle, in the staged shards and in the activity index
+beside everything else this section describes. A page cannot author either field
+— a capture payload carrying provenance is rejected outright
+(`apps/extension/lib/contract.ts:967-968`) — and, like the account fingerprint,
+these values are written into your own archive and are not transmitted anywhere
+by this extension.
+
+The database is named
 `chat-stasher-outbox` and lives under the extension's own origin; uninstalling
 the extension removes it with the rest of the extension's storage. **Its
 contents are not encrypted.** A record stays there until the host acknowledges

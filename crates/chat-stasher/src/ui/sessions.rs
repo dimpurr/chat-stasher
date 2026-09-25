@@ -438,12 +438,18 @@ fn provenance_row_html(s: &UiSession) -> String {
             .get("observedAt")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("time unknown");
+        // 🔴 A capture that recorded no provenance at all is **not** a capture
+        //    that recorded `unknown`. "We never wrote it down" and "it was
+        //    written down as unknown" are two different states (CLAUDE.md
+        //    invariant 1), and this sentence is the one ADR-043 mandates, so
+        //    the distinction has to survive in it. The no-supplement branch
+        //    below says "not recorded" for the same reason.
         let captured = if captured_was_unknown {
             "unknown".to_string()
         } else {
             captured_project
                 .map(&name)
-                .unwrap_or_else(|| "unknown".to_string())
+                .unwrap_or_else(|| "not recorded".to_string())
         };
         format!(
             "<tr><th>project</th><td>{effective} (learned later from {source} at {observed_at}); capture recorded project: {captured}</td></tr>\n",
