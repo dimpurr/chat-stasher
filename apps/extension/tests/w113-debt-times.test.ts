@@ -22,7 +22,17 @@ import {
   recordDebtTimes,
   resetDebtDbConnectionForTest,
 } from '../lib/backfill/debt-store';
-import { epochMsFrom, EPOCH_MS_MAX, EPOCH_MS_MIN, parseDeepSeekListPage } from '../lib/backfill/enumerate';
+import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { memoryStore } from '../lib/backfill/store';
+import {
+  DEEPSEEK_DETAIL_PATH,
+  DEEPSEEK_LIST_PATH,
+  epochMsFrom,
+  EPOCH_MS_MAX,
+  EPOCH_MS_MIN,
+  parseDeepSeekListPage,
+} from '../lib/backfill/enumerate';
+import type { Clock } from '../lib/backfill/pace';
 import { withI18n } from './i18n-harness';
 
 const P = 'deepseek';
@@ -191,5 +201,147 @@ describe('W113 · writing times onto debt rows', () => {
   it('nothing to record is 0, not a write', async () => {
     await seed(['a']);
     expect(await recordDebtTimes(P, S, new Map())).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W113b · The same three facts, through the engine's own write path
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 **Why the store-level cases above are not enough.**
+ *
+ * They drive `applyDebtDiff`/`recordDebtTimes` by hand, which fixes the *order* the two are called in. The
+ * engine has its own order, and it is the only one a real account ever runs: it records the times of a list
+ * page **and then** persists the ids of that same page (`runBackfill`'s per-page loop). The row a time is
+ * written onto therefore has to exist by the time the write happens, and the row has to keep it when the
+ * conversation is later archived — a settle writes a whole fresh record (`applyDebtDiff`), so a missing
+ * carry-through here erases a value the list gave and no later re-listing restores, because a complete
+ * enumeration never lists those ids again.
+ *
+ * So this section runs the real `runBackfill` over the real ledger and the real debt store, twice — the
+ * listing tick and the body tick — and reads the result back with `readDebtSet`. Nothing is seeded by hand.
+ */
+
+const ENGINE_SCOPE = 'acct-times';
+const ENGINE_ORIGIN = 'https://chat.deepseek.com';
+const ENGINE_LIMIT = 100;
+/** The instant every synthetic row's `updated_at` resolves to, written in **seconds** — DeepSeek's unit. */
+const LISTED_AT = Date.UTC(2026, 5, 4, 9, 30, 0);
+
+interface FixtureSession {
+  id: string;
+  seq_id: number;
+  updated_at: number;
+}
+
+function engineClock(): Clock {
+  let t = Date.parse('2026-09-20T00:00:00.000Z');
+  return { now: () => t, async sleep(ms: number) { t += ms; } };
+}
+
+/** One synthetic DeepSeek list page: same envelope as tests/c26-dslist.test.ts, no real endpoint. */
+function listPage(sessions: readonly FixtureSession[], hasMore: boolean): string {
+  return JSON.stringify({
+    code: 0,
+    msg: 'ok',
+    data: { biz_data: { chat_sessions: sessions, has_more: hasMore } },
+  });
+}
+
+/** A synthetic single-conversation body carrying both of lib/contract.ts's DeepSeek `requiredAnyPaths`. */
+function detailBody(id: string): string {
+  return JSON.stringify({
+    code: 0,
+    msg: 'ok',
+    data: {
+      biz_code: 0,
+      biz_msg: 'ok',
+      biz_data: {
+        chat_session: { id, title: 'synthetic-fixture', current_message_id: 2 },
+        chat_messages: [
+          { message_id: 1, parent_id: null, role: 'USER', content: 'synthetic-turn-1' },
+          { message_id: 2, parent_id: 1, role: 'ASSISTANT', content: 'synthetic-turn-2' },
+        ],
+      },
+    },
+  });
+}
+
+/** Serves the list page, and the one body, to a run that is otherwise allowed nowhere else. */
+function engineBackend(body: string) {
+  const calls: string[] = [];
+  const http = async (url: string): Promise<HttpResponse> => {
+    calls.push(url);
+    const u = new URL(url);
+    if (u.pathname === DEEPSEEK_LIST_PATH) return { status: 200, text: listPage(SESSIONS, false) };
+    if (u.pathname === DEEPSEEK_DETAIL_PATH) return { status: 200, text: body };
+    throw new Error(`unexpected path ${u.pathname}`);
+  };
+  return { http, calls };
+}
+
+const FIRST_ID = 'ds-0001-aaaaaaaa';
+const SECOND_ID = 'ds-0002-aaaaaaaa';
+const SESSIONS: FixtureSession[] = [
+  { id: FIRST_ID, seq_id: 999, updated_at: LISTED_AT / 1000 },
+  { id: SECOND_ID, seq_id: 998, updated_at: LISTED_AT / 1000 },
+];
+
+function engineTick(
+  store: ReturnType<typeof memoryStore>,
+  http: (url: string) => Promise<HttpResponse>,
+  maxDetails: number,
+) {
+  return runBackfill({
+    platform: P,
+    origin: ENGINE_ORIGIN,
+    scope: ENGINE_SCOPE,
+    store,
+    http,
+    clock: engineClock(),
+    listLimit: ENGINE_LIMIT,
+    maxDetails,
+  });
+}
+
+describe('W113b · the engine lists, then archives, and the time survives both', () => {
+  it('🔴 a time recorded while a debt is pending is still there once the debt is settled', async () => {
+    const store = memoryStore();
+    const be = engineBackend(detailBody(FIRST_ID));
+
+    // Tick 1 — the list. The engine records each page's times and persists the ids of that page.
+    const listing = await engineTick(store, be.http, 0);
+    expect(listing.state.pending).toEqual(SESSIONS.map((s) => s.id));
+    const listed = await readDebtSet(P, ENGINE_SCOPE);
+    expect(listed?.times.get(FIRST_ID)).toEqual({ at: LISTED_AT, from: 'list-update' });
+    expect(listed?.times.get(SECOND_ID)).toEqual({ at: LISTED_AT, from: 'list-update' });
+
+    // Tick 2 — the body. One conversation is fetched and archived; the enum cursor is complete, so nothing
+    // is listed again and no later read can repair a time lost here.
+    const bodies = await engineTick(store, be.http, 1);
+    expect(bodies.state.archived).toEqual([FIRST_ID]);
+
+    const after = await readDebtSet(P, ENGINE_SCOPE);
+    expect(after?.archived).toEqual([FIRST_ID]);
+    // 🔴 F1: the settle writes a fresh record, so the time has to be carried through it by name.
+    expect(after?.times.get(FIRST_ID)).toEqual({ at: LISTED_AT, from: 'list-update' });
+    // The one still pending is untouched, which is what makes the line above a statement about the settle.
+    expect(after?.times.get(SECOND_ID)).toEqual({ at: LISTED_AT, from: 'list-update' });
+  });
+
+  it('a second listing of the same conversations does not move them to another month', async () => {
+    const store = memoryStore();
+    const be = engineBackend(detailBody(FIRST_ID));
+
+    await engineTick(store, be.http, 0);
+    // The same ids, listed again — the shape W98's migration and a recovery both produce. `recordDebtTimes`
+    // is what refuses to restate a time, and this pins that the engine's own path goes through it.
+    const recorded = await recordDebtTimes(P, ENGINE_SCOPE, new Map([
+      [FIRST_ID, { at: Date.UTC(2026, 8, 1), from: 'list-create' as const }],
+    ]));
+    expect(recorded).toBe(0);
+    const after = await readDebtSet(P, ENGINE_SCOPE);
+    expect(after?.times.get(FIRST_ID)).toEqual({ at: LISTED_AT, from: 'list-update' });
   });
 });

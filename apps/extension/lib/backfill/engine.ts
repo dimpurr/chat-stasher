@@ -1935,27 +1935,6 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
     newDebts += enqueueDebts(state, parsed.page.ids).length;
 
-    /**
-     * 🔴 W113 · **Keep the time the list gave for each conversation** (ADR-032 §6).
-     *
-     * Written here, immediately after the ids are owed, and as a **separate operation** from the debt
-     * diff — `recordDebtTimes` touches `at`/`atFrom` and nothing else about the debt set, so the
-     * invariants the ledger is built on (a debt on disk before it is worked on, a drop is not a settle)
-     * are untouched by this line. It is also idempotent and never overwrites a time that is already
-     * there, so a re-listing cannot move a conversation to another month.
-     *
-     * 🔴 Its answer is deliberately not acted on beyond a log line. A missing time costs the coverage
-     *    page a bucket it already has a name for ("time unknown"); failing the run over it would trade a
-     *    cosmetic gap for an unenumerated account. `null` (the store refused) is logged as the different
-     *    fact it is.
-     */
-    if (parsed.page.times && parsed.page.times.size > 0) {
-      const recorded = await recordDebtTimes(opts.platform, opts.scope, parsed.page.times);
-      if (recorded === null) {
-        console.warn('[chat-stasher] the list gave conversation times, but the debt store refused the write; they will be counted as time-unknown');
-      }
-    }
-
     // Offset mode normally advances by the number of rows read; Perplexity's three
     // sources state explicitly that the client does `offset += limit` itself, so
     // even when this page is short or empty, the persisted value keeps that request
@@ -2093,6 +2072,45 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * endpoint has already printed wrongly.
      */
     await persist(state);
+
+    /**
+     * 🔴 W113b · **Keep the time the list gave for each conversation** (ADR-032 §6), and the
+     *    position of this block is the whole of its correctness: it runs **after the page's own
+     *    `persist`**, never before it.
+     *
+     * `recordDebtTimes` writes onto rows that are already in the store and deliberately cannot
+     * create one — a row created there would be a debt that nothing enumerated. The ids of this
+     * page only become rows when `persist` above writes them, so a call placed before it (where
+     * W113 first put it, "immediately after the ids are owed") found no row for any id the list was
+     * naming for the first time and dropped every time the platform gave. Measured against this
+     * repository's own fixtures: a fresh DeepSeek scope recorded nothing at all, and a complete
+     * enumeration never lists those ids again, so nothing repaired it later — the by-month column
+     * stayed empty while the times were in hand.
+     *
+     * It stays a **separate operation** from the debt diff — `recordDebtTimes` touches
+     * `at`/`atFrom` and nothing else about the debt set, so the invariants the ledger is built on
+     * (a debt on disk before it is worked on, a drop is not a settle) are untouched by this line.
+     * It is also idempotent and never overwrites a time that is already there, so a re-listing of
+     * an earlier page cannot move a conversation to another month.
+     *
+     * 🔴 Its answer is deliberately not acted on beyond a log line. A missing time costs the coverage
+     *    page a bucket it already has a name for ("time unknown"); failing the run over it would trade a
+     *    cosmetic gap for an unenumerated account. `null` (the store refused) is logged as the different
+     *    fact it is.
+     *
+     * 🔴 What this order does **not** survive, written down rather than implied: a worker killed
+     *    between the `persist` and this line leaves those ids owed with no time, and no later run
+     *    re-lists them. The cost is one page's conversations in the "time unknown" bucket — a state
+     *    the page already names — and the alternative (threading the times through the debt diff so
+     *    both land in one transaction) is the one `recordDebtTimes`' own note rejects, because it
+     *    would put a timestamp inside the three lists every debt invariant is stated over.
+     */
+    if (parsed.page.times && parsed.page.times.size > 0) {
+      const recorded = await recordDebtTimes(opts.platform, opts.scope, parsed.page.times);
+      if (recorded === null) {
+        console.warn('[chat-stasher] the list gave conversation times, but the debt store refused the write; they will be counted as time-unknown');
+      }
+    }
   }
 
   // 🔴 C26 · **Before issuing any body request**, ask: have we actually written this

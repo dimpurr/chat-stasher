@@ -532,13 +532,17 @@ export async function applyDebtDiff(
   for (const id of diff.enqueue) {
     puts.push({ platform, scope, id, state: 'pending', seq: seq++ });
   }
-  for (const id of diff.settle) {
-    // A settled id takes a fresh `seq`: order only ever mattered for ids that are
-    // still owed, and the id is leaving `pending` for good. `settleDebt` is
-    // idempotent, so settling one twice cannot resurrect a `seq` that is already
-    // gone.
-    puts.push({ platform, scope, id, state: 'archived', seq: seq++ });
-  }
+  /**
+   * 🔴 W113b · **A settle's `seq` is taken here, but its record is written inside the
+   *    transaction below, because it has to read the row it is replacing first.**
+   *
+   * A settled id takes a fresh `seq`: order only ever mattered for ids that are
+   * still owed, and the id is leaving `pending` for good. `settleDebt` is
+   * idempotent, so settling one twice cannot resurrect a `seq` that is already
+   * gone.
+   */
+  const settled: Array<{ id: string; seq: number }> = [];
+  for (const id of diff.settle) settled.push({ id, seq: seq++ });
   // An id that is enqueued *and* dropped inside one persist is owed again — the
   // enqueue is the later fact, so it must not be deleted by the drop's tombstone.
   // (Not reachable from the engine's tick order today; written down because the
@@ -548,16 +552,52 @@ export async function applyDebtDiff(
     .filter((id) => !owed.has(id))
     .map((id) => [platform, scope, id]);
 
+  const settledPuts: DebtRecord[] = [];
   try {
     const tx = db.transaction(DEBTS_STORE, 'readwrite');
     const store = tx.objectStore(DEBTS_STORE);
     for (const record of puts) store.put(record);
     for (const key of deletes) store.delete(key);
+    /**
+     * 🔴 W113b · **The settle carries the row's recorded list time through, and that is not a
+     *    nicety — IndexedDB's `put` replaces the whole record.**
+     *
+     * The row being archived is the only place the platform's time for this conversation was
+     * ever written (`recordDebtTimes`, while it was pending), so a settle that writes the
+     * shape `{platform, scope, id, state, seq}` and nothing else destroys it at the moment the
+     * conversation is stored — which is the one moment the coverage page (ADR-032 §6) wants it.
+     * Nothing restores it: a complete enumeration never lists those ids again, so the whole
+     * by-month *stored* column would read "time unknown" on every archived conversation while
+     * the data was sitting there a moment earlier.
+     *
+     * The read is a `get` in **this same transaction**, so it cannot see a store state other
+     * than the one the settle commits against, and the idempotent-settle argument above
+     * survives it: re-settling an archived row reads back the same time it wrote.
+     *
+     * 🔴 `timeInRow` decides whether there is a time to carry, and it is deliberately the same
+     *    reader `readDebtSet` uses: a bare number, or a source this build does not know, is not
+     *    a time, so a settle cannot resurrect a value the reader would refuse to interpret.
+     */
+    for (const entry of settled) {
+      const request = store.get([platform, scope, entry.id]);
+      request.onsuccess = () => {
+        const had = request.result as DebtRecord | undefined;
+        const record: DebtRecord = { platform, scope, id: entry.id, state: 'archived', seq: entry.seq };
+        const time = had ? timeInRow(had) : null;
+        if (time) {
+          record.at = time.at;
+          record.atFrom = time.from;
+        }
+        store.put(record);
+        settledPuts.push(record);
+      };
+    }
     await txDone(tx);
   } catch {
     return false;
   }
   for (const record of puts) countWrite('debt', record);
+  for (const record of settledPuts) countWrite('debt', record);
   for (const key of deletes) countWrite('debt', key);
   return true;
 }
