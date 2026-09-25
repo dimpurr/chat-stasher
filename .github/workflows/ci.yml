@@ -182,6 +182,80 @@ jobs:
         shell: bash
         run: bash scripts/release-gate.sh
 
+      # ---------------------------------------------------------------------
+      # W163 · Does the *installed* CLI work end to end on Linux?
+      #
+      # release-gate.sh above answers "is the archive chain correct" against one
+      # harness's fixture. This answers a different question: given a machine with
+      # no config and a set of synthetic histories, does `doctor` -> `init` ->
+      # `run-once` -> `read` -> `overview` -> `schedule` work, and does the
+      # registry actually find what is on disk? It seeds every harness the
+      # shipped Linux cells can be seeded for, and asserts both halves: the
+      # harnesses it planted are counted, and the ones it did not plant come back
+      # `unknown`/skipped rather than as a claimed `0`.
+      #
+      # Linux only, because that is the platform this step exists to cover —
+      # the step above already runs wherever the gate can. On the ubuntu cell
+      # `cargo build` has just produced the binary the smoke drives; nothing
+      # else in the matrix needs it.
+      #
+      # It adds no trigger: it is three seconds of steps inside a job that the
+      # push-to-main tier already runs, which is the point (see the policy block
+      # at the top of this file — the ubuntu cell is the ×1 one that exists to
+      # say "merged and broke" quickly).
+      - name: Smoke — installed CLI end to end (synthetic histories)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/smoke/linux-smoke.sh
+
+  # ---------------------------------------------------------------------------
+  # W163 · The same smoke on Linux arm64.
+  #
+  # Why a separate job rather than a matrix cell: the matrix in `rust` already
+  # decides which OSes run, and its expression is deliberately built around the
+  # *trigger* (tag → three cells, push to main → ubuntu ×1, otherwise → ubuntu +
+  # windows). An arm64 cell cannot be added to that expression without also
+  # putting it on the push-to-main tier, and that tier is budgeted at one cell
+  # on purpose. So arm64 gets its own job with its own guard.
+  #
+  # 🔴 Why arm64 is NOT on push: a push to main is answered by the ubuntu ×1
+  # cell, which exists to say "merged and broke" as cheaply as possible. arm64
+  # would double the Linux cost of every one of those pushes to re-check
+  # something a main-branch push cannot regress on its own — the arm64 cell's job
+  # is to prove a *release candidate* builds and runs there, and every tag
+  # already runs the full matrix plus this. It is also the cell with no `-latest`
+  # alias (there is no arm64 `-latest` label; `ubuntu-24.04-arm` is the current
+  # one), so pinning it deliberately rather than following a moving tag is the
+  # right shape for something that only speaks at release time.
+  #
+  # ⚠️ Not green-by-suppression: nothing here is skipped on the tiers it does
+  # serve. A tag, the daily schedule and a manual dispatch all get a real build
+  # and a real smoke; the push-to-main tier keeps the coverage it had, no less.
+  arm64-smoke:
+    name: smoke (ubuntu-24.04-arm)
+    # The same three triggers the `rust` matrix lets run wide: a tag, the daily
+    # schedule, or a manual dispatch. A push to main is answered by ubuntu ×1.
+    if: github.ref_type == 'tag' || github.event_name != 'push'
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Just the build. The full test suite runs on the tagged matrix cell for
+      # this commit; this job's only question is whether the smoke — which walks
+      # the registry, opens SQLite stores and runs the archive cycle against a
+      # throwaway HOME — behaves the same on arm64 Linux as on x86_64.
+      - name: Build
+        run: cargo build
+
+      - name: Smoke — installed CLI end to end (synthetic histories)
+        shell: bash
+        run: bash scripts/smoke/linux-smoke.sh
+
   # ---------------------------------------------------------------------------
   # Source-text gates. Pure Python, no build, seconds to run — so they belong on
   # EVERY push rather than at the end of the pipeline.
