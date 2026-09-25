@@ -518,9 +518,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6010-6106`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6048-6144`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:5982-5989`).
+  (`crates/chat-stasher/src/main.rs:6020-6027`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -531,7 +531,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:4335-4391`).
+  as many words (`crates/chat-stasher/src/main.rs:4373-4429`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -572,13 +572,13 @@ a real limitation of the current code.
    `setup`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
-   `activity-index`, `machine-declare`, `machine-label`, `overview`
-   (`crates/chat-stasher/src/main.rs:148-1138`); **a command that puts sessions
+   `activity-index`, `machine-declare`, `machine-label`, `overview`, `index`
+   (`crates/chat-stasher/src/main.rs:148-1143`); **a command that puts sessions
    back into a harness's own directories does not exist**. There are two
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:402-404,6342-6481`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:402-404,6380-6519`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:611-691`) — see exposure 5
@@ -586,10 +586,14 @@ a real limitation of the current code.
    possible; what remains missing is restoring them into a harness's own
    directories.
 
-5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
-   never fetches or decrypts a **session shard** — the conversation payload;
-   full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:549-579`). One qualification, because the
+5. **Search remains metadata-only; full-text indexing is an explicit local
+   plaintext operation.** `search` walks snapshot/index/tree objects and never
+   fetches or decrypts a **session shard** — the conversation payload
+   (`crates/chat-stasher/src/search.rs:16-38`). `index build` separately reads
+   changed session payloads and stores user/assistant text and titles in a local
+   SQLite index in the operating-system cache directory. The index is mode 0600
+   on Unix and can be removed with `index clear`
+   (`crates/chat-stasher/src/fts.rs:1-6,227-327,330-344,439-456`; `crates/chat-stasher/src/main.rs:6645-6870`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

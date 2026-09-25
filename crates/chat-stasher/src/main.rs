@@ -1135,6 +1135,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<CacheAction>,
     },
+    /// Build or inspect the per-destination local full-text index.
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
 }
 
 /// `cache` subcommands.
@@ -1146,6 +1151,38 @@ enum CacheAction {
     /// destination, never a key. Entries are re-fetched from the destination
     /// the next time a session is read.
     Clear,
+}
+
+#[derive(clap::Args)]
+struct IndexArgs {
+    /// Destination to index. Required unless an explicit repository is given.
+    #[arg(long)]
+    destination: Option<String>,
+    /// Repository path override.
+    #[arg(long)]
+    repo: Option<String>,
+    /// Masterkey file override (build only).
+    #[arg(long)]
+    key_file: Option<String>,
+    /// Concurrency cap override (build only).
+    #[arg(long)]
+    connections: Option<usize>,
+    /// Backend option key=value, repeatable (build only).
+    #[arg(long = "option")]
+    options: Vec<String>,
+    /// Keep ssh ControlMaster processes open after this run.
+    #[arg(long)]
+    keep_ssh_masters: bool,
+}
+
+#[derive(clap::Subcommand)]
+enum IndexAction {
+    /// Read changed sessions from the archive and update the local FTS index.
+    Build(IndexArgs),
+    /// Validate and count indexed sessions without contacting the archive.
+    Check(IndexArgs),
+    /// Delete this destination's marked local index.
+    Clear(IndexArgs),
 }
 
 /// export `--turns` selector. A value enum rather than a string so an unknown
@@ -1522,6 +1559,7 @@ fn run() -> ExitCode {
         ),
         Command::Doctor { json } => cmd_doctor(json),
         Command::Cache { action } => cmd_cache(action),
+        Command::Index { action } => cmd_index(action),
         Command::Verify {
             level,
             stage,
@@ -6638,6 +6676,237 @@ fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
         },
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_index(action: IndexAction) -> ExitCode {
+    let (args, operation) = match action {
+        IndexAction::Build(args) => (args, "build"),
+        IndexAction::Check(args) => (args, "check"),
+        IndexAction::Clear(args) => (args, "clear"),
+    };
+    let config = match config_or_refuse("index") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if args.destination.is_none() && args.repo.is_none() && !config.destinations.is_empty() {
+        eprintln!("index: name a destination with `--destination` (there is no implicit choice)");
+        return ExitCode::from(2);
+    }
+    let cfg = match resolve_store_config_checked(
+        &config,
+        args.destination.as_deref(),
+        args.repo.clone(),
+        args.key_file.clone(),
+        args.connections,
+        &args.options,
+    ) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!("{problem}");
+            return ExitCode::from(2);
+        }
+    };
+    let identity = args.destination.as_deref().unwrap_or(&cfg.repo_root);
+    let Some(cache_root) = scanner::user_cache_dirs().into_iter().next() else {
+        eprintln!("index: no operating-system cache directory is available");
+        return ExitCode::FAILURE;
+    };
+    let index = chat_stasher::fts::Index::for_destination(&cache_root, identity);
+    match operation {
+        "check" => match index.check() {
+            Ok(documents) => {
+                println!("[index] state=valid documents={documents}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("index: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
+        "clear" => match index.clear() {
+            Ok(true) => {
+                println!("[index] cleared=true");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                println!("[index] state=missing");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("index: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => {
+            let mk = match store::load_key_file(&cfg) {
+                Ok(mk) => mk,
+                Err(error) => {
+                    eprintln!("index: {error:#}; archive was not read");
+                    return ExitCode::from(3);
+                }
+            };
+            let body_cache = match chat_stasher::body_cache::settings_for(&config) {
+                Ok(settings) if settings.enabled() => Some(std::sync::Arc::new(
+                    chat_stasher::body_cache::BodyCache::new(settings.root, settings.max_bytes),
+                )),
+                Ok(_) => None,
+                Err(error) => {
+                    eprintln!("index: body cache settings are invalid: {error:#}");
+                    return ExitCode::from(3);
+                }
+            };
+            let backup =
+                BackupStore::for_metadata_query(cfg.clone()).with_body_cache(body_cache.clone());
+            let backends = match backup.backends() {
+                Ok(backends) => backends,
+                Err(error) => {
+                    eprintln!("index: {error:#}");
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    return ExitCode::from(3);
+                }
+            };
+            let repo_result = (|| -> anyhow::Result<_> {
+                Repository::new(&cfg.repository_options(), &backends)?
+                    .open(&Credentials::Masterkey(mk))
+                    .context("open destination for FTS build")?
+                    .to_indexed()
+                    .context("index destination for FTS build")
+            })();
+            let repo = match repo_result {
+                Ok(repo) => repo,
+                Err(error) => {
+                    eprintln!("index: cannot open archive: {error:#}; this is not an empty index");
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    return ExitCode::from(3);
+                }
+            };
+            use rustic_core::repofile::NodeType;
+            let build_result = (|| -> anyhow::Result<chat_stasher::fts::BuildStats> {
+                let snapshots = repo
+                    .get_all_snapshots()
+                    .context("list archive snapshots for FTS")?;
+                let mut entries_all = Vec::new();
+                let mut paths_by_id = BTreeMap::<String, Vec<usize>>::new();
+                let mut titles = BTreeMap::<String, String>::new();
+                for snapshot in readback::newest_snapshot_per_host(snapshots) {
+                    let root = repo
+                        .node_from_snapshot_and_path(&snapshot, "")
+                        .context("read snapshot root for FTS")?;
+                    let entries = repo
+                        .ls(&root, &LsOptions::default())
+                        .context("list snapshot files for FTS")?
+                        .collect::<rustic_core::RusticResult<Vec<_>>>()
+                        .context("collect snapshot files for FTS")?;
+                    for (path, node) in &entries {
+                        if node.node_type == NodeType::File {
+                            if let Some((machine, session, _)) = readback::bucket_shard_path(path) {
+                                paths_by_id
+                                    .entry(format!("{machine}/{session}"))
+                                    .or_default()
+                                    .push(entries_all.len());
+                            } else if let Some(machine) = sidecar::activity_index_machine(path) {
+                                let mut bytes = Vec::new();
+                                repo.dump(node, &mut bytes)
+                                    .context("read FTS title metadata")?;
+                                for line in String::from_utf8_lossy(&bytes)
+                                    .lines()
+                                    .filter(|line| !line.trim().is_empty())
+                                {
+                                    if let Ok(row) =
+                                        serde_json::from_str::<activity::ActivityRow>(line)
+                                    {
+                                        if let Some(activity::SessionTitle::Known {
+                                            text, ..
+                                        }) = row.title
+                                        {
+                                            titles.insert(
+                                                format!("{machine}/{}", row.session_id),
+                                                text,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        entries_all.push((path.clone(), node.clone()));
+                    }
+                }
+                for indexes in paths_by_id.values_mut() {
+                    indexes.sort_by_key(|idx| {
+                        entries_all[*idx]
+                            .0
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .and_then(store::parse_shard_seq)
+                            .unwrap_or(u64::MAX)
+                    });
+                }
+                let sources: Vec<_> = paths_by_id
+                    .iter()
+                    .map(|(id, indexes)| {
+                        let mut hasher = sha2::Sha256::new();
+                        use sha2::Digest;
+                        for idx in indexes {
+                            let (path, node) = &entries_all[*idx];
+                            hasher.update(path.to_string_lossy().as_bytes());
+                            hasher.update([0]);
+                            hasher.update(node.meta.size.to_le_bytes());
+                            hasher.update(format!("{:?}", node.meta.mtime).as_bytes());
+                            hasher.update([0]);
+                        }
+                        if let Some(title) = titles.get(id) {
+                            hasher.update(title.as_bytes());
+                        }
+                        chat_stasher::fts::SourceDoc {
+                            id: id.clone(),
+                            source_sha256: hasher
+                                .finalize()
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect(),
+                        }
+                    })
+                    .collect();
+                index.build(&sources, |id| {
+                    let indexes = paths_by_id.get(id).ok_or_else(|| {
+                        anyhow::anyhow!("changed source disappeared during index build")
+                    })?;
+                    let session_bytes: u64 = indexes
+                        .iter()
+                        .map(|idx| entries_all[*idx].1.meta.size)
+                        .sum();
+                    let _session_scope = body_cache
+                        .as_ref()
+                        .map(|cache| cache.declare_session(session_bytes));
+                    let mut raw = Vec::new();
+                    for idx in indexes {
+                        repo.dump(&entries_all[*idx].1, &mut raw)
+                            .context("read changed archived document")?;
+                    }
+                    let (fallback_title, body) = chat_stasher::fts::extract_index_text(&raw)?;
+                    Ok(chat_stasher::fts::DocText {
+                        title: titles.get(id).cloned().unwrap_or(fallback_title),
+                        body,
+                    })
+                })
+            })();
+            match build_result {
+                Ok(stats) => {
+                    println!(
+                        "[index] documents={} read={} unchanged={} removed={}",
+                        stats.documents, stats.read, stats.unchanged, stats.removed
+                    );
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("index: build did not complete: {error:#}; the result is not a complete index");
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    ExitCode::from(3)
+                }
+            }
+        }
+    }
 }
 
 /// One line saying whether this run used the body cache — and if not, which of

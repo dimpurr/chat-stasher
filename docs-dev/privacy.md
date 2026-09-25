@@ -54,6 +54,10 @@ that document is the honest one.
   [section 5](#5-where-the-extension-runs).
 - **Everything is stored on your machine or at a destination you configure**
   (a local disk, or a remote store whose credentials only you hold).
+- **The optional local full-text index is plaintext.** `index build` reads
+  changed archived sessions into a destination-scoped SQLite cache under the
+  operating-system cache directory; `index clear` removes that cache
+  (`crates/chat-stasher/src/fts.rs:1-6,227-327,330-344`; `crates/chat-stasher/src/main.rs:6645-6870`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
@@ -682,7 +686,8 @@ Retention on **your** machine is under your control:
 | Extension local storage (backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
 | A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:611-691`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list is `init`, `setup`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`, `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`, `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`, `activity-index`, `machine-declare`, `machine-label`, `overview` (`crates/chat-stasher/src/main.rs:148-1138`). Selective per-conversation deletion inside an archive is not implemented. |
+| The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:148-1143`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension stops all capture immediately** and removes its
 local storage, which is where the outbox lives — so uninstalling also deletes
