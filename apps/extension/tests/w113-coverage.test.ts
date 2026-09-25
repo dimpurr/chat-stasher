@@ -19,7 +19,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
-import { buildCoverage, describeSkipReason, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageScopeInput } from '../lib/coverage';
+import { buildCoverage, describeSkipReason, enumNote, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageScopeInput } from '../lib/coverage';
 import { coverageCard, coverageView } from '../lib/coverage-view';
 import { SPEED_PLANS } from '../lib/backfill/speed';
 import { initialState, type BackfillHeader, type HaltRecord } from '../lib/backfill/types';
@@ -107,6 +107,18 @@ describe('W113 · item 1 — how much is listed, and whether the list is finishe
     }));
     expect(row.enumState).toBe('truncated');
     expect(row.truncation).toBe('has-more-missing');
+  });
+
+  it('🔴 W113b · a truncated list carries the `≥` as well, because it too was not read to its end', () => {
+    // ADR-032 §1 is "未列完时必须带 ≥", and `truncated` is exactly that: the words already said the list was
+    // not read to its end while the number was printed bare, which is a lower bound drawn as a total.
+    const row = rowOf(input({
+      scopes: [scope({ header: header({ enumCursor: { offset: 40, complete: true, truncated: 'cursor-missing' } }) })],
+    }));
+    const note = enumNote(row);
+    expect(note).toContain('≥');
+    // …and the number it is about is still there, marked as what it is.
+    expect(note).toContain('40');
   });
 });
 

@@ -489,7 +489,9 @@ coverage:
   enum:
     complete: "已列出：{listed} —— 这个列表已经读到末尾"
     inProgress: "仍在列出：目前 ≥ {listed}"
-    truncated: "已列出：{listed}，并且这个列表【没有】读到末尾 —— {why}"
+    # 🔴 W113b · truncated 和 inProgress 一样是「没列完」，所以数字也要带 ≥（ADR-032 §1：未列完时必须带 ≥）。
+    #    原文说「没有读到末尾」而数字却是裸的——那正是「把下限画成总数」的形状。
+    truncated: "已列出：目前 ≥ {listed}，并且这个列表【没有】读到末尾 —— {why}"
     why:
       cursorMissing: 平台的回复里没有带翻页游标，所以只列出了拿到的那一页
       hasMoreMissing: 平台的回复没有说还有没有下一页，所以我们停下，而不是去假设

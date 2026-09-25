@@ -770,7 +770,10 @@ coverage:
   enum:
     complete: "listed: {listed} — the list has been read to its end"
     inProgress: "still listing: ≥ {listed} so far"
-    truncated: "listed: {listed}, and the list was NOT read to its end — {why}"
+    # 🔴 W113b · `truncated` is an **unfinished** list like `inProgress`, so its number carries the `≥` too
+    #    (ADR-032 §1: 未列完时必须带 ≥). The words said "NOT read to its end" while the number was printed
+    #    bare, which is exactly the shape — a lower bound drawn as a total — the rule exists to forbid.
+    truncated: "listed: ≥ {listed} so far, and the list was NOT read to its end — {why}"
     why:
       cursorMissing: the platform's answer carried no continuation cursor, so only the page we had was listed
       hasMoreMissing: the platform's answer said nothing about whether another page exists, so we stopped rather than assume
