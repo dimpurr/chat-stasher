@@ -19,7 +19,9 @@
  *      debts untouched.~~ 🔴 **Superseded by W8 (2026-09-14), and the fact is deliberately changed, not the
  *      assertion weakened.** DeepSeek's body segment is no longer null, so this file's 5th section now records
  *      that DeepSeek **leaves** the half-leg branch instead of entering it. The half-leg mechanism itself is
- *      unchanged and is still watched — by tests/c27-pplx.test.ts, where Perplexity now sits in that state.
+ *      unchanged and is still watched — by tests/c27-pplx.test.ts and tests/w44-halt-capability.test.ts,
+ *      each of which injects a list-only plan: no platform is in that state any more, because W84/W84b
+ *      filled in the last real one.
  *      DeepSeek's body segment has its own file: tests/w3-deepseek-detail.test.ts.
  *
  * 🔴 Scope note (W8): this file is about DeepSeek's **list** segment. Its shared `run()` helper stops before the
@@ -394,7 +396,8 @@ describe('C26-4 · updated_at is handled as a number', () => {
 //    It used to prove "DeepSeek lists conversations but cannot fetch a single body". DeepSeek's body
 //    segment now has evidence, so that sentence is false and the section now records the move:
 //    DeepSeek **leaves** the half-leg branch. The mechanism it used to demonstrate is untouched and is
-//    still watched by tests/c27-pplx.test.ts:144 (Perplexity is in that state). DeepSeek's new body
+//    still watched — with an injected list-only plan, since no platform is in that state any more — by
+//    tests/c27-pplx.test.ts and tests/w44-halt-capability.test.ts. DeepSeek's new body
 //    segment has its own file, tests/w3-deepseek-detail.test.ts.
 // ---------------------------------------------------------------------------
 describe('C26-5 · being able to list conversations ≠ being able to backfill history', () => {
@@ -406,7 +409,8 @@ describe('C26-5 · being able to list conversations ≠ being able to backfill h
     const report = await run(store, be.http, 'acct-half', { maxDetails: 1 });
 
     // 🔴 Before W8 this was 'detail-unsupported'. The halt is gone because the missing half was filled in,
-    //    not because the branch was loosened — `partial` is still what expresses it, and Perplexity still has one.
+    //    not because the branch was loosened — `partial` is still what expresses it, and no plan declares
+    //    one today (Perplexity was the last; W84/W84b filled its body segment in).
     expect(report.halted?.reason).not.toBe('detail-unsupported');
     // 🔴 Its difference from 'unsupported-platform' is still this line: the list request really was sent, and so was a body request.
     expect(be.calls.length).toBe(2);

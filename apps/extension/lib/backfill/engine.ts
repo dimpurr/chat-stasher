@@ -1686,8 +1686,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * page per tick is *fewer* requests per tick than the old loop, never more.
    *
    * 🔴 Why `canBackfillDetail` and not simply 1 for everybody: a plan with no
-   *    body segment (Perplexity, detailPath/detailUrl both null) has no body
-   *    fetch that a long list could starve. Capping it at one page would gain
+   *    body segment (`detailPath`/`detailUrl` both null) has no body
+   *    fetch that a long list could starve. 🔴 W157 · **No plan is in that state
+   *    today**: Perplexity held it last and W84/W84b filled its body segment in,
+   *    so `canBackfillDetail` answers "yes, cap it" for every row in the table —
+   *    the hook stays because it is the question a future unsourced plan would
+   *    have to be asked. Capping such a plan at one page would gain
    *    nothing and would **lose** something: that plan's tick ends in
    *    halt('detail-unsupported'), and a persisted halt stops every later tick
    *    from reading page 2 at all — the list would be cut off at the first page
@@ -2116,11 +2120,15 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // 🔴 C26 · **Before issuing any body request**, ask: have we actually written this
   // platform's body segment at all?
   //
-  // Perplexity is in exactly this intermediate state: the list segment has a
-  // three-source provenance (conversations have been listed, debts are on disk), and
-  // the body segment has none. (DeepSeek was in it until W8 filled its body segment
-  // in; the branch, the halt reason and the wording below are unchanged — what moved
-  // is which platform sits in it.) At that point:
+  // 🔴 W157 · **Which platform sits in this intermediate state: none.** "The list
+  // segment is sourced" means conversations have really been listed and debts are on
+  // disk; "the body segment has none" means no plan declares a body route. That pair
+  // is what this branch is for, and every plan declares a non-null
+  // detailPath/detailUrl today, so the branch below is unreachable. It got there one
+  // platform at a time — DeepSeek until W8, then Perplexity until W84/W84b, and
+  // Perplexity was the last. (The branch, the halt reason and the wording below are
+  // unchanged; what moved is which platform sits in it, and W157 is the change that
+  // records the state as empty.) At that point:
   //  · it must not keep going — plan.detailUrl is null, and forcing it would mean
   //    inventing a body route on the spot;
   //  · and it must not quietly return 'queue-empty' either — that would amount to

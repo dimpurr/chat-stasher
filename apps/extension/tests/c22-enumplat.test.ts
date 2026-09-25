@@ -243,7 +243,11 @@ describe('C22-3 · "we cannot read your history yet" and "you have no history" m
     //    itself** — which is the only thing this check has ever asked for. The mechanism is unchanged:
     //    same origin + in the platform table + has a plan + the plan's own path + (W8) the plan's own
     //    query. The two counter-examples below still pin that it did not become a prefix wildcard.
-    //    🔴 The half-leg case this line used to demonstrate now belongs to Perplexity — tests/c27-pplx.test.ts.
+    //    🔴 W157 · The half-leg case this line used to demonstrate has no platform left to demonstrate
+    //    it on: every plan's detailPath/detailUrl is non-null (Perplexity's was the last, filled in by
+    //    W84/W84b), and `isAllowedBackfillUrl` reads the real table, so that arm is unreachable from
+    //    here. The half-leg *handling* is still covered, on the engine's side, through injected list-only
+    //    plans in tests/c27-pplx.test.ts and tests/w44-halt-capability.test.ts — not through this arm.
     expect(isAllowedBackfillUrl(
       `${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages?chat_session_id=x`, DEEPSEEK_ORIGIN)).toBe(true);
     // 🔴 And the tightening W8 added, in the same breath: that path with no declared query is refused.
