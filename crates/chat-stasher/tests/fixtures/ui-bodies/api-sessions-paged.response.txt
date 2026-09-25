@@ -7,15 +7,15 @@ content-type: application/json; charset=utf-8
   "could_not_be_placed": 0,
   "data_blobs_read": 0,
   "destination": "dest-under-test",
-  "filter": "machine `m-1` · harness in {claude-code}",
+  "filter": null,
   "machines_with_legacy_index": [],
-  "matched": 1,
-  "not_matched": 3,
+  "matched": 4,
+  "not_matched": 0,
   "paging": {
-    "limit": 100,
-    "offset": 0,
-    "sort": "last-desc",
-    "total": 1
+    "limit": 1,
+    "offset": 1,
+    "sort": "size-desc",
+    "total": 4
   },
   "payload_loaded": false,
   "schema_version": 2,

@@ -11,9 +11,61 @@ content-type: application/json; charset=utf-8
   "machines_with_legacy_index": [],
   "matched": 4,
   "not_matched": 0,
+  "paging": {
+    "limit": 100,
+    "offset": 0,
+    "sort": "last-desc",
+    "total": 4
+  },
   "payload_loaded": false,
   "schema_version": 2,
   "sessions": [
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 20,
+      "first_unix": {
+        "kind": "known",
+        "unix": 1769999900
+      },
+      "harness": null,
+      "href": "/session?i=3&token=golden-token",
+      "index": 3,
+      "last_unix": {
+        "kind": "known",
+        "unix": 1769999910
+      },
+      "line_count": 10,
+      "machine": "m-2",
+      "session_short_id": ".hidden-~7526f9",
+      "shards": 1,
+      "source": "(no harness prefix)",
+      "title": {
+        "state": "no_label"
+      }
+    },
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 200,
+      "first_unix": {
+        "kind": "known",
+        "unix": 1769999400
+      },
+      "harness": "claude-code",
+      "href": "/session?i=2&token=golden-token",
+      "index": 2,
+      "last_unix": {
+        "kind": "known",
+        "unix": 1769999500
+      },
+      "line_count": 10,
+      "machine": "m-2",
+      "session_short_id": "claude-c~5690f8",
+      "shards": 3,
+      "source": "claude-code",
+      "title": {
+        "state": "no_label"
+      }
+    },
     {
       "archive_time_unix": 1769996400,
       "bytes": 100,
@@ -56,52 +108,6 @@ content-type: application/json; charset=utf-8
       "session_short_id": "deepseek~e4009d",
       "shards": 1,
       "source": "deepseek",
-      "title": {
-        "state": "no_label"
-      }
-    },
-    {
-      "archive_time_unix": 1769996400,
-      "bytes": 200,
-      "first_unix": {
-        "kind": "known",
-        "unix": 1769999400
-      },
-      "harness": "claude-code",
-      "href": "/session?i=2&token=golden-token",
-      "index": 2,
-      "last_unix": {
-        "kind": "known",
-        "unix": 1769999500
-      },
-      "line_count": 10,
-      "machine": "m-2",
-      "session_short_id": "claude-c~5690f8",
-      "shards": 3,
-      "source": "claude-code",
-      "title": {
-        "state": "no_label"
-      }
-    },
-    {
-      "archive_time_unix": 1769996400,
-      "bytes": 20,
-      "first_unix": {
-        "kind": "known",
-        "unix": 1769999900
-      },
-      "harness": null,
-      "href": "/session?i=3&token=golden-token",
-      "index": 3,
-      "last_unix": {
-        "kind": "known",
-        "unix": 1769999910
-      },
-      "line_count": 10,
-      "machine": "m-2",
-      "session_short_id": ".hidden-~7526f9",
-      "shards": 1,
-      "source": "(no harness prefix)",
       "title": {
         "state": "no_label"
       }

@@ -1012,3 +1012,516 @@ fn a_launch_filter_is_named_on_the_page() {
     );
     assert_eq!(v["matched"], serde_json::json!(2));
 }
+
+// ------------------------------------------------------- UIA-2 · paging (W175)
+//
+// The §5.2 contract's four invariants over a real loopback socket and a real
+// binary: `limit=0` is a usage error; an offset past the end is a 200 with
+// an empty window; a concatenated walk of the pages is the whole list in the
+// walk's order; and no page of any sort can leave the launch filter's set.
+
+/// The ten-row paging archive: one machine, nine claude-code conversations
+/// stamped one per day (so every time order is derivable by hand — a later
+/// day is a later conversation time, and one line per session makes
+/// `first == last`), plus one extension-delivered deepseek session with no
+/// timestamp at all, the row every time order must refuse to rank.
+const PAGE_DAYS: u32 = 9;
+
+fn page_stage_session(day: u32) -> String {
+    format!(
+        "claude-code.mbp-page.aaaaaaaa-0000-0000-0000-{:06}",
+        day as u64 + 1
+    )
+}
+
+fn build_page_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let mut sessions: Vec<(String, Vec<String>)> = (1..=PAGE_DAYS)
+        .map(|day| {
+            (
+                page_stage_session(day),
+                vec![cc_line(&format!("2025-03-{day:02}T12:00:00Z"))],
+            )
+        })
+        .collect();
+    sessions.push(("deepseek.page-0001".to_string(), vec![ext_line()]));
+    let pairs = sessions
+        .iter()
+        .map(|(id, lines)| (id.as_str(), lines.clone()))
+        .collect::<Vec<_>>();
+    let stage = stage_for(sandbox, "mbp-page", &pairs);
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let indexed = run(
+        sandbox,
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "mbp-page",
+        ],
+    );
+    assert!(indexed.status.success(), "activity-index: {indexed:?}");
+    let pushed = run(
+        sandbox,
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-page",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(
+        pushed.status.success(),
+        "push failed: {pushed:?}\n{}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    (repo, key)
+}
+
+/// The `sessions` array of one JSON page, as `(machine, last_unix value or
+/// why-kind)` pairs — machine and the conversation time are the two facts
+/// the paging tests reason about, and neither is conversation text.
+fn rows_of(body: &str) -> Vec<(String, serde_json::Value)> {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    v["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["machine"].as_str().unwrap().to_string(),
+                r["last_unix"].clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_zero_limit_and_unknown_sorts_are_usage_errors_on_the_socket() {
+    let sb = sandbox();
+    let (repo, key) = build_page_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    // `limit=0` — the one value most easily read as "just show me nothing".
+    // It is refused as a usage error on both routes, never answered with a
+    // list of zero rows.
+    for (target, needle) in [
+        ("/sessions?limit=0", "`limit`"),
+        ("/sessions?limit=x", "`limit`"),
+        ("/api/sessions?limit=0", "`limit`"),
+        ("/sessions?offset=x", "`offset`"),
+        ("/api/sessions?offset=x", "`offset`"),
+        ("/sessions?sort=by-time", "`sort`"),
+        ("/sessions?sort=", "`sort`"),
+    ] {
+        let (status, body) = ui.get(target);
+        assert_eq!(status, 400, "{target}: {body}");
+        assert!(
+            body.contains(needle),
+            "{target} must explain itself: {body}"
+        );
+        assert!(
+            !body.contains("Not in this destination"),
+            "{target}: a refused query must not read as a zero match: {body}"
+        );
+        if target.starts_with("/api/") {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["status"], serde_json::json!(400), "{target}: {body}");
+            assert!(v["matched"].is_null(), "{target}: {body}");
+            assert!(
+                v["note"].as_str().unwrap().contains("not an empty result"),
+                "{target}: {body}"
+            );
+        }
+    }
+    // An unresolvable filter and an unresolvable page are the same class of
+    // refusal, and the vocabulary error names the vocabulary.
+    let (_, body) = ui.get("/sessions?sort=by-time");
+    assert!(body.contains("last-desc"), "{body}");
+    // When both are wrong the filter answers first: one refusal names one
+    // thing, and neither is ever an empty list.
+    let (status, body) = ui.get("/sessions?day=not-a-date&limit=0");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("calendar date"), "{body}");
+    assert!(!body.contains("`limit`"), "one refusal at a time: {body}");
+}
+
+#[test]
+fn an_offset_past_the_list_is_an_empty_window_not_a_zero_hit() {
+    let sb = sandbox();
+    let (repo, key) = build_page_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    // The API: 200, empty rows, the matched count intact, the offset echoed
+    // rather than silently clamped.
+    let (status, body) = ui.get("/api/sessions?offset=9999&limit=3");
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["matched"], serde_json::json!(10), "{body}");
+    assert_eq!(rows_of(&body).len(), 0, "{body}");
+    assert_eq!(
+        v["paging"],
+        serde_json::json!({
+            "total": 10, "limit": 3, "offset": 9999, "sort": "last-desc"
+        }),
+        "{body}"
+    );
+
+    // The page: its own sentence, the way back, and none of the three
+    // "nothing matched" words.
+    let (status, html) = ui.get("/sessions?offset=9999");
+    assert_eq!(status, 200);
+    assert!(html.contains("No rows on this page."), "{html}");
+    assert!(html.contains("Back to page 1"), "{html}");
+    assert!(!html.contains("Not in this destination"), "{html}");
+
+    // While a genuine zero match keeps its own three-state sentence with the
+    // paging parameters riding along: a windowed zero is still the honest
+    // "not in this destination", and cannot become "No rows on this page".
+    let (status, html) = ui.get("/sessions?machine=mbp-zz&offset=99&limit=500&sort=size-desc");
+    assert_eq!(status, 200);
+    assert!(html.contains("Not in this destination"), "{html}");
+    assert!(!html.contains("No rows on this page."), "{html}");
+}
+
+/// The largest window start a URL can carry is `usize::MAX`, and it is not an
+/// error: `offset` is deliberately unclamped, so it must land on the same 200
+/// empty window as any other offset past the end. The paging nav above that
+/// sentence is the part with teeth — the page number it prints is derived
+/// arithmetic, and the largest offset is exactly where derived arithmetic
+/// stops being arithmetic. The verdict is the *next* request: a server that
+/// died computing this page could not answer it.
+#[test]
+fn the_largest_offset_a_url_can_carry_is_still_an_empty_window() {
+    let sb = sandbox();
+    let (repo, key) = build_page_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    // Width 1 makes the page count the row count, so the page numbers below
+    // are the archive's own ten; the offset is past every one of them.
+    let (status, html) = ui.get(&format!("/sessions?limit=1&offset={}", usize::MAX));
+    assert_eq!(status, 200, "{html}");
+    assert!(html.contains("No rows on this page."), "{html}");
+    assert!(html.contains("Back to page 1"), "{html}");
+
+    // The nav pins the window to the last page. The alternative a wrapped
+    // quotient produces is a page 0 no list has, or no current page at all —
+    // both would be a number this archive never contained.
+    assert_eq!(
+        html.matches("aria-current=\"page\"").count(),
+        1,
+        "exactly one page is current: {html}"
+    );
+    assert!(
+        html.contains("<b aria-current=\"page\">10</b>"),
+        "the empty window is pinned to the last page: {html}"
+    );
+
+    // The API answers the same offset the same way, echoing it rather than
+    // clamping it behind the caller's back.
+    let (status, body) = ui.get(&format!("/api/sessions?limit=1&offset={}", usize::MAX));
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["matched"], serde_json::json!(10), "{body}");
+    assert_eq!(rows_of(&body).len(), 0, "{body}");
+    assert_eq!(
+        v["paging"],
+        serde_json::json!({
+            "total": 10, "limit": 1, "offset": usize::MAX, "sort": "last-desc"
+        }),
+        "{body}"
+    );
+
+    // Reaching this line at all is the proof: the route returned instead of
+    // taking the accept loop down with it, so the next request is answered.
+    let (status, _) = ui.get("/sessions");
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn walking_the_pages_concatenates_the_whole_list_in_that_walks_order() {
+    let sb = sandbox();
+    let (repo, key) = build_page_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    // The corpus's one shapable fact: day `d`'s session carries conversation
+    // time 2025-03-0d 12:00 UTC, and the deepseek row carries none. Time
+    // orders are therefore fully derivable: descending days, then the one
+    // unrankable row at the bottom.
+    let day_unix = |day: u32| {
+        chrono::DateTime::parse_from_rfc3339(&format!("2025-03-{day:02}T12:00:00Z"))
+            .unwrap()
+            .timestamp()
+    };
+    for sort in [
+        "default",
+        "last-desc",
+        "last-asc",
+        "first-desc",
+        "first-asc",
+        "size-desc",
+    ] {
+        // One window no `limit` in the vocabulary can exceed: the clamp is
+        // 500 and the archive is 10 rows, so this response holds the whole
+        // order the walk below must reproduce.
+        let (status, full) = ui.get(&format!("/api/sessions?limit=500&sort={sort}"));
+        assert_eq!(status, 200);
+        let whole = rows_of(&full);
+        assert_eq!(whole.len(), 10, "{sort}: {full}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&full).unwrap()["paging"]["limit"],
+            serde_json::json!(500),
+            "{sort}: the clamp, not the ask"
+        );
+
+        // The walk: pages of 2, 3 and 4 rows — including widths that do not
+        // divide 10 — must reassemble into exactly that sequence.
+        for limit in [2, 3, 4, 500] {
+            let mut walked: Vec<(String, serde_json::Value)> = Vec::new();
+            let mut pages_seen = 0;
+            for page in 0.. {
+                // Bound the walk the contract itself implies: the first empty
+                // window is not past `total + limit`. Without the bound, a
+                // server that answered every window with the whole list would
+                // hang this test instead of failing it.
+                assert!(
+                    page * limit <= 10 + limit,
+                    "{sort}/{limit}: page {} never ran out of rows",
+                    page + 1
+                );
+                let (status, body) = ui.get(&format!(
+                    "/api/sessions?limit={limit}&offset={}&sort={sort}",
+                    page * limit
+                ));
+                assert_eq!(status, 200, "{sort}/{limit}: {body}");
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["paging"]["total"], serde_json::json!(10), "{body}");
+                assert_eq!(v["matched"], serde_json::json!(10), "{body}");
+                assert_eq!(v["not_matched"], serde_json::json!(0), "{body}");
+                let page_rows = rows_of(&body);
+                if page_rows.is_empty() {
+                    // The first empty window starts at or after the list's
+                    // end, and the page before it reached into the list — a
+                    // walk that stopped early would break both.
+                    assert!(
+                        page * limit >= 10,
+                        "{sort}/{limit}: an empty window before the end: {body}"
+                    );
+                    assert!(
+                        (page - 1) * limit < 10,
+                        "{sort}/{limit}: the walk skipped a row: {body}"
+                    );
+                    break;
+                }
+                pages_seen += 1;
+                walked.extend(page_rows);
+            }
+            assert_eq!(walked, whole, "{sort} in pages of {limit}");
+            // 10 rows: pages of 2 and 3 end mid-sequence; the count is right.
+            let expected_pages = (10 + limit - 1) / limit;
+            assert_eq!(pages_seen, expected_pages, "{sort}/{limit}");
+        }
+
+        // The known time orders: days descending (then the unrankable
+        // deepseek row), or ascending with the same row still last.
+        let last_col: Vec<&str> = whole
+            .iter()
+            .map(|(_, t)| t["kind"].as_str().unwrap())
+            .collect();
+        match sort {
+            "last-desc" => {
+                for w in whole.iter().take(PAGE_DAYS as usize) {
+                    let unix = w.1["unix"].as_i64().unwrap();
+                    assert!(
+                        (1..=PAGE_DAYS).any(|d| day_unix(d) == unix),
+                        "{sort}: {full}"
+                    );
+                }
+                assert_eq!(last_col[9], "unknown", "{sort}: {full}");
+                for pair in whole.windows(2).take(PAGE_DAYS as usize - 1) {
+                    assert!(
+                        pair[0].1["unix"].as_i64().unwrap() > pair[1].1["unix"].as_i64().unwrap(),
+                        "{sort} is descending on conversation time: {full}"
+                    );
+                }
+            }
+            "last-asc" => {
+                assert_eq!(last_col[9], "unknown", "{sort}: {full}");
+                for pair in whole.windows(2).take(PAGE_DAYS as usize - 1) {
+                    assert!(
+                        pair[0].1["unix"].as_i64().unwrap() < pair[1].1["unix"].as_i64().unwrap(),
+                        "{sort} is ascending on conversation time: {full}"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // The HTML list and the JSON rows cut the same window of the same order:
+    // the JSON page's short ids are exactly the HTML page's short ids, in the
+    // same positions.
+    let json_row_ids = |body: &str| -> Vec<String> {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["session_short_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let html_row_ids = |html: &str| -> Vec<String> {
+        html.split("<a class=mono href=\"/session?i=")
+            .skip(1)
+            .map(|rest| {
+                rest.split("\">")
+                    .nth(1)
+                    .unwrap()
+                    .split("</a>")
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+    for (limit, offset) in [(4, 0), (4, 6), (500, 0)] {
+        let (_, json_body) = ui.get(&format!(
+            "/api/sessions?sort=last-asc&limit={limit}&offset={offset}"
+        ));
+        let (_, html) = ui.get(&format!(
+            "/sessions?sort=last-asc&limit={limit}&offset={offset}"
+        ));
+        let from_json = json_row_ids(&json_body);
+        let from_html = html_row_ids(&html);
+        assert_eq!(
+            from_json, from_html,
+            "the HTML list and the API rows are the same window"
+        );
+        assert_eq!(
+            from_json.len(),
+            (offset..10).take(limit).count(),
+            "the window holds exactly the remaining rows"
+        );
+    }
+}
+
+/// The zero-JS nav is a set of links a browser can actually follow: the next
+/// link carries the sort, width and token, and the window it names is the
+/// window that renders.
+#[test]
+fn the_html_nav_links_walk_the_same_list_the_api_does() {
+    let sb = sandbox();
+    let (repo, key) = build_page_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    let (status, html) = ui.get("/sessions?limit=4&sort=last-asc");
+    assert_eq!(status, 200);
+    assert!(
+        html.contains("Sessions 1–4 of 10 · sorted by last message time, oldest first"),
+        "the range sentence names the window and the order: {html}"
+    );
+    assert!(
+        html.contains(
+            "sessions with an unknown conversation time are not ranked and stay \
+                       at the bottom"
+        ),
+        "the unrankable row is not quietly called the oldest: {html}"
+    );
+    assert!(
+        html.contains("<b aria-current=\"page\">1</b>"),
+        "the current page is where the reader already is: {html}"
+    );
+    // The next link: found in the nav, its target followed, continuation of
+    // the list rendered. The token rides in the link itself.
+    let target = {
+        let frag = html.split("<a href=\"").find(|f| f.contains("next ›"));
+        assert!(frag.is_some(), "there is a next link: {html}");
+        let frag = frag.unwrap();
+        frag[..frag.find('"').unwrap()].to_string()
+    };
+    for carried in ["limit=4", "sort=last-asc", "offset=4", "token="] {
+        assert!(
+            target.contains(carried),
+            "the link carries {carried}: {target}"
+        );
+    }
+    // Follow it exactly as a browser would.
+    let followed = target.split("&token=").next().unwrap().to_string();
+    let (status, page2) = ui.get(&followed);
+    assert_eq!(status, 200, "{followed}");
+    assert!(page2.contains("Sessions 5–8 of 10"), "{followed}: {page2}");
+    assert!(page2.contains("‹ previous"), "{page2}");
+    assert!(page2.contains("<b aria-current=\"page\">2</b>"), "{page2}");
+}
+
+/// No page of any sort can leave the launch filter: the launch filter decides
+/// the list once, before the socket is bound, and paging is a window of that
+/// decision.
+#[test]
+fn paging_cannot_page_out_of_the_launch_filter() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &["--machine", "mbp-a"], "ui");
+
+    for sort in ["last-desc", "first-asc", "size-desc", "default"] {
+        let mut machines: std::collections::BTreeSet<String> = Default::default();
+        let mut walked = 0;
+        for page in 0.. {
+            // Same bound as the walk test: the filtered list is 2 rows, so an
+            // un-ending page sequence is a violation to report, not to keep
+            // walking.
+            assert!(
+                page <= 2 + 1,
+                "{sort}: page {} never ran out of rows",
+                page + 1
+            );
+            let (status, body) = ui.get(&format!(
+                "/api/sessions?limit=1&offset={}&sort={sort}",
+                page
+            ));
+            assert_eq!(status, 200, "{sort}: {body}");
+            let rows = rows_of(&body);
+            if rows.is_empty() {
+                break;
+            }
+            for (machine, _) in &rows {
+                machines.insert(machine.clone());
+            }
+            walked += rows.len();
+        }
+        assert_eq!(walked, 2, "{sort}: the launch filter's list, all of it");
+        assert_eq!(
+            machines,
+            std::collections::BTreeSet::from(["mbp-a".to_string()]),
+            "{sort}: no drill-down page can include another machine"
+        );
+    }
+    // An offset the launch filter's list cannot fill is the empty window —
+    // with the matched total of the *filtered* list, not a 404 the reader
+    // could mistake for a filter having hidden the rows.
+    let (status, body) = ui.get("/api/sessions?offset=500&sort=size-desc");
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["matched"], serde_json::json!(2), "{body}");
+    assert_eq!(v["paging"]["total"], serde_json::json!(2), "{body}");
+    assert_eq!(rows_of(&body).len(), 0, "{body}");
+    // The drill-down filter composes with paging as a conjunction: mbp-b's
+    // rows are another machine's, the launch filter refuses the whole
+    // dimension, and a window of that is still empty — not leaked.
+    let (status, body) = ui.get("/api/sessions?machine=mbp-b&offset=0&limit=500");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        v["matched"],
+        serde_json::json!(2),
+        "sanity: launch standing"
+    );
+    let v2: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v2["matched"], serde_json::json!(0), "{body}");
+    assert_eq!(rows_of(&body).len(), 0, "{body}");
+}

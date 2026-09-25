@@ -56,13 +56,14 @@ nav.sub{display:flex;gap:1rem}
 <p class=sub><a href="/?token=golden-token">← overview</a> · destination <b>dest-under-test</b></p>
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
 <p><b>4</b> session(s) matched.</p>
+<p class=sub>Sessions 1–4 of 4 · sorted by last message time, newest first · sessions with an unknown conversation time are not ranked and stay at the bottom</p>
 <div class=scroll><table>
 <thead><tr><th>machine</th><th>source</th><th>session (short)</th><th>label</th><th class=n>shards</th><th class=n>bytes</th><th>first message</th><th>last message</th><th>snapshot time</th></tr></thead>
 <tbody>
+<tr><td class=mono>m-2</td><td>(no harness prefix)</td><td><a class=mono href="/session?i=3&token=golden-token">.hidden-~7526f9</a></td><td>no label recorded</td><td class=n>1</td><td class=n>20 B</td><td>2026-02-02 02:38 UTC</td><td>2026-02-02 02:38 UTC</td><td>2026-02-02 01:40 UTC</td></tr>
+<tr><td class=mono>m-2</td><td>claude-code</td><td><a class=mono href="/session?i=2&token=golden-token">claude-c~5690f8</a></td><td>no label recorded</td><td class=n>3</td><td class=n>200 B</td><td>2026-02-02 02:30 UTC</td><td>2026-02-02 02:31 UTC</td><td>2026-02-02 01:40 UTC</td></tr>
 <tr><td class=mono>m-1</td><td>claude-code</td><td><a class=mono href="/session?i=0&token=golden-token">claude-c~e58aa6</a></td><td>no label recorded</td><td class=n>2</td><td class=n>100 B</td><td>2026-02-02 00:40 UTC</td><td>2026-02-02 00:43 UTC</td><td>2026-02-02 01:40 UTC</td></tr>
 <tr><td class=mono>m-1</td><td>deepseek</td><td><a class=mono href="/session?i=1&token=golden-token">deepseek~e4009d</a></td><td>no label recorded</td><td class=n>1</td><td class=n>50 B</td><td><span class=bad title="unknown">unknown</span></td><td><span class=bad title="unknown">unknown</span></td><td>2026-02-02 01:40 UTC</td></tr>
-<tr><td class=mono>m-2</td><td>claude-code</td><td><a class=mono href="/session?i=2&token=golden-token">claude-c~5690f8</a></td><td>no label recorded</td><td class=n>3</td><td class=n>200 B</td><td>2026-02-02 02:30 UTC</td><td>2026-02-02 02:31 UTC</td><td>2026-02-02 01:40 UTC</td></tr>
-<tr><td class=mono>m-2</td><td>(no harness prefix)</td><td><a class=mono href="/session?i=3&token=golden-token">.hidden-~7526f9</a></td><td>no label recorded</td><td class=n>1</td><td class=n>20 B</td><td>2026-02-02 02:38 UTC</td><td>2026-02-02 02:38 UTC</td><td>2026-02-02 01:40 UTC</td></tr>
 </tbody></table></div>
 <footer>
 <p><b>Metadata tier.</b> This page was rendered from one archive-metadata read taken before the server started (snapshots + index + tree + the activity sidecar). The only conversation text it holds is each session's one-line label — at most 100 characters, recorded in the activity index, which rode that same metadata read. 0 session shard blob(s) were fetched by that read — a session's full conversation is fetched only when you click it and then click <i>load</i>, and the cost is shown before you do.</p>
