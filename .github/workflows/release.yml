@@ -22,8 +22,14 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  # Only the auto-generated GITHUB_TOKEN is used (no stored secrets). Writing
-  # the Release and uploading assets to it needs contents: write.
+  # The workflow-wide grant is `contents: write` because the build-and-release
+  # job uses the auto-generated GITHUB_TOKEN to create the Release and upload
+  # its assets. The two tap jobs narrow it at the job level: tap-guard gets no
+  # scope at all, homebrew-tap only contents: read. The one stored secret this
+  # workflow reads is TAP_TOKEN — a fine-grained PAT on dimpurr/homebrew-tap,
+  # used only by the homebrew-tap job to clone that repository, push a branch,
+  # and open a draft PR, because the auto-generated GITHUB_TOKEN cannot write
+  # to another repository.
   contents: write
 
 jobs:
@@ -382,6 +388,10 @@ jobs:
   tap-guard:
     name: tap update preconditions
     runs-on: ubuntu-latest
+    # Deciding is local: this job reads a secret and a tag name, prints a
+    # reason, and publishes an output for `needs`. It never talks to GitHub's
+    # API, so it needs no GITHUB_TOKEN scope at all.
+    permissions: {}
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
     steps:
@@ -407,6 +417,12 @@ jobs:
     needs: [build-and-release, tap-guard]
     if: needs.tap-guard.outputs.enabled == 'true'
     runs-on: ubuntu-latest
+    # The auto-generated token appears in one place — `gh release download` of
+    # this run's SHA256SUMS, which reading the Release is all it needs.
+    # Everything that touches dimpurr/homebrew-tap below (clone, push,
+    # `gh pr create`) authenticates with TAP_TOKEN instead.
+    permissions:
+      contents: read
 
     env:
       TAG: ${{ github.ref_name }}

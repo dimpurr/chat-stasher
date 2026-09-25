@@ -114,11 +114,13 @@ automation creates one.
    `brew install dimpurr/tap/chat-stasher` on a clean Mac, which must install
    the version just released.
 
-   `brew test dimpurr/tap/chat-stasher` is that acceptance test in one command:
-   it installs the tapped formula and asserts that the binary reports the
-   version the URLs pin. Neither `brew audit` nor `brew style` runs the formula's
-   `test do` block, so the two lint checks above cannot see a formula that
-   installs but reports the wrong version. This one can.
+   `brew test dimpurr/tap/chat-stasher` finishes that test. `brew test`
+   installs nothing — it runs the `test do` block of a formula that is already
+   installed — so run it after the `brew install` above. The block asserts that
+   the binary in the Cellar reports the version the URLs pin. Neither `brew
+   audit` nor `brew style` runs the formula's `test do` block, so the two lint
+   checks above cannot see a formula that installs but reports the wrong
+   version. This one can.
 10. **Move `main` forward**: bump `crates/chat-stasher/Cargo.toml` to the next
     development version (`X.Y.(Z+1)-dev` or `X.(Y+1).0-dev`) in a new commit.
     `main` never sits on an unsuffixed version.
@@ -254,6 +256,9 @@ thing it does not.
   broken cannot make a release fail, and a release cannot merge to the tap
   without the owner's review (step 9). A pull request for that branch is never
   opened twice: an existing one, open or closed, is left alone and reported.
+  A failure inside the job still marks the workflow *run* red — the Release
+  itself is already published at that point, so that red is a report on the tap
+  update, not a failed release.
 
 It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
 every check above, so `git tag -a` in step 6 is a step the owner follows and not
