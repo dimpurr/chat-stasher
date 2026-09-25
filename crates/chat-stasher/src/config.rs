@@ -1542,7 +1542,10 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = Config::load();
+        // `Config::load` refuses a file it cannot act on, and this one is
+        // loadable: the reference resolves, and no path in it needs expanding.
+        let cfg =
+            Config::load().expect("a config whose only option is a set env reference must load");
         let resolved = cfg.destinations["d1"].options.get("secret");
         assert!(resolved.is_some_and(|value| value == "test-only-secret-value"));
 
