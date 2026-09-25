@@ -422,6 +422,14 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     if version.parse::<i64>().ok() != Some(SCHEMA_VERSION) {
         bail!("unsupported FTS index schema version; use `chat-stasher index clear` then rebuild");
     }
+    let integrity = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        .map_err(|error| {
+            anyhow!("corrupt FTS index; use `chat-stasher index clear` then rebuild: {error}")
+        })?;
+    if integrity != "ok" {
+        bail!("corrupt FTS index; use `chat-stasher index clear` then rebuild");
+    }
     connection
         .query_row("SELECT count(*) FROM documents_fts", [], |row| {
             row.get::<_, i64>(0)
@@ -429,6 +437,30 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         .map_err(|error| {
             anyhow!("corrupt FTS index; use `chat-stasher index clear` then rebuild: {error}")
         })?;
+    let inconsistent = connection
+        .query_row(
+            "SELECT count(*) FROM documents d \
+             LEFT JOIN documents_fts f ON f.id = d.id \
+             WHERE f.id IS NULL OR f.title != d.title OR f.body != d.body",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| {
+            anyhow!("corrupt FTS index; use `chat-stasher index clear` then rebuild: {error}")
+        })?;
+    let extra = connection
+        .query_row(
+            "SELECT count(*) FROM documents_fts f \
+             LEFT JOIN documents d ON d.id = f.id WHERE d.id IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| {
+            anyhow!("corrupt FTS index; use `chat-stasher index clear` then rebuild: {error}")
+        })?;
+    if inconsistent != 0 || extra != 0 {
+        bail!("corrupt FTS index; use `chat-stasher index clear` then rebuild");
+    }
     Ok(())
 }
 
@@ -555,6 +587,39 @@ mod tests {
         fs::write(index.db_path(), b"not sqlite").unwrap();
         let error = index.check().unwrap_err().to_string();
         assert!(error.contains("corrupt") || error.contains("invalid"));
+    }
+
+    #[test]
+    fn inconsistent_open_database_is_refused_by_check_and_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [SourceDoc {
+            id: "synthetic/session".into(),
+            source_sha256: "synthetic-source".into(),
+        }];
+        index
+            .build(&sources, |_| {
+                Ok(DocText {
+                    title: "synthetic title".into(),
+                    body: "synthetic body".into(),
+                })
+            })
+            .unwrap();
+        Connection::open(index.db_path())
+            .unwrap()
+            .execute("DELETE FROM documents_fts", [])
+            .unwrap();
+
+        assert!(index.check().unwrap_err().to_string().contains("corrupt"));
+        let read = Cell::new(false);
+        let error = index
+            .build(&sources, |_| {
+                read.set(true);
+                Ok(DocText::default())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("corrupt"));
+        assert!(!read.get());
     }
 
     #[cfg(unix)]

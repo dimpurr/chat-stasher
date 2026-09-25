@@ -18,7 +18,7 @@ use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, NodeType};
-use rustic_core::{Credentials, LsOptions, Repository};
+use rustic_core::{Credentials, Grouped, LsOptions, Repository, SnapshotGroupCriterion};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
@@ -6706,12 +6706,16 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let identity = args.destination.as_deref().unwrap_or(&cfg.repo_root);
+    let identity = index_identity(
+        args.destination.as_deref(),
+        args.repo.as_deref(),
+        &cfg.repo_root,
+    );
     let Some(cache_root) = scanner::user_cache_dirs().into_iter().next() else {
         eprintln!("index: no operating-system cache directory is available");
         return ExitCode::FAILURE;
     };
-    let index = chat_stasher::fts::Index::for_destination(&cache_root, identity);
+    let index = chat_stasher::fts::Index::for_destination(&cache_root, &identity);
     match operation {
         "check" => match index.check() {
             Ok(documents) => {
@@ -6745,18 +6749,7 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     return ExitCode::from(3);
                 }
             };
-            let body_cache = match chat_stasher::body_cache::settings_for(&config) {
-                Ok(settings) if settings.enabled() => Some(std::sync::Arc::new(
-                    chat_stasher::body_cache::BodyCache::new(settings.root, settings.max_bytes),
-                )),
-                Ok(_) => None,
-                Err(error) => {
-                    eprintln!("index: body cache settings are invalid: {error:#}");
-                    return ExitCode::from(3);
-                }
-            };
-            let backup =
-                BackupStore::for_metadata_query(cfg.clone()).with_body_cache(body_cache.clone());
+            let backup = BackupStore::for_metadata_query(cfg.clone());
             let backends = match backup.backends() {
                 Ok(backends) => backends,
                 Err(error) => {
@@ -6788,22 +6781,36 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 let mut entries_all = Vec::new();
                 let mut paths_by_id = BTreeMap::<String, Vec<usize>>::new();
                 let mut titles = BTreeMap::<String, String>::new();
-                for snapshot in readback::newest_snapshot_per_host(snapshots) {
-                    let root = repo
-                        .node_from_snapshot_and_path(&snapshot, "")
-                        .context("read snapshot root for FTS")?;
-                    let entries = repo
-                        .ls(&root, &LsOptions::default())
-                        .context("list snapshot files for FTS")?
-                        .collect::<rustic_core::RusticResult<Vec<_>>>()
-                        .context("collect snapshot files for FTS")?;
-                    for (path, node) in &entries {
-                        if node.node_type == NodeType::File {
+                let grouped =
+                    Grouped::from_items(snapshots, SnapshotGroupCriterion::new().hostname(true));
+                for group in grouped.groups {
+                    let mut snapshots = group.items;
+                    snapshots.sort_by(|a, b| b.time.cmp(&a.time));
+                    let mut resolved_sessions = BTreeSet::new();
+                    for snapshot in snapshots {
+                        let root = repo
+                            .node_from_snapshot_and_path(&snapshot, "")
+                            .context("read snapshot root for FTS")?;
+                        let entries = repo
+                            .ls(&root, &LsOptions::default())
+                            .context("list snapshot files for FTS")?
+                            .collect::<rustic_core::RusticResult<Vec<_>>>()
+                            .context("collect snapshot files for FTS")?;
+                        let snapshot_sessions = unresolved_index_sessions(
+                            entries.iter().filter_map(|(path, node)| {
+                                (node.node_type == NodeType::File).then_some(path.as_path())
+                            }),
+                            &resolved_sessions,
+                        );
+                        for (path, node) in &entries {
+                            if node.node_type != NodeType::File {
+                                continue;
+                            }
                             if let Some((machine, session, _)) = readback::bucket_shard_path(path) {
-                                paths_by_id
-                                    .entry(format!("{machine}/{session}"))
-                                    .or_default()
-                                    .push(entries_all.len());
+                                let id = format!("{machine}/{session}");
+                                if snapshot_sessions.contains(&id) {
+                                    paths_by_id.entry(id).or_default().push(entries_all.len());
+                                }
                             } else if let Some(machine) = sidecar::activity_index_machine(path) {
                                 let mut bytes = Vec::new();
                                 repo.dump(node, &mut bytes)
@@ -6819,16 +6826,16 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                                             text, ..
                                         }) = row.title
                                         {
-                                            titles.insert(
-                                                format!("{machine}/{}", row.session_id),
-                                                text,
-                                            );
+                                            titles
+                                                .entry(format!("{machine}/{}", row.session_id))
+                                                .or_insert(text);
                                         }
                                     }
                                 }
                             }
+                            entries_all.push((path.clone(), node.clone()));
                         }
-                        entries_all.push((path.clone(), node.clone()));
+                        resolved_sessions.extend(snapshot_sessions);
                     }
                 }
                 for indexes in paths_by_id.values_mut() {
@@ -6844,26 +6851,27 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 let sources: Vec<_> = paths_by_id
                     .iter()
                     .map(|(id, indexes)| {
-                        let mut hasher = sha2::Sha256::new();
-                        use sha2::Digest;
-                        for idx in indexes {
-                            let (path, node) = &entries_all[*idx];
-                            hasher.update(path.to_string_lossy().as_bytes());
-                            hasher.update([0]);
-                            hasher.update(node.meta.size.to_le_bytes());
-                            hasher.update(format!("{:?}", node.meta.mtime).as_bytes());
-                            hasher.update([0]);
-                        }
-                        if let Some(title) = titles.get(id) {
-                            hasher.update(title.as_bytes());
-                        }
+                        let shards: Vec<_> = indexes
+                            .iter()
+                            .map(|idx| {
+                                let (path, node) = &entries_all[*idx];
+                                (
+                                    path.to_string_lossy().into_owned(),
+                                    node.content
+                                        .as_deref()
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .map(|data_id| data_id.to_hex().as_str().to_owned())
+                                        .collect(),
+                                )
+                            })
+                            .collect();
                         chat_stasher::fts::SourceDoc {
                             id: id.clone(),
-                            source_sha256: hasher
-                                .finalize()
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect(),
+                            source_sha256: index_source_fingerprint(
+                                &shards,
+                                titles.get(id).map(String::as_str),
+                            ),
                         }
                     })
                     .collect();
@@ -6871,13 +6879,6 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     let indexes = paths_by_id.get(id).ok_or_else(|| {
                         anyhow::anyhow!("changed source disappeared during index build")
                     })?;
-                    let session_bytes: u64 = indexes
-                        .iter()
-                        .map(|idx| entries_all[*idx].1.meta.size)
-                        .sum();
-                    let _session_scope = body_cache
-                        .as_ref()
-                        .map(|cache| cache.declare_session(session_bytes));
                     let mut raw = Vec::new();
                     for idx in indexes {
                         repo.dump(&entries_all[*idx].1, &mut raw)
@@ -6907,6 +6908,54 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             }
         }
     }
+}
+
+fn index_identity(
+    destination: Option<&str>,
+    repo_override: Option<&str>,
+    repo_root: &str,
+) -> String {
+    match repo_override {
+        Some(repo) => format!("repo-override:{repo}"),
+        None => destination
+            .map(str::to_owned)
+            .unwrap_or_else(|| repo_root.to_owned()),
+    }
+}
+
+fn unresolved_index_sessions<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+    already_resolved: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    paths
+        .into_iter()
+        .filter_map(readback::bucket_shard_path)
+        .map(|(machine, session, _)| format!("{machine}/{session}"))
+        .filter(|id| !already_resolved.contains(id))
+        .collect()
+}
+
+fn index_source_fingerprint(shards: &[(String, Vec<String>)], title: Option<&str>) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"chat-stasher-fts-source-v1\0");
+    for (path, data_ids) in shards {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(data_ids.len().to_le_bytes());
+        for data_id in data_ids {
+            hasher.update(data_id.as_bytes());
+            hasher.update([0]);
+        }
+    }
+    if let Some(title) = title {
+        hasher.update(title.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// One line saying whether this run used the body cache — and if not, which of
@@ -7487,6 +7536,67 @@ mod decision_surface_tests {
     use super::*;
     use clap::CommandFactory;
     use std::fs;
+
+    #[test]
+    fn explicit_repo_override_gets_its_own_index_identity() {
+        let named = index_identity(Some("archive"), None, "/archive/configured");
+        let overridden = index_identity(
+            Some("archive"),
+            Some("/archive/other"),
+            "/archive/configured",
+        );
+        let direct = index_identity(None, Some("/archive/other"), "/unused");
+        assert_eq!(named, "archive");
+        assert_ne!(named, overridden);
+        assert_eq!(overridden, direct);
+    }
+
+    #[test]
+    fn source_fingerprint_changes_when_archive_content_id_changes() {
+        let first = vec![(
+            "sessions/machine/session/000001.jsonl".into(),
+            vec!["blob-a".into()],
+        )];
+        let same = vec![(
+            "sessions/machine/session/000001.jsonl".into(),
+            vec!["blob-a".into()],
+        )];
+        let changed = vec![(
+            "sessions/machine/session/000001.jsonl".into(),
+            vec!["blob-b".into()],
+        )];
+        let first_hash = index_source_fingerprint(&first, Some("synthetic title"));
+        assert_eq!(
+            first_hash,
+            index_source_fingerprint(&same, Some("synthetic title"))
+        );
+        assert_ne!(
+            first_hash,
+            index_source_fingerprint(&changed, Some("synthetic title"))
+        );
+    }
+
+    #[test]
+    fn index_snapshot_resolution_retains_sessions_missing_from_newer_snapshot() {
+        let newest = [PathBuf::from("sessions/machine/active/000001.jsonl")];
+        let newest_sessions =
+            unresolved_index_sessions(newest.iter().map(PathBuf::as_path), &BTreeSet::new());
+        assert_eq!(
+            newest_sessions,
+            BTreeSet::from(["machine/active".to_owned()])
+        );
+
+        let older = [
+            PathBuf::from("sessions/machine/archived/000001.jsonl"),
+            PathBuf::from("sessions/machine/active/000001.jsonl"),
+        ];
+        let older_sessions =
+            unresolved_index_sessions(older.iter().map(PathBuf::as_path), &newest_sessions);
+        assert_eq!(
+            older_sessions,
+            BTreeSet::from(["machine/archived".to_owned()])
+        );
+    }
 
     /// A report for a run that stopped before the remote step could do
     /// anything, used by the payload tests below.
