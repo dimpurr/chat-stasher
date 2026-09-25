@@ -91,7 +91,11 @@
  *  2. **Half a leg can now be written down** (detailPath/detailUrl may be null,
  *     plus `partial`). DeepSeek's list segment has a four-source provenance; its
  *     body segment had none. ~~(🔴 superseded by W8 below: DeepSeek's body segment
- *     is no longer the null case — Perplexity is.)~~ Previously that left only two options: keep calling
+ *     is no longer the null case — Perplexity is.)~~ 🔴 That struck-out sentence is
+ *     itself history now, and W157 records why: Perplexity took the null case over
+ *     from DeepSeek and held it until W84/W84b filled its body in from the
+ *     2026-09-23 live probe, so **no plan has a null body segment today**.
+ *     Previously that left only two options: keep calling
  *     the whole platform "unsupported" (even though the list is readable), or
  *     invent a body route to fill the plan in (which is the genuinely dangerous
  *     kind of lie). There is now a third way to write it, and it corresponds to a
@@ -122,8 +126,12 @@
  *
  * 🔴 The half-leg **mechanism** stays, and this change did not touch it: `partial`
  *    and 'detail-unsupported' are still how a platform with a sourced list and an
- *    unsourced body is written down (Perplexity is in exactly that state). What
- *    changed is one platform's facts, not the shape of the table.
+ *    unsourced body is written down. 🔴 W157 · **No plan is in that state today.**
+ *    Perplexity was the last one and held it through C27 and W28; W84/W84b filled
+ *    its body segment in from the 2026-09-23 live probe, so `PERPLEXITY_PLAN.partial`
+ *    is gone and every plan's `detailPath`/`detailUrl` is non-null. What changed is
+ *    platform facts, not the shape of the table — the branch below is unreachable,
+ *    not removed, and it is what a future unsourced plan would land on.
  *
  * 🔴 **What W8 did NOT verify**, and therefore must not be written down as known:
  *    whether that endpoint pages, or truncates a long conversation. Not one of the
@@ -943,8 +951,10 @@ export interface BackfillEnumPlan {
   /**
    * 4 · The body endpoint.
    * 🔴 C26: **null is allowed** — "the list segment is sourced, the body segment
-   *    is not" is a real intermediate state (Perplexity is in it), and it must be
-   *    writable rather than forcing someone to invent a body route.
+   *    is not" is a real intermediate state, and it must be readable rather than
+   *    forcing someone to invent a body route. 🔴 W157 · **No plan is in it today**;
+   *    Perplexity held this state from C27 until W84/W84b filled its body in, and it
+   *    was the last one. The type keeps the null arm so the state stays expressible.
    *    null ⇒ the content script allows no body URL for this platform (rule 4 of
    *    tab-port.ts), and the engine halts with 'detail-unsupported' **before
    *    issuing a single body request**.
@@ -4583,9 +4593,13 @@ export function unsupportedBackfillFor(platform: string): UnsupportedBackfill | 
 
 /**
  * 🔴 C26 · "Can this plan really get past conversation **bodies** back?"
- * A plan with only the list segment (Perplexity) must answer false here — it can
- * list conversations but cannot fetch a single body, and to the user the history
- * still has not been backfilled.
+ * A plan with only the list segment must answer false here — it can list
+ * conversations but cannot fetch a single body, and to the user the history still
+ * has not been backfilled.
+ *
+ * 🔴 W157 · Perplexity used to be named here as the example of such a plan, and it
+ * is no longer one (W84/W84b), so the example is gone rather than replaced: no plan
+ * in the table is list-only today, and naming another would invent one.
  */
 export function canBackfillDetail(plan: BackfillEnumPlan): boolean {
   return plan.detailPath !== null && plan.detailUrl !== null;
