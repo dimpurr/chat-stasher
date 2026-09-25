@@ -1,13 +1,15 @@
 //! Render scheduler templates without installing or registering them.
 //!
 //! The scheduler is deliberately external to chat-stasher: launchd/systemd
-//! starts one run-once process, which exits after the pass. This module only
-//! renders files and the commands a human may choose to run later.
+//! starts one run-once process, which exits after the pass. Rendering remains
+//! side-effect free; the launchd install helpers are explicit and testable.
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::config::{Config, DEFAULT_BACKUP_INTERVAL_SECS};
 
@@ -50,6 +52,11 @@ pub const RECLAIM_STAGE_MINUTE: u8 = 17;
 /// minutes of random start delay so a fleet of machines does not all hit their
 /// destination at 03:17:00 on the same second.
 pub const RECLAIM_STAGE_RANDOMIZED_DELAY_SECS: u64 = 15 * 60;
+
+/// Per-run scheduler jitter, in seconds. launchd has no random-delay key for
+/// `StartInterval`, so the shell preamble sleeps for a bounded random interval
+/// before `exec`; systemd gets the same bound through `RandomizedDelaySec`.
+pub const SCHEDULER_RANDOMIZED_DELAY_SECS: u64 = 5 * 60;
 
 /// Cap for the launchd stdout/stderr logs, in bytes. Beyond this the log is
 /// truncated to empty in place at the start of the next run (see
@@ -117,6 +124,63 @@ pub struct ReclaimStageArgs {
     pub keep_ssh_masters: bool,
 }
 
+/// Resolve the executable that a persistent scheduler may safely embed.
+/// Cargo's `target/` paths are disposable build products, not installation
+/// paths. An explicit non-build path is accepted without requiring it to exist
+/// yet, so a package manager can render before its copy is complete.
+pub fn resolve_binary(explicit: Option<&Path>, current_exe: &Path, home: &Path) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        let path = absolute_path(path);
+        if is_build_artifact(&path) {
+            bail!(
+                "binary path must be an installed path outside target/: {}",
+                path.display()
+            );
+        }
+        return Ok(path);
+    }
+
+    let current_exe = absolute_path(current_exe);
+    if !is_build_artifact(&current_exe) {
+        return Ok(current_exe);
+    }
+
+    let candidates = [
+        home.join(".local/bin/chat-stasher"),
+        PathBuf::from("/opt/homebrew/bin/chat-stasher"),
+        PathBuf::from("/usr/local/bin/chat-stasher"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "current executable is a build artifact at {}; pass --binary with an installed path or install chat-stasher under ~/.local/bin or Homebrew",
+                current_exe.display()
+            )
+        })
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn is_build_artifact(path: &Path) -> bool {
+    let parts: Vec<&str> = path
+        .iter()
+        .filter_map(|component| component.to_str())
+        .collect();
+    parts
+        .windows(2)
+        .any(|window| window[0] == "target" && matches!(window[1], "debug" | "release"))
+}
+
 /// Resolve the configured cadence. Zero is rejected because it would create
 /// a hot loop in both launchd and systemd.
 pub fn interval_secs(config: &Config) -> Result<u64> {
@@ -158,17 +222,47 @@ fn render_run_once(
 ) -> Vec<TemplateFile> {
     match format {
         Format::Launchd => vec![TemplateFile {
-            name: format!("{LAUNCHD_LABEL}.plist"),
-            content: render_launchd(binary, stage, interval, args, home),
+            name: format!(
+                "{}.plist",
+                launchd_label_for_destination(Unit::RunOnce, args.destination.as_deref())
+            ),
+            content: render_launchd(
+                binary,
+                stage,
+                interval,
+                args,
+                home,
+                &launchd_label_for_destination(Unit::RunOnce, args.destination.as_deref()),
+            ),
         }],
         Format::Systemd => vec![
             TemplateFile {
-                name: SYSTEMD_SERVICE.to_string(),
-                content: render_systemd_service(binary, stage, args),
+                name: systemd_service_name_for_destination(
+                    Unit::RunOnce,
+                    args.destination.as_deref(),
+                ),
+                content: render_systemd_service(
+                    binary,
+                    stage,
+                    args,
+                    &systemd_service_name_for_destination(
+                        Unit::RunOnce,
+                        args.destination.as_deref(),
+                    ),
+                ),
             },
             TemplateFile {
-                name: SYSTEMD_TIMER.to_string(),
-                content: render_systemd_timer(interval),
+                name: systemd_timer_name_for_destination(
+                    Unit::RunOnce,
+                    args.destination.as_deref(),
+                ),
+                content: render_systemd_timer(
+                    interval,
+                    &systemd_service_name_for_destination(
+                        Unit::RunOnce,
+                        args.destination.as_deref(),
+                    ),
+                ),
             },
         ],
     }
@@ -208,10 +302,32 @@ pub fn launchd_label(unit: Unit) -> &'static str {
     }
 }
 
+/// Return a collision-resistant, filesystem-safe launchd label for a named
+/// destination. Legacy single-destination and reclaim-stage labels stay
+/// unchanged so existing users can uninstall them.
+pub fn launchd_label_for_destination(unit: Unit, destination: Option<&str>) -> String {
+    let base = launchd_label(unit);
+    match destination {
+        Some(name) => format!("{base}.{}", destination_component(name)),
+        None => base.to_string(),
+    }
+}
+
 pub fn systemd_service_name(unit: Unit) -> &'static str {
     match unit {
         Unit::RunOnce => SYSTEMD_SERVICE,
         Unit::ReclaimStage => SYSTEMD_SERVICE_RECLAIM_STAGE,
+    }
+}
+
+pub fn systemd_service_name_for_destination(unit: Unit, destination: Option<&str>) -> String {
+    let base = systemd_service_name(unit);
+    match destination {
+        Some(name) => base.replace(
+            ".service",
+            &format!("-{}.service", destination_component(name)),
+        ),
+        None => base.to_string(),
     }
 }
 
@@ -222,6 +338,44 @@ pub fn systemd_timer_name(unit: Unit) -> &'static str {
     }
 }
 
+pub fn systemd_timer_name_for_destination(unit: Unit, destination: Option<&str>) -> String {
+    let base = systemd_timer_name(unit);
+    match destination {
+        Some(name) => base.replace(".timer", &format!("-{}.timer", destination_component(name))),
+        None => base.to_string(),
+    }
+}
+
+fn destination_component(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if safe == name && !safe.is_empty() {
+        return safe;
+    }
+    let digest = Sha256::digest(name.as_bytes());
+    let suffix = digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{}-{suffix}",
+        if safe.is_empty() {
+            "destination"
+        } else {
+            &safe
+        }
+    )
+}
+
 /// Write rendered templates. For launchd, output is the plist file. For
 /// systemd, output is a directory containing the service and timer files.
 pub fn write_templates(
@@ -229,9 +383,9 @@ pub fn write_templates(
     output: &Path,
     files: &[TemplateFile],
 ) -> Result<Vec<PathBuf>> {
-    if matches!(format, Format::Systemd) {
+    if matches!(format, Format::Systemd) || files.len() > 1 {
         fs::create_dir_all(output)
-            .with_context(|| format!("create systemd template directory {}", output.display()))?;
+            .with_context(|| format!("create scheduler template directory {}", output.display()))?;
     } else if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create launchd template directory {}", parent.display()))?;
@@ -239,7 +393,7 @@ pub fn write_templates(
 
     let mut paths = Vec::with_capacity(files.len());
     for file in files {
-        let path = if matches!(format, Format::Systemd) {
+        let path = if matches!(format, Format::Systemd) || files.len() > 1 {
             output.join(&file.name)
         } else {
             output.to_path_buf()
@@ -254,52 +408,202 @@ pub fn write_templates(
 pub fn install_command(unit: Unit, format: Format, paths: &[PathBuf]) -> String {
     match format {
         Format::Launchd => {
-            let label = launchd_label(unit);
-            format!(
-                "mkdir -p \"$HOME/Library/LaunchAgents\" \"$HOME/Library/Logs/chat-stasher\" && cp {} \"$HOME/Library/LaunchAgents/{label}.plist\" && launchctl bootstrap \"gui/$(id -u)\" \"$HOME/Library/LaunchAgents/{label}.plist\"",
-                paths
-                    .first()
-                    .map(|p| shell_quote(p))
-                    .unwrap_or_else(|| "<generated-plist>".to_string())
-            )
+            let mut command = String::from(
+                "mkdir -p \"$HOME/Library/LaunchAgents\" \"$HOME/Library/Logs/chat-stasher\"",
+            );
+            for path in paths {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("{}.plist", launchd_label(unit)));
+                command.push_str(&format!(
+                    " && cp {} \"$HOME/Library/LaunchAgents/{name}\" && launchctl bootstrap \"gui/$(id -u)\" \"$HOME/Library/LaunchAgents/{name}\"",
+                    shell_quote(path)
+                ));
+            }
+            if paths.is_empty() {
+                command.push_str(" && # generated plist path missing");
+            }
+            command
         }
         Format::Systemd => {
-            let service_name = systemd_service_name(unit);
-            let timer_name = systemd_timer_name(unit);
-            let service = paths
-                .iter()
-                .find(|p| {
-                    p.file_name()
-                        .is_some_and(|n| n.to_string_lossy() == service_name)
-                })
-                .map(|p| shell_quote(p))
-                .unwrap_or_else(|| "<generated-service>".to_string());
-            let timer = paths
-                .iter()
-                .find(|p| {
-                    p.file_name()
-                        .is_some_and(|n| n.to_string_lossy() == timer_name)
-                })
-                .map(|p| shell_quote(p))
-                .unwrap_or_else(|| "<generated-timer>".to_string());
-            format!(
-                "install -Dm644 {service} \"$HOME/.config/systemd/user/{service_name}\" && install -Dm644 {timer} \"$HOME/.config/systemd/user/{timer_name}\" && systemctl --user daemon-reload && systemctl --user enable --now {timer_name}"
-            )
+            // A destination-specific render names its units after the
+            // destination, so the installed target names must come from the
+            // files themselves, not from the unit's fixed default names. With
+            // several destinations there is one service+timer pair per
+            // destination, so every printed file is installed and every timer
+            // is enabled — not only the first pair.
+            if paths.is_empty() {
+                return format!(
+                    "systemctl --user daemon-reload && systemctl --user enable --now {}",
+                    systemd_timer_name(unit)
+                );
+            }
+            let mut command = String::new();
+            for path in paths {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                command.push_str(&format!(
+                    "install -Dm644 {} \"$HOME/.config/systemd/user/{name}\" && ",
+                    shell_quote(path)
+                ));
+            }
+            command.push_str("systemctl --user daemon-reload");
+            for path in paths {
+                let Some(name) = path.file_name() else {
+                    continue;
+                };
+                let name = name.to_string_lossy();
+                if name.ends_with(".timer") {
+                    command.push_str(&format!(" && systemctl --user enable --now {name}"));
+                }
+            }
+            command
         }
     }
 }
 
-pub fn install_command_for_saved(unit: Unit, format: Format) -> String {
+/// Installation command for templates that render-only mode only *printed* by
+/// name. One destination yields one plist (launchd) or one service+timer pair
+/// (systemd), so the command names every printed file instead of assuming the
+/// single fixed unit name.
+pub fn install_command_for_files(format: Format, files: &[TemplateFile]) -> String {
     match format {
         Format::Launchd => {
-            let label = launchd_label(unit);
-            format!(
-                "mkdir -p \"$HOME/Library/LaunchAgents\" \"$HOME/Library/Logs/chat-stasher\" && launchctl bootstrap \"gui/$(id -u)\" \"$HOME/Library/LaunchAgents/{label}.plist\""
-            )
+            let mut command = String::from(
+                "mkdir -p \"$HOME/Library/LaunchAgents\" \"$HOME/Library/Logs/chat-stasher\"",
+            );
+            for file in files {
+                command.push_str(&format!(
+                    " && launchctl bootstrap \"gui/$(id -u)\" \"$HOME/Library/LaunchAgents/{name}\"",
+                    name = file.name
+                ));
+            }
+            command
         }
         Format::Systemd => {
-            let timer_name = systemd_timer_name(unit);
-            format!("systemctl --user daemon-reload && systemctl --user enable --now {timer_name}")
+            let mut command = String::from("systemctl --user daemon-reload");
+            for file in files.iter().filter(|file| file.name.ends_with(".timer")) {
+                command.push_str(&format!(
+                    " && systemctl --user enable --now {name}",
+                    name = file.name
+                ));
+            }
+            command
+        }
+    }
+}
+
+/// The launchctl executable is passed in by the caller so tests can use a
+/// throwaway fake without touching the machine's real launchd session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallResult {
+    Installed,
+    Unchanged,
+}
+
+pub fn install_launchd_agents(
+    home: &Path,
+    files: &[TemplateFile],
+    launchctl: &Path,
+    domain: &str,
+) -> Result<Vec<InstallResult>> {
+    let agents = home.join("Library/LaunchAgents");
+    fs::create_dir_all(&agents)
+        .with_context(|| format!("create launchd agent directory {}", agents.display()))?;
+    fs::create_dir_all(home.join("Library/Logs/chat-stasher"))
+        .with_context(|| format!("create launchd log directory under {}", home.display()))?;
+
+    let mut results = Vec::with_capacity(files.len());
+    for file in files {
+        let path = agents.join(&file.name);
+        let label = file.name.strip_suffix(".plist").unwrap_or(&file.name);
+        let target = format!("{domain}/{label}");
+        // A read error means the installed plist is absent or unreadable, which
+        // is not the same bytes as what we would write. The safe direction is
+        // to rewrite and reload, never to leave a stale unit in place.
+        let same = fs::read(&path)
+            .map(|bytes| bytes == file.content.as_bytes())
+            .unwrap_or(false); // reason: an absent or unreadable installed plist is treated as changed, so install rewrites and reloads it
+        let loaded = launchctl_status(launchctl, &target)?;
+        if same && loaded {
+            results.push(InstallResult::Unchanged);
+            continue;
+        }
+        if loaded {
+            launchctl_run(launchctl, &["bootout", domain, label])
+                .with_context(|| format!("unload launchd agent {label}"))?;
+        }
+        if !same {
+            write_atomic(&path, file.content.as_bytes())
+                .with_context(|| format!("write launchd agent {}", path.display()))?;
+        }
+        launchctl_run(launchctl, &["bootstrap", domain, &path.to_string_lossy()])
+            .with_context(|| format!("load launchd agent {label}"))?;
+        results.push(InstallResult::Installed);
+    }
+    Ok(results)
+}
+
+pub fn uninstall_launchd_agents(
+    home: &Path,
+    labels: &[String],
+    launchctl: &Path,
+    domain: &str,
+) -> Result<usize> {
+    let agents = home.join("Library/LaunchAgents");
+    let mut removed = 0;
+    for label in labels {
+        let path = agents.join(format!("{label}.plist"));
+        let target = format!("{domain}/{label}");
+        if launchctl_status(launchctl, &target)? {
+            launchctl_run(launchctl, &["bootout", domain, label])
+                .with_context(|| format!("unload launchd agent {label}"))?;
+        }
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("remove launchd agent {}", path.display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn launchctl_status(launchctl: &Path, target: &str) -> Result<bool> {
+    let status = Command::new(launchctl)
+        .arg("print")
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("run {} print", launchctl.display()))?;
+    Ok(status.success())
+}
+
+fn launchctl_run(launchctl: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new(launchctl)
+        .args(args)
+        .status()
+        .with_context(|| format!("run {}", launchctl.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{} exited with status {}", launchctl.display(), status)
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("plist.{}.tmp", std::process::id()));
+    fs::write(&tmp, bytes)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Best-effort cleanup of the temporary file; the rename error is
+            // the one that must be reported.
+            drop(fs::remove_file(&tmp));
+            Err(error)
         }
     }
 }
@@ -391,6 +695,7 @@ fn render_launchd(
     interval: u64,
     args: &RunOnceArgs,
     home: &Path,
+    label: &str,
 ) -> String {
     let argv = run_once_argv(binary, stage, args);
 
@@ -409,9 +714,10 @@ fn render_launchd(
     // chat-stasher, so SuccessExitStatus=0 semantics are preserved).
     let cap = LAUNCHD_LOG_CAP_BYTES;
     let command = format!(
-        "{}\n{}\nexec {}",
+        "{}\n{}\njitter=$(( $(od -An -N2 -tu2 /dev/urandom) % {} ))\nsleep \"$jitter\"\nexec {}",
         cap_line(&stdout_log, cap),
         cap_line(&stderr_log, cap),
+        SCHEDULER_RANDOMIZED_DELAY_SECS + 1,
         argv.iter()
             .map(|arg| sh_single_quote(arg))
             .collect::<Vec<_>>()
@@ -430,7 +736,7 @@ fn render_launchd(
 <dict>
   <!-- chat-stasher is a one-shot process: exit 0 is success; result=NOOP means no snapshot, result=COMPLETED means snapshot created; non-zero is error. -->
   <key>Label</key>
-  <string>{LAUNCHD_LABEL}</string>
+  <string>{label}</string>
   <key>ProgramArguments</key>
   <array>
 {arguments}
@@ -448,6 +754,7 @@ fn render_launchd(
 "#,
         stdout = xml_escape(&stdout_log.to_string_lossy()),
         stderr = xml_escape(&stderr_log.to_string_lossy()),
+        label = xml_escape(label),
     )
 }
 
@@ -535,7 +842,12 @@ fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn render_systemd_service(binary: &Path, stage: &Path, args: &RunOnceArgs) -> String {
+fn render_systemd_service(
+    binary: &Path,
+    stage: &Path,
+    args: &RunOnceArgs,
+    service_name: &str,
+) -> String {
     let argv = run_once_argv(binary, stage, args);
     let args = argv
         .iter()
@@ -544,7 +856,7 @@ fn render_systemd_service(binary: &Path, stage: &Path, args: &RunOnceArgs) -> St
         .join(" ");
     format!(
         r#"[Unit]
-Description=Run one chat-stasher archive cycle
+Description=Run one chat-stasher archive cycle ({service_name})
 
 [Service]
 Type=oneshot
@@ -558,7 +870,7 @@ StandardError=journal
     )
 }
 
-fn render_systemd_timer(interval: u64) -> String {
+fn render_systemd_timer(interval: u64, service_name: &str) -> String {
     format!(
         r#"[Unit]
 Description=Hourly chat-stasher archive cycle
@@ -566,12 +878,15 @@ Description=Hourly chat-stasher archive cycle
 [Timer]
 OnBootSec={interval}s
 OnUnitActiveSec={interval}s
+RandomizedDelaySec={delay}s
 Persistent=true
-Unit={SYSTEMD_SERVICE}
+Unit={service_name}
 
 [Install]
 WantedBy=timers.target
-"#
+"#,
+        delay = SCHEDULER_RANDOMIZED_DELAY_SECS,
+        service_name = service_name,
     )
 }
 
@@ -814,6 +1129,7 @@ mod tests {
         assert!(plist.contains("&apos;--verify&apos;"));
         assert!(plist.contains("&apos;--connections&apos;"));
         assert!(plist.contains("&apos;2&apos;"));
+        assert!(plist.contains("<string>com.chat-stasher.run-once.external-disk</string>"));
 
         let systemd = render(
             Unit::RunOnce,
@@ -832,6 +1148,141 @@ mod tests {
         assert!(service.contains("\"--verify\""));
         assert!(service.contains("\"--connections\""));
         assert!(service.contains("\"2\""));
+        assert_eq!(
+            systemd[0].name,
+            "chat-stasher-run-once-external-disk.service"
+        );
+        assert_eq!(systemd[1].name, "chat-stasher-run-once-external-disk.timer");
+    }
+
+    /// A name that is not already filesystem-safe must still yield a stable,
+    /// collision-resistant unit name, and the install command must name the
+    /// printed files rather than falling back to the unit's default names.
+    #[test]
+    fn unsafe_destination_names_get_a_stable_suffix_and_install_by_name() {
+        let args = RunOnceArgs {
+            destination: Some("external disk".to_string()),
+            ..RunOnceArgs::default()
+        };
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        assert_eq!(files.len(), 1);
+        let label = files[0].name.trim_end_matches(".plist");
+        assert!(label.starts_with("com.chat-stasher.run-once.external-disk-"));
+        assert!(
+            files[0]
+                .content
+                .contains(&format!("<string>{label}</string>")),
+            "the plist Label must match its file name"
+        );
+
+        let command = install_command_for_files(Format::Launchd, &files);
+        assert!(command.contains(&files[0].name));
+    }
+
+    #[test]
+    fn systemd_install_command_uses_destination_unit_names() {
+        let args = RunOnceArgs {
+            destination: Some("external-disk".to_string()),
+            ..RunOnceArgs::default()
+        };
+        let files = render(
+            Unit::RunOnce,
+            Format::Systemd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        let paths = files
+            .iter()
+            .map(|file| PathBuf::from("/tmp/templates").join(&file.name))
+            .collect::<Vec<_>>();
+        let command = install_command(Unit::RunOnce, Format::Systemd, &paths);
+        assert!(command
+            .contains("$HOME/.config/systemd/user/chat-stasher-run-once-external-disk.service"));
+        assert!(command
+            .contains("$HOME/.config/systemd/user/chat-stasher-run-once-external-disk.timer"));
+    }
+
+    /// A multi-destination render produces one service+timer pair per
+    /// destination. The printed install command must install every pair and
+    /// enable every timer, not only the first — an earlier version found the
+    /// first `.service` / `.timer` and silently dropped the rest.
+    #[test]
+    fn systemd_install_command_covers_every_destination() {
+        let mut files = Vec::new();
+        for destination in ["alpha", "beta"] {
+            let args = RunOnceArgs {
+                destination: Some(destination.to_string()),
+                ..RunOnceArgs::default()
+            };
+            files.extend(render(
+                Unit::RunOnce,
+                Format::Systemd,
+                Path::new("/opt/chat-stasher"),
+                Path::new("/var/lib/chat-stasher/stage"),
+                3600,
+                &args,
+                &ReclaimStageArgs::default(),
+                Path::new("/home/tester"),
+            ));
+        }
+        let paths = files
+            .iter()
+            .map(|file| PathBuf::from("/tmp/templates").join(&file.name))
+            .collect::<Vec<_>>();
+        let command = install_command(Unit::RunOnce, Format::Systemd, &paths);
+        for name in [
+            "chat-stasher-run-once-alpha.service",
+            "chat-stasher-run-once-alpha.timer",
+            "chat-stasher-run-once-beta.service",
+            "chat-stasher-run-once-beta.timer",
+        ] {
+            assert!(
+                command.contains(&format!("\"$HOME/.config/systemd/user/{name}\"")),
+                "install command must install {name}: {command}"
+            );
+        }
+        assert!(command.contains("systemctl --user enable --now chat-stasher-run-once-alpha.timer"));
+        assert!(command.contains("systemctl --user enable --now chat-stasher-run-once-beta.timer"));
+    }
+
+    /// launchd has no random-delay key for `StartInterval`, so the shell
+    /// preamble must sleep for a bounded random interval *before* `exec`.
+    #[test]
+    fn launchd_preamble_bounds_jitter_before_exec() {
+        let args = RunOnceArgs::default();
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        let modulus = SCHEDULER_RANDOMIZED_DELAY_SECS + 1;
+        assert!(plist.contains(&format!(
+            "jitter=$(( $(od -An -N2 -tu2 /dev/urandom) % {modulus} ))"
+        )));
+        let sleep = plist
+            .find("sleep &quot;$jitter&quot;")
+            .expect("jitter sleep");
+        let exec = plist.find("exec &apos;").expect("exec");
+        assert!(sleep < exec, "jitter must be applied before exec");
     }
 
     /// The weekly unit must embed the `reclaim-stage` subcommand, the stage path
@@ -919,11 +1370,114 @@ mod tests {
             systemd_timer_name(Unit::ReclaimStage)
         );
         // The install commands must target the unit they belong to.
-        let run = install_command_for_saved(Unit::RunOnce, Format::Systemd);
-        let reclaim = install_command_for_saved(Unit::ReclaimStage, Format::Systemd);
+        let run = install_command_for_files(
+            Format::Systemd,
+            &[TemplateFile {
+                name: SYSTEMD_TIMER.to_string(),
+                content: String::new(),
+            }],
+        );
+        let reclaim = install_command_for_files(
+            Format::Systemd,
+            &[TemplateFile {
+                name: SYSTEMD_TIMER_RECLAIM_STAGE.to_string(),
+                content: String::new(),
+            }],
+        );
         assert!(run.contains("chat-stasher-run-once.timer"));
         assert!(!run.contains("chat-stasher-reclaim-stage.timer"));
         assert!(reclaim.contains("chat-stasher-reclaim-stage.timer"));
         assert!(!reclaim.contains("chat-stasher-run-once.timer"));
+    }
+
+    #[test]
+    fn binary_resolution_prefers_installed_copy_over_cargo_artifact() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let home = temp.path().join("home");
+        let installed = home.join(".local/bin/chat-stasher");
+        fs::create_dir_all(installed.parent().unwrap()).expect("create local bin");
+        fs::write(&installed, b"binary").expect("write installed marker");
+
+        let cargo_binary = temp.path().join("target/release/chat-stasher");
+        assert_eq!(
+            resolve_binary(None, &cargo_binary, &home).unwrap(),
+            installed
+        );
+        assert!(resolve_binary(Some(&cargo_binary), &cargo_binary, &home).is_err());
+
+        let installed_current = temp.path().join("bin/chat-stasher");
+        assert_eq!(
+            resolve_binary(None, &installed_current, &home).unwrap(),
+            installed_current
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launchd_install_and_uninstall_are_idempotent_with_fake_launchctl() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("launchctl");
+        let state = temp.path().join("loaded");
+        let log = temp.path().join("calls");
+        let script_body = format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> \"{}\"\n\
+             case \"$1\" in\n\
+               print) test -f \"{}\";;\n\
+               bootstrap) touch \"{}\";;\n\
+               bootout) rm -f \"{}\";;\n\
+               *) exit 2;;\n\
+             esac\n",
+            log.display(),
+            state.display(),
+            state.display(),
+            state.display()
+        );
+        fs::write(&script, script_body).expect("write fake launchctl");
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("make fake launchctl executable");
+
+        let file = TemplateFile {
+            name: "com.chat-stasher.run-once.disk.plist".to_string(),
+            content: "plist-v1".to_string(),
+        };
+        assert_eq!(
+            install_launchd_agents(temp.path(), &[file.clone()], &script, "gui/test").unwrap(),
+            vec![InstallResult::Installed]
+        );
+        assert_eq!(
+            install_launchd_agents(temp.path(), &[file], &script, "gui/test").unwrap(),
+            vec![InstallResult::Unchanged]
+        );
+        assert_eq!(
+            uninstall_launchd_agents(
+                temp.path(),
+                &["com.chat-stasher.run-once.disk".to_string()],
+                &script,
+                "gui/test"
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            uninstall_launchd_agents(
+                temp.path(),
+                &["com.chat-stasher.run-once.disk".to_string()],
+                &script,
+                "gui/test"
+            )
+            .unwrap(),
+            0
+        );
+        assert!(!temp
+            .path()
+            .join("Library/LaunchAgents/com.chat-stasher.run-once.disk.plist")
+            .exists());
+        let calls = fs::read_to_string(log).expect("read fake launchctl log");
+        assert_eq!(calls.matches("bootstrap").count(), 1);
+        assert_eq!(calls.matches("bootout").count(), 1);
     }
 }

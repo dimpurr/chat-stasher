@@ -128,6 +128,14 @@ struct UiArgs {
     keep_ssh_masters: bool,
 }
 
+#[derive(Subcommand, Clone, Copy)]
+enum ScheduleAction {
+    /// Render, write, and load launchd agents.
+    Install,
+    /// Unload and remove launchd agents.
+    Uninstall,
+}
+
 /// Subcommands. `push`/`read` are backed by the BackupStore
 /// (rustic_core); `doctor` answers one question — is a harness silently
 /// deleting your history?
@@ -173,64 +181,72 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
-    /// Render a launchd plist or systemd user service/timer; never installs it.
+    /// Render a launchd plist or systemd user service/timer. The optional
+    /// install/uninstall actions manage macOS launchd agents.
     Schedule {
+        /// Optional action. Without it, only render the templates.
+        #[command(subcommand)]
+        action: Option<ScheduleAction>,
         /// Template format to render.
-        #[arg(long, value_enum, default_value = "launchd")]
+        #[arg(long, value_enum, default_value = "launchd", global = true)]
         format: schedule::Format,
         /// Which scheduled job to render. `run-once` (default) is the hourly
         /// archive cycle. `reclaim-stage` is the weekly stage reclamation that
         /// deletes staged shard bodies once every destination proves it holds
         /// them — unrelated to the ssh connection reaping that
         /// `--keep-ssh-masters` disables.
-        #[arg(long, value_enum, default_value = "run-once")]
+        #[arg(long, value_enum, default_value = "run-once", global = true)]
         unit: schedule::Unit,
-        /// Stage path embedded in the one-shot command.
-        #[arg(long)]
-        stage: PathBuf,
+        /// Stage path embedded in the one-shot command. Required for render
+        /// and install; not needed for uninstall.
+        #[arg(long, global = true)]
+        stage: Option<PathBuf>,
         /// Write to this plist path, or systemd directory. Without it, print.
-        #[arg(long)]
+        /// With more than one destination the output must be a directory (one
+        /// plist per destination for launchd, one service+timer pair for
+        /// systemd).
+        #[arg(long, global = true)]
         output: Option<PathBuf>,
         /// Binary path embedded in the template. Defaults to the current
-        /// executable; if that is a build artifact under `target/`, a warning is
-        /// printed because the path will not survive `cargo clean`. Pass the
-        /// installed binary path for a durable service.
-        #[arg(long)]
+        /// executable when it is outside target/. A build executable falls back
+        /// to ~/.local/bin/chat-stasher or a Homebrew bin; target/ paths are
+        /// rejected. Pass an installed binary path for a durable service.
+        #[arg(long, global = true)]
         binary: Option<PathBuf>,
-        /// Named destination forwarded to `run-once`. Required once the config
-        /// declares any destination (unless `--repo` is given). Not valid with
-        /// `--unit reclaim-stage`.
-        #[arg(long)]
-        destination: Option<String>,
+        /// Named destination forwarded to run-once. Repeat it to render or
+        /// install one unit per declared destination. Not valid with unit
+        /// reclaim-stage.
+        #[arg(long, global = true)]
+        destination: Vec<String>,
         /// Repository path override forwarded to the scheduled command
         /// (`reclaim-stage` honours it for a single-destination config only).
-        #[arg(long)]
+        #[arg(long, global = true)]
         repo: Option<String>,
         /// Masterkey file override forwarded to the scheduled command
         /// (`reclaim-stage` honours it for a single-destination config only).
-        #[arg(long)]
+        #[arg(long, global = true)]
         key_file: Option<String>,
         /// Concurrency cap override forwarded to the scheduled command.
-        #[arg(long)]
+        #[arg(long, global = true)]
         connections: Option<usize>,
         /// Backend option `key=value`, repeatable, forwarded to the scheduled
         /// command.
-        #[arg(long = "option")]
+        #[arg(long = "option", global = true)]
         options: Vec<String>,
         /// Machine partition forwarded to `run-once`.
-        #[arg(long)]
+        #[arg(long, global = true)]
         machine: Option<String>,
         /// Maximum sealed shards per bucket forwarded to `run-once`.
-        #[arg(long)]
+        #[arg(long, global = true)]
         shard_bucket_cap: Option<usize>,
         /// Add the cheap L1 verify pass after each archive cycle.
-        #[arg(long)]
+        #[arg(long, global = true)]
         verify: bool,
         /// Keep the ssh ControlMaster processes open after the scheduled command
         /// runs (do not shut them down). This is about ssh connection masters
         /// only — it never disables the stage reclamation that `--unit
         /// reclaim-stage` performs.
-        #[arg(long)]
+        #[arg(long, global = true)]
         keep_ssh_masters: bool,
     },
     /// Move a batch of sealed session shards into the rustic repository.
@@ -1197,6 +1213,7 @@ fn run() -> ExitCode {
             keep_ssh_masters,
         ),
         Command::Schedule {
+            action,
             unit,
             format,
             stage,
@@ -1212,9 +1229,10 @@ fn run() -> ExitCode {
             verify,
             keep_ssh_masters,
         } => cmd_schedule(
+            action,
             unit,
             format,
-            &stage,
+            stage.as_deref(),
             output,
             binary,
             destination,
@@ -4865,12 +4883,13 @@ fn run_once_pass(
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_schedule(
+    action: Option<ScheduleAction>,
     unit: schedule::Unit,
     format: schedule::Format,
-    stage: &Path,
+    stage: Option<&Path>,
     output: Option<PathBuf>,
     binary: Option<PathBuf>,
-    destination: Option<String>,
+    destinations: Vec<String>,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -4881,6 +4900,19 @@ fn cmd_schedule(
     keep_ssh_masters: bool,
 ) -> ExitCode {
     let config = Config::load();
+
+    if matches!(action, Some(ScheduleAction::Uninstall))
+        && !matches!(format, schedule::Format::Launchd)
+    {
+        eprintln!("schedule uninstall: only launchd agents can be unloaded by this command");
+        return ExitCode::from(2);
+    }
+    if matches!(action, Some(ScheduleAction::Install))
+        && !matches!(format, schedule::Format::Launchd)
+    {
+        eprintln!("schedule install: only launchd agents can be loaded by this command");
+        return ExitCode::from(2);
+    }
 
     // The run-once timer's cadence comes from the config; the reclaim-stage timer
     // is a fixed weekly slot, so no interval is resolved for it (`render`
@@ -4896,12 +4928,16 @@ fn cmd_schedule(
         schedule::Unit::ReclaimStage => 0,
     };
 
-    // `reclaim-stage` proves against *every* declared destination, so the
-    // run-once "must name a destination" rule does not apply to it.
+    if unit == schedule::Unit::ReclaimStage && !destinations.is_empty() {
+        eprintln!("schedule: destination is not valid with unit reclaim-stage");
+        return ExitCode::from(2);
+    }
+
     if unit == schedule::Unit::RunOnce
-        && destination.is_none()
+        && destinations.is_empty()
         && repo.is_none()
         && !config.destinations.is_empty()
+        && !matches!(action, Some(ScheduleAction::Uninstall))
     {
         let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -4913,10 +4949,10 @@ fn cmd_schedule(
         return ExitCode::from(2);
     }
 
-    // Only `run-once` takes the run-once-only forwarding slots; reject them
+    // Only run-once takes the run-once-only forwarding slots; reject them
     // loudly for the reclaim-stage unit instead of silently dropping them.
     if unit == schedule::Unit::ReclaimStage
-        && (destination.is_some() || machine.is_some() || shard_bucket_cap.is_some() || verify)
+        && (machine.is_some() || shard_bucket_cap.is_some() || verify)
     {
         eprintln!(
             "schedule: `--unit reclaim-stage` does not forward `--destination` / `--machine` / `--shard-bucket-cap` / `--verify` (those are `run-once` slots). `--repo` / `--key-file` / `--connections` / `--option` / `--keep-ssh-masters` are forwarded to `reclaim-stage`."
@@ -4924,53 +4960,145 @@ fn cmd_schedule(
         return ExitCode::from(2);
     }
 
-    let binary = match binary {
-        Some(path) => absolute_path(&path),
-        None => match std::env::current_exe() {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("schedule: cannot resolve current executable: {e}");
-                return ExitCode::FAILURE;
+    let selected_destinations: Vec<Option<String>> = if unit == schedule::Unit::ReclaimStage {
+        // `reclaim-stage` proves against every declared destination at once,
+        // so its one unit is never destination-specific. Explicit
+        // destinations were already rejected above.
+        vec![None]
+    } else if matches!(action, Some(ScheduleAction::Uninstall)) {
+        if destinations.is_empty() {
+            if config.destinations.is_empty() {
+                vec![None]
+            } else {
+                config.destinations.keys().cloned().map(Some).collect()
             }
-        },
+        } else {
+            destinations.into_iter().map(Some).collect()
+        }
+    } else if destinations.is_empty() {
+        vec![None]
+    } else {
+        destinations.into_iter().map(Some).collect()
     };
-    if is_build_artifact(&binary) {
-        eprintln!(
-            "[schedule] warning: resolved binary is a build artifact at {}. \
-             It will not survive `cargo clean`. Pass `--binary` with the installed path.",
-            binary.display()
-        );
+    for destination in selected_destinations.iter().flatten() {
+        if !config.destinations.contains_key(destination) {
+            eprintln!("schedule: destination {destination} is not declared in the config");
+            return ExitCode::from(2);
+        }
     }
 
-    let stage = absolute_path(stage);
-    let args = schedule::RunOnceArgs {
-        destination,
-        repo: repo.clone(),
-        key_file: key_file.clone(),
-        connections,
-        options: options.clone(),
-        machine,
-        shard_bucket_cap,
-        keep_ssh_masters,
-        verify,
+    if matches!(action, Some(ScheduleAction::Uninstall)) {
+        let labels = selected_destinations
+            .iter()
+            .map(|destination| {
+                schedule::launchd_label_for_destination(unit, destination.as_deref())
+            })
+            .collect::<Vec<_>>();
+        let launchctl = std::env::var_os("CHAT_STASHER_LAUNCHCTL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("launchctl"));
+        let domain = match launchd_domain() {
+            Ok(domain) => domain,
+            Err(error) => {
+                eprintln!("schedule uninstall: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match schedule::uninstall_launchd_agents(&config::home_dir(), &labels, &launchctl, &domain)
+        {
+            Ok(removed) => {
+                println!("[schedule] uninstalled agents: {removed}");
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => {
+                eprintln!("schedule uninstall: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let stage = match stage {
+        Some(stage) => absolute_path(stage),
+        None => {
+            eprintln!("schedule: --stage is required for render and install");
+            return ExitCode::from(2);
+        }
     };
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("schedule: cannot resolve current executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let binary =
+        match schedule::resolve_binary(binary.as_deref(), &current_exe, &config::home_dir()) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("schedule: {error:#}");
+                return ExitCode::from(2);
+            }
+        };
     let reclaim_args = schedule::ReclaimStageArgs {
-        repo,
+        repo: repo.clone(),
         key_file,
         connections,
         options,
         keep_ssh_masters,
     };
-    let files = schedule::render(
-        unit,
-        format,
-        &binary,
-        &stage,
-        interval,
-        &args,
-        &reclaim_args,
-        &config::home_dir(),
-    );
+    let mut files = Vec::new();
+    for destination in selected_destinations {
+        let args = schedule::RunOnceArgs {
+            destination,
+            repo: repo.clone(),
+            key_file: reclaim_args.key_file.clone(),
+            connections,
+            options: reclaim_args.options.clone(),
+            machine: machine.clone(),
+            shard_bucket_cap,
+            keep_ssh_masters,
+            verify,
+        };
+        files.extend(schedule::render(
+            unit,
+            format,
+            &binary,
+            &stage,
+            interval,
+            &args,
+            &reclaim_args,
+            &config::home_dir(),
+        ));
+    }
+    if matches!(action, Some(ScheduleAction::Install)) {
+        let launchctl = std::env::var_os("CHAT_STASHER_LAUNCHCTL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("launchctl"));
+        let domain = match launchd_domain() {
+            Ok(domain) => domain,
+            Err(error) => {
+                eprintln!("schedule install: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match schedule::install_launchd_agents(&config::home_dir(), &files, &launchctl, &domain) {
+            Ok(results) => {
+                let unchanged = results
+                    .iter()
+                    .filter(|result| **result == schedule::InstallResult::Unchanged)
+                    .count();
+                println!(
+                    "[schedule] installed agents: {} unchanged: {unchanged}",
+                    results.len() - unchanged
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => {
+                eprintln!("schedule install: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let paths = match output {
         Some(output) => match schedule::write_templates(format, &output, &files) {
             Ok(paths) => {
@@ -5004,20 +5132,38 @@ fn cmd_schedule(
     if paths.is_empty() {
         match format {
             schedule::Format::Launchd => println!(
-                "[schedule] save the plist as \"$HOME/Library/LaunchAgents/{label}.plist\" first.",
-                label = schedule::launchd_label(unit)
+                "[schedule] save each plist under \"$HOME/Library/LaunchAgents/\" using the name shown above."
             ),
             schedule::Format::Systemd => {
                 println!("[schedule] save both units under \"$HOME/.config/systemd/user/\" first.")
             }
         }
         println!("[schedule] installation requires you to execute this command yourself:");
-        println!("{}", schedule::install_command_for_saved(unit, format));
+        println!("{}", schedule::install_command_for_files(format, &files));
     } else {
         println!("[schedule] you must execute this command yourself to install:");
         println!("{}", schedule::install_command(unit, format, &paths));
     }
     ExitCode::SUCCESS
+}
+
+fn launchd_domain() -> anyhow::Result<String> {
+    if let Some(domain) = std::env::var_os("CHAT_STASHER_LAUNCHD_DOMAIN") {
+        return Ok(domain.to_string_lossy().into_owned());
+    }
+    let output = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .context("resolve the current user id for launchd")?;
+    if !output.status.success() {
+        anyhow::bail!("id -u exited with status {}", output.status);
+    }
+    let uid = String::from_utf8(output.stdout).context("decode the current user id")?;
+    let uid = uid.trim();
+    if uid.is_empty() {
+        anyhow::bail!("id -u returned an empty user id");
+    }
+    Ok(format!("gui/{uid}"))
 }
 
 fn absolute_path(path: &Path) -> PathBuf {
@@ -5030,21 +5176,6 @@ fn absolute_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Detect whether a path looks like a Cargo build artifact. This is a heuristic
-/// used by `schedule` to warn that the embedded binary path will vanish after
-/// `cargo clean`.
-fn is_build_artifact(path: &Path) -> bool {
-    let parts: Vec<&str> = path.iter().filter_map(|c| c.to_str()).collect();
-    for window in parts.windows(3) {
-        if window[0] == "target"
-            && (window[1] == "debug" || window[1] == "release")
-            && window[2] == "chat-stasher"
-        {
-            return true;
-        }
-    }
-    false
-}
 /// `seal` — allowlist-checked rename-sealing of one active file.
 ///
 /// The registry (`data/harness-registry-v1.json`) is the single decision

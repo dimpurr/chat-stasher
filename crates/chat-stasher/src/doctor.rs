@@ -1972,7 +1972,7 @@ pub struct NativeHostCheck {
 /// Does this path sit inside a Cargo `target/` tree?
 ///
 /// The same question `schedule` asks about the binary it embeds (see
-/// `is_build_artifact` in `main.rs`), asked here about the binary a browser
+/// `is_build_artifact` in `schedule.rs`), asked here about the binary a browser
 /// manifest points at. It is narrower than "the file exists": a path under
 /// `target/` works until somebody runs `cargo clean`, and then the host stops
 /// being found with no error anywhere the user would look.
