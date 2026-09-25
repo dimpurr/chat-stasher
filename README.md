@@ -119,6 +119,15 @@ extension store yet; load it yourself:
    **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
 4. Reload any AI chat tab that was already open, so the page picks up the
    extension. Then open the extension's popup to check it can reach the host.
+5. Past conversations are a separate switch. Turn **backfill** on in the popup,
+   and know the one precondition before you do: **it needs an open, logged-in
+   page of that platform to fetch through.** The extension requests no host
+   permissions, so every backfill request is made inside one of your own open
+   platform pages rather than by the extension itself. With no such page open
+   the popup says archiving is not running for want of a fetch channel and
+   fetches nothing — it is not stuck, and it carries on by itself as soon as you
+   open one. It does not have to be the conversation you want: any open page of
+   that platform answers.
 
 To update, unzip the new release over the same folder and press the reload
 button on the extension's card; reload open chat tabs again. Full details, and

@@ -109,6 +109,21 @@ marketing (`apps/extension/lib/backfill/enumerate.ts:4521-4548`):
 | **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Perplexity**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the seven. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2746-2749`). 🔴 Grok and Claude are the least verified of the seven: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:2965-2967`, `:3047-3108`). 🔴 W84 (2026-09-23) filled in Perplexity's body segment last: its route is `GET /rest/thread/<slug>` with a five-parameter set pinned by the plan (`apps/extension/lib/backfill/enumerate.ts:2850-2861`), and a logged-in probe observed a stated completeness signal (`has_next_page` + `next_cursor`) at the top level, so the extension archives a body only when the response declares there is no more, and **refuses** a body that declares more rather than archiving a truncated conversation (`apps/extension/lib/backfill/enumerate.ts:2198-2242`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:3132-3194`; `apps/extension/lib/platform-auth.ts:268-305`; `apps/extension/lib/backfill/engine.ts:2537-2572`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3571-3699`; `apps/extension/lib/backfill/engine.ts:2360-2419`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:679-779`). |
 
 
+🔴 **The one precondition, before any tier applies: this leg fetches through a
+page, so it needs one open.** The extension requests **no host permissions at
+all** (`apps/extension/wxt.config.ts:122-125`), so a backfill request is made
+from inside an open, logged-in page of the same platform — a same-origin request
+using the login you already have — rather than by the extension itself. With no
+page of that platform open there is no channel at all and the leg fetches
+nothing: the popup says archiving is not running for want of a fetch channel,
+and the alarm's last-tick trace names the same thing as `no-http-port`
+(`apps/extension/lib/backfill/schedule.ts:212`;
+`apps/extension/entrypoints/background.ts:679-681`). That page does not have to
+be the conversation being archived — any open page of that platform answers —
+and the leg carries on by itself as soon as one is open. One open page per
+platform you want archived is the whole operational requirement; it is the price
+of the permission model, not a fault to wait out.
+
 🔴 There is no longer a middle tier: the "can list conversations but saves none of
 their content" row was Perplexity's, and W84 (2026-09-23) filled that plan's body
 segment in from a live probe, so every platform in the table above now fetches
