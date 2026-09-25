@@ -193,6 +193,8 @@ UNKNOWN = "unknown"        # the file, or the range, is not readable at --old
 UNCLAIMED = "unclaimed"    # no declared side's own document writes this range
 BLANK = "blank"            # every cited line is whitespace, so it names nothing
 ELSEWHERE = "elsewhere"    # the token does not name one file on both sides
+SYMLINK = "symlink"        # the cited file is a link, so the two sides read different bytes
+CONTINUATION = "continuation"  # `:N` here is part of another side's `name:N`, not a continuation
 
 # Outcomes that rewrite a range. 🔴 Exactly one, and it has to be: the cited
 # block's text must still sit in the merged file as the same run of lines, in
@@ -215,10 +217,14 @@ RELOCATED = (SHIFTED,)
 # whoever has to fix them: several matches is "this sentence could be about any
 # of these", zero matches is "the block is not in the merged file unchanged",
 # blank is "there is no text here to look for", unclaimed is "these numbers are
-# in nobody's coordinate system", and elsewhere is "the token does not name one
+# in nobody's coordinate system", elsewhere is "the token does not name one
 # file on both sides — it is a bare name, or that side's parse of it did not land
-# on the merged file". All six need a human, and none of them is another.
-REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED, BLANK, ELSEWHERE)
+# on the merged file", symlink is "the file is one name for two different byte
+# sequences and the two sides read different ones", and continuation is "the
+# colon is part of another side's `name:N`, so this is not a continuation after
+# all". All eight need a human, and none of them is another.
+REFUSALS = (AMBIGUOUS, MISSING, UNKNOWN, UNCLAIMED, BLANK, ELSEWHERE, SYMLINK,
+            CONTINUATION)
 
 
 class SourceIndex:
@@ -330,7 +336,7 @@ class Parent:
         self.written: dict[str, set[str]] = {}
         self.lines: dict[str, set[str]] = {}
 
-        files = self._tree_files()
+        files, self.symlinks = self._tree_entries()
         self._files = set(files)
         basenames: dict[str, list[str]] = {}
         for rel in files:
@@ -358,17 +364,30 @@ class Parent:
             for c in citations:
                 self.tokens.setdefault((doc, c.raw, c.start, c.end), set()).add(c.target)
 
-    def _tree_files(self) -> list[str]:
-        """This commit's tracked files, repo-relative.
+    def _tree_entries(self) -> tuple[list[str], set[str]]:
+        """This commit's tracked files, repo-relative, and which are symlinks.
 
         `ls-tree` rather than a walk of some directory: it is the tree, it needs
         no checkout, and it does not pick up the build output and untracked
-        scratch a working-tree walk would.
+        scratch a working-tree walk would. The modes are read as well as the
+        names because a symlink is stored as a `120000` blob whose *content* is
+        the path it points at — `git show` prints that path, while reading the
+        working tree follows the link. The two sides then describe different
+        bytes under one name, which is the case symlink_refusal() exists for.
         """
-        rc, out = git("ls-tree", "-r", "--name-only", self.commit)
+        rc, out = git("ls-tree", "-r", self.commit)
         if rc != 0:
             die(f"cannot list the files of --old {self.commit[:12]}")
-        return [line for line in out.splitlines() if line]
+        files: list[str] = []
+        symlinks: set[str] = set()
+        for line in out.splitlines():
+            if not line:
+                continue
+            meta, _, path = line.partition("\t")
+            files.append(path)
+            if meta.split()[0] == "120000":
+                symlinks.add(path)
+        return files, symlinks
 
     def carries(self, rel: str) -> bool:
         """Whether this commit's tree has a file at the repo-relative `rel`.
@@ -500,6 +519,88 @@ def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision
 
 
 
+def worktree_symlink(rel: str) -> str | None:
+    """The first symlink among `rel`'s path components in the working tree.
+
+    Every component is checked, not only the last: `git show` cannot descend
+    through a tree symlink, so a tracked symlink can only be the path's own last
+    component, but the filesystem can be handed a symlinked directory the tree
+    does not have, and `open()` would follow it just the same.
+    """
+    accum = REPO
+    for part in rel.split("/"):
+        accum = os.path.join(accum, part)
+        if os.path.islink(accum):
+            return os.path.relpath(accum, REPO)
+    return None
+
+
+def symlink_refusal(parents: list[Parent], target: str) -> str | None:
+    """Why the cited file cannot be read as the same bytes on both sides.
+
+    A symlink is one path name for two different byte sequences: `git show
+    <commit>:<path>` prints the link's target text, while reading the working
+    tree follows the link to the target's contents. `source_at()` uses the
+    former and `working_tree_index()` the latter, so a citation of a symlink is
+    compared against text that never lived in the same file — and when the link
+    text happens to appear in the target, the "exact shift" it finds moves the
+    citation onto a line that is not the cited one and exits 0 (R66e: the target
+    gains the link text, `src/a.ts:1` is rewritten to `src/a.ts:2`).
+    """
+    rel = worktree_symlink(target)
+    if rel is not None:
+        where = "the path itself" if rel == target else f"`{rel}` on the way to it"
+        return (
+            f"the cited file `{target}` is a symlink in the working tree ({where}): "
+            f"`git show` reads the link's target text while the working tree follows "
+            f"the link, so the two sides are not the same file's bytes and a range "
+            f"compared across them names nothing. Needs a human"
+        )
+    for p in parents:
+        if target in p.symlinks:
+            return (
+                f"the cited file `{target}` is a symlink at --old {p.short}: `git "
+                f"show` reads the link's target text while the working tree follows "
+                f"the link, so the two sides are not the same file's bytes and a "
+                f"range compared across them names nothing. Needs a human"
+            )
+    return None
+
+
+def continuation_refusal(parents: list[Parent], doc: str, cit) -> str | None:
+    """Why a bare `:N` in the merged document is not one on a declared side.
+
+    The merged parser reads `Makefile:10` as a continuation `:10` once
+    `Makefile` is no longer in the tree: the token stops being path-shaped, is
+    dropped, and the colon inherits the file its sentence last named. A side's
+    own document, parsed in that side's tree, wrote the token `Makefile:10` and
+    resolved it to `Makefile` — and a claim is keyed on the token, so the two
+    sides never meet. With no owner the citation used to be called "already
+    right" against the file the merged parse chose (`src/a.ts`) and the run
+    exited 0 while the sentence still says `Makefile`. A side that wrote a
+    different token at this same range, ending in this same `:N`, is the
+    evidence that the colon is part of another name and not a continuation.
+    """
+    if not cit.raw.startswith(":"):
+        return None
+    for p in parents:
+        for (d, raw, start, end), targets in p.tokens.items():
+            if d != doc or start != cit.start or end != cit.end:
+                continue
+            if raw == cit.raw or not raw.endswith(cit.raw):
+                continue
+            others = sorted(t for t in targets if t != cit.target)
+            if others:
+                return (
+                    f"the merged document reads `{cit.raw}` as a continuation of "
+                    f"`{cit.target}`, but at --old {p.short} this range is written "
+                    f"`{raw}`, naming `{others[0]}`: on that side the colon is part "
+                    f"of another token, so this is not a continuation and the file "
+                    f"it means is not `{cit.target}`. Needs a human"
+                )
+    return None
+
+
 def identity_refusal(parents: list[Parent], doc: str, cit) -> str | None:
     """Why this citation's token does not name one file on both sides, or None.
 
@@ -586,6 +687,12 @@ def decide(
     """Decide one citation, using only the sides whose own document writes it."""
     target, start, end = cit.target, cit.start, cit.end
 
+    # 🔴 A symlink is one name for two different byte sequences, and the two
+    # sides read different ones, so no range can be compared across them.
+    refusal = symlink_refusal(parents, target)
+    if refusal is not None:
+        return Decision(SYMLINK, start, end, None, None, refusal)
+
     # 🔴 Before anything else: the token has to name the same file on both sides,
     # and a bare name cannot be shown to. Checked here rather than left to the
     # ownership test below, because an unclaimed range can still come back
@@ -609,6 +716,15 @@ def decide(
         # a citation this script relocated on an earlier run, and relocating it
         # again from a side that never wrote it would move a correct anchor onto
         # an unrelated range.
+        #
+        # 🔴 Before that, a bare `:N` whose colon is part of another side's
+        # `name:N` is not a continuation at all: the merged parser dropped a
+        # token that side's tree still had, so the two sides' citations never
+        # meet and the range comes back "already right" against a file the
+        # sentence never named (R66e's `Makefile:10`).
+        refusal = continuation_refusal(parents, doc, cit)
+        if refusal is not None:
+            return Decision(CONTINUATION, start, end, None, None, refusal)
         for p in parents:
             old = source_at(p.commit, target)
             if old is not None and is_right(old, cur, start, end):
@@ -987,7 +1103,7 @@ def main() -> int:
         return 1
 
     counts = {s: 0 for s in (RIGHT, SHIFTED, AMBIGUOUS, MISSING, UNKNOWN,
-                             UNCLAIMED, BLANK, ELSEWHERE)}
+                             UNCLAIMED, BLANK, ELSEWHERE, SYMLINK, CONTINUATION)}
     for doc, d, target in all_decisions:
         counts[d.status] += 1
         if d.status == RIGHT:
