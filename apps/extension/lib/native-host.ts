@@ -155,6 +155,116 @@ export interface DashboardFailed {
 
 export type DashboardResult = DashboardOk | DashboardFailed;
 
+// ---------------------------------------------------------------------------
+// §6.6 has — "does the stage already hold this exact content?"
+// ---------------------------------------------------------------------------
+
+/**
+ * Timeout for the §6.6 question.
+ *
+ * 🔴 Not `REQUEST_TIMEOUT_MS`, and the reason is the one [`HELLO_PROBE_TIMEOUT_MS`]
+ *    gives, with one difference: this question sits on the *capture* path (both
+ *    delivery legs ask it before sending anything), and the answer is a directory
+ *    listing plus, at most, this one conversation's shards — a healthy host is back
+ *    in milliseconds. It gets more room than the popup's probe because it does real
+ *    work, and it must not take the delivery path's minute because a wedged host
+ *    would then hold a capture for that long on every view.
+ *
+ * A question that runs out of time answers `timeout`, which every caller reads the
+ * same way as every other failure: **not held** ⇒ deliver. The cost of a too-short
+ * timeout is one extra copy, never a skipped conversation.
+ */
+export const HAS_TIMEOUT_MS = 5_000;
+
+/**
+ * §6.6's answer. `ok` means the question was **answered**: `held: false` is the
+ * answer "nothing in the stage holds this", which is a different state from a
+ * `nack` ("the question could not be asked") and from a timeout. Both of the
+ * latter come back as `ok: false` here and both mean *deliver* to every caller.
+ */
+export interface HasOk {
+  ok: true;
+  /** A shard in that conversation's directory carries this fingerprint. */
+  held: boolean;
+  /** The shard it was found in, or `null` when `held` is false. */
+  shard: string | null;
+}
+
+export interface HasFailed {
+  ok: false;
+  reason: UndeliveredReason;
+  kind?: NackKind;
+  detail?: string;
+  retryable: boolean;
+}
+
+export type HasResult = HasOk | HasFailed;
+
+/**
+ * One §6.6 question: "does the stage already hold this exact content?"
+ *
+ * 🔴 There is deliberately **no `olderHost` field**, unlike [`SummaryResult`] and
+ *    [`DashboardResult`]. Those need it because the popup tells the user which
+ *    cause it concluded; here the only outcome a caller may act on is
+ *    `held: true`, and every failure — including an old host's
+ *    `bad-request "unknown message type"` — is read as "not held" ⇒ deliver. A
+ *    field nobody branches on would be a conclusion this module does not have.
+ */
+export async function has(
+  query: { platform: string; sessionId: string; fingerprint: string },
+  options: { timeoutMs?: number } = {},
+): Promise<HasResult> {
+  const requestId = newRequestId();
+  if (requestId === null) {
+    return {
+      ok: false,
+      reason: 'crypto-unavailable',
+      retryable: false,
+      detail: 'crypto.randomUUID unavailable in this context',
+    };
+  }
+
+  const outcome = await sendOnce(
+    getRuntime(),
+    {
+      protocol: PROTOCOL,
+      type: 'has',
+      request_id: requestId,
+      platform: query.platform,
+      session_id: query.sessionId,
+      fingerprint: query.fingerprint,
+    },
+    options.timeoutMs ?? HAS_TIMEOUT_MS,
+  );
+  const classified = classify(
+    outcome,
+    (value) => {
+      if (value.type !== 'has') return "type is neither 'has' nor 'nack'";
+      const validated = validateHas(value);
+      if (typeof validated === 'string') return validated;
+      // 🔴 The same §1 discipline `deliver` uses, applied to the new message: an
+      //    answer that does not carry the `request_id` we sent is not an answer to
+      //    *our* question, and `held: true` from an unattributable response would
+      //    skip a conversation on someone else's word.
+      if (validated.request_id !== requestId) return 'has request_id does not match the request';
+      return validated;
+    },
+    requestId,
+  );
+
+  if (!classified.ok) {
+    return {
+      ok: false,
+      reason: classified.reason,
+      kind: classified.kind,
+      detail: classified.detail,
+      retryable: classified.retryable,
+    };
+  }
+  const answer = classified.value as HasResponse;
+  return { ok: true, held: answer.held, shard: answer.shard };
+}
+
 /**
  * Timeout for the popup's `summary` question. Same reasoning as
  * [`HELLO_PROBE_TIMEOUT_MS`]: the answer is a directory listing, so a healthy
@@ -521,6 +631,36 @@ function validateSummary(value: Record<string, unknown>): StageSummary | string 
   return { windowHours, complete, total, last24h, byHarness, lastPush };
 }
 
+/**
+ * §6.6's answer.
+ *
+ * 🔴 `shard` is `string | null` and **not** optional: §6.6 says the field is always
+ *    there, `null` when nothing was found, so a response that omits it is malformed
+ *    rather than "no shard named". The same rule the two tagged-state validators
+ *    below apply — "absent" and "null" must not collapse into one another.
+ */
+interface HasResponse {
+  request_id: string;
+  held: boolean;
+  shard: string | null;
+}
+
+function validateHas(value: Record<string, unknown>): HasResponse | string {
+  if (value.protocol !== PROTOCOL) return `protocol is not ${PROTOCOL}`;
+  if (value.type !== 'has') return "type is not 'has'";
+  const bad = keysOk(value, ['protocol', 'type', 'ok', 'request_id', 'held', 'shard']);
+  if (bad) return bad;
+  if (value.ok !== true) return 'ok is not true';
+  if (typeof value.request_id !== 'string' || !REQUEST_ID_RE.test(value.request_id)) {
+    return 'request_id is not 1-128 chars of [A-Za-z0-9_-]';
+  }
+  if (typeof value.held !== 'boolean') return 'held is not a boolean';
+  if (value.shard !== null && typeof value.shard !== 'string') {
+    return 'shard is neither a string nor null';
+  }
+  return { request_id: value.request_id, held: value.held, shard: value.shard };
+}
+
 /** §6.5's answer. The URL is checked here, so no caller has to remember to. */
 function validateDashboard(value: Record<string, unknown>): { url: string } | string {
   if (value.protocol !== PROTOCOL) return `protocol is not ${PROTOCOL}`;
@@ -749,10 +889,20 @@ export async function openDashboard(options: { timeoutMs?: number } = {}): Promi
  * `JSON.stringify`; the sha256 is computed here over its UTF-8 bytes and is the
  * same content key every other channel uses.
  *
+ * 🔴 `fingerprint` is optional and is §6.6's content key, not this one. It is omitted
+ *    from the request entirely when it is null, which is what an older extension
+ *    sends and what a caller with no capture-body derivation has: the shard then
+ *    carries none, and can only ever be recognised by its exact bytes (§7). It takes
+ *    no part in the duplicate decision on either side.
+ *
  * The only success is a matching `ack`. Everything else — including a response
  * that merely *looks* like an ack — comes back as `{delivered: false}`.
  */
-export async function deliver(name: string, payload: string): Promise<DeliverResult> {
+export async function deliver(
+  name: string,
+  payload: string,
+  fingerprint: string | null = null,
+): Promise<DeliverResult> {
   const sha256 = await sha256Hex(payload);
   const requestId = newRequestId();
   if (sha256 === null || requestId === null) {
@@ -769,7 +919,15 @@ export async function deliver(name: string, payload: string): Promise<DeliverRes
 
   const outcome = await sendOnce(
     getRuntime(),
-    { protocol: PROTOCOL, type: 'deliver', request_id: requestId, name, payload, sha256 },
+    {
+      protocol: PROTOCOL,
+      type: 'deliver',
+      request_id: requestId,
+      name,
+      payload,
+      sha256,
+      ...(fingerprint === null ? {} : { fingerprint }),
+    },
     REQUEST_TIMEOUT_MS,
   );
   const classified = classify(outcome, (value) => {

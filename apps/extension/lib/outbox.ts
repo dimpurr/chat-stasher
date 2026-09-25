@@ -29,6 +29,7 @@
  */
 
 import { deliver, isItemRejected, sha256Hex, type DeliverResult } from './native-host';
+import { deliveryFingerprint } from './recapture';
 import type { BackfillStore } from './backfill/store';
 
 export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
@@ -504,7 +505,11 @@ export async function recordExport(store: BackfillStore | null, rec: LastExport)
 // Draining
 // ---------------------------------------------------------------------------
 
-export type DeliveryFn = (name: string, payload: string) => Promise<DeliverResult>;
+export type DeliveryFn = (
+  name: string,
+  payload: string,
+  fingerprint: string | null,
+) => Promise<DeliverResult>;
 
 export interface DrainOptions {
   /** Test seam. Production always uses the real `deliver` from native-host. */
@@ -604,7 +609,13 @@ async function runDrain(options: DrainOptions): Promise<DrainReport> {
       report.stoppedBy = 'batch';
       return report;
     }
-    const result = await deliverFn(entry.name, entry.payload);
+    // 🔴 W50c · The §6.6 fingerprint travels with the bytes, derived here from the
+    //    payload this attempt is about to send (`lib/recapture.ts`
+    //    `deliveryFingerprint`, which is where that decision is argued). It is
+    //    metadata the host records on the shard, never a delivery precondition: a
+    //    payload it cannot be derived from is delivered without one, exactly as
+    //    before this field existed.
+    const result = await deliverFn(entry.name, entry.payload, await deliveryFingerprint(entry.payload));
     report.attempted += 1;
 
     if (result.delivered) {

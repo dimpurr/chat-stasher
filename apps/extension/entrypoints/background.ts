@@ -20,10 +20,11 @@ import {
   recordHookDecline,
   recordHookStatus,
 } from '../lib/hook-status';
-import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
+import { deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import { recordLiveCapture } from '../lib/live-capture';
 import {
   captureFingerprint,
+  deliveryFingerprint,
   isUnchangedCapture,
   rememberDeliveredQuietly,
 } from '../lib/recapture';
@@ -41,7 +42,6 @@ import {
   checkHost,
   loadHostPause,
   loadHostStatus,
-  probeDestination,
   setHostPause,
   type HostStatusRecord,
 } from '../lib/host-status';
@@ -277,7 +277,8 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     recaptureStore,
     name,
     derived,
-    () => probeDestination(recaptureStore),
+    { platform: prepared.platform, sessionId },
+    (query) => has(query).then((answer) => answer.ok && answer.held),
   )) {
     // 🔴 W69 · This **is** an arrival. The page produced a capture and the archive
     //    already held exactly this copy, so nothing was sent again — but the whole
@@ -347,18 +348,13 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     //    basis would lose a conversation that was never stored. Failing to record
     //    it is not a delivery failure — the cost of a missing record is one extra
     //    copy, so the ack's outcome must not be touched by it.
-    // 🔴 W50b · **And where it was stored is written down with it.** The ack does not
-    //    name the host that sent it (§6.2's `ack` carries status/shard only), so the
-    //    destination is asked for here — a moment when the host has demonstrably just
-    //    answered, so the probe is cheap. A host that will not say records nothing,
-    //    and the next capture of this conversation is delivered again rather than
-    //    skipped against a destination we invented.
-    await rememberDeliveredQuietly(
-      recaptureStore,
-      name,
-      derived,
-      await probeDestination(recaptureStore),
-    );
+    // 🔴 W50c · **What is written down is the fingerprint and nothing else.** W50b
+    //    also recorded the stage and machine the host reported, so a record could
+    //    answer "stored, and *there*". That answer is now the host's, about its own
+    //    stage, and a remembered copy of it could only be stale — an archive replaced
+    //    at the same path is exactly the case that fooled it. The record's one job is
+    //    to say "asking the host about this capture is worth a round trip".
+    await rememberDeliveredQuietly(recaptureStore, name, derived);
     // 🔴 W69 · The other arrival: the host acknowledged this conversation, so it
     //    is on disk. Recorded here, after the fingerprint write above and before
     //    the answer — see `recordArrival`.
@@ -398,9 +394,26 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   };
 }
 
-/** The single construction point for names and payloads. The live leg and the backfill leg **share** it, so the on-disk logic does not fork. */
+/**
+ * The single construction point for names and payloads. The live leg and the backfill
+ * leg **share** it, so the on-disk logic does not fork.
+ *
+ * 🔴 W50c · `platform` is returned as well, and it is the same value the bundle just
+ *    got, for the reason the identity below is one derivation and not two: §6.6's
+ *    `has` names the conversation it is asking about, and the host turns that name
+ *    into a stage directory. Sending a platform derived anywhere but here could name
+ *    a different directory than the delivery writes into — and since a miss is
+ *    answered `held: false`, the only symptom would be an extra copy, silently.
+ */
 export type PreparedPayload =
-  | { ok: true; name: string; payload: string; bytes: number; sessionId: string }
+  | {
+    ok: true;
+    name: string;
+    payload: string;
+    bytes: number;
+    sessionId: string;
+    platform: string;
+  }
   | { ok: false; reason: string };
 
 async function preparePayload(
@@ -438,6 +451,7 @@ async function preparePayload(
     payload,
     bytes: new TextEncoder().encode(payload).byteLength,
     sessionId: bundle.sessionId,
+    platform: bundle.platform,
   };
 }
 
@@ -520,32 +534,41 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
    * fingerprint can only be computed from the body. The second **copy** is not.
    *
    * 🔴 A match is answered `saved: true`, and that is the honest answer, not a
-   *    convenience. `rememberDelivered` writes only after a matching ack, so a
-   *    matching fingerprint means this exact content is on record as stored under
-   *    this exact file name — 🔴 W50b · **and at the destination the host reports
-   *    now.** The engine reads `saved: true` as "settle the debt"
-   *    (engine.ts `sinkVerdict` → `settleDebt`, into `archived`), which is what the
-   *    debt ledger should say: that conversation is in the archive. The live leg
-   *    answers `status:'unchanged'` for the same situation; answering `saved:false`
-   *    here would send an archived conversation to the failure list and out of
-   *    `pending` for good — the "unknown recorded as a conclusion" failure this
-   *    project treats as least acceptable, inverted.
+   *    convenience — 🔴 W50c · **but it is the host's answer now, and this leg no
+   *    longer supplies one.**
+   *
+   *    What the host is answering with `held: true` is "a shard in this
+   *    conversation's directory of the stage I am writing to carries this
+   *    fingerprint" (§6.6). That is the claim the debt ledger needs, because the
+   *    engine reads `saved: true` as "settle the debt" (engine.ts `sinkVerdict` →
+   *    `settleDebt`, into `archived`), which is what the ledger should say: that
+   *    conversation is in the archive. The live leg answers `status:'unchanged'` for
+   *    the same situation; answering `saved:false` here would send an archived
+   *    conversation to the failure list and out of `pending` for good — the
+   *    "unknown recorded as a conclusion" failure this project treats as least
+   *    acceptable, inverted.
+   *
+   * 🔴 W50c was asked for because the previous answer was not the host's, and could
+   *    not be made safe: a record in extension storage said "we stored this, at this
+   *    stage", and an archive replaced or restored at that same path left the record
+   *    standing. This leg would then settle a debt for a conversation that had
+   *    reached no archive at all — the worst of the two directions. The record is now
+   *    only a pre-gate (lib/recapture.ts `isUnchangedCapture`).
    *
    * 🔴 It runs **before** the delivery attempt, so the debt is never touched by a
-   *    failed send. What W50b changed, stated rather than left to be found: the
-   *    guard **does** now contact the host, because "stored" is only ever true of a
-   *    destination, and our own storage cannot say which one. A host that is
-   *    momentarily down therefore no longer lets an unchanged item be skipped — it
-   *    falls through, `deliver` reports `retryLater`, and the leg pauses exactly as
-   *    it does for any other item. The cost is one extra copy once the host returns;
-   *    the alternative was marking a conversation archived in an archive it never
-   *    reached. The probe is paid **only** for a name whose body already matched, so
-   *    a first-time capture is unaffected (lib/recapture.ts `isUnchangedCapture`).
+   *    failed send. The guard contacts the host, and that has a cost worth stating:
+   *    a host that is momentarily down can no longer let an unchanged item be
+   *    skipped — it falls through, `deliver` reports `retryLater`, and the leg pauses
+   *    exactly as it does for any other item. One extra copy once the host returns,
+   *    against marking a conversation archived in an archive it never reached. The
+   *    question is asked **only** for a name whose body already matched, so a
+   *    first-time capture is unaffected.
    *
    * A platform with no volatile-field table (grok, kimi, deepseek), a non-JSON body,
-   * an unreadable store, **or a destination the host did not confirm** all yield
-   * "not known to be unchanged" ⇒ delivered, so no conversation is ever skipped on
-   * the strength of a fingerprint we do not have.
+   * an unreadable store, **or any answer other than `held: true`** all yield "not
+   * known to be unchanged" ⇒ delivered, so no conversation is ever settled as
+   * archived on the strength of a fingerprint we do not have or a question we could
+   * not get answered.
    */
   const recaptureStore = browserLocalStore();
   const derived = await captureFingerprint(captured);
@@ -553,12 +576,20 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
     recaptureStore,
     prepared.name,
     derived,
-    () => probeDestination(recaptureStore),
+    { platform: prepared.platform, sessionId: prepared.sessionId },
+    (query) => has(query).then((answer) => answer.ok && answer.held),
   )) {
     return { saved: true, sessionId: prepared.sessionId };
   }
 
-  const result = await deliver(prepared.name, prepared.payload);
+  // 🔴 W50c · The fingerprint is derived from the payload being sent, by the same
+  //    function the outbox drain uses, so both legs put the same value on the shard
+  //    (`lib/recapture.ts` `deliveryFingerprint`).
+  const result = await deliver(
+    prepared.name,
+    prepared.payload,
+    await deliveryFingerprint(prepared.payload),
+  );
   if (result.delivered) {
     // 🔴 W50 · The record point on this leg is **this leg's own ack**. The live leg's
     //    precondition (`lookup.entry === null`, i.e. a matching ack deleted the
@@ -569,15 +600,11 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
     //    sharing the *observation* is impossible because the two legs acknowledge
     //    by different mechanisms, and inventing an outbox entry here would put one
     //    conversation in two ledgers.
-    // 🔴 W50b · The destination is asked for at this point on this leg for the same
-    //    reason it is on the live leg (see that call site): the ack does not name the
-    //    host that produced it, and the host has just answered, so the probe is cheap.
-    await rememberDeliveredQuietly(
-      recaptureStore,
-      prepared.name,
-      derived,
-      await probeDestination(recaptureStore),
-    );
+    // 🔴 W50c · The record says one thing — this fingerprint was delivered — and it
+    //    is written at the same point on both legs. W50b's destination argument is
+    //    gone here for the same reason it is gone on the live leg (see that call
+    //    site): the host answers "where" about its own stage, from §6.6.
+    await rememberDeliveredQuietly(recaptureStore, prepared.name, derived);
     return { saved: true, sessionId: prepared.sessionId };
   }
   if (isItemRejected(result)) {

@@ -134,6 +134,14 @@ const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 /** 'up' acks every delivery; 'down' makes every host call throw. */
 let hostMode: 'up' | 'down' = 'up';
 let lastCapturedAt = 1_700_000_000_000;
+/**
+ * What this fake host's stage holds, keyed as the real host keys it:
+ * `<platform>.<sessionId>|<fingerprint>` (`crates/chat-stasher/src/inbox.rs`
+ * `session_dir_id` + the `fingerprint` on the shard record). W50c's guard asks
+ * §6.6 before answering `unchanged`, so a stub without this would make every
+ * re-capture read as a fresh delivery.
+ */
+const stageHolds = new Set<string>();
 
 const fakeBrowser: any = {
   runtime: {
@@ -145,7 +153,20 @@ const fakeBrowser: any = {
       if (message.type === 'hello') {
         return { protocol: 1, type: 'hello', ok: true, host_version: '0.3.0', machine: 'm', stage: '/stage' };
       }
+      if (message.type === 'has') {
+        const isHeld = stageHolds.has(
+          `${message.platform}.${message.session_id}|${message.fingerprint}`,
+        );
+        return {
+          protocol: 1, type: 'has', ok: true, request_id: message.request_id,
+          held: isHeld, shard: isHeld ? '000001.jsonl' : null,
+        };
+      }
       if (message.type === 'deliver') {
+        if (typeof message.fingerprint === 'string') {
+          const bundle = JSON.parse(message.payload);
+          stageHolds.add(`${bundle.platform}.${bundle.sessionId}|${message.fingerprint}`);
+        }
         return {
           protocol: 1, type: 'ack', request_id: message.request_id,
           status: 'stored', sha256: message.sha256, shard: `0001-${message.name}`,
@@ -234,6 +255,7 @@ beforeEach(() => {
   (globalThis as any).indexedDB = new IDBFactory();
   hostMode = 'up';
   lastCapturedAt = 1_700_000_000_000;
+  stageHolds.clear();
   fakeBrowser.action.badgeText = '';
   vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);

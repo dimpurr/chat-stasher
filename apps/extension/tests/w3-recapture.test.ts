@@ -37,7 +37,6 @@ import {
   contentFingerprint,
   isUnchangedCapture,
   rememberDelivered,
-  type DeliveryDestination,
 } from '../lib/recapture';
 
 // ---------------------------------------------------------------------------
@@ -75,6 +74,15 @@ let hostMode: 'up' | 'down' = 'up';
 let deliveries: Array<{ name: string; payload: string }> = [];
 let lastCapturedAt = 1_700_000_000_000;
 
+/**
+ * What this fake host's **stage** holds, keyed as the real host keys it:
+ * `<platform>.<sessionId>|<fingerprint>`. Written when a delivery seals, cleared by
+ * [`replaceStage`] — never read from anything the extension wrote down.
+ */
+const stageHolds = new Set<string>();
+/** Empty the stage at the same path, keeping its name and machine (§6.6's premise). */
+function replaceStage(): void { stageHolds.clear(); }
+
 const fakeBrowser: any = {
   runtime: {
     id: 'w3-recapture',
@@ -85,8 +93,20 @@ const fakeBrowser: any = {
       if (message.type === 'hello') {
         return { protocol: 1, type: 'hello', ok: true, host_version: '0.3.0', machine: 'm', stage: '/stage' };
       }
+      if (message.type === 'has') {
+        const key = `${message.platform}.${message.session_id}|${message.fingerprint}`;
+        const isHeld = stageHolds.has(key);
+        return {
+          protocol: 1, type: 'has', ok: true, request_id: message.request_id,
+          held: isHeld, shard: isHeld ? '000001.jsonl' : null,
+        };
+      }
       if (message.type === 'deliver') {
         deliveries.push({ name: message.name, payload: message.payload });
+        if (typeof message.fingerprint === 'string') {
+          const bundle = JSON.parse(message.payload);
+          stageHolds.add(`${bundle.platform}.${bundle.sessionId}|${message.fingerprint}`);
+        }
         return {
           protocol: 1, type: 'ack', request_id: message.request_id,
           status: 'stored', sha256: message.sha256, shard: `0001-${message.name}`,
@@ -161,6 +181,7 @@ beforeEach(() => {
   hostMode = 'up';
   deliveries = [];
   lastCapturedAt = 1_700_000_000_000;
+  stageHolds.clear();
   fakeBrowser.action.badgeText = '';
   vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
@@ -218,72 +239,99 @@ describe('W3-RECAPTURE · contentFingerprint', () => {
 // The store is the repository's own in-memory implementation (the two methods
 // the port asks for), not a second copy of it.
 //
-// 🔴 W50b · Every call now carries a destination, because "unchanged" is only ever
-//    true of *where* the copy was stored. `DEST_A` is the fixture host this section
-//    acknowledges against. The two failure cases that need the real delivery path
-//    (a host that has changed, and an entry written before W50b) are exercised
-//    through `runtime.onMessage` in tests/w50b-delivery-destination.test.ts; what is
-//    asserted here is the store's own bookkeeping.
+// 🔴 W50c · The store's job here is only to decide whether the host is worth
+//    asking. `askHost` is the host's answer, and the tests below pin the
+//    consequence: a record with a host that says "not held" is **not** unchanged.
+//    The end-to-end cases (a replaced archive, an old host) go through
+//    `runtime.onMessage` in tests/w50c-host-answers.test.ts.
 // ---------------------------------------------------------------------------
 
-const DEST_A: DeliveryDestination = { machine: 'fixture-machine', stage: '/stage/a' };
-const DEST_B: DeliveryDestination = { machine: 'fixture-machine', stage: '/stage/b' };
+const ID = { platform: 'chatgpt', sessionId: CHATGPT_SID };
+/** A well-formed fingerprint: 64 lowercase hex characters. */
+const FP_1 = 'a'.repeat(64);
+const FP_2 = 'b'.repeat(64);
+/** `i` as a distinct well-formed fingerprint, for the cap test. */
+const fpOf = (i: number): string => i.toString(16).padEnd(64, 'c');
 
 /** The guard as a delivery leg calls it, with the host's answer fixed for the test. */
 function unchanged(
   s: ReturnType<typeof memoryStore> | null,
   name: string,
   fingerprint: string,
-  destination: DeliveryDestination | null,
+  hostHolds: boolean,
 ): Promise<boolean> {
-  return isUnchangedCapture(s, name, { platform: 'chatgpt', fingerprint }, async () => destination);
+  return isUnchangedCapture(s, name, { platform: 'chatgpt', fingerprint }, ID, async () => hostHolds);
 }
 
 describe('W3-RECAPTURE · the remembered fingerprint', () => {
-  it('is unchanged only after that exact fingerprint was recorded for that name at that destination', async () => {
+  it('is unchanged only when the record matches AND the host answers that it holds it', async () => {
     const s = memoryStore();
     const name = `chatgpt-${CHATGPT_SID}.json`;
 
-    expect(await unchanged(s, name, 'fp-1', DEST_A)).toBe(false);
+    expect(await unchanged(s, name, FP_1, true)).toBe(false);
 
-    await rememberDelivered(s, name, 'fp-1', DEST_A);
-    expect(await unchanged(s, name, 'fp-1', DEST_A)).toBe(true);
+    await rememberDelivered(s, name, FP_1);
+    expect(await unchanged(s, name, FP_1, true)).toBe(true);
     // A different fingerprint for the same conversation is a change.
-    expect(await unchanged(s, name, 'fp-2', DEST_A)).toBe(false);
+    expect(await unchanged(s, name, FP_2, true)).toBe(false);
     // The same fingerprint under another name says nothing about this one.
-    expect(await unchanged(s, 'chatgpt-other.json', 'fp-1', DEST_A)).toBe(false);
-    // 🔴 W50b · The same body acknowledged at another destination is not a match:
-    //    this copy is not on record as stored *there*, whatever it says about here.
-    expect(await unchanged(s, name, 'fp-1', DEST_B)).toBe(false);
-    // 🔴 And a destination the host would not confirm is not a match either — the
-    //    unknown is resolved toward delivering, never toward skipping.
-    expect(await unchanged(s, name, 'fp-1', null)).toBe(false);
+    expect(await unchanged(s, 'chatgpt-other.json', FP_1, true)).toBe(false);
+
+    // 🔴 W50c · **And the record is not the answer.** The same record with a host
+    //    that does not hold this content — a stage that was replaced, a host that
+    //    writes elsewhere — is not unchanged, however good the record looks.
+    expect(await unchanged(s, name, FP_1, false)).toBe(false);
   });
 
-  it('an unavailable store answers "not known to be unchanged", never "unchanged"', async () => {
+  it('a store that cannot be read answers "not known to be unchanged", never "unchanged"', async () => {
     // 🔴 "Cannot read it" must not collapse into "it did not change": the caller
     //    has to keep delivering.
-    expect(await unchanged(null, 'anything.json', 'fp-1', DEST_A)).toBe(false);
+    expect(await unchanged(null, 'anything.json', FP_1, true)).toBe(false);
     // And recording into it is a no-op rather than a throw.
-    await expect(rememberDelivered(null, 'anything.json', 'fp-1', DEST_A)).resolves.toBeUndefined();
+    await expect(rememberDelivered(null, 'anything.json', FP_1)).resolves.toBeUndefined();
+  });
+
+  it('reads a record written before W50c, and never writes that shape again', async () => {
+    // The two shapes this key has held: a bare fingerprint (pre-W50b) and W50b's
+    // object. Both say the same one thing now — "this content was delivered" — so
+    // both may send the extension to the host; neither may answer for it.
+    const s = memoryStore({
+      [LAST_DELIVERED_KEY]: {
+        'chatgpt-old.json': FP_1,
+        'chatgpt-w50b.json': { fingerprint: FP_2, machine: 'm', stage: '/stage/b' },
+        // Not a fingerprint, so not a record.
+        'chatgpt-junk.json': 'not-a-fingerprint',
+        'chatgpt-empty.json': { machine: 'm', stage: '/stage/b' },
+      },
+    });
+
+    expect(await unchanged(s, 'chatgpt-old.json', FP_1, true)).toBe(true);
+    expect(await unchanged(s, 'chatgpt-w50b.json', FP_2, true)).toBe(true);
+    expect(await unchanged(s, 'chatgpt-junk.json', FP_1, true)).toBe(false);
+    expect(await unchanged(s, 'chatgpt-empty.json', FP_2, true)).toBe(false);
+
+    await rememberDelivered(s, 'chatgpt-new.json', FP_1);
+    const saved = s.data[LAST_DELIVERED_KEY] as Record<string, unknown>;
+    // 🔴 The write is a plain string: no destination, because the record no longer
+    //    claims to know one (§6.6 answers "where" from the stage).
+    expect(saved['chatgpt-new.json']).toBe(FP_1);
+    expect(saved['chatgpt-old.json']).toBe(FP_1);
   });
 
   it('keeps the most recent MAX_REMEMBERED, dropping the oldest first', async () => {
     const seed: Record<string, unknown> = {};
-    for (let i = 0; i < MAX_REMEMBERED; i += 1) {
-      seed[`conv-${i}`] = { fingerprint: `fp-${i}`, machine: DEST_A.machine, stage: DEST_A.stage };
-    }
+    for (let i = 0; i < MAX_REMEMBERED; i += 1) seed[`conv-${i}`] = fpOf(i);
     const s = memoryStore({ [LAST_DELIVERED_KEY]: seed });
 
-    await rememberDelivered(s, 'conv-new', 'fp-new', DEST_A);
+    await rememberDelivered(s, 'conv-new', FP_1);
 
     const oldest = 'conv-0';
     const newest = `conv-${MAX_REMEMBERED - 1}`;
     // 🔴 The oldest really is gone, and the newest really is still there — both
     //    halves asserted, because either alone would pass on a broken cap.
-    expect(await unchanged(s, oldest, 'fp-0', DEST_A)).toBe(false);
-    expect(await unchanged(s, newest, `fp-${MAX_REMEMBERED - 1}`, DEST_A)).toBe(true);
-    expect(await unchanged(s, 'conv-new', 'fp-new', DEST_A)).toBe(true);
+    expect(await unchanged(s, oldest, fpOf(0), true)).toBe(false);
+    expect(await unchanged(s, newest, fpOf(MAX_REMEMBERED - 1), true)).toBe(true);
+    expect(await unchanged(s, 'conv-new', FP_1, true)).toBe(true);
 
     const saved = s.data[LAST_DELIVERED_KEY] as Record<string, unknown>;
     expect(Object.keys(saved)).toHaveLength(MAX_REMEMBERED);

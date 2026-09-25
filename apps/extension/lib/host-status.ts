@@ -18,9 +18,8 @@
  * be said to be visible at all.
  */
 
-import { HELLO_PROBE_TIMEOUT_MS, hello, type HelloResult, type NackKind } from './native-host';
+import { hello, type HelloResult, type NackKind } from './native-host';
 import type { BackfillStore } from './backfill/store';
-import type { DeliveryDestination } from './recapture';
 
 export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
 export const HOST_PAUSE_KEY = 'cs_native_host_pause_v1';
@@ -158,43 +157,17 @@ export async function resumeBackfill(
 }
 
 /**
- * 🔴 W50b · **Where the host writes, asked now.**
+ * 🔴 W50b · **`probeDestination` lived here and is gone, deliberately.**
  *
- * This is the recapture guard's source of destination identity (lib/recapture.ts),
- * and the reason it is a **live probe** rather than a read of the `HostStatusRecord`
- * we have already written down: that record is explicitly *"the last hello result
- * ... not a current fact"* (this file's header, and `lastKnownStage` below). A
- * destination is the one thing a stored record cannot answer, because a
- * reconfiguration is exactly the event that changes it — and the guard consults it
- * only to decide whether a conversation may be marked archived **without being
- * sent**. Answering that from a stale record is the defect W50b exists to close, so
- * the guard asks the host, and a host that does not answer yields `null`, which the
- * guard reads as "not unchanged" (invariant 1: an unknown is never recorded as a
- * confirmation).
+ * It asked the host where it writes so the recapture guard could compare that with
+ * the destination a remembered delivery named. W50c removed the comparison and the
+ * remembered destination with it: the guard now asks the host one question — §6.6
+ * `has`, "do you already hold this content?" — and the host answers it **from the
+ * stage it is writing to**. A destination the extension holds is therefore a second
+ * copy of an answer the archive gives directly, and the weaker copy: it is a string
+ * captured at ack time, and the event it cannot see (the archive replaced at the same
+ * path) is exactly the one the guard exists for.
  *
- * It writes the answer down as a side effect — `checkHost` is the existing
- * "ask, then record" function, reused rather than duplicated, so a probe also
- * refreshes what the popup renders.
- *
- * 🔴 The timeout is `HELLO_PROBE_TIMEOUT_MS`, the popup's, not the delivery path's
- *    60 s: the guard must not hang a capture on a wedged host. The same constant and
- *    the same reasoning as `hostStatusForPopup`. A host that needs longer than this
- *    is one the guard declines to vouch for, and the capture is delivered instead —
- *    a cost of one extra copy, never a wrongly-skipped one.
- *
- * Never throws: the guard's caller is a delivery path, and a probe that fails must
- * read as "no destination", not as an exception.
+ * Nothing here replaces it. `checkHost` above is unaffected and still serves the
+ * popup; the guard no longer reads the host's identity at all.
  */
-export async function probeDestination(
-  store: BackfillStore | null,
-): Promise<DeliveryDestination | null> {
-  try {
-    const status = await checkHost(store, { timeoutMs: HELLO_PROBE_TIMEOUT_MS });
-    if (!status.ok) return null;
-    if (typeof status.machine !== 'string' || typeof status.stage !== 'string') return null;
-    if (status.machine === '' || status.stage === '') return null;
-    return { machine: status.machine, stage: status.stage };
-  } catch {
-    return null;
-  }
-}

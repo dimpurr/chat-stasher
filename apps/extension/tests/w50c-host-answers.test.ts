@@ -1,33 +1,38 @@
 /**
- * W50b · **A remembered delivery names the destination that acknowledged it.**
+ * W50c · **"Is this already stored?" is answered by the host, from its stage.**
  *
  * ## The defect this covers
  *
  * W50 gave both legs the same guard: a fingerprint recorded after a matching ack,
- * keyed by delivery name and body content. Nothing in that record said *where* the
- * copy went. So the store could only answer "this content is stored" when the
- * honest question — the one the guard's `saved: true` actually claims, because the
- * engine settles a debt on it (engine.ts `sinkVerdict` → `settleDebt`) — is "this
- * content is stored **here**".
+ * keyed by delivery name and body content. W50b then added the stage and machine the
+ * host reported, so the record could say "stored, and *there*". Two review rounds
+ * found the same thing underneath both: the answer came from **extension memory
+ * about an archive**, and memory cannot see the event that matters. Replace or
+ * restore the archive at the same path — same `stage`, same `machine`, every record
+ * still standing — and a relist settles a conversation as archived having delivered
+ * nothing to the archive that is there now. On the backfill leg that means the debt
+ * is cleared and the engine moves on; the conversation is in no archive anywhere.
  *
- * Point the native host at another stage while browser storage survives, and every
- * record still stands. On the backfill leg a relist then marks a conversation
- * archived having delivered nothing to the new archive; on the live leg a re-view
- * answers `status:'unchanged'` the same way. Both legs read the same predicate and
- * write through the same function, so both are covered here.
+ * W50c put the question to the host: §6.6 `has`, answered by scanning the stage the
+ * host is writing to *now*. This file drives that through the real delivery path.
  *
  * ## What is asserted, and why each case needs the others
  *
- *  · **same host ⇒ skip.** The positive control. Without it, "changed host ⇒
- *    deliver" would pass on a guard that had simply stopped skipping, and the
- *    one-extra-copy cost W50b accepts would be paid on every capture for nothing.
- *  · **changed host ⇒ deliver.** The defect itself. The only thing that differs
- *    between this case and the first is the `stage` the host reports.
- *  · **legacy entry ⇒ deliver.** A record written before W50b is a bare fingerprint
- *    string. It must be read as *not delivered* — never upgraded, because nothing on
- *    disk says which stage those bytes reached. The seeded value is asserted to be
- *    the fingerprint the guard really computes, so this case cannot pass merely
- *    because the test seeded a value that could never have matched.
+ *  · **same host, same stage ⇒ skip.** The positive control. Without it, every
+ *    "⇒ deliver" case below would pass on a guard that had simply stopped skipping.
+ *  · **the archive replaced at the same path ⇒ deliver.** The review's finding. The
+ *    stage keeps its path and its machine; only its contents are gone. Nothing in
+ *    extension storage changes, which is exactly the situation that defeated both
+ *    earlier designs.
+ *  · **the host moved to another stage ⇒ deliver.** W50b's case, kept: the record
+ *    was written against one archive and the host now writes to another.
+ *  · **an older host that does not know `has` ⇒ deliver.** The fallback. Its `nack`
+ *    is not an answer, so nothing may be skipped on it.
+ *  · **a record written before W50c ⇒ the host is still asked.** Both older shapes of
+ *    the record are read for the one thing they say ("this was delivered once"), so
+ *    the host decides instead of the shape deciding.
+ *  · **another conversation's copy ⇒ deliver.** The answer is scoped to the
+ *    conversation whose directory the shard was sealed under.
  *
  * ## Level
  *
@@ -37,9 +42,14 @@
  * relist helpers this file reuses. The only swapped parts are `browser.*`, the http
  * port and the native host. Zero network, zero logged-in state, and every body
  * below is synthetic.
+ *
+ * 🔴 The synthetic host's `has` answers from **its own stage model**, never from
+ *    anything the extension wrote (tests/synthetic-native-host.ts). A stub that read
+ *    the extension's record would let this whole file pass with the defect open.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
@@ -245,27 +255,67 @@ const A = 'c1111111-0000-4000-8000-00000000000a';
 const NAME_A = `chatgpt-${A}.json`;
 
 // ===========================================================================
-// 1 · the destination is what decides, and the other two cases prove it
+// 1 · the stage decides, and the other cases prove it
 // ===========================================================================
 
-describe('W50b · the backfill leg answers "stored" only for the destination that acknowledged it', () => {
+describe('W50c · the backfill leg settles "stored" only on the host\'s own answer', () => {
   it('🔴 the same host, relisted: nothing is stored a second time (the positive control)', async () => {
     const server = makeServer([A], (id, n) => chatgptBody(id, { safeUrls: [`https://files.example/${n}`] }));
 
-    // ---- pass 1: first-seen ⇒ delivered, and the record names host /stage/a ----
+    // ---- pass 1: first-seen ⇒ delivered, and the shard records the fingerprint ----
     await bootAndDispatch(server);
     expect(deliveriesFor([A])).toHaveLength(1);
     expect((await stateOf()).archived).toEqual([A]);
+    const afterFirst = host.hasCount();
 
     await relist();
 
-    // ---- pass 2: a relist, against the same host ----
+    // ---- pass 2: a relist, against the same host and the same stage ----
     await bootAndDispatch(server);
 
     // The body really was fetched again — so this is not "the tick did nothing".
     expect(server.detailUrls.filter((u) => u.includes(A))).toHaveLength(2);
-    // 🔴 And nothing was stored a second time.
+    // 🔴 And nothing was stored a second time — because the host was asked and said
+    //    it held it. Asserted as a question that was really put, not merely as the
+    //    absence of a delivery: a guard that had stopped asking would also deliver
+    //    nothing if it skipped from memory, and that is the design this replaced.
+    expect(host.hasCount()).toBeGreaterThan(afterFirst);
     expect(deliveriesFor([A])).toHaveLength(1);
+    const s2 = await stateOf();
+    expect(s2.archived).toEqual([A]);
+    expect(s2.pending).toEqual([]);
+    expect(s2.failures ?? []).toEqual([]);
+  });
+
+  it('🔴 the archive replaced at the same path: the relist IS delivered, not marked archived', async () => {
+    const server = makeServer([A], (id, n) => chatgptBody(id, { safeUrls: [`https://files.example/${n}`] }));
+
+    // ---- pass 1: delivered, and the record written ----
+    await bootAndDispatch(server);
+    expect(deliveriesFor([A])).toHaveLength(1);
+    expect((await stateOf()).archived).toEqual([A]);
+    // The record really is on disk — the situation the defect needs. Asserted
+    // shape-agnostically on purpose: which shape it takes is not this test's subject
+    // (the shapes are tested in tests/w3-recapture.test.ts), and a shape here would
+    // turn the case below into a test of the record's spelling.
+    expect(store[LAST_DELIVERED_KEY]).toHaveProperty([NAME_A]);
+
+    await relist();
+
+    // 🔴 The one thing that changes: the archive at `/stage/a` is gone. Same stage
+    //    path, same machine, same extension storage, same records — a replaced,
+    //    restored or rebuilt archive. Under W50 **and** W50b the stored record still
+    //    matched, so this relist settled the debt without delivering anything; the
+    //    conversation would be `archived` in the ledger and in no archive anywhere.
+    host.replaceStage();
+
+    // ---- pass 2 ----
+    await bootAndDispatch(server);
+
+    // 🔴 Delivered again, into the archive that is actually there. Under W50 and
+    //    W50b this was answered `saved:true` from the stored record alone, so the
+    //    debt settled with nothing reaching `/stage/a` and this count would be 1.
+    expect(deliveriesFor([A])).toHaveLength(2);
     const s2 = await stateOf();
     expect(s2.archived).toEqual([A]);
     expect(s2.pending).toEqual([]);
@@ -282,17 +332,17 @@ describe('W50b · the backfill leg answers "stored" only for the destination tha
 
     await relist();
 
-    // 🔴 The one thing that changes: the host now writes somewhere else. Browser
-    //    storage is untouched — the same records the first pass wrote are still
-    //    there, which is precisely the situation the defect needs.
+    // 🔴 The host now writes somewhere else. Browser storage is untouched — the same
+    //    records the first pass wrote are still there.
     host = createSyntheticHost({ up: true, stage: '/stage/b', machine: 'm1' });
 
     // ---- pass 2 ----
     await bootAndDispatch(server);
 
-    // 🔴 Delivered again, and to the **new** stage. Under W50 this was answered
-    //    `saved:true` from the stored fingerprint alone, so the debt settled with
-    //    nothing reaching /stage/b and the count below would be 0.
+    // Delivered again, and to the **new** stage. Under W50 this was answered
+    // `saved:true` from the stored fingerprint alone; under W50b the destination
+    // comparison caught it, and under W50c it is caught because the host is asked
+    // about the stage it is writing to.
     //    The two hosts are counted separately because swapping the instance swaps
     //    its delivery log with it; "1 and 1" is the same claim as "2, at two
     //    stages", and it is the one that stays true if a future bug sends pass 2
@@ -308,26 +358,70 @@ describe('W50b · the backfill leg answers "stored" only for the destination tha
     expect(s2.failures ?? []).toEqual([]);
   });
 
-  it('🔴 a record written before W50b is delivered again, never read as stored', async () => {
+  it('🔴 an older host that does not know `has`: the relist is delivered', async () => {
+    const server = makeServer([A], (id, n) => chatgptBody(id, { safeUrls: [`https://files.example/${n}`] }));
+
+    // Pass 1 against a host that answers `has` normally, so the record really is
+    // written. (It is *not* asked anything yet: a first-time capture has no record
+    // to be worth a round trip — that is the pre-gate, and it is asserted here so a
+    // future change that asks on every capture shows up rather than passing.)
+    await bootAndDispatch(server);
+    expect(deliveriesFor([A])).toHaveLength(1);
+    expect(host.hasCount()).toBe(0);
+
+    await relist();
+
+    // 🔴 The host is *downgraded* to one that predates §6.6 but still holds the
+    //    stage — its `ack` would still be honoured, and only the question is
+    //    missing. §6.3's `bad-request` is what such a host answers an unknown `type`
+    //    with, and it is not an answer to the question.
+    host = createSyntheticHost({ up: true, stage: '/stage/a', machine: 'm1', unsupported: true });
+
+    await bootAndDispatch(server);
+
+    // 🔴 Delivered. "We could not ask" must never become "it is already there", which
+    //    is the one direction of this error that loses a conversation instead of
+    //    copying it. And the question really was put — asserted, because "did not
+    //    ask" would also deliver nothing and would be the wrong reason to pass.
+    //
+    //    Counted per conversation rather than as a total: the live capture this boot
+    //    dispatched is a *second* question (its own record now exists, so its re-view
+    //    asks about itself), and a bare total would conflate the two.
+    expect(host.requests().filter((r) => r.type === 'has' && r.session_id === A)).toHaveLength(1);
+    expect(deliveriesFor([A])).toHaveLength(1);
+    const s2 = await stateOf();
+    expect(s2.archived).toEqual([A]);
+    expect(s2.pending).toEqual([]);
+  });
+
+  it('🔴 a record in either older shape is read, and the host — not the shape — decides', async () => {
     const body = chatgptBody(A, { safeUrls: ['https://files.example/1'] });
     const fingerprint = await contentFingerprint('chatgpt', body);
-    // 🔴 If this were null the case below would be vacuous — the guard would skip the
-    //    record because there was nothing to compare, not because it lacked a
-    //    destination. Asserted so the case cannot pass for the wrong reason.
+    // 🔴 If this were null the cases below would be vacuous — nothing would be
+    //    answered at all. Asserted so they cannot pass for the wrong reason.
     expect(typeof fingerprint).toBe('string');
 
-    // The pre-W50b shape: a bare fingerprint string under the delivery name.
-    store[LAST_DELIVERED_KEY] = { [NAME_A]: fingerprint };
-
+    // ---- a record written before W50c, against a stage that does hold the content
+    // ---- ⇒ the host is asked, and answers that it holds it ⇒ unchanged.
     await bootAndDispatch(makeServer([A], () => body));
-
-    // 🔴 Delivered, even though the value on disk is the exact fingerprint the guard
-    //    computes: nothing there says which stage those bytes reached, so "stored"
-    //    cannot be claimed of this one.
     expect(deliveriesFor([A])).toHaveLength(1);
-    const s1 = await stateOf();
-    expect(s1.archived).toEqual([A]);
-    expect(s1.pending).toEqual([]);
+    await relist();
+    // Rewrite the record into the pre-W50b shape: a bare fingerprint string.
+    store[LAST_DELIVERED_KEY] = { [NAME_A]: fingerprint };
+    await bootAndDispatch(makeServer([A], () => body));
+    expect(deliveriesFor([A])).toHaveLength(1);
+    expect((await stateOf()).archived).toEqual([A]);
+    expect((await stateOf()).failures ?? []).toEqual([]);
+
+    // ---- the same record, against a stage that does not ⇒ delivered.
+    // 🔴 This is the half that proves the record is only a pre-gate: the value on
+    //    disk is still the exact fingerprint the guard computes, and it is not
+    //    allowed to answer for the archive.
+    await relist();
+    host.replaceStage();
+    await bootAndDispatch(makeServer([A], () => body));
+    expect(deliveriesFor([A])).toHaveLength(2);
+    expect((await stateOf()).archived).toEqual([A]);
   });
 });
 
@@ -335,8 +429,8 @@ describe('W50b · the backfill leg answers "stored" only for the destination tha
 // 2 · the live leg had the same hole, and is fixed by the same code
 // ===========================================================================
 
-describe('W50b · the live leg answers "unchanged" only for the destination that acknowledged it', () => {
-  it('🔴 the same host: the second view is unchanged; a moved host: it is delivered again', async () => {
+describe('W50c · the live leg answers "unchanged" only on the host\'s own answer', () => {
+  it('🔴 the same host: the second view is unchanged; a replaced archive: it is delivered again', async () => {
     // The backfill leg is not what this case is about, and the live-leg kick starts
     // a tick — so it is given an empty conversation list and stays out of the way.
     const mod = await boot(makeServer([], () => ''));
@@ -347,19 +441,169 @@ describe('W50b · the live leg answers "unchanged" only for the destination that
     expect(first).toMatchObject({ saved: true, status: 'delivered' });
     expect(host.deliveries).toHaveLength(1);
 
-    // ---- view 2, same body, same host: unchanged, and nothing sent ----
+    // ---- view 2, same body, same stage: unchanged, and nothing sent ----
     const second = await dispatch(mod, capture);
     expect(second).toMatchObject({ saved: true, status: 'unchanged' });
     expect(host.deliveries).toHaveLength(1);
 
-    // 🔴 The host moves. The stored record — written by view 1 against /stage/a —
-    //    is still there, and is now a statement about a destination that is no
-    //    longer the one in use.
-    host = createSyntheticHost({ up: true, stage: '/stage/b', machine: 'm1' });
+    // 🔴 The archive at the same path is replaced. The stored record — written by
+    //    view 1 — is still there, and is now a statement about content the archive
+    //    no longer holds.
+    host.replaceStage();
 
     // ---- view 3: the same bytes, and this time they must actually be sent ----
     const third = await dispatch(mod, capture);
     expect(third).toMatchObject({ saved: true, status: 'delivered' });
+    expect(host.deliveries).toHaveLength(2);
+  });
+
+  it('🔴 an older host: the second view is delivered rather than answered `unchanged`', async () => {
+    const mod = await boot(makeServer([], () => ''));
+    const capture = liveCapture();
+
+    // View 1 against a host that knows `has`, so the stage holds the conversation
+    // and the record is written.
+    expect(await dispatch(mod, capture)).toMatchObject({ saved: true, status: 'delivered' });
+
+    // 🔴 The host is replaced by one that predates §6.6, at the same stage.
+    host = createSyntheticHost({ up: true, stage: '/stage/a', machine: 'm1', unsupported: true });
+
+    // Both views below must go out: the question cannot be asked, so nothing may be
+    // skipped. A `nack` read as "held" would lose every re-view of every
+    // conversation on a host that is merely older than the extension.
+    expect(await dispatch(mod, capture)).toMatchObject({ saved: true, status: 'delivered' });
     expect(host.deliveries).toHaveLength(1);
+    expect(await dispatch(mod, capture)).toMatchObject({ saved: true, status: 'delivered' });
+    expect(host.deliveries).toHaveLength(2);
+  });
+});
+
+// ===========================================================================
+// 3 · the hand-written validator and the committed schema are one contract
+//
+// `native-host.ts` validates responses by hand (§1's rule: the code path that
+// decides whether data is safe to forget pulls in no JSON-schema library), and
+// `contracts/nativehost-message.schema.json` is what the host is held to. Two
+// hand-written halves of one contract is exactly the shape that drifts — and on
+// this message the drift is silent: a response the extension fails to recognise
+// becomes "malformed", which every caller reads as "not held" ⇒ deliver. So the
+// shape the extension accepts is checked here against the committed schema file
+// itself rather than against this suite's stub, which would agree with any
+// mistake by construction.
+//
+// The request half is checked the same way: the fields sent are the fields the
+// schema names and no others. The host ignores request fields it does not define
+// (§6), so an unused one would sit there unnoticed.
+// ===========================================================================
+
+const SCHEMA = JSON.parse(
+  readFileSync(new URL('../../../contracts/nativehost-message.schema.json', import.meta.url), 'utf8'),
+) as { $defs: Record<string, any> };
+
+/**
+ * One `has()` call against a response this file chooses, plus the request that was
+ * actually sent.
+ *
+ * 🔴 `response` is built **from the request**, because §1 makes `request_id`
+ *    load-bearing: an answer carrying a different one is not an answer, so a fixed
+ *    `request_id` here would make every case below test the echo check instead of
+ *    the shape under test.
+ */
+async function askWith(
+  response:
+    | Record<string, unknown>
+    | ((request: Record<string, unknown>) => Record<string, unknown>),
+): Promise<{ answer: { ok: boolean; held?: boolean; reason?: string }; sent: Array<Record<string, unknown>> }> {
+  const sent: Array<Record<string, unknown>> = [];
+  const sendNativeMessage = (_host: string, message: Record<string, unknown>) => {
+    sent.push(message);
+    return Promise.resolve(typeof response === 'function' ? response(message) : response);
+  };
+  vi.stubGlobal('chrome', { runtime: { id: 'w50c-schema-check', sendNativeMessage } });
+  vi.stubGlobal('browser', { runtime: { id: 'w50c-schema-check', sendNativeMessage } });
+  const { has } = await import('../lib/native-host');
+  const answer = await has(
+    { platform: 'chatgpt', sessionId: 's', fingerprint: 'a'.repeat(64) },
+    { timeoutMs: 100 },
+  );
+  return { answer: answer as { ok: boolean; held?: boolean; reason?: string }, sent };
+}
+
+/** §6.6's complete success response, spelled the way the schema spells it. */
+const hasOk = (over: Record<string, unknown> = {}) =>
+  (request: Record<string, unknown>): Record<string, unknown> => ({
+    protocol: 1, type: 'has', ok: true, request_id: request.request_id,
+    held: true, shard: '000001.jsonl', ...over,
+  });
+
+describe('W50c · §6.6 as the schema writes it and as the extension reads it', () => {
+  it('🔴 the response fields the validator requires are exactly the schema\'s', async () => {
+    const def = SCHEMA.$defs.hasResponse;
+    expect(def, 'the committed schema must describe §6.6').toBeDefined();
+    expect(def.additionalProperties, 'an extra response field must stay a red test').toBe(false);
+    const required: string[] = def.required;
+    // The exact set, not a superset: a field the schema requires and the validator
+    // ignores would be a response the extension only half-reads.
+    expect([...required].sort()).toEqual(['held', 'ok', 'protocol', 'request_id', 'shard', 'type']);
+
+    // The whole shape is accepted...
+    expect((await askWith(hasOk())).answer).toMatchObject({ ok: true, held: true });
+
+    // ...and each required field, left out, is a malformed response rather than a
+    // defaulted one. `held` absent in particular must never read as `false`.
+    for (const field of required) {
+      const { answer } = await askWith((request) => {
+        const body = hasOk()(request);
+        delete body[field];
+        return body;
+      });
+      expect(answer.ok, `a response without \`${field}\` must not be accepted`).toBe(false);
+      expect(answer.reason).toBe('malformed-response');
+    }
+
+    // An extra field is malformed too — that is what `additionalProperties: false`
+    // means on the wire.
+    expect((await askWith(hasOk({ extra: 1 }))).answer).toMatchObject({
+      ok: false, reason: 'malformed-response',
+    });
+
+    // 🔴 `shard` is `string | null`, and the two wrong-type cases are the ones a
+    //    hand-written check drops: `null` is a real value (`held: false`) and must
+    //    not be confused with "absent", and a number is neither.
+    expect((await askWith(hasOk({ held: false, shard: null }))).answer).toMatchObject({
+      ok: true, held: false,
+    });
+    expect((await askWith(hasOk({ shard: 7 }))).answer).toMatchObject({ ok: false });
+    expect((await askWith(hasOk({ held: 'yes' }))).answer).toMatchObject({ ok: false });
+
+    // 🔴 And the answer is believed only for the request that was sent (§1): a
+    //    `held: true` under someone else's `request_id` is not an answer to us, and
+    //    this is the check that stops a stray response skipping a conversation.
+    const borrowed = await askWith((request) => ({ ...hasOk()(request), request_id: 'not-ours' }));
+    expect(borrowed.sent[0]!.request_id).not.toBe('not-ours');
+    expect(borrowed.answer.ok).toBe(false);
+  });
+
+  it('🔴 the request fields the extension sends are exactly the schema\'s `hasRequest`', async () => {
+    const def = SCHEMA.$defs.hasRequest;
+    expect(def, 'the committed schema must describe §6.6').toBeDefined();
+    expect([...(def.required as string[])].sort()).toEqual([
+      'fingerprint', 'platform', 'protocol', 'request_id', 'session_id', 'type',
+    ]);
+    // Both identity-bearing fields are the schema's own definitions, not free text:
+    // a request_id outside §6.2's grammar or a fingerprint that is not 64 hex would
+    // be refused by the host, and the refusal would read as "not held".
+    expect(def.properties.request_id.$ref).toBe('#/$defs/requestId');
+    expect(def.properties.fingerprint.$ref).toBe('#/$defs/sha256');
+
+    const { sent } = await askWith(hasOk({ held: false, shard: null }));
+    expect(sent).toHaveLength(1);
+    expect(Object.keys(sent[0]!).sort()).toEqual([
+      'fingerprint', 'platform', 'protocol', 'request_id', 'session_id', 'type',
+    ]);
+    expect(sent[0]).toMatchObject({
+      protocol: 1, type: 'has', platform: 'chatgpt', session_id: 's', fingerprint: 'a'.repeat(64),
+    });
+    expect(sent[0]!.request_id).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
   });
 });
