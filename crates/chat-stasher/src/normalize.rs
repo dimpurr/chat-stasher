@@ -8,6 +8,15 @@
 use crate::activity::TimeSource;
 use serde_json::Value;
 
+/// One extractor file per harness, dispatched by [`normalize_value`]. A
+/// harness with no arm there is served the raw view only — see
+/// [`harness_has_a_reader`] — and never a generic guess about its shape.
+mod codex;
+mod cursor;
+mod gemini_cli;
+mod kimi_code;
+mod opencode;
+
 pub const DEFAULT_WINDOW: usize = 50;
 pub const MAX_WINDOW: usize = 200;
 
@@ -88,8 +97,20 @@ pub struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provenance {
-    Known { source: String },
-    Unknown { why: String },
+    Known {
+        source: String,
+    },
+    Unknown {
+        why: String,
+    },
+    /// The harness is known and this build has no extractor for it: the raw
+    /// shards are the only view. This is a third, distinct state — not
+    /// "unknown" (the harness *is* identified) and never "empty" (no claim
+    /// at all is made about the body, so the zeroed counters below are
+    /// unread, not measured).
+    RawOnly {
+        why: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,8 +156,23 @@ impl Conversation {
 
 /// Normalize the concatenated archive body. The body remains untouched; the
 /// returned model is only a reader view and counts every line it cannot use.
+///
+/// A harness with no extractor in this build gets no interpretation at all:
+/// no lines are parsed and no counts are taken, and the returned
+/// [`Provenance::RawOnly`] tells the reader to serve the raw view honestly
+/// (the design's "raw view only" state, 29-UI-DESIGN UIA-7).
 pub fn normalize(harness: &str, body: &str) -> Conversation {
     let mut conversation = Conversation::new(harness);
+    if !harness_has_a_reader(harness) {
+        mark_raw_view_only(harness, &mut conversation);
+        return conversation;
+    }
+    if harness == "kimi-code" {
+        // The wire journal needs per-body state to fold a step's parts into
+        // one assistant message, so it owns its own line walk.
+        kimi_code::normalize_body(body, &mut conversation);
+        return conversation;
+    }
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -177,12 +213,12 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
                 // would report our own reading as the body's defect — "52
                 // lines were not valid JSON" about a body that is valid JSON.
                 // What replaces them is the documents' own accounting:
-                // `normalize_gemini_cli` counts a document that holds no
+                // `gemini_cli::document` counts a document that holds no
                 // message, and each record inside one that it cannot read.
                 conversation.unrendered_lines = 0;
                 conversation.unrecognized_lines = 0;
                 for document in &documents {
-                    normalize_gemini_cli(document, &mut conversation);
+                    gemini_cli::document(document, &mut conversation);
                 }
             }
             Err(_) => {
@@ -197,20 +233,60 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
     conversation
 }
 
+/// The harnesses this build reads as a conversation. This is the registry:
+/// one arm per extractor file, and the `""` row that carries no harness id
+/// at all (it keeps the structural attempt and its distinct
+/// provenance-unknown state). Every other id — the registry harnesses with
+/// no extractor yet (github-copilot-cli, aider, crush, zed, continue, grok)
+/// and the web-platform ids whose readers ship separately (gemini,
+/// perplexity, kimi) — is served the raw view only.
+fn harness_has_a_reader(harness: &str) -> bool {
+    matches!(
+        harness,
+        "claude-code"
+            | "codex"
+            | "gemini-cli"
+            | "kimi-code"
+            | "opencode"
+            | "cursor"
+            | "chatgpt"
+            | "deepseek"
+            | "claude"
+            | ""
+    )
+}
+
+fn mark_raw_view_only(harness: &str, conversation: &mut Conversation) {
+    conversation.provenance = Provenance::RawOnly {
+        why: if harness.is_empty() {
+            "the archived row did not identify a harness".to_string()
+        } else {
+            format!("no reader for `{harness}` records exists in this build")
+        },
+    };
+    conversation.unrendered_lines = 0;
+    conversation.unrecognized_lines = 0;
+}
+
 fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation) {
     match harness {
-        "claude-code" | "kimi-code" => normalize_cli_line(harness, value, conversation),
-        "codex" => normalize_codex_line(value, conversation),
-        "gemini-cli" => normalize_gemini_cli(value, conversation),
+        "claude-code" => normalize_cli_line(harness, value, conversation),
+        "codex" => codex::normalize_line(value, conversation),
+        "gemini-cli" => gemini_cli::document(value, conversation),
+        "kimi-code" => kimi_code::record_or_count(value, conversation),
+        "opencode" => opencode::normalize_session(value, conversation),
+        "cursor" => cursor::normalize_session(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),
-        // `opencode` and `cursor` were routed to the codex extractor, which is
-        // a claim that they are recorded in codex's shape. They are not: both
-        // archive a session *summary* document, and `opencode`'s carries a
-        // `messages` array. The generic reader is the design's fallback for a
-        // harness with no extractor of its own, so they go there.
-        _ => normalize_generic(value, conversation),
+        // An empty harness id is not a harness at all: there is no shape to
+        // claim, the provenance-unknown state is already recorded, and the
+        // envelope probe below is the only honest structural attempt left.
+        "" => normalize_generic(value, conversation),
+        // Unreachable while `normalize` gates on `harness_has_a_reader`, and
+        // this same arm is the fallback a new harness id deserves if the two
+        // ever disagree: no interpretation, no counts, raw view only.
+        _ => mark_raw_view_only(harness, conversation),
     }
 }
 
@@ -273,153 +349,6 @@ fn normalize_cli_line(harness: &str, value: &Value, conversation: &mut Conversat
         time: line_time,
         blocks,
     });
-}
-
-/// One archived codex line.
-///
-/// The archived body is `{"timestamp":…, "type":…, "payload":{…}}` and it is
-/// `payload.type` that names the record. `response_item` holds the transcript
-/// the model saw — `message`, `reasoning`, `function_call`,
-/// `function_call_output` — and is what this renders. `event_msg` is the same
-/// turn recorded a second time at the application level (`user_message`,
-/// `agent_message`, `agent_reasoning`, `token_count`), so rendering it too
-/// would show every turn twice; it is counted as not rendered, along with
-/// `session_meta` and `turn_context`, which are session metadata rather than
-/// conversation.
-///
-/// The minimal `{"payload":{"message":…}}` shape is kept because
-/// `activity::analyze_session`'s fixture uses it (`activity.rs:1717`).
-fn normalize_codex_line(value: &Value, conversation: &mut Conversation) {
-    let time = message_time(value.get("timestamp"));
-    if let Some(message) = value.pointer("/payload/message") {
-        if let Some(message) = message_from_value(message, time, conversation) {
-            conversation.push_message(message);
-        } else {
-            conversation.unrendered_lines += 1;
-        }
-        return;
-    }
-    let kind = value.get("type").and_then(Value::as_str);
-    if kind == Some("response_item") {
-        if let Some(item) = codex_item(value.get("payload"), time, conversation) {
-            conversation.push_message(item);
-        } else {
-            conversation.unrendered_lines += 1;
-        }
-        return;
-    }
-    if let Some(item) = value.get("item") {
-        if let Some(message) = message_from_value(item, time, conversation) {
-            conversation.push_message(message);
-        } else {
-            conversation.unrendered_lines += 1;
-        }
-        return;
-    }
-    conversation.unrendered_lines += 1;
-}
-
-/// Turn one codex `response_item` payload into a message, or `None` when the
-/// record is not part of the conversation (metadata, a token count, or a
-/// reasoning record whose text was archived encrypted).
-fn codex_item(
-    payload: Option<&Value>,
-    time: MessageTime,
-    conversation: &mut Conversation,
-) -> Option<Message> {
-    let payload = payload?;
-    match payload.get("type").and_then(Value::as_str)? {
-        "message" => {
-            let role = payload
-                .get("role")
-                .and_then(Value::as_str)
-                .and_then(Role::from_str)?;
-            let blocks =
-                blocks_from_content(payload.get("content").unwrap_or(payload), conversation);
-            (!blocks.is_empty()).then_some(Message { role, time, blocks })
-        }
-        "reasoning" => {
-            // The readable part of a reasoning record is its `summary`; the
-            // `content` it also carries is archived encrypted, and the reader
-            // does not pretend to have read it.
-            let text = payload
-                .get("summary")
-                .and_then(Value::as_array)
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter_map(|part| part.get("text").and_then(Value::as_str))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .filter(|text| !text.is_empty())?;
-            Some(Message {
-                role: Role::Assistant,
-                time,
-                blocks: vec![Block::Thinking(text)],
-            })
-        }
-        "function_call" | "custom_tool_call" | "local_shell_call" | "web_search_call" => {
-            Some(Message {
-                role: Role::Tool,
-                time,
-                blocks: vec![Block::ToolCall {
-                    name: payload
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    input_summary: compact_json(
-                        payload.get("arguments").or_else(|| payload.get("action")),
-                    ),
-                    // The result arrives as its own `function_call_output`.
-                    output_bytes: None,
-                }],
-            })
-        }
-        "function_call_output" | "custom_tool_call_output" => Some(Message {
-            role: Role::Tool,
-            time,
-            blocks: vec![Block::ToolCall {
-                name: payload
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                input_summary: "tool result".to_string(),
-                output_bytes: payload
-                    .get("output")
-                    .map(|value| compact_json(Some(value)).len()),
-            }],
-        }),
-        _ => None,
-    }
-}
-
-fn normalize_gemini_cli(value: &Value, conversation: &mut Conversation) {
-    let Some(messages) = value.get("messages").and_then(Value::as_array) else {
-        conversation.unrendered_lines += 1;
-        return;
-    };
-    for item in messages {
-        let role = match item.get("type").and_then(Value::as_str) {
-            Some("user") => Role::User,
-            Some("gemini") | Some("assistant") => Role::Assistant,
-            _ => {
-                conversation.unrendered_lines += 1;
-                continue;
-            }
-        };
-        let content = item.get("content").unwrap_or(item);
-        let blocks = blocks_from_content(content, conversation);
-        if blocks.is_empty() {
-            conversation.unrendered_lines += 1;
-            continue;
-        }
-        conversation.push_message(Message {
-            role,
-            time: message_time(item.get("timestamp")),
-            blocks,
-        });
-    }
 }
 
 fn normalize_chatgpt(value: &Value, conversation: &mut Conversation) {
@@ -837,160 +766,31 @@ mod tests {
         assert!(matches!(conversation.messages[2].role, Role::Tool));
     }
 
-    #[test]
-    fn codex_and_gemini_fixtures_produce_roles_and_code() {
-        let codex = r#"{"timestamp":1736944496,"payload":{"message":{"role":"assistant","content":[{"type":"output_text","text":"done"},{"type":"code","language":"rust","code":"fn main() {}"}]}}}"#;
-        let result = normalize("codex", codex);
-        assert_eq!(result.messages.len(), 1);
-        assert!(result.messages[0]
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::CodeBlock { .. })));
+    // The codex, gemini-cli, opencode, cursor and kimi-code fixtures live in
+    // their own files (`normalize/<harness>.rs`), next to the extractors they
+    // pin. This root module pins the model shared by all of them, plus the
+    // claude-code reference extractor and the web-platform readers that have
+    // no file of their own yet.
 
-        let gemini = r#"{"messages":[{"type":"user","timestamp":"2026-09-25T10:00:00Z","content":[{"text":"hi"}]},{"type":"gemini","content":[{"text":"hello"}]}]}"#;
-        let result = normalize("gemini-cli", gemini);
-        assert_eq!(result.messages.len(), 2);
-        assert!(matches!(result.messages[1].role, Role::Assistant));
-    }
-
-    /// The archived codex body is `payload.type`-tagged, and `event_msg`
-    /// records the same turn a second time at the application level. Rendering
-    /// both would show every turn twice, so the transcript comes from
-    /// `response_item` and the mirror is counted as not rendered.
+    /// `opencode` and `cursor` previously reached the generic reader through
+    /// a test asserting a summary shape (`messages[].role/content`) that the
+    /// capture side never writes — which is why the real-archive smoke in
+    /// the W154 report rendered zero messages for both harnesses. The
+    /// per-harness files own their real-shape fixtures now
+    /// (`opencode.rs`, `cursor.rs`); this root test pins only the registry
+    /// behaviour the page depends on: a harness with no reader is never
+    /// handed a generic guess.
     #[test]
-    fn codex_renders_the_transcript_once_not_the_mirrored_event() {
-        let body = concat!(
-            r#"{"timestamp":1736944496,"type":"session_meta","payload":{"id":"s","cli_version":"1"}}"#,
-            "\n",
-            r#"{"timestamp":1736944497,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"q"}]}}"#,
-            "\n",
-            r#"{"timestamp":1736944497,"type":"event_msg","payload":{"type":"user_message","message":"q"}}"#,
-            "\n",
-            r#"{"timestamp":1736944498,"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"weighing"}],"content":[{"encrypted_content":"opaque"}]}}"#,
-            "\n",
-            r#"{"timestamp":1736944499,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"c1"}}"#,
-            "\n",
-            r#"{"timestamp":1736944500,"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"3 files"}}"#,
-            "\n",
-            r#"{"timestamp":1736944501,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
-            "\n",
-            r#"{"timestamp":1736944501,"type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
-            "\n",
-            r#"{"timestamp":1736944502,"type":"event_msg","payload":{"type":"token_count","info":{}}}"#,
-            "\n",
-        );
-        let result = normalize("codex", body);
-        // user, reasoning, call, call output, assistant — five, not eight.
-        assert_eq!(result.messages.len(), 5);
-        assert!(matches!(result.messages[0].role, Role::User));
-        assert!(matches!(result.messages[1].blocks[0], Block::Thinking(_)));
-        assert!(matches!(result.messages[2].role, Role::Tool));
-        assert!(matches!(
-            result.messages[2].blocks[0],
-            Block::ToolCall {
-                output_bytes: None,
-                ..
-            }
-        ));
-        assert!(matches!(
-            result.messages[3].blocks[0],
-            Block::ToolCall {
-                output_bytes: Some(7),
-                ..
-            }
-        ));
-        assert!(matches!(result.messages[4].role, Role::Assistant));
-        // session_meta, event_msg (mirror) and token_count are not messages.
-        assert_eq!(result.unrendered_lines, 4);
-    }
-
-    /// `gemini-cli` does not archive JSONL: its body is pretty-printed JSON
-    /// documents run together, so line-by-line parsing reads nothing at all.
-    /// The body has to be re-read as the stream of documents it is, and the
-    /// lines must not then be reported as unreadable content.
-    #[test]
-    fn a_gemini_cli_document_is_read_as_documents_not_as_lines() {
-        let body = concat!(
-            "{\n",
-            "  \"sessionId\": \"s1\",\n",
-            "  \"messages\": [\n",
-            "    {\"id\": \"m1\", \"timestamp\": \"2026-09-25T10:00:00Z\",\n",
-            "     \"type\": \"user\", \"content\": [{\"text\": \"hi\"}]},\n",
-            "    {\"id\": \"m2\", \"type\": \"gemini\", \"content\": [{\"text\": \"hello\"}]}\n",
-            "  ],\n",
-            "  \"kind\": \"main\"\n",
-            "}\n",
-            // A second document in the same body, which is what the archive
-            // actually holds: the walk above has to reach it too.
-            "{\n",
-            "  \"sessionId\": \"s1\",\n",
-            "  \"messages\": [\n",
-            "    {\"id\": \"m3\", \"type\": \"user\", \"content\": [{\"text\": \"again\"}]}\n",
-            "  ],\n",
-            "  \"kind\": \"summary\"\n",
-            "}\n",
-        );
-        let result = normalize("gemini-cli", body);
-        assert_eq!(result.messages.len(), 3, "both documents must be read");
-        assert!(matches!(result.messages[0].role, Role::User));
-        assert!(matches!(result.messages[1].role, Role::Assistant));
-        assert!(matches!(result.messages[2].role, Role::User));
-        assert_eq!(
-            result.unrecognized_lines, 0,
-            "the framing is ours to solve, not the body's defect"
-        );
-        assert_eq!(
-            result.unrendered_lines, 0,
-            "no record in either document went unrendered"
-        );
-    }
-
-    /// A body that reads as documents but yields no message must not report
-    /// the lines as invalid JSON: the framing is solved and the residue is a
-    /// document with nothing readable in it, which is the honest thing to
-    /// count.
-    #[test]
-    fn a_readable_gemini_cli_body_with_no_message_does_not_blame_the_json() {
-        let body = "{\n  \"sessionId\": \"s1\",\n  \"kind\": \"main\"\n}\n";
-        let result = normalize("gemini-cli", body);
+    fn an_unimplemented_harness_serves_the_raw_view_only_state() {
+        let body = "{\"unexpected\":true}\nnot json either\n";
+        let result = normalize("aider", body);
         assert_eq!(result.messages.len(), 0);
-        assert_eq!(
-            result.unrecognized_lines, 0,
-            "the body is valid JSON; it simply holds no message"
-        );
-        assert_eq!(
-            result.unrendered_lines, 1,
-            "one document was framed and held no message"
-        );
-    }
-
-    /// A body whose lines do not parse and whose document stream does not read
-    /// either keeps the line counts: they are the only measurement there is,
-    /// and replacing them with a clean zero would turn "unreadable" into
-    /// "empty".
-    #[test]
-    fn an_unreadable_gemini_cli_body_keeps_its_counts() {
-        // A document, then something that is not part of any document.
-        let body = "{\n  \"nothing\": [\n    1, 2\n  ]\n}\nnot json at all\n";
-        let result = normalize("gemini-cli", body);
-        assert_eq!(result.messages.len(), 0);
-        assert_eq!(
-            result.unrecognized_lines, 6,
-            "every line of an unreadable body stays counted as unreadable"
-        );
+        // No line was parsed, so "0" here is unread, not measured — the
+        // `RawOnly` provenance is what the reader must show instead of any
+        // zero-message sentence.
         assert_eq!(result.unrendered_lines, 0);
-    }
-
-    /// `opencode` archives a session summary whose `messages` array the
-    /// generic reader can already read. Routing it to the codex extractor
-    /// claimed a shape it does not have.
-    #[test]
-    fn an_opencode_summary_is_read_by_the_generic_reader() {
-        let body = r#"{"schema":"opencode/v1","session":{"agent":"build"},"orphan_parts":[],"messages":[{"role":"user","content":"q"},{"role":"assistant","content":"a"}]}"#;
-        let result = normalize("opencode", body);
-        assert_eq!(result.messages.len(), 2);
-        assert!(matches!(result.messages[0].role, Role::User));
-        assert!(matches!(result.messages[1].role, Role::Assistant));
+        assert_eq!(result.unrecognized_lines, 0);
+        assert!(matches!(result.provenance, Provenance::RawOnly { .. }));
     }
 
     #[test]

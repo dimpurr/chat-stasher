@@ -1659,6 +1659,58 @@ mod tests {
         assert!(response.body.contains("time unknown"), "{}", response.body);
     }
 
+    /// A named harness this build has no extractor for is the UIA-7 "raw view
+    /// only" state: the reader says so and parses none of the body, so the
+    /// zero-message sentences — each a claim about the archive or about a
+    /// reader that actually ran — must not appear.
+    #[test]
+    fn a_harness_with_no_reader_is_served_the_raw_view_only_state() {
+        struct UnreadHarness;
+        impl ContentSource for UnreadHarness {
+            fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "ab".repeat(32),
+                    bytes: 64,
+                    body: "{\"messages\":[{\"role\":\"user\",\"content\":\"words\"}]}\n\
+                           not json either\n"
+                        .to_string(),
+                })
+            }
+        }
+        let mut data = fixture::data();
+        data.sessions[0].harness = Some("aider".into());
+        let response = req("/reader?i=0", &data, &UnreadHarness);
+        assert_eq!(response.status, 200);
+        assert!(
+            response
+                .body
+                .contains("No reader for this harness in this build"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("open the raw shards"),
+            "the raw route is linked from the state: {}",
+            response.body
+        );
+        assert!(
+            !response.body.contains("no conversation content"),
+            "an uninterpreted body is not an empty archive: {}",
+            response.body
+        );
+        assert!(
+            !response.body.contains("could be rendered as a message"),
+            "no reader ran, so no reader failed: {}",
+            response.body
+        );
+        assert!(
+            !response.body.contains("Reader coverage"),
+            "no parsing means no counts: {}",
+            response.body
+        );
+    }
+
     /// A reader fixture whose message count is known: three one-line turns.
     struct ThreeMessages;
     impl ContentSource for ThreeMessages {
