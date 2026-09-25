@@ -1702,6 +1702,7 @@ mod tests {
             line_count: 3,
             time_source: ActivityTimeSource::Exact,
             source_zone: None,
+            title: None,
         };
         let t = indexed_time(&row);
         assert_eq!(t.first_unix, None);
@@ -1725,6 +1726,7 @@ mod tests {
                 why: "no timestamp field found".into(),
             },
             source_zone: None,
+            title: None,
         };
         assert_eq!(
             indexed_time(&row).why.as_deref(),
@@ -1746,6 +1748,7 @@ mod tests {
                 how: "numeric epoch".into(),
             },
             source_zone: None,
+            title: None,
         };
         let t = indexed_time(&row);
         assert_eq!(
