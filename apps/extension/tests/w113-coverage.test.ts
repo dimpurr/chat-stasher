@@ -7,22 +7,27 @@
  *  · a lower bound is never drawn as a total (§1) — `in-progress` and `truncated` are distinct from
  *    `complete`, and `truncated` wins even when the cursor also says `complete`;
  *  · a percentage exists only where `computeProgress` allowed one, so an untrustworthy denominator
- *    produces a sentence with no `%` in it at all;
+ *    produces a card with no percent ring and a sentence that says why;
  *  · an estimate is always labelled one, and named as the rate it came from (§5);
  *  · a conversation with no recorded time is counted in its own bucket and is **never** spread over a
  *    month (§6);
- *  · every one of the six items is emitted for every row, so "there was nothing to say" cannot become
+ *  · every one of the six items is emitted for every card, so "there was nothing to say" cannot become
  *    "the item was dropped".
+ *
+ * W149 · The view layer is card-shaped now (`lib/coverage-view.ts` produces one `CoverageCardView` per
+ * platform×scope plus an overview header), so the assertions above are rewritten against that shape —
+ * same rules, same strength, one wording: every sentence the view can emit is still collected and pinned.
  *
  * No browser, no IndexedDB, no clock: the model is pure and takes `now`.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
-import { buildCoverage, describeSkipReason, enumNote, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageScopeInput } from '../lib/coverage';
-import { coverageCard, coverageView } from '../lib/coverage-view';
+import { buildCoverage, describeSkipReason, enumNote, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageRow, type CoverageScopeInput } from '../lib/coverage';
+import { coverageCard, coverageView, presetWhat } from '../lib/coverage-view';
 import { SPEED_PLANS } from '../lib/backfill/speed';
-import { initialState, type BackfillHeader, type HaltRecord } from '../lib/backfill/types';
+import { haltClassOf, initialState, TRANSIENT_RETRY_BASE_MS, type BackfillHeader, type HaltReason, type HaltRecord } from '../lib/backfill/types';
+import type { CoveragePageView } from '../lib/coverage-view';
 
 const NOW = Date.UTC(2026, 8, 24, 12, 0, 0); // 2026-09-24T12:00:00Z
 const PLATFORM = 'chatgpt';
@@ -79,6 +84,42 @@ function rowOf(i: CoverageInput) {
   return report.rows[0]!;
 }
 
+/** The one card a single-scope page view has. */
+function cardOf(i: CoverageInput) {
+  const view = coverageView(buildCoverage(i), NOW);
+  expect(view.cards).toHaveLength(1);
+  return view.cards[0]!;
+}
+
+/** Every sentence the view layer can emit for one page, flattened. The placeholder guard pins exactly this. */
+function pageTexts(view: CoveragePageView): string[] {
+  const texts: string[] = [
+    view.title,
+    view.subtitle,
+    view.aboutSummary,
+    view.aboutNote,
+    view.empty ?? '',
+    view.tickNote ?? '',
+    view.health?.text ?? '',
+  ];
+  for (const alert of view.alerts) texts.push(alert.text);
+  for (const card of view.cards) {
+    texts.push(card.platform, card.scope, card.monogram, card.chip.word, card.listed, card.eta, card.quota.line);
+    if (card.percentNote) texts.push(card.percentNote);
+    if (card.percentTitle) texts.push(card.percentTitle);
+    for (const alert of card.alerts) texts.push(alert.text);
+    for (const row of card.detailRows) texts.push(row.label, row.value);
+    for (const entry of card.legend) texts.push(entry.label, String(entry.count));
+    if (card.months.title) texts.push(card.months.title);
+    texts.push(card.months.archivedLabel, card.months.pendingLabel, card.months.unknownLabel);
+    if (card.months.unknownNote) texts.push(card.months.unknownNote);
+    if (card.months.noneNote) texts.push(card.months.noneNote);
+  }
+  for (const option of view.speed.options) texts.push(option.label, option.what);
+  if (view.speed.riskNote) texts.push(view.speed.riskNote);
+  return texts;
+}
+
 beforeEach(() => {
   vi.stubGlobal('browser', withI18n({} as never));
 });
@@ -87,10 +128,10 @@ describe('W113 · item 1 — how much is listed, and whether the list is finishe
   it('🔴 while the list is still being read, the number is a lower bound', () => {
     const row = rowOf(input({ scopes: [scope({ header: header({ enumCursor: { offset: 300, complete: false } }) })] }));
     expect(row.enumState).toBe('in-progress');
-    const text = coverageView(buildCoverage(input({
+    const card = cardOf(input({
       scopes: [scope({ header: header({ enumCursor: { offset: 300, complete: false } }) })],
-    })), NOW).sections[0]!.blocks.find((b) => b.kind === 'note' && b.text.includes('≥'));
-    expect(text, 'the wording must mark the number as a lower bound').toBeTruthy();
+    }));
+    expect(card.listed, 'the wording must mark the number as a lower bound').toContain('≥');
   });
 
   it('a finished list is a different sentence from a running one', () => {
@@ -147,10 +188,10 @@ describe('W113 · item 2 — where the total came from', () => {
   });
 
   it('🔴 W113b · a response total is printed as the platform\'s own number, with nothing else in the sentence', () => {
-    const blocks = coverageView(buildCoverage(input({
+    const card = cardOf(input({
       scopes: [scope({ header: header({ totalKnown: 900, totalSource: 'response-total' }) })],
-    })), NOW).sections[0]!.blocks;
-    const values = blocks.flatMap((b) => (b.kind === 'facts' ? b.rows.map((r) => r.value) : []));
+    }));
+    const values = card.detailRows.map((row) => row.value);
     // §2 asks *where* the total came from, and that is the whole claim: a number the platform reports, not a
     // measurement of the account. The sentence used to open with a fragment ("at least see above;") that
     // pointed at nothing.
@@ -174,11 +215,15 @@ describe('W113 · item 3 — stored, owed, failed, parked', () => {
     expect(row.pending).toBe(7);
     expect(row.archived).toBe(3);
     expect(row.countsSource.fromStore).toBe(false);
-    const blocks = coverageView(buildCoverage(input({
+    const view = coverageView(buildCoverage(input({
       scopes: [scope({ debt: null, header: header({ pendingCount: 7, archivedCount: 3 }) })],
-    })), NOW).sections[0]!.blocks;
-    expect(blocks.some((b) => b.kind === 'note' && b.text.includes('authority')))
-      .toBe(true);
+    })), NOW);
+    expect(pageTexts(view).some((text) => text.includes('authority'))).toBe(true);
+    const card = cardOf(input({
+      scopes: [scope({ debt: null, header: header({ pendingCount: 7, archivedCount: 3 }) })],
+    }));
+    expect(card.bar.archived).toBe(3);
+    expect(card.bar.owed).toBe(7);
   });
 
   it('failures are grouped by reason, commonest first, and the dropped count survives', () => {
@@ -236,16 +281,22 @@ describe('W113 · item 4 — the state, and why', () => {
     const note = speedNote(row, NOW);
     expect(note).not.toContain('estimate: about');
     expect(note).toContain('nothing runs for this platform here');
+    // W149 · the short ETA line on the card face says the same thing: no estimate, and why.
+    const card = cardOf(input({
+      scopes: [scope({ registered: false, debt: owed, header: header({ pendingCount: 2 }) })],
+    }));
+    expect(card.eta).toContain('nothing runs for this platform here');
+    expect(card.eta).toContain('2');
   });
 
   it('W113b · a waiting row prints its reason once, not twice', () => {
     // A guard, not the proof of a fix: the branch this replaced was unreachable (`stateOf` returns `waiting`
-    // only when `skippedReason` is non-null, and `stateNote` already renders `describeSkipReason`). It is
+    // only when `skippedReason` is non-null, and the state sentence already renders `describeSkipReason`). It is
     // here so that a future second copy of the sentence is caught by an assertion rather than by reading.
-    const report = buildCoverage(input({
+    const view = coverageView(buildCoverage(input({
       scopes: [scope({ debt: { pending: ['p1'], archived: [], times: new Map() }, skippedReason: 'no-http-port' })],
-    }));
-    const texts = coverageView(report, NOW).sections[0]!.blocks.flatMap((b) => ('text' in b ? [b.text] : []));
+    })), NOW);
+    const texts = pageTexts(view);
     const why = describeSkipReason('no-http-port');
     expect(texts.filter((text) => text.includes(why))).toHaveLength(1);
   });
@@ -313,6 +364,13 @@ describe('W113 · item 5 — speed and ETA', () => {
     expect(row.speed.counterStale).toBe(true);
     expect(row.speed.bodiesToday).toBe(0);
     expect(row.speed.measuredPerDay).toBeNull();
+    // W149 · the quota meter carries the stale flag, and the page's meter draws no fill for it — the
+    // line itself must not read as today's draw either.
+    const card = cardOf(input({
+      scopes: [scope({ header: header({ detailToday: { day: '2026-09-20', count: 300, cap: 400 } }) })],
+    }));
+    expect(card.quota.counterStale).toBe(true);
+    expect(card.quota.line).toContain('another day');
   });
 
   it('🔴 a measured rate is withheld until there is enough of a day behind it', () => {
@@ -363,6 +421,37 @@ describe('W113 · item 5 — speed and ETA', () => {
     expect(row.speed.etaDays).toBeNull();
     expect(speedNote(row, NOW)).toContain('nothing is owed');
   });
+
+  it('🔴 W149 · the short ETA line is labelled an estimate in every branch that can appear on a card', () => {
+    // Cap basis: pending 700, cap 400/day, no measured rate yet.
+    const capBasis = cardOf(input({
+      presetRaw: 'standard',
+      scopes: [scope({
+        debt: { pending: Array.from({ length: 700 }, (_, i) => `p${i}`), archived: [], times: new Map() },
+        header: header({ detailToday: { day: '2026-09-24', count: 0, cap: 400 } }),
+      })],
+    }));
+    expect(capBasis.eta).toContain('estimate');
+    expect(capBasis.eta).toContain('daily limit');
+    expect(capBasis.eta).toContain('700');
+    // Measured basis: pending 100, 120/day measured.
+    const measured = cardOf(input({
+      presetRaw: 'standard',
+      scopes: [scope({
+        debt: { pending: Array.from({ length: 100 }, (_, i) => `p${i}`), archived: [], times: new Map() },
+        header: header({ detailToday: { day: '2026-09-24', count: 60, cap: 400 } }),
+      })],
+    }));
+    expect(measured.eta).toContain('estimate');
+    expect(measured.eta).toContain('rate measured today');
+    // Nothing owed: the sentence says so, and is still the labelled branch.
+    const none = cardOf(input({
+      presetRaw: 'standard',
+      scopes: [scope({ header: header({ detailToday: { day: '2026-09-24', count: 0, cap: 400 } }) })],
+    }));
+    expect(none.eta).toContain('nothing is owed');
+    expect(none.eta).toContain('estimate');
+  });
 });
 
 describe('W113 · item 6 — when the conversations are from', () => {
@@ -399,10 +488,14 @@ describe('W113 · item 6 — when the conversations are from', () => {
     const row = rowOf(input({ scopes: [scope({ debt: { pending: ['p1'], archived: ['a1'], times: new Map() } })] }));
     expect(row.months).toEqual([]);
     expect(row.unknownTime).toEqual({ archived: 1, pending: 1 });
-    const blocks = coverageView(buildCoverage(input({
+    const card = cardOf(input({
       scopes: [scope({ debt: { pending: ['p1'], archived: ['a1'], times: new Map() } })],
-    })), NOW).sections[0]!.blocks;
-    expect(blocks.some((b) => b.kind === 'note' && b.text.includes('not an empty history'))).toBe(true);
+    }));
+    expect(card.months.title).toBeNull();
+    expect(card.months.noneNote).not.toBeNull();
+    expect(card.months.noneNote).toContain('not an empty history');
+    // …and the time-unknown sentence is still there, carrying the counts.
+    expect(card.months.unknownNote).toContain(String(1));
   });
 
   it('the bucket month comes from the injected calendar, not from a hard-coded zone', () => {
@@ -411,6 +504,16 @@ describe('W113 · item 6 — when the conversations are from', () => {
       scopes: [scope({ debt: { pending: [], archived: ['a3'], times } })],
     }));
     expect(utc.months).toEqual([{ month: '2026-09', archived: 1, pending: 0 }]);
+  });
+
+  it('W149 · the months view carries the chart\'s labels, and the unknown bucket keeps its own', () => {
+    const card = cardOf(input({
+      scopes: [scope({ debt: { pending: ['a3', 'p-unknown'], archived: ['a1', 'a2'], times } })],
+    }));
+    expect(card.months.title).not.toBeNull();
+    expect(card.months.months.map((m) => m.month)).toEqual(['2026-07', '2026-09']);
+    expect(card.months.unknownTime).toEqual({ archived: 0, pending: 1 });
+    expect(card.months.unknownNote).toContain('time unknown');
   });
 });
 
@@ -444,28 +547,421 @@ describe('W113 · the report as a whole', () => {
     expect(problemRows(report).map((r) => r.scope).sort()).toEqual(['failed', 'stopped']);
   });
 
-  it('every one of the six items is emitted for every row, with nothing conditional on having something to say', () => {
-    const report = buildCoverage(input({
+  it('every one of the six items is emitted for every card, with nothing conditional on having something to say', () => {
+    const view = coverageView(buildCoverage(input({
       scopes: [scope({ debt: { pending: ['p'], archived: ['a'], times: new Map([['a', { at: Date.UTC(2026, 5, 2), from: 'list-update' }]]) } })],
-    }));
-    const blocks = coverageView(report, NOW).sections.flatMap((s) => s.blocks);
-    const text = blocks.map((b) => ('text' in b ? b.text : '')).join('\n');
-    const values = blocks.flatMap((b) => (b.kind === 'facts' ? b.rows.map((r) => r.value) : []));
+    })), NOW);
+    expect(view.cards).toHaveLength(1);
+    const card = view.cards[0]!;
     // 1 · the listed count, and it is marked as a lower bound because the list is not finished
-    expect(text).toContain('≥');
+    expect(card.listed).toContain('≥');
     // 2 · where the total came from — this fixture has no total, so the sentence says which number is
     //     missing rather than leaving a blank
-    expect(values.some((v) => v.includes('no denominator') || v.includes('no percentage'))).toBe(true);
+    expect(card.detailRows.map((r) => r.value)).toContain('the platform does not provide a total for this list, so there is no denominator');
     // 3 · stored against owed. Both labels are present even though one of them is zero.
-    expect(blocks.flatMap((b) => (b.kind === 'facts' ? b.rows.map((r) => r.label) : [])))
-      .toEqual(expect.arrayContaining(['stored in full', 'still owed', 'Total, as the platform reports it']));
+    const labels = card.detailRows.map((r) => r.label);
+    expect(labels).toEqual(expect.arrayContaining(['stored in full', 'still owed']));
+    expect(card.detailRows.find((r) => r.label === 'stored in full')!.value).toBe('1');
+    expect(card.detailRows.find((r) => r.label === 'still owed')!.value).toBe('1');
     // 5 · the estimate, and it says so in the sentence itself
-    expect(text).toContain('estimate:');
-    expect(blocks.some((b) => b.kind === 'table')).toBe(true); // 6
-    // 4 — the state. `in-progress` deliberately has no sentence, so a row is allowed to show none; what it
+    expect(card.eta).toContain('estimate');
+    // The full speed sentence too, in the details, with its cap.
+    expect(card.detailRows.map((r) => r.value).some((v) => v.includes('Daily limit'))).toBe(true);
+    // 6 · the monthly distribution: a month exists, and the chart's labels travel with it
+    expect(card.months.months.length).toBe(1);
+    expect(card.months.title).not.toBeNull();
+    // 4 — the state. `in-progress` deliberately has no sentence, so a card is allowed to show none; what it
     // may not do is show a *different* state's sentence.
-    expect(stateNote(report.rows[0]!, NOW)).toBeNull();
-    expect(report.rows[0]!.state).toBe('in-progress');
+    expect(card.detailRows.filter((r) => r.label === 'state')).toHaveLength(0);
+    expect(card.chip.tone).toBe('run');
+  });
+});
+
+describe('W149 · the overview header', () => {
+  const running = scope({
+    debt: { pending: ['p1', 'p2'], archived: ['a1', 'a2'], times: new Map() },
+    header: header({ pendingCount: 2, archivedCount: 2, enumCursor: { offset: 4, complete: false } }),
+  });
+  const halted = scope({
+    platform: 'claude',
+    scope: 'default',
+    debt: { pending: ['p3'], archived: [], times: new Map() },
+    header: {
+      ...header({ pendingCount: 1, archivedCount: 0 }),
+      platform: 'claude',
+      scope: 'default',
+      halted: { reason: 'shape-changed', detail: 'x', at: 1 },
+    },
+  });
+
+  it('the three sums are the rows\' own numbers, nothing invented', () => {
+    const view = coverageView(buildCoverage(input({
+      scopes: [
+        running,
+        scope({ scope: 'failed', header: header({ scope: 'failed', failures: [{ shortId: 'aaaaaaaa', platform: 'chatgpt', reason: 'detail-empty', at: 1 }, { shortId: 'bbbbbbbb', platform: 'chatgpt', reason: 'detail-empty', at: 2 }] }) }),
+      ],
+    })), NOW);
+    expect(view.stats).not.toBeNull();
+    expect(view.stats!.stored).toBe(2);
+    expect(view.stats!.owed).toBe(2);
+    expect(view.stats!.failed).toBe(2);
+    // A page with no rows has no sums to show — the empty state says the rest.
+    const empty = coverageView(buildCoverage(input({ scopes: [] })), NOW);
+    expect(empty.stats).toBeNull();
+    expect(empty.health).toBeNull();
+    expect(empty.empty).not.toBeNull();
+  });
+
+  it('🔴 the health line never softens a stop the model reported', () => {
+    const view = coverageView(buildCoverage(input({ scopes: [running, halted] })), NOW);
+    expect(view.health!.tone).toBe('bad');
+    expect(view.health!.text).toContain('claude');
+    expect(view.health!.text).toContain('stopped');
+    // The halted card's alert is the model's own action sentence, and the chip states it in one word.
+    const card = view.cards.find((c) => c.platform === 'claude')!;
+    expect(card.chip.word).toBe('stopped');
+    expect(card.alerts.some((a) => a.tone === 'bad' && a.text.includes('shape-changed'))).toBe(true);
+  });
+
+  it('waiting legs are named, with the one action that resolves them', () => {
+    const waiting = scope({
+      platform: 'claude',
+      scope: 'default',
+      debt: { pending: ['p'], archived: [], times: new Map() },
+      header: { ...header({ pendingCount: 1 }), platform: 'claude', scope: 'default' },
+      skippedReason: 'no-http-port',
+    });
+    const view = coverageView(buildCoverage(input({ scopes: [running, waiting] })), NOW);
+    expect(view.health!.tone).toBe('wait');
+    expect(view.health!.text).toContain('claude');
+    expect(view.health!.text).toContain('open');
+    // The waiting card keeps the state sentence in its details, so the chip is not the only wording.
+    const card = view.cards.find((c) => c.platform === 'claude')!;
+    expect(card.detailRows.some((r) => r.label === 'state' && r.value.includes('Not running right now'))).toBe(true);
+  });
+
+  it('a clean report gets the all-clear line, and nothing else', () => {
+    const view = coverageView(buildCoverage(input({ scopes: [running] })), NOW);
+    expect(view.health!.tone).toBe('ok');
+    expect(view.health!.text).not.toContain('stopped');
+    expect(view.alerts).toHaveLength(0);
+  });
+
+  it('the two global stops are page-level alerts, not card content', () => {
+    const off = coverageView(buildCoverage(input({ enabled: false, scopes: [running] })), NOW);
+    expect(off.alerts[0]!.id).toBe('global:off');
+    expect(off.alerts[0]!.text).toContain('switch is off');
+    const paused = coverageView(buildCoverage(input({ hostPaused: true, scopes: [running] })), NOW);
+    expect(paused.alerts[0]!.id).toBe('global:host-paused');
+    // Every card's chip shows the state too: the header and the cards may not disagree about the world.
+    expect(paused.cards[0]!.chip.tone).toBe('muted');
+  });
+});
+
+describe('W149d · a leg waiting out a retry is never worded as a stop', () => {
+  /**
+   * 🔴 The transient half of `halted`. `haltNote`'s sentence for a backoff says the leg has **not** stopped
+   * and will come back by itself; a chip, an overview line and a details row all sit on the same card as
+   * that sentence, so none of them may contradict it. `halted` alone could not tell the two apart, and the
+   * chip read "stopped" beside an action text reading "NOT stopped".
+   */
+  const backoff = scope({
+    platform: 'claude',
+    scope: 'default',
+    debt: { pending: ['p'], archived: [], times: new Map() },
+    header: {
+      ...header({ pendingCount: 1 }),
+      platform: 'claude',
+      scope: 'default',
+      halted: { reason: 'rate-limited', detail: 'x', at: 1, attempts: 2, retryAt: NOW + 15 * 60_000 },
+    },
+  });
+
+  it('🔴 the chip says the leg is coming back, and the sentence beside it agrees', () => {
+    const card = cardOf(input({ scopes: [backoff] }));
+    expect(card.chip.word).not.toBe('stopped');
+    expect(card.chip.word).toBe('retrying');
+    expect(card.alerts.some((a) => a.text.includes('NOT stopped'))).toBe(true);
+  });
+
+  it('🔴 a permanent stop still says stopped — the transient rule may not soften it', () => {
+    const card = cardOf(input({
+      scopes: [scope({ header: header({ halted: { reason: 'shape-changed', detail: 'x', at: 1 } }) })],
+    }));
+    expect(card.chip.word).toBe('stopped');
+    expect(card.chip.tone).toBe('bad');
+  });
+
+  it('🔴 the overview line does not call a backoff a stop either', () => {
+    const view = coverageView(buildCoverage(input({ scopes: [backoff] })), NOW);
+    expect(view.health!.text).not.toContain('stopped');
+    expect(view.health!.text).toContain('claude');
+    expect(view.health!.tone).toBe('wait');
+  });
+
+  it('🔴 dismissing the alert cannot remove the reason from the page', () => {
+    // The halt sentence is the alert the card opens with *and* a details row. The alert is dismissible
+    // (`entrypoints/coverage/main.ts`), the disclosure is not — and a dismissal is a hiding gesture, so it
+    // may not be the only copy of a fact the model reported.
+    const card = cardOf(input({ scopes: [backoff] }));
+    expect(card.alerts.some((a) => a.id.endsWith(':halt'))).toBe(true);
+    const state = card.detailRows.filter((r) => r.label === 'state');
+    expect(state).toHaveLength(1);
+    expect(state[0]!.value).toContain('NOT stopped');
+  });
+});
+
+describe('W149d · the all-clear line covers moving and finished legs, and nothing else', () => {
+  const withWork = scope({
+    debt: { pending: ['p1'], archived: ['a1'], times: new Map() },
+    header: header({ pendingCount: 1, archivedCount: 1, enumCursor: { offset: 2, complete: false } }),
+  });
+
+  it('🔴 legs that are switched off are not "moving or finished"', () => {
+    // Every row is `off`, so both attention lists are empty — and the old branch answered that emptiness
+    // with the clean bill, contradicting every card under it.
+    const view = coverageView(buildCoverage(input({ enabled: false, scopes: [withWork] })), NOW);
+    expect(view.health!.tone).not.toBe('ok');
+    expect(view.health!.text).not.toContain('moving or finished');
+    expect(view.health!.text).toContain('chatgpt');
+  });
+
+  it('🔴 neither are legs paused by an unreachable host', () => {
+    const view = coverageView(buildCoverage(input({ hostPaused: true, scopes: [withWork] })), NOW);
+    expect(view.health!.tone).not.toBe('ok');
+    expect(view.health!.text).not.toContain('moving or finished');
+    expect(view.health!.text).toContain('chatgpt');
+  });
+
+  it('a leg that really is moving keeps the all-clear, so the rule is not "never say ok"', () => {
+    const view = coverageView(buildCoverage(input({ scopes: [withWork] })), NOW);
+    expect(view.health!.tone).toBe('ok');
+    expect(view.health!.text).toContain('moving or finished');
+  });
+});
+
+describe('W149e · the retry bucket is worded for every reason that reaches it', () => {
+  /**
+   * 🔴 This bucket is the one health branch that is not one reason: **every** transient reason lands in it
+   * (`isRetrying` → `haltClassOf`), and one sentence is printed over all of them. So that sentence may not
+   * carry a claim true of some and false of others — and the first version carried two:
+   *
+   *   · "the platform turned a request away" — false for `scope-mismatch`, which is raised **before any
+   *     request goes out** (the page's active organization differs from the stored scope; the engine's own
+   *     detail string says "the page active organization differs from the stored backfill scope"), and for
+   *     `transport-error`, where a request is dropped rather than turned away;
+   *   · "Nothing to do" — false for `auth-refused`, whose own card sentence sends the user to sign in again
+   *     while the leg keeps asking.
+   *
+   * The reason set is **derived**, not typed out: `EVERY_REASON` is a `Record<HaltReason, true>`, so the
+   * compiler refuses to build until a member added to the union is named here, and the transient half is
+   * then whatever `haltClassOf` says — the same function `isRetrying` uses. That shape is the bug: the old
+   * test pinned one reason (`rate-limited`), so four fifths of this sentence's own inputs were never
+   * rendered, and the two clauses above were never read against the states they were printed in.
+   */
+  const EVERY_REASON: Record<HaltReason, true> = {
+    'rate-limited': true,
+    'shape-changed': true,
+    'transport-error': true,
+    'scope-mismatch': true,
+    'storage-unavailable': true,
+    'unsupported-platform': true,
+    'detail-unsupported': true,
+    'detail-empty-unverified': true,
+    'state-unreadable': true,
+    'org-ambiguous': true,
+    'org-unresolved': true,
+    'ledger-mismatch': true,
+    'auth-refused': true,
+    'refused-unknown': true,
+  };
+  const ALL_REASONS = Object.keys(EVERY_REASON) as HaltReason[];
+  const TRANSIENT = ALL_REASONS.filter((reason) => haltClassOf(reason) === 'transient');
+
+  /** One page whose only leg is halted on `reason`, with a retry moment in the future. */
+  const pageOn = (reason: HaltReason) => input({
+    scopes: [scope({
+      header: header({ halted: { reason, detail: 'synthetic detail', at: 1, attempts: 2, retryAt: NOW + 15 * 60_000 } }),
+    })],
+  });
+
+  /** The one state sentence a card carries — the details row, which a dismissal cannot remove. */
+  const stateOf = (reason: HaltReason) => {
+    const rows = cardOf(pageOn(reason)).detailRows.filter((r) => r.label === 'state');
+    expect(rows, reason).toHaveLength(1);
+    return rows[0]!.value;
+  };
+
+  it('the set under test is the ladder table\'s own key set, and it is not a single reason', () => {
+    // Two lists that must agree are one edit: the ladder is a total `Record<TransientHaltReason, …>`, so a
+    // transient reason with no rung does not compile, and `haltClassOf` answers from the same set.
+    expect([...TRANSIENT].sort()).toEqual(Object.keys(TRANSIENT_RETRY_BASE_MS).sort());
+    expect(TRANSIENT.length).toBeGreaterThan(1);
+    // The two that make the sentence's claims false, named so this test cannot quietly stop covering them.
+    expect(TRANSIENT).toContain('scope-mismatch');
+    expect(TRANSIENT).toContain('auth-refused');
+  });
+
+  it('🔴 the retry line names no cause and grants no free pass, for any reason that lands in it', () => {
+    for (const reason of TRANSIENT) {
+      const health = coverageView(buildCoverage(pageOn(reason)), NOW).health!;
+      expect(health.tone, reason).toBe('wait');
+      expect(health.text, reason).toContain('chatgpt');
+      expect(health.text, reason).toMatch(/retry/i);
+      // The refusal claim: false of scope-mismatch (no request is sent) and of transport-error (dropped,
+      // not turned away) — and this one string is printed over both of them.
+      expect(health.text, reason).not.toMatch(/refus|turned \S+ away|dropped a request|unhappy/i);
+      // The free pass: false of auth-refused, whose card sends the user to sign in again.
+      expect(health.text, reason).not.toMatch(/nothing to do|no action/i);
+      // And it points at the card, which is where each reason and each action actually live.
+      expect(health.text, reason).toMatch(/card/i);
+    }
+  });
+
+  it('🔴 the card for a scope mismatch does not claim the platform refused or dropped anything', () => {
+    // `scope-mismatch` shares `waitingRetry` with the two reasons where the platform really did answer, so
+    // that sentence may not name a refusal — and on this reason no request was ever built.
+    const sentence = stateOf('scope-mismatch');
+    expect(sentence).not.toMatch(/refus|dropped a request|unhappy/i);
+    // …and it still says the two things that ARE true of it, so the fix cannot be "print less".
+    expect(sentence).toContain('NOT stopped');
+    expect(sentence).toContain('carry on by itself');
+    // The reason and the engine's own detail survive in the same sentence: the cause is not deleted,
+    // it is left to the two fields that carry it.
+    expect(sentence).toContain('scope-mismatch');
+    expect(sentence).toContain('synthetic detail');
+  });
+
+  it('🔴 a refusal keeps its own sentence, and the shared one may not borrow it back', () => {
+    // These two reasons were split away from `waitingRetry` for exactly this rule. Loosening the overview
+    // line may not loosen them: their cards still say what happened and what to do about it.
+    const auth = stateOf('auth-refused');
+    expect(auth).toContain('refused a request');
+    expect(auth).toContain('sign in again');
+    const unknown = stateOf('refused-unknown');
+    expect(unknown).toContain('refused a request');
+    // An unreadable code is not a login problem, and this sentence refuses to guess one.
+    expect(unknown).toContain('does not recognise');
+    expect(unknown).not.toMatch(/sign in/i);
+  });
+
+  it('🔴 the skip line for a waiting retry names no cause either', () => {
+    // The same bucket one layer up: a tick skipped because the leg is in its backoff. Every transient
+    // reason reaches this line, so "after a refusal" was false here for the same two reasons.
+    const skip = describeSkipReason('waiting-retry');
+    expect(skip).not.toMatch(/refus|turned \S+ away|dropped a request/i);
+    expect(skip).toMatch(/backoff/i);
+    expect(skip).toMatch(/asked again|retry/i);
+  });
+});
+
+describe('W149 · the composition bar and the chip', () => {
+  it('🔴 a contradicted total is never drawn as a remainder segment', () => {
+    // The platform's total was exceeded by rows actually returned; `progress.ts` refuses it as a
+    // denominator, and a bar segment made of it would draw the number the model refused.
+    const card = cardOf(input({
+      scopes: [scope({ header: header({ totalKnown: 901, totalSource: 'contradicted', enumCursor: { offset: 901, complete: true } }) })],
+    }));
+    expect(card.bar.remainder).toBe(0);
+    // …and the contradicted sentence still exists in the details, words intact.
+    expect(card.detailRows.map((r) => r.value)).toContain('the platform\'s own total has already been exceeded by the rows actually returned, so it is not used as a denominator');
+  });
+
+  it('a response total beyond the listing is the only source of a remainder segment', () => {
+    const card = cardOf(input({
+      scopes: [scope({ header: header({ totalKnown: 900, totalSource: 'response-total', enumCursor: { offset: 250, complete: false } }) })],
+    }));
+    expect(card.bar.remainder).toBe(650);
+    expect(card.legend.some((entry) => entry.tone === 'remainder' && entry.count === 650)).toBe(true);
+  });
+
+  it('zero-count segments never reach the legend or the bar', () => {
+    const card = cardOf(input({ scopes: [scope({ debt: { pending: ['p'], archived: ['a'], times: new Map() } })] }));
+    expect(card.bar.failed).toBe(0);
+    expect(card.bar.remainder).toBe(0);
+    expect(card.legend.map((e) => e.tone)).toEqual(['ok', 'hatch']);
+  });
+
+  it('🔴 the percent ring exists exactly when the model produced a percentage', () => {
+    const withPercent = cardOf(input({
+      scopes: [scope({ header: header({ totalKnown: 10, totalSource: 'response-total', enumCursor: { offset: 10, complete: true } }), debt: { pending: [], archived: ['a'], times: new Map() } })],
+    }));
+    expect(withPercent.percent).not.toBeNull();
+    expect(withPercent.percentTitle).toContain(String(withPercent.percent));
+    expect(withPercent.percentNote).toBeNull();
+    const without = cardOf(input({
+      scopes: [scope({ header: header({ totalKnown: null, totalSource: 'unknown', enumCursor: { offset: 10, complete: true } }) })],
+    }));
+    expect(without.percent).toBeNull();
+    expect(without.percentTitle).toBeNull();
+    expect(without.percentNote).toContain('no percentage');
+  });
+
+  it('the chip is one word from the closed set, per state', () => {
+    const cases: Array<{ state: string; card: ReturnType<typeof cardOf>; tone: string }> = [
+      {
+        state: 'in-progress',
+        card: cardOf(input({ scopes: [scope({ debt: { pending: ['p'], archived: [], times: new Map() } })] })),
+        tone: 'run',
+      },
+      {
+        state: 'waiting',
+        card: cardOf(input({ scopes: [scope({ debt: { pending: ['p'], archived: [], times: new Map() }, skippedReason: 'no-http-port' })] })),
+        tone: 'wait',
+      },
+      {
+        state: 'capped',
+        card: cardOf(input({
+          presetRaw: 'standard',
+          scopes: [scope({
+            debt: { pending: ['p'], archived: [], times: new Map() },
+            header: header({ detailToday: { day: '2026-09-24', count: SPEED_PLANS.standard.pace.detail.maxPerDay ?? 0, cap: SPEED_PLANS.standard.pace.detail.maxPerDay ?? 0 } }),
+          })],
+        })),
+        tone: 'wait',
+      },
+      {
+        state: 'done',
+        card: cardOf(input({ scopes: [scope({ debt: { pending: [], archived: ['a'], times: new Map() } })] })),
+        tone: 'ok',
+      },
+      {
+        state: 'halted',
+        card: cardOf(input({ scopes: [scope({ header: header({ halted: { reason: 'shape-changed', detail: 'x', at: 1 } }) })] })),
+        tone: 'bad',
+      },
+      {
+        state: 'off',
+        card: cardOf(input({ enabled: false })),
+        tone: 'muted',
+      },
+    ];
+    for (const { state, card, tone } of cases) {
+      expect(card.chip.tone, `${state} chip tone`).toBe(tone);
+      expect(card.chip.word.length, `${state} chip word is a word, not empty`).toBeGreaterThan(0);
+    }
+  });
+
+  it('the monogram and hue identify a platform without any logo', () => {
+    const card = cardOf(input({ scopes: [scope({ platform: 'claude', scope: 'default' })] }));
+    expect(card.monogram).toBe('C');
+    expect(card.hueKey).toBe('claude');
+    const unknownCard = cardOf(input({ scopes: [scope({ platform: 'not-a-known-platform', scope: 'default' })] }));
+    expect(unknownCard.hueKey).toBe('default');
+    expect(unknownCard.monogram).toBe('N');
+  });
+
+  it('failures produce one dismissible alert with the count, and no more', () => {
+    const card = cardOf(input({
+      scopes: [scope({ header: header({ failures: [{ shortId: 'aaaaaaaa', platform: PLATFORM, reason: 'detail-empty', at: 1 }] }) })],
+    }));
+    expect(card.alerts).toHaveLength(1);
+    expect(card.alerts[0]!.id).toBe('chatgpt:default:failures');
+    expect(card.alerts[0]!.tone).toBe('bad');
+    expect(card.alerts[0]!.text).toContain('1');
+    // And the card is never [0]-length alerted for a clean row.
+    const clean = cardOf(input({}));
+    expect(clean.alerts).toHaveLength(0);
   });
 });
 
@@ -476,18 +972,21 @@ describe('W113 · the popup summary card', () => {
     }));
     const card = coverageCard(report, NOW);
     expect(card.lines).toHaveLength(1);
-    const all = card.lines.map((l) => l.text).join('\n') + (card.note ?? '');
+    const line = card.lines[0]!;
+    const all = [line.text, line.chip.word].join('\n') + (card.note ?? '');
     expect(all).not.toContain('%');
     expect(all).not.toContain('estimate');
-    expect(card.lines[0]!.text).toContain('1');
-    expect(card.lines[0]!.text).toContain('2');
+    expect(line.text).toContain('1');
+    expect(line.text).toContain('2');
+    expect(line.chip.tone).toBe('run');
+    expect(line.bar).toEqual({ archived: 1, owed: 2 });
   });
 
   it('an install with no records says so rather than showing an empty card', () => {
     const report = buildCoverage(input({ scopes: [] }));
     expect(coverageCard(report, NOW).lines).toHaveLength(0);
     expect(coverageCard(report, NOW).note).not.toBeNull();
-    expect(coverageView(report, NOW).legend).not.toBe('');
+    expect(coverageView(report, NOW).empty).not.toBeNull();
   });
 });
 
@@ -495,11 +994,18 @@ describe('W113 · the page offers the three presets and warns about one', () => 
   it('the risk note appears with the fast preset and with no other', () => {
     for (const preset of ['gentle', 'standard'] as const) {
       const view = coverageView(buildCoverage(input({ presetRaw: preset })), NOW);
-      expect(view.legend).not.toContain('Faster raises');
+      expect(view.speed.riskNote).toBeNull();
+      expect(view.speed.current).toBe(preset);
+      expect(view.speed.options.map((o) => o.preset)).toEqual(['gentle', 'standard', 'faster']);
     }
     const fast = coverageView(buildCoverage(input({ presetRaw: 'faster' })), NOW);
-    // The note lives beside the control (the page's own speed blocks), not buried in the sections.
-    expect(fast.sections.length).toBeGreaterThan(0);
+    // The note lives beside the control, not buried in the cards.
+    expect(fast.speed.riskNote).toContain('Faster raises how much is fetched per day');
+    expect(fast.cards.length).toBeGreaterThan(0);
+    // Every option carries its own numbers, from the plan, never retyped.
+    expect(fast.speed.options.map((o) => o.what)).toEqual(
+      ['gentle', 'standard', 'faster'].map((preset) => presetWhat(preset as 'gentle')),
+    );
   });
 });
 
@@ -538,30 +1044,24 @@ describe('W113 · no rendered sentence may keep a placeholder', () => {
     }));
   }
 
-  it('the page, every block of it, has no literal placeholder left', () => {
+  it('the page, every sentence of it, has no literal placeholder left', () => {
     const view = coverageView(richReport(), NOW);
-    const texts = [
-      view.title,
-      view.subtitle,
-      view.legend,
-      ...view.banners.flatMap((b) => ('text' in b ? [b.text] : [])),
-      ...view.sections.flatMap((s) => s.blocks.flatMap((b) => ('text' in b ? [b.text] : []))),
-    ];
-    for (const text of texts) {
+    for (const text of pageTexts(view)) {
       expect(text, `unsubstituted placeholder in: ${text}`).not.toMatch(UNSUBSTITUTED);
     }
   });
 
-  it('the facts and the table carry no placeholder either', () => {
+  it('the details and the months table carry no placeholder either', () => {
     const view = coverageView(richReport(), NOW);
-    const cells = view.sections.flatMap((s) => s.blocks.flatMap((b) => {
-      if (b.kind === 'facts') return b.rows.flatMap((r) => [r.label, r.value]);
-      if (b.kind === 'table') return [...b.headers, ...b.rows.flat()];
-      return [];
-    }));
-    expect(cells.length).toBeGreaterThan(0);
-    for (const cell of cells) {
-      expect(cell, `unsubstituted placeholder in: ${cell}`).not.toMatch(UNSUBSTITUTED);
+    expect(view.cards.length).toBeGreaterThan(0);
+    for (const card of view.cards) {
+      for (const row of card.detailRows) {
+        expect(row.label || 'x', `unsubstituted placeholder in: ${row.label || 'x'}`).not.toMatch(UNSUBSTITUTED);
+        expect(row.value, `unsubstituted placeholder in: ${row.value}`).not.toMatch(UNSUBSTITUTED);
+      }
+      for (const month of card.months.months) {
+        expect(month.month, `month key is data, but it may not look like a placeholder: ${month.month}`).not.toMatch(UNSUBSTITUTED);
+      }
     }
   });
 
@@ -570,11 +1070,12 @@ describe('W113 · no rendered sentence may keep a placeholder', () => {
     expect(card.lines).toHaveLength(3);
     for (const line of card.lines) {
       expect(line.text, line.text).not.toMatch(UNSUBSTITUTED);
+      expect(line.chip.word, line.chip.word).not.toMatch(UNSUBSTITUTED);
+      // The two things the browser test caught: the platform is named, and the scope distinguishes two
+      // accounts of one platform.
+      expect(line.text).toContain(line.platform);
+      expect(line.text).toContain(line.scope);
     }
-    // The two things the browser test caught: the platform is named, and the scope distinguishes two
-    // accounts of one platform.
-    expect(card.lines[0]!.text).toContain('chatgpt');
-    expect(card.lines.some((l) => l.text.includes('second'))).toBe(true);
   });
 
   it('the speed sentence and the state sentence are substituted in every preset', () => {
@@ -585,5 +1086,27 @@ describe('W113 · no rendered sentence may keep a placeholder', () => {
       const note = stateNote(row, NOW);
       if (note !== null) expect(note).not.toMatch(UNSUBSTITUTED);
     }
+  });
+});
+
+describe('W149 · every card keeps the tick\'s and the quota\'s characters intact', () => {
+  it('the demoted tick note reuses the popup\'s own sentence for the last wake', () => {
+    const view = coverageView(buildCoverage(input({
+      tick: { at: NOW - 60_000, ran: true, reason: 'ran', targets: 2 },
+    })), NOW);
+    expect(view.tickNote).toContain('really ran');
+    const skipped = coverageView(buildCoverage(input({
+      tick: { at: NOW - 60_000, ran: false, reason: 'no-http-port', targets: 0 },
+    })), NOW);
+    expect(skipped.tickNote).toContain('did nothing at all');
+  });
+
+  it('a quota whose cap is the plan\'s own prints the numbers the plan chose', () => {
+    const card = cardOf(input({
+      presetRaw: 'standard',
+      scopes: [scope({ header: header({ detailToday: { day: '2026-09-24', count: 10, cap: 350 } }) })],
+    }));
+    expect(card.quota.line).toContain('10');
+    expect(card.quota.line).toContain('350');
   });
 });

@@ -29,6 +29,7 @@ import {
 } from '../../lib/backfill/store';
 import { buildCoverage } from '../../lib/coverage';
 import { readCoverageInputs } from '../../lib/coverage-read';
+import { barGeometry } from '../../lib/coverage-charts';
 import { coverageCard, coverageCardTitle, openCoverageLabel } from '../../lib/coverage-view';
 import {
   isBackfillEnabled,
@@ -486,12 +487,17 @@ async function refresh(): Promise<void> {
 }
 
 /**
- * ADR-032 §1 · The summary card: one line per (platform, scope), and the way into the full page.
+ * ADR-032 §1 · The summary card: one row per (platform, scope), and the way into the full page.
  *
  * 🔴 This reads the **same model** the page does (`lib/coverage.ts`, via `lib/coverage-read.ts`), so the
  *    card and the page cannot disagree about a count. What it deliberately does *not* show is anything
  *    needing a caveat: no percentage, no estimate, no monthly distribution. Those are the page's job, and
  *    a two-line card that abbreviated them would be the place a fabricated number first appeared.
+ *
+ * W149 · Each row is now the compact form of the page's card: the status chip (the model's own state,
+ * one word), the counts sentence, and a two-segment mini bar whose widths are exact proportions of
+ * stored vs owed (`barGeometry`, the same helper the page's bar uses). The bar adds no number the
+ * sentence does not name and drops zero-count segments, so a one-sided archive cannot paint a sliver.
  */
 async function refreshCoverageCard(): Promise<void> {
   const card = document.getElementById('coverage-card') as HTMLElement | null;
@@ -507,11 +513,35 @@ async function refreshCoverageCard(): Promise<void> {
     title.textContent = coverageCardTitle();
     card.appendChild(title);
     for (const line of view.lines) {
-      const div = document.createElement('div');
-      div.className = 'line';
-      // textContent, not innerHTML: a line carries a platform id and an account scope.
-      div.textContent = line.text;
-      card.appendChild(div);
+      const row = document.createElement('div');
+      row.className = 'cv-row';
+      const chip = document.createElement('span');
+      chip.className = `cv-chip cv-chip-${line.chip.tone}`;
+      // textContent, not innerHTML: a chip carries the state word only, but the row next to it
+      // names a platform id and an account scope, and none of that may be parsed as HTML.
+      chip.textContent = line.chip.word;
+      const box = document.createElement('div');
+      box.className = 'cv-text';
+      const text = document.createElement('span');
+      text.textContent = line.text;
+      box.appendChild(text);
+      const counts = { archived: line.bar.archived, owed: line.bar.owed, failed: 0, remainder: 0 };
+      const segments = barGeometry(counts, 1000);
+      if (segments.length > 0) {
+        const bar = document.createElement('div');
+        bar.className = 'cv-bar';
+        bar.setAttribute('role', 'img');
+        bar.setAttribute('aria-label', `${line.platform} (${line.scope}): ${line.text}`);
+        for (const segment of segments) {
+          const seg = document.createElement('i');
+          seg.className = `cv-seg-${segment.tone === 'archived' ? 'ok' : 'owed'}`;
+          seg.style.width = `${(segment.w / 1000) * 100}%`;
+          bar.appendChild(seg);
+        }
+        box.appendChild(bar);
+      }
+      row.append(chip, box);
+      card.appendChild(row);
     }
     if (view.note) {
       const div = document.createElement('div');
