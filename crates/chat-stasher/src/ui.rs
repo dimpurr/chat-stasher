@@ -555,6 +555,7 @@ pub fn handle(
         "/sessions" => Some(list_page(params, token, data)),
         "/session" => Some(one_session_page(params, token, data)),
         "/content" => Some(content_page(params, data, content)),
+        "/reader" => Some(reader_page(params, token, data, content)),
         "/api/overview" => Some(Response::json(200, "OK", json_overview(data))),
         "/api/sessions" => Some(match selector_from_query(params) {
             Ok(r) => Response::json(
@@ -612,6 +613,68 @@ fn content_page(params: &Query, data: &UiData, content: &dyn ContentSource) -> R
             ),
         ),
     }
+}
+
+fn reader_page(
+    params: &Query,
+    token: &str,
+    data: &UiData,
+    content: &dyn ContentSource,
+) -> Response {
+    let Some(row) = index_param(params, data) else {
+        return Response::text(
+            400,
+            "Bad Request",
+            "ui: `i` must name a row of this dashboard's session list. An index that \
+             resolves to nothing is a usage error, not an empty session.\n",
+        );
+    };
+    let (start, width) = match reader_window(params) {
+        Ok(window) => window,
+        Err(message) => return Response::text(400, "Bad Request", format!("ui: {message}\n")),
+    };
+    match content.fetch(&row.machine, &row.session_id) {
+        Ok(c) => {
+            let conversation =
+                crate::normalize::normalize(row.harness.as_deref().unwrap_or(""), &c.body);
+            Response::html(
+                200,
+                "OK",
+                page_reader(row, token, data, &conversation, start, width),
+            )
+        }
+        Err(e) => Response::text(
+            502,
+            "Bad Gateway",
+            format!(
+                "ui: could not read session {} on `{}`: {e}\n\
+                 This is a failure to read, NOT an empty session.\n",
+                row.short_id, row.machine
+            ),
+        ),
+    }
+}
+
+fn reader_window(params: &Query) -> Result<(usize, usize), String> {
+    let start = match param(params, "m") {
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|_| "`m` must be a non-negative message offset".to_string())?,
+        None => 0,
+    };
+    let width = match param(params, "n") {
+        Some(raw) => {
+            let parsed = raw
+                .parse::<usize>()
+                .map_err(|_| "`n` must be a positive message window".to_string())?;
+            if parsed == 0 {
+                return Err("`n` must be a positive message window".to_string());
+            }
+            parsed.min(crate::normalize::MAX_WINDOW)
+        }
+        None => crate::normalize::DEFAULT_WINDOW,
+    };
+    Ok((start, width))
 }
 
 /// Resolve `?i=` against the inventory.
@@ -701,6 +764,16 @@ white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;
 border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
+.message{border:1px solid var(--line);border-radius:5px;margin:1rem 0;padding:.75rem 1rem}
+.message>header{color:var(--muted);font-size:.85rem;margin-bottom:.5rem}
+.message>header b{color:var(--fg)}
+.message p:first-child{margin-top:0}.message p:last-child{margin-bottom:0}
+.message details{margin:.6rem 0}
+.message summary{cursor:pointer}
+.thinking{border-left:3px solid var(--note-line);padding-left:.7rem}
+.tool{border-left:3px solid var(--link);padding-left:.7rem}
+.attachment{color:var(--muted);border-left:3px solid var(--line);padding-left:.7rem}
+nav.sub{display:flex;gap:1rem}
 "#;
 
 fn head(title: &str) -> String {
@@ -1517,7 +1590,8 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
          Loading this session costs <b>{b} of shard data</b> across <b>{sh} shard(s)</b> made of \
          <b>{db} data blob(s)</b> — fetched from the destination and decrypted locally. \
          Nothing is fetched until you ask.<br><br>\
-         <a href=\"/content?i={i}&token={t}\"><b>Load this session</b></a> \
+         <a href=\"/reader?i={i}&token={t}\"><b>Open reader</b></a> · \
+         <a href=\"/content?i={i}&token={t}\"><b>show raw shards</b></a> \
          <span class=sub>({b})</span></div>\n",
         b = esc(&fmt_bytes(payload_bytes)),
         sh = s.shard_count,
@@ -1561,6 +1635,334 @@ fn page_content(s: &UiSession, c: &Content, data: &UiData) -> String {
         body = esc(&c.body),
         footer = footer(data),
     )
+}
+
+// --------------------------------------------------------------- reader page
+
+fn page_reader(
+    s: &UiSession,
+    token: &str,
+    data: &UiData,
+    conversation: &crate::normalize::Conversation,
+    start: usize,
+    width: usize,
+) -> String {
+    let total = conversation.messages.len();
+    let end = start.saturating_add(width).min(total);
+    let mut out = head(&format!("chat-stasher · reader · {}", s.short_id));
+    out.push_str(&format!(
+        "<h1>Conversation <span class=mono>{sid}</span></h1>\n\
+         <p class=sub><a href=\"/session?i={i}&token={t}\">← session metadata</a> · \
+         <a href=\"/content?i={i}&token={t}\">show raw shards</a> · destination <b>{d}</b></p>\n",
+        sid = esc(&s.short_id),
+        i = s.index,
+        t = percent_encode(token),
+        d = esc(&data.destination_label),
+    ));
+    out.push_str(&reader_provenance(conversation));
+    if conversation.branch_nodes > 0 || !conversation.canonical_follows_active {
+        if conversation.canonical_follows_active {
+            out.push_str(&format!(
+                "<div class=note>Following the active branch. {} branch node(s) are not shown.</div>\n",
+                conversation.branch_nodes
+            ));
+        } else {
+            out.push_str(
+                "<div class=warn>Branch provenance is unknown; the displayed messages are not claimed to be the complete active branch.</div>\n",
+            );
+        }
+    }
+    if conversation.message_total == 0 {
+        // "No conversation content" (ADR-035) is a claim about the archive: the
+        // session holds nothing to place in time. A body that does have lines,
+        // none of which this reader could turn into a message, is the other
+        // state and must be worded as itself — the coverage line below says how
+        // many lines were involved and the raw link is where they are audited.
+        if conversation.unrendered_lines > 0 || conversation.unrecognized_lines > 0 {
+            out.push_str(
+                "<div class=warn>Nothing in this session's body could be rendered as a message. \
+                 This is not an empty conversation: the body has lines, and they are counted \
+                 below.</div>\n",
+            );
+        } else {
+            out.push_str("<div class=note>no conversation content</div>\n");
+        }
+    } else if start >= total {
+        // An offset past the end is not a missing conversation and not a
+        // usage error: the window is empty, which is a different claim from
+        // both, so it is stated as itself and a way back is offered.
+        out.push_str(&format!(
+            "<div class=note>no messages in this window: this conversation has {} message(s) \
+             and the window starts after the last one.</div>\n",
+            total
+        ));
+        out.push_str(&reader_nav(s, token, start, width, total));
+    } else {
+        out.push_str(&format!(
+            "<p class=sub>Showing messages {}–{} of {}.</p>\n",
+            start.saturating_add(1),
+            end,
+            conversation.message_total
+        ));
+        for (index, message) in conversation.messages[start..end].iter().enumerate() {
+            out.push_str(&render_message(start + index, message));
+        }
+        out.push_str(&reader_nav(s, token, start, width, total));
+    }
+    if conversation.unrendered_lines > 0 || conversation.unrecognized_lines > 0 {
+        out.push_str(&format!(
+            "<div class=warn>Reader coverage: {} line(s) were not rendered and {} line(s) were not valid JSON. \
+             <a href=\"/content?i={i}&token={t}\">Open raw shards to audit them.</a></div>\n",
+            conversation.unrendered_lines,
+            conversation.unrecognized_lines,
+            i = s.index,
+            t = percent_encode(token),
+        ));
+    }
+    out.push_str(&footer(data));
+    out.push_str("</body></html>\n");
+    out
+}
+
+fn reader_provenance(conversation: &crate::normalize::Conversation) -> String {
+    let text = match &conversation.provenance {
+        crate::normalize::Provenance::Known { source } => {
+            format!(
+                "<p class=sub>Provenance: archived {} records.</p>\n",
+                esc(source)
+            )
+        }
+        crate::normalize::Provenance::Unknown { why } => {
+            format!("<div class=warn>Provenance unknown: {}</div>\n", esc(why))
+        }
+    };
+    text
+}
+
+/// Window links, in the order the design's wireframe draws them: previous,
+/// next, first, last. Every one is a plain `<a>` with the window in its query,
+/// so paging works with no script and each page is a URL worth bookkeeping.
+fn reader_nav(s: &UiSession, token: &str, start: usize, width: usize, total: usize) -> String {
+    let width = width.max(1);
+    let last_start = total.saturating_sub(1) / width * width;
+    let mut links = Vec::new();
+    let push = |label: &str, m: usize, links: &mut Vec<String>| {
+        links.push(format!(
+            "<a href=\"/reader?i={}&m={}&n={}&token={}\">{}</a>",
+            s.index,
+            m,
+            width,
+            percent_encode(token),
+            label
+        ));
+    };
+    if start > 0 {
+        push("← previous messages", start.saturating_sub(width), &mut links);
+    }
+    if start.saturating_add(width) < total {
+        push("next messages →", start.saturating_add(width), &mut links);
+    }
+    if start > 0 {
+        push("first messages", 0, &mut links);
+    }
+    if last_start > start {
+        push("last messages", last_start, &mut links);
+    }
+    if links.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<nav class=sub aria-label=\"message pages\">{}</nav>\n",
+            links.join(" · ")
+        )
+    }
+}
+
+fn render_message(index: usize, message: &crate::normalize::Message) -> String {
+    let time = match &message.time {
+        crate::normalize::MessageTime::Known { unix, .. } => {
+            format!("<time>{}</time>", esc(&fmt_unix(*unix)))
+        }
+        crate::normalize::MessageTime::Unknown { why } => {
+            format!("<span class=bad title=\"{}\">time unknown</span>", esc(why))
+        }
+    };
+    let blocks = message.blocks.iter().map(render_block).collect::<String>();
+    format!(
+        "<article id=\"m{index}\" class=message><header><b>{}</b> · {} </header>{blocks}</article>\n",
+        message.role.label(),
+        time,
+    )
+}
+
+fn render_block(block: &crate::normalize::Block) -> String {
+    match block {
+        crate::normalize::Block::Text(text) => render_markdown(text),
+        crate::normalize::Block::CodeBlock { language, code } => format!(
+            "<pre><code{}>{}</code></pre>\n",
+            language
+                .as_deref()
+                .map(|lang| format!(" class=\"language-{}\"", esc(lang)))
+                .unwrap_or_default(),
+            esc(code)
+        ),
+        crate::normalize::Block::Thinking(text) => format!(
+            "<details class=thinking><summary>Thinking</summary>{}</details>\n",
+            render_markdown(text)
+        ),
+        crate::normalize::Block::ToolCall {
+            name,
+            input_summary,
+            output_bytes,
+        } => format!(
+            "<details class=tool><summary>Tool call{} · output {}</summary><pre>{}</pre></details>\n",
+            name.as_deref()
+                .map(|name| format!(": {}", esc(name)))
+                .unwrap_or_default(),
+            esc(&fmt_bytes(*output_bytes as u64)),
+            esc(input_summary)
+        ),
+        crate::normalize::Block::AttachmentRef(attachment) => format!(
+            "<p class=attachment>Attachment reference: <span class=mono>{}</span> · {} · {}</p>\n",
+            esc(attachment.name.as_deref().unwrap_or("unnamed")),
+            esc(attachment.media_type.as_deref().unwrap_or("type unknown")),
+            attachment
+                .bytes
+                .map(|bytes| esc(&fmt_bytes(bytes)))
+                .unwrap_or_else(|| "size unknown".to_string())
+        ),
+    }
+}
+
+/// Render a bounded Markdown subset after escaping all source text. Raw HTML
+/// and off-host resources never become markup; links are limited to local
+/// fragment/path targets so a reader cannot turn the page into a remote asset
+/// loader.
+fn render_markdown(markdown: &str) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    let mut fence_language = String::new();
+    let mut code = String::new();
+    let mut list_open = false;
+    for line in markdown.lines() {
+        if let Some(language) = line.strip_prefix("```") {
+            if in_fence {
+                out.push_str(&format!("<pre><code>{}</code></pre>\n", esc(&code)));
+                code.clear();
+                in_fence = false;
+                fence_language.clear();
+            } else {
+                in_fence = true;
+                fence_language = language.trim().to_string();
+            }
+            continue;
+        }
+        if in_fence {
+            if !code.is_empty() {
+                code.push('\n');
+            }
+            code.push_str(line);
+            continue;
+        }
+        if line.trim().is_empty() {
+            if list_open {
+                out.push_str("</ul>\n");
+                list_open = false;
+            }
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            if !list_open {
+                out.push_str("<ul>\n");
+                list_open = true;
+            }
+            out.push_str(&format!("<li>{}</li>\n", render_inline(item)));
+            continue;
+        }
+        if list_open {
+            out.push_str("</ul>\n");
+            list_open = false;
+        }
+        let heading = line.chars().take_while(|c| *c == '#').count();
+        if (1..=3).contains(&heading) && line.chars().nth(heading) == Some(' ') {
+            let text = line[heading + 1..].trim();
+            out.push_str(&format!(
+                "<h{heading}>{}</h{heading}>\n",
+                render_inline(text)
+            ));
+        } else {
+            out.push_str(&format!("<p>{}</p>\n", render_inline(line)));
+        }
+    }
+    if in_fence {
+        out.push_str(&format!(
+            "<pre><code class=\"language-{}\">{}</code></pre>\n",
+            esc(&fence_language),
+            esc(&code)
+        ));
+    }
+    if list_open {
+        out.push_str("</ul>\n");
+    }
+    out
+}
+
+fn render_inline(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let candidates = [
+            (rest.find("**"), "**"),
+            (rest.find('`'), "`"),
+            (rest.find('['), "["),
+        ];
+        let Some((index, marker)) = candidates
+            .iter()
+            .filter_map(|(index, marker)| index.map(|index| (index, *marker)))
+            .min_by_key(|(index, _)| *index)
+        else {
+            out.push_str(&esc(rest));
+            break;
+        };
+        out.push_str(&esc(&rest[..index]));
+        if marker == "**" {
+            let after = &rest[index + 2..];
+            if let Some(end) = after.find("**") {
+                out.push_str("<strong>");
+                out.push_str(&esc(&after[..end]));
+                out.push_str("</strong>");
+                rest = &after[end + 2..];
+                continue;
+            }
+        } else if marker == "`" {
+            let after = &rest[index + 1..];
+            if let Some(end) = after.find('`') {
+                out.push_str("<code>");
+                out.push_str(&esc(&after[..end]));
+                out.push_str("</code>");
+                rest = &after[end + 1..];
+                continue;
+            }
+        } else {
+            let after = &rest[index + 1..];
+            if let Some(label_end) = after.find("](") {
+                if let Some(url_end) = after[label_end + 2..].find(')') {
+                    let label = &after[..label_end];
+                    let url = &after[label_end + 2..label_end + 2 + url_end];
+                    if url.starts_with('/') || url.starts_with('#') {
+                        out.push_str(&format!("<a href=\"{}\">{}</a>", esc(url), esc(label)));
+                    } else {
+                        out.push_str(&esc(label));
+                    }
+                    rest = &after[label_end + 3 + url_end..];
+                    continue;
+                }
+            }
+        }
+        out.push_str(&esc(marker));
+        rest = &rest[index + marker.len()..];
+    }
+    out
 }
 
 // ---------------------------------------------------------------- json routes
@@ -1939,7 +2341,7 @@ mod tests {
     /// except the one you click through to.** Every other route must leave the
     /// source untouched — proved by a source that records its callers.
     #[test]
-    fn only_the_content_route_reaches_the_payload_tier() {
+    fn only_the_body_routes_reach_the_payload_tier() {
         let d = fixture::data();
         let src = CountingContent::default();
         for target in [
@@ -1955,22 +2357,26 @@ mod tests {
             assert_eq!(r.status, 200, "{target}");
             assert!(
                 src.calls.borrow().is_empty(),
-                "{target} reached the payload tier; only /content may"
+                "{target} reached the payload tier; only /content and /reader may"
             );
         }
-        // …and the instrument can say yes.
-        let r = req("/content?i=1", &d, &src);
-        assert_eq!(r.status, 200);
-        assert_eq!(
-            src.calls.borrow().len(),
-            1,
-            "the content route must actually fetch"
-        );
-        assert_eq!(
-            src.calls.borrow()[0].1,
-            "deepseek.d41f6a2b9c0e47aaaa1111",
-            "it must fetch the row the URL asked for"
-        );
+        // …and the instrument can say yes, once per body route, for the row the
+        // URL asked for.
+        for target in ["/content?i=1", "/reader?i=1"] {
+            let r = req(target, &d, &src);
+            assert_eq!(r.status, 200, "{target}");
+            assert_eq!(
+                src.calls.borrow().len(),
+                1,
+                "{target} must fetch exactly once"
+            );
+            assert_eq!(
+                src.calls.borrow()[0].1,
+                "deepseek.d41f6a2b9c0e47aaaa1111",
+                "{target} must fetch the row the URL asked for"
+            );
+            src.calls.borrow_mut().clear();
+        }
     }
 
     /// The session page states the price and does not pay it.
@@ -1986,6 +2392,216 @@ mod tests {
         assert!(
             html.contains("/content?i=2&token=t"),
             "the load link must be an explicit click, and must carry the row"
+        );
+    }
+
+    #[test]
+    fn reader_renders_roles_markdown_code_tools_attachments_and_safe_html() {
+        struct ReaderSource;
+        impl ContentSource for ReaderSource {
+            fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "aa".repeat(32),
+                    bytes: 512,
+                    body: concat!(
+                        r##"{"type":"user","timestamp":"2026-09-25T10:00:00Z","message":{"role":"user","content":"# Question\n\n**hello** <script>alert(1)</script>\n[javascript](javascript:alert(1))"}}"##,
+                        "\n",
+                        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"code","language":"rust","code":"fn main() {}"},{"type":"thinking","thinking":"private"},{"type":"tool_use","name":"search","input":{"q":"x"}},{"type":"image","name":"plot.png","content_type":"image/png","bytes":12}]}}"#,
+                        "\n",
+                        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok"}]}}"#,
+                    )
+                    .to_string(),
+                })
+            }
+        }
+        let response = req("/reader?i=0", &fixture::data(), &ReaderSource);
+        assert_eq!(response.status, 200);
+        assert!(
+            response.body.contains("<h1>Question</h1>"),
+            "{}",
+            response.body
+        );
+        assert!(response.body.contains("User"), "{}", response.body);
+        assert!(response.body.contains("Assistant"), "{}", response.body);
+        assert!(response.body.contains("Tool"), "{}", response.body);
+        assert!(
+            response.body.contains("<details class=thinking>"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("<details class=tool>"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("Attachment reference"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("&lt;script&gt;"),
+            "{}",
+            response.body
+        );
+        assert!(
+            !response.body.contains("<script>alert"),
+            "{}",
+            response.body
+        );
+        assert!(
+            !response.body.contains("href=\"javascript:"),
+            "{}",
+            response.body
+        );
+    }
+
+    #[test]
+    fn reader_keeps_unknown_time_and_provenance_visible() {
+        struct UnknownSource;
+        impl ContentSource for UnknownSource {
+            fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "bb".repeat(32),
+                    bytes: 32,
+                    body: "{\"messages\":[{\"role\":\"user\",\"content\":\"archived\"}]}\n"
+                        .to_string(),
+                })
+            }
+        }
+        let mut data = fixture::data();
+        data.sessions[0].harness = None;
+        let response = req("/reader?i=0", &data, &UnknownSource);
+        assert_eq!(response.status, 200);
+        assert!(
+            response.body.contains("Provenance unknown"),
+            "{}",
+            response.body
+        );
+        assert!(response.body.contains("time unknown"), "{}", response.body);
+    }
+
+    /// A reader fixture whose message count is known: three one-line turns.
+    struct ThreeMessages;
+    impl ContentSource for ThreeMessages {
+        fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
+            Ok(Content {
+                shards: Vec::new(),
+                concat_sha256: "dd".repeat(32),
+                bytes: 96,
+                body: (0..3)
+                    .map(|n| {
+                        format!(
+                            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"m{n}\"}}}}"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            })
+        }
+    }
+
+    /// A window starting past the last message is an empty window. It is not a
+    /// missing conversation and not a usage error, and it has to offer a way
+    /// back — an offset that resolves to nothing must not read as a finding.
+    #[test]
+    fn a_window_past_the_last_message_is_an_empty_window_not_a_missing_one() {
+        let r = req("/reader?i=0&m=9", &fixture::data(), &ThreeMessages);
+        assert_eq!(r.status, 200);
+        assert!(
+            r.body.contains("no messages in this window"),
+            "{}",
+            r.body
+        );
+        assert!(!r.body.contains("no conversation content"), "{}", r.body);
+        assert!(r.body.contains("← previous messages"), "{}", r.body);
+        assert!(r.body.contains("first messages"), "{}", r.body);
+    }
+
+    /// Zero messages is the empty conversation, and it is named as that rather
+    /// than as a failed read.
+    #[test]
+    fn an_empty_conversation_is_named_empty() {
+        struct EmptyBody;
+        impl ContentSource for EmptyBody {
+            fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "ee".repeat(32),
+                    bytes: 0,
+                    body: String::new(),
+                })
+            }
+        }
+        let r = req("/reader?i=0", &fixture::data(), &EmptyBody);
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("no conversation content"), "{}", r.body);
+        assert!(!r.body.contains("Reader coverage"), "{}", r.body);
+    }
+
+    /// A body that has lines and no recognisable message is not an empty
+    /// conversation. Rendering zero messages must not upgrade "we could not
+    /// read this shape" into "there is nothing here" (ADR-035 vs ADR-031).
+    #[test]
+    fn a_body_with_no_recognisable_message_is_not_an_empty_conversation() {
+        struct ForeignShape;
+        impl ContentSource for ForeignShape {
+            fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "ff".repeat(32),
+                    bytes: 48,
+                    body: "{\"unexpected\":true}\nnot json either\n".to_string(),
+                })
+            }
+        }
+        let r = req("/reader?i=0", &fixture::data(), &ForeignShape);
+        assert_eq!(r.status, 200);
+        assert!(
+            r.body.contains("could be rendered as a message"),
+            "{}",
+            r.body
+        );
+        assert!(!r.body.contains("no conversation content"), "{}", r.body);
+        assert!(r.body.contains("1 line(s) were not rendered"), "{}", r.body);
+        assert!(
+            r.body.contains("1 line(s) were not valid JSON"),
+            "{}",
+            r.body
+        );
+    }
+
+    /// A window that cannot be read is a usage error, and a window never
+    /// silently widens to the whole conversation.
+    #[test]
+    fn a_bad_window_is_a_usage_error_and_a_window_never_widens() {
+        let data = fixture::data();
+        for target in [
+            "/reader?i=0&n=0",
+            "/reader?i=0&n=x",
+            "/reader?i=0&m=x",
+            "/reader?n=1",
+        ] {
+            assert_eq!(
+                req(target, &data, &ThreeMessages).status,
+                400,
+                "{target} must be a usage error"
+            );
+        }
+
+        let one = req("/reader?i=0&m=0&n=1", &data, &ThreeMessages).body;
+        assert!(one.contains("Showing messages 1–1 of 3"), "{one}");
+        assert!(one.contains("id=\"m0\""), "{one}");
+        assert!(!one.contains("id=\"m1\""), "{one}");
+        assert!(one.contains("next messages →"), "{one}");
+        assert!(one.contains("last messages"), "{one}");
+
+        let (_, params) = split_target("/reader?n=9999");
+        assert_eq!(
+            reader_window(&params).unwrap(),
+            (0, crate::normalize::MAX_WINDOW)
         );
     }
 
