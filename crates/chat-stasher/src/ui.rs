@@ -1758,7 +1758,11 @@ fn reader_nav(s: &UiSession, token: &str, start: usize, width: usize, total: usi
         ));
     };
     if start > 0 {
-        push("← previous messages", start.saturating_sub(width), &mut links);
+        push(
+            "← previous messages",
+            start.saturating_sub(width),
+            &mut links,
+        );
     }
     if start.saturating_add(width) < total {
         push("next messages →", start.saturating_add(width), &mut links);
@@ -1826,11 +1830,7 @@ fn time_source_label(source: &crate::activity::TimeSource) -> String {
 /// not fit is cut to its head and tail and the byte count in between is
 /// printed with a link to the raw shards, so a large message costs a bounded
 /// page without the hidden part being denied.
-fn render_block(
-    block: &crate::normalize::Block,
-    remaining: &mut usize,
-    raw_href: &str,
-) -> String {
+fn render_block(block: &crate::normalize::Block, remaining: &mut usize, raw_href: &str) -> String {
     match block {
         crate::normalize::Block::Text(text) => {
             if text.len() <= *remaining {
@@ -1844,6 +1844,9 @@ fn render_block(
             let class = language
                 .as_deref()
                 .map(|lang| format!(" class=\"language-{}\"", esc(lang)))
+                // reason: no language was recorded, so no class attribute is
+                // written. The empty string is the absence of an attribute,
+                // not a language named "".
                 .unwrap_or_default();
             if code.len() <= *remaining {
                 *remaining -= code.len();
@@ -1875,14 +1878,21 @@ fn render_block(
             } else {
                 render_elided(input_summary, remaining, raw_href)
             };
+            // The output size is written only when a record carried one: a
+            // tool call whose result was not archived has no output size, and
+            // "output 0 B" would be the reader inventing one.
+            let output = match output_bytes {
+                Some(bytes) => format!(" · output {}", esc(&fmt_bytes(*bytes as u64))),
+                None => " · output not recorded".to_string(),
+            };
             format!(
-                "<details class=tool><summary>Tool call{} · output {}</summary>{}</details>\n",
-                name
-                    .as_deref()
+                "<details class=tool><summary>Tool call{}{output}</summary>{body}</details>\n",
+                name.as_deref()
                     .map(|name| format!(": {}", esc(name)))
+                    // reason: an unnamed tool call keeps its number and its
+                    // body; the name is simply absent, and no placeholder
+                    // name is substituted for it.
                     .unwrap_or_default(),
-                esc(&fmt_bytes(*output_bytes as u64)),
-                body
             )
         }
         crate::normalize::Block::AttachmentRef(attachment) => format!(
@@ -2576,6 +2586,21 @@ mod tests {
             "{}",
             response.body
         );
+        // A `tool_use` names a call; the output arrives in the `tool_result`
+        // that follows. The call's own size is unrecorded, not zero.
+        assert!(
+            response
+                .body
+                .contains("Tool call: search · output not recorded"),
+            "{}",
+            response.body
+        );
+        // …and the result that *was* archived reports its measured size.
+        assert!(
+            response.body.contains("Tool call: call-1 · output 2 B"),
+            "{}",
+            response.body
+        );
         assert!(
             response.body.contains("Attachment reference"),
             "{}",
@@ -2651,11 +2676,7 @@ mod tests {
     fn a_window_past_the_last_message_is_an_empty_window_not_a_missing_one() {
         let r = req("/reader?i=0&m=9", &fixture::data(), &ThreeMessages);
         assert_eq!(r.status, 200);
-        assert!(
-            r.body.contains("no messages in this window"),
-            "{}",
-            r.body
-        );
+        assert!(r.body.contains("no messages in this window"), "{}", r.body);
         assert!(!r.body.contains("no conversation content"), "{}", r.body);
         assert!(r.body.contains("← previous messages"), "{}", r.body);
         assert!(r.body.contains("first messages"), "{}", r.body);
@@ -2774,7 +2795,10 @@ mod tests {
             html.contains(&format!("[{elided} bytes elided")),
             "the dropped byte count must be the measured one; {elided} expected"
         );
-        assert!(html.contains("/content?i=0"), "the elision must be auditable");
+        assert!(
+            html.contains("/content?i=0"),
+            "the elision must be auditable"
+        );
         assert!(
             html.len() < 100 * 1024,
             "one message must not blow the budget; page was {} bytes",

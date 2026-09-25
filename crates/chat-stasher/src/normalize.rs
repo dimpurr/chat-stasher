@@ -70,7 +70,11 @@ pub enum Block {
     ToolCall {
         name: Option<String>,
         input_summary: String,
-        output_bytes: usize,
+        /// `None` is a record that does not carry the output — a `tool_use`
+        /// names the call, the `tool_result` that follows carries what came
+        /// back. It is not zero bytes, and the reader does not print it as
+        /// one: "not recorded" and "recorded as empty" are different claims.
+        output_bytes: Option<usize>,
     },
     AttachmentRef(AttachmentRef),
 }
@@ -474,9 +478,7 @@ fn message_from_value(
                     ),
                     output_bytes: value
                         .get("output")
-                        .map(|value| compact_json(Some(value)))
-                        .map(|s| s.len())
-                        .unwrap_or(0),
+                        .map(|value| compact_json(Some(value)).len()),
                 }],
             });
         }
@@ -518,12 +520,19 @@ fn blocks_from_content(value: &Value, conversation: &mut Conversation) -> Vec<Bl
                     .get("text")
                     .and_then(Value::as_str)
                     .map(|text| vec![Block::Text(text.to_string())])
+                    // reason: a `text` part whose text is not a string
+                    // contributes no block at all, and the caller counts the
+                    // whole line as unrendered — an empty list here is "this
+                    // part held nothing readable", never "the message was
+                    // empty".
                     .unwrap_or_default(),
                 Some("thinking") | Some("reasoning") => map
                     .get("thinking")
                     .or_else(|| map.get("text"))
                     .and_then(Value::as_str)
                     .map(|text| vec![Block::Thinking(text.to_string())])
+                    // reason: same as `text` above — a reasoning part with no
+                    // readable string yields no block and the line is counted.
                     .unwrap_or_default(),
                 Some("tool_use") | Some("tool_call") | Some("function_call") => {
                     vec![Block::ToolCall {
@@ -533,7 +542,10 @@ fn blocks_from_content(value: &Value, conversation: &mut Conversation) -> Vec<Bl
                                 .or_else(|| map.get("arguments"))
                                 .or_else(|| map.get("content")),
                         ),
-                        output_bytes: 0,
+                        // The call record names the call; what came back is in
+                        // the `tool_result` that follows it, if one was
+                        // archived. Writing 0 here would claim a measurement.
+                        output_bytes: None,
                     }]
                 }
                 Some("tool_result") | Some("function_result") => vec![Block::ToolCall {
@@ -545,9 +557,7 @@ fn blocks_from_content(value: &Value, conversation: &mut Conversation) -> Vec<Bl
                     input_summary: "tool result".to_string(),
                     output_bytes: map
                         .get("content")
-                        .map(|value| compact_json(Some(value)))
-                        .map(|s| s.len())
-                        .unwrap_or(0),
+                        .map(|value| compact_json(Some(value)).len()),
                 }],
                 Some("image") | Some("attachment") | Some("file") => {
                     let attachment = attachment_from_map(map);
