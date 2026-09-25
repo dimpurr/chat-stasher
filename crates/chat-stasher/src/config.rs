@@ -167,6 +167,20 @@ pub struct Config {
     /// a user has to apply is different in each case.
     pub native_host: Option<NativeHostConfig>,
 
+    /// Why `[cache]` could not be read, when it could not.
+    ///
+    /// Runtime metadata, like [`source`](Self::source), not part of the TOML
+    /// schema — a `cache_error` line in the file is ignored.
+    ///
+    /// `None` means the section was absent (so the documented default quota
+    /// applies) or read cleanly. `Some` means it was there and at least one of
+    /// its values could not be read, and then the body cache is **off**: a
+    /// mistyped quota must not activate a cache nobody asked for, and it must
+    /// not take the rest of the file — `[destinations]`, the harness roots —
+    /// down with it. `doctor` and `read` both report this instead of a quota.
+    #[serde(skip)]
+    pub cache_error: Option<String>,
+
     /// The `[cache]` section: this machine's body cache (ADR-034).
     ///
     /// Distinct from `rustic_cache_dir` / `rustic_no_cache` above, which are
@@ -302,38 +316,15 @@ impl Config {
     /// Only a parse failure or an unexpected I/O error produces a warning
     /// (still on stderr, still non-fatal), because a scan must never be
     /// blocked by a config typo.
+    ///
+    /// One failure is not allowed to take the whole file down with it: a
+    /// `[cache]` section whose values could not be read leaves the rest of the
+    /// config in force, turns the body cache off and records why (see
+    /// [`Config::cache_error`]). Every other failure degrades to defaults as it
+    /// always did.
     pub fn load() -> Self {
         match std::fs::read_to_string(config_path()) {
-            Ok(raw) => match toml::from_str::<Config>(&raw) {
-                Ok(mut cfg) => {
-                    cfg.source = ConfigSource::File;
-                    expand_config_paths(&mut cfg);
-                    cfg
-                }
-                Err(e) => match recover_windows_paths(&raw)
-                    .and_then(|fixed| toml::from_str::<Config>(&fixed).ok())
-                {
-                    Some(mut cfg) => {
-                        eprintln!(
-                            "warning: config contains unescaped backslash paths (Windows spelling), read as literal paths: {}",
-                            config_path().display()
-                        );
-                        eprintln!(
-                            "         `\\` is the escape character in TOML; write 'C:\\path' (single quotes) or \"C:\\\\path\" to silence this warning"
-                        );
-                        cfg.source = ConfigSource::FileAfterWindowsPathRepair;
-                        expand_config_paths(&mut cfg);
-                        cfg
-                    }
-                    None => {
-                        eprintln!("warning: config is not valid TOML, using defaults: {e}");
-                        Config {
-                            source: ConfigSource::DefaultsAfterParseError,
-                            ..Config::default()
-                        }
-                    }
-                },
-            },
+            Ok(raw) => Self::from_text(&raw),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // First run — no config yet. That is explicitly fine.
                 Config::default()
@@ -345,6 +336,69 @@ impl Config {
                     ..Config::default()
                 }
             }
+        }
+    }
+
+    /// The text of a config file, as a config, degrading as far as the file
+    /// itself allows.
+    fn from_text(raw: &str) -> Self {
+        match toml::from_str::<Config>(raw) {
+            Ok(mut cfg) => {
+                cfg.source = ConfigSource::File;
+                expand_config_paths(&mut cfg);
+                cfg
+            }
+            Err(strict_error) => Self::recover(raw, &strict_error),
+        }
+    }
+
+    /// What a config file means when a strict parse of it failed.
+    ///
+    /// Two recoveries, in order, and then the old whole-file fallback. The
+    /// second one is why this is a function of its own: a bad value inside
+    /// `[cache]` used to replace the *entire* config with its defaults, which
+    /// silently dropped every other section and — because an absent `[cache]`
+    /// means the documented default quota — turned the cache on at a size
+    /// nobody wrote.
+    fn recover(raw: &str, strict_error: &toml::de::Error) -> Self {
+        // 1. A Windows path pasted verbatim into a basic string is not valid
+        //    TOML, and rejecting the whole file over it would act as if the user
+        //    never stated where their store lives.
+        let repaired = recover_windows_paths(raw);
+        if let Some(fixed) = repaired.as_deref() {
+            if let Ok(mut cfg) = toml::from_str::<Config>(fixed) {
+                warn_windows_paths();
+                cfg.source = ConfigSource::FileAfterWindowsPathRepair;
+                expand_config_paths(&mut cfg);
+                return cfg;
+            }
+        }
+        // 2. A `[cache]` section that is present and unreadable. The rest of the
+        //    file is provably fine — removing that one key is what makes it
+        //    parse — so the rest of the file stays in force.
+        if let Some(mut cfg) = salvage_unreadable_cache(repaired.as_deref().unwrap_or(raw)) {
+            if repaired.is_some() {
+                warn_windows_paths();
+                cfg.source = ConfigSource::FileAfterWindowsPathRepair;
+            } else {
+                cfg.source = ConfigSource::File;
+            }
+            let why = format!("`[cache]` could not be read: {}", strict_error.message());
+            eprintln!(
+                "warning: {why}, so the body cache is off and the rest of {} was applied",
+                config_path().display()
+            );
+            eprintln!(
+                "         fix that value to turn the cache back on; `chat-stasher doctor` reports this too"
+            );
+            cfg.cache_error = Some(why);
+            expand_config_paths(&mut cfg);
+            return cfg;
+        }
+        eprintln!("warning: config is not valid TOML, using defaults: {strict_error}");
+        Config {
+            source: ConfigSource::DefaultsAfterParseError,
+            ..Config::default()
         }
     }
 
@@ -605,6 +659,31 @@ fn expand_config_paths(cfg: &mut Config) {
             "warning: the `~` in a config path could not be expanded; the option was reset to its default (a literal `~` is never written as a path): {problem}"
         );
     }
+}
+
+/// The two lines a backslash-repaired config is reported with.
+fn warn_windows_paths() {
+    eprintln!(
+        "warning: config contains unescaped backslash paths (Windows spelling), read as literal paths: {}",
+        config_path().display()
+    );
+    eprintln!(
+        "         `\\` is the escape character in TOML; write 'C:\\path' (single quotes) or \"C:\\\\path\" to silence this warning"
+    );
+}
+
+/// The config a file means when its only unreadable part is `[cache]`.
+///
+/// `None` unless removing the `cache` key is what makes the text parse — which
+/// is exactly the case where every other key is fine and `[cache]` is the sole
+/// problem. A file broken anywhere else keeps the caller's existing behaviour:
+/// this recovery is deliberately scoped to the one section the body cache owns,
+/// so it can never quietly promote a *different* broken section into a config
+/// that looks valid.
+fn salvage_unreadable_cache(text: &str) -> Option<Config> {
+    let mut table: toml::Table = text.parse().ok()?;
+    table.remove("cache")?;
+    Config::deserialize(toml::Value::Table(table)).ok()
 }
 
 /// Characters that may legally follow a backslash inside a TOML basic string,
@@ -1541,6 +1620,86 @@ max_bytes = "50GB"
             text.contains("50G"),
             "the error must quote the value the user wrote: {text}"
         );
+    }
+
+    /// A `[cache]` value the parser rejects must not take the rest of the file
+    /// down with it, and must not turn the cache on at the default quota. The
+    /// cache goes off, the reason travels with it, and every other section is
+    /// still in force.
+    #[test]
+    fn an_unreadable_cache_section_leaves_the_rest_of_the_config_in_force() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            r#"
+machine = "m-alpha"
+
+[destinations.d1]
+repo = "/nonexistent/repo"
+
+[cache]
+max_bytes = "50G"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        // The typo does not cost the user the rest of the file: this is the
+        // half of the change that has nothing to do with the cache itself.
+        assert_eq!(cfg.machine.as_deref(), Some("m-alpha"));
+        assert!(
+            cfg.destinations.contains_key("d1"),
+            "an unreadable `[cache]` must not drop `[destinations]` either: {:?}",
+            cfg.destinations.keys().collect::<Vec<&String>>()
+        );
+        // And it does not silently activate a cache nobody asked for.
+        let problem = cfg
+            .cache_error
+            .as_deref()
+            .expect("the reason must be recorded on the config");
+        assert!(
+            problem.contains("50G"),
+            "the reason must quote the value the user wrote: {problem}"
+        );
+        assert!(
+            crate::body_cache::settings_for(&cfg).is_err(),
+            "a cache whose quota could not be read has no quota to report"
+        );
+        match crate::body_cache::for_operation(&cfg, crate::body_cache::Policy::ReadThrough) {
+            crate::body_cache::Availability::Invalid(why) => {
+                assert!(why.contains("50G"), "the state carries the reason: {why}");
+            }
+            other => {
+                panic!("an unreadable `[cache]` must not read as off, let alone as on: {other:?}")
+            }
+        }
+    }
+
+    /// The recovery is scoped to `[cache]`: a file broken anywhere else keeps
+    /// the old whole-file behaviour, so this can never quietly promote a
+    /// *different* broken section into a config that looks valid.
+    #[test]
+    fn the_cache_recovery_does_not_mask_a_break_somewhere_else() {
+        // `connections` is not a number, and `[cache]` is absent.
+        let other_break =
+            "machine = \"m-alpha\"\n[destinations.d1]\nrepo = \"/tmp/x\"\nconnections = \"lots\"\n";
+        let cfg = Config::from_text(other_break);
+        assert_eq!(cfg.source, ConfigSource::DefaultsAfterParseError);
+        assert!(cfg.cache_error.is_none());
+        assert!(cfg.machine.is_none(), "defaults, as before");
+
+        // A readable `[cache]` next to a break elsewhere: removing the cache
+        // key does not make the file parse, so this is not the cache recovery.
+        let mixed = "[cache]\nmax_bytes = 0\n[destinations.d1]\nrepo = \"/tmp/x\"\nconnections = \"lots\"\n";
+        let cfg = Config::from_text(mixed);
+        assert_eq!(cfg.source, ConfigSource::DefaultsAfterParseError);
+        assert!(cfg.cache_error.is_none());
+        assert!(cfg.cache.is_none());
     }
 
     #[test]

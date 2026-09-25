@@ -279,8 +279,14 @@ pub fn parse_size(raw: &str) -> Result<u64, String> {
 /// skip, and ADR-034 requires the cache to take part in no synchronisation.
 ///
 /// An unset `max_bytes` means [`DEFAULT_MAX_BYTES`] — a documented default, not
-/// an unknown turned into a number.
+/// an unknown turned into a number. A `[cache]` section that *could not be
+/// read* is a third state: not an absent section (which takes the default) and
+/// not a valid one, so this is an error and the cache is off. Nothing here
+/// guesses a quota from a value the user mistyped.
 pub fn settings_for(config: &crate::config::Config) -> Result<Settings> {
+    if let Some(problem) = config.cache_error.as_deref() {
+        return Err(anyhow!("{problem}"));
+    }
     let root = match config.cache.as_ref().and_then(|c| c.dir.as_deref()) {
         Some(raw) => {
             crate::config::expand_tilde(raw).map_err(|e| anyhow!("cache.dir `{raw}`: {e}"))?
@@ -316,7 +322,7 @@ pub fn default_root() -> PathBuf {
 
 /// Why a body cache is, or is not, in use for one operation.
 ///
-/// Five states, not two, because "no cache" has four different causes and only
+/// Six states, not two, because "no cache" has five different causes and only
 /// one of them is the user's decision. Collapsing them would mean a command
 /// that silently ran uncached while the user believed a 50 GB quota was in
 /// effect — the same class of mistake as recording an unknown as zero — or one
@@ -337,6 +343,12 @@ pub enum Availability {
     /// read continues uncached: nothing is written to that directory, and
     /// nothing in it is deleted.
     Foreign(String),
+    /// `[cache]` was present and could not be read. The cache is off, because
+    /// the quota the user meant to write is unknown — falling back to the
+    /// documented default would report a quota nobody asked for as if they had
+    /// asked for it. Distinct from `Foreign` because the fix is a different
+    /// line of the config.
+    Invalid(String),
 }
 
 impl Availability {
@@ -347,7 +359,8 @@ impl Availability {
             Availability::Off
             | Availability::Bulk
             | Availability::Unresolved(_)
-            | Availability::Foreign(_) => None,
+            | Availability::Foreign(_)
+            | Availability::Invalid(_) => None,
         }
     }
 }
@@ -356,6 +369,12 @@ impl Availability {
 pub fn for_operation(config: &crate::config::Config, policy: Policy) -> Availability {
     if policy == Policy::Bulk {
         return Availability::Bulk;
+    }
+    // A `[cache]` section that could not be read is not an absent one: the
+    // cache is off, and the reason travels with it. (An absent section, by
+    // contrast, means the documented default quota — see `settings_for`.)
+    if let Some(problem) = config.cache_error.as_deref() {
+        return Availability::Invalid(problem.to_string());
     }
     match settings_for(config) {
         Ok(settings) if settings.enabled() => {

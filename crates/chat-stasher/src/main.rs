@@ -5837,6 +5837,18 @@ fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
     use chat_stasher::body_cache::RootState;
 
     let config = Config::load();
+    // A `[cache]` section that could not be read is neither an absent one (which
+    // takes the documented default quota) nor a path problem: the quota the user
+    // wrote is unknown, so the cache is off and this says which line to fix.
+    if let Some(problem) = config.cache_error.as_deref() {
+        eprintln!("cache: {problem}");
+        eprintln!(
+            "cache: the body cache is off until that value is fixed, and nothing was read or \
+             deleted"
+        );
+        // 2, not 1: nothing was attempted. The config is the thing to fix.
+        return ExitCode::from(2);
+    }
     let settings = match chat_stasher::body_cache::settings_for(&config) {
         Ok(settings) => settings,
         Err(e) => {
@@ -5988,7 +6000,11 @@ fn body_cache_state_line(availability: &chat_stasher::body_cache::Availability) 
         Availability::Unresolved(why) => {
             format!("unavailable ({why}); this read goes to the remote uncached")
         }
-        Availability::Foreign(why) => {
+        // Two states, one sentence: neither is the user's decision, and in both
+        // the reason says which of the two it is — a directory that is not the
+        // cache's, or a `[cache]` value that could not be read. `doctor` words
+        // them apart with more room than a single line has.
+        Availability::Foreign(why) | Availability::Invalid(why) => {
             format!("off ({why}); this read goes to the remote uncached")
         }
     }

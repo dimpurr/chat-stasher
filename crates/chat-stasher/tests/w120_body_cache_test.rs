@@ -739,6 +739,63 @@ fn the_cache_refuses_a_directory_it_did_not_create() {
     assert!(keep.exists(), "the read touched a file it did not write");
 }
 
+/// A `[cache]` value the parser cannot read turns the cache off and says why.
+///
+/// It must not activate the cache at the documented default quota — the user
+/// wrote a quota, and reporting a different one as if they had written it is the
+/// same class of mistake as recording an unknown as a number — and it must not
+/// stop the read from working.
+#[test]
+fn an_unreadable_cache_quota_turns_the_cache_off() {
+    let sandbox = Sandbox::new(1, 40_000);
+    // `50G` is refused by the size parser: `GB` is 10⁹ and `GiB` is 2³⁰, and a
+    // bare `G` is neither.
+    let cfg_dir = sandbox.path().join("config").join("chat-stasher");
+    fs::create_dir_all(&cfg_dir).expect("config dir");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        "[cache]\nmax_bytes = \"50G\"\n",
+    )
+    .expect("write config");
+
+    let read = sandbox.read(0);
+    assert_eq!(
+        read.status.code(),
+        Some(0),
+        "a cache that cannot be configured must not fail a read:\n{}",
+        stdout(&read)
+    );
+    let state = cache_state(&read);
+    assert!(
+        state.contains("off"),
+        "an unreadable quota disables the cache rather than choosing one: {state}"
+    );
+    assert!(
+        state.contains("50G"),
+        "the state line must quote the value to fix: {state}"
+    );
+
+    // The cache the *absent* section would have meant is the default one, and
+    // nothing may have been written to it.
+    let default_root = sandbox
+        .path()
+        .join("cache")
+        .join("chat-stasher")
+        .join("body");
+    assert!(
+        !default_root.exists(),
+        "a mistyped quota must not activate the cache at the default location: {}",
+        default_root.display()
+    );
+
+    // The stderr warning names the file, so the fix is in the message.
+    let warning = stderr(&read);
+    assert!(
+        warning.contains("[cache]"),
+        "the warning must name the section to fix:\n{warning}"
+    );
+}
+
 /// The second read of one session must fetch **no body bytes at all**: not
 /// "fewer", not "faster", but none — every body lookup hits.
 ///

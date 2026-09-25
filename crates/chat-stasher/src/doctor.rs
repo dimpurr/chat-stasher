@@ -1473,6 +1473,11 @@ pub enum BodyCacheCheck {
     /// will write to or delete from. Distinct from `NoCacheDir` (nothing is
     /// there) and from `Unreadable` (could not look).
     NotACacheRoot { root: PathBuf, detail: String },
+    /// `[cache]` was present and could not be read, so the body cache is off
+    /// and there is no quota to report. Distinct from `Disabled` (the user
+    /// wrote `max_bytes = 0`) and from an absent section (the default quota):
+    /// the fix is a different line of the config in each case.
+    Invalid { detail: String },
     /// The cache is on and measured.
     Ok {
         root: PathBuf,
@@ -1490,6 +1495,7 @@ impl BodyCacheCheck {
             BodyCacheCheck::Unreadable { .. } => "unreadable",
             BodyCacheCheck::Unresolved { .. } => "unresolved",
             BodyCacheCheck::NotACacheRoot { .. } => "not_a_cache_root",
+            BodyCacheCheck::Invalid { .. } => "invalid",
             BodyCacheCheck::Ok { .. } => "ok",
         }
     }
@@ -1503,6 +1509,15 @@ impl BodyCacheCheck {
 pub fn inspect_body_cache(config: &Config) -> BodyCacheCheck {
     use crate::body_cache::RootState;
 
+    // A `[cache]` section that could not be read comes first, before any
+    // resolution: there is no quota to report and no location the user's own
+    // value points at, and saying "off" here would read as if they had written
+    // `max_bytes = 0`.
+    if let Some(problem) = config.cache_error.as_deref() {
+        return BodyCacheCheck::Invalid {
+            detail: problem.to_string(),
+        };
+    }
     let settings = match crate::body_cache::settings_for(config) {
         Ok(settings) => settings,
         Err(e) => {
@@ -1586,6 +1601,11 @@ fn body_cache_json(c: &BodyCacheCheck) -> serde_json::Value {
             "total_bytes": CountState::unknown(detail),
             "error": detail,
         }),
+        BodyCacheCheck::Invalid { detail } => serde_json::json!({
+            "kind": "invalid",
+            "total_bytes": CountState::unknown(detail),
+            "error": detail,
+        }),
         BodyCacheCheck::Ok {
             root,
             max_bytes,
@@ -1646,6 +1666,12 @@ fn print_body_cache(c: &BodyCacheCheck) {
             );
             eprintln!(
                 "  point `[cache] dir` at a directory chat-stasher created, or remove this one by hand."
+            );
+        }
+        BodyCacheCheck::Invalid { detail } => {
+            eprintln!("  body cache is off: {detail}");
+            eprintln!(
+                "  fix that value in the config; reads keep working, and each one fetches from the destination."
             );
         }
         BodyCacheCheck::Ok {
@@ -3444,6 +3470,32 @@ mod json_tests {
             "a cache switched off must still show what it left on the disk"
         );
         assert_eq!(v["entries"], serde_json::json!(1));
+    }
+
+    /// A `[cache]` value that could not be read is a finding of its own: not
+    /// `disabled` (which is the user's own switch), not a missing directory,
+    /// and never a quota.
+    #[test]
+    fn body_cache_report_names_an_unreadable_cache_section() {
+        let config = Config {
+            cache_error: Some(
+                "`[cache]` could not be read: cache size `50G` has an unknown unit `G`".to_string(),
+            ),
+            ..Config::default()
+        };
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "invalid");
+        let v = body_cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("invalid"));
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("50G"),
+            "the report must quote the value to fix: {v}"
+        );
+        assert_ne!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":0}),
+            "a cache that could not be configured is not a measured empty one"
+        );
     }
 
     /// A directory that is not the cache's own is reported as such, and its
