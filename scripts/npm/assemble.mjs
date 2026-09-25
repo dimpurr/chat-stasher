@@ -49,8 +49,10 @@ const NPM_DIR = path.join(REPO, 'npm');
 
 // The release asset holding the binary for a platform key. These are not derived
 // from the key: npm spells the Intel architecture `x64` while the release
-// artifacts spell it `x86_64` (scripts/release-artifacts.sh), so a template
-// string would produce a 404 on Intel and nothing else would notice.
+// artifacts spell it `x86_64` (release.yml, "Stage and check the two macOS
+// binaries"), and npm spells the OS `win32` while the asset spells it
+// `windows`. So a template string would produce a 404 on exactly those two
+// keys, and nothing else would notice.
 //
 // The set of keys here and the set of directories under npm/platforms/ are
 // asserted equal below, and npm/test/platform-packages.test.mjs asserts the same
@@ -58,9 +60,26 @@ const NPM_DIR = path.join(REPO, 'npm');
 const RELEASE_ASSET = {
   'darwin-arm64': 'chat-stasher-darwin-arm64',
   'darwin-x64': 'chat-stasher-darwin-x86_64',
+  'linux-arm64': 'chat-stasher-linux-arm64',
+  'linux-x64': 'chat-stasher-linux-x86_64',
+  'win32-x64': 'chat-stasher-windows-x86_64.exe',
 };
 
 const MAIN_PACKAGE = 'chat-stasher';
+
+// What the binary is called inside its platform package. The launcher has to
+// look for the same name (npm/bin/chat-stasher.js, `binaryNameFor`), and
+// npm/test/platform-packages.test.mjs asserts the two functions agree.
+//
+// Windows is the reason this is not a constant: `CreateProcess` appends `.exe`
+// only to a name that has no extension, so the file really has to be
+// `chat-stasher.exe` there. Note that this is the *package's* file name, which
+// is not the *asset's*: the Windows asset carries the extension too, but the
+// release asset for Intel macOS carries `x86_64` where npm spells the same
+// architecture `x64`, which is why RELEASE_ASSET is a table and not a rule.
+function binaryNameFor(key) {
+  return key.startsWith('win32-') ? `${MAIN_PACKAGE}.exe` : MAIN_PACKAGE;
+}
 
 const USAGE = [
   'usage: node scripts/npm/assemble.mjs --version V --assets DIR --out DIR [--sha256sums PATH]',
@@ -267,19 +286,23 @@ async function main(argv) {
 
     const packageDir = path.join(out, packageName);
     const binDir = path.join(packageDir, 'bin');
+    const binaryName = binaryNameFor(key);
     await fs.mkdir(binDir, { recursive: true });
-    await fs.copyFile(assetPath, path.join(binDir, MAIN_PACKAGE));
-    await fs.chmod(path.join(binDir, MAIN_PACKAGE), 0o755);
+    await fs.copyFile(assetPath, path.join(binDir, binaryName));
+    // chmod is a no-op for the meaning of the bit on Windows, where the file
+    // is executable by virtue of the name; it is what makes every other
+    // platform's copy runnable.
+    await fs.chmod(path.join(binDir, binaryName), 0o755);
     await copyShared(packageDir);
 
     const manifest = { ...template, version };
     delete manifest.private;
     await writeJson(path.join(packageDir, 'package.json'), manifest);
 
-    const problem = await assertExactTree(packageDir, ['package.json', 'LICENSE', 'NOTICE', `bin/${MAIN_PACKAGE}`]);
+    const problem = await assertExactTree(packageDir, ['package.json', 'LICENSE', 'NOTICE', `bin/${binaryName}`]);
     if (problem !== null) return fail(problem);
 
-    written.push({ packageName, version, binPath: `bin/${MAIN_PACKAGE}`, bytes: (await fs.stat(assetPath)).size, sha256: actual });
+    written.push({ packageName, version, binPath: `bin/${binaryName}`, bytes: (await fs.stat(assetPath)).size, sha256: actual });
   }
 
   // ---- the launcher package --------------------------------------------------
@@ -371,4 +394,4 @@ if (invokedAsScript) {
   process.exitCode = await main(process.argv.slice(2));
 }
 
-export { RELEASE_ASSET, checkVersion, parseSums, main };
+export { RELEASE_ASSET, binaryNameFor, checkVersion, parseSums, main };

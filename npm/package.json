@@ -28,7 +28,10 @@
   ],
   "optionalDependencies": {
     "@dimpurr/chat-stasher-darwin-arm64": "0.0.0",
-    "@dimpurr/chat-stasher-darwin-x64": "0.0.0"
+    "@dimpurr/chat-stasher-darwin-x64": "0.0.0",
+    "@dimpurr/chat-stasher-linux-arm64": "0.0.0",
+    "@dimpurr/chat-stasher-linux-x64": "0.0.0",
+    "@dimpurr/chat-stasher-win32-x64": "0.0.0"
   },
   "private": true
 }

@@ -12,7 +12,9 @@ your `PATH`.
 ## Requirements
 
 - macOS on **Apple Silicon (arm64)** or **Intel (x86_64)** — prebuilt binaries
-  are shipped for both architectures. Linux is not available yet (see
+  are shipped for both architectures. This tap is macOS-only; the release
+  workflow also builds Linux binaries, but no Release carries one yet, and they
+  would not come through Homebrew in any case (see
   [What this tap does not ship](#what-this-tap-does-not-ship)).
 - [Homebrew](https://brew.sh) (works on both Intel and Apple Silicon Homebrew).
 
@@ -85,7 +87,7 @@ brew untap dimpurr/chat-stasher
 | --- | --- |
 | macOS arm64 (Apple Silicon) | ✅ prebuilt, v0.2.0 |
 | macOS x86_64 (Intel) | ✅ prebuilt, v0.2.0 |
-| Linux | ❌ not shipped — no prebuilt binary, no source build path in this tap |
+| Linux | ❌ not shipped by this tap — and, as of 2026-09-25, not carried by any Release either: the release workflow builds `chat-stasher-linux-x86_64` and `chat-stasher-linux-arm64` (static musl builds) on a version tag, but no version tag has been pushed since those jobs were added, so no Release holds one. The newest Release, v0.4.0, carries two macOS binaries, the extension zip and `SHA256SUMS` only (`gh release view v0.4.0`, 2026-09-25). `scripts/install.sh` has an install path for Linux and reads that manifest first, so on Linux it refuses today rather than fetching a file the release does not have. A Homebrew formula for them, with its own bottles, would be separate work for this tap |
 
 For a platform without a prebuilt binary, build from source:
 

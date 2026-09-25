@@ -84,13 +84,18 @@ lto = true
 # keep test builds quiet unless a test fails
 
 # `cargo binstall chat-stasher` pulls the release binary directly instead of
-# compiling. The asset names are the install.sh contract (release.yml "Stage
-# artifacts"): the bare, versionless `chat-stasher-darwin-arm64` and
-# `chat-stasher-darwin-x86_64`. `pkg-fmt = "bin"` says the download *is* the
-# binary, so no `bin-dir` is needed. The default `{ target }` would interpolate
-# the Rust triple (`aarch64-apple-darwin`), which matches none of the assets,
-# hence the per-target overrides. Targets with no override (everything but
-# macOS) fall back to binstall's other strategies.
+# compiling. The asset names are the release asset contract (release.yml, the
+# build jobs' "Stage" steps): the bare, versionless
+# `chat-stasher-darwin-arm64` and so on. `pkg-fmt = "bin"` says the download
+# *is* the binary, so no `bin-dir` is needed. The default `{ target }` would
+# interpolate the Rust triple (`aarch64-apple-darwin`), which matches none of
+# the assets, hence the per-target overrides. A target with no override falls
+# back to binstall's other strategies, which is what happens on any platform
+# this project ships no binary for.
+#
+# One override per target the release builds for, because the two vocabularies
+# are unrelated: the keys on the left are Rust triples and the URLs on the
+# right are the asset names this project publishes.
 [package.metadata.binstall]
 pkg-fmt = "bin"
 
@@ -99,3 +104,15 @@ pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-darwin-arm64"
 
 [package.metadata.binstall.overrides.x86_64-apple-darwin]
 pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-darwin-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-linux-arm64"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-linux-x86_64"
+
+# The Windows asset carries its `.exe`, because that is the name a Windows user
+# who downloads it from the Releases page needs. binstall fetches whatever the
+# URL names, so the override names it exactly as it is published.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-windows-x86_64.exe"

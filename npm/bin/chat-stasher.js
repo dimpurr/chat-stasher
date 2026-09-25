@@ -31,7 +31,24 @@ const { spawn } = require('node:child_process');
 // `@dimpurr/chat-stasher-darwin-arm64` is the package for the key
 // `darwin-arm64`; scripts/npm/assemble.mjs publishes one package per key and
 // npm/test/platform-packages.test.mjs asserts the two lists agree.
-const SUPPORTED = ['darwin-arm64', 'darwin-x64'];
+const SUPPORTED = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'];
+
+// The command's own name, and the file the platform package holds it in.
+const BINARY_NAME = 'chat-stasher';
+
+// What the binary is called inside its platform package for a platform key.
+//
+// Windows needs the extension to run at all: `CreateProcess` appends `.exe`
+// only when the name it was given has no extension, so a file actually named
+// `chat-stasher` is not something it will start, and `fs.accessSync` would not
+// see it either. Every other platform gets the bare name.
+//
+// scripts/npm/assemble.mjs writes the file this returns, and
+// npm/test/platform-packages.test.mjs asserts the two agree — the failure this
+// guards is a package that installs perfectly and then cannot be found.
+function binaryNameFor(key) {
+  return key.startsWith('win32-') ? `${BINARY_NAME}.exe` : BINARY_NAME;
+}
 
 // Where a reader can get a binary some other way. Both alternatives are in the
 // same line on purpose: this is the one line an unsupported user sees.
@@ -73,7 +90,7 @@ function targetFor(platform, arch, resolve = require.resolve) {
     return { ok: false, key, packageName, reason: 'package-not-installed', errno: errnoOf(err) };
   }
 
-  const binPath = path.join(path.dirname(manifestPath), 'bin', 'chat-stasher');
+  const binPath = path.join(path.dirname(manifestPath), 'bin', binaryNameFor(key));
   try {
     // X_OK, not exists: a binary that is present but not executable cannot be
     // run either, and saying "not installed" about it would be wrong.
@@ -177,6 +194,6 @@ function main() {
 
 // Exported so the tests can drive the decision table and the spawn behaviour
 // directly; the bin form is the branch below, not a second entry point.
-module.exports = { SUPPORTED, packageNameFor, targetFor, messageFor, main };
+module.exports = { SUPPORTED, packageNameFor, binaryNameFor, targetFor, messageFor, main };
 
 if (require.main === module) main();

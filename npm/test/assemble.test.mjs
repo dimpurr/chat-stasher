@@ -26,6 +26,20 @@ const ASSEMBLE = path.join(REPO, 'scripts', 'npm', 'assemble.mjs');
 
 const ARM64 = 'chat-stasher-darwin-arm64';
 const X64 = 'chat-stasher-darwin-x86_64';
+const LINUX_ARM64 = 'chat-stasher-linux-arm64';
+const LINUX_X64 = 'chat-stasher-linux-x86_64';
+const WINDOWS_X64 = 'chat-stasher-windows-x86_64.exe';
+
+// Every package a release publishes, in the order the assertions below list
+// them: the launcher first, then one per platform key.
+const PACKAGES = [
+  'chat-stasher',
+  '@dimpurr/chat-stasher-darwin-arm64',
+  '@dimpurr/chat-stasher-darwin-x64',
+  '@dimpurr/chat-stasher-linux-arm64',
+  '@dimpurr/chat-stasher-linux-x64',
+  '@dimpurr/chat-stasher-win32-x64',
+];
 
 const temporary = [];
 function tmpdir(prefix) {
@@ -39,7 +53,7 @@ after(() => {
 
 const sha256 = (buffer) => createHash('sha256').update(buffer).digest('hex');
 
-// A release directory with the two binaries and a SHA256SUMS over them.
+// A release directory with one binary per platform and a SHA256SUMS over them.
 // `missing` names assets that get a checksum line but no file, which is the
 // "the checksum says it should be here" case; `sums` replaces the checksum file.
 function release({ missing = [], sums } = {}) {
@@ -47,6 +61,9 @@ function release({ missing = [], sums } = {}) {
   const bytes = {
     [ARM64]: Buffer.from('fixture bytes for the arm64 binary\n'),
     [X64]: Buffer.from('fixture bytes for the x86_64 binary\n'),
+    [LINUX_ARM64]: Buffer.from('fixture bytes for the linux arm64 binary\n'),
+    [LINUX_X64]: Buffer.from('fixture bytes for the linux x86_64 binary\n'),
+    [WINDOWS_X64]: Buffer.from('fixture bytes for the windows binary\n'),
   };
   for (const [name, buffer] of Object.entries(bytes)) {
     if (!missing.includes(name)) fs.writeFileSync(path.join(dir, name), buffer);
@@ -74,7 +91,7 @@ describe('assembling a release', () => {
     const result = run(assets, out);
     assert.equal(result.code, 0, result.stderr);
 
-    for (const name of ['chat-stasher', '@dimpurr/chat-stasher-darwin-arm64', '@dimpurr/chat-stasher-darwin-x64']) {
+    for (const name of PACKAGES) {
       const manifest = readManifest(out, name);
       assert.equal(manifest.version, '0.4.0', `${name} must carry the release version`);
       assert.equal(manifest.private, undefined, `${name} must be publishable, not private`);
@@ -85,6 +102,9 @@ describe('assembling a release', () => {
     assert.deepEqual(readManifest(out, 'chat-stasher').optionalDependencies, {
       '@dimpurr/chat-stasher-darwin-arm64': '0.4.0',
       '@dimpurr/chat-stasher-darwin-x64': '0.4.0',
+      '@dimpurr/chat-stasher-linux-arm64': '0.4.0',
+      '@dimpurr/chat-stasher-linux-x64': '0.4.0',
+      '@dimpurr/chat-stasher-win32-x64': '0.4.0',
     });
   });
 
@@ -97,7 +117,30 @@ describe('assembling a release', () => {
     assert.equal(sha256(fs.readFileSync(binary)), sha256(fs.readFileSync(path.join(assets, ARM64))));
     assert.notEqual(fs.statSync(binary).mode & 0o111, 0, 'the binary must be executable');
 
-    for (const name of ['chat-stasher', '@dimpurr/chat-stasher-darwin-arm64', '@dimpurr/chat-stasher-darwin-x64']) {
+    // Two of the asset names are spelled unlike their npm keys (`x86_64` where
+    // npm says `x64`, `windows` where npm says `win32`), so each copy is
+    // checked against the asset it must have come from rather than against the
+    // one next to it.
+    for (const [packageName, assetName] of [
+      ['@dimpurr/chat-stasher-darwin-x64', X64],
+      ['@dimpurr/chat-stasher-linux-x64', LINUX_X64],
+      ['@dimpurr/chat-stasher-linux-arm64', LINUX_ARM64],
+    ]) {
+      const copied = path.join(out, packageName, 'bin', 'chat-stasher');
+      assert.equal(
+        sha256(fs.readFileSync(copied)),
+        sha256(fs.readFileSync(path.join(assets, assetName))),
+        `${packageName} must hold ${assetName}`,
+      );
+    }
+
+    // Windows gets the extension: a file named `chat-stasher` is not something
+    // Windows will start, so the package would install and then be unusable.
+    const winBinary = path.join(out, '@dimpurr/chat-stasher-win32-x64', 'bin', 'chat-stasher.exe');
+    assert.equal(sha256(fs.readFileSync(winBinary)), sha256(fs.readFileSync(path.join(assets, WINDOWS_X64))));
+    assert.ok(!fs.existsSync(path.join(out, '@dimpurr/chat-stasher-win32-x64', 'bin', 'chat-stasher')));
+
+    for (const name of PACKAGES) {
       for (const file of ['LICENSE', 'NOTICE']) {
         assert.ok(fs.existsSync(path.join(out, name, file)), `${name} is missing ${file}`);
       }

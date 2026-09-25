@@ -5,6 +5,17 @@
 # 一个陌生人应该下载一个文件就能跑，而不是先装 Rust 工具链。
 #
 # 用法：bash scripts/release-artifacts.sh [outdir]   （默认 dist/）
+#
+# 🔴 SCOPE — this is the macOS half of a release, not a whole one. It runs on a
+# macOS host because that is the only architecture it can build for, and its
+# asset-set check at the end is about *this* directory. A Release is more than
+# it can produce here: .github/workflows/release.yml also builds
+# chat-stasher-linux-x86_64, chat-stasher-linux-arm64 and
+# chat-stasher-windows-x86_64.exe, each on a runner of that architecture, so
+# the Release the workflow publishes carries three assets this host cannot. So
+# a green run here says nothing about whether a Release's asset set is complete
+# — the workflow's own "Stage artifacts" step is what asserts that set, and it
+# is the one that fails if a binary did not arrive.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/dist}"
@@ -67,8 +78,12 @@ done
 
 EXPECTED="$(printf '%s\n' "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET" SHA256SUMS | sort)"
 ACTUAL="$(ls "$OUT" | sort)"
-if [ "$EXPECTED" = "$ACTUAL" ]; then say "asset set OK: exactly two CLI binaries, stable extension zip, and SHA256SUMS"
+if [ "$EXPECTED" = "$ACTUAL" ]; then say "asset set OK for a macOS host: two CLI binaries, stable extension zip, and SHA256SUMS"
 else say "unexpected asset set"; printf '%s\n' "$ACTUAL"; FAILED=1; fi
+
+# A green run above is the macOS part of a release and not the whole of one;
+# say so where the result is read, not only in the header comment.
+say "NOTE: a Release published by the workflow also carries the Linux and Windows binaries, which this host cannot build (see release.yml)"
 
 echo
 if [ "$FAILED" = 0 ]; then ls -la "$OUT"; echo; echo "[release] RELEASE-ARTIFACTS: PASS"; exit 0

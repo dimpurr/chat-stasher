@@ -1,4 +1,4 @@
-# Release — build the installable binary and attach it to the tagged Release.
+# Release — build the installable binaries and attach them to the tagged Release.
 #
 # Runs ONLY when a version tag (`v*`) is pushed. A release is an event — the
 # tag — not a manual toggle, so there is no workflow_dispatch here. `v*` is
@@ -6,9 +6,30 @@
 # below: a tag that is not `vX.Y.Z` or `vX.Y.Z-rc.N` fails the run before
 # anything is built.
 #
-# The workflow builds prebuilt binaries for supported macOS platforms
-# (darwin-arm64 and darwin-x86_64) and bundles a single SHA256SUMS covering both.
-# Gates run once before building to ensure only verified code is released.
+# The workflow builds one prebuilt binary per supported platform, each on a
+# runner whose architecture is the binary's architecture (no cross-emulation,
+# no qemu):
+#
+#   chat-stasher-darwin-arm64          macos-latest (arm64), native
+#   chat-stasher-darwin-x86_64         macos-latest (arm64), cross-built for x86_64
+#   chat-stasher-linux-x86_64          ubuntu-24.04      (x86_64), musl, static
+#   chat-stasher-linux-arm64           ubuntu-24.04-arm  (arm64),  musl, static
+#   chat-stasher-windows-x86_64.exe    windows-latest    (x86_64)
+#
+# plus the stable browser-extension zip, and bundles a single SHA256SUMS
+# covering all of them.
+#
+# The two macOS binaries come out of one job because one macOS runner can build
+# both, and a macOS runner is the most expensive of the three by an order of
+# magnitude (the arithmetic is at the top of .github/workflows/ci.yml). The
+# Linux builds are one job per architecture rather than one job cross-compiling
+# both, because a static musl build compiles its C dependencies (aws-lc,
+# sqlite3, zstd) for the target, and having the target's own compiler is what
+# makes that a build rather than a guess.
+#
+# Gates run once, in their own job, before any build starts, and every build
+# job depends on it. The tag is the release's whole identity, so the gates are
+# the first thing that can end a run.
 name: Release
 
 on:
@@ -22,9 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  # The workflow-wide grant is `contents: write` because the build-and-release
-  # job uses the auto-generated GITHUB_TOKEN to create the Release and upload
-  # its assets. The two tap jobs narrow it at the job level: tap-guard gets no
+  # The workflow-wide grant is `contents: write` because the `release` job uses
+  # the auto-generated GITHUB_TOKEN to create the Release and upload its assets.
+  # The two tap jobs narrow it at the job level: tap-guard gets no
   # scope at all, homebrew-tap only contents: read. The one stored secret this
   # workflow reads is TAP_TOKEN — a fine-grained PAT on dimpurr/homebrew-tap,
   # used only by the homebrew-tap job to clone that repository, push a branch,
@@ -33,20 +54,21 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: build + release (macOS arm64 + x86_64)
-    runs-on: macos-latest
-
+  # ---------------------------------------------------------------------------
+  # The tag, and the gates that must hold before anything is built.
+  # ---------------------------------------------------------------------------
+  gates:
+    name: gates (tag shape + source gates)
+    runs-on: ubuntu-24.04
+    outputs:
+      # Read by the release job, so the one place that knows what the two tag
+      # shapes are is this job, and no downstream step re-derives it from the
+      # string. A job output is the only carrier that survives the job
+      # boundary; $GITHUB_ENV does not cross jobs.
+      prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Install stable Rust with arm64 and x86_64 targets
-        # Mirrors .github/workflows/ci.yml:109 (dtolnay/rust-toolchain@stable).
-        # Adds both aarch64-apple-darwin and x86_64-apple-darwin targets.
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       # -----------------------------------------------------------------------
       # FIRST gate, because the tag is the release's whole identity and because
@@ -73,6 +95,7 @@ jobs:
       # and the stable it is a candidate for would then print the same version,
       # which is why the rc carries its `-rc.N` suffix in Cargo.toml too.
       - name: Gate — tag shape and version agreement
+        id: tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -130,9 +153,7 @@ jobs:
 
           echo "tag OK: ${TAG} — ${KIND}; Cargo.toml agrees at ${CARGO_VERSION}"
 
-          # Read by the create step, so the two places that need to know the
-          # shape cannot disagree about what the shapes are.
-          echo "RELEASE_PRERELEASE=${PRERELEASE}" >> "$GITHUB_ENV"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
       # Verify BEFORE building anything that could be published.
@@ -147,8 +168,17 @@ jobs:
       #
       # The fix is not more discipline. It is that the workflow which publishes
       # must itself verify what it publishes, rather than trusting a sibling.
-      # These steps run before the build so a failure costs seconds, not a
-      # cross-compile.
+      # These steps are that verification, in this workflow, and every build job
+      # below declares `needs: gates` — a real dependency edge, so a failing
+      # gate cannot be outrun by a build that already started. They run first
+      # so a failure costs seconds, not five cross-compiles and a macOS runner.
+      #
+      # This job is the same runner and the same commands the ubuntu job in
+      # ci.yml runs on every push (including scripts/release-gate.sh, which is
+      # portable now — it probes for GNU `stat -c` before BSD `stat -f`).
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Gate — semantic defaults (unknown must not become a value)
         run: python3 scripts/check-semantic-defaults.py
 
@@ -166,6 +196,238 @@ jobs:
       # comment admitting the two copies would drift. They no longer exist.
       - name: Gate — full release gate
         run: bash scripts/release-gate.sh
+
+  # ---------------------------------------------------------------------------
+  # Builds. One artifact per release asset, each named exactly as the asset it
+  # carries, so the release job's download is the asset set and a rename cannot
+  # happen in between.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: build (darwin-arm64 + darwin-x86_64)
+    needs: gates
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust with arm64 and x86_64 targets
+        # Mirrors .github/workflows/ci.yml:109 (dtolnay/rust-toolchain@stable).
+        # Adds both aarch64-apple-darwin and x86_64-apple-darwin targets.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Build release binaries (aarch64 + x86_64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Stage and check the two macOS binaries
+        run: |
+          set -euo pipefail
+
+          # The artifact names follow the install.sh contract, byte for byte
+          # (scripts/install.sh):
+          #   TARGET   = "$(uname -s)-$(uname -m)" → darwin-arm64, darwin-x86_64
+          #   ARTIFACT = "chat-stasher-${TARGET}"
+          ARTIFACT_ARM64="chat-stasher-darwin-arm64"
+          ARTIFACT_X86="chat-stasher-darwin-x86_64"
+
+          mkdir -p dist
+          cp "target/aarch64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_ARM64"
+          cp "target/x86_64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_X86"
+
+          # Guard against a mislabeled binary: assert each Mach-O is really its
+          # architecture. It is checked here, next to the build, rather than in
+          # the job that publishes, because this is the job that knows which
+          # target directory each file came out of.
+          file "dist/$ARTIFACT_ARM64" | grep -q 'arm64' || {
+            echo "error: built binary is not arm64:" >&2
+            file "dist/$ARTIFACT_ARM64" >&2
+            exit 1
+          }
+          file "dist/$ARTIFACT_X86" | grep -q 'x86_64' || {
+            echo "error: built binary is not x86_64:" >&2
+            file "dist/$ARTIFACT_X86" >&2
+            exit 1
+          }
+
+          ls -l dist
+
+      - name: Upload chat-stasher-darwin-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-stasher-darwin-arm64
+          path: dist/chat-stasher-darwin-arm64
+          if-no-files-found: error
+
+      - name: Upload chat-stasher-darwin-x86_64
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-stasher-darwin-x86_64
+          path: dist/chat-stasher-darwin-x86_64
+          if-no-files-found: error
+
+  build-linux:
+    name: build (${{ matrix.asset }})
+    needs: gates
+    strategy:
+      # One architecture failing must not cancel the other: the run's result is
+      # the same either way, and a cancelled job reports less than a failed one.
+      fail-fast: false
+      matrix:
+        include:
+          - asset: chat-stasher-linux-x86_64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-musl
+            file_machine: x86-64
+          - asset: chat-stasher-linux-arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            file_machine: ARM aarch64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # The Rust target ships musl's libc and its start files, but not a C
+      # compiler for it: the C dependencies (aws-lc-sys for TLS, bundled
+      # SQLite, zstd) are compiled from source by their build scripts and need
+      # a compiler whose output links against musl. `musl-tools` is what puts
+      # one on PATH, named `musl-gcc`, which is the name cc-rs looks for on a
+      # musl target.
+      - name: Install the musl C toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          musl-gcc --version
+
+      - name: Install stable Rust with the musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build the static musl binary
+        run: cargo build --release --target ${{ matrix.rust_target }}
+
+      # The build is only half the claim: "a static musl binary" is a property
+      # of the file that comes out. A build that quietly used the runner's
+      # glibc would run here — this runner has glibc — and fail on the user's
+      # machine, which is the one place nobody would connect back to this run.
+      - name: Stage the binary, check it is static, and run it
+        run: |
+          set -euo pipefail
+
+          ASSET="${{ matrix.asset }}"
+          mkdir -p dist
+          cp "target/${{ matrix.rust_target }}/release/chat-stasher" "dist/$ASSET"
+
+          file -b "dist/$ASSET"
+
+          # `file` names the machine and says "statically linked"; an
+          # architecture check that only ran the binary would pass on a wrong
+          # binary the runner happened to be able to execute, and both of these
+          # cells run native code.
+          FILE_OUT="$(file -b "dist/$ASSET")"
+          case "$FILE_OUT" in
+            *"${{ matrix.file_machine }}"*) ;;
+            *)
+              echo "error: ${ASSET} is not a ${{ matrix.file_machine }} binary:" >&2
+              echo "       ${FILE_OUT}" >&2
+              exit 1
+              ;;
+          esac
+          case "$FILE_OUT" in
+            *"statically linked"*) ;;
+            *)
+              echo "error: ${ASSET} is not statically linked — it would need a libc the target machine may not have:" >&2
+              echo "       ${FILE_OUT}" >&2
+              exit 1
+              ;;
+          esac
+
+          # The same claim from the other direction: a dynamically linked
+          # executable is one `ldd` can parse and exit 0 on.
+          if ldd "dist/$ASSET" >/dev/null 2>&1; then
+            echo "error: ${ASSET} is a dynamic executable:" >&2
+            ldd "dist/$ASSET" >&2
+            exit 1
+          fi
+
+          # And it runs. A binary that is the right shape and refuses to start
+          # is not a release asset, and this is the cheapest place to find out.
+          "./dist/$ASSET" --version
+
+      - name: Upload ${{ matrix.asset }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  build-windows:
+    name: build (windows-x86_64)
+    needs: gates
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and check the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # x86_64-pc-windows-msvc is the host target of this runner, so the
+          # build is explicit about it rather than relying on the default.
+          cargo build --release --target x86_64-pc-windows-msvc
+
+          ASSET="chat-stasher-windows-x86_64.exe"
+          mkdir -p dist
+          cp "target/x86_64-pc-windows-msvc/release/chat-stasher.exe" "dist/$ASSET"
+
+          # The check is that it runs, not that a tool describes it: `file` on
+          # a Windows runner describes the PE it is given and would pass for
+          # any architecture, and this is a native runner, so starting the
+          # binary is available and says more.
+          "./dist/$ASSET" --version
+          ls -l dist
+
+      - name: Upload chat-stasher-windows-x86_64.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-stasher-windows-x86_64.exe
+          path: dist/chat-stasher-windows-x86_64.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish. Every binary is already built; this job assembles the release's
+  # asset set, checksums it, and creates the Release.
+  # ---------------------------------------------------------------------------
+  release:
+    name: release (stage + publish)
+    needs: [gates, build-macos, build-linux, build-windows]
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download every built binary
+        uses: actions/download-artifact@v4
+        with:
+          # One artifact per release asset, merged flat into dist/ so the
+          # staged set *is* the downloaded set. Nothing is renamed here.
+          pattern: chat-stasher-*
+          path: dist
+          merge-multiple: true
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -190,27 +452,31 @@ jobs:
           unset CS_RELEASE_CHANNEL
           pnpm zip
 
-      - name: Build release binaries (aarch64 + x86_64)
-        run: |
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
-
-      - name: Stage artifacts (binaries + stable extension + SHA256SUMS)
+      - name: Stage artifacts (extension zip + SHA256SUMS over every binary)
         run: |
           set -euo pipefail
 
-          # The artifact names follow the install.sh contract, byte for byte
-          # (scripts/install.sh):
-          #   TARGET   = "$(uname -s)-$(uname -m)" → darwin-arm64, darwin-x86_64
-          #   ARTIFACT = "chat-stasher-${TARGET}"
-          ARTIFACT_ARM64="chat-stasher-darwin-arm64"
-          ARTIFACT_X86="chat-stasher-darwin-x86_64"
+          ARTIFACT_DARWIN_ARM64="chat-stasher-darwin-arm64"
+          ARTIFACT_DARWIN_X86="chat-stasher-darwin-x86_64"
+          ARTIFACT_LINUX_X86="chat-stasher-linux-x86_64"
+          ARTIFACT_LINUX_ARM64="chat-stasher-linux-arm64"
+          ARTIFACT_WINDOWS_X86="chat-stasher-windows-x86_64.exe"
+          BINARIES="$ARTIFACT_DARWIN_ARM64 $ARTIFACT_DARWIN_X86 $ARTIFACT_LINUX_X86 $ARTIFACT_LINUX_ARM64 $ARTIFACT_WINDOWS_X86"
           EXT_VERSION="$(node -p "require('./apps/extension/package.json').version")"
           EXT_ASSET="chat-stasher-extension-${EXT_VERSION}.zip"
 
-          mkdir -p dist
-          cp "target/aarch64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_ARM64"
-          cp "target/x86_64-apple-darwin/release/chat-stasher" "dist/$ARTIFACT_X86"
+          # 🔴 Every binary the build jobs produced must have arrived. A
+          # download that silently dropped one would otherwise be visible only
+          # in the asset-set check below, as a missing line rather than as the
+          # step that lost it.
+          for art in $BINARIES; do
+            if [ ! -f "dist/$art" ]; then
+              echo "error: the build jobs did not provide ${art}" >&2
+              ls -l dist >&2
+              exit 1
+            fi
+          done
+
           EXT_ZIP="$(find apps/extension/.output -maxdepth 1 -type f -name '*.zip' -print -quit)"
           if [ -z "$EXT_ZIP" ]; then
             echo "error: extension zip was not produced" >&2
@@ -229,28 +495,22 @@ jobs:
           print("stable extension manifest OK: no experimental origins")
           '
 
-          # Guard against a mislabeled binary: assert each Mach-O is really its architecture
-          file "dist/$ARTIFACT_ARM64" | grep -q 'arm64' || {
-            echo "error: built binary is not arm64:" >&2
-            file "dist/$ARTIFACT_ARM64" >&2
-            exit 1
-          }
-          file "dist/$ARTIFACT_X86" | grep -q 'x86_64' || {
-            echo "error: built binary is not x86_64:" >&2
-            file "dist/$ARTIFACT_X86" >&2
-            exit 1
-          }
-
           # SHA256SUMS must parse under install.sh's exact rule
-          # `awk -v a="$ARTIFACT" '$2 == a { print $1 }'` (install.sh:80), i.e.
+          # `awk -v a="$ARTIFACT" '$2 == a { print $1 }'` (install.sh:169), i.e.
           # one "<hex>  <filename>" line per asset. `shasum -a 256` emits the
           # same two-space separator release-artifacts.sh produces locally
-          # (scripts/release-artifacts.sh:52).
-          ( cd dist && shasum -a 256 "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET" > SHA256SUMS )
+          # (scripts/release-artifacts.sh:72).
+          # shellcheck disable=SC2086  # word splitting is the list of assets
+          ( cd dist && shasum -a 256 $BINARIES "$EXT_ASSET" > SHA256SUMS )
 
-          # Self-check with install.sh's own awk: the digest for each artifact
-          # must be present, or installs would hard-fail at install.sh:81-84.
-          for art in "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET"; do
+          # Self-check with install.sh's own awk: the digest for each asset must
+          # be present. install.sh reads this manifest before it downloads
+          # anything and treats a missing entry as "this release carries no
+          # binary for your platform" (install.sh:170-229), so a name that does
+          # not parse here is not a one-user install error — it is every user of
+          # that platform being told the release does not have what it does.
+          # shellcheck disable=SC2086
+          for art in $BINARIES "$EXT_ASSET"; do
             EXPECTED="$(awk -v a="$art" '$2 == a { print $1 }' dist/SHA256SUMS)"
             [ -n "$EXPECTED" ] || {
               echo "error: SHA256SUMS has no entry for '${art}'" >&2
@@ -265,7 +525,8 @@ jobs:
           # The extension joins stable releases only as a stable-channel zip.
           # Keep the uploaded set closed so a dev-channel build or stray file
           # cannot become an unreviewed release asset.
-          expected="$(printf '%s\n' "$ARTIFACT_ARM64" "$ARTIFACT_X86" "$EXT_ASSET" SHA256SUMS | sort)"
+          # shellcheck disable=SC2086
+          expected="$(printf '%s\n' $BINARIES "$EXT_ASSET" SHA256SUMS | sort)"
           actual="$(ls dist | sort)"
           if [ "$expected" != "$actual" ]; then
             echo "error: unexpected release assets in dist/ — expected exactly:" >&2
@@ -274,25 +535,30 @@ jobs:
             printf '%s\n' "$actual" >&2
             exit 1
           fi
-          echo "asset set OK: CLI binaries + stable extension zip + SHA256SUMS"
+          echo "asset set OK: five CLI binaries + stable extension zip + SHA256SUMS"
+
       - name: Create Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
+          # Carried from the gates job, which is the only place that knows what
+          # the two tag shapes are. `needs:` is what makes that ordering real
+          # rather than hoped for.
+          RELEASE_PRERELEASE: ${{ needs.gates.outputs.prerelease }}
         run: |
           set -euo pipefail
 
           # The tag is "v0.1.0"; install.sh fetches from
           # https://github.com/dimpurr/chat-stasher/releases/download/v${VERSION}
-          # (install.sh:22), so the Release tag and asset names must match the
+          # (install.sh:48), so the Release tag and asset names must match the
           # tag exactly — nothing is renamed here.
           TAG="$GITHUB_REF_NAME"    # e.g. v0.2.0 | v0.3.0-rc.1
           VERSION="${TAG#v}"        # e.g. 0.2.0 | 0.3.0-rc.1
 
           # --- stable vs release candidate ----------------------------------
           # The shape was decided once, by the "Gate — tag shape and version
-          # agreement" step, which is the only place that knows what the two
-          # shapes are; this step reads its answer rather than re-deriving it
-          # from the string, so the two steps cannot drift apart.
+          # agreement" step in the gates job, which is the only place that knows
+          # what the two shapes are; this step reads its answer rather than
+          # re-deriving it from the string, so the two steps cannot drift apart.
           #
           # The prerelease flag is the whole mechanism that keeps an rc from
           # becoming the repository's "latest" release, and "latest" is what a
@@ -303,8 +569,8 @@ jobs:
           #
           # An unset value is NOT read as "stable": that would be the gate
           # failing open, publishing an unverified tag as the latest release.
-          # It means this job reached here without the gate, and the tag was
-          # never checked.
+          # It means this job reached here without the gates job, and the tag
+          # was never checked.
           #
           # `${RC_FLAG:+--prerelease}` rather than a bare `$RC_FLAG`: it expands
           # to nothing when the variable is empty, so a stable tag runs the
@@ -313,13 +579,13 @@ jobs:
             0) RC_FLAG="" ;;
             1) RC_FLAG=1 ;;
             *)
-              echo "error: RELEASE_PRERELEASE is '${RELEASE_PRERELEASE:-<unset>}', not 0 or 1 — the tag-shape gate did not run, so '${TAG}' was never verified. Refusing to publish." >&2
+              echo "error: RELEASE_PRERELEASE is '${RELEASE_PRERELEASE:-<unset>}', not 0 or 1 — the gates job did not run, so '${TAG}' was never verified. Refusing to publish." >&2
               exit 1
               ;;
           esac
 
           # The staged set, already asserted in the "Stage artifacts" step to be
-          # exactly four files. This is the set the Release must end up with.
+          # exactly seven files. This is the set the Release must end up with.
           expected_assets="$(cd dist && ls -1 | sort)"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -347,11 +613,11 @@ jobs:
             gh release create "$TAG" dist/* \
               ${RC_FLAG:+--prerelease} \
               --title "chat-stasher v${VERSION}" \
-              --notes "Prebuilt macOS CLI binaries, the stable browser extension zip, and SHA256SUMS. See docs/install.md for installation."
+              --notes "Prebuilt macOS (arm64, x86_64), Linux (x86_64, arm64 — static musl) and Windows (x86_64) CLI binaries, the stable browser extension zip, and SHA256SUMS. See docs/install.md for installation."
           fi
 
           # 🔴 The published set must equal the staged set, exactly — the same
-          # four names the "Stage artifacts" step asserted in `dist/`. Checking
+          # seven names the "Stage artifacts" step asserted in `dist/`. Checking
           # the *result* rather than trusting the commands is what turns a
           # partial upload (a `--clobber` that lost an asset, a delete that did
           # not happen) into a red run instead of a Release that quietly
@@ -414,7 +680,7 @@ jobs:
 
   homebrew-tap:
     name: open Homebrew tap PR (draft)
-    needs: [build-and-release, tap-guard]
+    needs: [release, tap-guard]
     if: needs.tap-guard.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     # The auto-generated token appears in one place — `gh release download` of
@@ -429,7 +695,7 @@ jobs:
 
     steps:
       # The Release, and therefore SHA256SUMS, exists before this job starts
-      # (needs: build-and-release). Reading it back is what pins the tap to the
+      # (needs: release). Reading it back is what pins the tap to the
       # bytes this run published rather than to a local rebuild.
       - name: Fetch this release's SHA256SUMS
         env:

@@ -61,6 +61,7 @@ python3 scripts/check-support-matrix.py --selftest
 python3 scripts/check-commit-messages.py --selftest
 bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
+bash scripts/self-test-install.sh
 node --test npm/test/*.test.mjs
 bash scripts/release-gate.sh
 bash scripts/smoke/linux-smoke.sh
@@ -70,6 +71,26 @@ bash scripts/smoke/linux-smoke.sh
 repository and a stub build command, so it needs no extension toolchain, no
 network and no browser. It is the guard for the reload script's mechanics, which
 is why it sits here rather than only in the section below that describes them.
+
+`self-test-install.sh` is the same shape for the installer: it serves a mock
+Release over `file://` and shadows `uname` on `PATH`, so the platform branches
+the host cannot reach on its own — both Linux architectures, the Windows
+refusal, and the Intel macOS artifact — are exercised with no network call. That
+shadowing is why it is here rather than left to one machine's own architecture:
+without it, the branch that decides a platform's artifact would only ever run
+for the platform the suite happens to start on.
+
+It runs every case twice, under `bash` and under `dash`, and lints the installer
+with `shellcheck --shell=sh`. That is not thoroughness for its own sake.
+`install.sh` is documented as `curl -fsSL … | sh`, and on Debian and Ubuntu `sh`
+is dash, where `set -o pipefail` is an illegal option — so the installer was
+broken for exactly the users it was written for, and this suite was green the
+whole time because every case invoked `bash`. `/bin/sh` is not a second opinion
+on macOS, where it is bash under another name and accepts the same bashism.
+`shellcheck` needs `--shell=sh` for the same reason: without it the linter
+assumes bash and passes the construct. Both are skipped in as many words when
+the tool is missing locally, and CI asserts both are present so the skip cannot
+become the normal case in the one place meant to catch it.
 
 The npm launcher's tests need no toolchain either: they run against a fake
 platform package built in a temp directory, and they force the platform they
