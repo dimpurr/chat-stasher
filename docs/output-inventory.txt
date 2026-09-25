@@ -1569,3 +1569,4 @@ bail         crates/chat-stasher/src/verify.rs:414  "L3 baseline: stage body is 
 context      crates/chat-stasher/src/verify.rs:481  "read sessions root"
 context      crates/chat-stasher/src/verify.rs:487  "read machine dir"
 bail         crates/chat-stasher/src/verify.rs:551  "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against"
+eprintln     crates/chat-stasher/src/view.rs:442  "ui: accepted a connection but cannot set it blocking: {e}"

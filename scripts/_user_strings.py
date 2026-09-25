@@ -141,7 +141,7 @@ class _Scanner:
                 hashes += 1
                 j += 1
             if j >= n or t[j] != '"':
-                return i, None, None
+                return None, None, None
             j += 1
             close = '"' + "#" * hashes
             end = t.find(close, j)
@@ -214,7 +214,31 @@ class _Scanner:
             disp.append(c)
             val.append(c)
             j += 1
-        return i, None, None
+        return None, None, None
+
+    def _char_literal_end(self, i: int) -> int | None:
+        """Index just past the char literal at i, or None when i is not one.
+
+        `'a'` and `'\\n'` and `'\\''` and `'"'` are char literals; `'a` alone is
+        a lifetime. Without this the `"` in `'"'` reads as the start of a string
+        literal, and everything after it is scanned in the wrong state.
+        """
+        t, n = self.text, self.n
+        j = i + 1
+        if j < n and t[j] == "\\":
+            j += 2
+            if j - 1 < n and t[j - 1] == "u" and j < n and t[j] == "{":
+                k = t.find("}", j)
+                if k == -1:
+                    return None
+                j = k + 1
+        else:
+            if j >= n or t[j] == "'":
+                return None
+            j += 1
+        if j < n and t[j] == "'":
+            return j + 1
+        return None
 
     # ------------------------------------------------------------- region scan
     def _find_matching_paren(self, open_pos: int) -> int:
@@ -224,6 +248,11 @@ class _Scanner:
         j = open_pos
         while j < n:
             c = t[j]
+            if c == "'":
+                char_end = self._char_literal_end(j)
+                if char_end is not None:
+                    j = char_end
+                    continue
             if c == '"' or (c == "r" and j + 1 < n and t[j + 1] in '"#'):
                 end, _d, _v = self.parse_string(j)
                 if end is not None:
@@ -252,6 +281,11 @@ class _Scanner:
         j = open_pos + 1
         while j < close_pos:
             c = t[j]
+            if c == "'":
+                char_end = self._char_literal_end(j)
+                if char_end is not None and char_end <= close_pos:
+                    j = char_end
+                    continue
             if c == '"' or (c == "r" and j + 1 < close_pos and t[j + 1] in '"#'):
                 end, disp, val = self.parse_string(j)
                 if disp is not None:
@@ -294,6 +328,14 @@ class _Scanner:
         while i < n:
             c = t[i]
 
+            # -- char literal: skipped whole, so the `"` in `'"'` is never
+            #    mistaken for the start of a string
+            if c == "'":
+                char_end = self._char_literal_end(i)
+                if char_end is not None:
+                    i = char_end
+                    continue
+
             # -- string literal (skip; literals inside macros are handled below)
             if c == '"' or (c == "r" and i + 1 < n and t[i + 1] in '"#'):
                 end, _d, _v = self.parse_string(i)
@@ -328,6 +370,11 @@ class _Scanner:
                 j = i + 2
                 while j < n:
                     cj = t[j]
+                    if cj == "'":
+                        char_end = self._char_literal_end(j)
+                        if char_end is not None:
+                            j = char_end
+                            continue
                     if cj == '"' or (cj == "r" and j + 1 < n and t[j + 1] in '"#'):
                         end, _d, _v = self.parse_string(j)
                         if end is not None:
