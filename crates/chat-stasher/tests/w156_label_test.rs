@@ -86,6 +86,11 @@ fn cc_ai_title(title: &str) -> String {
     format!(r#"{{"type":"ai-title","aiTitle":"{title}","sessionId":"s"}}"#)
 }
 
+/// A claude-code continuation summary, distinct from its `ai-title` record.
+fn cc_summary(summary: &str) -> String {
+    format!(r#"{{"type":"summary","summary":"{summary}","sessionId":"s"}}"#)
+}
+
 /// A metadata line that carries no conversation and no title.
 fn cc_snapshot_meta() -> String {
     r#"{"type":"file-history-snapshot","sessionId":"s","uuid":"u7"}"#.to_string()
@@ -124,6 +129,7 @@ const T: &str = "2025-01-15T12:00:00Z";
 //                by design, not a fourth state.
 const TITLED: &str = "claude-code.mbp-w156.019bf00d-97b6-7eb2-9bf8-eacbacc0aa01";
 const SUMMARISED: &str = "claude-code.mbp-w156.019bf00d-97b6-7eb2-9bf8-eacbacc0aa02";
+const SUMMARY_ONLY: &str = "claude-code.mbp-w156.019bf00d-97b6-7eb2-9bf8-eacbacc0aa07";
 const BLOCKS: &str = "claude-code.mbp-w156.019bf00d-97b6-7eb2-9bf8-eacbacc0aa03";
 const SPARSE: &str = "claude-code.mbp-w156.019bf00d-97b6-7eb2-9bf8-eacbacc0aa04";
 const LONG: &str = "claude-code.mbp-w156.019bf00d-97b6-7eb2-9bf8-eacbacc0aa05";
@@ -131,10 +137,11 @@ const CODEX: &str = "codex.mbp-w156.99000001-2222-3333-4444-555555555555";
 
 const TITLED_LABEL: &str = "Fix the parser retry loop";
 const SUMMARISED_LABEL: &str = "sort a list of lists by length in python";
+const SUMMARY_LABEL: &str = "continue the parser investigation";
 const BLOCKS_LABEL: &str = "extract the retry policy from the config";
 const CODEX_PROMPT: &str = "explain the ownership model of this repository";
 
-/// The stage of `mbp-w156`, in one bucket, six sessions.
+/// The stage of `mbp-w156`, in one bucket, seven sessions.
 fn stage_w156(sandbox: &Path) -> std::path::PathBuf {
     let stage = sandbox.join("stage-w156");
     let over_cap = {
@@ -149,7 +156,7 @@ fn stage_w156(sandbox: &Path) -> std::path::PathBuf {
         );
         words.to_string()
     };
-    let sessions: [(&str, Vec<String>); 6] = [
+    let sessions: [(&str, Vec<String>); 7] = [
         (
             TITLED,
             vec![
@@ -159,6 +166,7 @@ fn stage_w156(sandbox: &Path) -> std::path::PathBuf {
             ],
         ),
         (SUMMARISED, vec![cc_user(SUMMARISED_LABEL, T)]),
+        (SUMMARY_ONLY, vec![cc_summary(SUMMARY_LABEL)]),
         (BLOCKS, vec![cc_user_blocks(BLOCKS_LABEL, T)]),
         (SPARSE, vec![cc_snapshot_meta()]),
         (LONG, vec![cc_user(&over_cap, T)]),
@@ -407,6 +415,9 @@ fn activity_index_records_each_title_state() {
     assert_eq!(row(TITLED)["title"]["truncated"], false);
     assert_eq!(row(SUMMARISED)["title"]["source"], "first_user_line");
     assert_eq!(row(SUMMARISED)["title"]["text"], SUMMARISED_LABEL);
+    assert_eq!(row(SUMMARY_ONLY)["title"]["state"], "known");
+    assert_eq!(row(SUMMARY_ONLY)["title"]["source"], "harness_title");
+    assert_eq!(row(SUMMARY_ONLY)["title"]["text"], SUMMARY_LABEL);
     assert_eq!(
         row(BLOCKS)["title"]["text"],
         BLOCKS_LABEL,
@@ -591,7 +602,7 @@ fn api_sessions_carries_title_states_at_schema_two() {
         "{body}"
     );
     let rows = v["sessions"].as_array().expect("rows");
-    assert_eq!(rows.len(), 7, "{body}");
+    assert_eq!(rows.len(), 8, "{body}");
     for r in rows {
         assert!(
             r["title"]["state"].is_string(),
