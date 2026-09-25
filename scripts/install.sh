@@ -29,15 +29,24 @@ BASE_URL="${CHAT_STASHER_BASE_URL:-https://github.com/dimpurr/chat-stasher/relea
 
 # ---------------------------------------------------------------------------
 # 3. Default install dir is ~/.local/bin — user-writable and already on most
-#    PATHs. Override with CHAT_STASHER_INSTALL_DIR.
+#    PATHs, on macOS and Linux alike. Override with CHAT_STASHER_INSTALL_DIR.
 # 5. We never sudo and never write to /usr/local or any system directory.
 # ---------------------------------------------------------------------------
 INSTALL_DIR="${CHAT_STASHER_INSTALL_DIR:-$HOME/.local/bin}"
 
 # ---------------------------------------------------------------------------
-# 6. Detect platform. macOS (darwin-arm64 and darwin-x86_64) ships prebuilt
-#    binaries; anything else gets a clear "unsupported" message instead of
-#    a silently broken install.
+# 6. Detect platform. macOS and Linux ship prebuilt binaries; anything else
+#    gets a clear "unsupported" message instead of a silently broken install.
+#
+#    The Linux artifacts are built against musl and statically linked, so one
+#    binary per architecture covers every distribution: the artifact does not
+#    depend on which libc this machine has, and no glibc version has to be
+#    guessed from userspace.
+#
+#    Windows is not an oversight — this is a POSIX shell script, and Windows
+#    has no `sh` to run it with except the one Git Bash ships. Its prebuilt
+#    binary is a release asset, so that branch points at the asset instead of
+#    pretending this script can install it.
 # ---------------------------------------------------------------------------
 OS="$(uname -s | tr 'A-Z' 'a-z')"
 ARCH="$(uname -m | tr 'A-Z' 'a-z')"
@@ -45,13 +54,33 @@ ARCH="$(uname -m | tr 'A-Z' 'a-z')"
 TARGET="$OS-$ARCH"
 
 case "$TARGET" in
-  darwin-arm64|darwin-x86_64) : ;;
+  darwin-arm64|darwin-x86_64|linux-x86_64|linux-arm64) : ;;
+  mingw*|msys*|cygwin*)
+    cat >&2 <<EOF
+Unsupported platform: ${TARGET}
+
+This installer is a POSIX shell script and does not install the Windows build
+of chat-stasher. Windows ships a prebuilt binary as a release asset instead:
+
+  ${BASE_URL}/chat-stasher-windows-x86_64.exe
+
+Download that file, put it anywhere on your PATH, and run
+'chat-stasher doctor'. Its checksum is in ${BASE_URL}/SHA256SUMS.
+
+To build from source instead:
+  git clone https://github.com/dimpurr/chat-stasher
+  cd chat-stasher && cargo build --release
+See docs/install.md for details.
+EOF
+    exit 1
+    ;;
   *)
     cat >&2 <<EOF
 Unsupported platform: ${TARGET}
 
-chat-stasher currently ships prebuilt binaries only for macOS
-(darwin-arm64 and darwin-x86_64). There is no working binary for your platform yet, so
+chat-stasher currently ships prebuilt binaries for macOS
+(darwin-arm64 and darwin-x86_64) and Linux (linux-x86_64 and linux-arm64).
+There is no working binary for your platform yet, so
 this installer refuses to write a broken one.
 
 To use chat-stasher on your platform, build from source:

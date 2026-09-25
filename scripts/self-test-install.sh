@@ -11,6 +11,16 @@
 #   3. bad hash    -> install.sh must hard-fail (non-zero) and not install
 #   4. bad target  -> a SHA256SUMS missing our artifact must hard-fail
 #   5. unsupported platform -> must refuse with a clear message
+#   6. linux-x86_64 / linux-arm64 -> installs that architecture's artifact
+#   7. windows (mingw/msys/cygwin uname) -> refuses and names the .exe asset
+#   8. darwin-x86_64 -> the same install as the host's own darwin target
+#
+# Cases 1-4 are driven by the host's own platform, so on a macOS machine they
+# cover the darwin path and only the darwin path. Cases 6-8 exist because that
+# is a hole once more than one OS is supported: the refusal branch, the
+# architecture normalisation (`aarch64` -> `arm64`) and the artifact name that
+# follows from both are only reachable by pretending to be another machine, so
+# `uname` is shadowed on PATH and install.sh's own detection code is what runs.
 #
 # Usage: bash scripts/self-test-install.sh
 set -euo pipefail
@@ -46,6 +56,36 @@ FAKE_HASH="$(shasum -a 256 "$MOCK_BIN" | awk '{print $1}')"
 
 INSTALL_DIR="$TMP/install"
 BASE="file://$DIST"
+
+# A mock dist holding one artifact, checksummed, named whatever the platform
+# under test would ask for. Echoes the directory to serve.
+mock_dist() {
+  local artifact="$1" dir="$TMP/dist-$1" hash
+  mkdir -p "$dir"
+  printf '#!/bin/sh\necho fake-chat-stasher\n' > "$dir/$artifact"
+  chmod +x "$dir/$artifact"
+  hash="$(shasum -a 256 "$dir/$artifact" | awk '{print $1}')"
+  ( cd "$dir" && printf '%s  %s\n' "$hash" "$artifact" > SHA256SUMS )
+  printf '%s' "$dir"
+}
+
+# A fake `uname` reporting a chosen platform, so install.sh's platform
+# detection runs rather than the host's. Echoes the directory to prepend to
+# PATH. The `-s` / `-m` shapes are all install.sh asks for.
+make_uname() {
+  local os="$1" arch="$2" dir="$TMP/uname-$1-$2"
+  mkdir -p "$dir"
+  cat > "$dir/uname" <<SH
+#!/bin/sh
+case "\$1" in
+  -s) echo "$os" ;;
+  -m) echo "$arch" ;;
+  *)  echo "$os" ;;
+esac
+SH
+  chmod +x "$dir/uname"
+  printf '%s' "$dir"
+}
 
 # 1) happy path --------------------------------------------------------------
 if CHAT_STASHER_BASE_URL="$BASE" \
@@ -103,27 +143,87 @@ else
 fi
 
 # 5) unsupported platform -----------------------------------------------------
-# Force a non-darwin, non-arm64 target by shadowing `uname` on PATH so
-# install.sh's platform-detection branch genuinely runs.
-FAKE_UNAME="$TMP/fake-uname"
-mkdir -p "$FAKE_UNAME"
-cat > "$FAKE_UNAME/uname" <<'SH'
-#!/bin/sh
-case "$1" in
-  -s) echo linux ;;
-  -m) echo x86_64 ;;
-  *)  echo linux ;;
-esac
-SH
-chmod +x "$FAKE_UNAME/uname"
-
-if PATH="$FAKE_UNAME:$PATH" \
+# A platform with no prebuilt binary, forced by shadowing `uname` on PATH so
+# install.sh's platform-detection branch genuinely runs. This case used to be
+# `linux x86_64`; Linux is supported now, so the example moved to an OS that is
+# still unshipped rather than the assertion being dropped.
+UNSUPPORTED_OUT="$TMP/unsupported-out"
+UNSUPPORTED_RC=0
+UNSUPPORTED_OUT="$(PATH="$(make_uname freebsd x86_64):$PATH" \
    CHAT_STASHER_BASE_URL="$BASE" \
    CHAT_STASHER_INSTALL_DIR="$TMP/unsupported-install" \
-   bash "$INSTALL_SH" >/dev/null 2>&1; then
+   bash "$INSTALL_SH" 2>&1)" || UNSUPPORTED_RC=$?
+
+if [ "$UNSUPPORTED_RC" = 0 ]; then
   fail "unsupported platform did NOT refuse"
 else
   pass "unsupported platform refuses with non-zero exit"
+  if printf '%s' "$UNSUPPORTED_OUT" | grep -q 'freebsd-x86_64'; then
+    pass "unsupported platform names the target it refused"
+  else fail "unsupported message does not name the target"; fi
+  if [ -e "$TMP/unsupported-install/chat-stasher" ]; then
+    fail "unsupported platform wrote a binary"
+  else pass "unsupported platform wrote nothing"; fi
+fi
+
+# 6) Linux: the artifact name follows the architecture, and musl is not a
+#    separate name to detect — one artifact per architecture.
+for platform in "linux x86_64 chat-stasher-linux-x86_64" "linux aarch64 chat-stasher-linux-arm64"; do
+  read -r LINUX_OS LINUX_UNAME_ARCH LINUX_ARTIFACT <<< "$platform"
+  LINUX_DIST="$(mock_dist "$LINUX_ARTIFACT")"
+  LINUX_DIR="$TMP/install-$LINUX_ARTIFACT"
+  if PATH="$(make_uname "$LINUX_OS" "$LINUX_UNAME_ARCH"):$PATH" \
+     CHAT_STASHER_BASE_URL="file://$LINUX_DIST" \
+     CHAT_STASHER_INSTALL_DIR="$LINUX_DIR" \
+     bash "$INSTALL_SH" >/dev/null 2>&1; then
+    if [ -x "$LINUX_DIR/chat-stasher" ]; then
+      pass "installs ${LINUX_ARTIFACT} on ${LINUX_OS} ${LINUX_UNAME_ARCH}"
+    else fail "${LINUX_ARTIFACT} installed but not executable"; fi
+    if [ "$(shasum -a 256 "$LINUX_DIR/chat-stasher" | awk '{print $1}')" = \
+         "$(shasum -a 256 "$LINUX_DIST/$LINUX_ARTIFACT" | awk '{print $1}')" ]; then
+      pass "${LINUX_ARTIFACT} bytes match the served artifact"
+    else fail "${LINUX_ARTIFACT} bytes differ"; fi
+  else
+    fail "installing ${LINUX_ARTIFACT} returned non-zero"
+  fi
+done
+
+# 7) Windows: this installer cannot serve it, so it must say so and point at
+#    the release asset rather than downloading the wrong thing.
+WINDOWS_OUT="$TMP/windows-out"
+WINDOWS_RC=0
+WINDOWS_OUT="$(PATH="$(make_uname mingw64_nt-10.0 x86_64):$PATH" \
+   CHAT_STASHER_BASE_URL="$BASE" \
+   CHAT_STASHER_INSTALL_DIR="$TMP/windows-install" \
+   bash "$INSTALL_SH" 2>&1)" || WINDOWS_RC=$?
+
+if [ "$WINDOWS_RC" = 0 ]; then
+  fail "windows did NOT refuse"
+else
+  pass "windows refuses with non-zero exit"
+  if printf '%s' "$WINDOWS_OUT" | grep -q 'chat-stasher-windows-x86_64\.exe'; then
+    pass "windows refusal names the .exe release asset"
+  else fail "windows refusal does not name the .exe asset"; fi
+  if printf '%s' "$WINDOWS_OUT" | grep -q "$BASE/chat-stasher-windows-x86_64.exe"; then
+    pass "windows refusal gives the URL to fetch it from"
+  else fail "windows refusal gives no URL"; fi
+  if [ -e "$TMP/windows-install/chat-stasher" ]; then
+    fail "windows case wrote a binary"
+  else pass "windows case wrote nothing"; fi
+fi
+
+# 8) darwin-x86_64 installs the Intel artifact ---------------------------------
+# The one macOS branch a macOS arm64 host never takes on its own.
+DARWIN_X86_DIST="$(mock_dist chat-stasher-darwin-x86_64)"
+DARWIN_X86_DIR="$TMP/install-darwin-x86_64"
+if PATH="$(make_uname darwin x86_64):$PATH" \
+   CHAT_STASHER_BASE_URL="file://$DARWIN_X86_DIST" \
+   CHAT_STASHER_INSTALL_DIR="$DARWIN_X86_DIR" \
+   bash "$INSTALL_SH" >/dev/null 2>&1; then
+  if [ -x "$DARWIN_X86_DIR/chat-stasher" ]; then pass "installs chat-stasher-darwin-x86_64"
+  else fail "darwin-x86_64 installed but not executable"; fi
+else
+  fail "installing chat-stasher-darwin-x86_64 returned non-zero"
 fi
 
 echo
