@@ -26,10 +26,14 @@
 //!   in a rustic repository every file's bytes are a data blob — there is no
 //!   side channel for small files. The index is metadata **by declaration**
 //!   (it lives under `meta/`, is written by `activity-index`, and carries one
-//!   timestamp per session), not conversation content. So the promise this
-//!   module keeps is narrower and exact: *a shard of conversation never gets
-//!   read*, which [`SearchReport::data_blobs_read`] counts and the tests prove
-//!   by removing every data pack. Index reads are counted separately, in
+//!   timestamp and one capped one-line label per session), not conversation
+//!   content — with the label the one piece of conversation-derived text the
+//!   declaration admits (a harness title, or the head of the session's first
+//!   user line, at most 100 characters, recorded by the R3 label column). So
+//!   the promise this module keeps is narrower and exact: *a shard of
+//!   conversation never gets read*, which is what
+//!   [`SearchReport::data_blobs_read`] counts and the tests prove by removing
+//!   every data pack. Index reads are counted separately, in
 //!   [`SearchReport::index_files_read`], so neither number hides behind the
 //!   other.
 //! * **payload tier** (NOT implemented): full-text matching inside the archived
@@ -66,7 +70,7 @@ use rustic_core::repofile::{MasterKey, NodeType};
 use rustic_core::{Credentials, LsOptions, Repository};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::activity::{ActivityRow, TimeSource as ActivityTimeSource};
+use crate::activity::{ActivityRow, SessionTitle, TimeSource as ActivityTimeSource, TitleSource};
 use crate::readback::{bucket_shard_path, newest_snapshot_per_host};
 use crate::selector::{Selector, SessionMeta, TimeBounds, TimeWindow, UnplacedBy, Verdict};
 use crate::sidecar::{activity_index_machine, infer_harness};
@@ -125,6 +129,74 @@ pub struct SessionHit {
     /// same [`crate::overview::OverviewRow`]s `overview` renders) reads the
     /// index's own answer instead of inventing a second rule for "known".
     pub time_source: ActivityTimeSource,
+    /// The label this session is listed under, resolved from the index row —
+    /// the design's three label states plus the query-time corner the design
+    /// names at machine level (see [`SessionLabel`]).
+    pub title: SessionLabel,
+}
+
+/// The label state one session resolves to once its index row has been read
+/// (29-UI-DESIGN §2.2's three states, plus the two query-time corners that
+/// arise when there is no row to read at all):
+///
+/// * [`SessionLabel::Known`] and [`SessionLabel::NoLabelRecorded`] are what
+///   the row recorded — a label with provenance, or an honest absence;
+/// * [`SessionLabel::LegacyIndex`] means the row exists but predates labels:
+///   this machine's index was written before the `title` key existed, a
+///   machine-level state (`SearchReport::machines_with_legacy_index`) the
+///   consumer explains once per machine rather than shouting per row;
+/// * [`SessionLabel::Unknown`] means there was no row to read — no index for
+///   the machine at all, or none for this session — with the `why` saying
+///   which, mirroring how the time side reports the very same corner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLabel {
+    Known {
+        text: String,
+        source: TitleSource,
+        truncated: bool,
+    },
+    NoLabelRecorded,
+    LegacyIndex,
+    Unknown {
+        why: String,
+    },
+}
+
+impl SessionLabel {
+    /// Resolve a session's label from its index row. `indexed` is the same
+    /// lookup the times come from; `None` means this session has no row (or
+    /// the machine no index), and `machine_with_index` says which of the two.
+    fn from_indexed(indexed: Option<&IndexedTime>, machine: &str, machine_has_index: bool) -> Self {
+        match indexed {
+            Some(t) => match &t.title {
+                Some(SessionTitle::Known {
+                    text,
+                    source,
+                    truncated,
+                }) => SessionLabel::Known {
+                    text: text.clone(),
+                    source: source.clone(),
+                    truncated: *truncated,
+                },
+                Some(SessionTitle::NoLabelRecorded) => SessionLabel::NoLabelRecorded,
+                None => SessionLabel::LegacyIndex,
+            },
+            None => SessionLabel::Unknown {
+                why: if machine_has_index {
+                    format!(
+                        "machine `{machine}`'s activity index in this snapshot has no row \
+                         for this session, so its label was never recorded"
+                    )
+                } else {
+                    format!(
+                        "machine `{machine}` has no activity index \
+                         (`meta/{machine}/activity-v1.jsonl`) in this snapshot, so its \
+                         label was never recorded"
+                    )
+                },
+            },
+        }
+    }
 }
 
 impl SessionHit {
@@ -251,6 +323,11 @@ pub struct SearchReport {
     /// beside them. Named explicitly: a machine missing from the index must
     /// never look like a machine with no sessions.
     pub machines_without_index: Vec<String>,
+    /// Machines whose index predates labels: at least one of their rows
+    /// carried no `title` key. Named at machine level on purpose — the
+    /// affected sessions' labels read as unknown, and the consumer explains
+    /// the machine once, not once per row.
+    pub machines_with_legacy_index: Vec<String>,
     /// Every hostname whose newest snapshot was walked, with that snapshot's id
     /// and time and whether its activity index was present and readable. The
     /// archive's machine list — see [`HostSnapshot`].
@@ -684,7 +761,8 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
     s
 }
 
-/// What the activity index said about one session's conversation time.
+/// What the activity index said about one session's conversation time, and
+/// (since R3) what its row recorded as the session's label.
 #[derive(Debug, Clone)]
 struct IndexedTime {
     first_unix: Option<i64>,
@@ -694,6 +772,10 @@ struct IndexedTime {
     line_count: u64,
     /// The index's own tri-state, passed through unchanged.
     source: ActivityTimeSource,
+    /// The row's label, or `None` when the row predates labels (the
+    /// machine-level [`SearchReport::machines_with_legacy_index`] state —
+    /// see [`SessionLabel::LegacyIndex`]).
+    title: Option<SessionTitle>,
 }
 
 /// Turn one index row into the tri-state this module actually needs.
@@ -715,6 +797,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
         _ => None,
     };
     let line_count = row.line_count;
+    let title = row.title.clone();
     match (row.first_unix, row.last_unix, why) {
         (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
             first_unix: None,
@@ -722,6 +805,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             why: None,
             line_count,
             source: ActivityTimeSource::NoConversationContent,
+            title,
         },
         // Bounds that are only part of the span: carried through as measured,
         // with the partiality kept on the source so no consumer answers
@@ -733,6 +817,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                 why: Some(why),
                 line_count,
                 source: row.time_source.clone(),
+                title,
             }
         }
         (Some(first), Some(last), _) => IndexedTime {
@@ -741,6 +826,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             why: None,
             line_count,
             source: row.time_source.clone(),
+            title,
         },
         (first, last, Some(why)) => IndexedTime {
             first_unix: first,
@@ -748,6 +834,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             why: Some(why.clone()),
             line_count,
             source: ActivityTimeSource::Unknown { why },
+            title,
         },
         (first, last, None) => IndexedTime {
             first_unix: first,
@@ -757,6 +844,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: ActivityTimeSource::Unknown {
                 why: NO_BOUND.to_string(),
             },
+            title,
         },
     }
 }
@@ -806,12 +894,16 @@ pub fn search_sessions(
         all_recall: BTreeMap::new(),
         not_matched: 0,
         machines_without_index: Vec::new(),
+        machines_with_legacy_index: Vec::new(),
         hosts: Vec::new(),
         unreadable: Vec::new(),
         data_blobs_read: 0,
         index_files_read: 0,
     };
     let mut index_machines: BTreeSet<String> = BTreeSet::new();
+    // Rows whose `title` key was absent — an index written before labels
+    // existed. Machine-level state; see the report field of the same name.
+    let mut legacy_index_machines: BTreeSet<String> = BTreeSet::new();
 
     for snap in newest {
         let snapshot_id = snap.id.to_hex().as_str().to_string();
@@ -909,6 +1001,9 @@ pub fn search_sessions(
                 }
                 match serde_json::from_str::<ActivityRow>(line) {
                     Ok(row) => {
+                        if row.title.is_none() {
+                            legacy_index_machines.insert(machine.clone());
+                        }
                         times.insert(
                             (row.machine.clone(), row.session_id.clone()),
                             indexed_time(&row),
@@ -989,6 +1084,11 @@ pub fn search_sessions(
                 }
             };
             let no_content = time_source.is_no_conversation_content();
+            let title = SessionLabel::from_indexed(
+                indexed,
+                &machine,
+                machines_with_index.contains(&machine),
+            );
             let recall = report.all_recall.entry(machine.clone()).or_default();
             if first_unix.is_some() && last_unix.is_some() {
                 recall.0 += 1;
@@ -1028,6 +1128,7 @@ pub fn search_sessions(
                     data_blobs,
                     line_count,
                     time_source,
+                    title,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
                 Verdict::Unevaluated { dimension, why } => {
@@ -1073,6 +1174,7 @@ pub fn search_sessions(
     report
         .unplaced
         .sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
+    report.machines_with_legacy_index = legacy_index_machines.into_iter().collect();
     Ok(report)
 }
 
@@ -1097,6 +1199,7 @@ mod tests {
             time_source: ActivityTimeSource::Unknown {
                 why: "test fixture records no conversation time".into(),
             },
+            title: SessionLabel::NoLabelRecorded,
         }
     }
 
@@ -1130,6 +1233,7 @@ mod tests {
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: vec![HostSnapshot {
                 hostname: "machine-a".into(),
                 snapshot_id: "abcdef0123456789".into(),
@@ -1188,6 +1292,7 @@ mod tests {
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: vec![HostSnapshot {
                 hostname: "machine-a".into(),
                 snapshot_id: "abcdef0123456789".into(),
@@ -1254,6 +1359,7 @@ mod tests {
             }],
             not_matched: 100,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: vec![HostSnapshot {
                 hostname: "machine-a".into(),
                 snapshot_id: "abcdef0123456789".into(),
@@ -1314,6 +1420,7 @@ mod tests {
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: vec![HostSnapshot {
                 hostname: "machine-a".into(),
                 snapshot_id: "abcdef0123456789".into(),
@@ -1347,6 +1454,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
@@ -1371,6 +1479,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 7,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
@@ -1407,6 +1516,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 4,
             machines_without_index: vec!["m-1".into()],
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
@@ -1449,6 +1559,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
@@ -1565,6 +1676,7 @@ mod tests {
                 data_blobs: 2,
                 line_count: 3,
                 time_source: ActivityTimeSource::Exact,
+                title: SessionLabel::NoLabelRecorded,
             }],
             unplaced: vec![UnplacedSession {
                 machine: "m-2".into(),
@@ -1583,6 +1695,7 @@ mod tests {
             }],
             not_matched: 1,
             machines_without_index: vec!["m-2".into()],
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
@@ -1640,10 +1753,16 @@ mod tests {
                 time_source: ActivityTimeSource::Unknown {
                     why: "no timestamp field found".into(),
                 },
+                title: SessionLabel::Unknown {
+                    why: "machine `m`'s activity index in this snapshot has no row \
+                          for this session, so its label was never recorded"
+                        .into(),
+                },
             }],
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,
@@ -1677,6 +1796,7 @@ mod tests {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
             hosts: Vec::new(),
             unreadable: Vec::new(),
             data_blobs_read: 0,

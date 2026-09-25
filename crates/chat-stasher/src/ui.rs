@@ -1596,6 +1596,7 @@ pub(crate) mod fixture {
             data_blobs: shards,
             line_count: 10,
             time_source: source,
+            title: crate::search::SessionLabel::NoLabelRecorded,
         }
     }
 
@@ -1635,6 +1636,7 @@ pub(crate) mod fixture {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: vec!["m-3".into()],
+            machines_with_legacy_index: Vec::new(),
             hosts: vec![
                 HostSnapshot {
                     hostname: "m-1".into(),
