@@ -18,7 +18,7 @@ use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, NodeType};
-use rustic_core::{Credentials, LsOptions, Repository};
+use rustic_core::{Credentials, Grouped, LsOptions, Repository, SnapshotGroupCriterion};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
@@ -1135,6 +1135,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<CacheAction>,
     },
+    /// Build or inspect the per-destination local full-text index.
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
 }
 
 /// `cache` subcommands.
@@ -1146,6 +1151,38 @@ enum CacheAction {
     /// destination, never a key. Entries are re-fetched from the destination
     /// the next time a session is read.
     Clear,
+}
+
+#[derive(clap::Args)]
+struct IndexArgs {
+    /// Destination to index. Required unless an explicit repository is given.
+    #[arg(long)]
+    destination: Option<String>,
+    /// Repository path override.
+    #[arg(long)]
+    repo: Option<String>,
+    /// Masterkey file override (build only).
+    #[arg(long)]
+    key_file: Option<String>,
+    /// Concurrency cap override (build only).
+    #[arg(long)]
+    connections: Option<usize>,
+    /// Backend option key=value, repeatable (build only).
+    #[arg(long = "option")]
+    options: Vec<String>,
+    /// Keep ssh ControlMaster processes open after this run.
+    #[arg(long)]
+    keep_ssh_masters: bool,
+}
+
+#[derive(clap::Subcommand)]
+enum IndexAction {
+    /// Read changed sessions from the archive and update the local FTS index.
+    Build(IndexArgs),
+    /// Validate and count indexed sessions without contacting the archive.
+    Check(IndexArgs),
+    /// Delete this destination's marked local index.
+    Clear(IndexArgs),
 }
 
 /// export `--turns` selector. A value enum rather than a string so an unknown
@@ -1522,6 +1559,7 @@ fn run() -> ExitCode {
         ),
         Command::Doctor { json } => cmd_doctor(json),
         Command::Cache { action } => cmd_cache(action),
+        Command::Index { action } => cmd_index(action),
         Command::Verify {
             level,
             stage,
@@ -6640,6 +6678,290 @@ fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn cmd_index(action: IndexAction) -> ExitCode {
+    let (args, operation) = match action {
+        IndexAction::Build(args) => (args, "build"),
+        IndexAction::Check(args) => (args, "check"),
+        IndexAction::Clear(args) => (args, "clear"),
+    };
+    let config = match config_or_refuse("index") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if args.destination.is_none() && args.repo.is_none() && !config.destinations.is_empty() {
+        eprintln!("index: name a destination with `--destination` (there is no implicit choice)");
+        return ExitCode::from(2);
+    }
+    let cfg = match resolve_store_config_checked(
+        &config,
+        args.destination.as_deref(),
+        args.repo.clone(),
+        args.key_file.clone(),
+        args.connections,
+        &args.options,
+    ) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!("{problem}");
+            return ExitCode::from(2);
+        }
+    };
+    let identity = index_identity(
+        args.destination.as_deref(),
+        args.repo.as_deref(),
+        &cfg.repo_root,
+    );
+    let Some(cache_root) = scanner::user_cache_dirs().into_iter().next() else {
+        eprintln!("index: no operating-system cache directory is available");
+        return ExitCode::FAILURE;
+    };
+    let index = chat_stasher::fts::Index::for_destination(&cache_root, &identity);
+    match operation {
+        "check" => match index.check() {
+            Ok(documents) => {
+                println!("[index] state=valid documents={documents}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("index: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
+        "clear" => match index.clear() {
+            Ok(true) => {
+                println!("[index] cleared=true");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                println!("[index] state=missing");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("index: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => {
+            let mk = match store::load_key_file(&cfg) {
+                Ok(mk) => mk,
+                Err(error) => {
+                    eprintln!("index: {error:#}; archive was not read");
+                    return ExitCode::from(3);
+                }
+            };
+            let backup = BackupStore::for_metadata_query(cfg.clone());
+            let backends = match backup.backends() {
+                Ok(backends) => backends,
+                Err(error) => {
+                    eprintln!("index: {error:#}");
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    return ExitCode::from(3);
+                }
+            };
+            let repo_result = (|| -> anyhow::Result<_> {
+                Repository::new(&cfg.repository_options(), &backends)?
+                    .open(&Credentials::Masterkey(mk))
+                    .context("open destination for FTS build")?
+                    .to_indexed()
+                    .context("index destination for FTS build")
+            })();
+            let repo = match repo_result {
+                Ok(repo) => repo,
+                Err(error) => {
+                    eprintln!("index: cannot open archive: {error:#}; this is not an empty index");
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    return ExitCode::from(3);
+                }
+            };
+            use rustic_core::repofile::NodeType;
+            let build_result = (|| -> anyhow::Result<chat_stasher::fts::BuildStats> {
+                let snapshots = repo
+                    .get_all_snapshots()
+                    .context("list archive snapshots for FTS")?;
+                let mut entries_all = Vec::new();
+                let mut paths_by_id = BTreeMap::<String, Vec<usize>>::new();
+                let mut titles = BTreeMap::<String, String>::new();
+                let grouped =
+                    Grouped::from_items(snapshots, SnapshotGroupCriterion::new().hostname(true));
+                for group in grouped.groups {
+                    let mut snapshots = group.items;
+                    snapshots.sort_by(|a, b| b.time.cmp(&a.time));
+                    let mut resolved_sessions = BTreeSet::new();
+                    for snapshot in snapshots {
+                        let root = repo
+                            .node_from_snapshot_and_path(&snapshot, "")
+                            .context("read snapshot root for FTS")?;
+                        let entries = repo
+                            .ls(&root, &LsOptions::default())
+                            .context("list snapshot files for FTS")?
+                            .collect::<rustic_core::RusticResult<Vec<_>>>()
+                            .context("collect snapshot files for FTS")?;
+                        let snapshot_sessions = unresolved_index_sessions(
+                            entries.iter().filter_map(|(path, node)| {
+                                (node.node_type == NodeType::File).then_some(path.as_path())
+                            }),
+                            &resolved_sessions,
+                        );
+                        for (path, node) in &entries {
+                            if node.node_type != NodeType::File {
+                                continue;
+                            }
+                            if let Some((machine, session, _)) = readback::bucket_shard_path(path) {
+                                let id = format!("{machine}/{session}");
+                                if snapshot_sessions.contains(&id) {
+                                    paths_by_id.entry(id).or_default().push(entries_all.len());
+                                }
+                            } else if let Some(machine) = sidecar::activity_index_machine(path) {
+                                let mut bytes = Vec::new();
+                                repo.dump(node, &mut bytes)
+                                    .context("read FTS title metadata")?;
+                                for line in String::from_utf8_lossy(&bytes)
+                                    .lines()
+                                    .filter(|line| !line.trim().is_empty())
+                                {
+                                    if let Ok(row) =
+                                        serde_json::from_str::<activity::ActivityRow>(line)
+                                    {
+                                        if let Some(activity::SessionTitle::Known {
+                                            text, ..
+                                        }) = row.title
+                                        {
+                                            titles
+                                                .entry(format!("{machine}/{}", row.session_id))
+                                                .or_insert(text);
+                                        }
+                                    }
+                                }
+                            }
+                            entries_all.push((path.clone(), node.clone()));
+                        }
+                        resolved_sessions.extend(snapshot_sessions);
+                    }
+                }
+                for indexes in paths_by_id.values_mut() {
+                    indexes.sort_by_key(|idx| {
+                        entries_all[*idx]
+                            .0
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .and_then(store::parse_shard_seq)
+                            .unwrap_or(u64::MAX)
+                    });
+                }
+                let sources: Vec<_> = paths_by_id
+                    .iter()
+                    .map(|(id, indexes)| -> anyhow::Result<_> {
+                        let shards: Vec<_> = indexes
+                            .iter()
+                            .map(|idx| -> anyhow::Result<_> {
+                                let (path, node) = &entries_all[*idx];
+                                let data_ids = match node.content.as_deref() {
+                                    Some(data_ids) => data_ids
+                                        .iter()
+                                        .map(|data_id| data_id.to_hex().as_str().to_owned())
+                                        .collect(),
+                                    None if node.meta.size == 0 => vec!["empty-file".to_owned()],
+                                    None => {
+                                        return Err(anyhow::anyhow!(
+                                            "non-empty archived shard has no content IDs"
+                                        ));
+                                    }
+                                };
+                                Ok((path.to_string_lossy().into_owned(), data_ids))
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        Ok(chat_stasher::fts::SourceDoc {
+                            id: id.clone(),
+                            source_sha256: index_source_fingerprint(
+                                &shards,
+                                titles.get(id).map(String::as_str),
+                            ),
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                index.build(&sources, |id| {
+                    let indexes = paths_by_id.get(id).ok_or_else(|| {
+                        anyhow::anyhow!("changed source disappeared during index build")
+                    })?;
+                    let mut raw = Vec::new();
+                    for idx in indexes {
+                        repo.dump(&entries_all[*idx].1, &mut raw)
+                            .context("read changed archived document")?;
+                    }
+                    let (fallback_title, body) = chat_stasher::fts::extract_index_text(&raw)?;
+                    Ok(chat_stasher::fts::DocText {
+                        title: titles.get(id).cloned().unwrap_or(fallback_title),
+                        body,
+                    })
+                })
+            })();
+            match build_result {
+                Ok(stats) => {
+                    println!(
+                        "[index] documents={} read={} unchanged={} removed={}",
+                        stats.documents, stats.read, stats.unchanged, stats.removed
+                    );
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("index: build did not complete: {error:#}; the result is not a complete index");
+                    reap_remote(&cfg, args.keep_ssh_masters);
+                    ExitCode::from(3)
+                }
+            }
+        }
+    }
+}
+
+fn index_identity(
+    destination: Option<&str>,
+    repo_override: Option<&str>,
+    repo_root: &str,
+) -> String {
+    match repo_override {
+        Some(repo) => format!("repo-override:{repo}"),
+        None => destination
+            .map(str::to_owned)
+            .unwrap_or_else(|| repo_root.to_owned()),
+    }
+}
+
+fn unresolved_index_sessions<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+    already_resolved: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    paths
+        .into_iter()
+        .filter_map(readback::bucket_shard_path)
+        .map(|(machine, session, _)| format!("{machine}/{session}"))
+        .filter(|id| !already_resolved.contains(id))
+        .collect()
+}
+
+fn index_source_fingerprint(shards: &[(String, Vec<String>)], title: Option<&str>) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"chat-stasher-fts-source-v1\0");
+    for (path, data_ids) in shards {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(data_ids.len().to_le_bytes());
+        for data_id in data_ids {
+            hasher.update(data_id.as_bytes());
+            hasher.update([0]);
+        }
+    }
+    if let Some(title) = title {
+        hasher.update(title.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// One line saying whether this run used the body cache — and if not, which of
 /// the three different reasons applies (ADR-034).
 ///
@@ -7218,6 +7540,67 @@ mod decision_surface_tests {
     use super::*;
     use clap::CommandFactory;
     use std::fs;
+
+    #[test]
+    fn explicit_repo_override_gets_its_own_index_identity() {
+        let named = index_identity(Some("archive"), None, "/archive/configured");
+        let overridden = index_identity(
+            Some("archive"),
+            Some("/archive/other"),
+            "/archive/configured",
+        );
+        let direct = index_identity(None, Some("/archive/other"), "/unused");
+        assert_eq!(named, "archive");
+        assert_ne!(named, overridden);
+        assert_eq!(overridden, direct);
+    }
+
+    #[test]
+    fn source_fingerprint_changes_when_archive_content_id_changes() {
+        let first = vec![(
+            "sessions/machine/session/000001.jsonl".into(),
+            vec!["blob-a".into()],
+        )];
+        let same = vec![(
+            "sessions/machine/session/000001.jsonl".into(),
+            vec!["blob-a".into()],
+        )];
+        let changed = vec![(
+            "sessions/machine/session/000001.jsonl".into(),
+            vec!["blob-b".into()],
+        )];
+        let first_hash = index_source_fingerprint(&first, Some("synthetic title"));
+        assert_eq!(
+            first_hash,
+            index_source_fingerprint(&same, Some("synthetic title"))
+        );
+        assert_ne!(
+            first_hash,
+            index_source_fingerprint(&changed, Some("synthetic title"))
+        );
+    }
+
+    #[test]
+    fn index_snapshot_resolution_retains_sessions_missing_from_newer_snapshot() {
+        let newest = [PathBuf::from("sessions/machine/active/000001.jsonl")];
+        let newest_sessions =
+            unresolved_index_sessions(newest.iter().map(PathBuf::as_path), &BTreeSet::new());
+        assert_eq!(
+            newest_sessions,
+            BTreeSet::from(["machine/active".to_owned()])
+        );
+
+        let older = [
+            PathBuf::from("sessions/machine/archived/000001.jsonl"),
+            PathBuf::from("sessions/machine/active/000001.jsonl"),
+        ];
+        let older_sessions =
+            unresolved_index_sessions(older.iter().map(PathBuf::as_path), &newest_sessions);
+        assert_eq!(
+            older_sessions,
+            BTreeSet::from(["machine/archived".to_owned()])
+        );
+    }
 
     /// A report for a run that stopped before the remote step could do
     /// anything, used by the payload tests below.

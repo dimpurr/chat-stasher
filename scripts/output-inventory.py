@@ -49,7 +49,8 @@ def render(hits: list[us.Hit]) -> str:
     prod.sort(key=lambda h: (h.path, h.line, h.kind))
     lines = [HEADER.rstrip("\n")]
     for h in prod:
-        lines.append(f"{h.kind:<12} {h.path}:{h.line}  {h.text}")
+        prefix = f"{h.kind:<12} {h.path}:{h.line}"
+        lines.append(f"{prefix}  {h.text}" if h.text.strip() else prefix)
     return "\n".join(lines) + "\n"
 
 

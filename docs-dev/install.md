@@ -268,12 +268,12 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:8732-8744`).
+(`crates/chat-stasher/src/main.rs:9115-9125`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read
-(`crates/chat-stasher/src/doctor.rs:1153-1181,1186-1192`). And an **absent** config file is a
+(`crates/chat-stasher/src/doctor.rs:1165-1205`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:367-374`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -452,11 +452,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:4132-4145`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:4170-4183`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:4168-4192`). An
+it does anything else (`crates/chat-stasher/src/main.rs:4206-4230`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -488,10 +488,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:4147-4156`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:4185-4194`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:4135-4143`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:4173-4181`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -730,12 +730,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:11836-11837`). This is the
+does not (`crates/chat-stasher/src/main.rs:12388-12401`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:8589-8590`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:12086-12088`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -751,7 +751,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:12017-12307`):
+(`crates/chat-stasher/src/main.rs:12396-12686`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -764,7 +764,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:8682-8689`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:12119-12160`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -774,10 +774,11 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:11686-11700`). **Note:** the entire report goes to
+(`crates/chat-stasher/src/main.rs:12063-12083`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
-To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`.
+To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
+the JSON report is on stdout.
 
 There is also a related command: `doctor`. It answers a different question —
 **whether any tool is silently deleting your history**. Its report contains
@@ -789,14 +790,16 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:829-971`, `:1009-1069`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:845-982,1020-1079`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:851-971`).
+(`crates/chat-stasher/src/doctor.rs:862-982`).
 It creates nothing, so a destination it reports as "not there yet" is still not
-created by running `doctor`. This is the one thing `doctor` does that touches
-the network; see section 4.4 if it reports a host it cannot trust.
+created by running `doctor`. D10 also checks each destination's local FTS index
+without connecting to it (`crates/chat-stasher/src/doctor.rs:1316,1836-1885`).
+The destination probes are the one check that touches the network; see section
+4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:845-982,1020-1079`).
 
 ### 5.1 Exporting a day
 
@@ -843,7 +846,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` command — nothing puts a session back into a
   harness's own directory, and that is not in phase one.** The subcommand table
-  has no `restore` entry (`crates/chat-stasher/src/main.rs:148-1138`). Getting
+  has no `restore` entry (`crates/chat-stasher/src/main.rs:148-1143`). Getting
   content *out* does have a bulk path: `export --out <dir>` writes every session
   a time window selects to files in one command
   (`crates/chat-stasher/src/main.rs:611-691`), and `read` dumps **one**

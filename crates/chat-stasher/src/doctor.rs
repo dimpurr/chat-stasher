@@ -812,6 +812,9 @@ pub struct DoctorReport {
     /// so a report whose config could not be read has nothing to measure and must
     /// not report a number taken at a root nobody chose.
     pub body_cache: Option<BodyCacheCheck>,
+    /// D10 — local full-text index health, keyed by declared destination.
+    /// `None` means the config could not be read, not that no index exists.
+    pub fts_indexes: Option<Vec<FtsIndexCheck>>,
     /// Per-harness fate decided by the path registry (`scanner::scan`).
     pub probes: Vec<scanner::HarnessProbe>,
     /// Registry-recognised sessions that are not represented by a
@@ -829,6 +832,14 @@ pub struct DoctorReport {
     /// [`run()`] entry point fills it in; the field is an `Option` so a caller
     /// can distinguish "checked and found nothing" from "not checked").
     pub native_host: Option<NativeHostCheck>,
+}
+
+/// D10 state for one destination's disposable full-text index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtsIndexCheck {
+    pub destination: String,
+    pub state: &'static str,
+    pub documents: Option<usize>,
 }
 
 /// What one read-only connection to a declared destination answered.
@@ -1129,12 +1140,13 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 8] = [
+const CHECKS_NEEDING_CONFIG: [&str; 9] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
     "D6 local metadata cache",
     "D9 body cache",
+    "D10 full-text indexes",
     "D7 destination probes",
     "D8 native host stage",
     "machine identity",
@@ -1170,6 +1182,7 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // D9's root and quota both come from the config, so it is one of the
         // checks that did not run — not a body cache of zero bytes.
         body_cache: None,
+        fts_indexes: None,
         probes: Vec::new(),
         archive_gaps: Vec::new(),
         // True as well: the scan is one of the checks that did not run, and this
@@ -1300,6 +1313,9 @@ pub fn run() -> DoctorReport {
     // D9
     let body_cache = inspect_body_cache(&config);
 
+    // D10 — local-only, no repository connection and no document payload reads.
+    let fts_indexes = Some(inspect_fts_indexes(&config));
+
     // D8 — read-only, opens nothing but the manifests themselves. The root is
     // the machine's, resolved here because this is the one caller that means the
     // real machine: `%LOCALAPPDATA%` on Windows, and `home` everywhere else.
@@ -1319,6 +1335,7 @@ pub fn run() -> DoctorReport {
         reclaim: Some(reclaim),
         cache: Some(cache),
         body_cache: Some(body_cache),
+        fts_indexes,
         probes,
         archive_gaps,
         scan_failed,
@@ -1813,6 +1830,63 @@ pub fn inspect_body_cache(config: &Config) -> BodyCacheCheck {
             error: e.to_string(),
         },
     }
+}
+
+/// D10 — inspect only local index files; this never opens an archive.
+pub fn inspect_fts_indexes(config: &Config) -> Vec<FtsIndexCheck> {
+    let mut identities: Vec<(String, String)> = config
+        .destinations
+        .keys()
+        .map(|name| (name.clone(), name.clone()))
+        .collect();
+    if identities.is_empty() {
+        if let Some(repo) = config.rustic_repo.as_ref().or(config.archive_root.as_ref()) {
+            identities.push(("single-destination".to_string(), repo.clone()));
+        }
+    }
+    let Some(cache_root) = scanner::user_cache_dirs().into_iter().next() else {
+        return identities
+            .into_iter()
+            .map(|(destination, _)| FtsIndexCheck {
+                destination,
+                state: "unavailable",
+                documents: None,
+            })
+            .collect();
+    };
+    identities
+        .into_iter()
+        .map(|(_destination, identity)| {
+            let index = crate::fts::Index::for_destination(&cache_root, &identity);
+            let destination = index
+                .root()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|digest| format!("destination-{}", &digest[..8.min(digest.len())]))
+                .unwrap_or_else(|| "destination-unknown".to_string());
+            match index.check() {
+                Ok(documents) => FtsIndexCheck {
+                    destination,
+                    state: "valid",
+                    documents: Some(documents),
+                },
+                Err(error) => FtsIndexCheck {
+                    destination,
+                    state: if format!("{error:#}").contains("no local index has been built") {
+                        "missing"
+                    } else if format!("{error:#}").contains("corrupt")
+                        || format!("{error:#}").contains("invalid")
+                        || format!("{error:#}").contains("unsupported")
+                    {
+                        "corrupt"
+                    } else {
+                        "unreadable"
+                    },
+                    documents: None,
+                },
+            }
+        })
+        .collect()
 }
 
 /// D9 JSON. Like D6's, the byte count is a tri-state: unknown when there is
@@ -2313,6 +2387,17 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
             Some(body_cache) => body_cache_json(body_cache),
             None => serde_json::json!({"checked": false}),
         },
+        "fts_indexes": match &r.fts_indexes {
+            Some(indexes) => serde_json::json!({
+                "checked": true,
+                "destinations": indexes.iter().map(|index| serde_json::json!({
+                    "destination": index.destination,
+                    "state": index.state,
+                    "documents": index.documents,
+                })).collect::<Vec<_>>(),
+            }),
+            None => serde_json::json!({"checked": false}),
+        },
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
@@ -2749,6 +2834,7 @@ pub fn print_report(r: &DoctorReport) {
             print_body_cache(body_cache);
             eprintln!();
         }
+        print_fts_indexes(&r.fts_indexes);
         print_destinations(&r.destinations);
         // D8 does not depend on the scan at all — it reads the browser
         // manifests and the config — so it is reported on this path too.
@@ -2849,6 +2935,7 @@ pub fn print_report(r: &DoctorReport) {
         print_body_cache(body_cache);
         eprintln!();
     }
+    print_fts_indexes(&r.fts_indexes);
 
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
@@ -2858,6 +2945,23 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!();
         print_native_host(check);
     }
+}
+
+fn print_fts_indexes(indexes: &Option<Vec<FtsIndexCheck>>) {
+    let Some(indexes) = indexes else { return };
+    eprintln!("D10 · Full-text indexes (local, per destination)");
+    if indexes.is_empty() {
+        eprintln!("  no destination configured");
+    }
+    for index in indexes {
+        match (index.state, index.documents) {
+            ("valid", Some(count)) => {
+                eprintln!("  {} · valid · {count} document(s)", index.destination)
+            }
+            (state, _) => eprintln!("  {} · {state}", index.destination),
+        }
+    }
+    eprintln!();
 }
 
 /// D8 printing. Read-only findings about the browser registration and the stage
@@ -3625,6 +3729,7 @@ mod json_tests {
             body_cache: Some(BodyCacheCheck::NoCacheDir {
                 root: PathBuf::from("/nowhere/body"),
             }),
+            fts_indexes: Some(Vec::new()),
             probes: vec![probe()],
             archive_gaps: Vec::new(),
             scan_failed: false,
@@ -3649,6 +3754,9 @@ mod json_tests {
     /// is unaffected. The two caches are reported apart on purpose — one is
     /// governed by a quota and the other is not, and a single merged number
     /// could not be compared against either.
+    ///
+    /// D10 adds the local FTS inventory as a new field; its per-destination
+    /// state does not require a destination connection or archive read.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -3665,6 +3773,7 @@ mod json_tests {
                 "config_source",
                 "destinations",
                 "footprints",
+                "fts_indexes",
                 "gemini",
                 "native_host",
                 "not_checked",
