@@ -42,7 +42,13 @@ If the command is missing, ask the user before installing anything. On macOS and
 curl -fsSL https://chatstasher.com/install.sh | sh
 ```
 
-The script installs to `~/.local/bin` without `sudo`, and prints a line to add if that folder is not on `PATH`. It installs the newest **stable** release, which may predate the Linux binaries; if it refuses for that reason, name a version that carries one (`CHAT_STASHER_VERSION=<version> sh`). Windows is not installed by this script, because it is a POSIX `sh` script: it prints the URL of the `.exe` release asset to download instead.
+The script installs to `~/.local/bin` without `sudo`, and prints a line to add if that folder is not on `PATH`. It installs the newest **stable** release, which may predate the Linux binaries; if it refuses for that reason, name a version that carries one. The variable has to reach `sh`, which means setting it on the **right-hand side of the pipe** — `sh` is what reads the script, so the assignment belongs to it, and `curl` still fetches the same script:
+
+```sh
+curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=<version> sh
+```
+
+Windows is not installed by this script, because it is a POSIX `sh` script: it prints the URL of the `.exe` release asset to download instead.
 
 Alternative installs, published from 0.5.0: `npm install -g chat-stasher` (a launcher, so it needs Node 18 or newer and nothing to compile) and `cargo install chat-stasher`. To build from source, `cargo build --release`, then **copy the binary out of `target/`**: timers and the browser host record the binary's path, and a path inside `target/` stops working after `cargo clean`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
 
@@ -78,7 +84,7 @@ chat-stasher setup
 
 A non-TTY run does the same work from named flags and prints one JSON object, including any missing named parameters. The destination step writes a `[destinations.<name>]` block and then runs `dest-init`. The scheduler step is still a stub: it plans and prints, and installs nothing, so do [Step 3](#step-3-hourly-archiving) yourself.
 
-Otherwise, do the same work by hand:
+Otherwise, do it by hand — but know that this is **less** than `setup` does, not the same work. `setup` runs the pass twice and reads a session back out; the manual path runs **one** pass and reads nothing back, so it gives you no evidence that the archive can be opened again. If the user needs that proof, use `setup`.
 
 ```sh
 chat-stasher init
@@ -95,7 +101,9 @@ chat-stasher run-once --stage <stage>
 
 With no destination declared, this archives to `~/.local/share/chat-stasher/repo`. Success ends with `result: COMPLETED` on the first run, and `result: NOOP` when nothing changed. Both exit `0`.
 
-**Human step: the master key.** The first run created `~/.local/share/chat-stasher/masterkey.json`, the only key to the archive. Tell the user to copy it somewhere off this disk, such as a password manager or an external drive, and say plainly that a lost key cannot be recovered. Do not read or print the file.
+**Human step: the master key — only if the run actually created one.** The key is made by the step that writes a snapshot, so a `NOOP` run creates neither the repository nor `~/.local/share/chat-stasher/masterkey.json`: there was nothing to archive, and `push` never ran. In that case there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there. The step applies to the first run that archives something — read the `result:` line, and treat `COMPLETED` as "a key now exists".
+
+When a key does exist, tell the user to copy `~/.local/share/chat-stasher/masterkey.json` somewhere off this disk, such as a password manager or an external drive, and say plainly that it is the only key to the archive and that a lost key cannot be recovered. Do not read or print the file.
 
 ## Step 3: hourly archiving
 
