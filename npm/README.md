@@ -34,13 +34,24 @@ Nothing but the launcher and `node_modules/.bin/chat-stasher`. The binary itself
 lives in `@dimpurr/chat-stasher-<platform>-<arch>`, which npm installs alongside
 this package on a matching platform.
 
-| Platform | Key | Binary package | Status |
+| Platform | Key | Binary package | In a Release? |
 | --- | --- | --- | --- |
-| macOS arm64 (Apple Silicon) | `darwin-arm64` | `@dimpurr/chat-stasher-darwin-arm64` | shipped |
-| macOS x86_64 (Intel) | `darwin-x64` | `@dimpurr/chat-stasher-darwin-x64` | shipped |
-| Linux x86_64 | `linux-x64` | `@dimpurr/chat-stasher-linux-x64` | shipped (static, musl) |
-| Linux arm64 | `linux-arm64` | `@dimpurr/chat-stasher-linux-arm64` | shipped (static, musl) |
-| Windows x86_64 | `win32-x64` | `@dimpurr/chat-stasher-win32-x64` | shipped |
+| macOS arm64 (Apple Silicon) | `darwin-arm64` | `@dimpurr/chat-stasher-darwin-arm64` | yes, every Release |
+| macOS x86_64 (Intel) | `darwin-x64` | `@dimpurr/chat-stasher-darwin-x64` | yes, every Release |
+| Linux x86_64 | `linux-x64` | `@dimpurr/chat-stasher-linux-x64` | not yet |
+| Linux arm64 | `linux-arm64` | `@dimpurr/chat-stasher-linux-arm64` | not yet |
+| Windows x86_64 | `win32-x64` | `@dimpurr/chat-stasher-win32-x64` | not yet |
+
+The last column is about the Release, not about npm, because the Release is what
+decides whether the package can exist at all: a platform package is assembled
+from a Release's own assets, and `scripts/npm/assemble.mjs` refuses to build one
+whose binary is not among them (`release asset is not in <dir>`). The Linux and
+Windows binaries are produced by the release workflow
+(`.github/workflows/release.yml`), but no version tag has been pushed since they
+were added, so no Release has carried one — as of 2026-09-25 the newest Release,
+v0.4.0, holds two macOS binaries, an extension zip and `SHA256SUMS`. Those three
+platform packages cannot be assembled until a Release carries their binaries;
+the rows above are the set npm can match on.
 
 The Linux binaries are built against musl and statically linked, so one package
 per architecture covers every distribution — the same binary runs on Alpine and
@@ -86,6 +97,11 @@ curl -fsSL https://chatstasher.com/install.sh | sh
 # or, from source
 cargo install chat-stasher --locked
 ```
+
+The installer keeps the same contract as the table above: it reads the Release's
+manifest and refuses, naming the release and what it does carry, when that
+release holds no binary for the platform. So on a platform the newest Release
+does not carry, the source line is the one that works.
 
 ## Source
 
