@@ -150,6 +150,37 @@ If a release is wrong, do not delete the tag and re-push it: an installer that
 already ran will have the old binary, and `install.sh` pins by tag. Cut the
 next version instead.
 
+## When to cut a release candidate
+
+An rc is not a second release. It is this release, published earlier under
+a tag that says what it is, because some of what a release changes cannot
+be taken back afterwards. Two kinds of change qualify:
+
+- **A minor or major bump.** The number is a claim that something changed
+  shape — `0.5.0` after `0.4.0`, or `1.0.0` after any `0.x` — and it is the
+  only place the claim is recorded. A candidate is where it meets a real
+  install before it becomes permanent.
+- **A release that changes the release workflow, the packaging, or the
+  distribution channels.** The version number says nothing about any of
+  these, yet they are how every later release reaches its users: a
+  patch-sized change here can be the only part of a release that nothing has
+  ever tested. A candidate exercises it in a real publication while the
+  version is still one that nothing installs by default.
+
+A patch release that only fixes bugs may be tagged stable directly: it is the
+case the `Channels` table has in mind when it calls the rc channel optional.
+Neither of the two kinds above may.
+
+The candidate decides nothing by itself. The stable tag is cut from the code
+the candidate was cut from, and only after the candidate has passed "Verify the
+published release" below in full — the seven assets and their `SHA256SUMS`
+exist only once a Release has been published, so a candidate is the first
+moment that list can be run against real artifacts at all. A candidate that
+fails it is not repaired into a stable tag: `main` takes the fix, and the next
+candidate is `rc.N+1`, because the tag that failed is installed wherever it was
+tried. "How a release candidate works" below has the mechanics; this section is
+the rule for when they apply.
+
 ## How a release candidate works
 
 An rc exists to answer "does this exact artifact install and run" before the
