@@ -1,0 +1,41 @@
+name: Package
+
+# `cargo publish --dry-run` is the only check that exercises the *packaged*
+# crate rather than the checkout: `cargo package` decides which files ship and
+# `cargo publish` builds the result. A `readme` left outside the package, an
+# `include` list that drops a file the build reads, or metadata crates.io would
+# reject all stay green under `cargo build`/`cargo test` and go red here.
+#
+# It runs on `pull_request` because that is the last point before a tag, and a
+# crates.io version is immutable: publishing a broken package cannot be undone,
+# only yanked. `--dry-run` never uploads and needs no token, so a fork PR runs
+# it too.
+#
+# A separate workflow rather than a job in ci.yml: ci.yml's matrix is keyed to
+# the trigger type and carries no `pull_request:` entry, and adding one there
+# would run the whole Linux/Windows/macOS matrix on every PR. This job needs
+# only the package contents and a stable toolchain.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-dry-run:
+    name: cargo publish --dry-run --locked (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # `--locked` fails when Cargo.lock disagrees with Cargo.toml instead of
+      # silently re-resolving; a published crate should carry the lock it was
+      # verified with. The workspace's other member is not published, so the
+      # step names this package.
+      - name: Package the crate the way a publish would
+        run: cargo publish --dry-run --locked -p chat-stasher

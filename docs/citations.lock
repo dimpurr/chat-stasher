@@ -379,11 +379,11 @@ crates/chat-stasher/Cargo.toml:3  9d2b5aec4316  lines=1
   <- SECURITY.md:47  :: version = "0.5.0-dev"
 crates/chat-stasher/Cargo.toml:6  2d9a3079e6a6  lines=1
   <- README.md:207, docs/privacy.md:717  :: license = "Apache-2.0"
-crates/chat-stasher/Cargo.toml:14-27  096bce56001a  lines=14
+crates/chat-stasher/Cargo.toml:20-33  096bce56001a  lines=14
   <- docs/threat-model.md:637  :: [dependencies]
-crates/chat-stasher/Cargo.toml:20-21  4a5b59a2acb8  lines=2
+crates/chat-stasher/Cargo.toml:26-27  4a5b59a2acb8  lines=2
   <- docs/threat-model.md:62, docs/threat-model.md:80, docs/threat-model.md:639  :: rustic_core = { version = "=0.12.0" }
-crates/chat-stasher/Cargo.toml:27  f6c7a40dd8b1  lines=1
+crates/chat-stasher/Cargo.toml:33  f6c7a40dd8b1  lines=1
   <- docs/threat-model.md:639  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/data/harness-registry-v1.json:28  d9bf419bfc8b  lines=1
   <- README.md:93, README.md:194  :: "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude…

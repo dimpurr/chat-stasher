@@ -5,11 +5,17 @@ edition.workspace = true
 description = "Append-only archive for every LLM conversation, across harnesses."
 license = "Apache-2.0"
 repository = "https://github.com/dimpurr/chat-stasher"
-homepage = "https://github.com/dimpurr/chat-stasher"
+homepage = "https://chatstasher.com"
 documentation = "https://docs.rs/chat-stasher"
 keywords = ["llm", "archive", "conversation", "harness", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "../../README.md"
+# Tests are deliberately not packaged: `nativehost_e2e_test.rs:36` reads
+# `../../contracts/`, which lies outside the package root and cannot ship, so
+# `cargo test` inside a published crate would fail rather than pass. Everything
+# a source build needs (`src`, the embedded `data` registry, the lock and the
+# readme) is present.
+include = ["/src/**", "/data/**", "/Cargo.toml", "/Cargo.lock", "/README.md"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -26,7 +32,7 @@ zstd = "0.13"
 rayon = "1"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 # Appended rather than inserted: `docs/threat-model.md` cites this table by
-# line (`Cargo.toml:20-21,27`) to name the pinned crates, and inserting in the
+# line (`Cargo.toml:26-27,33`) to name the pinned crates, and inserting in the
 # middle would move those lines onto whatever was written here — turning a
 # still-correct sentence into a wrong one without anybody editing it.
 #
@@ -76,3 +82,20 @@ lto = true
 
 [profile.test]
 # keep test builds quiet unless a test fails
+
+# `cargo binstall chat-stasher` pulls the release binary directly instead of
+# compiling. The asset names are the install.sh contract (release.yml "Stage
+# artifacts"): the bare, versionless `chat-stasher-darwin-arm64` and
+# `chat-stasher-darwin-x86_64`. `pkg-fmt = "bin"` says the download *is* the
+# binary, so no `bin-dir` is needed. The default `{ target }` would interpolate
+# the Rust triple (`aarch64-apple-darwin`), which matches none of the assets,
+# hence the per-target overrides. Targets with no override (everything but
+# macOS) fall back to binstall's other strategies.
+[package.metadata.binstall]
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-darwin-arm64"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-darwin-x86_64"
