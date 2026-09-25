@@ -1686,8 +1686,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * page per tick is *fewer* requests per tick than the old loop, never more.
    *
    * 🔴 Why `canBackfillDetail` and not simply 1 for everybody: a plan with no
-   *    body segment (Perplexity, detailPath/detailUrl both null) has no body
-   *    fetch that a long list could starve. Capping it at one page would gain
+   *    body segment (`detailPath`/`detailUrl` both null) has no body
+   *    fetch that a long list could starve. 🔴 W157 · **No plan is in that state
+   *    today**: Perplexity held it last and W84/W84b filled its body segment in,
+   *    so `canBackfillDetail` answers "yes, cap it" for every row in the table —
+   *    the hook stays because it is the question a future unsourced plan would
+   *    have to be asked. Capping such a plan at one page would gain
    *    nothing and would **lose** something: that plan's tick ends in
    *    halt('detail-unsupported'), and a persisted halt stops every later tick
    *    from reading page 2 at all — the list would be cut off at the first page

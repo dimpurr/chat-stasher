@@ -476,9 +476,12 @@ export function checkBackfillRequest(
   else if (viaForm !== null) segment = viaForm;
   else if (u.pathname === plan.listPath) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
-  //    is not — Perplexity). null ⇒ this platform has **no** permitted body URL. The
-  //    allowlist is not loosened and does no prefix wildcarding: what is permitted
-  //    is still only the path the plan itself wrote down, character for character.
+  //    is not). null ⇒ this platform has **no** permitted body URL. 🔴 W157 · No plan is in
+  //    that state today: Perplexity held it last and W84/W84b filled its body segment
+  //    in, so this arm is unreachable — it stays because it is the shape a future
+  //    unsourced plan lands on. The allowlist is not loosened and does no prefix
+  //    wildcarding: what is permitted is still only the path the plan itself wrote
+  //    down, character for character.
   else if (plan.detailPath !== null && detailPathMatches(plan.detailPath, u.pathname)) segment = 'detail';
   // 🔴 W21 · The second step, when the plan declares one. It is a **third** named
   //    path, not a wildcard over the first: a plan with no `detailStep2` permits

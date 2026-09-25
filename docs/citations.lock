@@ -87,27 +87,27 @@ apps/extension/lib/backfill/engine.ts:136-139  5cfeee9f2531  lines=4
   <- docs/privacy.md:432, docs/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
 apps/extension/lib/backfill/engine.ts:1623-1635  026d25c05d0a  lines=13
   <- docs/privacy.md:358  :: if (plan.scopeInPath && (
-apps/extension/lib/backfill/engine.ts:1745-1761  72b5338c79fe  lines=17
+apps/extension/lib/backfill/engine.ts:1749-1765  72b5338c79fe  lines=17
   <- README.md:202  :: && state.enumCursor.truncated === undefined
-apps/extension/lib/backfill/engine.ts:1765-1774  67d65ac96649  lines=10
+apps/extension/lib/backfill/engine.ts:1769-1778  67d65ac96649  lines=10
   <- docs/threat-model.md:233, docs/threat-model.md:291  :: /**
-apps/extension/lib/backfill/engine.ts:1832-1912  7254a42550d4  lines=81
+apps/extension/lib/backfill/engine.ts:1836-1916  7254a42550d4  lines=81
   <- README.md:198, docs/install.md:763, docs/privacy.md:563, docs/threat-model.md:304  :: /**
-apps/extension/lib/backfill/engine.ts:2296-2314  5aec5b245dbd  lines=19
+apps/extension/lib/backfill/engine.ts:2300-2318  5aec5b245dbd  lines=19
   <- docs/privacy.md:426  :: * 🔴 W31 · The scope reaches the body URL exactly as it reac…
-apps/extension/lib/backfill/engine.ts:2307-2311  88b6e1017f2f  lines=5
+apps/extension/lib/backfill/engine.ts:2311-2315  88b6e1017f2f  lines=5
   <- docs/threat-model.md:233, docs/threat-model.md:291  :: const init = detailRequestInit(plan, opts.origin, id);
-apps/extension/lib/backfill/engine.ts:2384-2457  66b0315f676a  lines=74
+apps/extension/lib/backfill/engine.ts:2388-2461  66b0315f676a  lines=74
   <- README.md:201, docs/privacy.md:453  :: /**
-apps/extension/lib/backfill/engine.ts:2413-2453  6a44c25b00cc  lines=41
+apps/extension/lib/backfill/engine.ts:2417-2457  6a44c25b00cc  lines=41
   <- docs/privacy.md:475, docs/privacy.md:542, docs/threat-model.md:304, docs/threat-model.md:620  :: if (!step2 && plan.detailPages) {
-apps/extension/lib/backfill/engine.ts:2414-2473  8bbdf423498e  lines=60
+apps/extension/lib/backfill/engine.ts:2418-2477  8bbdf423498e  lines=60
   <- docs/install.md:109  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:2591-2626  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:2595-2630  2cb492e06a56  lines=36
   <- docs/install.md:109  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
-apps/extension/lib/backfill/engine.ts:2613-2626  2cb6b4af719d  lines=14
+apps/extension/lib/backfill/engine.ts:2617-2630  2cb6b4af719d  lines=14
   <- README.md:199, docs/install.md:766, docs/privacy.md:542, docs/privacy.md:558, docs/threat-model.md:304, docs/threat-model.md:614  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
-apps/extension/lib/backfill/engine.ts:2677-2689  5b084f3234d8  lines=13
+apps/extension/lib/backfill/engine.ts:2681-2693  5b084f3234d8  lines=13
   <- docs/privacy.md:544  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
 apps/extension/lib/backfill/enumerate.ts:1351-1419  9034b1d0c6c2  lines=69
   <- docs/install.md:762, docs/privacy.md:309  :: const SHAPE_DEPTH = 2;
@@ -191,9 +191,9 @@ apps/extension/lib/backfill/tab-port.ts:170  118cc6173392  lines=1
   <- docs/privacy.md:276  :: export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
 apps/extension/lib/backfill/tab-port.ts:422-461  593876bf3c4e  lines=40
   <- docs/threat-model.md:62  :: export function checkBackfillRequest(
-apps/extension/lib/backfill/tab-port.ts:464-480  7049b6f9bc26  lines=17
+apps/extension/lib/backfill/tab-port.ts:464-484  3a127cc35dfc  lines=21
   <- README.md:202, docs/threat-model.md:306  :: *    has two more segments, so the two cannot collide by co…
-apps/extension/lib/backfill/tab-port.ts:1130-1147  18db841e280b  lines=18
+apps/extension/lib/backfill/tab-port.ts:1133-1150  18db841e280b  lines=18
   <- README.md:202, docs/privacy.md:343  :: export async function askTabForClaudeOrg(
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs/install.md:291  :: export function badgeFor(state: OutboxSummary | null): Badg…
