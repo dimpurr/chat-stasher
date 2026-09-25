@@ -9133,6 +9133,7 @@ fn cmd_setup(
                 // object, and a run-once pass may print operational details.
                 let binary = std::env::var_os("CHAT_STASHER_SCHEDULE_BINARY")
                     .map(PathBuf::from)
+                    .map(|path| absolute_path(&path))
                     .or_else(|| std::env::current_exe().ok());
                 let mut check_destinations = destination.clone().into_iter().collect::<Vec<_>>();
                 if check_destinations.is_empty() {
