@@ -17,37 +17,37 @@
   <- docs/install.md:243  :: apps/extension/.output/
 apps/extension/.gitignore:11  6ef40595ec0a  lines=1
   <- docs/install.md:244  :: .output
-apps/extension/entrypoints/background.ts:150-178  30c84e84ef5b  lines=29
+apps/extension/entrypoints/background.ts:151-179  30c84e84ef5b  lines=29
   <- docs/privacy.md:244, docs/threat-model.md:111  :: function buildBundle(captured: CapturedFetch): InboxBundle {
-apps/extension/entrypoints/background.ts:165-167  36c85931504a  lines=3
+apps/extension/entrypoints/background.ts:166-168  36c85931504a  lines=3
   <- docs/threat-model.md:332  :: // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` gua…
-apps/extension/entrypoints/background.ts:244-246  66920853936e  lines=3
+apps/extension/entrypoints/background.ts:245-247  66920853936e  lines=3
   <- docs/privacy.md:282  :: const recordArrival = async (newlyStored: boolean): Promise…
-apps/extension/entrypoints/background.ts:259  73dcc2a4f27a  lines=1
+apps/extension/entrypoints/background.ts:260  73dcc2a4f27a  lines=1
   <- docs/privacy.md:282  :: await recordArrival(false);
-apps/extension/entrypoints/background.ts:270-287  41d87a302a6d  lines=18
+apps/extension/entrypoints/background.ts:271-288  41d87a302a6d  lines=18
   <- README.md:243, docs/privacy.md:131, docs/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
-apps/extension/entrypoints/background.ts:334  dd1ea05b0312  lines=1
+apps/extension/entrypoints/background.ts:335  dd1ea05b0312  lines=1
   <- docs/privacy.md:282  :: await recordArrival(true);
-apps/extension/entrypoints/background.ts:503-510  185eedd6b024  lines=8
+apps/extension/entrypoints/background.ts:504-511  185eedd6b024  lines=8
   <- docs/install.md:284  :: export async function hostStatusForPopup(): Promise<HostSta…
-apps/extension/entrypoints/background.ts:679-681  838c17e1ba12  lines=3
+apps/extension/entrypoints/background.ts:718-720  838c17e1ba12  lines=3
   <- docs/install.md:121  :: * 🔴 transportWired is not a static flag but the result of *…
-apps/extension/entrypoints/background.ts:751-781  e6c80301633c  lines=31
+apps/extension/entrypoints/background.ts:790-820  e6c80301633c  lines=31
   <- docs/privacy.md:377  :: /**
-apps/extension/entrypoints/background.ts:927-987  98f08dc581d5  lines=61
+apps/extension/entrypoints/background.ts:966-1026  98f08dc581d5  lines=61
   <- docs/privacy.md:326, docs/privacy.md:349, docs/threat-model.md:610  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:1118-1192  dc1702283c38  lines=75
+apps/extension/entrypoints/background.ts:1157-1231  dc1702283c38  lines=75
   <- docs/privacy.md:326  :: * 🔴 C33 · The registration entry point for **explicit infor…
-apps/extension/entrypoints/background.ts:1205-1248  fda982ba64df  lines=44
+apps/extension/entrypoints/background.ts:1244-1287  fda982ba64df  lines=44
   <- docs/privacy.md:313  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1248  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1287  6539997ed831  lines=1
   <- docs/privacy.md:315  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1440-1521  e14e2bd83366  lines=82
+apps/extension/entrypoints/background.ts:1481-1562  e14e2bd83366  lines=82
   <- README.md:201, docs/install.md:668, docs/privacy.md:365, docs/privacy.md:381  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1982-2052  3e110a9625a7  lines=71
+apps/extension/entrypoints/background.ts:2030-2100  3e110a9625a7  lines=71
   <- docs/privacy.md:280, docs/privacy.md:280  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:2286-2360  add884d9db90  lines=75
+apps/extension/entrypoints/background.ts:2334-2408  add884d9db90  lines=75
   <- docs/privacy.md:281, docs/privacy.md:281  :: if (message?.type === HOOK_STATUS_MESSAGE && !isHookStatusM…
 apps/extension/entrypoints/dw-bridge.content.ts:450-456  ff11500827ff  lines=7
   <- docs/privacy.md:124  :: function readKimiAccessToken(): string | null {
@@ -81,99 +81,99 @@ apps/extension/lib/backfill/claude-page.ts:96-107  584c9ab14ea0  lines=12
   <- docs/privacy.md:337  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs/privacy.md:277  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…
-apps/extension/lib/backfill/debt-store.ts:68-87  c2b9b363b155  lines=20
+apps/extension/lib/backfill/debt-store.ts:109-128  c2b9b363b155  lines=20
   <- docs/privacy.md:277  :: export const BACKFILL_DB_VERSION = 2;
-apps/extension/lib/backfill/engine.ts:135-138  5cfeee9f2531  lines=4
+apps/extension/lib/backfill/engine.ts:136-139  5cfeee9f2531  lines=4
   <- docs/privacy.md:432, docs/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
-apps/extension/lib/backfill/engine.ts:1622-1634  026d25c05d0a  lines=13
+apps/extension/lib/backfill/engine.ts:1623-1635  026d25c05d0a  lines=13
   <- docs/privacy.md:358  :: if (plan.scopeInPath && (
-apps/extension/lib/backfill/engine.ts:1744-1760  72b5338c79fe  lines=17
+apps/extension/lib/backfill/engine.ts:1745-1761  72b5338c79fe  lines=17
   <- README.md:201  :: && state.enumCursor.truncated === undefined
-apps/extension/lib/backfill/engine.ts:1764-1773  67d65ac96649  lines=10
+apps/extension/lib/backfill/engine.ts:1765-1774  67d65ac96649  lines=10
   <- docs/threat-model.md:233, docs/threat-model.md:291  :: /**
-apps/extension/lib/backfill/engine.ts:1831-1911  7254a42550d4  lines=81
+apps/extension/lib/backfill/engine.ts:1832-1912  7254a42550d4  lines=81
   <- README.md:197, docs/install.md:756, docs/privacy.md:563, docs/threat-model.md:304  :: /**
-apps/extension/lib/backfill/engine.ts:2242-2260  5aec5b245dbd  lines=19
+apps/extension/lib/backfill/engine.ts:2292-2310  5aec5b245dbd  lines=19
   <- docs/privacy.md:426  :: * 🔴 W31 · The scope reaches the body URL exactly as it reac…
-apps/extension/lib/backfill/engine.ts:2253-2257  88b6e1017f2f  lines=5
+apps/extension/lib/backfill/engine.ts:2303-2307  88b6e1017f2f  lines=5
   <- docs/threat-model.md:233, docs/threat-model.md:291  :: const init = detailRequestInit(plan, opts.origin, id);
-apps/extension/lib/backfill/engine.ts:2330-2403  66b0315f676a  lines=74
+apps/extension/lib/backfill/engine.ts:2380-2453  66b0315f676a  lines=74
   <- README.md:200, docs/privacy.md:453  :: /**
-apps/extension/lib/backfill/engine.ts:2359-2399  6a44c25b00cc  lines=41
+apps/extension/lib/backfill/engine.ts:2409-2449  6a44c25b00cc  lines=41
   <- docs/privacy.md:475, docs/privacy.md:542, docs/threat-model.md:304, docs/threat-model.md:620  :: if (!step2 && plan.detailPages) {
-apps/extension/lib/backfill/engine.ts:2360-2419  8bbdf423498e  lines=60
+apps/extension/lib/backfill/engine.ts:2410-2469  8bbdf423498e  lines=60
   <- docs/install.md:109  :: const pages = plan.detailPages;
-apps/extension/lib/backfill/engine.ts:2537-2572  2cb492e06a56  lines=36
+apps/extension/lib/backfill/engine.ts:2587-2622  2cb492e06a56  lines=36
   <- docs/install.md:109  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
-apps/extension/lib/backfill/engine.ts:2559-2572  2cb6b4af719d  lines=14
+apps/extension/lib/backfill/engine.ts:2609-2622  2cb6b4af719d  lines=14
   <- README.md:198, docs/install.md:759, docs/privacy.md:542, docs/privacy.md:558, docs/threat-model.md:304, docs/threat-model.md:614  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
-apps/extension/lib/backfill/engine.ts:2623-2635  5b084f3234d8  lines=13
+apps/extension/lib/backfill/engine.ts:2673-2685  5b084f3234d8  lines=13
   <- docs/privacy.md:544  :: if (detailParsed?.ok === true && detailParsed.outcome === '…
-apps/extension/lib/backfill/enumerate.ts:1301-1369  9034b1d0c6c2  lines=69
+apps/extension/lib/backfill/enumerate.ts:1341-1409  9034b1d0c6c2  lines=69
   <- docs/install.md:755, docs/privacy.md:309  :: const SHAPE_DEPTH = 2;
-apps/extension/lib/backfill/enumerate.ts:2198-2246  eb8e47d38523  lines=49
+apps/extension/lib/backfill/enumerate.ts:2257-2305  eb8e47d38523  lines=49
   <- README.md:199  :: *    `detail-paged-unsupported` — real content, explicitly …
-apps/extension/lib/backfill/enumerate.ts:2198-2242  e19b9f15deb3  lines=45
+apps/extension/lib/backfill/enumerate.ts:2257-2301  e19b9f15deb3  lines=45
   <- docs/install.md:109, docs/install.md:171, docs/privacy.md:543, docs/threat-model.md:305, docs/threat-model.md:316, docs/threat-model.md:624  :: *    `detail-paged-unsupported` — real content, explicitly …
-apps/extension/lib/backfill/enumerate.ts:2673-2687  ffe4f02c7973  lines=15
+apps/extension/lib/backfill/enumerate.ts:2732-2746  ffe4f02c7973  lines=15
   <- README.md:196, docs/install.md:151  :: */
-apps/extension/lib/backfill/enumerate.ts:2689-2716  7c96a3147177  lines=28
+apps/extension/lib/backfill/enumerate.ts:2748-2775  7c96a3147177  lines=28
   <- README.md:196, README.md:196, docs/install.md:147  :: *   list endpoint   GET https://chat.deepseek.com/api/v0/ch…
-apps/extension/lib/backfill/enumerate.ts:2721-2735  30e272d8bf3f  lines=15
+apps/extension/lib/backfill/enumerate.ts:2780-2794  30e272d8bf3f  lines=15
   <- docs/install.md:758  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
-apps/extension/lib/backfill/enumerate.ts:2737-2764  bf7a44d7622d  lines=28
+apps/extension/lib/backfill/enumerate.ts:2796-2823  bf7a44d7622d  lines=28
   <- docs/install.md:758, docs/privacy.md:542, docs/threat-model.md:304, docs/threat-model.md:585  :: *  · 🔴 W42 · **Whether this endpoint pages or truncates a l…
-apps/extension/lib/backfill/enumerate.ts:2746-2749  ceeb77784882  lines=4
+apps/extension/lib/backfill/enumerate.ts:2805-2808  ceeb77784882  lines=4
   <- README.md:196, docs/install.md:109  :: *    message names its `parent_id`. So the visible branch i…
-apps/extension/lib/backfill/enumerate.ts:2811-2863  d8a084086d48  lines=53
+apps/extension/lib/backfill/enumerate.ts:2870-2922  d8a084086d48  lines=53
   <- docs/install.md:755  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:2850-2861  c00e5345042f  lines=12
+apps/extension/lib/backfill/enumerate.ts:2909-2920  c00e5345042f  lines=12
   <- README.md:199, docs/install.md:109, docs/install.md:162, docs/privacy.md:543, docs/threat-model.md:305  :: + 'or starts at a leaf the response does not carry ⇒ detail…
-apps/extension/lib/backfill/enumerate.ts:2935-2954  b4b6a00acd0d  lines=20
+apps/extension/lib/backfill/enumerate.ts:2994-3013  b4b6a00acd0d  lines=20
   <- README.md:199  :: *
-apps/extension/lib/backfill/enumerate.ts:2965-2967  e4d183b25c3b  lines=3
+apps/extension/lib/backfill/enumerate.ts:3024-3026  e4d183b25c3b  lines=3
   <- README.md:197, docs/install.md:109  :: body: (_origin, offset, limit) => JSON.stringify({
-apps/extension/lib/backfill/enumerate.ts:2983-3004  72e20ad4d004  lines=22
+apps/extension/lib/backfill/enumerate.ts:3042-3063  72e20ad4d004  lines=22
   <- docs/install.md:755  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:2984  ffa5b6acbd98  lines=1
+apps/extension/lib/backfill/enumerate.ts:3043  ffa5b6acbd98  lines=1
   <- docs/privacy.md:463  :: 'cross-source reverse-engineering (R26 research, 2026-08-17…
-apps/extension/lib/backfill/enumerate.ts:3047-3108  b42aa63e2fd3  lines=62
+apps/extension/lib/backfill/enumerate.ts:3106-3167  b42aa63e2fd3  lines=62
   <- README.md:197, docs/install.md:109  :: *
-apps/extension/lib/backfill/enumerate.ts:3095-3156  a613cdfc4224  lines=62
+apps/extension/lib/backfill/enumerate.ts:3154-3215  a613cdfc4224  lines=62
   <- docs/install.md:755, docs/install.md:756, docs/install.md:757, docs/privacy.md:542, docs/threat-model.md:304  :: export const GROK_PLAN: BackfillEnumPlan = {
-apps/extension/lib/backfill/enumerate.ts:3132-3194  9cedb6638e39  lines=63
+apps/extension/lib/backfill/enumerate.ts:3191-3253  9cedb6638e39  lines=63
   <- README.md:198, docs/install.md:109, docs/privacy.md:465  :: //    the conversation is empty, and must not be settled as…
-apps/extension/lib/backfill/enumerate.ts:3134-3155  0b4239a1e3c5  lines=22
+apps/extension/lib/backfill/enumerate.ts:3193-3214  0b4239a1e3c5  lines=22
   <- docs/threat-model.md:580  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:3180-3242  584fb75ba557  lines=63
+apps/extension/lib/backfill/enumerate.ts:3239-3301  584fb75ba557  lines=63
   <- docs/install.md:759  :: * 🔴 W22 · Kimi's conversation list **and** its conversation…
-apps/extension/lib/backfill/enumerate.ts:3313-3316  edf469f1853d  lines=4
+apps/extension/lib/backfill/enumerate.ts:3372-3375  edf469f1853d  lines=4
   <- docs/threat-model.md:580  :: + '🔴 Unverified and handled, not guessed: whether a LONG co…
-apps/extension/lib/backfill/enumerate.ts:3571-3699  384b9c93a5e4  lines=129
+apps/extension/lib/backfill/enumerate.ts:3630-3758  384b9c93a5e4  lines=129
   <- README.md:200, docs/install.md:109  :: * page's own tokens come from `WIZ_global_data`.
-apps/extension/lib/backfill/enumerate.ts:3619-3747  0a778d57c7c4  lines=129
+apps/extension/lib/backfill/enumerate.ts:3678-3806  0a778d57c7c4  lines=129
   <- docs/privacy.md:475  :: export const GEMINI_PLAN: BackfillEnumPlan = {
-apps/extension/lib/backfill/enumerate.ts:3702-3708  e7ab3e554d68  lines=7
+apps/extension/lib/backfill/enumerate.ts:3761-3767  e7ab3e554d68  lines=7
   <- README.md:201  :: /**
-apps/extension/lib/backfill/enumerate.ts:3712-3724  f1085cfb0b6d  lines=13
+apps/extension/lib/backfill/enumerate.ts:3771-3783  f1085cfb0b6d  lines=13
   <- docs/privacy.md:470  :: GEMINI_RPC_DETAIL,
-apps/extension/lib/backfill/enumerate.ts:3739-3744  9822b23e6f57  lines=6
+apps/extension/lib/backfill/enumerate.ts:3798-3803  9822b23e6f57  lines=6
   <- docs/threat-model.md:580  :: + '🔴 Unverified and handled, not guessed: the request ARGUM…
-apps/extension/lib/backfill/enumerate.ts:3750-3756  2665dbd863fc  lines=7
+apps/extension/lib/backfill/enumerate.ts:3809-3815  2665dbd863fc  lines=7
   <- docs/privacy.md:544  :: // 🔴 W31 · claude.ai
-apps/extension/lib/backfill/enumerate.ts:3922-3997  8bdc37472f48  lines=76
+apps/extension/lib/backfill/enumerate.ts:3981-4056  8bdc37472f48  lines=76
   <- README.md:201  :: * 🔴 W31 · **Can this response prove it is the whole active …
-apps/extension/lib/backfill/enumerate.ts:3997-4075  cd3e6793d8f8  lines=79
+apps/extension/lib/backfill/enumerate.ts:4056-4134  cd3e6793d8f8  lines=79
   <- docs/privacy.md:544, docs/threat-model.md:306  :: export function parseClaudeDetailTree(
-apps/extension/lib/backfill/enumerate.ts:4221-4252  0663964bc1bb  lines=32
+apps/extension/lib/backfill/enumerate.ts:4280-4311  0663964bc1bb  lines=32
   <- docs/threat-model.md:591  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:4521-4548  760fcb2b5424  lines=28
+apps/extension/lib/backfill/enumerate.ts:4580-4607  760fcb2b5424  lines=28
   <- README.md:196, docs/install.md:105, docs/install.md:671, docs/privacy.md:452  :: export function unsupportedBackfillFor(platform: string): U…
-apps/extension/lib/backfill/enumerate.ts:4569-4593  043d98acfa1d  lines=25
+apps/extension/lib/backfill/enumerate.ts:4628-4652  043d98acfa1d  lines=25
   <- docs/privacy.md:542, docs/threat-model.md:304, docs/threat-model.md:576  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
-apps/extension/lib/backfill/pace.ts:92-103  1e65e383924f  lines=12
+apps/extension/lib/backfill/pace.ts:121-132  1e65e383924f  lines=12
   <- docs/install.md:611  :: export const DEFAULT_DETAIL_PACE: PacePlan = {
-apps/extension/lib/backfill/pace.ts:125-126  7848a0f0da9a  lines=2
+apps/extension/lib/backfill/pace.ts:154-155  7848a0f0da9a  lines=2
   <- docs/install.md:611  :: export const DAILY_CAP_MIN = 300;
 apps/extension/lib/backfill/schedule.ts:39  3f15d79a8fc9  lines=1
   <- docs/privacy.md:275, docs/privacy.md:430  :: export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1…
@@ -341,9 +341,9 @@ apps/extension/lib/platform-auth.ts:268-305  03784069e1a6  lines=38
   <- README.md:198, docs/install.md:109, docs/install.md:760, docs/privacy.md:123, docs/privacy.md:542, docs/threat-model.md:277, docs/threat-model.md:304, docs/threat-model.md:612  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:679-779  9037a7e5f6b3  lines=101
   <- README.md:200, docs/install.md:109, docs/privacy.md:46, docs/threat-model.md:281, docs/threat-model.md:619  :: export function createGeminiAuthorizedFetch(
-apps/extension/lib/popup-view.ts:865-878  00dceceff078  lines=14
+apps/extension/lib/popup-view.ts:867-880  00dceceff078  lines=14
   <- README.md:202, docs/install.md:183  :: /**
-apps/extension/lib/popup-view.ts:1615-1702  9f67dd3fe14c  lines=88
+apps/extension/lib/popup-view.ts:1535-1622  9f67dd3fe14c  lines=88
   <- docs/privacy.md:389  :: /**
 apps/extension/lib/ui-strings.ts:34-36  443dc6990477  lines=3
   <- docs/install.md:289  :: export function fixCommand(stage: string | null | undefined…
