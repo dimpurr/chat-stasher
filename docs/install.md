@@ -462,7 +462,148 @@ the option is `strict`, which is the behaviour described above. `add` and
 choose them at all, and note that `accept` weakens exactly the case step 2's
 warning is about.
 
-### 4.5 Install a timer (optional, but this is the key to "install once and forget it")
+### 4.5 An S3-compatible destination (tested with Cloudflare R2)
+
+Skip this if your destination is a local path or an SSH host (§4.4). It applies
+when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
+under `[destinations.<name>.options]` are forwarded verbatim to the backend
+(`crates/chat-stasher/src/store.rs:153-156`, `:271-275`; the field itself is
+`crates/chat-stasher/src/config.rs:209-210`), so the option names below belong
+to the backend, not to this tool.
+
+**What was tested, and where that stops.** The configuration below was exercised
+end to end against Cloudflare R2: seeding one machine's partition, an ordinary
+push, a read of three sessions back out of the destination, and an integrity
+verification. No other S3-compatible service was tested. Cloudflare's own
+compatibility page lists the headers and operations R2 does not implement
+(<https://developers.cloudflare.com/r2/api/s3/api/>); the pitfall list at the
+end of this section says which of them this configuration can actually reach.
+
+**The configuration.**
+
+```toml
+[destinations.<name>]
+repo = "opendal:s3"
+key_file = "~/stash/chat-stasher/masterkey-<name>.json"
+connections = 4
+
+[destinations.<name>.options]
+bucket = "<your-bucket>"
+endpoint = "https://<your-account-id>.r2.cloudflarestorage.com"
+region = "auto"
+root = "/chat-stasher/v1"
+access_key_id = "env:CHAT_STASHER_<NAME>_ACCESS_KEY_ID"
+secret_access_key = "env:CHAT_STASHER_<NAME>_SECRET_ACCESS_KEY"
+disable_config_load = "true"
+```
+
+`root` is the prefix inside the bucket that the repository lives under, so one
+bucket can hold more than one destination. `key_file` is the destination's
+master key and is **not** the S3 credential: back it up as §4.3 says, and give
+each destination its own.
+
+**`region` is required, and this backend will not guess it.** R2 is a
+single-region service — Cloudflare's page gives the value and notes that an
+empty value and `us-east-1` both alias to it: "the region for an R2 bucket is
+`auto`". The backend reads `region` from the option, else from `AWS_REGION` /
+`AWS_DEFAULT_REGION`, and otherwise fails to build with `region is missing.
+Please find it by S3::detect_region() or set them in env.` (opendal-service-s3
+0.57.0, the version this project pins, `src/backend.rs` lines 812-826). It does
+ship an R2-aware `detect_region` (`src/backend.rs` lines 654-655) — but that is
+a separate call this tool does not make, so write the value out.
+
+**`disable_config_load = "true"` is the one option here you are not asking the
+backend for.** Left out, the backend also looks for credentials in the ambient
+AWS environment, in `~/.aws/`, and at the EC2 metadata service — so a typo in
+`endpoint` or a missing credential can end up authenticating as whatever
+identity the machine happens to carry, against a bucket you did not name. With
+it set, those chains are switched off (opendal-service-s3 0.57.0
+`src/backend.rs` lines 856-857) and the only credentials are the two you wrote.
+
+**Credentials: two shapes, one of them conditional.**
+
+A value written literally is resolved immediately: put the two credentials in
+`[destinations.<name>.options]` as they are, and keep the config file
+owner-only-readable (`chmod 600`). That is the shape most S3 clients document,
+and nothing about it is wrong — it is a secret on a disk.
+
+A value spelled `env:NAME` is instead resolved at config load, out of the
+process environment (`crates/chat-stasher/src/config.rs:618`). The four ways
+that can fail — the name is not a legal variable name, the variable is set but
+empty, it is set to a value that is not valid Unicode, it is not set at all —
+are four different messages, and none of them quotes the value
+(`crates/chat-stasher/src/config.rs:594-611`; the warning is printed at `:571`).
+A reference that cannot be resolved **removes that option** rather than
+substituting an empty string, so the failure is a credential error, not a
+silently-empty one.
+
+🔴 **`env:NAME` means the variable must be in the environment of *every*
+invocation, including anything a scheduler runs.** A scheduled run that does not
+have it finds the destination unreachable — and `reclaim-stage`, which proves
+every session against every destination before it deletes anything, then refuses
+and deletes nothing. That is the safe direction, but it is silent apart from
+that scheduler's own log. If a timer runs the CLI for you, give that job the
+variables; a shell that needs them interactively does it like this, and note
+that a `.env`-style file is not exported unless the file says `export`:
+
+```sh
+set -a; . ~/.config/chat-stasher/<name>.env; set +a
+chat-stasher push --destination <name>
+```
+
+**Pitfalls, in the order you meet them.**
+
+- **A token can be scoped to one bucket, and then account-level calls fail.**
+  Measured against R2 with a token scoped to a single bucket: asking the account
+  for its bucket list exits non-zero and reports a 403-family response, while
+  listing and reading *inside* the configured bucket works normally. The
+  destination is healthy; the failing call is one this tool never makes.
+- **An unreachable endpoint is reported as a missing object.** Point the
+  destination at a host that does not resolve and the backend's first sentence
+  is `Path \`config\` does not exist.` — which reads as "the bucket has no
+  repository in it". The real cause is the last line of the same error, a `dns
+  error: failed to lookup address information ...`. Read the `Caused by:` tail.
+  The CLI still classifies the destination as unreachable, which is what makes
+  `reclaim-stage` refuse.
+- **`dest-init` seeds this machine's partition, not a copy of the other
+  destination.** When both destinations are reachable it reports how many
+  sessions belong to another machine's partition: those are deliberately *not*
+  copied, because copying them would re-attribute another machine's history to
+  this one. They stay only where they already were. A second destination
+  therefore does not start out equal to the first, and `dest-init` is not the
+  tool that makes it so.
+- **Do not set `checksum_algorithm`.** R2 implements `CRC-64/NVME` for full
+  objects and lists `CRC-32`, `CRC-32C`, `SHA-1` and `SHA-256` as composite-only
+  — that is, not usable as whole-object checksums
+  (<https://developers.cloudflare.com/r2/api/s3/api/>). Some S3 clients began
+  sending checksum headers by default in 2025 and broke against R2 and other
+  non-AWS stores; the JavaScript SDK's announcement issue is still open
+  (<https://github.com/aws/aws-sdk-js-v3/issues/6810>, opened 2025-01-16, read
+  2026-09-25). This backend sends none unless you ask (the option has no default
+  in opendal-service-s3 0.57.0 `src/config.rs` lines 217-218), so leave it out.
+- **Do not set `default_acl` or `enable_request_payer`.** They map onto headers
+  R2 marks unimplemented — `x-amz-acl` and the `x-amz-grant-*` family, and
+  `x-amz-request-payer` (<https://developers.cloudflare.com/r2/api/s3/api/>).
+- **Verification reads a stage that is still moving.** If your sources are still
+  being collected while `verify` runs, its layer-3 count can report a handful of
+  sessions as `MISSING IN ARCHIVE` that a later run finds. Comparison layers 1
+  and 2 are about the repository's own consistency; layer 3 is about the stage
+  as it stood at that moment.
+- **The address shape.** With `enable_virtual_host_style` unset — the default
+  every run here used — requests go to `<endpoint>/<bucket>/…`, with the bucket
+  as a path segment. Virtual-host style (`<bucket>.<endpoint>`) was not tested
+  against R2.
+
+**What you can check locally.** `chat-stasher dest-init --destination <name>
+--stage <your-stage>` connects and reads before it writes: a wrong region, a
+wrong endpoint or a credential that did not resolve stops it there, and it says
+which. After that, `chat-stasher verify --destination <name>` re-reads what was
+written and `chat-stasher read --destination <name>` reads a session back out.
+Neither command needs a real conversation to be interesting — a destination that
+was never seeded reports that it holds nothing, which is a different answer from
+a destination that could not be reached.
+
+### 4.6 Install a timer (optional, but this is the key to "install once and forget it")
 
 `chat-stasher schedule` renders a launchd plist or systemd user service/timer.
 Render-only remains the default. On macOS, `chat-stasher schedule install`
@@ -767,6 +908,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Whether the Kimi gateway requires the two extra request headers the page sends, or whether they are merely what the page happens to send | **Unverified** (the page's requests were observed carrying `x-msh-platform` and `x-language` alongside the bearer token, so the backfill requests send them too — that they are *required* has not been tested; `apps/extension/lib/platform-auth.ts:268-305`.) |
 | Whether a Kimi backfill run has ever completed end to end in a real browser | **Unverified** (implemented and wired to the host, like the other three; no complete run observed. See section 1.1.) |
 | Whether a ChatGPT or DeepSeek backfill run has ever completed end to end in a real browser | **Unverified** (both legs are implemented and wired to the host, but no complete run has been observed in a real browser. See section 1.1.) |
+| Whether an S3-compatible service other than the one tested behaves the same way — including its multipart and virtual-host behaviour | **Unverified** (section 4.5's configuration was exercised end to end against one service; the option names are the pinned backend's, but no second service was tried, and virtual-host addressing was left at its default) |
 
 "Unverified" = we have not tested it; it does not mean it does not exist, and
 it does not mean it does not work. The things in section 6 above that are
