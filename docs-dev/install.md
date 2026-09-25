@@ -302,9 +302,10 @@ pnpm build:firefox    # Firefox
 and pnpm; **the exact minimum versions are not declared in the repository —
 unverified**.)
 
-A source build lands in `apps/extension/.output/` (excluded by
-`apps/extension/.gitignore:11`). Load that directory with your browser's
-**Load unpacked** menu. The exact menu path varies by browser and is unverified.
+A source build lands in `apps/extension/.output/` (excluded by the root ignore
+rule at `.gitignore:12` and the extension ignore rule at
+`apps/extension/.gitignore:11`). Load that directory with your browser's **Load
+unpacked** menu. The exact menu path varies by browser and is unverified.
 
 ### 3.1 Register the Native Messaging host
 
