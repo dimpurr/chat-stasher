@@ -191,7 +191,12 @@ function liveCapture(): CapturedFetch {
 async function bootAndDispatch(server?: Server): Promise<any> {
   const mod: any = await import('../entrypoints/background');
   if (server) mod.configureBackfillTransport(server.port);
-  mod.configureBackfillPace({ clock: fakeClock, random: () => 0 });
+  // 🔴 W113 · `preset: 'standard'` is named rather than inherited. The mixed-page case
+  //    walks two owed conversations through one relisted page, so it needs the 2-body
+  //    tick budget this file was written under; the gentle default (1 body/tick, the
+  //    shipped preset since W113) would split that page across ticks for a reason
+  //    that has nothing to do with the guard under test.
+  mod.configureBackfillPace({ clock: fakeClock, random: () => 0, preset: 'standard' });
   if (runtimeListeners.length === 0) await mod.default();
   const responded = await new Promise<any>((resolve) => {
     const ret = runtimeListeners[0]!({ type: 'chat-captured', payload: liveCapture() }, { id: 's' }, resolve);
@@ -225,7 +230,7 @@ async function relist(): Promise<void> {
   const { browserLocalStore } = await import('../lib/backfill/store');
   const st = browserLocalStore();
   if (!st) throw new Error('no store');
-  expect(await replaceDebtSet('chatgpt', SCOPE, { pending: [], archived: [], nextSeq: 1 })).toBe(true);
+  expect(await replaceDebtSet('chatgpt', SCOPE, { pending: [], archived: [], nextSeq: 1, times: new Map() })).toBe(true);
   const recovery = await recoverLedgerLoss(st, 'chatgpt', SCOPE, fakeNow);
   expect(recovery.ok).toBe(true);
 }

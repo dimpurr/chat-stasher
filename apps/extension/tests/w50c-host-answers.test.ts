@@ -224,7 +224,7 @@ async function relist(): Promise<void> {
   const { browserLocalStore } = await import('../lib/backfill/store');
   const st = browserLocalStore();
   if (!st) throw new Error('no store');
-  expect(await replaceDebtSet('chatgpt', SCOPE, { pending: [], archived: [], nextSeq: 1 })).toBe(true);
+  expect(await replaceDebtSet('chatgpt', SCOPE, { pending: [], archived: [], nextSeq: 1, times: new Map() })).toBe(true);
   const recovery = await recoverLedgerLoss(st, 'chatgpt', SCOPE, fakeNow);
   expect(recovery.ok).toBe(true);
 }
