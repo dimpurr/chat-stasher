@@ -253,6 +253,18 @@ jobs:
       - name: Output inventory is up to date
         run: python3 scripts/output-inventory.py --check
 
+      # The support matrix is derived from the harness registry and the
+      # extension's platform table. This fails when either source moved and the
+      # committed tables under scripts/support-matrix/ were not re-derived, and
+      # it checks any `<!-- support-matrix:*:start/end -->` block already in
+      # README.md or docs/*.md. The selftest is here for the same reason as the
+      # others: a gate that cannot prove it still catches staleness is not a gate.
+      - name: Support matrix is up to date
+        run: python3 scripts/check-support-matrix.py
+
+      - name: Support matrix check self-test
+        run: python3 scripts/check-support-matrix.py --selftest
+
       # CONTRIBUTING.md lists this as a local check, so CI has to run it too, and
       # it belongs in this job rather than the extension one: it exercises the
       # reload script against a temp repository and a stub build command, so it

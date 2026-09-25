@@ -56,6 +56,8 @@ python3 scripts/check-semantic-defaults.py
 python3 scripts/check-terminology.py
 python3 scripts/check-citation-drift.py
 python3 scripts/output-inventory.py --check
+python3 scripts/check-support-matrix.py
+python3 scripts/check-support-matrix.py --selftest
 python3 scripts/check-commit-messages.py --selftest
 bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
@@ -108,7 +110,7 @@ generates its own synthetic fixtures, so it needs no arguments and no setup. It
 prints only privacy-preserving summary fields and should end with `GATE: PASS`
 and exit 0 on the happy path.
 
-Four of these checks guard properties that are easy to break without noticing:
+Five of these checks guard properties that are easy to break without noticing:
 
 - `check-semantic-defaults.py` requires a `// reason:` note wherever production
   code turns an unknown into a concrete value (`unwrap_or(0)` and friends). The
@@ -121,6 +123,10 @@ Four of these checks guard properties that are easy to break without noticing:
   updating the lockfile without reading the code defeats the check.
 - `output-inventory.py --check` pins the inventory of user-visible strings, so
   a change to what the tool says is visible in review rather than incidental.
+- `check-support-matrix.py` re-derives the support tables from the harness
+  registry and the extension's platform table, and fails when either source
+  moved without the committed tables being re-derived. It never decides whether
+  a row's claim is true — only whether the table still matches its inputs.
 
 The negative check is also useful when changing verification logic:
 
