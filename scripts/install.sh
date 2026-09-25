@@ -1,13 +1,25 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # install.sh — download and install the prebuilt chat-stasher binary.
 #
 # Distribution:  curl -fsSL https://<host>/install.sh | sh
+#
+# It is a POSIX shell script on purpose, and that is a property with a test:
+# the documented command pipes it into `sh`, and on the distributions the Linux
+# binaries exist for, `sh` is dash — which rejects `set -o pipefail` as an
+# illegal option and exits 2 before reading a line of this file. So the language
+# here is the portable subset: no `pipefail`, no `[[ ]]`, no arrays, no `local`,
+# no `${var^^}`. scripts/self-test-install.sh runs every one of its cases
+# through dash as well as bash for that reason, and `shellcheck --shell=sh` is
+# the static form of the same check (plain `shellcheck` assumes bash and would
+# accept the bashism). `/bin/sh` is not a substitute for dash: on macOS it is
+# bash under another name.
+#
 # We deliberately fetch the raw binary with curl rather than asking the user to
 # download a zip in a browser. A browser download attaches com.apple.quarantine
 # to the file, and macOS SIGKILLs (rc=137) an unsigned quarantined binary on
 # first launch. curl does not set the quarantine flag, so this path needs no
 # Apple signing/notarization.
-set -euo pipefail
+set -eu
 
 # ---------------------------------------------------------------------------
 # 1. Pin the version (env-overridable). We never default to "latest": an
@@ -19,13 +31,22 @@ set -euo pipefail
 #    this is the version `curl | sh` installs for everyone who does not name
 #    one, so a prerelease here would hand every new user an unreleased build.
 #    Asking for a prerelease by name is exactly what the override is for.
+#
+#    It is also the version whose manifest is read back below, and not every
+#    release carries every platform — a release is published from whatever the
+#    workflow built for its tag, so a version that predates a platform has no
+#    artifact for it. The default is named separately here so a refusal can say
+#    "this is the version you got without asking for one" rather than leaving
+#    the reader to work out why the documented command failed.
 # ---------------------------------------------------------------------------
-VERSION="${CHAT_STASHER_VERSION:-0.4.0}"
+DEFAULT_VERSION="0.4.0"
+VERSION="${CHAT_STASHER_VERSION:-$DEFAULT_VERSION}"
 
 # Where the binary + SHA256SUMS live. The default is the tagged GitHub release
 # (https only). Override with CHAT_STASHER_BASE_URL, e.g. to test against a
 # local file:// or https:// mirror.
 BASE_URL="${CHAT_STASHER_BASE_URL:-https://github.com/dimpurr/chat-stasher/releases/download/v${VERSION}}"
+RELEASES_URL="https://github.com/dimpurr/chat-stasher/releases"
 
 # ---------------------------------------------------------------------------
 # 3. Default install dir is ~/.local/bin — user-writable and already on most
@@ -99,31 +120,149 @@ ARTIFACT="chat-stasher-${TARGET}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+if ! command -v curl >/dev/null 2>&1; then
+  echo "error: curl is required to download chat-stasher and is not on PATH." >&2
+  echo "       Install curl and re-run, or build from source: docs/install.md." >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
-# 7. Download binary + checksums. curl -f makes any HTTP/non-zero exit abort
-#    under set -e, so a failed fetch, a flaky connection after retries, or a
-#    full disk mid-write all hard-fail here rather than continuing.
+# 7. Download the release manifest (SHA256SUMS) first, and the artifact second.
+#
+#    The order is the point. SHA256SUMS is the release's own list of what it
+#    carries, so reading it first is what keeps three situations apart, which
+#    is the difference between a message and a bare curl 404:
+#
+#      * the release could not be reached  -> say so, and say that nothing is
+#        therefore known about what it carries;
+#      * the release was read and does not carry this artifact -> say which
+#        release, which platform, and what it does carry (below);
+#      * the manifest lists the artifact and the asset is not downloadable ->
+#        that is a broken release, and it is not the platform's fault.
+#
+#    Only after the manifest names our artifact do we try to fetch it. curl -f
+#    makes any HTTP/non-zero exit a failure, and that failure is handled where
+#    it happens rather than being left to `set -e`, so a 404 says which of the
+#    three it was.
 # ---------------------------------------------------------------------------
-echo "Downloading ${ARTIFACT} v${VERSION} ..."
-curl -fsSL --fail --retry 3 -o "$TMP_DIR/$ARTIFACT" "$BASE_URL/$ARTIFACT"
-curl -fsSL --fail --retry 3 -o "$TMP_DIR/SHA256SUMS" "$BASE_URL/SHA256SUMS"
+if ! curl -fsSL --fail --retry 3 -o "$TMP_DIR/SHA256SUMS" "$BASE_URL/SHA256SUMS"; then
+  cat >&2 <<EOF
+error: could not download the release manifest:
+  ${BASE_URL}/SHA256SUMS
+
+Nothing is known about what this release carries: the manifest did not arrive,
+which is not the same as the release not having it. Check that v${VERSION} is a
+release (${RELEASES_URL}) and that this machine can reach it, then re-run.
+Set CHAT_STASHER_BASE_URL to fetch from a mirror instead.
+EOF
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Verify SHA256. On mismatch we MUST hard-fail — never "warn and continue".
 #    We parse the expected digest for our exact artifact out of SHA256SUMS.
+#
+#    A missing entry is not a mismatch, it is a release that does not carry this
+#    platform at all, so it gets its own message and its own evidence: the
+#    artifact it lacks and the ones the release does have.
 # ---------------------------------------------------------------------------
 EXPECTED="$(awk -v a="$ARTIFACT" '$2 == a { print $1 }' "$TMP_DIR/SHA256SUMS")"
 if [ -z "$EXPECTED" ]; then
-  echo "error: SHA256SUMS has no entry for '${ARTIFACT}'" >&2
+  CARRIED="$(awk 'NF >= 2 { print "  " $2 }' "$TMP_DIR/SHA256SUMS")"
+  [ -n "$CARRIED" ] || CARRIED="  (the manifest lists no artifacts at all)"
+
+  # Why this release has no artifact for us, as far as the manifest can show.
+  # This is derived from the manifest in hand, not from a remembered list of
+  # releases, so it stays true as releases are published.
+  NOTE=""
+  case "$TARGET" in
+    linux-*)
+      if awk '$2 ~ /^chat-stasher-linux-/ { found = 1 } END { exit !found }' \
+           "$TMP_DIR/SHA256SUMS"; then
+        NOTE="v${VERSION} does carry a Linux binary, but not one for ${ARCH}."
+      else
+        NOTE="v${VERSION} holds no Linux binary at all, for either architecture."
+        if [ "$VERSION" = "$DEFAULT_VERSION" ]; then
+          NOTE="${NOTE}
+It is also the version this installer defaults to, so on Linux the documented
+'curl | sh' with no CHAT_STASHER_VERSION lands here."
+        fi
+      fi
+      ;;
+  esac
+
+  cat >&2 <<EOF
+error: release v${VERSION} does not carry an artifact for ${TARGET}.
+
+There is no ${ARTIFACT} in v${VERSION}. The manifest was downloaded and
+read, so this is not a network failure: the release is reachable and has no
+binary for ${TARGET}. What it carries:
+
+${CARRIED}
+EOF
+  # Printed only when there is something to say, so a macOS-only release asked
+  # for on macOS does not get a paragraph about Linux or a stray blank line.
+  if [ -n "$NOTE" ]; then
+    printf '\n%s\n' "$NOTE" >&2
+  fi
+  cat >&2 <<EOF
+
+Not every release carries every platform, so a newer one may have ${TARGET}.
+Which assets each release holds is on the Releases page:
+
+  ${RELEASES_URL}
+
+Name a version that carries this platform and re-run the same command with it
+set:
+
+  CHAT_STASHER_VERSION=<version>
+
+Or build from source, which needs no release artifact:
+
+  git clone https://github.com/dimpurr/chat-stasher
+  cd chat-stasher && cargo build --release
+See docs/install.md for details.
+
+Nothing was installed.
+EOF
   exit 1
 fi
 
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL="$(sha256sum "$TMP_DIR/$ARTIFACT" | awk '{print $1}')"
-else
-  # macOS ships shasum instead of sha256sum.
-  ACTUAL="$(shasum -a 256 "$TMP_DIR/$ARTIFACT" | awk '{print $1}')"
+echo "Downloading ${ARTIFACT} v${VERSION} ..."
+if ! curl -fsSL --fail --retry 3 -o "$TMP_DIR/$ARTIFACT" "$BASE_URL/$ARTIFACT"; then
+  cat >&2 <<EOF
+error: ${ARTIFACT} is listed in the release manifest but could not be downloaded:
+  ${BASE_URL}/${ARTIFACT}
+
+The manifest and the release disagree about a file the manifest promises. That
+is a broken release rather than a platform this installer cannot serve, so
+${TARGET} is not the thing to look at. Nothing was installed; please report it
+at https://github.com/dimpurr/chat-stasher/issues, or build from source.
+EOF
+  exit 1
 fi
+
+# The digest is computed without a pipeline, so a tool that fails cannot look
+# like a mismatch: a failing `sha256sum | awk` yields an empty digest under a
+# shell without `pipefail`, and an empty digest compared against a real one is
+# the right answer (refuse) for the wrong reason.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    # macOS ships shasum instead of sha256sum.
+    shasum -a 256 "$1"
+  fi
+}
+
+DIGEST_OUT=""
+if ! DIGEST_OUT="$(sha256_of "$TMP_DIR/$ARTIFACT")"; then
+  echo "error: could not compute the sha256 of ${ARTIFACT}." >&2
+  echo "       Nothing was installed." >&2
+  exit 1
+fi
+# "  <hex>  <filename>": the digest is everything before the first space.
+ACTUAL="${DIGEST_OUT%% *}"
 
 if [ "$(printf '%s' "$ACTUAL" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$EXPECTED" | tr 'A-Z' 'a-z')" ]; then
   echo "error: sha256 mismatch for ${ARTIFACT}" >&2
@@ -185,8 +324,23 @@ fi
 # ---------------------------------------------------------------------------
 # 8. Tell the user whether the binary will be on their PATH. We NEVER modify
 #    the user's shell config files — we only print a hint.
+#
+#    A case pattern rather than `... | grep -Fxq`. Two reasons, and the first is
+#    a real bug in the pipeline form: grep -q exits at the first match, which
+#    can kill the writer with SIGPIPE, and under `pipefail` that non-zero
+#    pipeline reads as "not on PATH" — it prints the hint to someone who has it.
+#    The second is globbing: splitting $PATH on its own with `for d in $PATH`
+#    subjects each entry to pathname expansion, so an entry containing `*` or
+#    `?` would be replaced by whatever it matches. A quoted expansion inside a
+#    case pattern is matched literally, and the surrounding `:`s make it a
+#    whole-component match — `grep -Fxq`'s property, without either hazard.
 # ---------------------------------------------------------------------------
-if ! printf '%s' "$PATH" | tr ':' '\n' | grep -Fxq "$INSTALL_DIR"; then
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ON_PATH=1 ;;
+  *)                  ON_PATH=0 ;;
+esac
+
+if [ "$ON_PATH" -eq 0 ]; then
   cat >&2 <<EOF
 
 Note: ${INSTALL_DIR} is not on your PATH yet.

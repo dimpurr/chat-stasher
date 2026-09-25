@@ -496,7 +496,7 @@ jobs:
           '
 
           # SHA256SUMS must parse under install.sh's exact rule
-          # `awk -v a="$ARTIFACT" '$2 == a { print $1 }'` (install.sh:115), i.e.
+          # `awk -v a="$ARTIFACT" '$2 == a { print $1 }'` (install.sh:169), i.e.
           # one "<hex>  <filename>" line per asset. `shasum -a 256` emits the
           # same two-space separator release-artifacts.sh produces locally
           # (scripts/release-artifacts.sh:72).
@@ -504,7 +504,11 @@ jobs:
           ( cd dist && shasum -a 256 $BINARIES "$EXT_ASSET" > SHA256SUMS )
 
           # Self-check with install.sh's own awk: the digest for each asset must
-          # be present, or installs would hard-fail at install.sh:116-119.
+          # be present. install.sh reads this manifest before it downloads
+          # anything and treats a missing entry as "this release carries no
+          # binary for your platform" (install.sh:170-229), so a name that does
+          # not parse here is not a one-user install error — it is every user of
+          # that platform being told the release does not have what it does.
           # shellcheck disable=SC2086
           for art in $BINARIES "$EXT_ASSET"; do
             EXPECTED="$(awk -v a="$art" '$2 == a { print $1 }' dist/SHA256SUMS)"
@@ -545,7 +549,7 @@ jobs:
 
           # The tag is "v0.1.0"; install.sh fetches from
           # https://github.com/dimpurr/chat-stasher/releases/download/v${VERSION}
-          # (install.sh:28), so the Release tag and asset names must match the
+          # (install.sh:48), so the Release tag and asset names must match the
           # tag exactly — nothing is renamed here.
           TAG="$GITHUB_REF_NAME"    # e.g. v0.2.0 | v0.3.0-rc.1
           VERSION="${TAG#v}"        # e.g. 0.2.0 | 0.3.0-rc.1
