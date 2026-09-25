@@ -2073,7 +2073,7 @@ fn render_inline(text: &str) -> String {
                 let target = &after[label_end + 2..];
                 if let Some((url, consumed)) = link_target(target) {
                     let label = &after[..label_end];
-                    if url.starts_with('/') || url.starts_with('#') {
+                    if is_local_target(url) {
                         out.push_str(&format!("<a href=\"{}\">{}</a>", esc(url), esc(label)));
                     } else {
                         // An off-host target is not followed and not hidden:
@@ -2091,6 +2091,26 @@ fn render_inline(text: &str) -> String {
         rest = &rest[index + marker.len()..];
     }
     out
+}
+
+/// Whether a Markdown target may become an `href` on this page, which claims
+/// to load no off-host link.
+///
+/// A fragment and an absolute path are local. A target starting with `//` is
+/// not a path: browsers read it as protocol-relative and resolve it against
+/// the page's own scheme, so `//attacker.example` is off-host however much it
+/// looks like one. A leading `\` is the same hole written differently, because
+/// the URL parser maps `\` to `/` for the http(s) schemes — `/\attacker.example`
+/// and `\\attacker.example` both reach that host once clicked. Testing only for
+/// the first byte as `/` is what let these through.
+fn is_local_target(url: &str) -> bool {
+    if url.starts_with('#') {
+        return true;
+    }
+    let Some(path) = url.strip_prefix('/') else {
+        return false;
+    };
+    !path.starts_with('/') && !path.starts_with('\\')
 }
 
 /// The target inside `](…)` and how many bytes it occupied including the
@@ -2545,18 +2565,37 @@ mod tests {
         struct ReaderSource;
         impl ContentSource for ReaderSource {
             fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
+                // The matrix this test group exists for is W139's four
+                // vectors: `script`, `onerror=`, `javascript:` and an
+                // over-wide base64 payload. Two are in the first line; the
+                // last two are below, because an `onerror=` handler only fires
+                // on a real element and a wide payload is the case where a
+                // truncating renderer would be tempted to emit a fragment.
+                let mut body = concat!(
+                    r##"{"type":"user","timestamp":"2026-09-25T10:00:00Z","message":{"role":"user","content":"# Question\n\n**hello** <script>alert(1)</script>\n[javascript](javascript:alert(1))"}}"##,
+                    "\n",
+                    r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"code","language":"rust","code":"fn main() {}"},{"type":"thinking","thinking":"private"},{"type":"tool_use","name":"search","input":{"q":"x"}},{"type":"image","name":"plot.png","content_type":"image/png","bytes":12}]}}"#,
+                    "\n",
+                    r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok"}]}}"#,
+                    "\n",
+                    r#"{"type":"user","message":{"role":"user","content":"<img src=x onerror=alert(1)>"}}"#,
+                    "\n",
+                )
+                .to_string();
+                // A `data:` target carrying 8 KiB of base64 — wide enough that
+                // an eliding or splitting renderer would cut it, and a target
+                // the link predicate must print rather than emit.
+                body.push_str(
+                    "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\
+                     \"[wide](data:text/html;base64,",
+                );
+                body.push_str(&"QUFB".repeat(2048));
+                body.push_str(")\"}}\n");
                 Ok(Content {
                     shards: Vec::new(),
                     concat_sha256: "aa".repeat(32),
-                    bytes: 512,
-                    body: concat!(
-                        r##"{"type":"user","timestamp":"2026-09-25T10:00:00Z","message":{"role":"user","content":"# Question\n\n**hello** <script>alert(1)</script>\n[javascript](javascript:alert(1))"}}"##,
-                        "\n",
-                        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"code","language":"rust","code":"fn main() {}"},{"type":"thinking","thinking":"private"},{"type":"tool_use","name":"search","input":{"q":"x"}},{"type":"image","name":"plot.png","content_type":"image/png","bytes":12}]}}"#,
-                        "\n",
-                        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok"}]}}"#,
-                    )
-                    .to_string(),
+                    bytes: body.len(),
+                    body,
                 })
             }
         }
@@ -2618,6 +2657,35 @@ mod tests {
         );
         assert!(
             !response.body.contains("href=\"javascript:"),
+            "{}",
+            response.body
+        );
+        // W139's other two vectors. An `onerror=` handler needs a real
+        // element, and no element is built from archived text: the payload is
+        // shown, escaped, and the page holds no tag for the handler to hang
+        // on. The literal substring `src=` still appears — inside the escaped
+        // text, which is the point — so the assertion is about tags, not
+        // substrings.
+        assert!(
+            response.body.contains("&lt;img src=x onerror=alert(1)&gt;"),
+            "the onerror payload is shown escaped: {}",
+            response.body
+        );
+        assert!(!response.body.contains("<img"), "{}", response.body);
+        // The over-wide base64 target stays text, whole, and not a link.
+        assert!(
+            response.body.contains("wide (data:text/html;base64,"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("QUFB)"),
+            "the wide payload is rendered to its end, not cut: {}",
+            response.body
+        );
+        assert!(!response.body.contains("href=\"data:"), "{}", response.body);
+        assert!(
+            !response.body.contains("<a href=\"data"),
             "{}",
             response.body
         );
@@ -2816,7 +2884,9 @@ mod tests {
             fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
                 let content = "off [docs](https://example.invalid/x) local \
                                [here](/reader?i=0) nested [n](/a(b)c) js \
-                               [j](javascript:alert(1)) end";
+                               [j](javascript:alert(1)) psl [p](//a.invalid/x) \
+                               bs [b](/\\a.invalid/x) dbs [d](\\a.invalid/x) \
+                               frag [f](#section) end";
                 Ok(Content {
                     shards: Vec::new(),
                     concat_sha256: "22".repeat(32),
@@ -2842,6 +2912,42 @@ mod tests {
             html.contains("href=\"/a(b)c\""),
             "a target's own parentheses are part of it: {html}"
         );
+        assert!(
+            html.contains("href=\"#section\""),
+            "a fragment is local: {html}"
+        );
+
+        // A protocol-relative target is not a path, however much its first
+        // byte looks like one, and the URL parser reads a leading backslash as
+        // a slash. Each is off-host and must be printed rather than linked.
+        assert!(html.contains("p (//a.invalid/x)"), "{html}");
+        assert!(html.contains("b (/\\a.invalid/x)"), "{html}");
+        assert!(html.contains("d (\\a.invalid/x)"), "{html}");
+        assert!(!html.contains("href=\"//"), "{html}");
+        assert!(!html.contains("href=\"/\\"), "{html}");
+
+        // The vectors above are the ones this test happens to name; the claim
+        // is general. Every `href` the page emits is swept, because escaping
+        // turns a `"` from archived text into `&quot;`, so a literal `href="`
+        // can only begin a real attribute.
+        let hrefs: Vec<&str> = html
+            .split("href=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            !hrefs.is_empty(),
+            "the sweep found no href to check: {html}"
+        );
+        for href in hrefs {
+            assert!(
+                href.starts_with('#')
+                    || (href.starts_with('/')
+                        && !href.starts_with("//")
+                        && !href.starts_with("/\\")),
+                "the page emitted an off-host href {href:?}"
+            );
+        }
     }
 
     /// A time the reader had to interpret is labelled as interpreted. Calling
