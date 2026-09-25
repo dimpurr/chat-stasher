@@ -7,51 +7,329 @@
     <style>
       /* All inline — no external fonts/CSS, so this page makes zero network requests.
          That is a requirement of the page, not a style preference: it is the capture's
-         own progress view and it must not talk to anything but this browser's storage. */
+         own progress view and it must not talk to anything but this browser's storage.
+
+         W149 · The palette is the one nm/w149-contrast-check.py verified (2026-09-25):
+         every text pair passes WCAG AA 4.5:1 and every bar/hatch pair passes the
+         3:1 non-text minimum, in both colour schemes. Platform hues are brand-neutral
+         monogram tints — no logos, no copyrighted marks.
+
+         One radius scale, documented once: cards and tiles 10px, chips/meters/bars 6px,
+         the speed segmented control is a full pill. Nothing else is rounded. */
+
       :root { color-scheme: light dark; }
       [hidden] { display: none !important; }
+
+      :root {
+        --radius-card: 10px;
+        --radius-chip: 6px;
+        --tint-pct: 12%;
+        --bg: #f5f6f8;
+        --surface: #ffffff;
+        --ink: #212731;
+        --muted: #59636f;
+        --line: #dde1e6;
+        --accent: #1d4ed8;
+        --ok: #11793d;
+        --bad: #b3261e;
+        --warn: #8a5300;
+        --track: #e3e7ec;
+        --hatch: #566272;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --tint-pct: 15%;
+          --bg: #121418;
+          --surface: #191d23;
+          --ink: #e7eaee;
+          --muted: #9aa6b4;
+          --line: #2c333c;
+          --accent: #8ab4f8;
+          --ok: #6ecf95;
+          --bad: #f29b91;
+          --warn: #f0bf6f;
+          --track: #2a313b;
+          --hatch: #98a3b1;
+        }
+      }
+
+      /* The platform hues for the monogram tiles. Keys not listed fall back to
+         `default`. Light/dark pairs taken from the verified contrast table. */
+      :root { --hue: #495460; }
+      [data-hue="chatgpt"]     { --hue: #0b7285; }
+      [data-hue="claude"]      { --hue: #a1491f; }
+      [data-hue="deepseek"]    { --hue: #3b3fbf; }
+      [data-hue="gemini"]      { --hue: #1d4ed8; }
+      [data-hue="grok"]        { --hue: #334155; }
+      [data-hue="kimi"]        { --hue: #a4123f; }
+      [data-hue="perplexity"]  { --hue: #155e75; }
+      [data-hue="default"]     { --hue: #495460; }
+      @media (prefers-color-scheme: dark) {
+        [data-hue="chatgpt"]     { --hue: #66c7d6; }
+        [data-hue="claude"]      { --hue: #f0a582; }
+        [data-hue="deepseek"]    { --hue: #a5b0f8; }
+        [data-hue="gemini"]      { --hue: #8ab4f8; }
+        [data-hue="grok"]        { --hue: #aeb8c6; }
+        [data-hue="kimi"]        { --hue: #f2a3b5; }
+        [data-hue="perplexity"]  { --hue: #7cc7e0; }
+        [data-hue="default"]     { --hue: #8f9aa8; }
+      }
+
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 20px 22px 48px;
-        max-width: 900px;
+        padding: 26px 20px 56px;
         font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
       }
-      h1 { margin: 0 0 4px; font-size: 20px; }
-      h2 { margin: 26px 0 6px; font-size: 17px; padding-bottom: 4px; border-bottom: 1px solid rgba(128,128,128,.3); }
-      h3 { margin: 18px 0 4px; font-size: 14px; font-weight: 600; opacity: .95; }
-      .subtitle { margin: 0 0 14px; font-size: 12px; opacity: .8; white-space: pre-wrap; }
-      .note {
-        margin: 8px 0; padding: 8px 10px; font-size: 13px; white-space: pre-wrap;
-        border-left: 3px solid rgba(128,128,128,.55);
+      .page { max-width: 1120px; margin: 0 auto; }
+
+      h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+      .subtitle { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+
+      /* The about disclosure keeps the read-only promise one click away instead
+         of one paragraph of fine print on every render. */
+      .about { margin: 8px 0 0; font-size: 12px; }
+      .about summary {
+        cursor: pointer; color: var(--muted); user-select: none;
+        width: fit-content;
       }
-      .note.warn { border-left-color: #b7791f; background: rgba(183,121,31,.10); }
-      .note.bad { border-left-color: #c0392b; background: rgba(192,57,43,.10); font-weight: 600; }
-      .facts { margin: 8px 0; }
-      .fact { display: flex; gap: 10px; margin: 2px 0; font-size: 13px; }
-      .fact .label { flex: 0 0 190px; opacity: .8; }
-      .fact .value { flex: 1 1 auto; white-space: pre-wrap; }
-      table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
-      th, td { text-align: left; padding: 3px 14px 3px 0; font-variant-numeric: tabular-nums; }
-      th { border-bottom: 1px solid rgba(128,128,128,.4); font-weight: 600; }
-      .speed { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 8px; }
-      .speed button {
-        font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
-        border: 1px solid rgba(128,128,128,.5); border-radius: 5px; background: transparent;
+      .about summary:hover { color: var(--ink); }
+      .about p { margin: 6px 0 0; color: var(--muted); max-width: 72ch; }
+
+      /* Overview: three numbers and one health line. The numbers are the sums of
+         the cards below — labels say exactly what each one is. */
+      .overview { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 16px 0 0; align-items: baseline; }
+      .stat .v {
+        font-size: 22px; font-weight: 650; letter-spacing: -0.01em;
+        font-variant-numeric: tabular-nums;
+        margin-right: 7px;
       }
-      .speed button[aria-pressed="true"] { border-color: #2b6cb0; box-shadow: inset 0 0 0 1px #2b6cb0; font-weight: 600; }
-      .speed .what { flex: 1 1 100%; font-size: 12px; opacity: .75; }
-      .empty { margin: 16px 0; font-size: 13px; white-space: pre-wrap; opacity: .9; }
-      .error { margin: 16px 0; padding: 10px; font-weight: 600; border-left: 3px solid #c0392b; background: rgba(192,57,43,.12); white-space: pre-wrap; }
+      .stat .l { font-size: 12px; color: var(--muted); }
+      .stat-failed .v { color: var(--bad); }
+      .health { margin: 8px 0 0; font-size: 13px; padding: 7px 11px; border-radius: var(--radius-chip); width: fit-content; max-width: 100%; }
+      .health-ok   { color: var(--ok);   background: color-mix(in srgb, var(--ok) 10%, var(--surface)); }
+      .health-wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); }
+      .health-bad  { color: var(--bad);  background: color-mix(in srgb, var(--bad) 10%, var(--surface)); }
+
+      /* Dismissible alerts. Dismiss hides the callout for this page session only
+         (main.ts keeps a set in memory); the page writes nothing when one goes. */
+      .alerts { margin-top: 12px; display: grid; gap: 8px; }
+      .alert {
+        display: flex; gap: 10px; align-items: flex-start; justify-content: space-between;
+        padding: 9px 12px; border-radius: var(--radius-chip); font-size: 13px;
+        white-space: pre-wrap;
+      }
+      .alert-bad  { background: color-mix(in srgb, var(--bad) 10%, var(--surface)); color: var(--bad); }
+      .alert-warn { background: color-mix(in srgb, var(--warn) 12%, var(--surface)); color: var(--warn); }
+      .alert .dismiss {
+        flex: 0 0 auto; border: 0; background: transparent; color: inherit; cursor: pointer;
+        font: inherit; font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: var(--radius-chip);
+      }
+      .alert .dismiss:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+
+      /* The last wake: context, demoted. It stays a fact, but no longer leads. */
+      .meta { margin: 12px 0 0; font-size: 12px; color: var(--muted); max-width: 100ch; }
+
+      /* Cards. One per (platform, scope); the grid is the whole page. */
+      .cards {
+        margin: 22px 0 0;
+        display: grid; gap: 14px;
+        grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+        align-items: start;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-card);
+        padding: 14px 16px 16px;
+        min-width: 0;
+      }
+      .card-head { display: flex; align-items: center; gap: 10px; }
+      .mono {
+        flex: 0 0 auto;
+        width: 34px; height: 34px; border-radius: var(--radius-card);
+        display: inline-flex; align-items: center; justify-content: center;
+        background: color-mix(in srgb, var(--hue) var(--tint-pct), var(--surface));
+        color: var(--hue);
+        font-weight: 700; font-size: 16px;
+      }
+      .card-id { min-width: 0; flex: 1 1 auto; }
+      .card-id h2 {
+        margin: 0; font-size: 15.5px; letter-spacing: -0.01em;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .card-id .scope {
+        margin: 0; font-size: 11.5px; color: var(--muted);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+
+      .chip {
+        flex: 0 0 auto;
+        font-size: 11.5px; font-weight: 600; line-height: 1;
+        padding: 5px 9px; border-radius: var(--radius-chip);
+        white-space: nowrap;
+      }
+      .chip-run   { color: var(--ink);   background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--surface)); }
+      .chip-wait  { color: var(--warn);   background: color-mix(in srgb, var(--warn) 12%, var(--surface)); }
+      .chip-ok    { color: var(--ok);     background: color-mix(in srgb, var(--ok) 9%, var(--surface)); }
+      .chip-bad   { color: var(--bad);    background: color-mix(in srgb, var(--bad) 10%, var(--surface)); }
+      .chip-muted { color: var(--muted);  background: color-mix(in srgb, var(--muted) 12%, var(--surface)); }
+
+      /* The percent ring: drawn only when the model produced a percentage.
+         The number inside is the same figure the label under it spells out. */
+      .ring { flex: 0 0 auto; width: 44px; height: 44px; }
+      .ring-track { fill: none; stroke: var(--track); stroke-width: 4; }
+      .ring-fill  { fill: none; stroke: var(--ok); stroke-width: 4; stroke-linecap: round; }
+      .ring-num   { font-size: 11.5px; font-weight: 650; fill: var(--ink); font-variant-numeric: tabular-nums; }
+
+      .card > .alerts { margin-top: 10px; }
+
+      /* Composition bar: stored solid, owed hatched, failures solid, and the
+         remainder left as bare track (a total beyond the list is a claim about
+         the platform, not progress). Segment widths are exact proportions. */
+      .bar-wrap { margin: 12px 0 6px; }
+      .bar {
+        display: flex; height: 12px; border-radius: var(--radius-chip);
+        background: var(--track); overflow: hidden;
+      }
+      .seg-ok   { background: var(--ok); }
+      .seg-bad  { background: var(--bad); }
+      .seg-hatch {
+        background: repeating-linear-gradient(45deg, var(--hatch) 0 1.5px, var(--track) 1.5px 4.5px);
+      }
+      .legend {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-wrap: wrap; gap: 4px 14px;
+        font-size: 11.5px; color: var(--muted);
+      }
+      .legend li { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+      .legend .n { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+      .sw { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+      .sw-ok   { background: var(--ok); }
+      .sw-bad  { background: var(--bad); }
+      .sw-hatch { background: repeating-linear-gradient(45deg, var(--hatch) 0 1.5px, var(--track) 1.5px 4.5px); border: 1px solid var(--hatch); }
+      .sw-track { border: 1px solid var(--hatch); background: var(--track); }
+
+      .line { margin: 7px 0 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+      .line.listed { color: var(--ink); }
+      .line.eta { color: var(--ink); }
+      .line.mini { font-size: 12px; }
+      .line .why { color: var(--muted); }
+
+      /* Today's quota meter. Fill width is bodies/cap exactly; a stale counter
+         draws no fill at all (an unknown draw is not a small one). */
+      .quota { margin: 10px 0 0; }
+      .quota .meter {
+        height: 5px; border-radius: var(--radius-chip);
+        background: var(--track); overflow: hidden; margin-bottom: 4px;
+      }
+      .quota .meter i {
+        display: block; height: 100%; background: var(--accent);
+        border-radius: var(--radius-chip);
+      }
+      .quota .ql { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+      /* Monthly distribution, as an SVG column chart. Labels are the months'
+         own `YY/MM` keys (locale-neutral), the time-unknown column is labelled
+         with its name and never as a month, and the exact numbers are in the
+         details table. Hatched columns fill from a per-chart <pattern> (an SVG
+         fill cannot take a CSS gradient); the pattern line reads the token. */
+      .months { margin: 12px 0 0; }
+      .months svg { display: block; width: 100%; height: auto; }
+      .months .col-ok { fill: var(--ok); }
+      .months .m-hatchline { stroke: var(--hatch); stroke-width: 1.5; }
+      .months .axis { stroke: var(--line); stroke-width: 1; }
+      .months .m-label { fill: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+
+      /* Details disclosure: every ADR-032 fact that is not on the card face. */
+      .details { margin: 12px 0 0; border-top: 1px solid var(--line); padding-top: 8px; }
+      .details summary {
+        cursor: pointer; color: var(--muted); font-size: 12px; user-select: none;
+        width: fit-content;
+      }
+      .details summary:hover { color: var(--ink); }
+      .details .dr { display: flex; gap: 10px; margin: 6px 0 0; font-size: 12.5px; }
+      .details .dr .k { flex: 0 0 128px; color: var(--muted); font-size: 12px; }
+      .details .dr .v { flex: 1 1 auto; overflow-wrap: anywhere; }
+      .details table { border-collapse: collapse; margin: 8px 0 0; font-size: 12px; }
+      .details th, .details td { text-align: left; padding: 2px 16px 2px 0; font-variant-numeric: tabular-nums; }
+      .details th { border-bottom: 1px solid var(--line); font-weight: 600; color: var(--muted); }
+
+      /* Speed: a segmented control on native radios, one line per option with
+         its own numbers, the current preset checked from storage — never from
+         the last click (a write that did not land must not look like one). */
+      .speedctl { margin: 26px 0 0; }
+      .speedctl h2 { margin: 0 0 8px; font-size: 15.5px; }
+      .speed { position: relative; display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 999px; padding: 3px; background: var(--surface); gap: 2px; }
+      .speed label {
+        display: inline-flex; flex-direction: column; align-items: center; cursor: pointer;
+        border-radius: 999px; padding: 5px 14px 4px; text-align: center;
+      }
+      .speed label:hover { background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+      .speed input { position: absolute; opacity: 0; pointer-events: none; }
+      .speed .opt-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+      .speed .opt-what { font-size: 10.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .speed input:checked + label,
+      .speed input:focus-visible + label {
+        background: color-mix(in srgb, var(--accent) 13%, var(--surface));
+      }
+      .speed input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .speed-risk {
+        margin: 8px 0 0; font-size: 12px; color: var(--warn);
+        max-width: 78ch;
+      }
+      .speed-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+
+      .empty {
+        margin: 22px 0 0; padding: 18px; border: 1px dashed var(--hatch);
+        border-radius: var(--radius-card); font-size: 13px; color: var(--muted);
+        max-width: 76ch;
+      }
+      .error {
+        margin: 16px 0 0; padding: 10px 12px; font-weight: 600;
+        border-radius: var(--radius-chip); font-size: 13px;
+        background: color-mix(in srgb, var(--bad) 10%, var(--surface)); color: var(--bad);
+        white-space: pre-wrap;
+      }
+
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-chip); }
+
+      /* Motion: one transition family, gated. A repaint replaces nodes, so the
+         only motion on this page is state feedback (hover/focus/dismiss), which
+         reduced-motion simply renders without. */
+      @media (prefers-reduced-motion: no-preference) {
+        .alert .dismiss, .speed label, .about summary, .details summary { transition: background-color 160ms ease, color 160ms ease; }
+        .quota .meter i { transition: width 240ms ease; }
+      }
+
+      @media (max-width: 520px) {
+        body { padding: 18px 12px 40px; }
+        .cards { grid-template-columns: 1fr; }
+        .overview { gap: 6px 16px; }
+      }
     </style>
   </head>
   <body>
-    <h1 id="title"></h1>
-    <p class="subtitle" id="subtitle"></p>
-    <div id="banners"></div>
-    <div id="empty" class="empty" hidden></div>
-    <main id="sections"></main>
-    <div id="speed"></div>
-    <div id="error" class="error" hidden></div>
+    <div class="page">
+      <header class="hero">
+        <h1 id="title"></h1>
+        <p class="subtitle" id="subtitle"></p>
+        <details class="about" id="about">
+          <summary id="about-summary"></summary>
+          <p id="about-note"></p>
+        </details>
+        <div class="overview" id="overview" hidden></div>
+        <p class="health" id="health" hidden></p>
+        <div class="alerts" id="banners"></div>
+        <p class="meta" id="tickline" hidden></p>
+      </header>
+      <main id="sections" class="cards"></main>
+      <section class="speedctl" id="speed"></section>
+      <div id="empty" class="empty" hidden></div>
+      <div id="error" class="error" hidden></div>
+    </div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

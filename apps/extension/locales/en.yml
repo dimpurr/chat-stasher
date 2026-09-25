@@ -753,12 +753,19 @@ failure:
 # ---------------------------------------------------------------------------
 coverage:
   title: Backfill coverage
-  subtitle: >-
-    What the extension itself has recorded, as of {when}. This page reads this
-    browser's own progress records only — it sends nothing to any platform, and
-    the archive's own view is the "chat-stasher ui" command.
+  # W149 · One line under the title; the long read-only note moved behind the
+  # `about` disclosure. The two facts stay separated on purpose: what the
+  # numbers describe (this browser's own records) is not the same fact as what
+  # the page will never do (send anything to a platform).
+  subtitleShort: "This browser's own records, as of {when}."
+  about:
+    summary: About these numbers
+    note: >-
+      This page reads this browser's own progress records only: it sends
+      nothing to any chat platform. The archive's own view is the
+      "chat-stasher ui" command.
   empty: >-
-    No progress record exists yet. That is not "nothing has been archived" — it
+    No progress record exists yet. That is not "nothing has been archived": it
     means this browser has never backfilled a platform, which happens the first
     time you open one of the supported platforms with the backfill switch on.
   # ADR-032 §4 · The state, in plain words. `in-progress` deliberately has no
@@ -786,16 +793,16 @@ coverage:
   counts:
     fromHeader: >-
       The stored debt list could not be read, so the archived and owed numbers
-      below are the ones the progress header recorded — a convenience copy, not
-      the authority. The list itself is untouched.
+      are the ones the progress header recorded: a convenience copy, not the
+      authority. The list itself is untouched.
   enum:
-    complete: "listed: {listed} — the list has been read to its end"
+    complete: "listed: {listed}, and the list has been read to its end"
     inProgress: "still listing: ≥ {listed} so far"
     # 🔴 W113b · `truncated` is an **unfinished** list like `inProgress`, so its number carries the `≥` too
     #    (ADR-032 §1: any list that was not read to its end carries the `≥`). The words said "NOT read to
     #    its end" while the number was printed
     #    bare, which is exactly the shape — a lower bound drawn as a total — the rule exists to forbid.
-    truncated: "listed: ≥ {listed} so far, and the list was NOT read to its end — {why}"
+    truncated: "listed: ≥ {listed} so far, and the list was NOT read to its end: {why}"
     why:
       cursorMissing: the platform's answer carried no continuation cursor, so only the page we had was listed
       hasMoreMissing: the platform's answer said nothing about whether another page exists, so we stopped rather than assume
@@ -842,9 +849,9 @@ coverage:
       have passed)
     eta: >-
       estimate: about {days} day(s) to finish the {pending} still owed at the
-      {basis} — an estimate, not a promise: it assumes the leg keeps fetching
+      {basis}; an estimate, not a promise: it assumes the leg keeps fetching
     etaUnknown: >-
-      estimate: none — there is no rate to divide by yet, because no quota is in
+      estimate: none. There is no rate to divide by yet, because no quota is in
       force and no measured rate is available
     etaNothingOwed: "estimate: nothing is owed here, so there is nothing to finish"
     # 🔴 W113b · A scope with no registered target runs nothing, so there is no estimate to give — and the
@@ -852,40 +859,92 @@ coverage:
     #    have) or name a different cause (no rate to divide by yet). A reader who saw this row next to a row
     #    with an ETA must be able to tell which of the two is going to finish.
     etaUnregistered: >-
-      estimate: none — nothing runs for this platform here, so the {pending} still owed will not be
-      fetched until it is registered again
+      estimate: none: nothing runs for this platform here, so the {pending}
+      still owed will not be fetched until it is registered again
     # 🔴 Under a day the sentence switches units. "about 0.0 day(s)" is arithmetically right and
     #    useless: the reader cannot tell it from "no time at all".
     etaHours: >-
-      estimate: about {hours} hour(s) of fetching left for the {pending} still owed at the {basis} —
-      an estimate, not a promise: it assumes the leg keeps fetching
+      estimate: about {hours} hour(s) of fetching left for the {pending} still owed at the
+      {basis}; an estimate, not a promise: it assumes the leg keeps fetching
+    # The card face's ETAs: the same wording rules as the sentences that follow
+    # the speed note (labelled estimate, the rate named), in one line. The long
+    # twin above stays in the details disclosure with its "not a promise" clause.
+    etaShort:
+      days: "estimate: about {days} day(s) to finish the {pending} still owed (at the {basis})"
+      hours: "estimate: about {hours} hour(s) of fetching left for the {pending} still owed (at the {basis})"
+      none: "estimate: none yet"
     basisMeasured: rate measured today
     basisCap: daily limit
     neverFetched: no conversation body has been fetched yet
     lastBody: "last conversation fetched {minutes} min ago"
+  # The quota meter's one line under the ETA. A counter from another day is not
+  # zero and is not today's draw; the sentence says which of the two it is.
+  quota:
+    today: "today: {count} of {cap} fetched"
+    stale: "today's counter belongs to another day, so today's draw is unknown"
+    none: "no daily limit for this plan"
   # 🔴 The popup's summary card. Counts and a state word only — never a percentage and never an estimate:
   # those need the caveats that live on the page, and a two-line card cannot carry them.
+  # W149 · The state word moved out of the sentence into the chip beside it (the
+  # sentence is plain text and the chip is its own element, so a screen reader
+  # hears both, and the card no longer prints the word twice next to itself).
   card:
     open: Open the coverage page
     title: Coverage
-    line: "{platform} · {scope} · stored {archived}, owed {pending} — {state}"
-    running: running
+    line: "{platform} ({scope}): stored {archived}, owed {pending}"
+  # One dismissible alert per defect that can be acted on. Never more than the
+  # facts: the count, and the one thing that will not happen by itself.
+  failuresShort: "{count} fetched but not stored. They will not be retried automatically."
+  # The dismiss on an alert. Hides the callout for this page session only; the
+  # page writes nothing when it is pressed.
+  dismiss: Dismiss
+  # The composition bar's segment names, for the legend row under it. A segment
+  # with no count is not drawn and not named (coverage-charts drops it), so these
+  # label only what the reader can actually see.
+  bar:
+    failed: fetched but not stored
+    remainder: the platform's total says more exist beyond the ones listed so far
   months:
     title: When the conversations are from
     note: >-
       By the time the platform's own list gave for each conversation, counted in
       this browser's calendar. Months the platform gave no time for are counted
-      separately below and are NOT spread across the months — an unrecorded time
-      is not a month.
+      separately and are NOT spread across the months: an unrecorded time is
+      not a month.
     archived: stored
     pending: owed
     unknownTime: >-
-      time unknown: {archived} stored and {pending} owed — the platform's list
+      time unknown: {archived} stored and {pending} owed: the platform's list
       gave no time for these, so they are not in any month above
     none: >-
       No conversation here has a recorded time yet, so there is no monthly
       distribution to show. It is not an empty history: the times simply have not
       been recorded.
+  # The one health line under the three overview numbers. Only the rows' states,
+  # and every branch either is a clean bill or names the platforms it is not.
+  health:
+    ok: "all {total} platform leg(s) moving or finished"
+    stopped: "{count} stopped: {list}. Each card names the reason and the fix."
+    waiting: >-
+      {count} waiting for an open page: {list}. Open one of those pages and it
+      carries on by itself.
+  # The status chip: one word per state, always beside a card (or a popup row)
+  # that says the rest.
+  chip:
+    running: running
+    waiting: waiting
+    cappedToday: done for today
+    stopped: stopped
+    done: done
+    off: switch off
+    hostDown: host down
+    unregistered: unregistered
+  details:
+    summary: Details
+  # Label column entries for the details disclosure rows.
+  stateLabel: state
+  speedLabel: speed and estimate
+  countsLabel: counts
   preset:
     title: Speed
     gentle: Gentle (default)
@@ -893,7 +952,7 @@ coverage:
     faster: Faster
     risky: >-
       Faster raises how much is fetched per day and per wake. It does not change
-      how close together two requests are, and every gap keeps its irregularity —
+      how close together two requests are, and every gap keeps its irregularity;
       but it is the one setting here that asks more of the platform, which is why
       it is not the default.
     failed: "The speed setting could not be saved ({detail}), so nothing changed."

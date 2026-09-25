@@ -480,11 +480,14 @@ failure:
 # ---------------------------------------------------------------------------
 coverage:
   title: 回溯覆盖情况
-  subtitle: >-
-    以下是扩展自己记录下来的内容，读取时间 {when}。这个页面只读本浏览器自己的进度记录——
-    它不向任何平台发请求；归档自己的视图是 `chat-stasher ui` 命令。
+  subtitleShort: "本浏览器自己的记录，读取时间 {when}。"
+  about:
+    summary: 关于这些数字
+    note: >-
+      本页只读本浏览器自己的进度记录：不向任何平台发送任何请求。归档自身的视图是
+      "chat-stasher ui" 命令。
   empty: >-
-    还没有任何进度记录。这不等于「什么都没归档」——它的意思是这个浏览器还没有回溯过任何平台，
+    还没有任何进度记录。这不等于「什么都没归档」：它的意思是这个浏览器还没有回溯过任何平台，
     第一次在开关打开的情况下打开某个受支持平台时才会出现。
   state:
     off: >-
@@ -502,14 +505,14 @@ coverage:
     done: 这个平台列出来的对话都已经存下了。
   counts:
     fromHeader: >-
-      存欠账的那份清单读不出来，所以下面的「已存」「待存」是进度头里记下的数字——
+      存欠账的那份清单读不出来，所以「已存」「待存」是进度头里记下的数字：
       那是方便读的副本，不是权威。清单本身没有被改动。
   enum:
-    complete: "已列出：{listed} —— 这个列表已经读到末尾"
+    complete: "已列出：{listed}，这个列表已经读到末尾"
     inProgress: "仍在列出：目前 ≥ {listed}"
     # 🔴 W113b · truncated 和 inProgress 一样是「没列完」，所以数字也要带 ≥（ADR-032 §1：未列完时必须带 ≥）。
     #    原文说「没有读到末尾」而数字却是裸的——那正是「把下限画成总数」的形状。
-    truncated: "已列出：目前 ≥ {listed}，并且这个列表【没有】读到末尾 —— {why}"
+    truncated: "已列出：目前 ≥ {listed}，并且这个列表【没有】读到末尾：{why}"
     why:
       cursorMissing: 平台的回复里没有带翻页游标，所以只列出了拿到的那一页
       hasMoreMissing: 平台的回复没有说还有没有下一页，所以我们停下，而不是去假设
@@ -546,49 +549,80 @@ coverage:
     measured: "今天到目前为止实测：约 {rate}/天（{bodies} 条，用了 {hours} 小时）"
     measuredUnknown: "实测速度：今天过去的时间还不够发这个数（今天过了 {hours} 小时）"
     eta: >-
-      估算：约需 {days} 天跑完仍欠的 {pending} 条（按{basis}）——这是估算，不是承诺：
+      估算：约需 {days} 天跑完仍欠的 {pending} 条（按{basis}）；这是估算，不是承诺：
       它假设这条腿会一直取下去
     etaUnknown: >-
-      估算：没有——还没有可以拿来除的速度，因为既没有生效的额度，也没有可用的实测速度
+      估算：没有。还没有可以拿来除的速度：既没有生效的额度，也没有可用的实测速度
     etaNothingOwed: 估算：这里没有欠账，也就没有「跑完」可言
     # 🔴 W113b · 没有注册目标的 scope 什么都不跑，所以没有估算可给。这句话必须点明原因：
     # 旁边两句，一句是「有速度可除」，另一句是「还没有速度可除」——读者要能分辨哪一行真的会跑完。
     etaUnregistered: >-
-      估算：没有——这里没有为这个平台跑任何东西，仍欠的 {pending} 条要等它重新注册之后才会被取
+      估算：没有：这里没有为这个平台跑任何东西，仍欠的 {pending} 条要等它重新注册之后才会被取
     etaHours: >-
-      估算：还需 {hours} 小时才能跑完仍欠的 {pending} 条（按{basis}）——这是估算，不是承诺：
+      估算：还需 {hours} 小时才能跑完仍欠的 {pending} 条（按{basis}）；这是估算，不是承诺：
       它假设这条腿会一直取下去
+    etaShort:
+      days: "估算：约 {days} 天跑完仍欠的 {pending} 条（按{basis}）"
+      hours: "估算：约 {hours} 小时跑完仍欠的 {pending} 条（按{basis}）"
+      none: "估算：还没有"
     basisMeasured: 今天实测的速度
     basisCap: 每日上限
     neverFetched: 还没有取过任何正文
     lastBody: "最近一次取正文在 {minutes} 分钟前"
+  quota:
+    today: "今天：已取 {count}/{cap}"
+    stale: "今天的计数器属于另一个日期，所以今天的用量未知"
+    none: "这个计划没有每日上限"
   # 🔴 弹窗里的摘要卡。只有计数和状态词——不出现百分比，也不出现估算：
   # 那些需要页面上的说明，两行卡片承载不了。
   card:
     open: 打开覆盖页
     title: 覆盖情况
-    line: "{platform} · {scope} · 已存 {archived}、欠 {pending} —— {state}"
-    running: 正在跑
+    line: "{platform}（{scope}）：已存 {archived}，欠 {pending}"
+  failuresShort: "{count} 条取到过正文但没有存下。它们不会被自动重试。"
+  dismiss: 暂不显示
+  bar:
+    failed: 取到过正文但没存下
+    remainder: 平台自报的总数里还有尚未列出的部分
   months:
     title: 对话是什么时候的
     note: >-
-      按平台自己的列表给每条对话的时间统计，用的是本浏览器的日历。平台没有给出时间的月份单独计在
-      下面，【不会】摊到上面的月份里——没有记到时间不等于属于某个月。
+      按平台自己的列表给每条对话的时间统计，用的是本浏览器的日历。平台没有给出时间的那些
+      单独计在下面，【不会】摊到月份里：没有记到时间不等于属于某个月。
     archived: 已存
     pending: 待存
     unknownTime: >-
-      时间未知：已存 {archived} 条、待存 {pending} 条——平台的列表没有给出它们的时间，
+      时间未知：已存 {archived} 条、待存 {pending} 条：平台的列表没有给出它们的时间，
       所以它们不在上面任何一个月里
     none: >-
-      这里还没有任何一条对话记下了时间，所以没有月度分布可看。这不是「历史是空的」——
+      这里还没有任何一条对话记下了时间，所以没有月度分布可看。这不是「历史是空的」：
       只是时间还没有被记录。
+  health:
+    ok: "{total} 条都在动或已完成"
+    stopped: "{count} 条已停止：{list}。每张卡片都写了原因和对应处理。"
+    waiting: >-
+      {count} 条在等一个打开的平台页面：{list}。打开其中一页，它就会自己继续。
+  chip:
+    running: 运行中
+    waiting: 等待中
+    cappedToday: 今日已满
+    stopped: 已停止
+    done: 已完成
+    off: 开关关闭
+    hostDown: 主机不可达
+    unregistered: 未注册
+  details:
+    summary: 详情
+  stateLabel: 状态
+  speedLabel: 速度与估算
+  countsLabel: 计数来源
   preset:
     title: 速度
     gentle: 温和（默认）
     standard: 标准
     faster: 加速
     risky: >-
-      加速会抬高每天、每次唤醒取多少。它不改变两个请求之间靠得多近，每一段间隔也仍然是不规则的——
+      加速会抬高每天、每次唤醒取多少。它不改变两个请求之间靠得多近，每一段间隔也仍然是不规则的；
       但它确实是这里唯一一个对平台要求更高的设置，所以它不是默认。
     failed: "速度设置没能保存（{detail}），所以什么都没有变。"
     what: "每天最多 {cap} 条，每次唤醒 {tick} 条"
