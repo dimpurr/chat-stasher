@@ -88,12 +88,21 @@ automation creates one.
    Each package version is checked first and an existing version is skipped,
    so a failed run can be retried from the Actions `workflow_dispatch` control
    on the same tag. An rc publishes every npm package under the `next`
-   dist-tag and a stable release under `latest`; the tag shape decides which,
-   so an rc never becomes what `npm install chat-stasher` resolves.
+   dist-tag and a stable release under `latest`; the tag shape decides which
+   (`scripts/release-tag-gate.sh`).
    `dry_run` defaults to true and runs `npm publish --dry-run` for the assembled
    npm packages and `cargo publish --dry-run --locked`; set it to false to
    publish. The dry-run flag covers registry publication; the normal release
    and Homebrew workflow steps still run.
+
+   **Passing `--tag next` is not enough to keep an rc out of `latest`**, and
+   this document claimed it was until v0.5.0-rc.2 disproved it. npm sets
+   `latest` on a package's **first** publish in addition to the tag asked for,
+   so on a package with no stable release yet the candidate becomes the version
+   a plain `npm install` resolves. The publish step therefore repairs the tag
+   after publishing — `scripts/npm-latest-tag.sh` re-points `latest` at the
+   newest stable when one exists, and writes a note to the run's job summary
+   when none does. See "Registry credentials" and step 7.
 7. **Verify the published release** before telling anyone it exists:
    - the Release is marked **latest**, and the seven uploaded assets are exactly
      `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64`,
@@ -111,6 +120,32 @@ automation creates one.
      uploading it, so this is the same check made by the owner, on the one
      platform the owner has to hand — not the first time any of these binaries
      was started.
+   - **npm's `latest` names the newest stable version**, for all six packages —
+     with the one exception set out under the block below: a package whose first
+     stable release has not happened yet has no stable version to point `latest`
+     at, and naming the candidate is expected there. This is the check the
+     workflow now makes for itself, and it is still worth making by hand because
+     it is the one registry state the workflow cannot undo once written:
+     ```sh
+     # Stable release: every one must print the version just released.
+     # Release candidate: each package must print its newest *stable* version.
+     # The one exception is a package with no stable release yet: npm points
+     # `latest` at its first publish, so there it prints the rc until the
+     # first stable release moves it.
+     for p in chat-stasher @dimpurr/chat-stasher-darwin-arm64 \
+              @dimpurr/chat-stasher-darwin-x64 @dimpurr/chat-stasher-linux-arm64 \
+              @dimpurr/chat-stasher-linux-x64 @dimpurr/chat-stasher-win32-x64; do
+       printf '%-42s %s\n' "$p" "$(npm view "$p" dist-tags.latest)"
+     done
+     ```
+     A package whose first stable release has not happened yet has no stable
+     version to point `latest` at; the job summary says so in as many words, and
+     `latest` naming the candidate is expected there and temporary. Everywhere
+     else `latest` must name the newest stable version — on an rc that means a
+     package which already has a stable release prints that stable, not the
+     candidate. What is *not* acceptable on any later release is `latest` still
+     naming an older version, whether that older version is a candidate or a
+     stable, while a newer stable exists.
 8. **Fill the Homebrew `sha256` values** from that `SHA256SUMS` in
    `homebrew/chat-stasher.rb`. Step 4 set the URLs; this step makes them
    checksum-pinned.
@@ -305,6 +340,47 @@ npm packages are published in platform-first order and each publish carries
 the exact package version and skips one that is already present, while
 continuing with later packages.
 
+### Two things a credential does not cover
+
+Both of these are registry behaviour the workflow has to work around after it
+has authenticated successfully. Neither is a credentials problem, and both cost
+a release before they were written down.
+
+**crates.io refuses a request that does not identify itself.** Its API enforces
+a data-access policy (<https://crates.io/data-access>) and answers `403` to a
+request whose `User-Agent` names only the HTTP client library — which is
+exactly what `curl` sends by default. The version lookup that decides whether
+the crate is already published was such a request, so it got a `403` instead of
+a `404` and stopped the publish of v0.5.0-rc.2 (run 36137101318) with
+`crates.io version lookup returned HTTP 403`. The lookup is now
+`scripts/crates-version-state.sh`, which sends
+`User-Agent: chat-stasher-release (https://github.com/dimpurr/chat-stasher)` —
+the "identify your bot, and include contact information" shape the policy asks
+for — and which treats only `200` and `404` as answers. Any other status,
+including `403`, `429` and every `5xx`, means the question was **not** answered
+and the run stops. That distinction is the point: a `403` read as "not
+published yet" is a publish, and publishing over an existing version cannot be
+undone.
+
+**npm sets `latest` on a package's first publish.** `npm publish --tag next`
+sets `next`, and also sets `latest` — the npm CLI docs say it sets `latest` only
+"unless the `--tag` option is used", and on a first publish that is not what the
+registry does. `latest` is what `npm install chat-stasher` resolves, so a
+candidate published this way becomes the version a plain install gets. Measured
+on v0.5.0-rc.2 (2026-09-25): all six packages came back with
+`latest = 0.5.0-rc.2` and exactly one version each. The publish step therefore
+runs `scripts/npm-latest-tag.sh` afterwards, whose rule is the invariant
+**`latest` must name the newest published stable version**: it re-points
+`latest` at that version when one exists (`npm dist-tag add <pkg>@<version>
+latest`), and when none exists it writes a notice to the run's job summary
+saying that `latest` temporarily names the candidate and that the first stable
+release will correct it.
+
+Re-pointing `latest` needs a credential that may write dist-tags, so the repair
+runs inside the publish step, where the npm credential has already been
+resolved — not as a separate step that would have to resolve it a second time.
+A `dry_run` publishes nothing and therefore repairs nothing.
+
 ## What the workflow checks
 
 A rule here is worth writing down only if something can tell when it is broken,
@@ -374,6 +450,29 @@ thing it does not.
   the tag shape decides which, and the publish step passes it through rather
   than choosing. A `workflow_dispatch` run can dry-run both registries or retry
   publication.
+- **The crate's version lookup identifies itself to crates.io.** The lookup is
+  `scripts/crates-version-state.sh`, which sends a `User-Agent` naming this
+  project and its URL, and which accepts only `200` ("already published") and
+  `404` ("not published yet") as answers. Every other status — a `403` from
+  crates.io's data-access policy, a `429`, a `5xx`, a transport failure — exits
+  `3`, which means *the question was not answered*: the step stops rather than
+  proceeding, because the branch that proceeds publishes and a version cannot
+  be unpublished. The gate is a script so this can be exercised without a
+  registry: `scripts/selftest-crates-version-state.sh` drives it with `curl`
+  shimmed, including the recorded `403` body, and fails if the request stops
+  carrying a descriptive `User-Agent` or starts using `curl -f`.
+- **npm's `latest` dist-tag names the newest stable version.**
+  `scripts/npm-latest-tag.sh` runs after the npm publishes and enforces one
+  invariant: `latest` must name the newest *published stable* version. If such a
+  version exists it re-points `latest` at it — from a candidate, from an older
+  stable, or from no tag at all; if none does, it writes a notice to the job
+  summary instead, a notice rather than a failure, because on a package's first
+  release there is genuinely nowhere else to point it.
+  `scripts/selftest-npm-latest-tag.sh` drives the same script against a shimmed
+  `npm`, including the three ways this can be wrong in the *wrong direction*:
+  re-pointing at a lexicographically-"larger" older version, re-pointing when
+  `latest` was already correct, and leaving an older stable in place because the
+  test asked only whether `latest` was a prerelease.
 - **Development versions are refused.** Registry steps reject any version
   containing `-dev`; the tag gate also accepts only `vX.Y.Z` and `vX.Y.Z-rc.N`.
 

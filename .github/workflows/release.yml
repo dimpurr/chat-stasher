@@ -763,6 +763,14 @@ jobs:
   #    job reads the answer off `needs.gates.outputs.npm_tag` instead of
   #    re-deriving it from the tag string.
   #
+  #    🔴 Passing `--tag` is NOT sufficient, which this comment claimed until
+  #    v0.5.0-rc.2 proved otherwise. On a package's FIRST publish npm sets
+  #    `latest` as well as the requested tag, so a candidate became what a plain
+  #    `npm install chat-stasher` resolved. The publish step passes `--tag` and
+  #    then repairs `latest` (scripts/npm-latest-tag.sh, below); neither half is
+  #    enough alone, and the repair is what makes the invariant hold rather than
+  #    the flag.
+  #
   # 🔴 Each registry publishes with whichever credential this run has, and the
   #    token secrets are OPTIONAL. RELEASING.md has the owner remove each one
   #    after trusted publishing is configured; a step that required the secret
@@ -950,6 +958,38 @@ jobs:
           done
           publish_if_missing npm-packages/chat-stasher
 
+          # 🔴 What the publishes above cannot do for themselves, and why the
+          #    `--tag` they pass is necessary but not sufficient.
+          #
+          #    npm sets `latest` on a package's FIRST publish even when `--tag`
+          #    names another tag — the docs say it does not, and the registry
+          #    says otherwise. `latest` is what `npm install chat-stasher`
+          #    resolves when the user names no version, so an rc published that
+          #    way becomes the version a plain install gets, which is the
+          #    opposite of what a candidate is for. Measured on v0.5.0-rc.2
+          #    (run 36137101318): all six packages came back with
+          #    `latest = 0.5.0-rc.2`.
+          #
+          #    The repair runs on every release, not only on an rc, because its
+          #    rule is an invariant rather than a step in a sequence: `latest`
+          #    must name the newest published stable version. On a stable release
+          #    the publish above has just made that true, so it finds `latest`
+          #    correct and changes nothing; it costs one read per package and
+          #    cannot undo the publish. It is a script so that the decision —
+          #    re-point at the newest stable, or say in the summary that there is
+          #    none yet — is the thing scripts/selftest-npm-latest-tag.sh drives.
+          #
+          #    The dry-run path returned above: a dry run published nothing, so
+          #    there is no tag for it to have left wrong.
+          repair_args=""
+          for package_dir in npm-packages/@dimpurr/*; do
+            repair_args="${repair_args} --package-dir ${package_dir}"
+          done
+          # Deliberately unquoted: repair_args is an assembled word list of
+          # paths this step built itself, one of which is `npm-packages/@dimpurr/…`.
+          # shellcheck disable=SC2086
+          bash scripts/npm-latest-tag.sh $repair_args --package-dir npm-packages/chat-stasher
+
       # crates.io trusted publishing: exchange the run's OIDC token for a
       # short-lived registry token, which the action also revokes in its post
       # step. It runs only when no bootstrap secret is configured, because a
@@ -998,11 +1038,38 @@ jobs:
           fi
           export CARGO_REGISTRY_TOKEN
 
-          status="$(curl -sS -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/chat-stasher/${VERSION}")"
-          case "$status" in
-            200) echo "chat-stasher ${VERSION} already exists; skipping." ;;
-            404) cargo publish --locked -p chat-stasher ;;
-            *) echo "error: crates.io version lookup returned HTTP ${status}" >&2; exit 1 ;;
+          # 🔴 The lookup is a script, not a line here, for two reasons that are
+          #    the same reason: the request has to identify itself, and the rule
+          #    about which answer means what has to be testable.
+          #
+          #    crates.io enforces a data-access policy (https://crates.io/
+          #    data-access) and refuses a request whose User-Agent names only
+          #    the HTTP client library. `curl` sends `curl/<version>` on its
+          #    own, which is that case — so the version this replaced got a
+          #    HTTP 403, and v0.5.0-rc.2 lost its crates.io publish to it (run
+          #    36137101318). The script sends a User-Agent that identifies this
+          #    project and carries its URL.
+          #
+          #    Its exit code is the second half. 0 means the question was
+          #    answered either way; 3 means it was NOT answered — a 403, a 429,
+          #    a 5xx, a transport failure — in which case this line stops the
+          #    step rather than letting anything below read as "not published".
+          #    "We do not know" must never become "publish it": that is how the
+          #    same bug destroyed a release in another project
+          #    (p-diogo/totalreclaw PR #632).
+          state="$(bash scripts/crates-version-state.sh --crate chat-stasher --version "$VERSION")"
+          case "$state" in
+            state=published) echo "chat-stasher ${VERSION} already exists; skipping." ;;
+            state=absent) cargo publish --locked -p chat-stasher ;;
+            *)
+              {
+                echo "error: crates-version-state.sh answered '${state}', which is"
+                echo "       neither published nor absent, so whether"
+                echo "       chat-stasher ${VERSION} exists is UNKNOWN. Refusing to guess:"
+                echo "       publishing over an existing version cannot be undone."
+              } >&2
+              exit 1
+              ;;
           esac
 
 # Each registry publishes with the `release` environment's token secret when it

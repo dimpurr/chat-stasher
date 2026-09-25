@@ -382,6 +382,17 @@ jobs:
       - name: Static binary gate self-test
         run: bash scripts/selftest-check-static-binary.sh
 
+      # The third gate release.yml calls, and the one whose absence cost
+      # v0.5.0-rc.2 its crates.io publish. Its probes shim `curl`, so the
+      # statuses that matter — including the recorded 403 from crates.io's
+      # data-access policy — are exercised with no network. The probe that
+      # matters most is the 403: exit must be 3 with empty stdout, because the
+      # branch that reads a 403 as "not published yet" is the branch that
+      # publishes. The argv the shim records is also asserted, which is what
+      # pins the descriptive User-Agent and the absence of `curl -f`.
+      - name: crates.io version lookup self-test
+        run: bash scripts/selftest-crates-version-state.sh
+
       # CONTRIBUTING.md lists this as a local check, so CI has to run it too, and
       # it belongs in this job rather than the extension one: it exercises the
       # reload script against a temp repository and a stub build command, so it
@@ -449,6 +460,25 @@ jobs:
       # up by the glob rather than by an edit to this line.
       - name: npm launcher and packaging
         run: node --test npm/test/*.test.mjs
+
+      # The other registry step release.yml now calls, and it is here rather
+      # than with the workflow gates above for one reason: it reads a
+      # package.json with `node`, so it needs the Node this job does not install
+      # until the step above. GitHub runs a job's steps in order, so the version
+      # the runner happens to preinstall would be what it used otherwise, and
+      # the pinned 18 is the only one this job promises.
+      #
+      # Its probes shim `npm`, so the decision — re-point `latest` at the newest
+      # stable, or write the notice — is exercised against fixtures rather than
+      # the real registry, and no dist-tag anywhere is modified. Three of its
+      # probes exist to catch an answer that is wrong in the direction that
+      # looks like a successful repair: a lexicographic version comparison
+      # (which re-points `latest` backwards, 0.9.0 over 0.10.0), a re-point when
+      # `latest` was already correct, and — the one that got through — a stable
+      # `latest` that is not the newest stable, which a test asking only "is
+      # `latest` a prerelease?" reports as correct and leaves standing.
+      - name: npm latest dist-tag self-test
+        run: bash scripts/selftest-npm-latest-tag.sh
 
   extension:
     # COVERAGE HOLE (deliberate): the extension is built and tested on Linux
