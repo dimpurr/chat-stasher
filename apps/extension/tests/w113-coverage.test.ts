@@ -110,8 +110,9 @@ describe('W113 · item 1 — how much is listed, and whether the list is finishe
   });
 
   it('🔴 W113b · a truncated list carries the `≥` as well, because it too was not read to its end', () => {
-    // ADR-032 §1 is "未列完时必须带 ≥", and `truncated` is exactly that: the words already said the list was
-    // not read to its end while the number was printed bare, which is a lower bound drawn as a total.
+    // ADR-032 §1 requires the `≥` on every list that was not read to its end, and `truncated` is exactly
+    // that: the words already said the list stopped short while the number was printed bare, which is a
+    // lower bound drawn as a total.
     const row = rowOf(input({
       scopes: [scope({ header: header({ enumCursor: { offset: 40, complete: true, truncated: 'cursor-missing' } }) })],
     }));

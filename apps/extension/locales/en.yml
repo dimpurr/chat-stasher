@@ -771,7 +771,8 @@ coverage:
     complete: "listed: {listed} — the list has been read to its end"
     inProgress: "still listing: ≥ {listed} so far"
     # 🔴 W113b · `truncated` is an **unfinished** list like `inProgress`, so its number carries the `≥` too
-    #    (ADR-032 §1: 未列完时必须带 ≥). The words said "NOT read to its end" while the number was printed
+    #    (ADR-032 §1: any list that was not read to its end carries the `≥`). The words said "NOT read to
+    #    its end" while the number was printed
     #    bare, which is exactly the shape — a lower bound drawn as a total — the rule exists to forbid.
     truncated: "listed: ≥ {listed} so far, and the list was NOT read to its end — {why}"
     why:
