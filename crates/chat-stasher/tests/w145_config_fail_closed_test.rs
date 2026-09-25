@@ -318,7 +318,12 @@ fn doctor_json_marks_the_checks_it_did_not_perform() {
         !not_checked.is_empty(),
         "the skipped checks must be listed: {v}"
     );
-    for section in ["reclaim", "cache", "native_host"] {
+    // `body_cache` (D9) belongs in this list for the same reason reclaim and
+    // cache are in it: its root and its quota both come out of the config, so a
+    // report whose config could not be read has nothing to measure. Reporting it
+    // as a finding — even an "unresolved" one — would be a statement about a
+    // cache root nobody chose.
+    for section in ["reclaim", "cache", "body_cache", "native_host"] {
         assert_eq!(
             v[section]["checked"],
             serde_json::json!(false),
