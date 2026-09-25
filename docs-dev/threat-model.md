@@ -43,10 +43,10 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:933-942`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:726-776`).
+   (`crates/chat-stasher/src/main.rs:729-779`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:303-340`).
+   (`crates/chat-stasher/src/main.rs:306-343`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary, and it is also the only step that can involve a network.
@@ -82,10 +82,9 @@ build you did not compile yourself, or a dependency (see
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
 much you produced each time, and therefore roughly when you were and were not
-having conversations. If you archive on a schedule
-(`crates/chat-stasher/src/main.rs:235-302`), the schedule itself is visible to
-them as a pattern of writes. If you archive manually, the write times are a
-usage log.
+having conversations. If you archive on a schedule, the schedule itself is
+visible to them as a pattern of writes. If you archive manually, the write
+times are a usage log.
 
 We do not pad object sizes, batch on a fixed cadence, or add cover traffic. If
 your threat model includes "the storage provider must not learn when I use an
@@ -129,7 +128,7 @@ Concretely, five separate plaintext exposures:
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:303-307`).
+   (`crates/chat-stasher/src/main.rs:306-310`).
 
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
@@ -141,7 +140,7 @@ Concretely, five separate plaintext exposures:
 
 5. **A directory you exported to.** `chat-stasher export --out <dir>` writes the
    archived sessions it selected back out **decrypted**, one file per session,
-   into a directory you name (`crates/chat-stasher/src/main.rs:608-688`). Unlike
+   into a directory you name (`crates/chat-stasher/src/main.rs:611-691`). Unlike
    the stage, nothing here is sealed and nothing moves it on: the files stay
    exactly as written until you delete them, and the command keeps no record of
    where they went. Name a directory you would be willing to lose, and delete it
@@ -496,12 +495,12 @@ machine:
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
   asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2010-2056`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:367,444-445`).
+  (`crates/chat-stasher/src/main.rs:370,447-448`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:778-810`).
+  the old inode (`crates/chat-stasher/src/main.rs:781-813`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -519,9 +518,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:5974-6070`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6010-6106`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:5946-5953`).
+  (`crates/chat-stasher/src/main.rs:5982-5989`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -532,7 +531,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:4329-4385`).
+  as many words (`crates/chat-stasher/src/main.rs:4335-4391`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -574,15 +573,15 @@ a real limitation of the current code.
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
    `activity-index`, `machine-declare`, `machine-label`, `overview`
-  (`crates/chat-stasher/src/main.rs:148-1135`); **a command that puts sessions
+   (`crates/chat-stasher/src/main.rs:148-1138`); **a command that puts sessions
    back into a harness's own directories does not exist**. There are two
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:399-401,6306-6445`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:402-404,6342-6481`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
-   **plaintext** (`crates/chat-stasher/src/main.rs:608-688`) — see exposure 5
+   **plaintext** (`crates/chat-stasher/src/main.rs:611-691`) — see exposure 5
    above. Bulk retrieval of the sessions a time window selects is therefore
    possible; what remains missing is restoring them into a harness's own
    directories.
@@ -590,7 +589,7 @@ a real limitation of the current code.
 5. **Search is metadata-only.** `search` walks snapshot/index/tree objects and
    never fetches or decrypts a **session shard** — the conversation payload;
    full-text matching is not implemented
-   (`crates/chat-stasher/src/main.rs:546-576`). One qualification, because the
+   (`crates/chat-stasher/src/main.rs:549-579`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
@@ -606,7 +605,7 @@ a real limitation of the current code.
    It also distinguishes "nothing matched" from "could not finish reading"
    **and** from "read it all but could not place every session in time", which
    is the same unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:572-576`).
+   (`crates/chat-stasher/src/main.rs:575-579`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -731,5 +730,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:456-494`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:459-497`) rather than assuming
    the archive is intact.

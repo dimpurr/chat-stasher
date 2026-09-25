@@ -132,6 +132,8 @@ chat-stasher schedule --stage ~/stash/chat-stasher/stage \
 
 `schedule` renders the timer, but it never installs it. It prints the exact command that does, which on macOS is a `launchctl bootstrap …` line. Run that command. On macOS, `chat-stasher schedule install` runs that last step for you; on Linux, add `--format systemd`.
 
+`chat-stasher setup --install-schedule` does that same install as the last step of the wizard, and says when the timer will next run: the scheduler's own answer where it has one — the next elapse systemd reports for the timer, or the local time a launchd calendar slot resolves to — and otherwise why there is no time to report, which is the case for a launchd interval job and for a timer systemd has not armed. A cadence is never printed as a timestamp.
+
 **4. Check on it any time.**
 
 ```sh

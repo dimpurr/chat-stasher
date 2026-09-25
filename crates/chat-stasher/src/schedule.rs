@@ -5,6 +5,7 @@
 //! side-effect free; the launchd install helpers are explicit and testable.
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Datelike, Days, Local, LocalResult, NaiveDate, TimeZone};
 use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -571,6 +572,365 @@ pub fn uninstall_launchd_agents(
     Ok(removed)
 }
 
+pub fn install_systemd_units(
+    home: &Path,
+    files: &[TemplateFile],
+    systemctl: &Path,
+) -> Result<Vec<InstallResult>> {
+    let units = home.join(".config/systemd/user");
+    fs::create_dir_all(&units)
+        .with_context(|| format!("create systemd user unit directory {}", units.display()))?;
+    let mut changed = false;
+    let mut timers = Vec::new();
+    for file in files {
+        let path = units.join(&file.name);
+        let same = fs::read(&path)
+            .map(|bytes| bytes == file.content.as_bytes())
+            .unwrap_or(false); // reason: absent or unreadable units must be rewritten before they can be enabled
+        if !same {
+            write_atomic(&path, file.content.as_bytes())
+                .with_context(|| format!("write systemd unit {}", path.display()))?;
+            changed = true;
+        }
+        if file.name.ends_with(".timer") {
+            timers.push(file.name.clone());
+        }
+    }
+    systemctl_run(systemctl, &["--user", "daemon-reload"])?;
+    let mut active = true;
+    for timer in &timers {
+        let output = Command::new(systemctl)
+            .args(["--user", "is-active", "--quiet", timer])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("check systemd timer {timer}"))?;
+        active &= output.success();
+    }
+    if !active || changed {
+        for timer in &timers {
+            systemctl_run(systemctl, &["--user", "enable", "--now", timer])?;
+        }
+    }
+    Ok(vec![if changed || !active {
+        InstallResult::Installed
+    } else {
+        InstallResult::Unchanged
+    }])
+}
+
+pub fn uninstall_systemd_units(home: &Path, timers: &[String], systemctl: &Path) -> Result<usize> {
+    let units = home.join(".config/systemd/user");
+    let mut removed = 0;
+    for timer in timers {
+        let timer_path = units.join(timer);
+        if timer_path.exists() {
+            systemctl_run(systemctl, &["--user", "disable", "--now", timer])?;
+        }
+        for name in [
+            timer
+                .strip_suffix(".timer")
+                .map(|stem| format!("{stem}.service")),
+            Some(timer.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = units.join(name);
+            if path.exists() {
+                fs::remove_file(&path)
+                    .with_context(|| format!("remove systemd unit {}", path.display()))?;
+                removed += 1;
+            }
+        }
+    }
+    systemctl_run(systemctl, &["--user", "daemon-reload"])?;
+    Ok(removed)
+}
+
+/// What the scheduler says about when the job it was given runs next.
+///
+/// Two states, never one. [`NextRun::Known`] carries a time that came from a
+/// source that knows it — systemd's own answer for a timer, or the local time
+/// a launchd `StartCalendarInterval` resolves to — and is never derived from
+/// the cadence. [`NextRun::Unknown`] carries the sentence that travels with
+/// the empty value: a bare `next_run: null` reads as "there is none", which is
+/// a different claim from "nobody could say".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextRun {
+    Known(String),
+    Unknown(String),
+}
+
+impl NextRun {
+    /// The timestamp, or `None` when no source that knows one has spoken.
+    pub fn value(&self) -> Option<&str> {
+        match self {
+            NextRun::Known(value) => Some(value),
+            NextRun::Unknown(_) => None,
+        }
+    }
+
+    /// Why there is no timestamp. `Some` exactly when [`NextRun::value`] is
+    /// `None`, so the empty value never reaches a reader without its reason.
+    pub fn note(&self) -> Option<&str> {
+        match self {
+            NextRun::Known(_) => None,
+            NextRun::Unknown(note) => Some(note),
+        }
+    }
+}
+
+/// The destinations whose units an install or an uninstall touches: the ones
+/// named on the command line, or every declared destination when none were
+/// named. One unit per destination is the shape both renderers produce, so
+/// this is also the set of units whose next run has to be asked about —
+/// `declared` is expected in a stable (sorted) order so the same config yields
+/// the same set of units on every call.
+pub fn install_targets(declared: &[String], requested: &[String]) -> Vec<Option<String>> {
+    if !requested.is_empty() {
+        return requested.iter().cloned().map(Some).collect();
+    }
+    if declared.is_empty() {
+        // No destination at all is still one unit: both renderers fall back to
+        // the destination-less names (see `launchd_label_for_destination`).
+        return vec![None];
+    }
+    declared.iter().cloned().map(Some).collect()
+}
+
+/// Ask the scheduler for the next run of the units that were just installed.
+///
+/// Nothing here is estimated. systemd is asked through `systemctl --user
+/// status`, whose `Trigger:` line is formatted from the same
+/// `calc_next_elapse` value `list-timers` prints as `NEXT` — including the
+/// `RandomizedDelaySec` offset, which systemd folds into `NextElapseUSec*`
+/// before arming — and the value is passed through verbatim, because
+/// reformatting it would mean being right about a clock this code cannot see.
+/// The `NEXT` column itself is text with no fixed width (it may carry a
+/// timezone abbreviation) and `--output=json` does not exist for
+/// `list-timers` upstream, so the delimited `Trigger:` line is the only
+/// machine-readable spelling of the same value. A launchd `StartInterval` job
+/// is a relative interval measured from the moment the job was loaded, not a
+/// wall-clock deadline, so there is no time to report for it; a
+/// `StartCalendarInterval` job is anchored to calendar fields, and the plist
+/// is the source: the slot is computed on the local calendar, which is the
+/// clock launchd itself reads.
+///
+/// `systemctl` is only run by the systemd probe; the launchd probe reads the
+/// installed plist instead.
+pub fn next_run(
+    unit: Unit,
+    format: Format,
+    targets: &[Option<String>],
+    home: &Path,
+    systemctl: &Path,
+    now: DateTime<Local>,
+) -> NextRun {
+    match targets {
+        [] => NextRun::Unknown(
+            "no scheduler unit was installed, so there is no next run to report".to_string(),
+        ),
+        [destination] => match format {
+            Format::Launchd => launchd_next_run(unit, destination.as_deref(), home, now),
+            Format::Systemd => systemd_next_run(unit, destination.as_deref(), systemctl),
+        },
+        // Each destination has its own timer, and this report carries one next
+        // run. Naming one of them would be a claim about the others, and
+        // comparing them is worse: their timestamps are the scheduler's own
+        // text, so "earliest" would be a string comparison across two possibly
+        // different formats and timezones.
+        _ => NextRun::Unknown(format!(
+            "{} destinations have one timer each and this report carries a single next run; ask \
+             the scheduler about one timer at a time",
+            targets.len()
+        )),
+    }
+}
+
+/// The `Trigger:` line `systemctl status` prints for a timer's next run.
+///
+/// The line reads `    Trigger: <timestamp>; <relative time>`. The `; ` is the
+/// only delimiter that holds: the timestamp carries a timezone abbreviation
+/// (`... 03:17:00 CEST`), so it has no fixed width, and what follows it is
+/// prose. `n/a` is systemd's own spelling for "no next elapse" and is reported
+/// as nothing rather than as a time.
+fn systemd_trigger_line(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("Trigger:")?.trim();
+        let value = rest.split("; ").next().unwrap_or(rest).trim();
+        if value.is_empty() || value == "n/a" {
+            return None;
+        }
+        Some(value.to_string())
+    })
+}
+
+fn systemd_next_run(unit: Unit, destination: Option<&str>, systemctl: &Path) -> NextRun {
+    let timer = systemd_timer_name_for_destination(unit, destination);
+    let output = Command::new(systemctl)
+        .args(["--user", "--no-pager", "status", &timer])
+        .output();
+    match output {
+        Err(error) => NextRun::Unknown(format!(
+            "{} could not be run to ask for {timer}'s next run ({error}), so it is unknown",
+            systemctl.display()
+        )),
+        Ok(output) => match systemd_trigger_line(&String::from_utf8_lossy(&output.stdout)) {
+            Some(value) => NextRun::Known(value),
+            None => NextRun::Unknown(format!(
+                "systemd did not report a next run for {timer} (it prints `Trigger: n/a` until \
+                 the timer is armed); `systemctl --user list-timers` shows the timer's state"
+            )),
+        },
+    }
+}
+
+fn launchd_next_run(
+    unit: Unit,
+    destination: Option<&str>,
+    home: &Path,
+    now: DateTime<Local>,
+) -> NextRun {
+    let label = launchd_label_for_destination(unit, destination);
+    let path = home
+        .join("Library/LaunchAgents")
+        .join(format!("{label}.plist"));
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            return NextRun::Unknown(format!(
+                "the installed plist {} could not be read ({error}), so the next fire time is \
+                 unknown",
+                path.display()
+            ))
+        }
+    };
+    if let Some(interval) = plist_integer(&text, "StartInterval") {
+        // A StartInterval is relative to the moment the job was loaded, so an
+        // absolute deadline would have to be measured from a load time this
+        // process never saw — and launchd does not expose one either.
+        return NextRun::Unknown(format!(
+            "launchd interval jobs expose no next fire time; the job runs {} after load",
+            interval_phrase(interval)
+        ));
+    }
+    let Some(slot) = plist_calendar_slot(&text) else {
+        return NextRun::Unknown(format!(
+            "the installed plist {} declares neither StartInterval nor a StartCalendarInterval \
+             naming Weekday, Hour and Minute, so no next fire time can be derived from it",
+            path.display()
+        ));
+    };
+    match next_calendar_occurrence(slot, now) {
+        Some(when) => NextRun::Known(when.format("%a %Y-%m-%d %H:%M:%S %z").to_string()),
+        None => NextRun::Unknown(
+            "the next occurrence of the plist's calendar slot does not exist in local time (a \
+             daylight-saving gap), so no fire time can be reported"
+                .to_string(),
+        ),
+    }
+}
+
+/// An integer-valued plist key: the first `<integer>` after `<key>NAME</key>`.
+fn plist_integer(text: &str, key: &str) -> Option<u64> {
+    let after_key = text.split_once(&format!("<key>{key}</key>"))?.1;
+    let after_open = after_key.split_once("<integer>")?.1;
+    let (value, _) = after_open.split_once("</integer>")?;
+    value.trim().parse().ok()
+}
+
+/// The `Weekday` / `Hour` / `Minute` of a launchd `StartCalendarInterval`.
+///
+/// The dictionary the renderer writes is flat, so the text between the key and
+/// the next `</dict>` is unambiguous. A value outside the range launchd
+/// accepts is treated as unreadable rather than clamped: clamping would move
+/// the fire time to one nobody asked for.
+fn plist_calendar_slot(text: &str) -> Option<CalendarSlot> {
+    let after_key = text.split_once("<key>StartCalendarInterval</key>")?.1;
+    let dict = after_key.split_once("</dict>")?.0;
+    let weekday = u32::try_from(plist_integer(dict, "Weekday")?).ok()?;
+    let hour = u32::try_from(plist_integer(dict, "Hour")?).ok()?;
+    let minute = u32::try_from(plist_integer(dict, "Minute")?).ok()?;
+    if weekday > 7 || hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(CalendarSlot {
+        weekday,
+        hour,
+        minute,
+    })
+}
+
+struct CalendarSlot {
+    weekday: u32,
+    hour: u32,
+    minute: u32,
+}
+
+/// The next occurrence of a launchd calendar slot, on the local calendar.
+///
+/// launchd fires `StartCalendarInterval` at local wall-clock time, so this is
+/// civil arithmetic: the answer is the wall clock launchd itself reads, with
+/// no timezone conversion and no DST rule of ours to get wrong. A slot that
+/// does not exist in local time (inside a spring-forward gap) is reported as
+/// nothing rather than moved, because moving it would state a fire time
+/// launchd was never asked for.
+fn next_calendar_occurrence(slot: CalendarSlot, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    // launchd accepts 0 and 7 for Sunday; chrono counts from Sunday at 0.
+    let target = slot.weekday % 7;
+    let today = now.date_naive();
+    let day = today.checked_add_days(Days::new(u64::from(
+        (target + 7 - today.weekday().num_days_from_sunday()) % 7,
+    )))?;
+    match local_at(day, &slot)? {
+        this_week if this_week > now => Some(this_week),
+        _ => local_at(day.checked_add_days(Days::new(7))?, &slot),
+    }
+}
+
+/// `date` at the slot's wall-clock time in the local zone.
+fn local_at(date: NaiveDate, slot: &CalendarSlot) -> Option<DateTime<Local>> {
+    let naive = date.and_hms_opt(slot.hour, slot.minute, 0)?;
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(when) => Some(when),
+        // A repeated wall-clock time (the autumn fall-back) happens twice; the
+        // earlier one is the one that comes next.
+        LocalResult::Ambiguous(first, _) => Some(first),
+        LocalResult::None => None,
+    }
+}
+
+/// A duration in the unit that keeps it a whole number, as prose: `every 60
+/// minutes`, `every 90 seconds`. Rounding it to a friendlier unit would make
+/// the sentence describe a cadence the plist does not declare.
+fn interval_phrase(interval: u64) -> String {
+    let (value, unit) = if interval % 60 == 0 {
+        (interval / 60, "minute")
+    } else {
+        (interval, "second")
+    };
+    if value == 1 {
+        format!("every {value} {unit}")
+    } else {
+        format!("every {value} {unit}s")
+    }
+}
+
+fn systemctl_run(systemctl: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new(systemctl)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("run {}", systemctl.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{} exited with status {}", systemctl.display(), status)
+    }
+}
+
 fn launchctl_status(launchctl: &Path, target: &str) -> Result<bool> {
     let status = Command::new(launchctl)
         .arg("print")
@@ -585,6 +945,8 @@ fn launchctl_status(launchctl: &Path, target: &str) -> Result<bool> {
 fn launchctl_run(launchctl: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new(launchctl)
         .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| format!("run {}", launchctl.display()))?;
     if status.success() {
@@ -1479,5 +1841,378 @@ mod tests {
         let calls = fs::read_to_string(log).expect("read fake launchctl log");
         assert_eq!(calls.matches("bootstrap").count(), 1);
         assert_eq!(calls.matches("bootout").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn systemd_install_and_uninstall_are_idempotent_with_fake_systemctl() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("systemctl");
+        let state = temp.path().join("active");
+        let log = temp.path().join("calls");
+        let script_body = format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> \"{}\"\n\
+             case \"$2\" in\n\
+               is-active) test -f \"{}\";;\n\
+               enable) touch \"{}\";;\n\
+               disable) rm -f \"{}\";;\n\
+               *) exit 0;;\n\
+             esac\n",
+            log.display(),
+            state.display(),
+            state.display(),
+            state.display()
+        );
+        fs::write(&script, script_body).expect("write fake systemctl");
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("make fake systemctl executable");
+
+        let files = vec![
+            TemplateFile {
+                name: "chat-stasher-run-once.service".into(),
+                content: "service-v1".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once.timer".into(),
+                content: "timer-v1".into(),
+            },
+        ];
+        assert_eq!(
+            install_systemd_units(temp.path(), &files, &script).unwrap(),
+            vec![InstallResult::Installed]
+        );
+        assert_eq!(
+            install_systemd_units(temp.path(), &files, &script).unwrap(),
+            vec![InstallResult::Unchanged]
+        );
+        let timer = "chat-stasher-run-once.timer".to_string();
+        assert_eq!(
+            uninstall_systemd_units(temp.path(), std::slice::from_ref(&timer), &script).unwrap(),
+            2
+        );
+        assert_eq!(
+            uninstall_systemd_units(temp.path(), &[timer], &script).unwrap(),
+            0
+        );
+        let calls = fs::read_to_string(log).expect("read fake systemctl log");
+        assert_eq!(calls.matches("enable --now").count(), 1);
+        assert_eq!(calls.matches("disable --now").count(), 1);
+    }
+
+    /// The plists `render` produced, saved where the installer saves them, so a
+    /// probe reads the same bytes launchd would.
+    fn write_plists(home: &Path, files: &[TemplateFile]) {
+        let agents = home.join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).expect("create launchd agent directory");
+        for file in files {
+            fs::write(agents.join(&file.name), &file.content).expect("write plist");
+        }
+    }
+
+    fn local_noon() -> DateTime<Local> {
+        // 2026-09-23 is a Wednesday, so "the next Sunday" is a real step and
+        // not the day the test happens to run on.
+        Local
+            .with_ymd_and_hms(2026, 9, 23, 12, 0, 0)
+            .earliest()
+            .expect("2026-09-23 12:00 exists in local time")
+    }
+
+    /// A calendar plist is its own source: the fire time is computed from the
+    /// `StartCalendarInterval` keys the plist carries, on the local calendar.
+    #[test]
+    fn launchd_calendar_plist_yields_the_exact_next_local_occurrence() {
+        use chrono::Timelike;
+
+        let home = tempfile::tempdir().unwrap();
+        let files = render(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            0,
+            &RunOnceArgs::default(),
+            &ReclaimStageArgs::default(),
+            home.path(),
+        );
+        write_plists(home.path(), &files);
+
+        let now = local_noon();
+        let next = next_run(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            Path::new("launchctl"),
+            now,
+        );
+        let value = next.value().expect("the plist names a calendar slot");
+        assert_eq!(next.note(), None, "a known time carries no excuse");
+
+        let when = DateTime::parse_from_str(value, "%a %Y-%m-%d %H:%M:%S %z")
+            .expect("the reported value is a local timestamp");
+        assert_eq!(
+            when.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 9, 27).unwrap()
+        );
+        assert_eq!(when.weekday(), chrono::Weekday::Sun);
+        // The slot the plist declares is Sunday 03:17 — spelled out rather
+        // than read back off the constants it was built from.
+        assert_eq!((when.hour(), when.minute()), (3, 17));
+        assert!(when > now, "the next occurrence is never in the past");
+    }
+
+    /// The same slot, asked again after it has passed, is the following week's.
+    #[test]
+    fn a_calendar_slot_that_has_already_passed_moves_to_next_week() {
+        let home = tempfile::tempdir().unwrap();
+        let files = render(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            0,
+            &RunOnceArgs::default(),
+            &ReclaimStageArgs::default(),
+            home.path(),
+        );
+        write_plists(home.path(), &files);
+
+        // Sunday 04:00, an hour after the slot has fired.
+        let now = Local
+            .with_ymd_and_hms(2026, 9, 27, 4, 0, 0)
+            .earliest()
+            .expect("2026-09-27 04:00 exists in local time");
+        let next = next_run(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            Path::new("launchctl"),
+            now,
+        );
+        let when = DateTime::parse_from_str(
+            next.value().expect("a calendar slot is known"),
+            "%a %Y-%m-%d %H:%M:%S %z",
+        )
+        .expect("the reported value is a local timestamp");
+        assert_eq!(
+            when.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 10, 4).unwrap()
+        );
+    }
+
+    /// launchd reports no fire time for an interval job, so the answer is the
+    /// sentence saying why — with the interval the plist declares.
+    #[test]
+    fn launchd_interval_plist_says_why_no_fire_time_is_reported() {
+        let home = tempfile::tempdir().unwrap();
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &RunOnceArgs::default(),
+            &ReclaimStageArgs::default(),
+            home.path(),
+        );
+        write_plists(home.path(), &files);
+
+        let next = next_run(
+            Unit::RunOnce,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            Path::new("launchctl"),
+            local_noon(),
+        );
+        assert_eq!(next.value(), None);
+        assert_eq!(
+            next.note(),
+            Some(
+                "launchd interval jobs expose no next fire time; the job runs every 60 minutes \
+                 after load"
+            )
+        );
+    }
+
+    /// A plist that cannot be read is not a plist that declares nothing: the
+    /// two must not collapse into one answer.
+    #[test]
+    fn an_unreadable_launchd_plist_is_reported_as_unread_not_as_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let next = next_run(
+            Unit::RunOnce,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            Path::new("launchctl"),
+            local_noon(),
+        );
+        assert_eq!(next.value(), None);
+        let note = next.note().expect("an empty answer carries its reason");
+        assert!(note.contains("could not be read"), "note={note}");
+        assert!(
+            note.contains("com.chat-stasher.run-once.plist"),
+            "the unreadable file is named: note={note}"
+        );
+    }
+
+    /// Only the `Trigger:` line is a fire time. `n/a` is systemd's own spelling
+    /// for "no next elapse" and must not be read as one.
+    #[test]
+    fn the_systemd_answer_comes_from_the_trigger_line_alone() {
+        let status = "● chat-stasher-run-once.timer - Hourly chat-stasher archive cycle\n     \
+                      Loaded: loaded (/home/u/.config/systemd/user/chat-stasher-run-once.timer)\n     \
+                      Active: active (waiting) since Wed 2026-09-23 12:00:00 CEST; 2h ago\n    \
+                      Trigger: Sun 2026-09-27 03:17:00 CEST; 3 days left\n   \
+                      Triggers: ● chat-stasher-run-once.service\n";
+        assert_eq!(
+            systemd_trigger_line(status).as_deref(),
+            Some("Sun 2026-09-27 03:17:00 CEST")
+        );
+        assert_eq!(systemd_trigger_line("    Trigger: n/a\n"), None);
+        // "TriggeredBy:" begins with the same eight characters, and a unit line
+        // is not a timestamp.
+        assert_eq!(
+            systemd_trigger_line("   TriggeredBy: ● chat-stasher-run-once.timer\n"),
+            None
+        );
+        assert_eq!(systemd_trigger_line(""), None);
+    }
+
+    /// One next run cannot stand for several timers, and an absent unit list is
+    /// not a timer that is merely unknown.
+    #[test]
+    fn one_next_run_cannot_stand_for_several_timers() {
+        let home = tempfile::tempdir().unwrap();
+        let several = next_run(
+            Unit::RunOnce,
+            Format::Systemd,
+            &[Some("a".to_string()), Some("b".to_string())],
+            home.path(),
+            Path::new("systemctl"),
+            local_noon(),
+        );
+        assert_eq!(several.value(), None);
+        let note = several.note().expect("the empty answer carries its reason");
+        assert!(
+            note.contains("2 destinations have one timer each"),
+            "note={note}"
+        );
+
+        let none = next_run(
+            Unit::RunOnce,
+            Format::Systemd,
+            &[],
+            home.path(),
+            Path::new("systemctl"),
+            local_noon(),
+        );
+        assert_eq!(none.value(), None);
+        assert!(none
+            .note()
+            .expect("the empty answer carries its reason")
+            .contains("no scheduler unit was installed"));
+    }
+
+    /// The three things a systemd probe can get back, each with its own state:
+    /// systemd's own timestamp, its `n/a`, and a `systemctl` that cannot be run
+    /// at all. A fake stands in for the scheduler so each one is reachable on
+    /// any host.
+    #[cfg(unix)]
+    #[test]
+    fn the_systemd_probe_reports_only_what_systemctl_answered() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("systemctl");
+        let answer = temp.path().join("answer");
+        fs::write(
+            &answer,
+            "    Trigger: Sun 2026-09-27 03:17:00 CEST; 3 days left\n",
+        )
+        .expect("write answer");
+        // `cat` reproduces the answer file, so the branch under test is the
+        // parse and not the fixture.
+        fs::write(
+            &script,
+            format!("#!/bin/sh\ncat \"{}\"\n", answer.display()),
+        )
+        .expect("write fake systemctl");
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("make fake systemctl executable");
+
+        let now = local_noon();
+        let known = next_run(
+            Unit::RunOnce,
+            Format::Systemd,
+            &[None],
+            temp.path(),
+            &script,
+            now,
+        );
+        assert_eq!(known.value(), Some("Sun 2026-09-27 03:17:00 CEST"));
+        assert_eq!(known.note(), None);
+
+        fs::write(&answer, "    Trigger: n/a\n").expect("write n/a answer");
+        let unarmed = next_run(
+            Unit::RunOnce,
+            Format::Systemd,
+            &[None],
+            temp.path(),
+            &script,
+            now,
+        );
+        assert_eq!(unarmed.value(), None);
+        assert!(
+            unarmed
+                .note()
+                .expect("the empty answer carries its reason")
+                .contains("did not report a next run"),
+            "note={:?}",
+            unarmed.note()
+        );
+
+        let missing = next_run(
+            Unit::RunOnce,
+            Format::Systemd,
+            &[None],
+            temp.path(),
+            &temp.path().join("no-such-systemctl"),
+            now,
+        );
+        assert_eq!(missing.value(), None);
+        assert!(
+            missing
+                .note()
+                .expect("the empty answer carries its reason")
+                .contains("could not be run"),
+            "note={:?}",
+            missing.note()
+        );
+    }
+
+    /// The installed shape is one unit per named destination, or one per
+    /// declared destination when none were named — the same set the installer
+    /// writes units for.
+    #[test]
+    fn install_targets_follow_the_named_destinations_or_all_declared_ones() {
+        let declared = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            install_targets(&declared, &[]),
+            vec![Some("a".to_string()), Some("b".to_string())]
+        );
+        assert_eq!(
+            install_targets(&declared, &["b".to_string()]),
+            vec![Some("b".to_string())]
+        );
+        assert_eq!(install_targets(&[], &[]), vec![None]);
     }
 }

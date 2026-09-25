@@ -371,6 +371,229 @@ fn setup_without_a_stage_names_the_parameter_and_writes_nothing() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new(true);
+    let scheduler = sandbox.root.path().join("fake-scheduler");
+    let calls = sandbox.root.path().join("scheduler-calls");
+    let state = sandbox.root.path().join("scheduler-active");
+    let script = if cfg!(target_os = "macos") {
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
+            calls.display(), state.display(), state.display(), state.display()
+        )
+    } else {
+        // `$3` is the verb of `systemctl --user --no-pager status <timer>`,
+        // the one call whose output the next-run probe reads. It answers with a
+        // fixed `Trigger:` line: the probe must pass the scheduler's own text
+        // through, never recompute it from the interval it was given.
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\ncase \"$3\" in\nstatus) echo '    Trigger: Sun 2026-09-27 03:17:00 UTC; 3 days left' ;;\nesac\n",
+            calls.display(), state.display(), state.display(), state.display()
+        )
+    };
+    fs::write(&scheduler, script).expect("write fake scheduler");
+    let mut permissions = fs::metadata(&scheduler)
+        .expect("scheduler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+
+    let scheduled_binary = sandbox.home().join(".local/bin/chat-stasher");
+    fs::create_dir_all(scheduled_binary.parent().expect("binary parent"))
+        .expect("create installed binary directory");
+    fs::copy(env!("CARGO_BIN_EXE_chat-stasher"), &scheduled_binary)
+        .expect("copy CLI to installed path for scheduler self-check");
+
+    let stage = sandbox.stage();
+    let args = [
+        "setup",
+        "--stage",
+        stage.to_str().expect("stage path"),
+        "--masterkey-saved-elsewhere",
+        "--install-schedule",
+        "--json",
+    ];
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("HOME", sandbox.home())
+            .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+            .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+            .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+            .env(
+                "CHAT_STASHER_REGISTRY",
+                sandbox.root.path().join("registry.json"),
+            )
+            .env("CHAT_STASHER_LAUNCHCTL", &scheduler)
+            .env("CHAT_STASHER_SYSTEMCTL", &scheduler)
+            .output()
+            .expect("run setup with fake scheduler")
+    };
+
+    for _ in 0..2 {
+        let output = run(&args);
+        let value = json_of(&output);
+        assert_eq!(exit_code(&output), 0, "value={value}");
+        assert_eq!(value["steps"]["schedule"], "installed_and_checked");
+        assert_eq!(value["schedule"]["status"], "installed_and_checked");
+        if cfg!(target_os = "linux") {
+            // The exact string the scheduler reported, not the hourly cadence
+            // this run installed.
+            assert_eq!(
+                value["schedule"]["next_run"],
+                serde_json::json!("Sun 2026-09-27 03:17:00 UTC")
+            );
+            assert!(
+                value["schedule"].get("next_run_note").is_none(),
+                "a reported next run carries no excuse: {value}"
+            );
+        } else {
+            assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
+            assert_eq!(
+                value["schedule"]["next_run_note"],
+                serde_json::json!(
+                    "launchd interval jobs expose no next fire time; the job runs every 60 \
+                     minutes after load"
+                ),
+                "an empty next run has to arrive with the sentence saying why: {value}"
+            );
+        }
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("scheduler-noise"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("scheduler-error"));
+    }
+    let uninstall_args = [
+        "setup",
+        "--stage",
+        stage.to_str().expect("stage path"),
+        "--masterkey-saved-elsewhere",
+        "--uninstall-schedule",
+        "--json",
+    ];
+    let output = run(&uninstall_args);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 0, "value={value}");
+    assert_eq!(value["steps"]["schedule"], "uninstalled");
+    assert_eq!(value["schedule"]["status"], "uninstalled");
+    assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
+    assert_eq!(
+        value["schedule"]["next_run_note"],
+        serde_json::json!(
+            "no scheduler timer was installed by this run, so there is no next run to report"
+        ),
+        "a removed timer is a different state from a timer nobody could ask: {value}"
+    );
+    let calls = fs::read_to_string(calls).expect("read fake scheduler calls");
+    assert_eq!(
+        calls.matches("enable --now").count(),
+        usize::from(cfg!(target_os = "linux"))
+    );
+    assert_eq!(
+        calls.matches("bootstrap").count(),
+        usize::from(cfg!(target_os = "macos"))
+    );
+    assert_eq!(
+        calls.matches("disable --now").count(),
+        usize::from(cfg!(target_os = "linux"))
+    );
+    assert_eq!(
+        calls.matches("bootout").count(),
+        usize::from(cfg!(target_os = "macos"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new(true);
+    let scheduler = sandbox.root.path().join("fake-scheduler");
+    let state = sandbox.root.path().join("scheduler-active");
+    let script = if cfg!(target_os = "macos") {
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
+            state.display(), state.display(), state.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\n",
+            state.display(), state.display(), state.display()
+        )
+    };
+    fs::write(&scheduler, script).expect("write fake scheduler");
+    let mut permissions = fs::metadata(&scheduler)
+        .expect("scheduler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+
+    let installed_binary = sandbox.home().join(".local/bin/chat-stasher");
+    fs::create_dir_all(installed_binary.parent().expect("binary parent"))
+        .expect("create installed binary directory");
+    fs::write(&installed_binary, "#!/bin/sh\nexit 1\n").expect("write failing installed binary");
+    let mut permissions = fs::metadata(&installed_binary)
+        .expect("installed binary metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&installed_binary, permissions).expect("make installed binary executable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args([
+            "setup",
+            "--stage",
+            sandbox.stage().to_str().expect("stage path"),
+            "--masterkey-saved-elsewhere",
+            "--install-schedule",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HOME", sandbox.home())
+        .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+        .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+        .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env(
+            "CHAT_STASHER_REGISTRY",
+            sandbox.root.path().join("registry.json"),
+        )
+        .env("CHAT_STASHER_LAUNCHCTL", &scheduler)
+        .env("CHAT_STASHER_SYSTEMCTL", &scheduler)
+        .output()
+        .expect("run setup with installed fallback binary");
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 1, "value={value}");
+    assert_eq!(value["schedule"]["status"], "self_check_failed");
+    assert_eq!(value["steps"]["schedule"], "self_check_failed");
+    assert_eq!(
+        value["schedule"]["next_run"],
+        serde_json::Value::Null,
+        "a next run the scheduler did not report must not be invented"
+    );
+    let note = value["schedule"]["next_run_note"]
+        .as_str()
+        .expect("an empty next run arrives with the sentence saying why");
+    if cfg!(target_os = "macos") {
+        assert!(
+            note.contains("launchd interval jobs expose no next fire time"),
+            "note={note}"
+        );
+    } else {
+        // This fake answers `is-active` and `enable` only, so the probe gets no
+        // `Trigger:` line at all — which is not the same as a timer systemd
+        // says has no next elapse, and both must be reported as an absence.
+        assert!(note.contains("did not report a next run"), "note={note}");
+    }
+}
+
 #[test]
 fn non_tty_setup_emits_json_missing_parameters_and_does_not_echo_stdin() {
     let home = tempfile::tempdir().unwrap();
