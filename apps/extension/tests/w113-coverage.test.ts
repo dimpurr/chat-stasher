@@ -19,7 +19,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
-import { buildCoverage, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageScopeInput } from '../lib/coverage';
+import { buildCoverage, describeSkipReason, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageScopeInput } from '../lib/coverage';
 import { coverageCard, coverageView } from '../lib/coverage-view';
 import { SPEED_PLANS } from '../lib/backfill/speed';
 import { initialState, type BackfillHeader, type HaltRecord } from '../lib/backfill/types';
@@ -211,6 +211,18 @@ describe('W113 · item 4 — the state, and why', () => {
     const note = speedNote(row, NOW);
     expect(note).not.toContain('estimate: about');
     expect(note).toContain('nothing runs for this platform here');
+  });
+
+  it('W113b · a waiting row prints its reason once, not twice', () => {
+    // A guard, not the proof of a fix: the branch this replaced was unreachable (`stateOf` returns `waiting`
+    // only when `skippedReason` is non-null, and `stateNote` already renders `describeSkipReason`). It is
+    // here so that a future second copy of the sentence is caught by an assertion rather than by reading.
+    const report = buildCoverage(input({
+      scopes: [scope({ debt: { pending: ['p1'], archived: [], times: new Map() }, skippedReason: 'no-http-port' })],
+    }));
+    const texts = coverageView(report, NOW).sections[0]!.blocks.flatMap((b) => ('text' in b ? [b.text] : []));
+    const why = describeSkipReason('no-http-port');
+    expect(texts.filter((text) => text.includes(why))).toHaveLength(1);
   });
 
   it("today's quota being spent is not a stop", () => {

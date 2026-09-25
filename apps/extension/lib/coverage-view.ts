@@ -20,7 +20,6 @@
 import { t } from './i18n';
 import {
   countsNote,
-  describeSkipReason,
   enumNote,
   failureNote,
   speedNote,
@@ -192,6 +191,11 @@ function rowBlocks(row: CoverageRow, now: number): CoverageBlock[] {
   if (detail.length > 0) blocks.push({ kind: 'facts', rows: detail });
 
   // 4 · the state and its reason, in plain words. `stateNote` reuses the popup's own halt sentences.
+  //     🔴 W113b · There is deliberately no second block for a `waiting` row whose `skippedReason` is null:
+  //     `stateOf` returns `waiting` only when that reason is non-null, so the branch that pushed
+  //     `describeSkipReason(null)` here was unreachable — and if it had been reachable it would have printed
+  //     the skip sentence twice, because `stateNote`'s `waiting` arm already renders the same function's
+  //     answer. The state belongs in the model; a second copy here could only drift from it.
   const state = stateNote(row, now);
   if (state) {
     blocks.push({
@@ -199,9 +203,6 @@ function rowBlocks(row: CoverageRow, now: number): CoverageBlock[] {
       tone: row.state === 'halted' ? 'bad' : row.state === 'done' ? 'info' : 'warn',
       text: state,
     });
-  }
-  if (row.state === 'waiting' && row.skippedReason === null) {
-    blocks.push({ kind: 'note', tone: 'warn', text: describeSkipReason(null) });
   }
 
   // 5 · speed and ETA.
