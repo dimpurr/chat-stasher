@@ -1,0 +1,4 @@
+status: 400 Bad Request
+content-type: text/plain; charset=utf-8
+
+ui: `yesterday` is not a calendar date; write it as YYYY-MM-DD, e.g. 2026-01-15

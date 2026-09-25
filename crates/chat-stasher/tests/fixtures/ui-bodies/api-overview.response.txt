@@ -1,0 +1,64 @@
+status: 200 OK
+content-type: application/json; charset=utf-8
+
+{
+  "command": "ui",
+  "complete": true,
+  "data_blobs_read": 0,
+  "destination": "dest-under-test",
+  "filter": null,
+  "generated_unix": 1770000000,
+  "index_files_read": 3,
+  "machines": [
+    {
+      "bytes": 150,
+      "has_activity_index": true,
+      "health": "archived recently",
+      "index_read_ok": true,
+      "machine": "m-1",
+      "newest_snapshot_short_id": "aaaaaaaa",
+      "newest_snapshot_unix": 1769996400,
+      "sessions": 2
+    },
+    {
+      "bytes": 220,
+      "has_activity_index": null,
+      "health": "snapshot time unknown",
+      "index_read_ok": null,
+      "machine": "m-2",
+      "newest_snapshot_short_id": null,
+      "newest_snapshot_unix": null,
+      "sessions": 2
+    },
+    {
+      "bytes": 0,
+      "has_activity_index": false,
+      "health": "index missing",
+      "index_read_ok": false,
+      "machine": "m-3",
+      "newest_snapshot_short_id": "bbbbbbbb",
+      "newest_snapshot_unix": 1766544000,
+      "sessions": 0
+    }
+  ],
+  "machines_without_activity_index": [
+    "m-3"
+  ],
+  "payload_loaded": false,
+  "schema_version": 1,
+  "sessions_seen": 4,
+  "snapshots_in_repo": 2,
+  "snapshots_scanned": 2,
+  "summary": {
+    "bytes_in_view": 370,
+    "could_not_be_placed": 0,
+    "machines": 3,
+    "matched": 4,
+    "not_matched": 0,
+    "sessions_in_view": 4,
+    "sources": 3,
+    "time_unknown": 1
+  },
+  "tier": "metadata",
+  "unreadable_parts": []
+}

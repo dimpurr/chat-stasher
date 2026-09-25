@@ -1,0 +1,5 @@
+status: 502 Bad Gateway
+content-type: text/plain; charset=utf-8
+
+ui: could not read session deepseek~e4009d on `m-1`: the payload tier is disabled for this server
+This is a failure to read, NOT an empty session.
