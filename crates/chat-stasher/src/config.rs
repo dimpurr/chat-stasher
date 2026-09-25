@@ -678,10 +678,13 @@ impl Config {
         // map fail to deserialize — a config the tool then cannot load at all.
         // Refusing here keeps the user's file loadable.
         if !is_bare_toml_key(name) {
+            // The rule stated here is the rule `is_bare_toml_key` enforces, and
+            // nothing more: a leading digit is *allowed* (`[destinations.1box]` is
+            // a key called `1box`), so a message that forbade it was describing a
+            // check this code does not make.
             anyhow::bail!(
                 "`{name}` cannot be a destination name: a destination is written as \
-                 `[destinations.<name>]`, so the name must be letters, digits, `_` or `-`, and \
-                 must not start with a digit"
+                 `[destinations.<name>]`, so the name must be letters, digits, `_` or `-`"
             );
         }
         if Self::destination_is_declared(name)? {

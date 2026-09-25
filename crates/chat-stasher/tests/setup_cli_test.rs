@@ -491,7 +491,10 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
     assert_eq!(value["destination"]["reach"]["kind"], "reached");
     assert_eq!(value["destination"]["dest_init"]["kind"], "ran");
     assert_eq!(value["destination"]["dest_init"]["exit_code"], 0);
-    assert_eq!(value["destination"]["trust"]["known_hosts_written"], false);
+    assert_eq!(
+        value["destination"]["trust"]["known_hosts_write_authorized"],
+        false
+    );
     assert_eq!(value["unread"], serde_json::json!([]));
     assert_eq!(value["incomplete"], serde_json::json!([]));
     // The report has to describe something that actually happened.
@@ -524,7 +527,10 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
     assert_eq!(value["exit_code"], 3);
     assert_eq!(value["steps"]["destination"], "unread");
     assert_eq!(value["destination"]["reach"]["kind"], "unreachable");
-    assert_eq!(value["destination"]["trust"]["known_hosts_written"], false);
+    assert_eq!(
+        value["destination"]["trust"]["known_hosts_write_authorized"],
+        false
+    );
     // Nothing was connected to, so nothing may be reported as run.
     assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
     assert_eq!(value["unread"], serde_json::json!(["destination"]));
@@ -550,6 +556,127 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
             .as_str()
             .is_some_and(|text| text.contains("loses the archive")),
         "the skip branch must say what it costs: {value}"
+    );
+}
+
+/// A destination declared by hand with no `repo` is a config-content problem
+/// this run *read* — so it is reported, not treated as a usage error.
+///
+/// The block below is the shape ADR-039 keeps open for the local-path and REST
+/// candidates, and the shape a half-filled-in block has. Every other command
+/// resolves a destination through `resolve_store_config`, which ends the process
+/// with 2; reached from inside the wizard, that made a `--json` run print
+/// **nothing at all** on stdout — not even the object that says what is wrong —
+/// and called a config the run had already read a command-line mistake. Two of
+/// the three exit codes exist precisely to keep those apart.
+#[test]
+fn a_declared_destination_without_a_repo_is_reported_rather_than_exiting() {
+    let sandbox = Sandbox::new(true);
+    sandbox.write_config("[destinations.bare]\nkey_file = '/nonexistent/key.json'\n");
+    let before = sandbox.read_config();
+    let output = sandbox.setup(&["--destination", "bare", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+
+    assert_eq!(
+        exit_code(&output),
+        3,
+        "the destination was never consulted, so what was not read proves nothing: {value}"
+    );
+    assert_eq!(value["steps"]["destination"], "unread");
+    assert_eq!(value["destination"]["reach"]["kind"], "unreadable");
+    assert_eq!(value["unread"], serde_json::json!(["destination"]));
+    assert_eq!(value["incomplete"], serde_json::json!([]));
+    // A half-written block is the user's: the wizard adopts it as it stands and
+    // never rewrites it.
+    assert_eq!(value["destination"]["config"]["kind"], "already_declared");
+    assert_eq!(
+        sandbox.read_config(),
+        before,
+        "the adopted block must be left exactly as it was found"
+    );
+    // The reason has to name what is missing, or a wrapper knows only that
+    // something is wrong.
+    let why = value["destination"]["reach"]["why"]
+        .as_str()
+        .expect("a why string");
+    assert!(
+        why.contains("repo"),
+        "the reason must name the missing key: {why}"
+    );
+    // Nothing may be reported as run against a destination that was never
+    // resolved.
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+}
+
+/// The credential observation reaches the JSON, not only the terminal.
+///
+/// A non-TTY run prints no wizard lines at all — stdout is one JSON object, and
+/// that object is the whole of what a wrapper sees — so an observation that
+/// existed only as a stderr sentence was missing for exactly the half of the
+/// acceptance surface the flags exist for. The two variables are reported
+/// separately because they have two different fixes, and neither is reported as
+/// a missing *parameter*: the parameter was given, the variable is absent.
+#[test]
+fn an_unusable_credential_variable_is_reported_to_a_non_tty_caller() {
+    let sandbox = Sandbox::new(true);
+    let unset = "CHAT_STASHER_W177_NOT_SET_ANYWHERE";
+    let empty = "CHAT_STASHER_W177_SET_BUT_EMPTY";
+    let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args([
+            "setup",
+            "--stage",
+            sandbox.stage().to_str().expect("utf-8 stage"),
+            "--destination",
+            "r2box",
+            "--masterkey-saved-elsewhere",
+            "--remote",
+            "s3",
+            "--remote-endpoint",
+            "https://127.0.0.1:1",
+            "--remote-bucket",
+            "fixture-bucket",
+            "--remote-access-key-id-env",
+            unset,
+            "--remote-secret-key-env",
+            empty,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HOME", sandbox.home())
+        .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+        .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+        .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env(
+            "CHAT_STASHER_REGISTRY",
+            sandbox.root.path().join("registry.json"),
+        )
+        .env_remove(unset)
+        .env(empty, "")
+        .output()
+        .expect("run chat-stasher");
+
+    let value = json_of(&output);
+    // The endpoint is a closed loopback port, so the destination is unread. What
+    // is under test is the observation, which is taken before any connection.
+    assert_eq!(exit_code(&output), 3, "value={value}");
+    assert_eq!(value["destination"]["credentials"]["kind"], "checked");
+    assert_eq!(
+        value["destination"]["credentials"]["variables"][0]["name"],
+        unset
+    );
+    assert_eq!(
+        value["destination"]["credentials"]["variables"][0]["state"], "not_set",
+        "an unset variable is a state in the object, not an absent field: {value}"
+    );
+    assert_eq!(
+        value["destination"]["credentials"]["variables"][1]["state"], "empty",
+        "set-but-empty has a different fix, so it is a different state: {value}"
+    );
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!([]),
+        "the parameter was supplied; the *variable* it names is what is absent: {value}"
     );
 }
 
@@ -790,7 +917,10 @@ fn a_run_that_never_reached_a_host_writes_nothing_to_known_hosts() {
         let value = json_of(&output);
 
         assert_eq!(exit_code(&output), 3, "value={value}");
-        assert_eq!(value["destination"]["trust"]["known_hosts_written"], false);
+        assert_eq!(
+            value["destination"]["trust"]["known_hosts_write_authorized"],
+            false
+        );
         assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
         let known_hosts = sandbox.home().join(".ssh").join("known_hosts");
         assert!(

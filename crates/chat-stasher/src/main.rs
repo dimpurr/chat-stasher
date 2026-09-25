@@ -5738,12 +5738,45 @@ fn data_root() -> PathBuf {
 /// were already expanded at load, and CLI `--repo`/`--key-file`/`--option`
 /// values are expanded here, so a literal `~` never survives either route.
 fn expand_path_arg(label: &str, value: &str) -> String {
-    match chat_stasher::config::expand_and_verify(value) {
-        Ok(path) => path.to_string_lossy().into_owned(),
-        Err(e) => {
-            eprintln!("{label}: {e}");
+    match expand_path_arg_checked(label, value) {
+        Ok(path) => path,
+        Err(problem) => {
+            eprintln!("{problem}");
             std::process::exit(2);
         }
+    }
+}
+
+/// A path argument that cannot be resolved, kept as data rather than as an exit.
+///
+/// Two fields because two callers render the same fact two ways:
+/// [`expand_path_arg`] prints `label: message` and ends the process, and the
+/// setup wizard embeds `message` in a sentence of its own and reports it as an
+/// observation. One string could not serve both — the wizard's sentence would
+/// grow a second `destination:` inside it — and two hand-kept copies of the same
+/// message would be two chances to let them drift.
+struct ResolutionProblem {
+    /// The word the tool prints the message under: `repo`, `key_file`, `option`.
+    label: String,
+    /// The sentence itself, with no prefix.
+    message: String,
+}
+
+impl std::fmt::Display for ResolutionProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.label, self.message)
+    }
+}
+
+/// [`expand_path_arg`] as a `Result`, for a caller that must report the failure
+/// instead of ending the process on it.
+fn expand_path_arg_checked(label: &str, value: &str) -> Result<String, ResolutionProblem> {
+    match chat_stasher::config::expand_and_verify(value) {
+        Ok(path) => Ok(path.to_string_lossy().into_owned()),
+        Err(e) => Err(ResolutionProblem {
+            label: label.to_string(),
+            message: e.to_string(),
+        }),
     }
 }
 
@@ -5767,37 +5800,81 @@ fn resolve_store_config(
     connections: Option<usize>,
     options: &[String],
 ) -> StoreConfig {
+    match resolve_store_config_checked(config, destination, repo, key_file, connections, options) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!("{problem}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// [`resolve_store_config`] as a `Result`, for a caller that has to report what it
+/// could not resolve instead of ending the process on it.
+///
+/// One caller needs that: the setup wizard. A `--json` run stopped from inside
+/// the destination step would exit 2 with **nothing on stdout** — not even the
+/// object that says what went wrong — and 2 is the code for a usage error, which
+/// is the wrong claim about a config the run had already read and found
+/// deficient. The wizard answers with the state machine it keeps apart
+/// (observed / unread / incomplete) and lets the exit code follow from that.
+///
+/// The `destination: None` arm still calls [`store_config_from`], whose own exits
+/// belong to the pre-ADR-013 single-destination mode. The wizard always names a
+/// destination, so it never reaches them.
+#[allow(clippy::too_many_arguments)]
+fn resolve_store_config_checked(
+    config: &Config,
+    destination: Option<&str>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+) -> Result<StoreConfig, ResolutionProblem> {
     let Some(name) = destination else {
         if repo.is_none() && !config.destinations.is_empty() {
             let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
             names.sort_unstable();
-            eprintln!(
-                "destination: the config declares {} destination(s) — pass `--destination <name>` (there is no default). Declared: {}",
-                names.len(),
-                names.join(", ")
-            );
-            std::process::exit(2);
+            return Err(ResolutionProblem {
+                label: "destination".to_string(),
+                message: format!(
+                    "the config declares {} destination(s) — pass `--destination <name>` (there is \
+                     no default). Declared: {}",
+                    names.len(),
+                    names.join(", ")
+                ),
+            });
         }
-        return store_config_from(config, repo, key_file, connections, options);
+        return Ok(store_config_from(
+            config,
+            repo,
+            key_file,
+            connections,
+            options,
+        ));
     };
     let Some(entry) = config.destinations.get(name) else {
         let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
         names.sort_unstable();
-        eprintln!(
-            "destination: `{name}` is not declared in the config. Declared: {}",
-            if names.is_empty() {
-                "(none)".to_string()
-            } else {
-                names.join(", ")
-            }
-        );
-        std::process::exit(2);
+        return Err(ResolutionProblem {
+            label: "destination".to_string(),
+            message: format!(
+                "`{name}` is not declared in the config. Declared: {}",
+                if names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    names.join(", ")
+                }
+            ),
+        });
     };
     let repo_root = match repo.or_else(|| entry.repo.clone()) {
-        Some(raw) => expand_path_arg("repo", &raw),
+        Some(raw) => expand_path_arg_checked("repo", &raw)?,
         None => {
-            eprintln!("destination: `{name}` has no `repo` set (and no --repo was given)");
-            std::process::exit(2);
+            return Err(ResolutionProblem {
+                label: "destination".to_string(),
+                message: format!("`{name}` has no `repo` set (and no --repo was given)"),
+            });
         }
     };
     let mut merged: BTreeMap<String, String> = entry.options.clone();
@@ -5807,8 +5884,10 @@ fn resolve_store_config(
                 merged.insert(k.to_string(), v.to_string());
             }
             None => {
-                eprintln!("option: option must be key=value, got `{kv}`");
-                std::process::exit(2);
+                return Err(ResolutionProblem {
+                    label: "option".to_string(),
+                    message: format!("option must be key=value, got `{kv}`"),
+                });
             }
         }
     }
@@ -5816,15 +5895,15 @@ fn resolve_store_config(
     // expanded at load; re-running is idempotent and also covers the CLI
     // `--option`s merged in above.
     for (k, v) in &mut merged {
-        *v = expand_path_arg(&format!("option {k}"), v);
+        *v = expand_path_arg_checked(&format!("option {k}"), v)?;
     }
     let key_file = match key_file.or_else(|| entry.key_file.clone()) {
-        Some(raw) => PathBuf::from(expand_path_arg("key_file", &raw)),
+        Some(raw) => PathBuf::from(expand_path_arg_checked("key_file", &raw)?),
         // Per-destination default: one key file per destination, so a new
         // destination never silently adopts another one's key.
         None => data_root().join(format!("masterkey-{name}.json")),
     };
-    StoreConfig {
+    Ok(StoreConfig {
         repo_root,
         key_file,
         connections: 0,
@@ -5833,7 +5912,8 @@ fn resolve_store_config(
             .cache_dir
             .as_deref()
             .or(config.rustic_cache_dir.as_deref())
-            .map(|raw| PathBuf::from(expand_path_arg("cache_dir", raw))),
+            .map(|raw| expand_path_arg_checked("cache_dir", raw).map(PathBuf::from))
+            .transpose()?,
         // reason: an unset Option<bool> here means "use the default (cache on)" —
         // a config default, not an unknown read result being collapsed to false.
         no_cache: entry.no_cache.or(config.rustic_no_cache).unwrap_or(false),
@@ -5842,7 +5922,7 @@ fn resolve_store_config(
         connections
             .or(entry.connections)
             .or(config.rustic_connections),
-    )
+    ))
 }
 
 fn store_config_from(
@@ -7119,6 +7199,9 @@ mod decision_surface_tests {
             dest_init: SetupDestinationInit::NotRun {
                 why: why.to_string(),
             },
+            credentials: SetupRemoteCredentials::NotChecked {
+                why: why.to_string(),
+            },
         }
     }
 
@@ -7505,6 +7588,7 @@ mod decision_surface_tests {
             reach,
             trust,
             dest_init,
+            credentials: SetupRemoteCredentials::NoneNamed,
         };
         // A skipped step is not an unfinished one: ADR-039 decision 2 step 3
         // makes skipping allowed, and the terminal says what it costs.
@@ -7519,6 +7603,9 @@ mod decision_surface_tests {
             },
             trust: SetupTrust::NotRequired,
             dest_init: SetupDestinationInit::NotRun {
+                why: "no destination was named".to_string(),
+            },
+            credentials: SetupRemoteCredentials::NotChecked {
                 why: "no destination was named".to_string(),
             },
         };
@@ -7603,34 +7690,66 @@ mod decision_surface_tests {
     /// The JSON of the stop state keeps the two facts apart: what the probe saw
     /// and what the operator said. A single "untrusted + we did write
     /// known_hosts" word would be the failure this shape exists to prevent.
+    ///
+    /// The field is the **authorization**, because that is the fact this process
+    /// holds: the wizard never writes `known_hosts` itself, it passes
+    /// `--trust-host` to a child. It used to be called `known_hosts_written` and
+    /// set from the declaration alone, which asserted a write on a run where the
+    /// child could not be started — a state the loop below covers on purpose.
     #[test]
-    fn the_json_never_says_known_hosts_was_written_unless_it_was() {
-        for (trust, written) in [
+    fn the_json_reports_the_known_hosts_authorization_it_holds_and_nothing_more() {
+        let report = |trust, dest_init| SetupRemoteReport {
+            name: Some("d".to_string()),
+            kind: Some(SetupRemoteKind::Sftp),
+            config: SetupDestinationConfig::Written,
+            reach: SetupReach::UntrustedHost {
+                host: "h".to_string(),
+                port: 23,
+            },
+            trust,
+            dest_init,
+            credentials: SetupRemoteCredentials::NoneNamed,
+        };
+        // What the child did is not what the declaration says. A write that was
+        // authorized and then never happened — the child could not be started, or
+        // failed first — must not be reported as a write.
+        for dest_init in [
+            SetupDestinationInit::NotRun {
+                why: "dest-init could not be started".to_string(),
+            },
+            SetupDestinationInit::Ran { exit_code: Some(1) },
+            SetupDestinationInit::Ran { exit_code: Some(0) },
+        ] {
+            let value = setup_remote_json(&report(SetupTrust::Declared, dest_init));
+            assert_eq!(
+                value["trust"]["known_hosts_write_authorized"], true,
+                "the authorization is what was declared, whatever dest-init did: {value}"
+            );
+            assert!(
+                value["trust"].get("known_hosts_written").is_none(),
+                "this process never observes the write, so it must have no field claiming it: \
+                 {value}"
+            );
+        }
+        // Each trust state reports its own authorization.
+        for (trust, authorized) in [
             (SetupTrust::NotRequired, false),
             (SetupTrust::Required, false),
             (SetupTrust::Declined, false),
             (SetupTrust::Declared, true),
         ] {
-            let report = SetupRemoteReport {
-                name: Some("d".to_string()),
-                kind: Some(SetupRemoteKind::Sftp),
-                config: SetupDestinationConfig::Written,
-                reach: SetupReach::UntrustedHost {
-                    host: "h".to_string(),
-                    port: 23,
-                },
+            let value = setup_remote_json(&report(
                 trust,
-                dest_init: SetupDestinationInit::Ran { exit_code: Some(0) },
-            };
-            let value = setup_remote_json(&report);
+                SetupDestinationInit::Ran { exit_code: Some(0) },
+            ));
             assert_eq!(
                 value["trust"]["kind"].is_string(),
                 true,
                 "the trust state is a tagged object: {value}"
             );
             assert_eq!(
-                value["trust"]["known_hosts_written"], written,
-                "trust={} must report known_hosts_written={written}: {value}",
+                value["trust"]["known_hosts_write_authorized"], authorized,
+                "trust={} must report known_hosts_write_authorized={authorized}: {value}",
                 value["trust"]["kind"]
             );
         }
@@ -7646,6 +7765,7 @@ mod decision_surface_tests {
             },
             trust: SetupTrust::Declared,
             dest_init: SetupDestinationInit::Ran { exit_code: Some(0) },
+            credentials: SetupRemoteCredentials::NoneNamed,
         });
         assert_eq!(declared["trust"]["declaration_is_verified"], false);
     }
@@ -7663,6 +7783,7 @@ mod decision_surface_tests {
             },
             trust: SetupTrust::NotRequired,
             dest_init: SetupDestinationInit::Ran { exit_code: Some(0) },
+            credentials: SetupRemoteCredentials::NoneNamed,
         };
         let value = setup_remote_json(&report);
         assert_eq!(value["kind"], "reachable");
@@ -7674,6 +7795,11 @@ mod decision_surface_tests {
     /// A credential variable that is not in this process is named as itself,
     /// before the connection is attempted. The three states are kept apart:
     /// unset, set-but-empty, and usable — and the value is never decoded.
+    ///
+    /// The reason sentence is asserted, and so is the JSON that carries the same
+    /// observation. A non-TTY caller is shown no stderr at all, so a source that
+    /// only existed in the sentence would be an observation half the acceptance
+    /// surface never receives — which is what this test found.
     #[test]
     fn an_unusable_credential_variable_is_named_as_unset_or_empty() {
         let name = "CHAT_STASHER_W177_UNUSED_VAR";
@@ -7683,26 +7809,71 @@ mod decision_surface_tests {
             remote_access_key_id_env: Some(name.to_string()),
             ..SetupRemoteArgs::default()
         };
-        let reported = setup_remote_credentials_unusable(&args);
-        assert_eq!(reported.len(), 1);
-        assert!(
-            reported[0].contains(name) && reported[0].contains("not set"),
-            "an unset variable is named as unset: {reported:?}"
+
+        // One report whose credential observation comes from `setup_remote_credentials`,
+        // rendered both ways: the sentence and the object.
+        let report = |credentials| SetupRemoteReport {
+            name: Some("d".to_string()),
+            kind: Some(SetupRemoteKind::S3),
+            config: SetupDestinationConfig::Written,
+            reach: SetupReach::NotAttempted {
+                why: "the probe is not what this test is about".to_string(),
+            },
+            trust: SetupTrust::NotRequired,
+            dest_init: SetupDestinationInit::Ran { exit_code: Some(0) },
+            credentials,
+        };
+
+        let unset = setup_remote_credentials(&args);
+        assert_eq!(
+            unset.unusable_names(),
+            vec![(name, SetupCredentialState::NotSet)],
+            "an unset variable is named as unset"
+        );
+        let value = setup_remote_json(&report(unset));
+        assert_eq!(value["credentials"]["kind"], "checked");
+        assert_eq!(value["credentials"]["variables"][0]["name"], name);
+        assert_eq!(
+            value["credentials"]["variables"][0]["state"], "not_set",
+            "the JSON has to carry the observation the terminal sentence carries: {value}"
         );
 
         std::env::set_var(name, "");
-        let reported = setup_remote_credentials_unusable(&args);
-        assert!(
-            reported[0].contains("set but empty"),
-            "empty is a different fix from unset, so it is a different sentence: {reported:?}"
+        let empty = setup_remote_credentials(&args);
+        assert_eq!(
+            empty.unusable_names()[0].1.reason(name),
+            format!("{name} is set but empty in this process"),
+            "empty is a different fix from unset, so it is a different sentence"
+        );
+        let value = setup_remote_json(&report(empty));
+        assert_eq!(
+            value["credentials"]["variables"][0]["state"], "empty",
+            "and a different state in the object: {value}"
         );
 
         std::env::set_var(name, "a-fixture-value-that-is-not-printed");
+        let usable = setup_remote_credentials(&args);
         assert!(
-            setup_remote_credentials_unusable(&args).is_empty(),
+            usable.unusable_names().is_empty(),
             "a usable variable reports nothing"
         );
+        let value = setup_remote_json(&report(usable));
+        assert_eq!(
+            value["credentials"]["variables"][0]["state"], "set",
+            "a usable variable is a measurement, not an omitted field: {value}"
+        );
+        assert!(
+            !format!("{value}").contains("a-fixture-value-that-is-not-printed"),
+            "the value is never decoded, so it cannot reach the object: {value}"
+        );
         std::env::remove_var(name);
+
+        // A destination that names no credential variable is a third answer, not
+        // an empty pass: nothing could be absent.
+        let none = setup_remote_json(&report(setup_remote_credentials(
+            &SetupRemoteArgs::default(),
+        )));
+        assert_eq!(none["credentials"]["kind"], "none_named", "{none}");
     }
 
     #[test]
@@ -8665,6 +8836,11 @@ fn cmd_setup(
                             why: "no stage was given, so the wizard stopped before the remote step"
                                 .to_string(),
                         },
+                        credentials: SetupRemoteCredentials::NotChecked {
+                            why: "no stage was given, so the wizard stopped before the credential \
+                                  check"
+                                .to_string(),
+                        },
                     },
                     &missing,
                     &[],
@@ -8767,23 +8943,30 @@ fn cmd_setup(
         }
     }
 
+    // Checked once, before the step and outside both of its branches, because it
+    // is a fact about the invocation rather than about how far the step got: the
+    // interactive lines below and the `--json` object are two renderings of this
+    // one value, so a non-TTY caller — who is shown nothing — reads the same
+    // observation an interactive one gets on stderr.
+    let credentials = setup_remote_credentials(&remote);
+
     let remote_report = match destination.as_deref() {
         Some(name) => {
+            if interactive {
+                for (variable, state) in credentials.unusable_names() {
+                    eprintln!(
+                        "setup: remote credentials: {}. The config will still be written, but the \
+                         option that names it is omitted at load time and the connection will \
+                         fail with a credential error. Export it, and run `setup` again (or \
+                         `dest-init`) — the destination block itself does not have to change.",
+                        state.reason(variable)
+                    );
+                }
+            }
             // The parameters this step adds to `missing_parameters`, named the
             // same way WIZ-1 names `stage`: only when the step was actually
             // asked for, and only the ones the chosen kind cannot be written
             // without.
-            let env_unusable = setup_remote_credentials_unusable(&remote);
-            if !env_unusable.is_empty() && interactive {
-                for reason in &env_unusable {
-                    eprintln!(
-                        "setup: remote credentials: {reason}. The config will still be written, \
-                         but the option that names it is omitted at load time and the connection \
-                         will fail with a credential error. Export it, and run `setup` again (or \
-                         `dest-init`) — the destination block itself does not have to change."
-                    );
-                }
-            }
             let remote_missing = setup_remote_missing(&remote, destination_declared);
             missing.extend(remote_missing.iter().copied());
             if !remote_missing.is_empty() {
@@ -8804,9 +8987,17 @@ fn cmd_setup(
                     dest_init: SetupDestinationInit::NotRun {
                         why: "the remote parameters were incomplete".to_string(),
                     },
+                    credentials,
                 }
             } else {
-                setup_remote_step(stage, name, &remote, interactive, remote.trust_host)
+                setup_remote_step(
+                    stage,
+                    name,
+                    &remote,
+                    interactive,
+                    remote.trust_host,
+                    credentials,
+                )
             }
         }
         None => SetupRemoteReport {
@@ -8821,6 +9012,14 @@ fn cmd_setup(
             trust: SetupTrust::NotRequired,
             dest_init: SetupDestinationInit::NotRun {
                 why: "no destination was named".to_string(),
+            },
+            // Not the value computed above: a credential variable belongs to a
+            // destination, and there is none. Saying "checked" here would claim a
+            // measurement about a destination this run never had.
+            credentials: SetupRemoteCredentials::NotChecked {
+                why: "no destination was named, so the remote step never reached the credential \
+                      check"
+                    .to_string(),
             },
         },
     };
@@ -9075,8 +9274,12 @@ fn setup_prompt_remote_kind(args: &SetupRemoteArgs) -> Result<SetupRemoteKind, S
     if answer.is_empty() {
         return Ok(candidates[0]);
     }
+    // The list is 1-based, and only a number that is *in* it is an answer.
+    // `saturating_sub(1)` read `0` as the first candidate, so a typo the prompt
+    // never offered — there is no `[0]` line above — silently chose the
+    // recommended remote instead of failing the way every other bad answer does.
     if let Ok(index) = answer.parse::<usize>() {
-        if let Some(kind) = candidates.get(index.saturating_sub(1)) {
+        if let Some(kind) = index.checked_sub(1).and_then(|index| candidates.get(index)) {
             return Ok(*kind);
         }
     }
@@ -10030,6 +10233,13 @@ struct SetupRemoteReport {
     reach: SetupReach,
     trust: SetupTrust,
     dest_init: SetupDestinationInit,
+    /// What was observed about the credential variables this destination names.
+    ///
+    /// Its own field rather than a `missing_parameter`: the parameter *was*
+    /// given, and the variable it names is absent. Reported here so that a
+    /// non-TTY caller — for whom nothing is printed — gets the same observation
+    /// an interactive one reads on stderr.
+    credentials: SetupRemoteCredentials,
 }
 
 /// How the destination's config block came to exist.
@@ -10091,6 +10301,82 @@ enum SetupTrust {
     Declared,
     /// The operator was asked and did not make the declaration.
     Declined,
+}
+
+/// What was observed about the credential variables the destination names.
+///
+/// A third state, named separately, all the way to the object a wrapper reads:
+/// "the check ran and every named variable is usable", "the check ran and these
+/// are the ones that are not", and "the check never ran" are three answers, and
+/// an absent or empty list would collapse the last two into a pass. The values
+/// are never decoded — only whether `var_os` found something and whether that
+/// something was empty — so there is no path from here to a secret.
+enum SetupRemoteCredentials {
+    /// The step never reached the check, and why.
+    NotChecked { why: String },
+    /// The check ran, and this destination names no credential variable at all:
+    /// nothing could be absent. Not a pass, because there was nothing to pass.
+    NoneNamed,
+    /// The check ran; one entry per named variable, in the order the flags named
+    /// them.
+    Checked(Vec<SetupCredentialCheck>),
+}
+
+/// One credential variable, as this process found it.
+struct SetupCredentialCheck {
+    /// The variable's **name**. Its value is never read, and never carried here.
+    name: String,
+    state: SetupCredentialState,
+}
+
+impl SetupRemoteCredentials {
+    /// The names that cannot be used here, each with the fix it needs.
+    ///
+    /// The terminal lines and the JSON are rendered from this one computation, so
+    /// the two cannot disagree about whether a variable is usable — the failure
+    /// that the "one observation, two renderings" rule elsewhere in this step
+    /// exists to prevent.
+    fn unusable_names(&self) -> Vec<(&str, SetupCredentialState)> {
+        match self {
+            Self::NotChecked { .. } | Self::NoneNamed => Vec::new(),
+            Self::Checked(variables) => variables
+                .iter()
+                .filter(|variable| variable.state != SetupCredentialState::Set)
+                .map(|variable| (variable.name.as_str(), variable.state))
+                .collect(),
+        }
+    }
+}
+
+/// Whether a named credential variable can be used by this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupCredentialState {
+    /// Set in this process and not empty, so the loader will resolve the option.
+    Set,
+    /// Not set in this process at all.
+    NotSet,
+    /// Set in this process and empty.
+    Empty,
+}
+
+impl SetupCredentialState {
+    /// The word this state is reported as, on both the terminal and in JSON.
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::NotSet => "not_set",
+            Self::Empty => "empty",
+        }
+    }
+
+    /// Why this state makes the option unusable, in the words the terminal uses.
+    fn reason(self, name: &str) -> String {
+        match self {
+            Self::Set => unreachable!("a usable variable has no reason to report"),
+            Self::NotSet => format!("{name} is not set in this process"),
+            Self::Empty => format!("{name} is set but empty in this process"),
+        }
+    }
 }
 
 /// The `dest-init` child, when it ran.
@@ -10318,7 +10604,7 @@ fn setup_remote_credential_names(args: &SetupRemoteArgs) -> Vec<&str> {
     names
 }
 
-/// The credential variables that are not usable in *this* process.
+/// What this process can say about the credential variables a destination names.
 ///
 /// A third state, named separately: the variable is not set here, or it is set
 /// and empty. Both make the config loader omit the option (`config.rs:781`),
@@ -10328,18 +10614,24 @@ fn setup_remote_credential_names(args: &SetupRemoteArgs) -> Vec<&str> {
 ///
 /// The variable's *value* is never decoded: an `OsString` is asked whether it is
 /// empty and dropped. There is no path from here to a secret.
-fn setup_remote_credentials_unusable(args: &SetupRemoteArgs) -> Vec<String> {
-    let mut unusable = Vec::new();
-    for name in setup_remote_credential_names(args) {
-        match std::env::var_os(name) {
-            None => unusable.push(format!("{name} is not set in this process")),
-            Some(value) if value.is_empty() => {
-                unusable.push(format!("{name} is set but empty in this process"))
-            }
-            Some(_) => {}
-        }
+fn setup_remote_credentials(args: &SetupRemoteArgs) -> SetupRemoteCredentials {
+    let names = setup_remote_credential_names(args);
+    if names.is_empty() {
+        return SetupRemoteCredentials::NoneNamed;
     }
-    unusable
+    SetupRemoteCredentials::Checked(
+        names
+            .into_iter()
+            .map(|name| SetupCredentialCheck {
+                name: name.to_string(),
+                state: match std::env::var_os(name) {
+                    None => SetupCredentialState::NotSet,
+                    Some(value) if value.is_empty() => SetupCredentialState::Empty,
+                    Some(_) => SetupCredentialState::Set,
+                },
+            })
+            .collect(),
+    )
 }
 
 /// The `[destinations.<name>.options]` table for one kind.
@@ -10415,6 +10707,7 @@ fn setup_remote_step(
     args: &SetupRemoteArgs,
     interactive: bool,
     trust_declared: bool,
+    credentials: SetupRemoteCredentials,
 ) -> SetupRemoteReport {
     let mut report = SetupRemoteReport {
         name: Some(name.to_string()),
@@ -10429,6 +10722,11 @@ fn setup_remote_step(
         dest_init: SetupDestinationInit::NotRun {
             why: "the destination step did not get as far as running dest-init".to_string(),
         },
+        // Computed from the arguments before the step started, and carried rather
+        // than recomputed: the step's own early returns must still report the
+        // same observation, and a second read of the environment could disagree
+        // with the first one the terminal already printed.
+        credentials,
     };
 
     // Step 3: the config block. A destination already in the file is adopted
@@ -10501,7 +10799,32 @@ fn setup_remote_step(
         };
         return report;
     }
-    let target = resolve_store_config(&reloaded, Some(name), None, None, None, &[]);
+    // Resolved, not exited on. A block that was declared by hand and carries no
+    // `repo` (the shape ADR-039 keeps open for the local-path and REST
+    // candidates, and for anyone who has not filled the block in yet) is a
+    // config-content problem this run has *read and observed*: ending the
+    // process here would make a `--json` caller's stdout an empty pipe and call
+    // it a usage error. It is reported through the same state machine as every
+    // other reach outcome instead — the destination was never consulted, so
+    // nothing about it is proven, and that is what `Unreadable` says.
+    let target = match resolve_store_config_checked(&reloaded, Some(name), None, None, None, &[]) {
+        Ok(target) => target,
+        Err(problem) => {
+            report.reach = SetupReach::Unreadable {
+                why: format!(
+                    "`{name}` could not be resolved to a repository, so it was never consulted: {}",
+                    problem.message
+                ),
+            };
+            report.dest_init = SetupDestinationInit::NotRun {
+                why: format!(
+                    "`{name}` could not be resolved to a repository, so there is nothing to \
+                     initialise"
+                ),
+            };
+            return report;
+        }
+    };
 
     // Step 4: the read-only probe, and the trust decision it feeds. One probe,
     // classified once, so the advice printed and the decision taken cannot
@@ -10829,10 +11152,10 @@ fn print_setup_remote(report: &SetupRemoteReport) {
     }
 }
 
-/// The destination (WIZ-4 scheduler) step, still a stub: it prints what it would
-/// do and writes nothing. "planned (not installed)" is the point — a rendered
-/// template is not an installed timer, and saying it was installed would be the
-/// one lie this project has paid for before.
+/// The scheduler (WIZ-4) step, still a stub: it prints what it would do and
+/// writes nothing. "planned (not installed)" is the point — a rendered template
+/// is not an installed timer, and saying it was installed would be the one lie
+/// this project has paid for before.
 fn print_setup_next_steps(install_schedule: bool) {
     if install_schedule {
         println!("setup: scheduler installation planned (not installed)");
@@ -10931,6 +11254,14 @@ fn setup_remote_json(report: &SetupRemoteReport) -> serde_json::Value {
             }),
         },
     );
+    // `trust` carries the *authorization*, and it says so in the field name. The
+    // wizard never writes `known_hosts` itself — it passes `--trust-host` to a
+    // child — so what this process observed is its own decision to authorize the
+    // write, not the write. A field called `known_hosts_written` said the second
+    // thing on the strength of the first: when the child could not be started, or
+    // exited non-zero before it got there, the object asserted a write that never
+    // happened. Two facts, one of them observed here and one of them not, and
+    // only the observed one is reported.
     object.insert(
         "trust".to_string(),
         match &report.trust {
@@ -10938,16 +11269,17 @@ fn setup_remote_json(report: &SetupRemoteReport) -> serde_json::Value {
                 "kind": "not_required",
                 // Recorded so a reader cannot mistake the absence of a trust
                 // question for an answer to one.
-                "known_hosts_written": false,
+                "known_hosts_write_authorized": false,
             }),
             SetupTrust::Required => serde_json::json!({
                 "kind": "required",
-                "known_hosts_written": false,
-                "why": "--trust-host was not given, so nothing was written to known_hosts",
+                "known_hosts_write_authorized": false,
+                "why": "--trust-host was not given, so dest-init was not authorized to write \
+                        known_hosts",
             }),
             SetupTrust::Declared => serde_json::json!({
                 "kind": "declared",
-                "known_hosts_written": true,
+                "known_hosts_write_authorized": true,
                 "declaration_is_verified": false,
                 "why": "dest-init was authorized to record the host key after the operator \
                         declared, out of band, that the fingerprint matched — a declaration this \
@@ -10955,9 +11287,36 @@ fn setup_remote_json(report: &SetupRemoteReport) -> serde_json::Value {
             }),
             SetupTrust::Declined => serde_json::json!({
                 "kind": "declined",
-                "known_hosts_written": false,
+                "known_hosts_write_authorized": false,
                 "why": "the operator was asked whether the fingerprint had been checked and did \
-                        not declare it, so nothing was written to known_hosts",
+                        not declare it, so dest-init was not authorized to write known_hosts",
+            }),
+        },
+    );
+    object.insert(
+        "credentials".to_string(),
+        match &report.credentials {
+            SetupRemoteCredentials::NotChecked { why } => {
+                serde_json::json!({"kind": "not_checked", "why": why})
+            }
+            SetupRemoteCredentials::NoneNamed => serde_json::json!({
+                "kind": "none_named",
+                "why": "this destination names no credential variable, so there is nothing that \
+                        could be absent",
+            }),
+            SetupRemoteCredentials::Checked(variables) => serde_json::json!({
+                "kind": "checked",
+                "variables": variables
+                    .iter()
+                    .map(|variable| serde_json::json!({
+                        "name": variable.name,
+                        "state": variable.state.slug(),
+                    }))
+                    .collect::<Vec<_>>(),
+                "why": "asked of this process with `var_os` before the connection was attempted: \
+                        the value is never decoded. An unset or empty variable makes the config \
+                        loader omit the option, so the failure would otherwise arrive much later \
+                        as an authentication error.",
             }),
         },
     );
