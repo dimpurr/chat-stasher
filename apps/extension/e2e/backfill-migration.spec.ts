@@ -33,6 +33,7 @@
  */
 
 import { expect, type Page } from '@playwright/test';
+import { isSweepNotConcluded, type TabSweepTrace } from '../lib/backfill/alarm';
 import {
   fireAlarm,
   fixture,
@@ -151,7 +152,24 @@ async function serveChatgpt(ext: Extension): Promise<{ api: string[]; list: stri
 /** The extension's own one-shot tick alarm name (`lib/backfill/alarm.ts`). */
 const TICK_ALARM = 'cs-backfill-tick';
 
-/** Poll `storage.local` until the alarm has recorded its tick. */
+/**
+ * Poll `storage.local` until the alarm has published a **concluded** tick record.
+ *
+ * 🔴 W70 · A truthy `cs_backfill_lasttick_v1` is not the completion signal.
+ *    Since W62 the tick publishes a **provisional** record before its tab
+ *    registry recovery sweep (`{tabSweep: {sweeping: true}}`, `SWEEP_NOT_CONCLUDED`
+ *    in `lib/backfill/alarm.ts`) and replaces it with the verdict when the sweep
+ *    concludes. Returning on the key alone read the tick *while it was still
+ *    running* — a state the code is not required to be finished in — and the
+ *    no-tab case's assertions happen to hold for the provisional record too, so
+ *    it passed without proving what it claims. The predicate below is the
+ *    product's own (`isSweepNotConcluded`), not a second spelling of the shape.
+ *
+ * Returning the last reading on timeout (rather than throwing) is deliberate,
+ * the same rule the other waiters follow: the caller decides what the snapshot
+ * means, and the body's assertions are what fail on a missing or provisional
+ * record.
+ */
 async function waitForTickRecord(
   ext: Extension,
   timeoutMs = 20_000,
@@ -159,7 +177,11 @@ async function waitForTickRecord(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const all = await readStorage(ext, null);
-    if (all['cs_backfill_lasttick_v1']) return all;
+    const record = all['cs_backfill_lasttick_v1'];
+    if (record && typeof record === 'object') {
+      const fields = record as { tabSweep?: TabSweepTrace | null };
+      if (!isSweepNotConcluded(fields.tabSweep)) return all;
+    }
     if (Date.now() >= deadline) return all;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -334,6 +356,12 @@ test('with no platform tab open at all, the layout still moves: the migration do
   expect(tick).toBeTruthy();
   expect(tick.reason).toBe('no-http-port');
   expect(tick.halted).toBeNull();
+  // 🔴 W70 · This is a **verdict**, not the provisional record the tick publishes
+  //    before its sweep (`SWEEP_NOT_CONCLUDED`, `lib/backfill/alarm.ts`). The
+  //    waiter requires the sweep to have concluded; this assertion makes the
+  //    requirement explicit, so a later change to the waiter cannot quietly
+  //    reintroduce reading the tick while it is still running.
+  expect(isSweepNotConcluded(tick.tabSweep as TabSweepTrace | null)).toBe(false);
 
   // And the storage layout moved anyway.
   expect(all[HEADER_KEY]).toBeTruthy();
