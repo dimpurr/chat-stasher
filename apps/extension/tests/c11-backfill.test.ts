@@ -76,6 +76,24 @@ function fakeBackend(allIds: string[], opts: { total?: number | null; pageSize?:
 }
 
 describe('C11 criterion 1 · stop-and-resume', () => {
+  it('records unknown ChatGPT project membership on the body capture', async () => {
+    const store = memoryStore();
+    const backend = fakeBackend(['conv-w176-fixture']);
+    const captured: Array<Record<string, unknown>> = [];
+    await runBackfill({
+      platform: 'chatgpt',
+      origin: ORIGIN,
+      scope: 'acct-fixture',
+      store,
+      http: backend.http,
+      clock: fakeClock(),
+      maxDetails: 1,
+      sink: (item) => { captured.push(item as unknown as Record<string, unknown>); return { saved: true }; },
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.provenance).toEqual({ workspace: 'unknown', project: 'unknown', archived: false });
+  });
+
   it('interrupted half way, a restart carries on from the breakpoint instead of from the start', async () => {
     const store = memoryStore();
     const backend = fakeBackend(ids(30));

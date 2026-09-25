@@ -109,7 +109,7 @@ pub(super) fn json_sessions(
     data: &UiData,
 ) -> String {
     let row = |s: &UiSession| {
-        serde_json::json!({
+        let mut row = serde_json::json!({
             "index": s.index,
             "machine": s.machine,
             "source": s.source_label(),
@@ -123,7 +123,11 @@ pub(super) fn json_sessions(
             "archive_time_unix": s.archive_time_unix,
             "title": title_json(s),
             "href": format!("/session?i={}&token={}", s.index, percent_encode(token)),
-        })
+        });
+        if let Some(provenance) = &s.provenance {
+            row["provenance"] = serde_json::json!(provenance);
+        }
+        row
     };
     let v = serde_json::json!({
         "schema_version": 2,

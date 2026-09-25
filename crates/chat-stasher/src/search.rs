@@ -70,7 +70,9 @@ use rustic_core::repofile::{MasterKey, NodeType};
 use rustic_core::{Credentials, LsOptions, Repository};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::activity::{ActivityRow, SessionTitle, TimeSource as ActivityTimeSource, TitleSource};
+use crate::activity::{
+    ActivityRow, ProjectProvenance, SessionTitle, TimeSource as ActivityTimeSource, TitleSource,
+};
 use crate::readback::{bucket_shard_path, newest_snapshot_per_host};
 use crate::selector::{Selector, SessionMeta, TimeBounds, TimeWindow, UnplacedBy, Verdict};
 use crate::sidecar::{activity_index_machine, infer_harness};
@@ -133,6 +135,8 @@ pub struct SessionHit {
     /// the design's three label states plus the query-time corner the design
     /// names at machine level (see [`SessionLabel`]).
     pub title: SessionLabel,
+    /// Capture-time provenance and the latest supplemental attribution.
+    pub provenance: Option<ProjectProvenance>,
 }
 
 /// The label state one session resolves to once its index row has been read
@@ -684,7 +688,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
         .hits
         .iter()
         .map(|h| {
-            serde_json::json!({
+            let mut hit = serde_json::json!({
                 "machine": h.machine,
                 "session_short_id": h.short_id(),
                 "harness": h.harness,
@@ -694,7 +698,11 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "archive_time_unix": h.archive_time_unix,
                 "first_unix": time_state(h.first_unix, h.time_why.as_deref(), &h.time_source),
                 "last_unix": time_state(h.last_unix, h.time_why.as_deref(), &h.time_source),
-            })
+            });
+            if let Some(provenance) = &h.provenance {
+                hit["provenance"] = serde_json::json!(provenance);
+            }
+            hit
         })
         .collect();
     let unplaced: Vec<serde_json::Value> = report
@@ -776,6 +784,7 @@ struct IndexedTime {
     /// machine-level [`SearchReport::machines_with_legacy_index`] state —
     /// see [`SessionLabel::LegacyIndex`]).
     title: Option<SessionTitle>,
+    provenance: Option<ProjectProvenance>,
 }
 
 /// Turn one index row into the tri-state this module actually needs.
@@ -798,6 +807,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     };
     let line_count = row.line_count;
     let title = row.title.clone();
+    let provenance = row.provenance.clone();
     match (row.first_unix, row.last_unix, why) {
         (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
             first_unix: None,
@@ -806,6 +816,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             line_count,
             source: ActivityTimeSource::NoConversationContent,
             title,
+            provenance,
         },
         // Bounds that are only part of the span: carried through as measured,
         // with the partiality kept on the source so no consumer answers
@@ -818,6 +829,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                 line_count,
                 source: row.time_source.clone(),
                 title,
+                provenance,
             }
         }
         (Some(first), Some(last), _) => IndexedTime {
@@ -827,6 +839,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             line_count,
             source: row.time_source.clone(),
             title,
+            provenance,
         },
         (first, last, Some(why)) => IndexedTime {
             first_unix: first,
@@ -835,6 +848,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             line_count,
             source: ActivityTimeSource::Unknown { why },
             title,
+            provenance,
         },
         (first, last, None) => IndexedTime {
             first_unix: first,
@@ -845,6 +859,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                 why: NO_BOUND.to_string(),
             },
             title,
+            provenance,
         },
     }
 }
@@ -1049,6 +1064,7 @@ pub fn search_sessions(
             report.sessions_seen += 1;
             let harness = infer_harness(&session_id);
             let indexed = times.get(&(machine.clone(), session_id.clone()));
+            let provenance = indexed.and_then(|row| row.provenance.clone());
             let (first_unix, last_unix, time_why, line_count, time_source) = match indexed {
                 Some(t) => (
                     t.first_unix,
@@ -1129,6 +1145,7 @@ pub fn search_sessions(
                     line_count,
                     time_source,
                     title,
+                    provenance,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
                 Verdict::Unevaluated { dimension, why } => {
@@ -1200,6 +1217,7 @@ mod tests {
                 why: "test fixture records no conversation time".into(),
             },
             title: SessionLabel::NoLabelRecorded,
+            provenance: None,
         }
     }
 
@@ -1677,6 +1695,7 @@ mod tests {
                 line_count: 3,
                 time_source: ActivityTimeSource::Exact,
                 title: SessionLabel::NoLabelRecorded,
+                provenance: None,
             }],
             unplaced: vec![UnplacedSession {
                 machine: "m-2".into(),
@@ -1758,6 +1777,7 @@ mod tests {
                           for this session, so its label was never recorded"
                         .into(),
                 },
+                provenance: None,
             }],
             unplaced: Vec::new(),
             not_matched: 0,
@@ -1809,6 +1829,76 @@ mod tests {
         );
     }
 
+    /// A hit's project provenance must reach `search --json`, the surface the
+    /// dashboard reads (ADR-043's "shown by the CLI / UI"). The capture-time fact and the
+    /// later supplement travel as two fields, and a hit whose archive recorded
+    /// no provenance carries **no key at all** — never a `null` one, which
+    /// would collapse "we never wrote it down" into "no project".
+    #[test]
+    fn report_json_carries_project_provenance() {
+        let mut known = hit("m-1", "chatgpt.m-1.aaaaaaaa-0000-0000-0000-000000000001", 5);
+        known.provenance = Some(crate::activity::ProjectProvenance {
+            captured: Some(serde_json::json!({
+                "workspace": "unknown",
+                "project": "unknown",
+                "archived": false,
+            })),
+            effective_project: Some(serde_json::json!({
+                "id": "project-fixture",
+                "name": "Synthetic Project",
+            })),
+            supplement: Some(serde_json::json!({
+                "workspace": "workspace-fixture",
+                "project": {"id": "project-fixture", "name": "Synthetic Project"},
+                "source": "project-list",
+                "observedAt": "2026-09-25T12:00:00.000Z",
+            })),
+        });
+        let report = SearchReport {
+            destination: "d".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            sessions_seen: 2,
+            window: None,
+            all_recall: BTreeMap::new(),
+            hits: vec![
+                known,
+                hit("m-1", "chatgpt.m-1.aaaaaaaa-0000-0000-0000-000000000002", 6),
+            ],
+            unplaced: Vec::new(),
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
+            hosts: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 0,
+        };
+        let v: serde_json::Value = serde_json::from_str(&report_json(&report, false)).unwrap();
+        let sessions = v["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            "the capture-time fact must travel unchanged, marker included"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            "the later attribution is what a consumer shows as the project"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["source"],
+            "project-list"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["observedAt"],
+            "2026-09-25T12:00:00.000Z"
+        );
+        assert!(
+            sessions[1].get("provenance").is_none(),
+            "a hit with no provenance record carries no key at all, never null: {}",
+            sessions[1]
+        );
+    }
+
     /// An index row that contradicts itself (`Exact` but no bounds) is unknown,
     /// not "starts at zero". `inbox.rs`'s `modified_ns` is the precedent.
     #[test]
@@ -1823,6 +1913,7 @@ mod tests {
             time_source: ActivityTimeSource::Exact,
             source_zone: None,
             title: None,
+            provenance: None,
         };
         let t = indexed_time(&row);
         assert_eq!(t.first_unix, None);
@@ -1847,6 +1938,7 @@ mod tests {
             },
             source_zone: None,
             title: None,
+            provenance: None,
         };
         assert_eq!(
             indexed_time(&row).why.as_deref(),
@@ -1869,6 +1961,7 @@ mod tests {
             },
             source_zone: None,
             title: None,
+            provenance: None,
         };
         let t = indexed_time(&row);
         assert_eq!(

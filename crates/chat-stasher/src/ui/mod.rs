@@ -106,6 +106,7 @@ pub struct UiSession {
     /// The label this session lists under, resolved from its index row with
     /// the same honesty states as [`SessionLabel`] documents.
     pub title: SessionLabel,
+    pub provenance: Option<crate::activity::ProjectProvenance>,
     pub line_count: u64,
     /// The snapshot's own time — the backup run, not the conversation's.
     pub archive_time_unix: i64,
@@ -153,6 +154,7 @@ impl UiSession {
             last_unix: self.last_unix,
             line_count: self.line_count,
             time_source: crate::overview::TimeSource::from(&self.time_source),
+            provenance: self.provenance.clone(),
         }
     }
 
@@ -255,6 +257,7 @@ impl UiData {
                 time_why: h.time_why.clone(),
                 time_source: h.time_source.clone(),
                 title: h.title.clone(),
+                provenance: h.provenance.clone(),
                 line_count: h.line_count,
                 archive_time_unix: h.archive_time_unix,
                 data_blobs: h.data_blobs,
@@ -669,6 +672,7 @@ pub(crate) mod fixture {
             line_count: 10,
             time_source: source,
             title: crate::search::SessionLabel::NoLabelRecorded,
+            provenance: None,
         }
     }
 
@@ -861,6 +865,117 @@ mod tests {
         assert!(
             html.contains("<span class=v>3</span><span class=l>sources</span>"),
             "{html}"
+        );
+    }
+
+    #[test]
+    fn session_page_shows_later_project_and_preserves_unknown_capture_fact() {
+        let mut d = fixture::data();
+        d.sessions[0].provenance = Some(crate::activity::ProjectProvenance {
+            captured: Some(
+                serde_json::json!({"workspace":"unknown","project":"unknown","archived":false}),
+            ),
+            effective_project: Some(
+                serde_json::json!({"id":"project-fixture","name":"Synthetic Project"}),
+            ),
+            supplement: Some(serde_json::json!({
+                "workspace":"workspace-fixture",
+                "project":{"id":"project-fixture","name":"Synthetic Project"},
+                "source":"project-list",
+                "observedAt":"2026-09-25T12:00:00.000Z"
+            })),
+        });
+        let page = req("/session?i=0", &d, &NoContent).body;
+        assert!(
+            page.contains("Synthetic Project"),
+            "effective project must be visible"
+        );
+        assert!(
+            page.contains("learned later from project-list at 2026-09-25T12:00:00.000Z"),
+            "source and observation time must be visible"
+        );
+        assert!(
+            page.contains("capture recorded project: unknown"),
+            "the immutable capture-time unknown must remain visible"
+        );
+    }
+
+    /// The same sentence, for a capture that recorded **nothing**: an archive
+    /// written before provenance existed, later given a supplement. "We never
+    /// wrote it down" is not "it was written down as unknown" (CLAUDE.md
+    /// invariant 1), and this sentence is the one ADR-043 mandates, so it has to
+    /// keep them apart — the no-supplement branch already says "not recorded".
+    #[test]
+    fn session_page_says_not_recorded_when_the_capture_recorded_no_provenance() {
+        let mut d = fixture::data();
+        d.sessions[0].provenance = Some(crate::activity::ProjectProvenance {
+            captured: None,
+            effective_project: Some(
+                serde_json::json!({"id":"project-fixture","name":"Synthetic Project"}),
+            ),
+            supplement: Some(serde_json::json!({
+                "workspace":"workspace-fixture",
+                "project":{"id":"project-fixture","name":"Synthetic Project"},
+                "source":"project-list",
+                "observedAt":"2026-09-25T12:00:00.000Z"
+            })),
+        });
+        let page = req("/session?i=0", &d, &NoContent).body;
+        assert!(
+            page.contains("capture recorded project: not recorded"),
+            "a capture that recorded no provenance must say so: {page}"
+        );
+        assert!(
+            !page.contains("capture recorded project: unknown"),
+            "a capture that recorded nothing is not a capture that recorded \
+             unknown: {page}"
+        );
+    }
+
+    /// `GET /api/sessions` is the machine-readable half of the same page, and it
+    /// must carry provenance too — the CTO's "shown by the CLI / UI" surface is both. A
+    /// session with no record carries no key, so a consumer cannot read "not
+    /// written down" as "no project".
+    #[test]
+    fn api_sessions_json_carries_project_provenance() {
+        let mut d = fixture::data();
+        d.sessions[0].provenance = Some(crate::activity::ProjectProvenance {
+            captured: Some(
+                serde_json::json!({"workspace":"unknown","project":"unknown","archived":false}),
+            ),
+            effective_project: Some(
+                serde_json::json!({"id":"project-fixture","name":"Synthetic Project"}),
+            ),
+            supplement: Some(serde_json::json!({
+                "workspace":"workspace-fixture",
+                "project":{"id":"project-fixture","name":"Synthetic Project"},
+                "source":"project-list",
+                "observedAt":"2026-09-25T12:00:00.000Z"
+            })),
+        });
+        let body = req("/api/sessions", &d, &NoContent).body;
+        let v: serde_json::Value = serde_json::from_str(&body).expect("the route must send JSON");
+        let sessions = v["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            "the capture-time fact must travel unchanged, marker included"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            "the later attribution is what the API shows as the project"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["source"],
+            "project-list"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["observedAt"],
+            "2026-09-25T12:00:00.000Z"
+        );
+        assert!(
+            sessions[1].get("provenance").is_none(),
+            "a session with no provenance record carries no key at all, never null: {}",
+            sessions[1]
         );
     }
 

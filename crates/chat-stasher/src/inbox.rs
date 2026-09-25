@@ -441,6 +441,9 @@ struct Bundle {
     /// account fingerprint is computed from state outside the captured response,
     /// so `raw.text` cannot re-derive it — an unparsed drop here is permanent.
     account: Option<serde_json::Value>,
+    provenance: Option<serde_json::Value>,
+    #[serde(rename = "provenanceSupplement")]
+    provenance_supplement: Option<serde_json::Value>,
 }
 
 /// Record stored inside each sealed shard (one JSONL line per bundle).
@@ -487,6 +490,11 @@ struct ShardRecord {
     /// id or the dedup key — those remain `platform.sessionId` / `file_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance: Option<serde_json::Value>,
+    #[serde(rename = "provenanceSupplement")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance_supplement: Option<serde_json::Value>,
     /// W50c · The **content fingerprint** the delivery was made under — the
     /// extension's "same conversation, volatile fields aside" key
     /// (`apps/extension/lib/recapture.ts`), which the byte-level `file_sha256`
@@ -804,6 +812,8 @@ pub fn seal_payload(
             .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
         identity: parsed.identity,
         account: parsed.account,
+        provenance: parsed.provenance,
+        provenance_supplement: parsed.provenance_supplement,
         fingerprint: fingerprint.map(str::to_string),
     };
     let line = serde_json::to_string(&record)
@@ -1175,6 +1185,8 @@ struct ParseOutcome {
     /// W128 step 1 · the `account` envelope as written, or `None` when the bundle
     /// carried no object with a string `kind`.
     account: Option<serde_json::Value>,
+    provenance: Option<serde_json::Value>,
+    provenance_supplement: Option<serde_json::Value>,
 }
 
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
@@ -1199,6 +1211,8 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         raw: None,
         identity: None,
         account: None,
+        provenance: None,
+        provenance_supplement: None,
     };
 
     let bundle: Bundle = match serde_json::from_slice(bytes) {
@@ -1300,6 +1314,16 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     if let Some(v) = bundle.account.as_ref() {
         if v.get("kind").and_then(|x| x.as_str()).is_some() {
             out.account = Some(v.clone());
+        }
+    }
+    if let Some(v) = bundle.provenance.as_ref() {
+        if v.is_object() {
+            out.provenance = Some(v.clone());
+        }
+    }
+    if let Some(v) = bundle.provenance_supplement.as_ref() {
+        if v.is_object() {
+            out.provenance_supplement = Some(v.clone());
         }
     }
     Ok(out)
@@ -1975,5 +1999,58 @@ mod tests {
         assert_eq!(audit.cache_hits, 1, "legacy numeric mtime must still hit");
         assert_eq!(audit.rehashed, 0);
         assert_eq!(audit.stage_covered_files, 1);
+    }
+
+    #[test]
+    fn chatgpt_unknown_capture_and_later_supplement_survive_ingest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        let bundle = serde_json::json!({
+            "schema": SCHEMA,
+            "platform": "chatgpt",
+            "sessionId": "session-fixture",
+            "raw": {"text": "{}", "bytes": 2},
+            "provenance": {"workspace": "unknown", "project": "unknown", "archived": false},
+            "provenanceSupplement": {
+                "workspace": "workspace-fixture",
+                "project": {"id": "project-fixture", "name": "Synthetic Project"},
+                "source": "project-list",
+                "observedAt": "2026-09-25T12:00:00.000Z"
+            }
+        });
+        fs::write(
+            inbox.join("chatgpt-session-fixture.json"),
+            serde_json::to_vec(&bundle).unwrap(),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "machine-fixture").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        let record = only_shard_record(&stage, "machine-fixture", "chatgpt.session-fixture");
+        assert_eq!(record["provenance"]["project"], "unknown");
+        assert_eq!(
+            record["provenanceSupplement"]["project"]["id"],
+            "project-fixture"
+        );
+        assert_eq!(record["provenanceSupplement"]["source"], "project-list");
+        assert_eq!(
+            record["provenanceSupplement"]["observedAt"],
+            "2026-09-25T12:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn committed_inbox_schema_accepts_the_unknown_project_marker() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/inbox.schema.json");
+        let schema: serde_json::Value = serde_json::from_slice(&fs::read(root).unwrap()).unwrap();
+        let project = &schema["properties"]["provenance"]["properties"]["project"]["oneOf"];
+        assert!(project
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|variant| variant["const"] == "unknown"));
+        assert!(schema["properties"]["provenanceSupplement"].is_object());
     }
 }

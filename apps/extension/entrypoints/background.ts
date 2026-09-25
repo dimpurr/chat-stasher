@@ -186,6 +186,8 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
       store,
       sessionId === 'unknown' ? null : sessionId,
     ),
+    ...(captured.provenance ? { provenance: captured.provenance } : {}),
+    ...(captured.provenanceSupplement ? { provenanceSupplement: captured.provenanceSupplement } : {}),
     url: captured.url,
     method: captured.method,
     status: captured.status,

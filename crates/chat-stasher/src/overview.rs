@@ -116,6 +116,7 @@ pub struct OverviewRow {
     pub last_unix: Option<i64>,
     pub line_count: u64,
     pub time_source: TimeSource,
+    pub provenance: Option<crate::activity::ProjectProvenance>,
 }
 
 /// The vertical axis of the heatmap.
@@ -305,7 +306,7 @@ fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_
             "this session recorded no time boundary on this end",
         ),
     };
-    serde_json::json!({
+    let mut row = serde_json::json!({
         "session_id": r.session_id,
         "machine": r.machine,
         "machine_display": display_name(&r.machine, display_names),
@@ -314,7 +315,11 @@ fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_
         "time_source": r.time_source,
         "first_unix": boundary(r.first_unix),
         "last_unix": boundary(r.last_unix),
-    })
+    });
+    if let Some(provenance) = &r.provenance {
+        row["provenance"] = serde_json::json!(provenance);
+    }
+    row
 }
 
 fn display_name(machine: &str, display_names: &BTreeMap<String, String>) -> String {
@@ -1019,6 +1024,7 @@ mod tests {
             last_unix: last,
             line_count: lines,
             time_source: ts,
+            provenance: None,
         }
     }
 
@@ -1464,6 +1470,73 @@ mod tests {
             "unknown time must never serialise as null: {text}"
         );
         assert_eq!(v["summary"]["unknown_time_sessions"], serde_json::json!(1));
+    }
+
+    /// `overview --json` carries each session's project provenance, and a row
+    /// whose archive recorded none carries **no key at all** rather than a
+    /// `null` — the JSON half of the same three-state rule `row_json` keeps for
+    /// time.
+    #[test]
+    fn overview_json_carries_project_provenance() {
+        let (snap, idx, decl) = machines(&["air"], &["air"], &["air"]);
+        let display = BTreeMap::new();
+        let mut known = row(
+            "s1",
+            "air",
+            "chatgpt",
+            Some(D1),
+            Some(D1),
+            5,
+            TimeSource::Exact,
+        );
+        known.provenance = Some(crate::activity::ProjectProvenance {
+            captured: Some(serde_json::json!({
+                "workspace": "unknown",
+                "project": "unknown",
+                "archived": false,
+            })),
+            effective_project: Some(serde_json::json!({
+                "id": "project-fixture",
+                "name": "Synthetic Project",
+            })),
+            supplement: Some(serde_json::json!({
+                "workspace": "workspace-fixture",
+                "project": {"id": "project-fixture", "name": "Synthetic Project"},
+                "source": "project-list",
+                "observedAt": "2026-09-25T12:00:00.000Z",
+            })),
+        });
+        let rows = vec![
+            known,
+            row(
+                "s2",
+                "air",
+                "chatgpt",
+                Some(D1),
+                Some(D1),
+                5,
+                TimeSource::Exact,
+            ),
+        ];
+        let v = overview_json(&rows, &snap, &idx, &decl, &display, 0);
+        let sessions = v["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            "the capture-time fact must travel unchanged, marker included"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            "the later attribution is what the overview shows as the project"
+        );
+        assert_eq!(
+            sessions[0]["provenance"]["supplement"]["source"],
+            "project-list"
+        );
+        assert!(
+            sessions[1].get("provenance").is_none(),
+            "a row with no provenance record carries no key at all, never null: {}",
+            sessions[1]
+        );
     }
 
     /// The exit-1 shape (read the whole repo, no index anywhere) is the same

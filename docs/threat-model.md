@@ -31,7 +31,7 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:310-378`;
-   `apps/extension/entrypoints/background.ts:304-321`).
+   `apps/extension/entrypoints/background.ts:306-323`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -108,7 +108,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:65-81`, `:310-378`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:163-198`). It sits there,
+   (`apps/extension/entrypoints/background.ts:196-199`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:380-395`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -327,7 +327,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:1132-1147`, `:1234-1250`). That value is written
+(`apps/extension/lib/contract.ts:1155-1170`, `:1257-1273`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:178-180`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -344,10 +344,10 @@ do. Two limits are worth stating rather than leaving to be discovered: the
 cannot be turned back into an account id from the archive alone; and because the
 salt is per install, fingerprints from two installs or two profiles are
 **incomparable** — a mismatch there is not evidence of a switch
-(`apps/extension/lib/contract.ts:1062-1066`). When no account id is visible the
+(`apps/extension/lib/contract.ts:1081-1085`). When no account id is visible the
 bundle carries an explicit `unknown` with a named reason instead of a value, so
 "we could not tell" is never recorded as a fingerprint
-(`apps/extension/lib/contract.ts:1035-1043`).
+(`apps/extension/lib/contract.ts:1054-1062`).
 
 ### The browser extension ecosystem — other extensions installed alongside ours
 
@@ -370,8 +370,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on the hook's ready message
-(`apps/extension/lib/contract.ts:965-975`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:930-963`). Those
+(`apps/extension/lib/contract.ts:984-994`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:946-975`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.
@@ -412,7 +412,7 @@ The properties that bound this boundary:
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
-  (`crates/chat-stasher/src/inbox.rs:66-68`, `:992-1020`). Two browsers, two
+  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1002-1030`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
@@ -650,7 +650,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:70-148`;
-   `apps/extension/entrypoints/background.ts:1096-1156`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1098-1158`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure

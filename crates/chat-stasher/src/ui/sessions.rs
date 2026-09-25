@@ -353,12 +353,14 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
             String::new(),
         ),
     };
+    let project_row = provenance_row_html(s);
     out.push_str(&format!(
         "<div class=scroll><table>\n<tbody>\n\
          <tr><th>machine</th><td class=mono>{m}</td></tr>\n\
          <tr><th>source</th><td>{h}</td></tr>\n\
          {label_row}\
          {label_source_row}\
+         {project_row}\
          <tr><th>first message</th><td>{f}</td></tr>\n\
          <tr><th>last message</th><td>{l}</td></tr>\n\
          <tr><th>shards</th><td class=n>{sh}</td></tr>\n\
@@ -370,6 +372,7 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
         h = esc(&s.source_label()),
         label_row = label_row,
         label_source_row = label_source_row,
+        project_row = project_row,
         f = time(s.first_unix),
         l = time(s.last_unix),
         sh = s.shard_count,
@@ -401,6 +404,66 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
     out.push_str(&footer(data));
     out.push_str("</body></html>\n");
     out
+}
+
+fn provenance_row_html(s: &UiSession) -> String {
+    let Some(provenance) = &s.provenance else {
+        return String::new();
+    };
+    let captured_project = provenance.captured.as_ref().and_then(|v| v.get("project"));
+    let captured_was_unknown = captured_project.is_some_and(|v| v == "unknown");
+    let name = |project: &serde_json::Value| -> String {
+        match project {
+            serde_json::Value::Null => "no project".to_string(),
+            serde_json::Value::String(s) if s == "unknown" => "unknown".to_string(),
+            serde_json::Value::Object(_) => project
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(esc)
+                .unwrap_or_else(|| "project name unreadable".to_string()),
+            _ => "project attribution unreadable".to_string(),
+        }
+    };
+    let effective = provenance
+        .effective_project
+        .as_ref()
+        .map(&name)
+        .unwrap_or_else(|| "unknown".to_string());
+    if let Some(supplement) = &provenance.supplement {
+        let source = supplement
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("source unknown");
+        let observed_at = supplement
+            .get("observedAt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("time unknown");
+        // 🔴 A capture that recorded no provenance at all is **not** a capture
+        //    that recorded `unknown`. "We never wrote it down" and "it was
+        //    written down as unknown" are two different states (CLAUDE.md
+        //    invariant 1), and this sentence is the one ADR-043 mandates, so
+        //    the distinction has to survive in it. The no-supplement branch
+        //    below says "not recorded" for the same reason.
+        let captured = if captured_was_unknown {
+            "unknown".to_string()
+        } else {
+            captured_project
+                .map(&name)
+                .unwrap_or_else(|| "not recorded".to_string())
+        };
+        format!(
+            "<tr><th>project</th><td>{effective} (learned later from {source} at {observed_at}); capture recorded project: {captured}</td></tr>\n",
+            effective = effective,
+            source = esc(source),
+            observed_at = esc(observed_at),
+            captured = captured,
+        )
+    } else {
+        let original = captured_project
+            .map(&name)
+            .unwrap_or_else(|| "not recorded".to_string());
+        format!("<tr><th>project</th><td>{}</td></tr>\n", esc(&original))
+    }
 }
 
 /// The payload tier. Reached only by the explicit link on the session page.
