@@ -12,7 +12,8 @@ your `PATH`.
 ## Requirements
 
 - macOS on **Apple Silicon (arm64)** or **Intel (x86_64)** — prebuilt binaries
-  are shipped for both architectures. Linux is not available yet (see
+  are shipped for both architectures. This tap is macOS-only; Linux has
+  prebuilt binaries too, but not through Homebrew (see
   [What this tap does not ship](#what-this-tap-does-not-ship)).
 - [Homebrew](https://brew.sh) (works on both Intel and Apple Silicon Homebrew).
 
@@ -85,7 +86,7 @@ brew untap dimpurr/chat-stasher
 | --- | --- |
 | macOS arm64 (Apple Silicon) | ✅ prebuilt, v0.2.0 |
 | macOS x86_64 (Intel) | ✅ prebuilt, v0.2.0 |
-| Linux | ❌ not shipped — no prebuilt binary, no source build path in this tap |
+| Linux | ❌ not shipped by this tap — the main repository's Release does carry `chat-stasher-linux-x86_64` and `chat-stasher-linux-arm64` (static musl builds), and `scripts/install.sh` installs them; a Homebrew formula for them, with its own bottles, would be separate work for this tap |
 
 For a platform without a prebuilt binary, build from source:
 

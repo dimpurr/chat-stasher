@@ -2,13 +2,16 @@
 #
 # This is a BINARY formula: Homebrew downloads a prebuilt binary from the
 # dimpurr/chat-stasher GitHub Release and installs it as-is. It does NOT build
-# from source. That is deliberate — see scripts/install.sh for the platform
-# story (darwin-arm64 and darwin-x86_64 are the shipped targets today).
+# from source. This formula ships macOS only — see scripts/install.sh for the
+# platform story, which now covers Linux as well: the release carries
+# chat-stasher-linux-x86_64 and chat-stasher-linux-arm64, and a Homebrew
+# formula for those (with its own bottles) would be separate work.
 #
 # 🔴 URL + artifact names in this file MUST stay in sync with:
 #    - scripts/install.sh          (BASE_URL + ARTIFACT + VERSION)
+#    - .github/workflows/release.yml (the asset names it stages)
 #    - scripts/release-artifacts.sh ($OUT/chat-stasher-$HOST + SHA256SUMS)
-# If any of the three drifts, `brew install` will fetch a 404 or a mismatched
+# If any of them drifts, `brew install` will fetch a 404 or a mismatched
 # binary and the tap is broken.
 #
 # sha256 values below are the v0.4.0 release's SHA256SUMS. On every release,
@@ -20,9 +23,10 @@ class ChatStasher < Formula
   license "Apache-2.0"
 
   # macOS-only, precompiled-binary tap. `on_macos` + Hardware::CPU.arm? picks
-  # the per-architecture URL. There is intentionally no top-level `url`: no
-  # Linux build exists, so a non-macOS install must fail early rather than
-  # fetch a darwin binary.
+  # the per-architecture URL. There is intentionally no top-level `url`: this
+  # formula has no Linux build to point at, so a non-macOS install must fail
+  # early rather than fetch a darwin binary. (The release does build Linux
+  # binaries; installing them through Homebrew is not this formula's job.)
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/dimpurr/chat-stasher/releases/download/v0.4.0/chat-stasher-darwin-arm64"
