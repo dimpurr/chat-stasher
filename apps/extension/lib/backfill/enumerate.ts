@@ -1369,7 +1369,7 @@ const SHAPE_MAX_CHARS = 2000;
  *
  * 🔴 The residual, stated rather than hidden: an all-lower-case single word is
  *    still echoed, so a title or account name that happens to look like that
- *    (`dimpurr`) would survive this test. It is named in docs/privacy.md for what
+ *    (`dimpurr`) would survive this test. It is named in docs-dev/privacy.md for what
  *    it is; the alternative — withholding every key — removes the diagnosis this
  *    whole trace exists for.
  */
@@ -3151,7 +3151,7 @@ const grokDetail2Url = (origin: string, id: string): string =>
  *     the pair is at most two same-origin requests per conversation. If the real
  *     server caps the array, a long conversation comes back partially and this
  *     plan has no signal that could tell — the same honest caveat DeepSeek's body
- *     segment carries. It is stated in the change report and in docs/privacy.md.
+ *     segment carries. It is stated in the change report and in docs-dev/privacy.md.
  *  3. **The skeleton's own query.** One source appends `?includeThreads=true` to
  *     the skeleton call and two do not. No query is sent here: the two-source
  *     form is the one that was verified end to end, and adding a third source's

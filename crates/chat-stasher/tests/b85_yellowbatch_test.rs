@@ -11,7 +11,7 @@
 //!
 //! All fixtures are `tempfile` paths with isolated HOME/XDG variables. They
 //! contain only synthetic names, metadata and configuration; no session body,
-//! real harness, archive, remote, or `.private/` path is read.
+//! real harness, archive, remote, or machine-local path is read.
 
 use chat_stasher::config::{self, Config};
 use chat_stasher::doctor::{self, ReclaimCheck};

@@ -78,6 +78,4 @@ Before changing an established behavior, look for the decision record that
 explains it, and if the change invalidates an assumption another part of the
 system depends on, say so explicitly in the change description.
 
-If a `.private/` directory exists in this checkout, read
-`.private/docs/AGENT-ENTRY.md` before making changes. It is not part of the
-public repository and its absence is normal.
+For the rule governing `docs-dev/`, see [`docs-dev/README.md`](docs-dev/README.md).

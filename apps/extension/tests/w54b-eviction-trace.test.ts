@@ -37,7 +37,7 @@
  *    on this branch before the fix, and on `main` — and fails there as real red
  *    assertions ("expected the record to hold the evicted scope, got none"),
  *    which is the evidence a regression test must be able to produce. It also
- *    pins the persisted key name, the same thing docs/privacy.md documents.
+ *    pins the persisted key name, the same thing docs-dev/privacy.md documents.
  *
  * 🔴 The suite pins the build channel to `dev` (`vitest.config.ts`); every
  *    platform used here is active in that channel.

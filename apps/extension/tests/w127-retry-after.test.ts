@@ -1,6 +1,5 @@
 /**
- * W127 · The two rate-limit follow-ups from `.private/docs/28-RATE-LIMITS.md`
- * (§3.3 item 3, §5 B2/B4):
+ * W127 · The two rate-limit follow-ups (§3.3 item 3, §5 B2/B4):
  *
  *  A · **429/503 `Retry-After` is honoured, clamped to [30 s, 15 min], and the
  *      ladder stays the fallback** for an absent, empty or unparseable header.

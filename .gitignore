@@ -1,6 +1,3 @@
-# 🔴 私有内核 —— 绝不进公开仓
-.private/
-
 # Rust
 /target/
 **/*.rs.bk

@@ -882,7 +882,7 @@ impl Config {
 /// value the file did not write — the destination is left without the option its
 /// author named, and the run that needs it fails loudly — which is not the
 /// "act on a default nobody asked for" failure this function exists to refuse.
-/// See `docs/install.md` §4.5 for the operator-facing contract.
+/// See `docs-dev/install.md` §4.5 for the operator-facing contract.
 fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
     let mut problems: Vec<String> = Vec::new();
     cfg.expand_all_paths(&mut problems);

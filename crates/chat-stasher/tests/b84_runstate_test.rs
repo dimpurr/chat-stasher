@@ -127,7 +127,7 @@ fn body_without_verdict(text: &str) -> String {
 /// know about": for the exit code, it is a problem, because that integer is
 /// the only channel a script has and an absent record is the absence of
 /// evidence, not evidence of health (`runstate.rs:186-192`,
-/// `docs/install.md`).
+/// `docs-dev/install.md`).
 #[test]
 fn never_ran_exits_non_zero() {
     let sandbox = tempfile::tempdir().expect("sandbox");
@@ -223,12 +223,12 @@ fn the_install_doc_still_promises_a_non_zero_exit_when_unhealthy() {
     let doc = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("docs")
+        .join("docs-dev")
         .join("install.md");
-    let text = fs::read_to_string(&doc).expect("read docs/install.md");
+    let text = fs::read_to_string(&doc).expect("read docs-dev/install.md");
 
     assert!(
         text.contains("it exits with a non-zero code"),
-        "docs/install.md promises a non-zero exit when status is unhealthy; change this sentence before changing the behaviour"
+        "docs-dev/install.md promises a non-zero exit when status is unhealthy; change this sentence before changing the behaviour"
     );
 }

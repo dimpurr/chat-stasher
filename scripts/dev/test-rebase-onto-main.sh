@@ -18,12 +18,12 @@ expect() {
 
 seed() {
   dir=$1
-  mkdir -p "$dir/scripts/dev" "$dir/docs" "$dir/src"
+  mkdir -p "$dir/scripts/dev" "$dir/docs-dev" "$dir/src"
   cp "$ROOT/scripts/dev/rebase-onto-main.sh" "$dir/scripts/dev/"
   cat > "$dir/scripts/relocate-citations.py" <<'PY'
 #!/usr/bin/env python3
 from pathlib import Path
-Path('docs/citations.lock').write_text(Path('docs/citations.lock').read_text() + '# relocated\n')
+Path('docs-dev/citations.lock').write_text(Path('docs-dev/citations.lock').read_text() + '# relocated\n')
 PY
   cat > "$dir/scripts/check-citation-drift.py" <<'PY'
 #!/usr/bin/env python3
@@ -33,12 +33,12 @@ PY
   cat > "$dir/README.md" <<'MD'
 Anchor `src/a.rs:1`.
 MD
-  echo 'src/a.rs:1 deadbeef lines=1' > "$dir/docs/citations.lock"
+  echo 'src/a.rs:1 deadbeef lines=1' > "$dir/docs-dev/citations.lock"
   printf 'base\ntail\n' > "$dir/src/a.rs"
   git -C "$dir" init -q
   git -C "$dir" config user.name fixture
   git -C "$dir" config user.email fixture@example.invalid
-  git -C "$dir" add README.md docs src scripts
+  git -C "$dir" add README.md docs-dev src scripts
   git -C "$dir" commit -qm base
   git -C "$dir" branch onto
 }
@@ -50,16 +50,16 @@ FIX="$TMP/citation"
 seed "$FIX"
 git -C "$FIX" checkout -q onto
 sed -i '' 's/src\/a.rs:1/src\/a.rs:2/' "$FIX/README.md"
-sed -i '' 's/src\/a.rs:1/src\/a.rs:2/' "$FIX/docs/citations.lock"
+sed -i '' 's/src\/a.rs:1/src\/a.rs:2/' "$FIX/docs-dev/citations.lock"
 printf 'onto\n' >> "$FIX/src/a.rs"
-git -C "$FIX" add README.md docs/citations.lock src/a.rs
+git -C "$FIX" add README.md docs-dev/citations.lock src/a.rs
 git -C "$FIX" commit -qm onto
 git -C "$FIX" checkout -qb topic HEAD~1
 sed -i '' 's/src\/a.rs:1/src\/a.rs:3/' "$FIX/README.md"
-sed -i '' 's/src\/a.rs:1/src\/a.rs:3/' "$FIX/docs/citations.lock"
+sed -i '' 's/src\/a.rs:1/src\/a.rs:3/' "$FIX/docs-dev/citations.lock"
 printf 'topic\n' | cat - "$FIX/src/a.rs" > "$FIX/src/a.rs.new"
 mv "$FIX/src/a.rs.new" "$FIX/src/a.rs"
-git -C "$FIX" add README.md docs/citations.lock src/a.rs
+git -C "$FIX" add README.md docs-dev/citations.lock src/a.rs
 git -C "$FIX" commit -qm topic
 (cd "$FIX" && bash scripts/dev/rebase-onto-main.sh --onto onto)
 rc=$?

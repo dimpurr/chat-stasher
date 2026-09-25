@@ -163,13 +163,13 @@ file_mode() { # file_mode <file> — the permission bits, octal
 # tool refuses to work on a tree it cannot fully parse. So its whole scan set has
 # to exist in a fixture, or every run below refuses on the fixture itself.
 seed_repo() { # seed_repo <dir>
-  mkdir -p "$1/scripts" "$1/docs" "$1/src"
+  mkdir -p "$1/scripts" "$1/docs-dev" "$1/src"
   cp "$ROOT/scripts/check-citation-drift.py" "$1/scripts/"
   cp "$ROOT/scripts/relocate-citations.py" "$1/scripts/"
   cat > "$1/README.md" <<'MD'
 # Fixture
 
-A minimal document so that the citations in docs/ have a project around them.
+A minimal document so that the citations in docs-dev/ have a project around them.
 MD
   cat > "$1/SECURITY.md" <<'MD'
 # Security
@@ -181,7 +181,7 @@ MD
 
 Run the checks.
 MD
-  cat > "$1/docs/threat-model.md" <<'MD'
+  cat > "$1/docs-dev/threat-model.md" <<'MD'
 # Threat model
 
 The fixture's threat model.
@@ -199,7 +199,7 @@ echo "Fixture A: a file the merge moves, re-indents and grows around"
 echo "=============================================================="
 FIXA="$TMP/a"
 seed_repo "$FIXA"
-cat > "$FIXA/docs/install.md" <<'MD'
+cat > "$FIXA/docs-dev/install.md" <<'MD'
 # The relocatable cases
 
 The body of alpha is `src/a.ts:2-4`, and beta is `src/a.ts:7-10`.
@@ -208,7 +208,7 @@ Two ranges in one span: `src/a.ts:2-4,15-17`.
 
 Alpha again, and then gamma without repeating the file name: `src/a.ts:2-4`, `:15-17`.
 MD
-cat > "$FIXA/docs/privacy.md" <<'MD'
+cat > "$FIXA/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -249,8 +249,8 @@ echo "  fixture A at ${OLDA:0:7}"
 # The digests the lock pins for the ranges about to move. The tool moves an
 # anchor; it must not change what content that anchor pins, so these have to
 # reappear unchanged under the new keys.
-digest_2_4="$(cd "$FIXA" && awk '$1=="src/a.ts:2-4"{print $2}' docs/citations.lock)"
-digest_15_17="$(cd "$FIXA" && awk '$1=="src/a.ts:15-17"{print $2}' docs/citations.lock)"
+digest_2_4="$(cd "$FIXA" && awk '$1=="src/a.ts:2-4"{print $2}' docs-dev/citations.lock)"
+digest_15_17="$(cd "$FIXA" && awk '$1=="src/a.ts:15-17"{print $2}' docs-dev/citations.lock)"
 if [ -z "$digest_2_4" ] || [ -z "$digest_15_17" ]; then
   echo "  ✘ fixture A's own lock has no src/a.ts:2-4 / :15-17 anchor; the selftest is void"
   FAILED=1
@@ -297,12 +297,12 @@ echo "  refused — and a dry run over it must say so with the same"
 echo "  non-zero exit the real run gives. A clean plan's exit 0 is"
 echo "  probe 9's job, where both citations really do relocate."
 echo "=============================================================="
-before="$(shasum -a 256 docs/install.md | cut -d' ' -f1)"
+before="$(shasum -a 256 docs-dev/install.md | cut -d' ' -f1)"
 python3 scripts/relocate-citations.py --old "$OLDA" --dry-run >"$TMP/dry.out" 2>&1
 rc=$?
 expect 1 "$rc" "a plan with a refusal in it must be an error"
-if [ "$before" = "$(shasum -a 256 docs/install.md | cut -d' ' -f1)" ]; then
-  echo "  ✔ docs/install.md is byte-identical after --dry-run"
+if [ "$before" = "$(shasum -a 256 docs-dev/install.md | cut -d' ' -f1)" ]; then
+  echo "  ✔ docs-dev/install.md is byte-identical after --dry-run"
 else
   echo "  ✘ --dry-run modified the document"
   FAILED=1
@@ -320,16 +320,16 @@ echo "=============================================================="
 python3 scripts/relocate-citations.py --old "$OLDA" >"$TMP/run1.out" 2>&1
 rc=$?
 expect 1 "$rc" "a block with a line inserted inside it is refused, so the run is not clean"
-contains docs/install.md '`src/a.ts:6-8`' "alpha's citation shifted to 6-8"
-contains docs/install.md '`src/a.ts:6-8,20-22`' "the two-range span was rewritten as one token"
-contains docs/install.md '`:20-22`' "the continuation kept its bare form and moved"
-absent docs/install.md '`src/a.ts:2-4`' "no stale range survived"
+contains docs-dev/install.md '`src/a.ts:6-8`' "alpha's citation shifted to 6-8"
+contains docs-dev/install.md '`src/a.ts:6-8,20-22`' "the two-range span was rewritten as one token"
+contains docs-dev/install.md '`:20-22`' "the continuation kept its bare form and moved"
+absent docs-dev/install.md '`src/a.ts:2-4`' "no stale range survived"
 refused "$TMP/run1.out" 'REFUSE.*src/a\.ts:7-10 .*not in the merged file at all' \
   "beta's grown block is refused as text that is no longer one run of lines"
-contains docs/install.md 'and beta is `src/a.ts:7-10`' \
+contains docs-dev/install.md 'and beta is `src/a.ts:7-10`' \
   "beta's citation is left with the text it had, for a human"
 absent "$TMP/run1.out" 'GROWN' "and nothing is reported as a growth any more"
-absent docs/install.md 'src/a.ts:11-15' "the grown range was not invented for it"
+absent docs-dev/install.md 'src/a.ts:11-15' "the grown range was not invented for it"
 
 echo
 echo "=============================================================="
@@ -349,7 +349,7 @@ echo "=============================================================="
 python3 - <<'PY'
 import pathlib
 
-doc = pathlib.Path("docs/install.md")
+doc = pathlib.Path("docs-dev/install.md")
 text = doc.read_text(encoding="utf-8")
 repaired = text.replace("`src/a.ts:7-10`", "`src/a.ts:11-15`")
 if repaired == text:
@@ -361,8 +361,8 @@ expect 0 "$rc" "the human repair the refusal asks for is applied to the fixture"
 python3 scripts/check-citation-drift.py --update >/dev/null 2>&1
 rc=$?
 expect 0 "$rc" "--update must accept the relocated documents"
-moved_2_4="$(awk '$1=="src/a.ts:6-8"{print $2}' docs/citations.lock)"
-moved_15_17="$(awk '$1=="src/a.ts:20-22"{print $2}' docs/citations.lock)"
+moved_2_4="$(awk '$1=="src/a.ts:6-8"{print $2}' docs-dev/citations.lock)"
+moved_15_17="$(awk '$1=="src/a.ts:20-22"{print $2}' docs-dev/citations.lock)"
 if [ -n "$digest_2_4" ] && [ "$moved_2_4" = "$digest_2_4" ]; then
   echo "  ✔ src/a.ts:2-4 and src/a.ts:6-8 pin the same content ($digest_2_4)"
 else
@@ -389,15 +389,15 @@ echo "  side A's document ever wrote — so the citation belongs to no"
 echo "  declared side, and the run must refuse rather than re-read"
 echo "  A's line 6 and relocate the citation to whatever that is."
 echo "=============================================================="
-cp docs/install.md "$TMP/install.after1"
+cp docs-dev/install.md "$TMP/install.after1"
 python3 scripts/relocate-citations.py --old "$OLDA" >"$TMP/run2.out" 2>&1
 rc=$?
 expect 1 "$rc" "a document that is in no declared side's coordinates is an error"
-if diff -q "$TMP/install.after1" docs/install.md >/dev/null; then
+if diff -q "$TMP/install.after1" docs-dev/install.md >/dev/null; then
   echo "  ✔ the second run left the document byte-identical"
 else
   echo "  ✘ the second run rewrote the document:"
-  diff "$TMP/install.after1" docs/install.md | sed 's/^/      /'
+  diff "$TMP/install.after1" docs-dev/install.md | sed 's/^/      /'
   FAILED=1
 fi
 if grep -q -F 'no --old document writes this range' "$TMP/run2.out"; then
@@ -414,12 +414,12 @@ echo "Fixture B: a duplicated snippet and a deleted one"
 echo "=============================================================="
 FIXB="$TMP/b"
 seed_repo "$FIXB"
-cat > "$FIXB/docs/install.md" <<'MD'
+cat > "$FIXB/docs-dev/install.md" <<'MD'
 # The relocatable case
 
 The body of alpha is `src/a.ts:2-4`.
 MD
-cat > "$FIXB/docs/privacy.md" <<'MD'
+cat > "$FIXB/docs-dev/privacy.md" <<'MD'
 # The refusals
 
 The duplicated snippet is `src/a.ts:12-13`.
@@ -511,15 +511,15 @@ echo "  The two-line snippet is written twice in the merged file."
 echo "  Only one of them is what the sentence was about and the"
 echo "  tool cannot tell which — so it must leave the line alone."
 echo "=============================================================="
-cp docs/privacy.md "$TMP/refuse.before"
+cp docs-dev/privacy.md "$TMP/refuse.before"
 python3 scripts/relocate-citations.py --old "$OLDB" >"$TMP/run3.out" 2>&1
 rc=$?
 expect 1 "$rc" "a citation with more than one possible answer is an error"
-if diff -q "$TMP/refuse.before" docs/privacy.md >/dev/null; then
+if diff -q "$TMP/refuse.before" docs-dev/privacy.md >/dev/null; then
   echo "  ✔ the refused document was left byte-identical"
 else
   echo "  ✘ the refused document was edited anyway:"
-  diff "$TMP/refuse.before" docs/privacy.md | sed 's/^/      /'
+  diff "$TMP/refuse.before" docs-dev/privacy.md | sed 's/^/      /'
   FAILED=1
 fi
 if grep -q -F 'src/a.ts:12-13' "$TMP/run3.out" && grep -q -F 'places in the merged file' "$TMP/run3.out"; then
@@ -574,7 +574,7 @@ echo "  The tool must still be useful on a document where two"
 echo "  citations need a human: it re-locates what is certain and"
 echo "  exits non-zero so the run is not mistaken for a clean one."
 echo "=============================================================="
-contains docs/install.md '`src/a.ts:6-8`' "the certain citation was relocated despite the refusals"
+contains docs-dev/install.md '`src/a.ts:6-8`' "the certain citation was relocated despite the refusals"
 
 echo
 echo "=============================================================="
@@ -594,10 +594,10 @@ S
 T
 U
 TS
-cat > "$FIXC/docs/install.md" <<'MD'
+cat > "$FIXC/docs-dev/install.md" <<'MD'
 # Nothing cited yet
 MD
-cat > "$FIXC/docs/privacy.md" <<'MD'
+cat > "$FIXC/docs-dev/privacy.md" <<'MD'
 # Nothing cited yet
 MD
 (
@@ -617,7 +617,7 @@ S
 T
 U
 TS
-cat > "$FIXC/docs/install.md" <<'MD'
+cat > "$FIXC/docs-dev/install.md" <<'MD'
 # Side A
 
 Side A cites `src/two.ts:3-4`.
@@ -644,7 +644,7 @@ S
 T
 U
 TS
-cat > "$FIXC/docs/privacy.md" <<'MD'
+cat > "$FIXC/docs-dev/privacy.md" <<'MD'
 # Side B
 
 Side B cites `src/two.ts:4-5`.
@@ -659,7 +659,7 @@ OLDC_B="$(cd "$FIXC" && git rev-parse HEAD)"
 (
   cd "$FIXC" || exit 2
   git checkout -q side-a
-  git checkout -q "$OLDC_B" -- docs/privacy.md
+  git checkout -q "$OLDC_B" -- docs-dev/privacy.md
 )
 cat > "$FIXC/src/two.ts" <<'TS'
 a1
@@ -729,8 +729,8 @@ echo "=============================================================="
 python3 scripts/relocate-citations.py --old "$OLDC_A" --old "$OLDC_B" >"$TMP/run6.out" 2>&1
 rc=$?
 expect 0 "$rc" "the multi-side run succeeds"
-contains docs/install.md '`src/two.ts:6-7`' "side A's document was rewritten"
-contains docs/privacy.md '`src/two.ts:6-7`' "side B's document was rewritten"
+contains docs-dev/install.md '`src/two.ts:6-7`' "side A's document was rewritten"
+contains docs-dev/privacy.md '`src/two.ts:6-7`' "side B's document was rewritten"
 
 echo
 echo "=============================================================="
@@ -747,7 +747,7 @@ echo "  everything cannot pass either."
 echo "=============================================================="
 FIXD="$TMP/d"
 seed_repo "$FIXD"
-cat > "$FIXD/docs/install.md" <<'MD'
+cat > "$FIXD/docs-dev/install.md" <<'MD'
 # The shapes that are not an exact shift
 
 The function is `src/a.ts:1-4`.
@@ -758,7 +758,7 @@ The repeats are `src/a.ts:9-10`.
 
 The blank line is `src/blank.ts:2`.
 MD
-cat > "$FIXD/docs/privacy.md" <<'MD'
+cat > "$FIXD/docs-dev/privacy.md" <<'MD'
 # The block that grew, and the one that merely moved
 
 The function is `src/a.ts:11-14`.
@@ -828,20 +828,20 @@ echo "=============================================================="
 echo "Probe 12: the run refuses, and still relocates the one that"
 echo "  is certain"
 echo "=============================================================="
-cp docs/install.md "$TMP/d-install.before"
-cp docs/privacy.md "$TMP/d-privacy.before"
+cp docs-dev/install.md "$TMP/d-install.before"
+cp docs-dev/privacy.md "$TMP/d-privacy.before"
 python3 scripts/relocate-citations.py --old "$OLDD" >"$TMP/run7.out" 2>&1
 rc=$?
 expect 1 "$rc" "a block that is not still one run of lines is an error, not a relocation"
-contains docs/privacy.md '`src/mover.ts:3-4`' "the exact shift beside them still relocated"
+contains docs-dev/privacy.md '`src/mover.ts:3-4`' "the exact shift beside them still relocated"
 refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:11-14 .*not in the merged file at all' \
   "the block the merge inserted a line into is refused, not grown"
-contains docs/privacy.md '`src/a.ts:11-14`' "and its line keeps the text it had"
-if [ "$(diff "$TMP/d-privacy.before" docs/privacy.md | grep -c '^[<>]')" = "2" ]; then
+contains docs-dev/privacy.md '`src/a.ts:11-14`' "and its line keeps the text it had"
+if [ "$(diff "$TMP/d-privacy.before" docs-dev/privacy.md | grep -c '^[<>]')" = "2" ]; then
   echo "  ✔ and it is the only line of privacy.md that changed"
 else
   echo "  ✘ privacy.md changed in more than the one certain citation:"
-  diff "$TMP/d-privacy.before" docs/privacy.md | sed 's/^/      /'
+  diff "$TMP/d-privacy.before" docs-dev/privacy.md | sed 's/^/      /'
   FAILED=1
 fi
 
@@ -857,8 +857,8 @@ echo "  \`src/a.ts:14\` — one line, from a block that named two."
 echo "=============================================================="
 refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:9-10.*not in the merged file at all' \
   "the deleted repeat is refused, not shrunk to one line"
-contains docs/install.md '`src/a.ts:9-10`' "it is still the range the document carries"
-absent docs/install.md 'src/a.ts:14' "no one-line range was invented for it"
+contains docs-dev/install.md '`src/a.ts:9-10`' "it is still the range the document carries"
+absent docs-dev/install.md 'src/a.ts:14' "no one-line range was invented for it"
 
 echo
 echo "=============================================================="
@@ -873,7 +873,7 @@ echo "  run of lines at all."
 echo "=============================================================="
 refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:1-4.*not in the merged file at all' \
   "the block whose tail repeats further down is refused"
-absent docs/install.md '`src/a.ts:1-6`' "the stitched range was not written"
+absent docs-dev/install.md '`src/a.ts:1-6`' "the stitched range was not written"
 
 echo
 echo "=============================================================="
@@ -886,7 +886,7 @@ echo "  alignment that stops short of the very text that survived."
 echo "=============================================================="
 refused "$TMP/run7.out" 'REFUSE.*src/a\.ts:5-7.*not in the merged file at all' \
   "the block whose run the merge broke is refused"
-absent docs/install.md '`src/a.ts:7-10`' "no alignment was picked for it"
+absent docs-dev/install.md '`src/a.ts:7-10`' "no alignment was picked for it"
 
 echo
 echo "=============================================================="
@@ -899,14 +899,14 @@ echo "  cited, at a range nothing distinguishes from any other."
 echo "=============================================================="
 refused "$TMP/run7.out" 'REFUSE.*src/blank\.ts:2.*is blank at --old' \
   "the whitespace-only range is refused, not matched to a blank line"
-contains docs/install.md '`src/blank.ts:2`' "its line in the document is untouched"
+contains docs-dev/install.md '`src/blank.ts:2`' "its line in the document is untouched"
 
 echo
 echo "=============================================================="
 echo "Probe 17: the document with the four refusals is byte-identical"
 echo "=============================================================="
-same_bytes "$TMP/d-install.before" docs/install.md \
-  "docs/install.md is exactly as the run found it"
+same_bytes "$TMP/d-install.before" docs-dev/install.md \
+  "docs-dev/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -929,8 +929,8 @@ printf 'd1\nd2\nd3\nd4\nd5\nd6\n' > "$FIXF/src/disagree.ts"
 printf 'w1\nw2\nw3\nw4\nw5\nw6\n' > "$FIXF/src/reword.ts"
 printf 'c1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXF/src/cross.ts"
 printf 'a1\na2\na3\na4\na5\na6\n' > "$FIXF/src/alpha.ts"
-printf '# base\n\nnothing\n' > "$FIXF/docs/install.md"
-printf '# base\n\nnothing\n' > "$FIXF/docs/privacy.md"
+printf '# base\n\nnothing\n' > "$FIXF/docs-dev/install.md"
+printf '# base\n\nnothing\n' > "$FIXF/docs-dev/privacy.md"
 (
   cd "$FIXF" || exit 2
   git add -A
@@ -941,7 +941,7 @@ OLDF_BASE="$(cd "$FIXF" && git rev-parse HEAD)"
 printf 'd1\nd2\nA3\nA4\nd5\nd6\n' > "$FIXF/src/disagree.ts"
 printf 'w1\nw2\nRA3\nRA4\nw5\nw6\n' > "$FIXF/src/reword.ts"
 printf 'a1\na2\nX3\nX4\na5\na6\n' > "$FIXF/src/alpha.ts"
-cat > "$FIXF/docs/install.md" <<'MD'
+cat > "$FIXF/docs-dev/install.md" <<'MD'
 # Side A
 
 Disagree is `src/disagree.ts:3-4`.
@@ -963,7 +963,7 @@ OLDF_A="$(cd "$FIXF" && git rev-parse HEAD)"
 )
 printf 'd1\nd2\nB3\nB4\nd5\nd6\n' > "$FIXF/src/disagree.ts"
 printf 'w1\nw2\nRB3\nRB4\nw5\nw6\n' > "$FIXF/src/reword.ts"
-cat > "$FIXF/docs/install.md" <<'MD'
+cat > "$FIXF/docs-dev/install.md" <<'MD'
 # Side B
 
 Disagree is `src/disagree.ts:3-4`.
@@ -982,12 +982,12 @@ OLDF_B="$(cd "$FIXF" && git rev-parse HEAD)"
 (
   cd "$FIXF" || exit 2
   git checkout -q side-a
-  git checkout -q "$OLDF_B" -- docs/install.md
+  git checkout -q "$OLDF_B" -- docs-dev/install.md
 )
 printf 'd1\nd2\nZZ\nA3\nA4\nd5\nd6\n' > "$FIXF/src/disagree.ts"
 printf 'w1\nw2\nYY\nRA3\nRA4\nw5\nw6\n' > "$FIXF/src/reword.ts"
 printf 'c1\nc2\nQQ\nc3\nc4\nc5\nc6\n' > "$FIXF/src/cross.ts"
-cat > "$FIXF/docs/install.md" <<'MD'
+cat > "$FIXF/docs-dev/install.md" <<'MD'
 # Merged
 
 Disagree is `src/disagree.ts:3-4`.
@@ -1009,7 +1009,7 @@ echo "  documents carry the sentence, so the prose cannot say whose"
 echo "  it is. The surviving side is half the evidence, and the"
 echo "  other half says the text this sentence names is gone."
 echo "=============================================================="
-cp docs/install.md "$TMP/f-install.before"
+cp docs-dev/install.md "$TMP/f-install.before"
 python3 scripts/relocate-citations.py --old "$OLDF_A" --old "$OLDF_B" >"$TMP/run8.out" 2>&1
 rc=$?
 expect 1 "$rc" "sides that disagree about a range are an error"
@@ -1017,7 +1017,7 @@ absent "$TMP/run8.out" 'cannot resolve every citation' \
   "and it got as far as the citations — a fixture the parser cannot read would refuse for the wrong reason"
 refused "$TMP/run8.out" 'REFUSE.*src/disagree\.ts:3-4.*do not agree about it.*not in the merged file at all' \
   "the disagreement is reported, naming the side whose text is gone"
-absent docs/install.md 'src/disagree.ts:4-5' "the surviving side's range was not written"
+absent docs-dev/install.md 'src/disagree.ts:4-5' "the surviving side's range was not written"
 
 echo
 echo "=============================================================="
@@ -1029,7 +1029,7 @@ echo "  the same disagreement as probe 18, reached a different way."
 echo "=============================================================="
 refused "$TMP/run8.out" 'REFUSE.*src/reword\.ts:3-4.*do not agree about it' \
   "the reworded sentence's range is refused"
-absent docs/install.md 'src/reword.ts:4-5' "no range was picked for it"
+absent docs-dev/install.md 'src/reword.ts:4-5' "no range was picked for it"
 
 echo
 echo "=============================================================="
@@ -1043,9 +1043,9 @@ echo "  document ever cited, using alpha.ts's coordinates for it."
 echo "=============================================================="
 refused "$TMP/run8.out" 'REFUSE.*src/cross\.ts:3-4.*no --old document writes this range' \
   "the range only another file's document wrote is unclaimed"
-absent docs/install.md 'src/cross.ts:4-5' "and the citation was left where it was"
-same_bytes "$TMP/f-install.before" docs/install.md \
-  "docs/install.md is exactly as the run found it"
+absent docs-dev/install.md 'src/cross.ts:4-5' "and the citation was left where it was"
+same_bytes "$TMP/f-install.before" docs-dev/install.md \
+  "docs-dev/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -1096,9 +1096,9 @@ TS
 # CRLF, and the last line has no newline after it. Neither is what the tool
 # writes by default, and both are properties of a document the tool must keep.
 printf '# Fixture G\r\n\r\nStay `pkg/src/a.ts:12` and move `src/a.ts:12`.' \
-  > "$FIXG/docs/install.md"
-printf '# Fixture G\n\nPrivacy cites nothing.\n' > "$FIXG/docs/privacy.md"
-if ! od -c "$FIXG/docs/install.md" | grep -q '\\r'; then
+  > "$FIXG/docs-dev/install.md"
+printf '# Fixture G\n\nPrivacy cites nothing.\n' > "$FIXG/docs-dev/privacy.md"
+if ! od -c "$FIXG/docs-dev/install.md" | grep -q '\\r'; then
   echo "  ✘ this printf does not write the CR fixture G needs; the selftest is void"
   FAILED=1
 fi
@@ -1137,17 +1137,17 @@ echo
 echo "=============================================================="
 echo "Probe 21: only the citation of the file that moved was rewritten"
 echo "=============================================================="
-mode_before="$(file_mode docs/install.md)"
+mode_before="$(file_mode docs-dev/install.md)"
 python3 scripts/relocate-citations.py --old "$OLDG" >"$TMP/run9.out" 2>&1
 rc=$?
 expect 0 "$rc" "one citation moved, the other is already right"
-contains docs/install.md '`pkg/src/a.ts:12` and move `src/a.ts:17`' \
+contains docs-dev/install.md '`pkg/src/a.ts:12` and move `src/a.ts:17`' \
   "the shorter token was rewritten where it starts, not inside the longer one"
-absent docs/install.md 'pkg/src/a.ts:17' "the longer token's file was left alone"
-if [ "$mode_before" = "$(file_mode docs/install.md)" ]; then
-  echo "  ✔ docs/install.md kept its permission bits (${mode_before#0} → the same)"
+absent docs-dev/install.md 'pkg/src/a.ts:17' "the longer token's file was left alone"
+if [ "$mode_before" = "$(file_mode docs-dev/install.md)" ]; then
+  echo "  ✔ docs-dev/install.md kept its permission bits (${mode_before#0} → the same)"
 else
-  echo "  ✘ the rewrite changed the document's permissions: $mode_before → $(file_mode docs/install.md)"
+  echo "  ✘ the rewrite changed the document's permissions: $mode_before → $(file_mode docs-dev/install.md)"
   FAILED=1
 fi
 
@@ -1163,8 +1163,8 @@ echo "  are one assertion, because a document is one file."
 echo "=============================================================="
 printf '# Fixture G\r\n\r\nStay `pkg/src/a.ts:12` and move `src/a.ts:17`.' \
   > "$TMP/g-expected"
-same_bytes "$TMP/g-expected" docs/install.md \
-  "docs/install.md is byte for byte the planned rewrite"
+same_bytes "$TMP/g-expected" docs-dev/install.md \
+  "docs-dev/install.md is byte for byte the planned rewrite"
 
 echo
 echo "=============================================================="
@@ -1178,7 +1178,7 @@ echo "=============================================================="
 FIXH="$TMP/h"
 seed_repo "$FIXH"
 mkdir -p "$FIXH/contracts"
-cat > "$FIXH/docs/install.md" <<'MD'
+cat > "$FIXH/docs-dev/install.md" <<'MD'
 # Fixture H
 
 Install cites nothing.
@@ -1193,7 +1193,7 @@ cat > "$FIXH/contracts/api.md" <<'MD'
 
 Contract cites `src/a.ts:2-3`.
 MD
-printf '# Fixture H\n\nPrivacy cites nothing.\n' > "$FIXH/docs/privacy.md"
+printf '# Fixture H\n\nPrivacy cites nothing.\n' > "$FIXH/docs-dev/privacy.md"
 printf 'AA\nBB\nCC\nDD\n' > "$FIXH/src/a.ts"
 (
   cd "$FIXH" || exit 2
@@ -1244,12 +1244,12 @@ echo "  and prints an ordinary-looking plan while doing it."
 echo "=============================================================="
 FIXI="$TMP/i"
 seed_repo "$FIXI"
-cat > "$FIXI/docs/install.md" <<'MD'
+cat > "$FIXI/docs-dev/install.md" <<'MD'
 # Fixture I
 
 Alpha is `src/a.ts:2-3`.
 MD
-cat > "$FIXI/docs/privacy.md" <<'MD'
+cat > "$FIXI/docs-dev/privacy.md" <<'MD'
 # Fixture I
 
 Privacy cites nothing.
@@ -1268,7 +1268,7 @@ printf 'NEW1\nNEW2\nA1\nA2\nA3\nA4\n' > "$FIXI/src/a.ts"
 # which is what makes the wrong tree answer the question instead of erroring.
 FIXI_OTHER="$TMP/i-other"
 cp -R "$FIXI" "$FIXI_OTHER"
-cp "$FIXI_OTHER/docs/install.md" "$TMP/i-other-install.before"
+cp "$FIXI_OTHER/docs-dev/install.md" "$TMP/i-other-install.before"
 
 echo
 echo "=============================================================="
@@ -1281,8 +1281,8 @@ echo "=============================================================="
 ) >"$TMP/run11.out" 2>&1
 rc=$?
 expect 0 "$rc" "another worktree's copy can still relocate in this one"
-contains "$FIXI/docs/install.md" '`src/a.ts:4-5`' "this worktree's document was the one rewritten"
-same_bytes "$TMP/i-other-install.before" "$FIXI_OTHER/docs/install.md" \
+contains "$FIXI/docs-dev/install.md" '`src/a.ts:4-5`' "this worktree's document was the one rewritten"
+same_bytes "$TMP/i-other-install.before" "$FIXI_OTHER/docs-dev/install.md" \
   "the worktree the script file lives in was not touched"
 
 echo
@@ -1316,14 +1316,14 @@ echo "  cannot pass."
 echo "=============================================================="
 FIXJ="$TMP/j"
 seed_repo "$FIXJ"
-cat > "$FIXJ/docs/install.md" <<'MD'
+cat > "$FIXJ/docs-dev/install.md" <<'MD'
 # The blocks the insertion broke
 
 The inner brace is `src/inner.ts:1-4`.
 
 The pair is `src/pair.ts:1-2`.
 MD
-cat > "$FIXJ/docs/privacy.md" <<'MD'
+cat > "$FIXJ/docs-dev/privacy.md" <<'MD'
 # The block that grew, and the one that merely moved
 
 The function is `src/control.ts:1-4`.
@@ -1396,14 +1396,14 @@ echo "  line after \`helper();\`. The \`}\` that closes the \`if\`"
 echo "  (line 5) is an earlier candidate the old walk took, and"
 echo "  the function's own \`}\` is line 7."
 echo "=============================================================="
-cp docs/install.md "$TMP/j-install.before"
-cp docs/privacy.md "$TMP/j-privacy.before"
+cp docs-dev/install.md "$TMP/j-install.before"
+cp docs-dev/privacy.md "$TMP/j-privacy.before"
 python3 scripts/relocate-citations.py --old "$OLDJ" >"$TMP/run13.out" 2>&1
 rc=$?
 expect 1 "$rc" "a block that is not one unchanged run of lines is an error"
 refused "$TMP/run13.out" 'REFUSE.*src/inner\.ts:1-4 .*not in the merged file at all' \
   "the inner-brace block is refused as text that is no longer one run"
-absent docs/install.md 'src/inner.ts:1-5' "the range that ends inside the function was not written"
+absent docs-dev/install.md 'src/inner.ts:1-5' "the range that ends inside the function was not written"
 
 echo
 echo "=============================================================="
@@ -1416,7 +1416,7 @@ echo "  \`}\` still on line 5."
 echo "=============================================================="
 refused "$TMP/run13.out" 'REFUSE.*src/pair\.ts:1-2 .*not in the merged file at all' \
   "the two-line block is refused by the same rule"
-absent docs/install.md 'src/pair.ts:1-3' "the range that ends on the inserted brace was not written"
+absent docs-dev/install.md 'src/pair.ts:1-3' "the range that ends on the inserted brace was not written"
 
 echo
 echo "=============================================================="
@@ -1427,19 +1427,19 @@ echo "  into, so it is refused too; mover.ts is a plain shift and"
 echo "  must still relocate, with the run exiting non-zero for the"
 echo "  three refusals beside it."
 echo "=============================================================="
-contains docs/privacy.md '`src/mover.ts:3-4`' "the exact shift relocated"
-contains docs/privacy.md '`src/control.ts:1-4`' "the grown block keeps the text it had"
+contains docs-dev/privacy.md '`src/mover.ts:3-4`' "the exact shift relocated"
+contains docs-dev/privacy.md '`src/control.ts:1-4`' "the grown block keeps the text it had"
 refused "$TMP/run13.out" 'REFUSE.*src/control\.ts:1-4 .*not in the merged file at all' \
   "and the grown block is refused, not grown"
-if [ "$(diff "$TMP/j-privacy.before" docs/privacy.md | grep -c '^[<>]')" = "2" ]; then
+if [ "$(diff "$TMP/j-privacy.before" docs-dev/privacy.md | grep -c '^[<>]')" = "2" ]; then
   echo "  ✔ and it is the only line of privacy.md that changed"
 else
   echo "  ✘ privacy.md changed in more than the one certain citation:"
-  diff "$TMP/j-privacy.before" docs/privacy.md | sed 's/^/      /'
+  diff "$TMP/j-privacy.before" docs-dev/privacy.md | sed 's/^/      /'
   FAILED=1
 fi
-same_bytes "$TMP/j-install.before" docs/install.md \
-  "docs/install.md is exactly as the run found it"
+same_bytes "$TMP/j-install.before" docs-dev/install.md \
+  "docs-dev/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -1461,7 +1461,7 @@ printf 'c1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXK/src/cross.ts"
 printf 'g1\ng2\ng3\ng4\n' > "$FIXK/src/gamma.ts"
 printf 'o1\no2\no3\no4\n' > "$FIXK/pkg/one/a.ts"
 printf 't1\nt2\nt3\nt4\n' > "$FIXK/pkg/two/a.ts"
-cat > "$FIXK/docs/install.md" <<'MD'
+cat > "$FIXK/docs-dev/install.md" <<'MD'
 # Side A
 
 Alpha is `src/alpha.ts:1-2`, and more of it is `:3-4`.
@@ -1470,7 +1470,7 @@ The basename is `a.ts:1-2`.
 
 Gamma is `src/gamma.ts:1-2`.
 MD
-cat > "$FIXK/docs/privacy.md" <<'MD'
+cat > "$FIXK/docs-dev/privacy.md" <<'MD'
 # Fixture K
 
 Privacy cites nothing.
@@ -1489,7 +1489,7 @@ printf 'ZZ\nk1\nk2\nk3\nk4\nk5\nk6\n' > "$FIXK/src/alpha.ts"
 printf 'QQ\nc1\nc2\nc3\nc4\nc5\nc6\n' > "$FIXK/src/cross.ts"
 printf 'ZZ\ng1\ng2\ng3\ng4\n' > "$FIXK/src/gamma.ts"
 printf 'YY\nt1\nt2\nt3\nt4\n' > "$FIXK/pkg/two/a.ts"
-cat > "$FIXK/docs/install.md" <<'MD'
+cat > "$FIXK/docs-dev/install.md" <<'MD'
 # Merged
 
 Alpha is `src/cross.ts:3-4`.
@@ -1509,13 +1509,13 @@ echo "  \`:3-4\` continuing it. src/cross.ts:3-4 is a citation no"
 echo "  declared side's document ever wrote: the continuation is a"
 echo "  claim about alpha, not about everything with a line 3."
 echo "=============================================================="
-cp docs/install.md "$TMP/k-install.before"
+cp docs-dev/install.md "$TMP/k-install.before"
 python3 scripts/relocate-citations.py --old "$OLDK" >"$TMP/run14.out" 2>&1
 rc=$?
 expect 1 "$rc" "an unclaimed range is an error, not a relocation"
 refused "$TMP/run14.out" 'REFUSE.*src/cross\.ts:3-4 .*no --old document writes this range' \
   "the file the continuation never named is unclaimed"
-absent docs/install.md 'src/cross.ts:4-5' "and the citation was left where it was"
+absent docs-dev/install.md 'src/cross.ts:4-5' "and the citation was left where it was"
 
 echo
 echo "=============================================================="
@@ -1528,7 +1528,7 @@ echo "  cannot be moved on the strength of it."
 echo "=============================================================="
 refused "$TMP/run14.out" 'REFUSE.*pkg/two/a\.ts:1-2 .*no --old document writes this range' \
   "the same-named file the bare token never resolved to is unclaimed"
-absent docs/install.md 'pkg/two/a.ts:2-3' "and its citation was left where it was"
+absent docs-dev/install.md 'pkg/two/a.ts:2-3' "and its citation was left where it was"
 
 echo
 echo "=============================================================="
@@ -1537,7 +1537,7 @@ echo "  The refusals above must not turn the run into one that"
 echo "  refuses everything: side A's document writes"
 echo "  src/gamma.ts:1-2 outright, and gamma's lines moved down one."
 echo "=============================================================="
-contains docs/install.md '`src/gamma.ts:2-3`' "the named citation was relocated"
+contains docs-dev/install.md '`src/gamma.ts:2-3`' "the named citation was relocated"
 
 echo
 echo "=============================================================="
@@ -1553,12 +1553,12 @@ echo "  something a reader can act on."
 echo "=============================================================="
 FIXL="$TMP/l"
 seed_repo "$FIXL"
-cat > "$FIXL/docs/install.md" <<'MD'
+cat > "$FIXL/docs-dev/install.md" <<'MD'
 # The comma list
 
 The spans are `src/a.ts:2-4,15-17`.
 MD
-cat > "$FIXL/docs/privacy.md" <<'MD'
+cat > "$FIXL/docs-dev/privacy.md" <<'MD'
 # Fixture L
 
 Privacy cites nothing.
@@ -1626,14 +1626,14 @@ echo "  The first span moved with the file; the second names three"
 echo "  lines the merge deleted. There is no rewrite of this token"
 echo "  that is not half old and half new."
 echo "=============================================================="
-cp docs/install.md "$TMP/l-install.before"
+cp docs-dev/install.md "$TMP/l-install.before"
 python3 scripts/relocate-citations.py --old "$OLDL" >"$TMP/run15.out" 2>&1
 rc=$?
 expect 1 "$rc" "a token only half of which can be placed is an error"
-contains docs/install.md '`src/a.ts:2-4,15-17`' "the token is still the one the document had"
-absent docs/install.md 'src/a.ts:6-8,15-17' "no half-rewritten token was written"
-same_bytes "$TMP/l-install.before" docs/install.md \
-  "docs/install.md is exactly as the run found it"
+contains docs-dev/install.md '`src/a.ts:2-4,15-17`' "the token is still the one the document had"
+absent docs-dev/install.md 'src/a.ts:6-8,15-17' "no half-rewritten token was written"
+same_bytes "$TMP/l-install.before" docs-dev/install.md \
+  "docs-dev/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -1660,12 +1660,12 @@ echo "  is the only shape that forces a range."
 echo "=============================================================="
 FIXM="$TMP/m"
 seed_repo "$FIXM"
-cat > "$FIXM/docs/install.md" <<'MD'
+cat > "$FIXM/docs-dev/install.md" <<'MD'
 # The repeated line inside the block
 
 The function is `src/a.ts:1-4`.
 MD
-cat > "$FIXM/docs/privacy.md" <<'MD'
+cat > "$FIXM/docs-dev/privacy.md" <<'MD'
 # Fixture M
 
 Privacy cites nothing.
@@ -1697,15 +1697,15 @@ echo "=============================================================="
 echo "Probe 35: the block that grew is refused, whatever the walk"
 echo "  could have matched"
 echo "=============================================================="
-cp docs/install.md "$TMP/m-install.before"
+cp docs-dev/install.md "$TMP/m-install.before"
 python3 scripts/relocate-citations.py --old "$OLDM" >"$TMP/run16.out" 2>&1
 rc=$?
 expect 1 "$rc" "a block with a line inserted inside it is a refusal, not a relocation"
 refused "$TMP/run16.out" 'REFUSE.*src/a\.ts:1-4 .*not in the merged file at all' \
   "the grown block is refused as text that is no longer one run of lines"
-absent docs/install.md 'src/a.ts:1-5' "the whole-construct range was not written"
-same_bytes "$TMP/m-install.before" docs/install.md \
-  "docs/install.md is exactly as the run found it"
+absent docs-dev/install.md 'src/a.ts:1-5' "the whole-construct range was not written"
+same_bytes "$TMP/m-install.before" docs-dev/install.md \
+  "docs-dev/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -1723,7 +1723,7 @@ echo "=============================================================="
 FIXN="$TMP/n"
 seed_repo "$FIXN"
 mkdir -p "$FIXN/contracts"
-cat > "$FIXN/docs/install.md" <<'MD'
+cat > "$FIXN/docs-dev/install.md" <<'MD'
 # Fixture N
 
 Install cites nothing.
@@ -1738,7 +1738,7 @@ cat > "$FIXN/contracts/api.md" <<'MD'
 
 Contract cites `src/a.ts:2-3`.
 MD
-printf '# Fixture N\n\nPrivacy cites nothing.\n' > "$FIXN/docs/privacy.md"
+printf '# Fixture N\n\nPrivacy cites nothing.\n' > "$FIXN/docs-dev/privacy.md"
 printf 'AA\nBB\nCC\nDD\n' > "$FIXN/src/a.ts"
 (
   cd "$FIXN" || exit 2
@@ -1838,7 +1838,7 @@ TS
 printf 'R1\nR2\n' > "$FIXO/a.ts"
 printf 'T1\nT2\n' > "$FIXO/pkg/a.ts"
 printf 's1\ns2\ns3\n' > "$FIXO/src/shift.ts"
-cat > "$FIXO/docs/install.md" <<'MD'
+cat > "$FIXO/docs-dev/install.md" <<'MD'
 # The inputs the grown heuristic answered wrongly
 
 The call is `src/call.ts:1-3`.
@@ -1849,7 +1849,7 @@ The function is `src/fn.ts:1-4`.
 
 The basename is `a.ts:1-2`.
 MD
-cat > "$FIXO/docs/privacy.md" <<'MD'
+cat > "$FIXO/docs-dev/privacy.md" <<'MD'
 # The one that only moved
 
 The certain one is `src/shift.ts:1-2`.
@@ -1899,7 +1899,7 @@ echo "  taken as the end of a block the merge broke"
 echo "  All three blocks are refused, and none of the ranges the"
 echo "  old walk wrote is in the document."
 echo "=============================================================="
-cp docs/install.md "$TMP/o-install.before"
+cp docs-dev/install.md "$TMP/o-install.before"
 python3 scripts/relocate-citations.py --old "$OLDO" >"$TMP/run18.out" 2>&1
 rc=$?
 expect 1 "$rc" "blocks the merge broke are errors, not relocations"
@@ -1909,10 +1909,10 @@ refused "$TMP/run18.out" 'REFUSE.*src/twoline\.ts:1-2 .*not in the merged file a
   "the two-line call is refused by the same rule"
 refused "$TMP/run18.out" 'REFUSE.*src/fn\.ts:1-4 .*not in the merged file at all' \
   "the function is refused rather than ended on the \`// }\` brace"
-absent docs/install.md 'src/call.ts:1-4' "no range ending on the inner \`);\` was written"
-absent docs/install.md 'src/call.ts:1-5' "and no longer growth of it either"
-absent docs/install.md 'src/twoline.ts:1-3' "no range ending on the inserted \`);\` was written"
-absent docs/install.md 'src/fn.ts:1-6' "no range ending on the \`if\`'s brace was written"
+absent docs-dev/install.md 'src/call.ts:1-4' "no range ending on the inner \`);\` was written"
+absent docs-dev/install.md 'src/call.ts:1-5' "and no longer growth of it either"
+absent docs-dev/install.md 'src/twoline.ts:1-3' "no range ending on the inserted \`);\` was written"
+absent docs-dev/install.md 'src/fn.ts:1-6' "no range ending on the \`if\`'s brace was written"
 
 echo
 echo "=============================================================="
@@ -1928,10 +1928,10 @@ echo "  different on the two sides, so no range is forced."
 echo "=============================================================="
 refused "$TMP/run18.out" 'REFUSE.*pkg/a\.ts:1-2 .*resolves to a different file' \
   "the token that re-resolves to another file is refused, and the other file is named"
-absent docs/install.md 'a.ts:2-3' "no range was written against pkg/a.ts's old lines"
-contains docs/install.md '`a.ts:1-2`' "and the citation keeps the text it had"
-same_bytes "$TMP/o-install.before" docs/install.md \
-  "docs/install.md is exactly as the run found it"
+absent docs-dev/install.md 'a.ts:2-3' "no range was written against pkg/a.ts's old lines"
+contains docs-dev/install.md '`a.ts:1-2`' "and the citation keeps the text it had"
+same_bytes "$TMP/o-install.before" docs-dev/install.md \
+  "docs-dev/install.md is exactly as the run found it"
 
 echo
 echo "=============================================================="
@@ -1940,7 +1940,7 @@ echo "  The refusals must not turn the run into one that refuses"
 echo "  everything: src/shift.ts:1-2 is one unchanged run of lines"
 echo "  two lines further down, and it must move."
 echo "=============================================================="
-contains docs/privacy.md '`src/shift.ts:3-4`' "the exact shift relocated"
+contains docs-dev/privacy.md '`src/shift.ts:3-4`' "the exact shift relocated"
 
 echo
 echo "=============================================================="
@@ -1958,7 +1958,7 @@ echo "=============================================================="
 FIXP="$TMP/p"
 seed_repo "$FIXP"
 mkdir -p "$FIXP/contracts"
-cat > "$FIXP/docs/install.md" <<'MD'
+cat > "$FIXP/docs-dev/install.md" <<'MD'
 # Fixture P
 
 Install cites nothing.
@@ -1973,7 +1973,7 @@ cat > "$FIXP/contracts/api.md" <<'MD'
 
 Contract cites `src/a.ts:2-3`.
 MD
-printf '# Fixture P\n\nPrivacy cites nothing.\n' > "$FIXP/docs/privacy.md"
+printf '# Fixture P\n\nPrivacy cites nothing.\n' > "$FIXP/docs-dev/privacy.md"
 printf 'AA\nBB\nCC\nDD\n' > "$FIXP/src/a.ts"
 (
   cd "$FIXP" || exit 2
@@ -2091,12 +2091,12 @@ echo "  refusing everything is not a way to pass this fixture."
 echo "=============================================================="
 FIXQ1="$TMP/q1"
 seed_repo "$FIXQ1"
-cat > "$FIXQ1/docs/install.md" <<'MD'
+cat > "$FIXQ1/docs-dev/install.md" <<'MD'
 # Install
 
 This document cites nothing.
 MD
-cat > "$FIXQ1/docs/privacy.md" <<'MD'
+cat > "$FIXQ1/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -2144,12 +2144,12 @@ fi
 
 FIXQ2="$TMP/q2"
 seed_repo "$FIXQ2"
-cat > "$FIXQ2/docs/install.md" <<'MD'
+cat > "$FIXQ2/docs-dev/install.md" <<'MD'
 # Install
 
 This document cites nothing.
 MD
-cat > "$FIXQ2/docs/privacy.md" <<'MD'
+cat > "$FIXQ2/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -2223,12 +2223,12 @@ echo "  Q2 side A ${OLDQ2_A:0:7}, side B ${OLDQ2_B:0:7}"
 
 FIXQ3="$TMP/q3"
 seed_repo "$FIXQ3"
-cat > "$FIXQ3/docs/install.md" <<'MD'
+cat > "$FIXQ3/docs-dev/install.md" <<'MD'
 # Install
 
 This document cites nothing.
 MD
-cat > "$FIXQ3/docs/privacy.md" <<'MD'
+cat > "$FIXQ3/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -2267,12 +2267,12 @@ printf 'X\nm1\nm2\nm3\n' > "$FIXQ3/src/moved.ts"
 
 FIXQ4="$TMP/q4"
 seed_repo "$FIXQ4"
-cat > "$FIXQ4/docs/install.md" <<'MD'
+cat > "$FIXQ4/docs-dev/install.md" <<'MD'
 # Install
 
 This document cites nothing.
 MD
-cat > "$FIXQ4/docs/privacy.md" <<'MD'
+cat > "$FIXQ4/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -2305,12 +2305,12 @@ printf 'X\nm1\nm2\nm3\n' > "$FIXQ4/src/moved.ts"
 
 FIXQ5="$TMP/q5"
 seed_repo "$FIXQ5"
-cat > "$FIXQ5/docs/install.md" <<'MD'
+cat > "$FIXQ5/docs-dev/install.md" <<'MD'
 # Install
 
 This document cites nothing.
 MD
-cat > "$FIXQ5/docs/privacy.md" <<'MD'
+cat > "$FIXQ5/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -2351,12 +2351,12 @@ printf 'X\nm1\nm2\nm3\n' > "$FIXQ5/src/moved.ts"
 
 FIXQ6="$TMP/q6"
 seed_repo "$FIXQ6"
-cat > "$FIXQ6/docs/install.md" <<'MD'
+cat > "$FIXQ6/docs-dev/install.md" <<'MD'
 # Install
 
 This document cites nothing.
 MD
-cat > "$FIXQ6/docs/privacy.md" <<'MD'
+cat > "$FIXQ6/docs-dev/privacy.md" <<'MD'
 # Privacy
 
 This document cites nothing.
@@ -2534,7 +2534,7 @@ ln -s ../pkg/real.ts "$FIXR/src/link.ts"
 printf 'OLDLINK\n' > "$FIXR/pkg/target.ts"
 ln -s ../pkg/target.ts "$FIXR/src/old.ts"
 printf 'm1\nm2\nm3\n' > "$FIXR/src/mover.ts"
-cat > "$FIXR/docs/install.md" <<'MD'
+cat > "$FIXR/docs-dev/install.md" <<'MD'
 # The symlink cases
 
 The working-tree link is `src/link.ts:1`.
@@ -2543,7 +2543,7 @@ The --old link is `src/old.ts:1`.
 
 The certain one is `src/mover.ts:1-2`.
 MD
-cat > "$FIXR/docs/privacy.md" <<'MD'
+cat > "$FIXR/docs-dev/privacy.md" <<'MD'
 # Fixture R
 
 Privacy cites nothing.
@@ -2575,14 +2575,14 @@ echo "=============================================================="
 echo "Probe 47: a symlink in the working tree is refused, and the"
 echo "  link's target text is not taken as the cited line"
 echo "=============================================================="
-cp docs/install.md "$TMP/r-install.before"
+cp docs-dev/install.md "$TMP/r-install.before"
 python3 scripts/relocate-citations.py --old "$OLDR" >"$TMP/run26.out" 2>&1
 rc=$?
 expect 1 "$rc" "a cited symlink is an error, not a relocation"
 refused "$TMP/run26.out" 'REFUSE.*src/link\.ts:1-1 .*symlink in the working tree' \
   "the working-tree symlink is refused and named"
-absent docs/install.md 'src/link.ts:2' "the link's target text was not written for it"
-contains docs/install.md '`src/link.ts:1`' "the citation keeps the text it had"
+absent docs-dev/install.md 'src/link.ts:2' "the link's target text was not written for it"
+contains docs-dev/install.md '`src/link.ts:1`' "the citation keeps the text it had"
 
 echo
 echo "=============================================================="
@@ -2591,9 +2591,9 @@ echo "  is a link on, not by the merged file it is now"
 echo "=============================================================="
 refused "$TMP/run26.out" 'REFUSE.*src/old\.ts:1-1 .*symlink at --old' \
   "the --old symlink is refused and named"
-absent docs/install.md 'src/old.ts:2' "the old link text was not written for it"
-contains docs/install.md '`src/old.ts:1`' "the citation keeps the text it had"
-contains docs/install.md '`src/mover.ts:3-4`' "the control shift beside the two links still relocated"
+absent docs-dev/install.md 'src/old.ts:2' "the old link text was not written for it"
+contains docs-dev/install.md '`src/old.ts:1`' "the citation keeps the text it had"
+contains docs-dev/install.md '`src/mover.ts:3-4`' "the control shift beside the two links still relocated"
 
 echo
 echo "=============================================================="
@@ -2623,14 +2623,14 @@ m8
 m9
 m10
 MK
-cat > "$FIXS/docs/install.md" <<'MD'
+cat > "$FIXS/docs-dev/install.md" <<'MD'
 # The odd continuation
 
 See `src/a.ts:1` and `Makefile:10`.
 
 The certain one is `src/mover.ts:1-2`.
 MD
-cat > "$FIXS/docs/privacy.md" <<'MD'
+cat > "$FIXS/docs-dev/privacy.md" <<'MD'
 # Fixture S
 
 Privacy cites nothing.
@@ -2652,16 +2652,16 @@ echo "=============================================================="
 echo "Probe 49: the deleted file's citation is refused, not reported"
 echo "  right against the file the merged parse inherited"
 echo "=============================================================="
-cp docs/install.md "$TMP/s-install.before"
+cp docs-dev/install.md "$TMP/s-install.before"
 python3 scripts/relocate-citations.py --old "$OLDS" >"$TMP/run27.out" 2>&1
 rc=$?
 expect 1 "$rc" "a colon that is part of another side's token is not a continuation"
 refused "$TMP/run27.out" 'REFUSE.*src/a\.ts:10-10 .*is written `Makefile:10`' \
   "the refusal names the other side's token at that range"
-absent "$TMP/run27.out" 'right    docs/install.md:  src/a.ts:10-10' \
+absent "$TMP/run27.out" 'right    docs-dev/install.md:  src/a.ts:10-10' \
   "and it is not listed among the citations that are already right"
-contains docs/install.md 'and `Makefile:10`' "the citation keeps the text it had"
-contains docs/install.md '`src/mover.ts:3-4`' "the control shift beside it still relocated"
+contains docs-dev/install.md 'and `Makefile:10`' "the citation keeps the text it had"
+contains docs-dev/install.md '`src/mover.ts:3-4`' "the control shift beside it still relocated"
 
 echo
 echo "=============================================================="

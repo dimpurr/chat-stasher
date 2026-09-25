@@ -561,7 +561,7 @@ jobs:
             gh release create "$TAG" dist/* \
               ${RC_FLAG:+--prerelease} \
               --title "chat-stasher v${VERSION}" \
-              --notes "Prebuilt macOS (arm64, x86_64), Linux (x86_64, arm64 — static musl) and Windows (x86_64) CLI binaries, the stable browser extension zip, and SHA256SUMS. See docs/install.md for installation."
+              --notes "Prebuilt macOS (arm64, x86_64), Linux (x86_64, arm64 — static musl) and Windows (x86_64) CLI binaries, the stable browser extension zip, and SHA256SUMS. See docs-dev/install.md for installation."
           fi
 
           # 🔴 The published set must equal the staged set, exactly — the same

@@ -6,9 +6,8 @@ safe to reproduce without access to anyone's private conversations.
 
 ## Before opening a change
 
-- Do not commit `.private/`, files copied from `~/.claude/projects/`, real
-  conversation payloads, credentials, account identifiers, or machine-specific
-  absolute paths.
+- Do not commit local notes, session files, real conversation data, credentials,
+  account identifiers, or machine-specific absolute paths.
 - Use synthetic JSONL when a fixture is needed. Keep fixture output opaque and
   bounded; test logs may contain counts, byte sizes, timestamps, session ID
   prefixes, and SHA-256 prefixes, but not conversation text.
@@ -218,7 +217,7 @@ self-test, not a successful release gate.
 ### Resolving a merge
 
 A branch that touches code moves line numbers, so a merge conflicts on README.md,
-the documents under `docs/`, and `docs/citations.lock`. Only the prose is a
+the documents under `docs-dev/`, and `docs-dev/citations.lock`. Only the prose is a
 judgement call; the citation numbers are mechanical and `scripts/relocate-citations.py`
 does them. Take both sides' prose, then:
 
@@ -254,8 +253,8 @@ check gets a chance to be red first.
 For a branch whose documentation changes are citation coordinates only, use
 `bash scripts/dev/rebase-onto-main.sh [--onto <ref>]`. It refuses a dirty
 worktree, preserves the original SHA if rebasing or checking fails, and takes
-the onto side for conflicts in `README.md`, `docs/*.md`, and
-`docs/citations.lock`. Before rebasing, it compares the branch's changed
+the onto side for conflicts in `README.md`, `docs-dev/*.md`, and
+`docs-dev/citations.lock`. Before rebasing, it compares the branch's changed
 Markdown with the onto version after normalizing citation line ranges; any
 remaining difference is reported as prose to re-apply by hand. Code conflicts
 abort and restore the original SHA. A relocation that needs a human leaves the
@@ -348,7 +347,7 @@ report needs:
 
 - **Conversation content.** No message text, no conversation titles, no
   attachment or file names. Counts, byte sizes, timestamps, hashes and
-  session-id prefixes are the substitute, and `docs/privacy.md` lists exactly
+  session-id prefixes are the substitute, and `docs-dev/privacy.md` lists exactly
   which fields exist to be quoted.
 - **Another project by name.** Route shapes, field names and parameter names may
   be quoted as evidence — that is what the documents in this repository do — but
@@ -359,13 +358,12 @@ report needs:
   names, no account identifiers, no e-mail addresses, and no origin carrying a
   tenant or workspace identifier. A path that names your work directory names
   your employer.
-- **A document the reader cannot open.** Anything under `.private/` — an ADR, a
-  plan, a worker report — is not published, so citing one as the authority for a
-  claim leaves the reader nothing to check. State the fact, and where it is
-  verifiable give the public source. (A bare `ADR-nn` label in a published
-  document — `contracts/nativehost-protocol.md` names one — is a naming
-  convention rather than a citation: the difference is whether the reader is
-  asked to accept something on the word of a document they cannot read.)
+- **A document the reader cannot open.** Do not cite a document unavailable to
+  readers as the authority for a claim. State the fact, and where it is
+  verifiable give the source readers can access. (A bare `ADR-nn` label in a
+  published document — `contracts/nativehost-protocol.md` names one — is a
+  naming convention rather than a citation: the difference is whether readers
+  are asked to accept something on the word of a document they cannot read.)
 
 A redacted report still has to be worth reading. Reduce the case to a synthetic
 reproduction where you can, and say which facts you verified, which you assumed,

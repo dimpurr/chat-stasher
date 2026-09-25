@@ -51,7 +51,7 @@ Usage:
     python3 scripts/gen-support-matrix.py --emit short       # one of them
     python3 scripts/gen-support-matrix.py --update-fixtures  # rewrite the committed tables
     python3 scripts/gen-support-matrix.py --write-readme README.md
-    python3 scripts/gen-support-matrix.py --write-docs docs/support.md
+    python3 scripts/gen-support-matrix.py --write-docs docs-dev/support.md
     python3 scripts/gen-support-matrix.py --check            # verify committed tables
     python3 scripts/gen-support-matrix.py --selftest         # prove the check can fail
 
@@ -439,11 +439,11 @@ def normalize(text: str) -> str:
 
 def markdown_docs(root: str) -> list[str]:
     docs = ["README.md"]
-    docs_dir = os.path.join(root, "docs")
+    docs_dir = os.path.join(root, "docs-dev")
     if os.path.isdir(docs_dir):
         for name in sorted(os.listdir(docs_dir)):
             if name.endswith(".md"):
-                docs.append(os.path.join("docs", name))
+                docs.append(os.path.join("docs-dev", name))
     return docs
 
 
@@ -492,7 +492,7 @@ def check(root: str) -> tuple[list[str], list[str]]:
                 )
     if not found_any:
         notes.append(
-            "no support-matrix markers in README.md or docs/*.md yet; "
+            "no support-matrix markers in README.md or docs-dev/*.md yet; "
             "the committed fixtures above are the gate"
         )
     return failures, notes
@@ -776,8 +776,8 @@ def selftest() -> int:
             fh.write("stale\n")
         with open(readme, "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{SHORT_START}\nwrong\n{SHORT_END}\n")
-        os.makedirs(os.path.join(tmp, "docs"), exist_ok=True)
-        with open(os.path.join(tmp, "docs", "support.md"), "w", encoding="utf-8") as fh:
+        os.makedirs(os.path.join(tmp, "docs-dev"), exist_ok=True)
+        with open(os.path.join(tmp, "docs-dev", "support.md"), "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{FULL_START}\nwrong\n{FULL_END}\n")
         printed_flags = {
             flag for text in check(tmp)[0] for flag in re.findall(r"--[a-z][a-z-]*", text)

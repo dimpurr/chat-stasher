@@ -48,7 +48,7 @@ const UNRESOLVED_MACHINE: &str = "<machine-identity-unavailable>";
 ///
 /// Spelled as `write_fmt` plus an explicit newline rather than `writeln!(out,
 /// "{args}")`, which would work but would put a `"{args}"` entry in
-/// `docs/output-inventory.txt`: that file is a human-readable list of
+/// `docs-dev/output-inventory.txt`: that file is a human-readable list of
 /// user-visible text, and a formatter is not one.
 fn say_to(out: &mut dyn std::io::Write, args: std::fmt::Arguments<'_>) {
     #[allow(
@@ -11487,7 +11487,7 @@ fn cmd_status(
     // same failure. It used to be 1, which is the code this command spends on
     // "the timer is not running"; a caller could not tell an unreadable
     // registry from a dead scheduler. Both are still non-zero, which is all
-    // `docs/install.md` promises.
+    // `docs-dev/install.md` promises.
     //
     // Deliberately *not* folded in here either: a scan that succeeded but could
     // not read every session a harness claims (`report.probes` with a non-zero
@@ -11497,7 +11497,7 @@ fn cmd_status(
     //
     //   * This code already means one thing — "is the scheduled run healthy?"
     //     (`run_state_info`, the `[run-once]` line above, documented in
-    //     `docs/install.md`). A second meaning on the same integer does not add
+    //     `docs-dev/install.md`). A second meaning on the same integer does not add
     //     information, it destroys the first: a non-zero `status` would no
     //     longer tell you whether to go look at your timer.
     //   * Unreadable sessions are a *steady state*, not an event. A Cursor
@@ -11521,7 +11521,7 @@ fn cmd_status(
     // so a 0 would tell them nothing they don't know; a script has nothing but
     // the integer, and for a script "no evidence the timer ever fired" is the
     // strongest reason there is to go look at the timer. So the integer serves
-    // the script. `docs/install.md` promises exactly this ("`status` exits with
+    // the script. `docs-dev/install.md` promises exactly this ("`status` exits with
     // non-zero when judged 'unhealthy'"), and says why in the same words as
     // `runstate.rs:186-192`: an absent record is the absence of evidence, not
     // evidence of health.
@@ -11529,7 +11529,7 @@ fn cmd_status(
     // The tempting counter-argument — "a user who just installed the binary has
     // never run it either, and that user is fine, not broken" — is answered by
     // what `status` is *for*. It is the "is the backup still working?" command
-    // (`docs/install.md:328`), so it is not run before there is anything to
+    // (`docs-dev/install.md:328`), so it is not run before there is anything to
     // check; and the freshly-installed state is precisely the state where the
     // timer is not yet doing its job. Calling that 0 would mean the code reads 0
     // both before the timer is installed and after it dies — the one interval a

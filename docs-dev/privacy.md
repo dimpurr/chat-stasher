@@ -14,7 +14,7 @@ as unverified**.
 
 If you want the longer, harsher version of this — organised as *who can see
 what*, including the parts we do not defend — read
-[`docs/threat-model.md`](threat-model.md). This policy is the short answer;
+[`docs-dev/threat-model.md`](threat-model.md). This policy is the short answer;
 that document is the honest one.
 
 ---
@@ -176,7 +176,7 @@ extension you installed. All are read-only, and none carries a conversation:
   (`chat-stasher ui`, on `127.0.0.1`, with a per-launch access token). For as
   long as the dashboard runs, that URL **is** a secret, and the host hands it to
   the extension and to nothing else: it is not logged, not written to disk and
-  not printed (`contracts/nativehost-protocol.md` §6.5; `docs/threat-model.md`,
+  not printed (`contracts/nativehost-protocol.md` §6.5; `docs-dev/threat-model.md`,
   "The local dashboard").
 - **`has`** — one question, *is this exact content already stored?*, asked before
   the extension spends a delivery on a conversation its own record says it may
@@ -459,7 +459,7 @@ The parties who *do* see something, stated plainly:
 | Party | What they see | Why |
 |---|---|---|
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:698`, `:559-576`; `apps/extension/lib/gemini-capture.ts:150-234` |
-| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271-345`; see `docs/threat-model.md` |
+| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271-345`; see `docs-dev/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:466-476` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
@@ -694,7 +694,7 @@ asked would be the worse failure.
 
 A privacy policy that lists no weaknesses is more dangerous than no policy at
 all, so here are the ones that bear on your privacy. The full list is in
-[`docs/threat-model.md`](threat-model.md).
+[`docs-dev/threat-model.md`](threat-model.md).
 
 **1. The plaintext window before delivery.** The extension writes each captured
 session as an ordinary, unencrypted record into its outbox database, inside your
@@ -729,7 +729,7 @@ whether a second, hostile extension with broad host permissions on a chat origin
 can observe our in-page hook or the `window.postMessage` traffic between our
 page hook and our bridge, and we did not test whether an extension can reach
 another extension's IndexedDB. Treat this as **potentially exposed, not safe**.
-See the extension-ecosystem row of [`docs/threat-model.md`](threat-model.md).
+See the extension-ecosystem row of [`docs-dev/threat-model.md`](threat-model.md).
 
 **5. No security audit has been performed.** We have not commissioned or run a
 formal security assessment of this project. "We have not attacked this" is never

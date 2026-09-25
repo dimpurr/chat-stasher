@@ -59,7 +59,7 @@
  * stubs, the same shape as tests/w3-recapture.test.ts.
  *
  * 🔴 The storage key is written as a **literal** in the key-pinning case on
- *    purpose: it is the name `docs/privacy.md` publishes, and a test that asked
+ *    purpose: it is the name `docs-dev/privacy.md` publishes, and a test that asked
  *    the module for it would pass after a rename that silently stranded the row
  *    under a name the documentation no longer describes.
  *
@@ -77,7 +77,7 @@
  * 3. **The count counted arrivals.** ChatGPT re-sends the whole conversation on
  *    every view, and each re-send read as another stored conversation. Only a
  *    capture that was newly stored raises the count, and the popup's sentence —
- *    and `docs/privacy.md`'s row for the key — say exactly that.
+ *    and `docs-dev/privacy.md`'s row for the key — say exactly that.
  *
  * Every W69b case is asserted against the same real surfaces: the real merge
  * (`mergeHookObservation`), the real verdict (`captureVerdict`), the real
@@ -113,7 +113,7 @@ const ORIGIN = 'https://chatgpt.com';
 const PLATFORM = 'chatgpt';
 const OTHER_PLATFORM = 'deepseek';
 
-/** The row `docs/privacy.md` publishes for this record. Spelled out, not imported. */
+/** The row `docs-dev/privacy.md` publishes for this record. Spelled out, not imported. */
 const LIVE_KEY = `cs_live_capture_v1:${PLATFORM}`;
 
 const CHATGPT_SID = 'c0ffee00-1111-4222-8333-9a0b0c0d0e0f';

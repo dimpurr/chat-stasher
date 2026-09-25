@@ -4,8 +4,8 @@
 # 为什么要脚本而不是「我照着 README 走了一遍」：后者不可复算。这个脚本每一步都
 # 打印退出码，任何人任何时候重跑都能得到同一份判据。
 #
-# 🔴 它 clone 的是【远端】，不是本地工作区 —— 本地有很多 gitignored 的东西
-# （`.output/`、`target/`、`.private/`），只有从远端 clone 才知道陌生人拿到的是什么。
+# 🔴 It clones the remote, not the local worktree. Ignored local files are
+# deliberately absent, so this checks what a new contributor actually receives.
 #
 # 用法：bash scripts/smoke-fresh-clone.sh [--with-extension]
 #   --with-extension  也跑 A2（pnpm install + build，慢很多）

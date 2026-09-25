@@ -1410,7 +1410,7 @@ impl KeyFileError {
 /// archive is world-readable, and that window is exactly what an unprivileged
 /// process on a shared machine would wait for. On platforms without unix modes
 /// the file inherits whatever the filesystem gives it, and
-/// `docs/threat-model.md` says so rather than implying protection we do not
+/// `docs-dev/threat-model.md` says so rather than implying protection we do not
 /// provide.
 ///
 /// Durability is part of the contract, not a bonus: this function's `Ok` is
@@ -1527,8 +1527,8 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 // A second `impl` block, kept at the end of the file on purpose: several
-// documents cite this file by line range (`docs/privacy.md`,
-// `docs/threat-model.md`, `README.md`, `docs/install.md`), so code added
+// documents cite this file by line range (`docs-dev/privacy.md`,
+// `docs-dev/threat-model.md`, `README.md`, `docs-dev/install.md`), so code added
 // anywhere above the last cited line re-numbers anchors that have not changed
 // — the same reason `Cargo.toml` appends dependencies instead of inserting
 // them. Nothing here needs to sit beside its siblings.
@@ -1668,7 +1668,7 @@ mod tests {
     /// `disable_ec2_metadata = "true"` in a config file becomes the string
     /// `true` under that key in the map the backend is built from. Whether the
     /// backend then honours it is the pinned crate's behaviour, cited in
-    /// `docs/install.md` §4.5 against that crate, not asserted here — opendal
+    /// `docs-dev/install.md` §4.5 against that crate, not asserted here — opendal
     /// is not a direct dependency of this crate, so a test that called into its
     /// config deserialiser would add an edge to the build graph. Pure and
     /// injectable — no backend is built, so this opens nothing.

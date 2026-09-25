@@ -113,7 +113,7 @@ fn hand_written_config() -> String {
 /// backslash — true of every Unix path, and of no Windows path. TOML has two
 /// string forms and prefers the literal one (`'C:\Users\…'`) once a value
 /// contains a backslash, because `\` is its escape character inside `"…"`;
-/// both forms are the same value, and `docs/output-inventory.txt` shows the
+/// both forms are the same value, and `docs-dev/output-inventory.txt` shows the
 /// tool's own warning telling users to prefer the literal one on Windows.
 fn stage_line(stage: &str) -> String {
     format!("stage = {}", toml::Value::String(stage.to_owned()))

@@ -97,7 +97,7 @@ Download that file, put it anywhere on your PATH, and run
 To build from source instead:
   git clone https://github.com/dimpurr/chat-stasher
   cd chat-stasher && cargo build --release
-See docs/install.md for details.
+See docs-dev/install.md for details.
 EOF
     exit 1
     ;;
@@ -113,7 +113,7 @@ this installer refuses to write a broken one.
 To use chat-stasher on your platform, build from source:
   git clone https://github.com/dimpurr/chat-stasher
   cd chat-stasher && cargo build --release
-See docs/install.md for details.
+See docs-dev/install.md for details.
 EOF
     exit 1
     ;;
@@ -128,7 +128,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "error: curl is required to download chat-stasher and is not on PATH." >&2
-  echo "       Install curl and re-run, or build from source: docs/install.md." >&2
+  echo "       Install curl and re-run, or build from source: docs-dev/install.md." >&2
   exit 1
 fi
 
@@ -227,7 +227,7 @@ Or build from source, which needs no release artifact:
 
   git clone https://github.com/dimpurr/chat-stasher
   cd chat-stasher && cargo build --release
-See docs/install.md for details.
+See docs-dev/install.md for details.
 
 Nothing was installed.
 EOF

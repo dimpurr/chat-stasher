@@ -10,3 +10,5 @@ The language invariant is stated once, in the "Language" section of `CLAUDE.md`,
 together with its single exception, where the `commit-msg` hook and the CI
 checker live, and how to enable the hook. Read it there; this file deliberately
 does not restate it, because two copies of an invariant drift apart.
+
+The rule governing `docs-dev/` is in [`docs-dev/README.md`](docs-dev/README.md).
