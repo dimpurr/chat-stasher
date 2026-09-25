@@ -9103,13 +9103,33 @@ fn cmd_setup(
         } else {
             ScheduleAction::Install
         };
+        // Resolve once and hand this exact path to both the scheduler template
+        // and the post-install check. In particular, when setup itself is a
+        // Cargo build artifact, `resolve_binary` may select an installed copy
+        // instead of current_exe().
+        let explicit_schedule_binary =
+            std::env::var_os("CHAT_STASHER_SCHEDULE_BINARY").map(PathBuf::from);
+        let resolved_schedule_binary = if install_schedule {
+            std::env::current_exe().ok().and_then(|current_exe| {
+                schedule::resolve_binary(
+                    explicit_schedule_binary.as_deref(),
+                    &current_exe,
+                    &config::home_dir(),
+                )
+                .ok()
+            })
+        } else {
+            None
+        };
         let schedule_exit = cmd_schedule(
             Some(action),
             schedule::Unit::RunOnce,
             setup_schedule_format(),
             Some(stage),
             None,
-            std::env::var_os("CHAT_STASHER_SCHEDULE_BINARY").map(PathBuf::from),
+            resolved_schedule_binary
+                .clone()
+                .or(explicit_schedule_binary),
             destination.iter().cloned().collect(),
             None,
             None,
@@ -9131,10 +9151,6 @@ fn cmd_setup(
                 // Exercise the exact scheduled command once after installation.
                 // Keep its output private: setup's non-TTY contract is one JSON
                 // object, and a run-once pass may print operational details.
-                let binary = std::env::var_os("CHAT_STASHER_SCHEDULE_BINARY")
-                    .map(PathBuf::from)
-                    .map(|path| absolute_path(&path))
-                    .or_else(|| std::env::current_exe().ok());
                 let mut check_destinations = destination.clone().into_iter().collect::<Vec<_>>();
                 if check_destinations.is_empty() {
                     check_destinations.extend(config.destinations.keys().cloned());
@@ -9143,7 +9159,7 @@ fn cmd_setup(
                 if check_destinations.is_empty() {
                     check_destinations.push(String::new());
                 }
-                let checked = binary.is_some_and(|binary| {
+                let checked = resolved_schedule_binary.is_some_and(|binary| {
                     check_destinations.iter().all(|destination| {
                         let mut command = std::process::Command::new(&binary);
                         command
@@ -9166,8 +9182,8 @@ fn cmd_setup(
                 }
                 // The scheduler owns the next deadline. systemd adds randomized
                 // delay and may catch up after sleep; launchd exposes no stable
-                // next-fire timestamp. Do not turn the configured cadence into
-                // a timestamp that claims more precision than either provides.
+                // next-fire timestamp. Keep the machine-readable timestamp
+                // unknown rather than turning cadence into a false deadline.
                 next_run = None;
             }
         } else {
@@ -11310,6 +11326,8 @@ fn print_setup_summary(
     println!("setup: scheduler: {schedule_status}");
     if let Some(next_run) = next_run {
         println!("setup: next run (estimated): {next_run}");
+    } else if schedule_status == "installed_and_checked" {
+        println!("setup: next run: scheduler-managed; exact deadline unavailable");
     }
     if !install_schedule && !uninstall_schedule {
         println!("setup: scheduler was skipped; run `chat-stasher setup --install-schedule` to install it");

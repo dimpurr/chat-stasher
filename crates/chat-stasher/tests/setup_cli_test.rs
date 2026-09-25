@@ -398,7 +398,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     permissions.set_mode(0o755);
     fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
 
-    let scheduled_binary = sandbox.root.path().join("installed/chat-stasher");
+    let scheduled_binary = sandbox.home().join(".local/bin/chat-stasher");
     fs::create_dir_all(scheduled_binary.parent().expect("binary parent"))
         .expect("create installed binary directory");
     fs::copy(env!("CARGO_BIN_EXE_chat-stasher"), &scheduled_binary)
@@ -427,7 +427,6 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
                 "CHAT_STASHER_REGISTRY",
                 sandbox.root.path().join("registry.json"),
             )
-            .env("CHAT_STASHER_SCHEDULE_BINARY", &scheduled_binary)
             .env("CHAT_STASHER_LAUNCHCTL", &scheduler)
             .env("CHAT_STASHER_SYSTEMCTL", &scheduler)
             .output()
@@ -473,6 +472,78 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     assert_eq!(
         calls.matches("bootout").count(),
         usize::from(cfg!(target_os = "macos"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new(true);
+    let scheduler = sandbox.root.path().join("fake-scheduler");
+    let state = sandbox.root.path().join("scheduler-active");
+    let script = if cfg!(target_os = "macos") {
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
+            state.display(), state.display(), state.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\n",
+            state.display(), state.display(), state.display()
+        )
+    };
+    fs::write(&scheduler, script).expect("write fake scheduler");
+    let mut permissions = fs::metadata(&scheduler)
+        .expect("scheduler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+
+    let installed_binary = sandbox.home().join(".local/bin/chat-stasher");
+    fs::create_dir_all(installed_binary.parent().expect("binary parent"))
+        .expect("create installed binary directory");
+    fs::write(&installed_binary, "#!/bin/sh\nexit 1\n").expect("write failing installed binary");
+    let mut permissions = fs::metadata(&installed_binary)
+        .expect("installed binary metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&installed_binary, permissions).expect("make installed binary executable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args([
+            "setup",
+            "--stage",
+            sandbox.stage().to_str().expect("stage path"),
+            "--masterkey-saved-elsewhere",
+            "--install-schedule",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HOME", sandbox.home())
+        .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+        .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+        .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env(
+            "CHAT_STASHER_REGISTRY",
+            sandbox.root.path().join("registry.json"),
+        )
+        .env("CHAT_STASHER_LAUNCHCTL", &scheduler)
+        .env("CHAT_STASHER_SYSTEMCTL", &scheduler)
+        .output()
+        .expect("run setup with installed fallback binary");
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 1, "value={value}");
+    assert_eq!(value["schedule"]["status"], "self_check_failed");
+    assert_eq!(value["steps"]["schedule"], "self_check_failed");
+    assert_eq!(
+        value["schedule"]["next_run"],
+        serde_json::Value::Null,
+        "the timestamp remains unknown when the scheduler does not expose it"
     );
 }
 
