@@ -331,6 +331,27 @@ popup:
     noTarget: >-
       There is no backfill record for any platform yet, so there is no archive
       scope to show here.
+    # 🔴 W54b · The registry's recorded evictions — the durable half of the
+    # target registry's cap (alarm.ts, `cs_backfill_evicted_v1`). A receipt, not
+    # a verdict: each seat that left, newest first, with the reason in words.
+    # The scope is the same kind of value the "This progress is for: …" row
+    # above already prints (an account/organization identifier, never a
+    # conversation title). The `dropped` sentence prints only when the receipt's
+    # own bound has pushed older records off it — never a silent truncation.
+    evictions:
+      title: >-
+        Backfill target registry: {count} eviction(s) are on record. The
+        registry keeps at most {max} target(s); a target that loses its seat
+        stops being backfilled until a new capture registers it again, and
+        each evicted seat took that scope's local progress header with it, so
+        nothing stays behind hidden (newest first):
+      row: "· platform {platform} · archive scope {scope} · {reason} · {when}"
+      dropped: >-
+        ({count} older eviction(s) are no longer on this record, which keeps
+        the {kept} most recent.)
+      reason:
+        registryCap: "evicted because the target registry was full"
+        other: "evicted for an unrecognised reason: {reason}"
     # 🔴 W36b · The pre-W18 storage layout, said out loud where it was found.
     # These two are NOT the same sentence, and the difference is the whole point:
     # `moved` is a completed repair, `refused` means the old record is still

@@ -43,7 +43,10 @@ import {
   BACKFILL_TICK_DELAY_MAX_MINUTES,
   BACKFILL_TICK_DELAY_MIN_MINUTES,
   isSweepNotConcluded,
+  MAX_EVICTED_ENTRIES,
+  MAX_TARGET_ENTRIES,
   type BackfillTickRecord,
+  type EvictionLog,
   type LegacyMigration,
 } from './backfill/alarm';
 import {
@@ -315,6 +318,25 @@ export interface PopupModel {
    * and like `hookStatus`, `null` here must not be worded as anything else.
    */
   hookDecline?: HookDeclineRecord | null;
+  /**
+   * 🔴 W54b · **The registry's eviction record** (`cs_backfill_evicted_v1`),
+   * channel-filtered (`evictionLogOf`, lib/backfill/alarm.ts): one entry for
+   * each seat the target registry's eight-row cap has pushed off — platform,
+   * scope, reason, when — newest first, with the count of records the
+   * receipt's own bound has pushed off before them.
+   *
+   * Before W54b the eviction had no durable record at all: the writer's local
+   * `dropped` array was discarded the moment the call returned, so once the
+   * header was removed with the row, nothing observable identified the
+   * evicted target or why it left — a silent eviction is the one thing the
+   * registry's cap must never perform.
+   *
+   * Omitted or null ⇒ nothing to name (no record at the key, an unreadable
+   * one, or none for a platform this channel serves) — the same
+   * optional-field rule as the fields above, so an existing call site needs
+   * no edit.
+   */
+  evictions?: EvictionLog | null;
 }
 
 /**
@@ -748,6 +770,55 @@ function failureNote(summary: FailureSummary): string {
     t('popup.failureNote.ledger'),
     t('popup.failureNote.clear'),
   ];
+  return lines.join('\n');
+}
+
+/**
+ * 🔴 W54b · One eviction reason, in words.
+ *
+ * `'registry-cap'` is the only code this build writes on the eviction record.
+ * A code this build does not know comes from a *newer* build and prints as
+ * itself, never rounded into a guess — the rule `describeFailureReason` and
+ * `describeTickReason` both follow.
+ */
+export function describeEvictionReason(reason: string): string {
+  if (reason === 'registry-cap') return t('popup.notes.evictions.reason.registryCap');
+  return t('popup.notes.evictions.reason.other', { reason });
+}
+
+/**
+ * 🔴 W54b · **The registry's recorded evictions, said out loud.**
+ *
+ * The popup is the one surface that reads the registry and everything beside
+ * it, and until this note it was the one place an eviction was *least*
+ * visible: the row is gone from the registry, its header was removed with it
+ * (W54), and since W49b the popup hides headers whose scope is not registered
+ * — three arrangements of "absent" that together say nothing at all. The
+ * eviction record is what turns that absent-shaped silence into a named fact:
+ * which target lost its seat, why, and when — a receipt, never a verdict.
+ *
+ * The note restates the record; it infers nothing. The `dropped` sentence is
+ * printed only when the receipt's own bound has pushed records off it, the
+ * same never-a-silent-truncation rule the failure list's wording follows.
+ */
+function evictionNote(log: EvictionLog): string {
+  const lines = [
+    t('popup.notes.evictions.title', { count: log.entries.length, max: MAX_TARGET_ENTRIES }),
+    ...log.entries.map(
+      (entry) => t('popup.notes.evictions.row', {
+        platform: entry.platform,
+        scope: entry.scope,
+        reason: describeEvictionReason(entry.reason),
+        when: stampOf(entry.at),
+      }),
+    ),
+  ];
+  if (log.dropped > 0) {
+    lines.push(t('popup.notes.evictions.dropped', {
+      count: log.dropped,
+      kept: MAX_EVICTED_ENTRIES,
+    }));
+  }
   return lines.join('\n');
 }
 
@@ -1466,6 +1537,16 @@ function notesFor(model: PopupModel): string[] {
   // 🔴 W30 · Why the summary line says "unknown", before the long-term coverage
   //    note: an unreadable count is current state, and the user asked for it.
   notes.push(...summaryNotes(model));
+
+  // 🔴 W54b · The registry's eviction record, right before the coverage note:
+  //    like it, a long-term fact rather than the current state, and unlike it
+  //    one that only exists when something actually happened. A user whose
+  //    organization lost its backfill seat can read here that it lost the
+  //    seat, when, and that a capture re-registers it — the alternative was a
+  //    registry eight rows long with no one able to say what ever left it.
+  if (model.evictions && model.evictions.entries.length > 0) {
+    notes.push(evictionNote(model.evictions));
+  }
 
   // 🔴 The coverage note comes last: it is a long-term fact, not the current state.
   if (BACKFILL_UNSUPPORTED.length > 0 || BACKFILL_PARTIAL.length > 0) notes.push(coverageNote());
