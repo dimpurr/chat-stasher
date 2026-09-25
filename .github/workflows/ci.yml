@@ -323,6 +323,18 @@ jobs:
       - name: Citation relocation self-test
         run: bash scripts/selftest-relocate-citations.sh
 
+      # Every link between our own Markdown files, and every `#fragment` on
+      # one, must resolve. Nothing else in this workflow reads a document for
+      # its links, so a file that moves or a heading that is renamed under a
+      # link was invisible: the page still renders and the reader lands
+      # nowhere. External links are counted, never fetched — a gate that needs
+      # the network fails when the network does, and someone else's 404 is not
+      # a fact about this repository.
+      - name: Documentation links resolve
+        run: python3 scripts/check-doc-links.py
+
+      - name: Documentation link check self-test
+        run: python3 scripts/check-doc-links.py --selftest
 
       - name: Output inventory is up to date
         run: python3 scripts/output-inventory.py --check

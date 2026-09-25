@@ -58,6 +58,8 @@ python3 scripts/output-inventory.py --check
 python3 scripts/check-support-matrix.py
 python3 scripts/check-support-matrix.py --selftest
 python3 scripts/check-commit-messages.py --selftest
+python3 scripts/check-doc-links.py
+python3 scripts/check-doc-links.py --selftest
 bash scripts/check-workflows.sh
 bash scripts/check-workflows.sh --selftest
 bash scripts/selftest-release-tag-gate.sh
@@ -201,7 +203,7 @@ a Windows contributor is not expected to run this one (which is a stated gap, no
 a silent skip). `--platform <name>` is a development aid that replays a foreign
 platform's registry cells locally; CI never passes it.
 
-Five of these checks guard properties that are easy to break without noticing:
+Six of these checks guard properties that are easy to break without noticing:
 
 - `check-semantic-defaults.py` requires a `// reason:` note wherever production
   code turns an unknown into a concrete value (`unwrap_or(0)` and friends). The
@@ -218,6 +220,12 @@ Five of these checks guard properties that are easy to break without noticing:
   registry and the extension's platform table, and fails when either source
   moved without the committed tables being re-derived. It never decides whether
   a row's claim is true — only whether the table still matches its inputs.
+- `check-doc-links.py` resolves every link between our own Markdown files,
+  including the `#fragment` on each one. A link to a file that moved, or to a
+  heading that was renamed under it, renders perfectly and fails silently, and
+  no other check in this list reads a document for its links. External links are
+  counted, never fetched: a gate that needs the network fails when the network
+  does, and someone else's 404 is not a fact about this repository.
 
 The negative check is also useful when changing verification logic:
 

@@ -739,25 +739,25 @@ from the record left by the last `run-once`
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
-  `[run-once] No run records yet: this machine has never completed a run-once successfully (or the state directory was cleared). Cannot determine whether the timer is working.`
-- Everything is normal (`{}` is filled with the real numbers):
-  `[run-once] OK: last run N minutes ago, took N ms, stored N shards, snapshot created.`
-  (When there is nothing new, the ending is "no changes, so no snapshot
+  `[run-once] No run has ever been recorded: run-once has never completed successfully on this machine (or the state directory was cleared). It is impossible to tell whether the timer is working.`
+- Everything is normal (the numbers in `{}` are the real ones):
+  `[run-once] Healthy: last run N minutes ago, took N ms, archived N shard(s), snapshot created.`
+  (When there is nothing new, the ending is "no change, so no snapshot
   created".)
 - The timer may have stopped:
-  `[run-once] Has not run for N days (threshold N hours): the timer may have stopped; the last result was success (no changes).`
+  `[run-once] No run for N days (threshold N hours): the timer may have stopped; the last result was success (no change).`
 - The last run failed:
-  `[run-once] Last run failed: N minutes ago an error occurred at the <step> step, and no run has succeeded since.`
+  `[run-once] Last run failed: the <step> step errored N minutes ago, with no successful run since.`
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
 (`crates/chat-stasher/src/main.rs:11795-12085`):
 
-- When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
-- When none are found: `[scan] No conversations found on this machine.`
-- When a source root directory does not exist, an extra line: `[scan] Skipped N source root directories that do not exist.`
-- When there are identified conversations that will not be archived: `⚠ N harnesses have identified conversations that collect will not archive.`
-- Finally, a fixed last line: `Details (one line per session): chat-stasher status --sessions`
+- When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
+- When none are found: `[scan] No sessions were found on this machine.`
+- When a source root directory does not exist, an extra line: `[scan] skipped N non-existent source root(s).`
+- When there are recognised sessions that will not be archived: `⚠ N harness(es) have recognised sessions that collect will not archive.`
+- Finally, a fixed last line: `details (one line per session): chat-stasher status --sessions`
 
 To see the per-session detail, add `--sessions`; that will be hundreds of lines
 (`crates/chat-stasher/src/main.rs:364-366`).

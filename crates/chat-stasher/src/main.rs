@@ -1185,7 +1185,7 @@ enum SetupRemoteKind {
     Sftp,
     /// S3-compatible object storage. Cloudflare R2 is the instance this project
     /// has tested end to end (ADR-036 / W121); the recipe is the documented one
-    /// at `docs/install.md` §4.5.
+    /// at `docs-dev/install.md` §4.5.
     S3,
 }
 
@@ -7470,7 +7470,7 @@ mod decision_surface_tests {
 
         // The SFTP recipe carries no credential at all — its `key` is a path to
         // a private key on disk, which is a location — and it deliberately does
-        // NOT write `known_hosts_strategy`, because `docs/install.md` §4.4
+        // NOT write `known_hosts_strategy`, because `docs-dev/install.md` §4.4
         // states as a property of this project that it sets none of that for
         // you. Writing `strict` would pin the same behaviour while making that
         // sentence false.
@@ -10636,7 +10636,7 @@ fn setup_remote_credentials(args: &SetupRemoteArgs) -> SetupRemoteCredentials {
 
 /// The `[destinations.<name>.options]` table for one kind.
 ///
-/// The recipes are the documented ones: SFTP from `docs/install.md` §4.4, S3 from
+/// The recipes are the documented ones: SFTP from `docs-dev/install.md` §4.4, S3 from
 /// §4.5. Three choices in them are deliberate:
 ///
 /// * **The two credential values are `env:NAME`**, never a value. That is the
