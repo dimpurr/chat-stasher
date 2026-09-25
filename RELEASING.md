@@ -80,9 +80,11 @@ automation creates one.
    not run on a branch — and its first gate ends the run unless the tag is
    exactly `vX.Y.Z` or `vX.Y.Z-rc.N` **and** agrees with `Cargo.toml`.
 7. **Verify the published release** before telling anyone it exists:
-   - the Release is marked **latest**, and the four uploaded assets are exactly
+   - the Release is marked **latest**, and the seven uploaded assets are exactly
      `chat-stasher-darwin-arm64`, `chat-stasher-darwin-x86_64`,
-     `chat-stasher-extension-X.Y.Z.zip` and `SHA256SUMS`. The extension zip is
+     `chat-stasher-linux-x86_64`, `chat-stasher-linux-arm64`,
+     `chat-stasher-windows-x86_64.exe`, `chat-stasher-extension-X.Y.Z.zip` and
+     `SHA256SUMS`. The extension zip is
      the stable channel and its manifest contains no experimental origins.
      (GitHub's own
      auto-generated "Source code" archives are not assets and are always
@@ -90,6 +92,10 @@ automation creates one.
    - `sha256` of each downloaded asset, including the extension zip, matches its
      `SHA256SUMS` line;
    - the downloaded arm64 binary prints `chat-stasher X.Y.Z`.
+     Each build job already ran its own binary with `--version` before
+     uploading it, so this is the same check made by the owner, on the one
+     platform the owner has to hand — not the first time any of these binaries
+     was started.
 8. **Fill the Homebrew `sha256` values** from that `SHA256SUMS` in
    `homebrew/chat-stasher.rb`. Step 4 set the URLs; this step makes them
    checksum-pinned.
@@ -171,7 +177,7 @@ The extension zip is named `chat-stasher-extension-X.Y.Z.zip`, using the
 extension's own `package.json` version independently of the CLI version. The
 release workflow builds it with `CS_RELEASE_CHANNEL` unset, checks that its
 manifest has no experimental origins, includes its checksum, and asserts the
-exact four-file asset set.
+exact seven-file asset set.
 
 Chrome Web Store submission is a separate manual owner step; publishing a GitHub
 Release does not submit or publish the extension to a browser store.
@@ -240,12 +246,19 @@ thing it does not.
   `[package]` version and requires it to equal the tag minus `v`, character for
   character, for both shapes.
 - **The uploaded asset set.** Exactly `chat-stasher-darwin-arm64`,
-  `chat-stasher-darwin-x86_64`, `chat-stasher-extension-X.Y.Z.zip` and
-  `SHA256SUMS` reach the Release. The zip is built on the stable channel and its
-  manifest is rejected if an experimental origin is present.
+  `chat-stasher-darwin-x86_64`, `chat-stasher-linux-x86_64`,
+  `chat-stasher-linux-arm64`, `chat-stasher-windows-x86_64.exe`,
+  `chat-stasher-extension-X.Y.Z.zip` and `SHA256SUMS` reach the Release. The zip
+  is built on the stable channel and its manifest is rejected if an experimental
+  origin is present.
+- **That each binary is the binary it says it is.** Each build job checks its
+  own output before uploading: the macOS job asserts each Mach-O's architecture
+  with `file`, each Linux job asserts the file is statically linked (with `file`
+  and by `ldd` refusing it), names the architecture it should be, and runs it,
+  and the Windows job runs the `.exe`.
 - **The uploaded asset set on a re-run.** Re-running the job for a tag whose
   Release already exists replaces the assets rather than failing on them or
-  adding to them: every asset the run does not stage is deleted first, the four
+  adding to them: every asset the run does not stage is deleted first, the seven
   staged files are uploaded with `--clobber`, and the workflow fails unless the
   Release's asset set then equals the staged set exactly. First publication is
   unaffected — `gh release create` starts from nothing.
@@ -275,3 +288,14 @@ to CI, because GitHub Actions cannot express "workflow B depends on workflow A":
 the v0.1.0 tag once triggered CI and the release workflow in parallel and the
 release shipped while CI's gate was failing. The workflow that publishes must be
 the workflow that verifies.
+
+That verification is the workflow's first job, and every build job declares
+`needs: gates`, so the dependency is an edge GitHub enforces rather than an
+ordering by convention. The job that publishes the Release reaches it only
+through those jobs; it cannot start beside them. Which of the two tag shapes
+this run is was decided in the gates job and is carried to the publishing job as
+a job output, so the shapes are still read from one place.
+
+One consequence worth knowing when reading `release.yml`: nothing is built
+until the gates have passed, and the tag-shape refusal happens before even the
+gates — a tag that is not `vX.Y.Z` or `vX.Y.Z-rc.N` ends the run in seconds.
