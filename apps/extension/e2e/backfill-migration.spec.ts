@@ -33,6 +33,7 @@
  */
 
 import { expect, type Page } from '@playwright/test';
+import { isSweepNotConcluded, type TabSweepTrace } from '../lib/backfill/alarm';
 import {
   fireAlarm,
   fixture,
@@ -151,29 +152,119 @@ async function serveChatgpt(ext: Extension): Promise<{ api: string[]; list: stri
 /** The extension's own one-shot tick alarm name (`lib/backfill/alarm.ts`). */
 const TICK_ALARM = 'cs-backfill-tick';
 
-/** Poll `storage.local` until the alarm has recorded its tick. */
+/**
+ * Poll `storage.local` until **a concluded tick record written at or after
+ * `since`** exists, and return that snapshot.
+ *
+ * 🔴 W70 · A truthy `cs_backfill_lasttick_v1` is not the completion signal.
+ *    Since W62 the tick publishes a **provisional** record before its tab
+ *    registry recovery sweep (`{tabSweep: {sweeping: true}}`, `SWEEP_NOT_CONCLUDED`
+ *    in `lib/backfill/alarm.ts`) and replaces it with the verdict when the sweep
+ *    concludes. Returning on the key alone read the tick *while it was still
+ *    running* — a state the code is not required to be finished in — and the
+ *    no-tab case's assertions happen to hold for the provisional record too, so
+ *    it passed without proving what it claims. The predicate below is the
+ *    product's own (`isSweepNotConcluded`), not a second spelling of the shape.
+ *
+ * 🔴 W67(b) · And the record is not necessarily **this** tick's: one written by
+ *    an earlier wake is already concluded, so the first condition alone would
+ *    return it. `since` rejects every record older than the caller's own fire —
+ *    pass the instant just before firing the alarm.
+ *
+ * Returning the last reading on timeout (rather than throwing) is deliberate,
+ * the same rule the other waiters follow: the caller decides what the snapshot
+ * means, and the body's assertions are what fail on a missing or provisional
+ * record.
+ */
 async function waitForTickRecord(
   ext: Extension,
-  timeoutMs = 20_000,
+  options: { since?: number; timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
+  const { since = 0, timeoutMs = 20_000 } = options;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const all = await readStorage(ext, null);
-    if (all['cs_backfill_lasttick_v1']) return all;
+    const record = all['cs_backfill_lasttick_v1'];
+    if (record && typeof record === 'object') {
+      const fields = record as { at?: unknown; tabSweep?: TabSweepTrace | null };
+      if (
+        typeof fields.at === 'number'
+        && fields.at > since
+        && !isSweepNotConcluded(fields.tabSweep)
+      ) {
+        return all;
+      }
+    }
     if (Date.now() >= deadline) return all;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
-/** Poll `storage.local` until the v2 key holds something, or give up. */
-async function waitForHeader(ext: Extension, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+/**
+ * Poll `storage.local` until the migration has reached its **terminal layout**:
+ * the v2 header exists **and** the pre-W18 key has been removed.
+ *
+ * 🔴 W67(b) · Waiting for the header alone samples a state the code is never
+ *    required to be finished in. `migrate` writes the header
+ *    (`lib/backfill/ledger.ts:811`) and removes the legacy key only afterwards,
+ *    as its **last** step (`:829`: "Step 5 is the only deletion in this file").
+ *    Polling on the header and then asserting the key is gone is a race against
+ *    that step; on a loaded machine it was measured failing 3 times in 100
+ *    repeats. The waiter waits for the step the assertion is about, and the
+ *    bounded timeout is what keeps it an assertion — a product that never removes
+ *    the key still fails after the wait rather than hanging forever.
+ */
+async function waitForMigratedLayout(ext: Extension, timeoutMs = 20_000): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const all = await readStorage(ext, null);
     const header = all[HEADER_KEY];
-    if (header && typeof header === 'object') return all;
+    if (header && typeof header === 'object' && !(LEGACY_KEY in all)) return all;
     if (Date.now() >= deadline) return all;
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/**
+ * Fire `cs-backfill-tick` until a tick actually runs (i.e. the trace is not the
+ * single-flight refusal), and return that snapshot.
+ *
+ * 🔴 W67(a) · The fired alarm can lose to the capture kick's own tick. Loading
+ *    the fixture page makes the page fetch; the capture leg stores it and then
+ *    kicks the backfill leg fire-and-forget (`entrypoints/background.ts:2365-2373`),
+ *    and that kick holds the single-flight lock (`lib/backfill/schedule.ts:303-304`).
+ *    An alarm fired inside that window is refused with `already-running` — the
+ *    product is right to serialise the two, and the trace says so — but the case
+ *    under test is the tick that actually runs, so it must not be read as a
+ *    failure. Measured on main: 7 of 100 repeats of test 2 failed at
+ *    `expect(tick.ran)`. Only one failure specimen was captured with its record
+ *    (a separate instrumented run), and it read
+ *    `{ran:false, reason:'already-running', stopped:'already-running', halted:'state-unreadable'}`.
+ *    Re-firing synchronises on that published outcome rather than sleeping a
+ *    guessed interval; every assertion on the record is unchanged.
+ */
+async function fireAlarmUntilRuns(
+  ext: Extension,
+  name: string,
+  timeoutMs = 20_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const since = Date.now();
+    await fireAlarm(ext, name);
+    const all = await waitForTickRecord(ext, {
+      since,
+      timeoutMs: Math.max(1, deadline - Date.now()),
+    });
+    const record = all['cs_backfill_lasttick_v1'];
+    const reason = record && typeof record === 'object'
+      ? (record as { reason?: unknown }).reason
+      : undefined;
+    if (reason !== 'already-running') return all;
+    if (Date.now() >= deadline) return all;
+    // The capture kick releases the single-flight lock when it finishes; a tick
+    // that runs then is the one this case is about.
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
 }
 
@@ -212,7 +303,11 @@ test('a real tick carries a pre-W18 record over: ids in the debt database, heade
   await loadFixturePage(ext);
   await waitForOutbox(ext, (rows) => rows.length >= 1);
 
-  const all = await waitForHeader(ext);
+  // 🔴 W67(b) · Wait for the migration's **terminal** layout, not the header:
+  //    the header is written before the legacy key is removed (`ledger.ts:811`
+  //    then `:829`), so reading on the header alone races the removal the very
+  //    next assertion is about. Measured on main: 3/100 repeats failed here.
+  const all = await waitForMigratedLayout(ext);
 
   // 1 · The old key is gone — and it could only be removed by the migration's
   //     last step, which runs after the ids were written *and read back*.
@@ -270,14 +365,17 @@ test('a record this build cannot read is left untouched, and the alarm tick says
   await loadFixturePage(ext);
 
   // 🔴 W82 · The extension arms this alarm in response to the switch going on
-  //    above, and `fireAlarm` below overrides the deadline of an alarm that is
-  //    already there. Waiting for its own arm is what makes this the last write to
-  //    the alarm instead of a race with it (see `waitForAlarm`). This case is the
-  //    one that never flaked, and only because the page load above is slow enough
-  //    to outlast the extension's arm — luck, not ordering.
+  //    above, and firing overrides the deadline of an alarm that is already there.
+  //    Waiting for its own arm is what makes this the last write to the alarm
+  //    instead of a race with it (see `waitForAlarm`).
   await waitForAlarm(ext, TICK_ALARM);
-  await fireAlarm(ext, TICK_ALARM);
-  const all = await waitForTickRecord(ext);
+  // 🔴 W67(a) · Waiting for the arm is necessary but not sufficient: the page
+  //    load above also kicks the backfill leg, and that kick can still hold the
+  //    single-flight lock when the alarm fires, so the fired tick records
+  //    `already-running` instead of running. `fireAlarmUntilRuns` re-fires once
+  //    the lock is free; see its note. Measured on main: 7/100 repeats failed at
+  //    `expect(tick.ran).toBe(true)`; one captured specimen read `already-running`.
+  const all = await fireAlarmUntilRuns(ext, TICK_ALARM);
   const tick = all['cs_backfill_lasttick_v1'] as Record<string, unknown>;
 
   // What the acceptance saw, and what it could not see past:
@@ -320,6 +418,7 @@ test('with no platform tab open at all, the layout still moves: the migration do
   //    gone, no tick runs, and `waitForTickRecord` returns nothing 20 s later.
   //    Fire only once the extension has armed it itself.
   await waitForAlarm(ext, TICK_ALARM);
+  const firedAt = Date.now();
   await fireAlarm(ext, TICK_ALARM);
   // Wait for the complete tick record, not just the header. The header is
   // written by the migration before any gate; the trace that names how the tick
@@ -327,13 +426,21 @@ test('with no platform tab open at all, the layout still moves: the migration do
   // reading on the header alone could catch the tick between the two. Since W62
   // the trace is recorded before the recovery sweep, so in this no-tab case it
   // lands in the same instant as the migration — never behind the sweep's pings.
-  const all = await waitForTickRecord(ext);
+  // 🔴 W70 · And since W62 that first trace is `SWEEP_NOT_CONCLUDED`, so the
+  // waiter also requires the sweep to have concluded (`isSweepNotConcluded`).
+  const all = await waitForTickRecord(ext, { since: firedAt });
 
   // The tick was blocked — that is the point — and the trace says which gate.
   const tick = all['cs_backfill_lasttick_v1'] as Record<string, unknown>;
   expect(tick).toBeTruthy();
   expect(tick.reason).toBe('no-http-port');
   expect(tick.halted).toBeNull();
+  // 🔴 W70 · This is a **verdict**, not the provisional record the tick publishes
+  //    before its sweep (`SWEEP_NOT_CONCLUDED`, `lib/backfill/alarm.ts`). The
+  //    waiter requires the sweep to have concluded; this assertion makes the
+  //    requirement explicit, so a later change to the waiter cannot quietly
+  //    reintroduce reading the tick while it is still running.
+  expect(isSweepNotConcluded(tick.tabSweep as TabSweepTrace | null)).toBe(false);
 
   // And the storage layout moved anyway.
   expect(all[HEADER_KEY]).toBeTruthy();
