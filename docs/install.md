@@ -389,11 +389,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:3826-3839`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:3834-3847`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:3862-3886`). An
+it does anything else (`crates/chat-stasher/src/main.rs:3870-3894`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -425,10 +425,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3841-3850`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3849-3858`;
 `crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:3829-3837`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:3837-3845`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -485,12 +485,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:7206-7207`). This is the
+does not (`crates/chat-stasher/src/main.rs:7214-7215`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:6910-6911`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:6918-6919`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -506,7 +506,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:7366-7657`):
+(`crates/chat-stasher/src/main.rs:7374-7665`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -519,7 +519,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:7003-7010`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:7011-7018`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 

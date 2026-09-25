@@ -68,7 +68,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::activity::{ActivityRow, TimeSource as ActivityTimeSource};
 use crate::readback::{bucket_shard_path, newest_snapshot_per_host};
-use crate::selector::{Selector, SessionMeta, TimeWindow, UnplacedBy, Verdict};
+use crate::selector::{Selector, SessionMeta, TimeBounds, TimeWindow, UnplacedBy, Verdict};
 use crate::sidecar::{activity_index_machine, infer_harness};
 use crate::store::BackupStore;
 
@@ -104,9 +104,11 @@ pub struct SessionHit {
     pub first_unix: Option<i64>,
     /// Latest conversation time from the activity index, unix seconds.
     pub last_unix: Option<i64>,
-    /// Why the conversation time is unknown. `Some` whenever either bound is
-    /// `None`, so the reason reaches the terminal instead of being reinvented
-    /// there. `None` only when both bounds are known.
+    /// Why the conversation time is unknown, **or** why the known bounds are
+    /// only part of the session's span (`TimeSource::PartialRange`). `Some`
+    /// whenever either bound is `None` or the bounds are partial, so the reason
+    /// reaches the terminal instead of being reinvented there. `None` only when
+    /// both bounds are known to be the whole span.
     pub time_why: Option<String>,
     /// Number of data blobs the shards are made of (from `node.content`).
     /// This is what a full-text pass would have to fetch — it is *counted*
@@ -142,10 +144,11 @@ impl SessionHit {
 ///
 /// This list is the reason [`SearchReport::answer_complete`] exists. Such a
 /// session is neither a match nor a proven non-match: its conversation time is
-/// unknown, or its harness cannot be derived, so a question the user actually
-/// asked has no answer for it. Reporting it as "not matched" would be the
-/// "unknown recorded as empty" failure this repo forbids; dropping it silently
-/// would be worse.
+/// unknown, or its recorded bounds are only part of its span (so a window they
+/// do not reach may still hold the rest of it), or its harness cannot be
+/// derived, so a question the user actually asked has no answer for it.
+/// Reporting it as "not matched" would be the "unknown recorded as empty"
+/// failure this repo forbids; dropping it silently would be worse.
 #[derive(Debug, Clone)]
 pub struct UnplacedSession {
     pub machine: String,
@@ -705,6 +708,10 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                             no reason for that, so the time is unknown rather than zero";
     let why = match &row.time_source {
         ActivityTimeSource::Unknown { why } => Some(why.clone()),
+        // A partial range keeps its measured bounds **and** the reason they are
+        // not the whole span: the selector needs that reason to report "may be
+        // outside" instead of excluding the session.
+        ActivityTimeSource::PartialRange { why, .. } => Some(why.clone()),
         _ => None,
     };
     let line_count = row.line_count;
@@ -716,6 +723,18 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             line_count,
             source: ActivityTimeSource::NoConversationContent,
         },
+        // Bounds that are only part of the span: carried through as measured,
+        // with the partiality kept on the source so no consumer answers
+        // "outside the window" from them.
+        (Some(first), Some(last), Some(why)) if row.time_source.bounds_are_partial() => {
+            IndexedTime {
+                first_unix: Some(first),
+                last_unix: Some(last),
+                why: Some(why),
+                line_count,
+                source: row.time_source.clone(),
+            }
+        }
         (Some(first), Some(last), _) => IndexedTime {
             first_unix: Some(first),
             last_unix: Some(last),
@@ -984,6 +1003,14 @@ pub fn search_sessions(
                 harness: harness.as_deref(),
                 first_unix,
                 last_unix,
+                // The index's own answer, never re-derived from the bounds: a
+                // partial range is exactly the case where the bounds alone
+                // would read as complete.
+                time_bounds: if time_source.bounds_are_partial() {
+                    TimeBounds::Partial
+                } else {
+                    TimeBounds::Complete
+                },
                 time_why: time_why.as_deref(),
             };
             match selector.select(&meta) {

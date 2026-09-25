@@ -53,6 +53,15 @@ pub enum TimeSource {
     /// No conversation content at all (empty shard, or metadata-only lines);
     /// distinct from `Unknown` per ADR-035.
     NoConversationContent,
+    /// The bounds are only **part** of the session's conversation span: the
+    /// session also holds records that could not be placed in time. Mirrors
+    /// [`crate::activity::TimeSource::PartialRange`], which documents the
+    /// semantics; `has_known_time` is false for it, because a bucket claim
+    /// ("this session happened here") is not something an inner bound supports.
+    PartialRange {
+        how: String,
+        why: String,
+    },
     Unknown {
         why: String,
     },
@@ -78,6 +87,10 @@ impl From<&crate::activity::TimeSource> for TimeSource {
             }
             crate::activity::TimeSource::ListUpdated => TimeSource::ListUpdated,
             crate::activity::TimeSource::NoConversationContent => TimeSource::NoConversationContent,
+            crate::activity::TimeSource::PartialRange { how, why } => TimeSource::PartialRange {
+                how: how.clone(),
+                why: why.clone(),
+            },
             crate::activity::TimeSource::Unknown { why } => {
                 TimeSource::Unknown { why: why.clone() }
             }
@@ -121,8 +134,12 @@ pub enum Granularity {
 
 impl OverviewRow {
     /// A session's time counts as *known* only when the source attests a real
-    /// time (Exact or Inferred) and we actually carry one. Anything tagged
-    /// Unknown — regardless of stray Option values — is treated as unknown.
+    /// time (Exact or Inferred) **and that time is the session's span**, and we
+    /// actually carry one. Anything tagged Unknown — regardless of stray Option
+    /// values — is treated as unknown, and so is a `PartialRange`: its bounds
+    /// are measured but are only *part* of the span, so they cannot back the
+    /// bucket claim "this session happened in this bucket". Those sessions are
+    /// listed with the unplaceable ones, carrying their own reason.
     pub fn has_known_time(&self) -> bool {
         matches!(
             self.time_source,
@@ -454,6 +471,9 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
         }
         let why = match &r.time_source {
             TimeSource::Unknown { why } => why.clone(),
+            // A partial range is unplaceable in a bucket for its own reason;
+            // the variant carries it, so the group header is never blank.
+            TimeSource::PartialRange { why, .. } => why.clone(),
             _ => String::new(),
         };
         let e = by_key
