@@ -23,13 +23,18 @@
 #   --binary PATH    use this binary instead of target/debug/chat-stasher
 #   --keep           keep the throwaway HOME and print its path
 #   --platform NAME  run the *seeding and assertion* logic as if this were
-#                    NAME (`macos` / `linux` / `windows`), by planting that
-#                    platform's registry cells in the slot this build reads.
-#                    A development aid: it is how the Linux path of this
-#                    script is proven on the machine it was written on, using
-#                    the same instrument the Rust tests use for a foreign
-#                    platform (`registry_default_path_shape_test`). CI never
-#                    passes it — there the platform is the real one.
+#                    NAME (`macos` / `linux`), by planting that platform's
+#                    registry cells in the slot this build reads. A development
+#                    aid: it is how the Linux path of this script is proven on
+#                    the machine it was written on, using the same instrument the
+#                    Rust tests use for a foreign platform
+#                    (`registry_default_path_shape_test`). CI never passes it —
+#                    there the platform is the real one.
+#                    `windows` is deliberately not offered: the fixture seeder
+#                    below anchors `~` and `$VAR` templates only, and a Windows
+#                    cell spells its overrides `%VAR%`, so every Windows cell
+#                    would come back unresolvable and the run would fail on its
+#                    own fixtures instead of on the product.
 #
 # Runs on Linux (that is the point) and on macOS (so it can be developed and
 # proven where the owner works). Nothing here is Linux-only: the scheduler
@@ -76,9 +81,12 @@
 #                      that holds — the fixture would encode a shape the tool
 #                      mishandles.
 #
-# Each of those is asserted below as a *state*, not left implicit: a harness the
-# registry declines to scan has to come back `unknown`, and the script fails if it
-# ever comes back as a claimed `0`.
+# Each of those is asserted below as a *state*, not left implicit, and the count
+# is asserted with it. Two shapes are lawful and they are not the same claim: a
+# harness the registry declines to scan has to come back `unknown` (the script
+# fails if it ever comes back as a claimed `0`), while one whose cell does anchor
+# comes back `missing` with a measured `0` — the path was checked and is not
+# there, which is a different statement from never having looked.
 #
 # The assertions read `doctor --json`, not the human table. The JSON is the
 # documented interface, and its tri-state tags are precisely what is being
@@ -104,8 +112,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$PLATFORM_SIM" in
-  ""|macos|linux|windows) ;;
-  *) echo "[smoke] --platform must be macos, linux or windows" >&2; exit 2 ;;
+  ""|macos|linux) ;;
+  windows) echo "[smoke] --platform windows is not supported: the fixture seeder anchors POSIX templates ('~', '\$VAR') only" >&2; exit 2 ;;
+  *) echo "[smoke] --platform must be macos or linux" >&2; exit 2 ;;
 esac
 
 step() { printf '\n[smoke] %s\n' "$1"; }
@@ -614,6 +623,11 @@ assert "overview sees one machine whose session total matches the stage" \
 
 # ------------------------------------------------------------------- step 7/8
 step "7/8 · schedule renders a systemd user unit (renders only; installs nothing)"
+# The phrase `schedule` uses to refuse an explicit `--binary` under `target/`
+# (schedule.rs, `resolve_binary`). Held in one variable because the pair of
+# assertions below is only worth something if both sides test the same string:
+# absent for a stable path, present — with a non-zero exit — for an artifact.
+BINARY_REFUSAL="must be an installed path outside target"
 SCHED_OK="$WORK/schedule-stable.txt"
 rc=0; "$INSTALLED" schedule --format systemd --stage "$STAGE" --binary "$INSTALLED" >"$SCHED_OK" 2>&1 || rc=$?
 check "schedule --format systemd exits 0" 0 "$rc"
@@ -624,20 +638,27 @@ assert "ExecStart points at the stable binary path" \
   "$(grep -qF "ExecStart=\"$INSTALLED\"" "$SCHED_OK" && echo 0 || echo 1)"
 assert "no rendered line points into a target/ directory" \
   "$(grep -q '/target/' "$SCHED_OK" && echo 1 || echo 0)"
-assert "the build-artifact warning is NOT printed for a stable path" \
-  "$(grep -q 'warning: resolved binary is a build artifact' "$SCHED_OK" && echo 1 || echo 0)"
+assert "the binary-path refusal is NOT raised for a stable path" \
+  "$(grep -qF "$BINARY_REFUSAL" "$SCHED_OK" && echo 1 || echo 0)"
 
-# ... and the same renderer, pointed at a build artifact, must say so. Without
-# this second run the assertion above would also pass if the warning had been
-# deleted — it would prove nothing about the thing it claims to check.
+# ... and the same renderer, pointed at a build artifact, must refuse it. An
+# explicit `--binary` under `target/` is not a persistent-scheduler path at all:
+# it does not survive `cargo clean`, so `schedule` refuses it outright rather
+# than rendering a unit that would break (schedule.rs, `resolve_binary`), and
+# the refusal is a usage error (exit 2), not a failure to render.
+#
+# The second run is what makes the assertion above worth anything: without it,
+# the absence grep would also pass if the refusal had been deleted.
 ARTIFACT_DIR="$WORK/checked-out/target/debug"
 mkdir -p "$ARTIFACT_DIR"
 cp "$BIN" "$ARTIFACT_DIR/chat-stasher"
 SCHED_BAD="$WORK/schedule-artifact.txt"
 rc=0; "$INSTALLED" schedule --format systemd --stage "$STAGE" --binary "$ARTIFACT_DIR/chat-stasher" >"$SCHED_BAD" 2>&1 || rc=$?
-check "schedule still exits 0 for a build artifact" 0 "$rc"
-assert "a build-artifact path DOES raise the warning, so the check above is not vacuous" \
-  "$(grep -q 'warning: resolved binary is a build artifact' "$SCHED_BAD" && echo 0 || echo 1)"
+check "schedule refuses a build artifact (usage error)" 2 "$rc"
+assert "the refusal names the offending path, so the check above is not vacuous" \
+  "$(grep -qF "$BINARY_REFUSAL" "$SCHED_BAD" && echo 0 || echo 1)"
+assert "the refused run rendered nothing" \
+  "$(grep -q 'chat-stasher-run-once.service' "$SCHED_BAD" && echo 1 || echo 0)"
 
 # ------------------------------------------------------------------- step 8/8
 step "8/8 · every seeded harness was detected, with the count that was planted"
@@ -671,12 +692,28 @@ for hid, want in sorted(seeded.items()):
     else:
         print(f"[smoke]   PASS · {hid:22} detected · sessions={sc['count']} · state={p['state']}")
 
-# The gaps, asserted as states. For the two reasons that carry a defined state,
-# the state AND the tri-state tag are both checked: "we did not look" must not
-# come back dressed as "there was nothing there".
+# The gaps, asserted as states — every one of them, and the count with it. Two
+# dispositions are lawful for a harness this script did not seed, and each makes
+# its own demand on the count:
+#
+#   * the registry declined to look (an `unascertained` cell) or its template
+#     could not be anchored — the count must stay `unknown`. "We did not look"
+#     must never come back dressed as "there was nothing there".
+#   * the cell does anchor (under this throwaway HOME, which is fresh), so the
+#     probe ran and the path is genuinely absent. `missing` is the disposition,
+#     and 0 is a measurement there rather than a fallback — doctor.rs keeps 0 for
+#     `missing` for exactly that reason: the path was checked. Any count above 0
+#     would be a number for something nothing planted.
+#
+# A reason with no expectation is a failure, not a note: an unasserted row is
+# how a regression gets in, and the file header promises each disposition is
+# asserted rather than left implicit.
 EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
     "template_unresolvable": "skip_unresolvable",
+    "cell_rejects_json": "missing",
+    "id_not_keyable": "missing",
+    "no_schema_in_build": "missing",
 }
 for hid, reason in sorted(not_seeded.items()):
     p = probes.get(hid)
@@ -685,14 +722,23 @@ for hid, reason in sorted(not_seeded.items()):
         continue
     want = EXPECTED_STATE.get(reason)
     if want is None:
-        print(f"[smoke]   note · {hid:22} not seeded ({reason}); doctor reports "
-              f"state={p['state']} sessions={p['session_count']}")
+        bad.append(f"{hid}: not seeded ({reason}) and this smoke has no expected state "
+                   f"for that reason — add one to EXPECTED_STATE, or say in the script "
+                   f"why the state cannot be asserted")
     elif p["state"] != want:
         bad.append(f"{hid}: not seeded because {reason}, yet doctor reports state={p['state']}")
-    elif p["session_count"]["kind"] != "unknown":
-        bad.append(f"{hid}: state={want} yet session_count={p['session_count']} (must stay unknown)")
+    elif want.startswith("skip"):
+        if p["session_count"]["kind"] != "unknown":
+            bad.append(f"{hid}: state={want} yet session_count={p['session_count']} (must stay unknown)")
+        else:
+            print(f"[smoke]   PASS · {hid:22} not seeded ({reason}) · doctor reports {want} and 'unknown'")
     else:
-        print(f"[smoke]   PASS · {hid:22} not seeded ({reason}) · doctor reports {want} and 'unknown'")
+        sc = p["session_count"]
+        if sc["kind"] != "known" or sc["count"] != 0:
+            bad.append(f"{hid}: state={want} yet session_count={sc} — nothing was planted "
+                       f"here, so the count has to be a measured 0")
+        else:
+            print(f"[smoke]   PASS · {hid:22} not seeded ({reason}) · doctor reports {want} and a measured 0")
 
 gaps = report.get("archive_gaps") or []
 if gaps:
