@@ -377,8 +377,8 @@ with owner-only-readable permissions, on platforms that can express them
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:306-310`; the config field itself
-is `crates/chat-stasher/src/config.rs:222-223`).
+(`crates/chat-stasher/src/store.rs:153-156`, `:306-310`, `:1549-1554`; the config
+field itself is `crates/chat-stasher/src/config.rs:263-264`).
 
 **Why this step exists.** A remote destination is reached by running the system
 `ssh` client. The first time it meets a host it has no record of, it refuses:
@@ -467,8 +467,8 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:1467-1472`; the field itself is
-`crates/chat-stasher/src/config.rs:209-210`), so the option names below belong
+(`crates/chat-stasher/src/store.rs:153-156`, `:1549-1554`; the field itself is
+`crates/chat-stasher/src/config.rs:263-264`), so the option names below belong
 to the backend, not to this tool.
 
 **What was tested, and where that stops.** The configuration below was exercised
@@ -550,11 +550,11 @@ owner-only-readable (`chmod 600`). That is the shape most S3 clients document,
 and nothing about it is wrong — it is a secret on a disk.
 
 A value spelled `env:NAME` is instead resolved at config load, out of the
-process environment (`crates/chat-stasher/src/config.rs:618`). The four ways
+process environment (`crates/chat-stasher/src/config.rs:719`). The four ways
 that can fail — the name is not a legal variable name, the variable is set but
 empty, it is set to a value that is not valid Unicode, it is not set at all —
 are four different messages, and none of them quotes the value
-(`crates/chat-stasher/src/config.rs:594-611`; the warning is printed at `:571`).
+(`crates/chat-stasher/src/config.rs:695-712`; the warning is printed at `:672`).
 A reference that cannot be resolved **removes that option** rather than
 substituting an empty string, so the failure is a credential error, not a
 silently-empty one.
