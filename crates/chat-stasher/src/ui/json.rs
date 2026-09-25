@@ -2,7 +2,17 @@
 //!
 //! A filter that does not resolve is reported as an error object under the same
 //! `400` the HTML route gives, never as an empty session list, so a consumer
-//! cannot read "we could not search" as "nothing matched".
+//! cannot read "we could not search" as "nothing matched". The same holds for
+//! an unresolvable paging parameter: both are one class of answer — a query
+//! the server refused to guess at.
+//!
+//! `/api/sessions` pages the list under the §5.2 contract: `paging` reports
+//! the window (`total` is the matched count, not the row count of this
+//! response) and `sessions` carries only the window's rows, in the order
+//! `paging.sort` names. Walking the pages at `offset` 0, `limit`, `2·limit`, …
+//! and concatenating reproduces the full sorted list — that walking is the
+//! point of `paging`, which is why the counts (`matched`, `not_matched`,
+//! `could_not_be_placed`) always describe the whole selection, never the page.
 
 use std::collections::BTreeSet;
 
@@ -12,7 +22,9 @@ use crate::selector::{Resolved, UnplacedBy, UsageError};
 
 use super::html::describe_selector;
 use super::overview::count_by_machine;
-use super::{health_of, percent_encode, select, Selection, UiData, UiSession};
+use super::{
+    health_of, page_window, percent_encode, select, sort_rows, Page, Selection, UiData, UiSession,
+};
 
 // ---------------------------------------------------------------- json routes
 
@@ -105,6 +117,7 @@ fn title_json(s: &UiSession) -> serde_json::Value {
 pub(super) fn json_sessions(
     sel: &Selection<'_>,
     resolved: &Resolved,
+    page: Page,
     token: &str,
     data: &UiData,
 ) -> String {
@@ -129,6 +142,8 @@ pub(super) fn json_sessions(
         }
         row
     };
+    let ordered = sort_rows(&sel.matched, page.sort);
+    let window = page_window(&ordered, page);
     let v = serde_json::json!({
         "schema_version": 2,
         "command": "ui",
@@ -139,11 +154,23 @@ pub(super) fn json_sessions(
         "complete": data.complete(),
         "unreadable_parts": data.unreadable,
         "filter": describe_selector(&resolved.selector),
+        // The whole selection, page or no page (§5.2: the three-state counts
+        // travel with every window, so a page is never mistaken for a
+        // measurement of the archive).
         "matched": sel.matched.len(),
         "not_matched": sel.not_matched,
         "could_not_be_placed": sel.unplaced.len(),
         "machines_with_legacy_index": data.machines_with_legacy_index,
-        "sessions": sel.matched.iter().map(|s| row(s)).collect::<Vec<_>>(),
+        // The window this page is: `total` is the matched count the pages
+        // divide, `sort` the order to read `sessions` in. A consumer that
+        // walks the offsets and concatenates gets exactly the sorted list.
+        "paging": {
+            "total": sel.matched.len(),
+            "limit": page.limit,
+            "offset": page.offset,
+            "sort": page.sort.wire(),
+        },
+        "sessions": window.iter().map(|s| row(s)).collect::<Vec<_>>(),
         "sessions_not_placed": sel.unplaced.iter().map(|(s, dim, why)| serde_json::json!({
             "index": s.index,
             "machine": s.machine,
@@ -156,10 +183,11 @@ pub(super) fn json_sessions(
     json_string(&v)
 }
 
-/// A filter that does not resolve is reported as a JSON object with the same
-/// `400` status the HTML route would give — never as an empty session list,
-/// which a consumer would read as "nothing matched".
-pub(super) fn json_filter_error(data: &UiData, e: &UsageError) -> String {
+/// A query that does not resolve — a filter value or a paging parameter — is
+/// reported as a JSON object with the same `400` status the HTML route gives,
+/// never as an empty session list, which a consumer would read as "nothing
+/// matched".
+pub(super) fn json_usage_error(data: &UiData, e: &UsageError) -> String {
     json_string(&serde_json::json!({
         "schema_version": 1,
         "command": "ui",
@@ -170,7 +198,7 @@ pub(super) fn json_filter_error(data: &UiData, e: &UsageError) -> String {
         "error": e.to_string(),
         "complete": false,
         "matched": null,
-        "note": "the filter could not be resolved, so nothing was searched — this is not an empty result",
+        "note": "the query could not be resolved, so nothing was searched — this is not an empty result",
     }))
 }
 

@@ -2,7 +2,10 @@
 //! and `/content` (the raw shards, the one route that reaches the payload tier).
 //!
 //! The list's three "nothing matched" sentences reuse `search`'s vocabulary,
-//! and `search`'s own selector produces the set the list is drawn from.
+//! and `search`'s own selector produces the set the list is drawn from. The
+//! list beyond that set is one window of it (29-UI-DESIGN §5.2): sorted by an
+//! order the header names, `limit` rows from `offset`, and an offset past the
+//! end is its own sentence — never a "nothing matched" one.
 
 use std::collections::BTreeSet;
 
@@ -12,9 +15,9 @@ use crate::selector::{Resolved, UnplacedBy};
 
 use super::html::{completeness_banner, describe_selector, esc, fmt_bytes, fmt_unix, footer, head};
 use super::{
-    index_param, percent_encode, select, selector_from_query, Content, ContentSource, Query,
-    Response, Selection, UiData, UiSession, EXPLICIT_REPO_LABEL, PROVENANCE_FIRST_USER_LINE,
-    PROVENANCE_HARNESS_TITLE,
+    index_param, page_from_query, page_window, percent_encode, select, selector_from_query,
+    sort_rows, Content, ContentSource, ListSort, Page, Query, Response, Selection, UiData,
+    UiSession, EXPLICIT_REPO_LABEL, PROVENANCE_FIRST_USER_LINE, PROVENANCE_HARNESS_TITLE,
 };
 
 pub(super) fn list_page(params: &Query, token: &str, data: &UiData) -> Response {
@@ -22,8 +25,18 @@ pub(super) fn list_page(params: &Query, token: &str, data: &UiData) -> Response 
         Ok(r) => r,
         Err(e) => return Response::text(400, "Bad Request", format!("ui: {e}\n")),
     };
+    // Same rule as the filter above: a paging parameter that cannot resolve is
+    // a usage error, never a list of zero rows a browser would render for one.
+    let page = match page_from_query(params) {
+        Ok(p) => p,
+        Err(e) => return Response::text(400, "Bad Request", format!("ui: {e}\n")),
+    };
     let sel = select(&data.sessions, &resolved.selector);
-    Response::html(200, "OK", page_sessions(&sel, &resolved, token, data))
+    Response::html(
+        200,
+        "OK",
+        page_sessions(&sel, &resolved, &page, params, token, data),
+    )
 }
 
 pub(super) fn one_session_page(params: &Query, token: &str, data: &UiData) -> Response {
@@ -63,7 +76,14 @@ pub(super) fn content_page(params: &Query, data: &UiData, content: &dyn ContentS
 
 // -------------------------------------------------------------- drilled list
 
-fn page_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &UiData) -> String {
+fn page_sessions(
+    sel: &Selection<'_>,
+    resolved: &Resolved,
+    page: &Page,
+    params: &Query,
+    token: &str,
+    data: &UiData,
+) -> String {
     let mut out = head(&format!(
         "chat-stasher · sessions · {}",
         data.destination_label
@@ -90,6 +110,9 @@ fn page_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
     out.push_str(&label_coverage_note(sel, data));
 
     if sel.matched.is_empty() {
+        // The three "nothing matched" sentences are triggered by the matched
+        // **total** alone (§5.2 invariant 1). Which window was asked for plays
+        // no part in them, so paging can neither create nor hide one.
         out.push_str(&no_hit_html(sel, data));
     } else {
         out.push_str(&format!(
@@ -101,17 +124,39 @@ fn page_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
                 String::new()
             }
         ));
-        out.push_str(
-            "<div class=scroll><table>\n<thead><tr><th>machine</th><th>source</th>\
-             <th>session (short)</th><th>label</th><th class=n>shards</th>\
-             <th class=n>bytes</th>\
-             <th>first message</th><th>last message</th><th>snapshot time</th>\
-             </tr></thead>\n<tbody>\n",
-        );
-        for s in &sel.matched {
-            out.push_str(&list_row(s, token));
+        // The order is fixed once, here, and the window cut from it, so the
+        // rows on a page and the range sentence below describe the same
+        // sequence a concatenated walk of all pages reproduces.
+        let ordered = sort_rows(&sel.matched, page.sort);
+        let total = ordered.len();
+        let window = page_window(&ordered, *page);
+        out.push_str(&range_sentence(page, &ordered, window.len()));
+        out.push_str(&list_nav(params, token, *page, total));
+        if window.is_empty() {
+            // A window that starts past the last matching row is the fourth
+            // sentence (§4.2): a position, not a count. It must never read as
+            // "not in this destination" — the filter matched, the reader
+            // simply paged past its rows.
+            out.push_str(&format!(
+                "<div class=note><b>No rows on this page.</b> The filter matched \
+                 <b>{total}</b> session(s), but this window starts past the last of them. \
+                 That is a paging position, not a match count: it is not the same as matching \
+                 nothing. <a href=\"{back}\">Back to page 1</a></div>\n",
+                back = page_href(params, token, 0),
+            ));
+        } else {
+            out.push_str(
+                "<div class=scroll><table>\n<thead><tr><th>machine</th><th>source</th>\
+                 <th>session (short)</th><th>label</th><th class=n>shards</th>\
+                 <th class=n>bytes</th>\
+                 <th>first message</th><th>last message</th><th>snapshot time</th>\
+                 </tr></thead>\n<tbody>\n",
+            );
+            for s in window {
+                out.push_str(&list_row(s, token));
+            }
+            out.push_str("</tbody></table></div>\n");
         }
-        out.push_str("</tbody></table></div>\n");
     }
     if !sel.unplaced.is_empty() {
         out.push_str(&format!(
@@ -176,6 +221,139 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
         "<p><b>Not in this destination</b> — 0 of the {} session(s) in view matched, and the \
          destination was read in full. This is a real absence, not a failure to look.</p>\n",
         data.sessions.len()
+    )
+}
+
+/// The line under the match count that names the window and the order in
+/// force (§5.2: the header prints the sort — one phrase, one place). The
+/// range is 1-based and inclusive, the same corners a reader would count
+/// from the rows actually on the page.
+fn range_sentence(page: &Page, ordered: &[&UiSession], shown: usize) -> String {
+    // An empty window has no range to name; the sentence it gets instead is
+    // the empty-window one, and that one states the matched total itself.
+    if shown == 0 {
+        return String::new();
+    }
+    let total = ordered.len();
+    // `archive order` names the sequence's source rather than a key it was
+    // sorted by, so the sentence says it plainly rather than "sorted by
+    // archive order", which would read as one more ranking.
+    let order_words = match page.sort {
+        ListSort::ArchiveOrder => "archive order".to_string(),
+        sort => format!("sorted by {}", sort.describe()),
+    };
+    let mut out = format!(
+        "<p class=sub>Sessions {}–{} of {} · {}",
+        page.offset + 1,
+        page.offset + shown,
+        total,
+        order_words
+    );
+    // §5.2's note: unknown times are never ranked into a timeline. The line
+    // says so exactly when the order in force ranks time and some row has
+    // none — otherwise the bottom of the list would read as "oldest", a rank
+    // the archive does not record.
+    let unranked = match page.sort {
+        ListSort::LastDesc | ListSort::LastAsc => ordered.iter().any(|s| s.last_unix.is_none()),
+        ListSort::FirstDesc | ListSort::FirstAsc => ordered.iter().any(|s| s.first_unix.is_none()),
+        ListSort::ArchiveOrder | ListSort::SizeDesc => false,
+    };
+    if unranked {
+        out.push_str(
+            " · sessions with an unknown conversation time are not ranked and \
+                      stay at the bottom",
+        );
+    }
+    out.push_str("</p>\n");
+    out
+}
+
+/// The URL one paging link points at: the query this page was reached by,
+/// moved to a new window. Only the vocabulary the two list routes read is
+/// carried — the selector keys plus `sort` and `limit` — each key's **first**
+/// value, the same one `selector_from_query` reads, so a link cannot smuggle
+/// in a second meaning for a key. `offset` is set to the one thing the link
+/// changes and the token is appended last, the way every link on the page
+/// carries it.
+fn page_href(params: &Query, token: &str, offset: usize) -> String {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut parts: Vec<String> = Vec::new();
+    for (key, value) in params {
+        if !matches!(
+            key.as_str(),
+            "session" | "machine" | "harness" | "day" | "since" | "until" | "sort" | "limit"
+        ) || !seen.insert(key.as_str())
+        {
+            continue;
+        }
+        parts.push(format!("{}={}", percent_encode(key), percent_encode(value)));
+    }
+    parts.push(format!("offset={offset}"));
+    parts.push(format!("token={}", percent_encode(token)));
+    format!("/sessions?{}", parts.join("&"))
+}
+
+/// The paging links, in the wireframe's order: previous, the page numbers,
+/// next. The numbers are the first page, the last page and the two pages
+/// around the current one (§5.2: never more than seven), with `…` where the
+/// sequence jumps; the current page is where the reader already is, so it is
+/// printed, not linked. A list that fits one window has no nav at all — the
+/// range sentence above already says so — mirroring the reader's window
+/// links, which appear only when there is something to page to.
+fn list_nav(params: &Query, token: &str, page: Page, total: usize) -> String {
+    let limit = page.limit.max(1);
+    let pages = total.div_ceil(limit);
+    if pages <= 1 {
+        return String::new();
+    }
+    // The window is pinned to the last page when it starts past the end: the
+    // fourth sentence's empty window is a position, and the position nearest
+    // it that is a page at all is the last one. The clamp is also what keeps
+    // `offset` out of this arithmetic — it is deliberately unclamped (see
+    // `Page`), so `usize::MAX / 1 + 1` is a real input here, and it overflows.
+    // Every other sum below is derived from `total`, the way the reader's
+    // window links are, so this is the only one that needs it.
+    let current = page.offset.min(total.saturating_sub(1)) / limit + 1;
+    let mut numbers: BTreeSet<usize> = BTreeSet::from([1, pages]);
+    for delta in [-2isize, -1, 0, 1, 2] {
+        let candidate = current as isize + delta;
+        if (1..=pages as isize).contains(&candidate) {
+            numbers.insert(candidate as usize);
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if page.offset >= limit {
+        parts.push(format!(
+            "<a href=\"{}\">‹ previous</a>",
+            page_href(params, token, page.offset - limit)
+        ));
+    }
+    let mut last_number: Option<usize> = None;
+    for n in &numbers {
+        if let Some(previous) = last_number {
+            if *n > previous + 1 {
+                parts.push("…".to_string());
+            }
+        }
+        if *n == current {
+            parts.push(format!("<b aria-current=\"page\">{n}</b>"));
+        } else {
+            parts.push(format!(
+                "<a href=\"{}\">{n}</a>",
+                page_href(params, token, (n - 1) * limit)
+            ));
+        }
+        last_number = Some(*n);
+    }
+    if page.offset.saturating_add(limit) < total {
+        parts.push(format!(
+            "<a href=\"{}\">next ›</a>",
+            page_href(params, token, page.offset + limit)
+        ));
+    }
+    format!(
+        "<nav class=sub aria-label=\"session pages\">{}</nav>\n",
+        parts.join(" · ")
     )
 }
 

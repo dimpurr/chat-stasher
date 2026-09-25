@@ -54,10 +54,10 @@ nav.sub{display:flex;gap:1rem}
 </style></head><body>
 <h1>Sessions</h1>
 <p class=sub><a href="/?token=golden-token">← overview</a> · destination <b>dest-under-test</b></p>
-<div class=note><b>Filter:</b> machine `m-1`<br><span class=sub>Applied by the same selector <code>search</code> uses, to one unfiltered read of the archive — so this list is the set <code>chat-stasher search</code> would return with the same flags.</span></div>
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
-<p><b>2</b> session(s) matched; 2 were evaluated and rejected.</p>
-<p class=sub>Sessions 1–2 of 2 · sorted by last message time, newest first · sessions with an unknown conversation time are not ranked and stay at the bottom</p>
+<p><b>4</b> session(s) matched.</p>
+<p class=sub>Sessions 3–4 of 4 · sorted by last message time, newest first · sessions with an unknown conversation time are not ranked and stay at the bottom</p>
+<nav class=sub aria-label="session pages"><a href="/sessions?limit=2&offset=0&token=golden-token">‹ previous</a> · <a href="/sessions?limit=2&offset=0&token=golden-token">1</a> · <b aria-current="page">2</b></nav>
 <div class=scroll><table>
 <thead><tr><th>machine</th><th>source</th><th>session (short)</th><th>label</th><th class=n>shards</th><th class=n>bytes</th><th>first message</th><th>last message</th><th>snapshot time</th></tr></thead>
 <tbody>

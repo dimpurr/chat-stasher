@@ -54,16 +54,9 @@ nav.sub{display:flex;gap:1rem}
 </style></head><body>
 <h1>Sessions</h1>
 <p class=sub><a href="/?token=golden-token">← overview</a> · destination <b>dest-under-test</b></p>
-<div class=note><b>Filter:</b> machine `m-1`<br><span class=sub>Applied by the same selector <code>search</code> uses, to one unfiltered read of the archive — so this list is the set <code>chat-stasher search</code> would return with the same flags.</span></div>
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
-<p><b>2</b> session(s) matched; 2 were evaluated and rejected.</p>
-<p class=sub>Sessions 1–2 of 2 · sorted by last message time, newest first · sessions with an unknown conversation time are not ranked and stay at the bottom</p>
-<div class=scroll><table>
-<thead><tr><th>machine</th><th>source</th><th>session (short)</th><th>label</th><th class=n>shards</th><th class=n>bytes</th><th>first message</th><th>last message</th><th>snapshot time</th></tr></thead>
-<tbody>
-<tr><td class=mono>m-1</td><td>claude-code</td><td><a class=mono href="/session?i=0&token=golden-token">claude-c~e58aa6</a></td><td>no label recorded</td><td class=n>2</td><td class=n>100 B</td><td>2026-02-02 00:40 UTC</td><td>2026-02-02 00:43 UTC</td><td>2026-02-02 01:40 UTC</td></tr>
-<tr><td class=mono>m-1</td><td>deepseek</td><td><a class=mono href="/session?i=1&token=golden-token">deepseek~e4009d</a></td><td>no label recorded</td><td class=n>1</td><td class=n>50 B</td><td><span class=bad title="unknown">unknown</span></td><td><span class=bad title="unknown">unknown</span></td><td>2026-02-02 01:40 UTC</td></tr>
-</tbody></table></div>
+<p><b>4</b> session(s) matched.</p>
+<div class=note><b>No rows on this page.</b> The filter matched <b>4</b> session(s), but this window starts past the last of them. That is a paging position, not a match count: it is not the same as matching nothing. <a href="/sessions?offset=0&token=golden-token">Back to page 1</a></div>
 <footer>
 <p><b>Metadata tier.</b> This page was rendered from one archive-metadata read taken before the server started (snapshots + index + tree + the activity sidecar). The only conversation text it holds is each session's one-line label — at most 100 characters, recorded in the activity index, which rode that same metadata read. 0 session shard blob(s) were fetched by that read — a session's full conversation is fetched only when you click it and then click <i>load</i>, and the cost is shown before you do.</p>
 <p>Machines are named by their archive partition id, which is the key the repository actually partitions on. Times are UTC. No JavaScript, no external asset, no off-host link is loaded by this page.</p>

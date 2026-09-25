@@ -48,7 +48,8 @@
 //! * [`json`] — `/api/overview` and `/api/sessions`.
 //! * [`facets`] — skeleton for the facet bar (29-UI-DESIGN §2, not yet built).
 //!
-//! Everything below is the shared model, the selector bridge and the router.
+//! Everything below is the shared model, the selector bridge, the paging
+//! window and the router.
 
 use std::collections::BTreeSet;
 
@@ -564,6 +565,216 @@ pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
     .resolve()
 }
 
+// ------------------------------------------------------------------- paging
+
+/// Rows per page when the URL asks for none (29-UI-DESIGN §5.2). 100 keeps a
+/// page at the §7 byte budget (~390 B/row measured on real archives) while
+/// still listing a week's worth of sessions at a glance.
+pub const DEFAULT_PAGE_LIMIT: usize = 100;
+
+/// The largest page any URL may name. A bigger `limit` is clamped to this, not
+/// refused: the reader's window behaves the same way for the same reason — a
+/// large page is a slow answer, not a wrong query.
+pub const MAX_PAGE_LIMIT: usize = 500;
+
+/// One order a list of sessions may be shown in (29-UI-DESIGN §5.2's value
+/// list, wire words verbatim). Every order is a **total** order on the list:
+/// the inventory position is the final tie key everywhere, so two rows that a
+/// sort cannot tell apart keep one stable order across pages and launches.
+///
+/// No sort ranks a session whose conversation time is unknown into that
+/// timeline: such rows stay at the **bottom**, in inventory order, and the page
+/// says so. Ordering them by anything else would claim a rank the archive does
+/// not record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListSort {
+    /// `default` — the archive's own order. What the list showed before
+    /// sorting existed, kept reachable as a value. The list's own default is
+    /// [`ListSort::LastDesc`]; this is deliberately not the trait default, so
+    /// no code path can fall into "archive order" without naming it.
+    ArchiveOrder,
+    /// `last-desc` — newest last message first. The default when the URL
+    /// asks for no sort.
+    LastDesc,
+    /// `last-asc`
+    LastAsc,
+    /// `first-desc`
+    FirstDesc,
+    /// `first-asc`
+    FirstAsc,
+    /// `size-desc` — largest archived session first.
+    SizeDesc,
+}
+
+impl ListSort {
+    /// The wire word a URL carries, and the word `/api/sessions` reports
+    /// inside `paging.sort`.
+    pub fn wire(self) -> &'static str {
+        match self {
+            ListSort::ArchiveOrder => "default",
+            ListSort::LastDesc => "last-desc",
+            ListSort::LastAsc => "last-asc",
+            ListSort::FirstDesc => "first-desc",
+            ListSort::FirstAsc => "first-asc",
+            ListSort::SizeDesc => "size-desc",
+        }
+    }
+
+    /// Every value a URL may spell, for the error message of an unknown one.
+    pub fn vocabulary() -> &'static str {
+        "last-desc (the default), last-asc, first-desc, first-asc, size-desc, default"
+    }
+
+    /// The one phrase the list header names the in-force order with. The
+    /// design pins the in-force sort to the page header (§10.1), so the words
+    /// come from one place, not from each caller.
+    pub fn describe(self) -> &'static str {
+        match self {
+            ListSort::ArchiveOrder => "archive order",
+            ListSort::LastDesc => "last message time, newest first",
+            ListSort::LastAsc => "last message time, oldest first",
+            ListSort::FirstDesc => "first message time, newest first",
+            ListSort::FirstAsc => "first message time, oldest first",
+            ListSort::SizeDesc => "archived size, largest first",
+        }
+    }
+}
+
+const SORTS: [(&str, ListSort); 6] = [
+    ("default", ListSort::ArchiveOrder),
+    ("last-desc", ListSort::LastDesc),
+    ("last-asc", ListSort::LastAsc),
+    ("first-desc", ListSort::FirstDesc),
+    ("first-asc", ListSort::FirstAsc),
+    ("size-desc", ListSort::SizeDesc),
+];
+
+/// `limit` / `offset` / `sort` as one request-side window (29-UI-DESIGN §5.2).
+/// The offset is kept unclamped on purpose: a window past the end is a *200
+/// with its own sentence*, not an error and not a zero-match, so the field a
+/// caller asked to start at is the field the answer describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    /// Rows per page, always `1..=MAX_PAGE_LIMIT`.
+    pub limit: usize,
+    /// Zero-based row the window starts at; may be past the end.
+    pub offset: usize,
+    /// The order the rows are shown in.
+    pub sort: ListSort,
+}
+
+/// Parse `limit` / `offset` / `sort` out of the same query the selector reads.
+///
+/// The parameters of an unresolvable page are a usage error exactly like an
+/// unresolvable filter value (29-UI-DESIGN §5.2: a typo is not allowed to
+/// masquerade as a list of zero rows): `limit=0`, a negative or non-numeric
+/// `limit`/`offset`, and an unknown `sort` are all a 400, never an empty list,
+/// even though an empty list is what a browser would render for one.
+pub fn page_from_query(params: &Query) -> Result<Page, UsageError> {
+    let limit = match param(params, "limit") {
+        None => DEFAULT_PAGE_LIMIT,
+        Some(raw) => {
+            // `usize::parse` rejects the negative and the non-numeric the same
+            // way; zero is rejected on its own below so its message stays the
+            // same as any other value that cannot name a page.
+            let parsed = raw.parse::<usize>().map_err(|_| {
+                UsageError(format!(
+                    "`limit` must be a positive page width, not `{raw}`"
+                ))
+            })?;
+            if parsed == 0 {
+                return Err(UsageError(
+                    "`limit` must be a positive page width — 0 would read as a measurement of \
+                     zero rows"
+                        .to_string(),
+                ));
+            }
+            parsed.min(MAX_PAGE_LIMIT)
+        }
+    };
+    let offset = match param(params, "offset") {
+        None => 0,
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|_| UsageError(format!("`offset` must be a row number, not `{raw}`")))?,
+    };
+    let sort = match param(params, "sort") {
+        None => ListSort::LastDesc,
+        Some(raw) => SORTS
+            .iter()
+            .find(|(word, _)| *word == raw)
+            .map(|(_, s)| *s)
+            .ok_or_else(|| {
+                UsageError(format!(
+                    "`sort` must be one of {}, not `{raw}`",
+                    ListSort::vocabulary()
+                ))
+            })?,
+    };
+    Ok(Page {
+        limit,
+        offset,
+        sort,
+    })
+}
+
+/// Order `rows` for one listed page.
+///
+/// The one comparison every time sort shares: two options with the same
+/// rank-ability are compared by their times, an unknown time never inherits a
+/// place in a timeline, and the inventory position ends all comparisons.
+pub fn sort_rows<'a>(rows: &[&'a UiSession], sort: ListSort) -> Vec<&'a UiSession> {
+    /// Two `Option<i64>` times, with an unknown always sorting after a known
+    /// one — whichever direction the timeline itself runs. `descending` flips
+    /// only the comparison of two *known* ranks.
+    fn cmp_time(a: Option<i64>, b: Option<i64>, descending: bool) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                if descending {
+                    y.cmp(&x)
+                } else {
+                    x.cmp(&y)
+                }
+            }
+            // A known time is ranked; an unknown one is only listed, so it goes
+            // below every ranked row, in either direction.
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+    let mut out = rows.to_vec();
+    out.sort_by(|a, b| match sort {
+        ListSort::ArchiveOrder => a.index.cmp(&b.index),
+        ListSort::LastDesc | ListSort::LastAsc => {
+            cmp_time(a.last_unix, b.last_unix, sort == ListSort::LastDesc)
+                .then_with(|| cmp_time(a.first_unix, b.first_unix, sort == ListSort::LastDesc))
+                .then_with(|| a.index.cmp(&b.index))
+        }
+        ListSort::FirstDesc | ListSort::FirstAsc => {
+            cmp_time(a.first_unix, b.first_unix, sort == ListSort::FirstDesc)
+                .then_with(|| cmp_time(a.last_unix, b.last_unix, sort == ListSort::FirstDesc))
+                .then_with(|| a.index.cmp(&b.index))
+        }
+        // Bytes are a measurement every row carries, so no row is unrankable
+        // here — but the tie key still applies.
+        ListSort::SizeDesc => b.bytes.cmp(&a.bytes).then_with(|| a.index.cmp(&b.index)),
+    });
+    out
+}
+
+/// The rows one page shows, in the order it shows them: sorted, then windowed
+/// at `page.offset`. A window that starts past the last row is empty — `None`
+/// handles no case here, because an empty window and an unmatched filter are
+/// the two different states §4.2 keeps apart, and the caller renders each in
+/// its own words.
+pub fn page_window<'a>(rows: &'a [&'a UiSession], page: Page) -> &'a [&'a UiSession] {
+    let start = page.offset.min(rows.len());
+    let end = page.offset.saturating_add(page.limit).min(rows.len());
+    &rows[start..end]
+}
+
 /// Route one request. `None` == no such route (the caller answers 404).
 ///
 /// Every branch below except `/content` is a pure function of `data`. The
@@ -587,14 +798,27 @@ pub fn handle(
         "/content" => Some(sessions::content_page(params, data, content)),
         "/reader" => Some(reader::reader_page(params, token, data, content)),
         "/api/overview" => Some(Response::json(200, "OK", json::json_overview(data))),
-        "/api/sessions" => Some(match selector_from_query(params) {
-            Ok(r) => Response::json(
-                200,
-                "OK",
-                json::json_sessions(&select(&data.sessions, &r.selector), &r, token, data),
-            ),
-            Err(e) => Response::json(400, "Bad Request", json::json_filter_error(data, &e)),
-        }),
+        "/api/sessions" => Some(
+            match (selector_from_query(params), page_from_query(params)) {
+                (Ok(r), Ok(page)) => Response::json(
+                    200,
+                    "OK",
+                    json::json_sessions(
+                        &select(&data.sessions, &r.selector),
+                        &r,
+                        page,
+                        token,
+                        data,
+                    ),
+                ),
+                // A filter or a paging parameter that cannot resolve is the same
+                // class of answer: an unsearchable query reported as an error,
+                // never as an empty list.
+                (Err(e), _) | (_, Err(e)) => {
+                    Response::json(400, "Bad Request", json::json_usage_error(data, &e))
+                }
+            },
+        ),
         _ => None,
     }
 }
@@ -777,6 +1001,127 @@ pub(crate) mod fixture {
         UiData::from_report(&r, "dest-under-test", Selector::default(), NOW)
     }
 
+    /// Seven rows whose facts are laid out by hand so every expected order in
+    /// the paging tests is derivable from this table alone — never by running
+    /// the sorter under test.
+    ///
+    /// | row | machine | bytes | conversation span |
+    /// |-----|---------|-------|--------------------|
+    /// | 0   | m-a     | 400   | 90 .. 100         |
+    /// | 1   | m-a     | 500   | unknown           |
+    /// | 2   | m-b     | 900   | 250 .. 300        |
+    /// | 3   | m-b     | 100   | 150 .. 200        |
+    /// | 4   | m-b     | 700   | 10 .. 300         |
+    /// | 5   | m-b     | 500   | unknown           |
+    /// | 6   | m-b     | 900   | 200 .. 200        |
+    ///
+    /// Row 2 and row 4 tie on `last` (300) to exercise the tie key, row 2 and
+    /// row 6 tie on size, and rows 1 and 5 carry no conversation time at all.
+    pub fn paging_data() -> UiData {
+        let rows = [
+            ("m-a", 400, Some((90, 100))),
+            ("m-a", 500, None),
+            ("m-b", 900, Some((250, 300))),
+            ("m-b", 100, Some((150, 200))),
+            ("m-b", 700, Some((10, 300))),
+            ("m-b", 500, None),
+            ("m-b", 900, Some((200, 200))),
+        ];
+        let hits = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (machine, bytes, span))| {
+                hit(
+                    machine,
+                    // The id's machine-looking segment is deliberately not the
+                    // row's machine: `machine` is the partition fact this
+                    // fixture varies, and the id is only here to be unique.
+                    &format!("claude-code.cx-0000.row-{:04}", i),
+                    *bytes,
+                    1,
+                    *span,
+                )
+            })
+            .collect();
+        UiData::from_report(
+            &SearchReport {
+                destination: "dest-under-test".into(),
+                snapshots_in_repo: 2,
+                snapshots_scanned: 2,
+                sessions_seen: rows.len(),
+                window: None,
+                all_recall: Default::default(),
+                hits,
+                unplaced: Vec::new(),
+                not_matched: 0,
+                machines_without_index: Vec::new(),
+                machines_with_legacy_index: Vec::new(),
+                hosts: Vec::new(),
+                unreadable: Vec::new(),
+                data_blobs_read: 0,
+                index_files_read: 0,
+            },
+            "dest-under-test",
+            Selector::default(),
+            NOW,
+        )
+    }
+
+    /// The scale fixture W136's test strategy named: 1,237 synthetic sessions,
+    /// which no `limit` can fetch at once (the clamp is 500), so the paging
+    /// contract's "walk the pages, concatenate, get the list" is the *only*
+    /// way to see it all — the walk below is the reader of last resort.
+    ///
+    /// The rows are laid out to keep the expected orders derivable by hand:
+    /// every ninth row (`i % 9 == 8`) has no conversation time — 137 of them —
+    /// and every known-time row carries `last = NOW - 1000·(1237 - i)` and
+    /// `first = last - 500`, so known rows are strictly ordered **by their
+    /// inventory position**: descending position is `last-desc`, ascending is
+    /// `last-asc`/`first-desc`/`first-asc`, and the unknown rows are exactly
+    /// the trailing tail of any time order.
+    pub fn big_data() -> UiData {
+        const ROWS: usize = 1237;
+        let hits = (0..ROWS)
+            .map(|i| {
+                let span = if i % 9 == 8 {
+                    None
+                } else {
+                    let last = NOW - 1000 * ((ROWS - i) as i64);
+                    Some((last - 500, last))
+                };
+                hit(
+                    "m-big",
+                    &format!("claude-code.m-big.row-{:06}", i),
+                    100 * ((i % 7) as u64 + 1),
+                    1,
+                    span,
+                )
+            })
+            .collect();
+        UiData::from_report(
+            &SearchReport {
+                destination: "dest-under-test".into(),
+                snapshots_in_repo: 1,
+                snapshots_scanned: 1,
+                sessions_seen: ROWS,
+                window: None,
+                all_recall: Default::default(),
+                hits,
+                unplaced: Vec::new(),
+                not_matched: 0,
+                machines_without_index: Vec::new(),
+                machines_with_legacy_index: Vec::new(),
+                hosts: Vec::new(),
+                unreadable: Vec::new(),
+                data_blobs_read: 0,
+                index_files_read: 0,
+            },
+            "dest-under-test",
+            Selector::default(),
+            NOW,
+        )
+    }
+
     /// A `ContentSource` that records every fetch and refuses none. The record
     /// is how a test proves *which* routes reached the payload tier.
     #[derive(Default)]
@@ -956,27 +1301,47 @@ mod tests {
         let body = req("/api/sessions", &d, &NoContent).body;
         let v: serde_json::Value = serde_json::from_str(&body).expect("the route must send JSON");
         let sessions = v["sessions"].as_array().unwrap();
+        // The rows come back in the page's own order — `last-desc` by default —
+        // so a row is found by the `index` the API carries (the same handle
+        // `/session?i=` takes), never by its position in this array. Position
+        // carries no promise here on purpose: `paging.sort` is what names the
+        // order, and `paging` is why a consumer can walk the pages at all.
+        let row = |index: u64| {
+            sessions
+                .iter()
+                .find(|s| s["index"].as_u64() == Some(index))
+                .unwrap_or_else(|| panic!("the page carries row {index}: {v}"))
+        };
+        let with_provenance = row(0);
         assert_eq!(
-            sessions[0]["provenance"]["captured"]["project"], "unknown",
+            with_provenance["provenance"]["captured"]["project"], "unknown",
             "the capture-time fact must travel unchanged, marker included"
         );
         assert_eq!(
-            sessions[0]["provenance"]["effectiveProject"]["name"], "Synthetic Project",
+            with_provenance["provenance"]["effectiveProject"]["name"], "Synthetic Project",
             "the later attribution is what the API shows as the project"
         );
         assert_eq!(
-            sessions[0]["provenance"]["supplement"]["source"],
+            with_provenance["provenance"]["supplement"]["source"],
             "project-list"
         );
         assert_eq!(
-            sessions[0]["provenance"]["supplement"]["observedAt"],
+            with_provenance["provenance"]["supplement"]["observedAt"],
             "2026-09-25T12:00:00.000Z"
         );
-        assert!(
-            sessions[1].get("provenance").is_none(),
-            "a session with no provenance record carries no key at all, never null: {}",
-            sessions[1]
-        );
+        // Every other row of this fixture has no provenance record, and none of
+        // them may grow a key to say so. All of them, not one: a key that
+        // appears on one row and not another is exactly the ambiguity the
+        // absent-key rule exists to prevent.
+        for s in sessions {
+            if s["index"].as_u64() == Some(0) {
+                continue;
+            }
+            assert!(
+                s.get("provenance").is_none(),
+                "a session with no provenance record carries no key at all, never null: {s}"
+            );
+        }
     }
 
     /// The byte total is the sum of the rows in view — pinned by construction so
@@ -2092,6 +2457,633 @@ mod tests {
         assert!(!text.contains('/'), "a partition id is not a path: {text}");
     }
 
+    // ------------------------------------------------------ paging + sorting
+    //
+    // The §5.2 contract's four invariants, pinned at unit level against the
+    // two synthetic fixtures: the hand-laid 7-row table (`fixture::paging_data`,
+    // every expected order derivable from its doc table) and the 1,237-row
+    // scale archive (`fixture::big_data`, the size W136's strategy named).
+
+    /// The seven-row fixture's expected orders, derived once from the table in
+    /// [`fixture::paging_data`]'s docs: a time sort's known rows in that
+    /// time's order, its ties by the second time, and the two unknown-time
+    /// rows at the bottom in inventory order; sizes tie-break by position.
+    #[test]
+    fn every_sort_orders_the_seven_row_table_as_its_facts_decide() {
+        let d = fixture::paging_data();
+        let index_order = |sort: &str| -> Vec<u64> {
+            let body = req(&format!("/api/sessions?sort={sort}"), &d, &NoContent).body;
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["matched"], serde_json::json!(7), "{body}");
+            assert_eq!(v["paging"]["total"], serde_json::json!(7), "{body}");
+            v["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["index"].as_u64().unwrap())
+                .collect()
+        };
+        // last-desc: 300s (row 2 before row 4 — their first messages tie-break
+        // newest-first), then 200s (row 6 before row 3, same tie key), then
+        // row 0; the two unknown-time rows last, in inventory order.
+        assert_eq!(index_order("last-desc"), [2, 4, 6, 3, 0, 1, 5]);
+        // last-asc: the reverse ranking of the same known rows, unknown rows
+        // still at the bottom — an ascending list must not claim them as
+        // "oldest".
+        assert_eq!(index_order("last-asc"), [0, 3, 6, 4, 2, 1, 5]);
+        assert_eq!(index_order("first-desc"), [2, 6, 3, 0, 4, 1, 5]);
+        assert_eq!(index_order("first-asc"), [4, 0, 3, 6, 2, 1, 5]);
+        // size-desc: the two 900 B rows tie (position decides), then 700,
+        // then the 500 B tie, then 400, then 100.
+        assert_eq!(index_order("size-desc"), [2, 6, 4, 1, 5, 0, 3]);
+        // `default` is the archive's own order, byte for byte.
+        assert_eq!(index_order("default"), [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    /// The HTML list and the JSON rows show the same order, because both are
+    /// windows cut from the one sorted sequence — the rank sentence and the
+    /// rows a reader counts from it cannot disagree.
+    #[test]
+    fn the_html_list_cuts_the_same_order_the_json_rows_do() {
+        let d = fixture::paging_data();
+        let html = req("/sessions?sort=size-desc", &d, &NoContent).body;
+        let handles: Vec<usize> = html
+            .split("href=\"/session?i=")
+            .skip(1)
+            .filter_map(|rest| {
+                rest.split('&')
+                    .next()
+                    .and_then(|digits| digits.parse().ok())
+            })
+            .collect();
+        assert_eq!(handles, [2, 6, 4, 1, 5, 0, 3], "{html}");
+        assert!(
+            html.contains("Sessions 1–7 of 7 · sorted by archived size, largest first"),
+            "{html}"
+        );
+        // A time order names the unranked bottom too: the two rows the order
+        // could not rank are the ones the header must not call oldest or
+        // newest of anything.
+        let html = req("/sessions?sort=last-asc", &d, &NoContent).body;
+        assert!(
+            html.contains(
+                "sessions with an unknown conversation time are not ranked and stay \
+                 at the bottom"
+            ),
+            "{html}"
+        );
+        // size and archive orders rank no time, so they make no such claim.
+        let html = req("/sessions?sort=size-desc", &d, &NoContent).body;
+        assert!(!html.contains("are not ranked"), "{html}");
+    }
+
+    /// §5.2's parse contract: defaults, the 1..=500 clamp, and the three
+    /// refusals — a `limit` that cannot name a page, an `offset` that cannot
+    /// name a row, and a `sort` outside the vocabulary. All three are usage
+    /// errors with their own message, never a list of zero rows.
+    #[test]
+    fn page_params_parse_clamp_or_refuse_per_the_contract() {
+        let page = |query: &str| {
+            let (_, params) = split_target(&format!("/sessions?{query}"));
+            page_from_query(&params)
+        };
+        let defaults = page("").unwrap();
+        assert_eq!(defaults.limit, DEFAULT_PAGE_LIMIT);
+        assert_eq!(defaults.offset, 0);
+        assert_eq!(defaults.sort, ListSort::LastDesc);
+        assert_eq!(DEFAULT_PAGE_LIMIT, 100);
+        assert_eq!(page("limit=7&offset=3&sort=first-asc").unwrap().limit, 7);
+        assert_eq!(page("limit=7&offset=3").unwrap().offset, 3);
+        // Bigger than the clamp: the page the URL gets is 500 rows, the
+        // number it asked for is not an error and not a lie.
+        assert_eq!(page("limit=100000").unwrap().limit, MAX_PAGE_LIMIT);
+        assert_eq!(MAX_PAGE_LIMIT, 500);
+        for bad in [
+            "limit=0",
+            "limit=x",
+            "limit=-1",
+            "offset=x",
+            "offset=-1",
+            "sort=newest",
+            "sort=",
+        ] {
+            let refused = page(bad).expect_err(bad).0;
+            let which = refused.split('`').nth(1).unwrap_or("");
+            assert_eq!(
+                which,
+                bad.split('=').next().unwrap(),
+                "`{bad}` must be refused by its own parameter: {refused}"
+            );
+        }
+        assert!(
+            page("sort=newest")
+                .expect_err("unknown sort")
+                .0
+                .contains("last-desc"),
+            "the refusal must name the vocabulary: {}",
+            page("sort=newest").expect_err("unknown sort").0
+        );
+    }
+
+    /// Invariants 3's refusal arm, on both routes: `limit=0` is a 400 on the
+    /// HTML list and a 400 JSON object on the API — never an empty list a
+    /// consumer would take for a measurement of zero.
+    #[test]
+    fn a_limit_of_zero_is_a_usage_error_on_both_list_routes() {
+        let d = fixture::paging_data();
+        let r = req("/sessions?limit=0", &d, &NoContent);
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("`limit`"), "{}", r.body);
+        assert!(
+            !r.body.contains("Not in this destination"),
+            "a usage error must not be dressed up as a zero match: {}",
+            r.body
+        );
+        let r = req("/api/sessions?limit=0", &d, &NoContent);
+        assert_eq!(r.status, 400);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(v["status"], serde_json::json!(400));
+        assert!(v["matched"].is_null(), "{}", r.body);
+        assert!(
+            v["note"].as_str().unwrap().contains("not an empty result"),
+            "{}",
+            r.body
+        );
+        // A filter that cannot resolve and a page that cannot resolve are
+        // the same class of refusal — and the filter keeps precedence when
+        // both are wrong, so the message names one thing at a time.
+        let r = req("/sessions?day=not-a-date&limit=0", &d, &NoContent);
+        assert_eq!(r.status, 400);
+        assert!(
+            r.body.contains("calendar date") && !r.body.contains("`limit`"),
+            "one refusal at a time: {}",
+            r.body
+        );
+    }
+
+    /// Invariant 3's window arms: an offset past the end is a **200 with an
+    /// empty window** on both routes, and the page says it in its own words —
+    /// never a 404, never a "nothing matched" sentence.
+    #[test]
+    fn an_offset_past_the_end_is_an_empty_window_not_a_finding() {
+        let d = fixture::paging_data();
+        for target in ["/sessions?offset=99", "/sessions?offset=7&limit=2"] {
+            let r = req(target, &d, &NoContent);
+            assert_eq!(r.status, 200, "{target}");
+            assert!(
+                r.body.contains("No rows on this page."),
+                "{target} must carry its own sentence: {}",
+                r.body
+            );
+            assert!(
+                r.body.contains("Back to page 1"),
+                "{target} must offer the way back: {}",
+                r.body
+            );
+            assert!(
+                !r.body.contains("Not in this destination"),
+                "{target} matched 7 rows; paging past them is not a zero match: {}",
+                r.body
+            );
+            assert!(
+                !r.body.contains("UNKNOWN"),
+                "{target} is not an unknown state either: {}",
+                r.body
+            );
+        }
+        // The API says the same thing in its own wire words: an empty rows
+        // array, the matched total intact, and the offset the caller asked
+        // for echoed rather than clamped behind their back.
+        let body = req(
+            "/api/sessions?offset=99&limit=3&sort=size-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["matched"], serde_json::json!(7), "{body}");
+        assert_eq!(v["sessions"].as_array().map(Vec::len), Some(0), "{body}");
+        assert_eq!(v["could_not_be_placed"], serde_json::json!(0), "{body}");
+        assert_eq!(
+            v["paging"],
+            serde_json::json!({"total": 7, "limit": 3, "offset": 99, "sort": "size-desc"}),
+            "{body}"
+        );
+        // Window boundaries at the seam: the last row, then the empty space.
+        let last = req(
+            "/api/sessions?limit=2&offset=6&sort=size-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap();
+        assert_eq!(v["sessions"].as_array().map(Vec::len), Some(1), "{last}");
+        let first = req(
+            "/api/sessions?limit=2&offset=6&sort=first-asc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        assert!(!first.contains("paging_error"), "{first}");
+        let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(v["sessions"].as_array().map(Vec::len), Some(1), "{first}");
+    }
+
+    /// Invariant 1: the three "nothing matched" sentences are triggered by
+    /// the matched **total** alone. Paging parameters ride along without
+    /// changing which sentence applies — a windowed zero is still whichever
+    /// of the three the data says it is.
+    #[test]
+    fn the_no_hit_sentences_are_a_function_of_the_match_total_alone() {
+        // A real zero match, with every paging parameter attached, is still
+        // the proven absence sentence.
+        let d = fixture::data();
+        let html = req(
+            "/sessions?machine=m-zz&limit=2&offset=2&sort=size-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        assert!(html.contains("Not in this destination"), "{html}");
+        // And still the UNKNOWN sentence on an incomplete read.
+        let html = req(
+            "/sessions?machine=m-zz&limit=500&offset=500",
+            &fixture::partial_data(),
+            &NoContent,
+        )
+        .body;
+        assert!(html.contains("UNKNOWN"), "{html}");
+        assert!(!html.contains("Not in this destination"), "{html}");
+        // While a non-empty match paged past its end is neither of those.
+        let html = req("/sessions?machine=m-1&offset=50", &d, &NoContent).body;
+        assert!(html.contains("No rows on this page."), "{html}");
+        assert!(!html.contains("Not in this destination"), "{html}");
+        assert!(!html.contains("UNKNOWN"), "{html}");
+    }
+
+    /// Invariant 2: the `i=` handle a row is addressed by is its inventory
+    /// position, so sorting and paging reorder what is *shown* without ever
+    /// renumbering what a link resolves to — the same `i` is the same
+    /// session on every sort of every page.
+    #[test]
+    fn row_handles_survive_reordering_and_windowing() {
+        let d = fixture::paging_data();
+        for sort in [
+            "default",
+            "last-desc",
+            "last-asc",
+            "first-desc",
+            "first-asc",
+            "size-desc",
+        ] {
+            for (limit, offset) in [(7, 0), (2, 0), (2, 2), (2, 4), (3, 6), (1, 3)] {
+                let html = req(
+                    &format!("/sessions?sort={sort}&limit={limit}&offset={offset}"),
+                    &d,
+                    &NoContent,
+                )
+                .body;
+                // Every row that is rendered carries the inventory position of
+                // the very session whose short id is beside it.
+                for s in &d.sessions {
+                    if !html.contains(&s.short_id) {
+                        continue;
+                    }
+                    assert!(
+                        html.contains(&format!("href=\"/session?i={}&", s.index)),
+                        "sort={sort} limit={limit} offset={offset} shows {} under a \
+                         renumbered handle",
+                        s.short_id
+                    );
+                }
+            }
+        }
+        // And the handle resolves the same row whatever order it was met in:
+        // the row whose inventory position is 3 is, under every sort, the
+        // session this fixture gave 100 bytes to.
+        for sort in ["default", "size-desc", "last-asc"] {
+            let page = req(&format!("/session?i=3&sort={sort}"), &d, &NoContent).body;
+            assert!(
+                page.contains(&d.sessions[3].short_id),
+                "i=3 resolves the same session under sort={sort}: {page}"
+            );
+            assert!(page.contains("100 B"), "row 3's own metadata: {page}");
+        }
+    }
+
+    /// Invariant 4: the launch filter. A dashboard opened with a filter shows
+    /// that filter's sessions, and no page of any sort can leave them — the
+    /// pages are a window of a list the filter already decided.
+    #[test]
+    fn no_page_of_any_sort_escapes_the_launch_filter() {
+        let args = crate::selector::SelectorArgs {
+            machine: Some("m-b".into()),
+            ..Default::default()
+        };
+        let launch = args.resolve().unwrap().selector;
+        let d = fixture::paging_data();
+        // Rebuild the data under the launch filter the way `cmd_ui` does.
+        let mut r = fixture::report();
+        r.hits = d
+            .sessions
+            .iter()
+            .map(|s| crate::search::SessionHit {
+                machine: s.machine.clone(),
+                session_id: s.session_id.clone(),
+                harness: s.harness.clone(),
+                shard_count: s.shard_count,
+                bytes: s.bytes,
+                snapshot_id: "aaaaaaaaaaaaaaaa".into(),
+                archive_time_unix: NOW - 3600,
+                first_unix: s.first_unix,
+                last_unix: s.last_unix,
+                time_why: s.time_why.clone(),
+                data_blobs: 1,
+                line_count: 10,
+                time_source: s.time_source.clone(),
+                title: crate::search::SessionLabel::NoLabelRecorded,
+                // `UiData::from_report` takes a session's provenance from its
+                // hit, so copying it here round-trips the same value the
+                // fixture put in. `None` would be equal only while
+                // `fixture::hit` happens to set none, and would silently drop
+                // a provenance this rebuild is meant to reproduce.
+                provenance: s.provenance.clone(),
+            })
+            .collect();
+        r.sessions_seen = r.hits.len();
+        let d = UiData::from_report(&r, "dest-under-test", launch, NOW);
+        assert_eq!(d.sessions.len(), 5, "the fixture's m-b rows");
+        for sort in ["default", "last-asc", "size-desc", "first-desc"] {
+            // Walk every page and concatenate: the walk reproduces the m-b list,
+            // in the walk's own sort, and no page of it is anything else.
+            let mut walked: Vec<u64> = Vec::new();
+            let mut offset = 0;
+            loop {
+                let body = req(
+                    &format!("/api/sessions?sort={sort}&limit=2&offset={offset}"),
+                    &d,
+                    &NoContent,
+                )
+                .body;
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let rows = v["sessions"].as_array().unwrap();
+                if rows.is_empty() {
+                    break;
+                }
+                for row in rows {
+                    assert_eq!(row["machine"], serde_json::json!("m-b"), "{body}");
+                    walked.push(row["index"].as_u64().unwrap());
+                }
+                offset += 2;
+            }
+            // The m-b facts, ordered by this walk's sort, hand-derived from
+            // the paging_data table (rows 2..6 are m-b's): sizes 900,900
+            // (positions 2,6), 700 (4), 500 (5), 100 (3); last times
+            // 300,300 (2,4), 200,200 (3,6 — first time decides).
+            let expected: Vec<u64> = match sort {
+                "default" => vec![2, 3, 4, 5, 6],
+                "last-asc" => vec![3, 6, 4, 2, 5],
+                "size-desc" => vec![2, 6, 4, 5, 3],
+                "first-desc" => vec![2, 6, 3, 4, 5],
+                _ => unreachable!("every sort is named above"),
+            };
+            assert_eq!(walked, expected, "sort={sort}");
+        }
+    }
+
+    /// The query filter composes with the sort and the window — a conjunction,
+    /// never an either-or: the window is cut from the filtered list, and the
+    /// filter's own rejections are reported on every page.
+    #[test]
+    fn filters_sorts_and_windows_are_a_conjunction() {
+        let d = fixture::paging_data();
+        // m-a holds rows 0 (400 B, known) and 1 (500 B, unknown time).
+        // size-desc puts row 1 first; the second page holds row 0 — and
+        // nowhere in either page may an m-b row appear.
+        let first = req(
+            "/sessions?machine=m-a&limit=1&sort=size-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        assert!(first.contains(&d.sessions[1].short_id), "{first}");
+        assert!(!first.contains(&d.sessions[2].short_id), "{first}");
+        assert!(first.contains("<b>2</b> session(s) matched"), "{first}");
+        let second = req(
+            "/sessions?machine=m-a&limit=1&offset=1&sort=size-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        assert!(second.contains(&d.sessions[0].short_id), "{second}");
+        assert!(!second.contains(&d.sessions[1].short_id), "{second}");
+        assert!(second.contains("<b>2</b> session(s) matched"), "{second}");
+        // The unknown-time m-a row is on top of a size order, but the header
+        // makes no time claim about it: size is not a time sort.
+        assert!(!second.contains("are not ranked"), "{second}");
+        // A harness filter narrows further: the claude-code rows of m-b only.
+        let body = req(
+            "/api/sessions?machine=m-b&harness=claude-code&limit=2&sort=size-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["matched"], serde_json::json!(5), "{body}");
+        assert_eq!(v["not_matched"], serde_json::json!(2), "{body}");
+        let walked: Vec<u64> = v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(walked, [2, 6], "{body}");
+    }
+
+    /// The zero-JS nav is links a browser can follow: each carries the query
+    /// the page was reached by (filters, sort, width), moves only the window,
+    /// and the window it names is the one that comes next. Following it is
+    /// the test — the continuation of the list is the only acceptable result.
+    #[test]
+    fn the_nav_links_carry_the_query_and_continue_the_list() {
+        let d = fixture::paging_data();
+        let html = req(
+            "/sessions?machine=m-b&sort=size-desc&limit=2",
+            &d,
+            &NoContent,
+        )
+        .body;
+        // 5 m-b rows at 2 per page: 3 pages, current is the first, so 2 and 3
+        // are linked and the numbers never exceed the §5.2 limit.
+        assert!(
+            html.contains("<b aria-current=\"page\">1</b>"),
+            "the current page is text, not a link: {html}"
+        );
+        // The nav's next link: the only place a `next ›` label appears, so
+        // its target is the window that must come next.
+        let target = {
+            let frag = html
+                .split("<a href=\"")
+                .find(|f| f.contains("next ›"))
+                .expect("a next link");
+            &frag[..frag.find('"').unwrap()]
+        };
+        assert!(
+            target.contains("machine=m-b"),
+            "the filter travels: {target}"
+        );
+        assert!(target.contains("sort=size-desc"), "{target}");
+        assert!(target.contains("limit=2"), "{target}");
+        assert!(target.contains("offset=2"), "{target}");
+        assert!(target.contains("token="), "{target}");
+        let followed = req(target, &d, &NoContent);
+        assert_eq!(followed.status, 200, "{target}");
+        assert!(
+            followed.body.contains("Sessions 3–4 of 5"),
+            "{target}: the window the link names is the window that renders: {}",
+            followed.body
+        );
+        assert!(
+            followed.body.contains(&d.sessions[5].short_id),
+            "{target}: page 2 of size-desc m-b is rows 4 and 5: {}",
+            followed.body
+        );
+        assert!(
+            followed.body.contains("<b aria-current=\"page\">2</b>"),
+            "{target}"
+        );
+        // The last page has no next link; and a list whose page numbers are
+        // not all within current±2 of the ends marks the jump with `…` (§5.2:
+        // first, last, current±2 — never more than seven numbers). Five rows
+        // at one per page puts current on 1, so the run 1 2 3 … 5 shows the
+        // marker exactly where a reader needs it.
+        let last = req(
+            "/sessions?machine=m-b&sort=size-desc&limit=1&offset=4",
+            &d,
+            &NoContent,
+        )
+        .body;
+        assert!(!last.contains("next ›"), "{last}");
+        let five_pages = req(
+            "/sessions?machine=m-b&sort=size-desc&limit=1",
+            &d,
+            &NoContent,
+        )
+        .body;
+        assert!(five_pages.contains("…"), "{five_pages}");
+        // A list that fits in one window carries no nav at all, mirroring the
+        // reader's window links.
+        let lone = req("/sessions?machine=m-a", &d, &NoContent).body;
+        assert!(!lone.contains("session pages"), "{lone}");
+        assert!(lone.contains("Sessions 1–2 of 2"), "{lone}");
+    }
+
+    /// The scale fixture: 1,237 rows that no single `limit` can fetch, so the
+    /// §5.2 invariant "page-concatenation==full list" is the only way to see
+    /// the whole list — and the walk reproduces it for every kind of order
+    /// the contract offers.
+    #[test]
+    fn a_thousand_rows_can_only_be_seen_by_walking_the_pages() {
+        let d = fixture::big_data();
+        assert_eq!(d.sessions.len(), 1237);
+        let rows = d.sessions.clone();
+        let no_time: Vec<usize> = (0..1237).filter(|i| i % 9 == 8).collect();
+        assert_eq!(no_time.len(), 137, "the fixture's unknown-time rows");
+        for sort in ["default", "last-desc"] {
+            // The expected sequence derived from the fixture's construction:
+            // `default` is the inventory, `last-desc` ranks the known rows by
+            // their position (descending) and parks the unknown ones at the
+            // bottom in inventory order.
+            let expected: Vec<usize> = match sort {
+                "default" => (0..1237).collect(),
+                "last-desc" => {
+                    let mut known: Vec<usize> = (0..1237).filter(|i| i % 9 != 8).collect();
+                    known.reverse();
+                    known.extend(no_time.iter().copied());
+                    known
+                }
+                _ => unreachable!(),
+            };
+            let mut walked: Vec<usize> = Vec::new();
+            for page in 0.. {
+                let body = req(
+                    &format!("/api/sessions?sort={sort}&limit=100&offset={}", page * 100),
+                    &d,
+                    &NoContent,
+                )
+                .body;
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["matched"], serde_json::json!(1237), "{body}");
+                assert_eq!(
+                    v["paging"],
+                    serde_json::json!({
+                        "total": 1237, "limit": 100, "offset": page * 100,
+                        "sort": sort
+                    }),
+                    "{body}"
+                );
+                let got: Vec<usize> = v["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["index"].as_u64().unwrap() as usize)
+                    .collect();
+                if got.is_empty() {
+                    break;
+                }
+                let got_len = got.len();
+                walked.extend(got);
+                // A page that returns fewer rows than its limit is (only) the
+                // last one, and its offset numbers the rows before it.
+                if got_len < 100 {
+                    assert_eq!(got_len, 1237 - page * 100, "{body}");
+                }
+            }
+            assert_eq!(walked.len(), 1237, "sort={sort}");
+            assert_eq!(walked, expected, "sort={sort}");
+        }
+        // The clamp a URL cannot talk its way past: no response ever carries
+        // more than 500 rows, even for an absurd `limit`.
+        let body = req("/api/sessions?limit=999999", &d, &NoContent).body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["paging"]["limit"], serde_json::json!(500), "{body}");
+        assert_eq!(v["sessions"].as_array().map(Vec::len), Some(500), "{body}");
+        // And the sampled known answers a walk of this size must not get
+        // wrong: the newest conversation is the first row of last-desc, and
+        // its unknown-time rows are a tail, not a mix (a sampled check of
+        // every 97th row below).
+        let first_page = req(
+            "/api/sessions?limit=100&offset=0&sort=last-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        let v: serde_json::Value = serde_json::from_str(&first_page).unwrap();
+        assert_eq!(
+            v["sessions"][0]["index"],
+            serde_json::json!(1236),
+            "row 1236 carries the known fixture's newest last message"
+        );
+        let full_last: Vec<i64> = rows.iter().map(|s| s.last_unix.unwrap_or(0)).collect();
+        assert_eq!(
+            full_last.iter().max().copied(),
+            Some(*full_last.last().unwrap())
+        );
+        let tail_probe = req(
+            "/api/sessions?limit=137&offset=1100&sort=last-desc",
+            &d,
+            &NoContent,
+        )
+        .body;
+        let v: serde_json::Value = serde_json::from_str(&tail_probe).unwrap();
+        for row in v["sessions"].as_array().unwrap() {
+            assert!(
+                row["last_unix"]["kind"] == serde_json::json!("unknown"),
+                "every tail row is an unknown-time row: {tail_probe}"
+            );
+        }
+    }
+
     // ---------------------------------------------------------- W156 labels
 
     /// The fixture archive with every label state on view: a harness title
@@ -2197,9 +3189,22 @@ mod tests {
             serde_json::json!(["m-1"]),
             "{body}"
         );
+        // Keyed by the fixture's inventory `index`, not by array position:
+        // since UIA-2 the rows arrive in the order `paging.sort` names
+        // (last-desc by default), and the label contract this test pins is a
+        // per-row fact, not a position in a sorted window.
+        let row_of = |i: usize| {
+            v["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["index"] == serde_json::json!(i))
+                .unwrap_or_else(|| panic!("no row with index {i} in {body}"))
+                .clone()
+        };
         let expect = |i: usize, state: &str| {
             assert_eq!(
-                v["sessions"][i]["title"]["state"],
+                row_of(i)["title"]["state"],
                 serde_json::json!(state),
                 "row {i} of {body}"
             )
@@ -2209,28 +3214,22 @@ mod tests {
         expect(2, "known");
         expect(3, "no_label");
         assert_eq!(
-            v["sessions"][0]["title"]["text"],
+            row_of(0)["title"]["text"],
             serde_json::json!("Fix the parser retry loop")
         );
         assert_eq!(
-            v["sessions"][0]["title"]["source"],
+            row_of(0)["title"]["source"],
             serde_json::json!("harness_title")
         );
+        assert_eq!(row_of(0)["title"]["truncated"], serde_json::json!(false));
         assert_eq!(
-            v["sessions"][0]["title"]["truncated"],
-            serde_json::json!(false)
-        );
-        assert_eq!(
-            v["sessions"][2]["title"]["source"],
+            row_of(2)["title"]["source"],
             serde_json::json!("first_user_line")
         );
-        assert_eq!(
-            v["sessions"][2]["title"]["truncated"],
-            serde_json::json!(true)
-        );
+        assert_eq!(row_of(2)["title"]["truncated"], serde_json::json!(true));
         // A recorded absence carries no text field at all — an empty string
         // could be confused with one.
-        assert!(v["sessions"][3]["title"]["text"].is_null(), "{body}");
+        assert!(row_of(3)["title"]["text"].is_null(), "{body}");
     }
 
     /// The session page shows the label with the same honesty, plus its
@@ -2323,6 +3322,35 @@ mod golden {
             "/sessions?machine=m-1",
             Source::Counting,
         ),
+        // The UIA-2 paging surface. One small paged list (its nav, its range
+        // sentence), one window past the end (the sentence that is neither a
+        // 404 nor a no-hit), one explicit archive-order page, and one JSON
+        // window whose `paging` object and row order are pinned byte-for-byte
+        // alongside it.
+        (
+            "sessions-paged",
+            "/sessions?limit=2&offset=2",
+            Source::Counting,
+        ),
+        (
+            "sessions-empty-window",
+            "/sessions?offset=99",
+            Source::Counting,
+        ),
+        (
+            "sessions-archive-order",
+            "/sessions?sort=default",
+            Source::Counting,
+        ),
+        (
+            "api-sessions-paged",
+            "/api/sessions?limit=1&offset=1&sort=size-desc",
+            Source::Counting,
+        ),
+        // A paging parameter that cannot resolve is a usage error on both
+        // routes, in the two wire forms the 400 takes.
+        ("limit-zero", "/sessions?limit=0", Source::Counting),
+        ("limit-zero-json", "/api/sessions?limit=0", Source::Counting),
         ("session-zero", "/session?i=0", Source::Counting),
         ("session-two", "/session?i=2", Source::Counting),
         ("content-one", "/content?i=1", Source::Counting),

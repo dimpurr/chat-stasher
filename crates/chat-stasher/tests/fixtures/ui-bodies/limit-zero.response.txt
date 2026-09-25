@@ -1,0 +1,4 @@
+status: 400 Bad Request
+content-type: text/plain; charset=utf-8
+
+ui: `limit` must be a positive page width — 0 would read as a measurement of zero rows

@@ -5,7 +5,7 @@ content-type: application/json; charset=utf-8
   "command": "ui",
   "complete": false,
   "destination": "dest-under-test",
-  "error": "`yesterday` is not a calendar date; write it as YYYY-MM-DD, e.g. 2026-01-15",
+  "error": "`limit` must be a positive page width — 0 would read as a measurement of zero rows",
   "matched": null,
   "note": "the query could not be resolved, so nothing was searched — this is not an empty result",
   "payload_loaded": false,
