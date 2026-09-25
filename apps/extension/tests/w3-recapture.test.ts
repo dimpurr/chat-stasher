@@ -35,8 +35,9 @@ import {
   LAST_DELIVERED_KEY,
   MAX_REMEMBERED,
   contentFingerprint,
-  isUnchangedSinceDelivery,
+  isUnchangedCapture,
   rememberDelivered,
+  type DeliveryDestination,
 } from '../lib/recapture';
 
 // ---------------------------------------------------------------------------
@@ -212,51 +213,79 @@ describe('W3-RECAPTURE · contentFingerprint', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2 · rememberDelivered / isUnchangedSinceDelivery
+// 2 · rememberDelivered / isUnchangedCapture
 //
 // The store is the repository's own in-memory implementation (the two methods
 // the port asks for), not a second copy of it.
+//
+// 🔴 W50b · Every call now carries a destination, because "unchanged" is only ever
+//    true of *where* the copy was stored. `DEST_A` is the fixture host this section
+//    acknowledges against. The two failure cases that need the real delivery path
+//    (a host that has changed, and an entry written before W50b) are exercised
+//    through `runtime.onMessage` in tests/w50b-delivery-destination.test.ts; what is
+//    asserted here is the store's own bookkeeping.
 // ---------------------------------------------------------------------------
 
+const DEST_A: DeliveryDestination = { machine: 'fixture-machine', stage: '/stage/a' };
+const DEST_B: DeliveryDestination = { machine: 'fixture-machine', stage: '/stage/b' };
+
+/** The guard as a delivery leg calls it, with the host's answer fixed for the test. */
+function unchanged(
+  s: ReturnType<typeof memoryStore> | null,
+  name: string,
+  fingerprint: string,
+  destination: DeliveryDestination | null,
+): Promise<boolean> {
+  return isUnchangedCapture(s, name, { platform: 'chatgpt', fingerprint }, async () => destination);
+}
+
 describe('W3-RECAPTURE · the remembered fingerprint', () => {
-  it('is unchanged only after that exact fingerprint was recorded for that name', async () => {
+  it('is unchanged only after that exact fingerprint was recorded for that name at that destination', async () => {
     const s = memoryStore();
     const name = `chatgpt-${CHATGPT_SID}.json`;
 
-    expect(await isUnchangedSinceDelivery(s, name, 'fp-1')).toBe(false);
+    expect(await unchanged(s, name, 'fp-1', DEST_A)).toBe(false);
 
-    await rememberDelivered(s, name, 'fp-1');
-    expect(await isUnchangedSinceDelivery(s, name, 'fp-1')).toBe(true);
+    await rememberDelivered(s, name, 'fp-1', DEST_A);
+    expect(await unchanged(s, name, 'fp-1', DEST_A)).toBe(true);
     // A different fingerprint for the same conversation is a change.
-    expect(await isUnchangedSinceDelivery(s, name, 'fp-2')).toBe(false);
+    expect(await unchanged(s, name, 'fp-2', DEST_A)).toBe(false);
     // The same fingerprint under another name says nothing about this one.
-    expect(await isUnchangedSinceDelivery(s, 'chatgpt-other.json', 'fp-1')).toBe(false);
+    expect(await unchanged(s, 'chatgpt-other.json', 'fp-1', DEST_A)).toBe(false);
+    // 🔴 W50b · The same body acknowledged at another destination is not a match:
+    //    this copy is not on record as stored *there*, whatever it says about here.
+    expect(await unchanged(s, name, 'fp-1', DEST_B)).toBe(false);
+    // 🔴 And a destination the host would not confirm is not a match either — the
+    //    unknown is resolved toward delivering, never toward skipping.
+    expect(await unchanged(s, name, 'fp-1', null)).toBe(false);
   });
 
   it('an unavailable store answers "not known to be unchanged", never "unchanged"', async () => {
     // 🔴 "Cannot read it" must not collapse into "it did not change": the caller
     //    has to keep delivering.
-    expect(await isUnchangedSinceDelivery(null, 'anything.json', 'fp-1')).toBe(false);
+    expect(await unchanged(null, 'anything.json', 'fp-1', DEST_A)).toBe(false);
     // And recording into it is a no-op rather than a throw.
-    await expect(rememberDelivered(null, 'anything.json', 'fp-1')).resolves.toBeUndefined();
+    await expect(rememberDelivered(null, 'anything.json', 'fp-1', DEST_A)).resolves.toBeUndefined();
   });
 
   it('keeps the most recent MAX_REMEMBERED, dropping the oldest first', async () => {
-    const seed: Record<string, string> = {};
-    for (let i = 0; i < MAX_REMEMBERED; i += 1) seed[`conv-${i}`] = `fp-${i}`;
+    const seed: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_REMEMBERED; i += 1) {
+      seed[`conv-${i}`] = { fingerprint: `fp-${i}`, machine: DEST_A.machine, stage: DEST_A.stage };
+    }
     const s = memoryStore({ [LAST_DELIVERED_KEY]: seed });
 
-    await rememberDelivered(s, 'conv-new', 'fp-new');
+    await rememberDelivered(s, 'conv-new', 'fp-new', DEST_A);
 
     const oldest = 'conv-0';
     const newest = `conv-${MAX_REMEMBERED - 1}`;
     // 🔴 The oldest really is gone, and the newest really is still there — both
     //    halves asserted, because either alone would pass on a broken cap.
-    expect(await isUnchangedSinceDelivery(s, oldest, `fp-0`)).toBe(false);
-    expect(await isUnchangedSinceDelivery(s, newest, `fp-${MAX_REMEMBERED - 1}`)).toBe(true);
-    expect(await isUnchangedSinceDelivery(s, 'conv-new', 'fp-new')).toBe(true);
+    expect(await unchanged(s, oldest, 'fp-0', DEST_A)).toBe(false);
+    expect(await unchanged(s, newest, `fp-${MAX_REMEMBERED - 1}`, DEST_A)).toBe(true);
+    expect(await unchanged(s, 'conv-new', 'fp-new', DEST_A)).toBe(true);
 
-    const saved = s.data[LAST_DELIVERED_KEY] as Record<string, string>;
+    const saved = s.data[LAST_DELIVERED_KEY] as Record<string, unknown>;
     expect(Object.keys(saved)).toHaveLength(MAX_REMEMBERED);
     expect(oldest in saved).toBe(false);
   });
