@@ -190,14 +190,41 @@ for the seven platforms above are each registered in the table at
 
 ## 2. Install the CLI
 
-There is no precompiled package in the repository, and no one-command channel
-like `brew install` — you need to compile from source once.
+There are two paths, and "you have to compile first" is not one of them.
+
+**Download the prebuilt binary.** Every Release carries one binary per
+supported platform plus a `SHA256SUMS` over them
+(<https://github.com/dimpurr/chat-stasher/releases>). This URL serves
+`scripts/install.sh` from `main`, and is the installer:
+
+```sh
+curl -fsSL https://chatstasher.com/install.sh | sh
+```
+
+It detects your platform, downloads that platform's artifact, checks it against
+the Release's `SHA256SUMS`, and starts it once before moving it into place — so
+a binary that matched its checksum but cannot start on your machine is refused
+rather than installed, and whatever was installed there before is left alone.
+macOS (`darwin-arm64`, `darwin-x86_64`) and Linux (`linux-x86_64`,
+`linux-arm64`, static musl builds) are accepted. Windows is not: this installer
+is a POSIX shell script, so it prints the `.exe` release asset to download
+instead.
+
+**Or compile from source**, which is the path below and needs no release
+artifact:
 
 ```sh
 git clone <repository-url> <your-directory>
 cd <your-directory>
 cargo build --release
 ```
+
+⚠️ Which of those binaries has been observed to build and run is in section 8 —
+"a Release carries it" and "it runs on your machine" are two different claims.
+The Homebrew formula in this repository (`homebrew/chat-stasher.rb`) has no tap
+to be published to yet (`dimpurr/homebrew-chat-stasher` did not exist when this
+was checked on 2026-09-25), so `brew install` is not a channel you can use
+today.
 
 - You need the Rust toolchain (`cargo`). **The package manifest does not declare a
   minimum Rust version** (`crates/chat-stasher/Cargo.toml:1-6`). Which exact
@@ -788,6 +815,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Whether the Kimi gateway requires the two extra request headers the page sends, or whether they are merely what the page happens to send | **Unverified** (the page's requests were observed carrying `x-msh-platform` and `x-language` alongside the bearer token, so the backfill requests send them too — that they are *required* has not been tested; `apps/extension/lib/platform-auth.ts:268-305`.) |
 | Whether a Kimi backfill run has ever completed end to end in a real browser | **Unverified** (implemented and wired to the host, like the other three; no complete run observed. See section 1.1.) |
 | Whether a ChatGPT or DeepSeek backfill run has ever completed end to end in a real browser | **Unverified** (both legs are implemented and wired to the host, but no complete run has been observed in a real browser. See section 1.1.) |
+| Whether the Linux and Windows binaries a Release will carry have ever been built, let alone run | **Unverified** (`.github/workflows/release.yml` builds one per platform on a version tag — static musl for `linux-x86_64` and `linux-arm64`, and `chat-stasher-windows-x86_64.exe`. The Linux jobs assert their output is statically linked and start it; the Windows job starts the `.exe`; the macOS job checks each Mach-O's architecture with `file`. No version tag has been pushed since those jobs were added, so no Release carries any of the three and none of them has been observed to build. The assets in v0.4.0 — two macOS binaries, the extension zip and `SHA256SUMS` — predate the change, and section 2's installer accepts Linux on the strength of an artifact that has not been built yet.) |
 
 "Unverified" = we have not tested it; it does not mean it does not exist, and
 it does not mean it does not work. The things in section 6 above that are
