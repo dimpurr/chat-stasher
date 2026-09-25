@@ -263,9 +263,11 @@ turns as you scroll, and a copy anchored anywhere but page 1 could look complete
 while holding only the oldest turns. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:679-684`;
-`apps/extension/entrypoints/dw-bridge.content.ts:613-639`;
-`apps/extension/lib/platform-auth.ts:111-130`). That is one extra request per
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:675-686` — the paged
+window the hook notices and refuses to archive;
+`apps/extension/entrypoints/dw-bridge.content.ts:613-639` — the extra request
+itself; `apps/extension/lib/platform-auth.ts:47`, `:90-105` — the token read
+from that endpoint, attached by `:111-130`). That is one extra request per
 conversation you open, at most once per 15 seconds per conversation. The token
 stays in the content script's memory; a script on the page itself could already
 read the same token, so this adds no new party who can see it. **Two other

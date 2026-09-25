@@ -251,6 +251,45 @@ visibility and licensing remain owner decisions. The release model — the dev a
 stable channels, who approves, and the exact steps to cut a release — is in
 [`RELEASING.md`](RELEASING.md).
 
+## Issues
+
+An issue is the other public surface, and it is read by people who never agreed
+to see anything about your setup. The same constraint as a pull request body
+applies to it, and it fails in a way a pull request does not: an issue is
+published the moment you press the button, and its edits stay in the API's
+history, so a redaction that arrives an hour later is still a correction. Write
+it redacted the first time.
+
+Four things a public report must not carry, each because it says more than the
+report needs:
+
+- **Conversation content.** No message text, no conversation titles, no
+  attachment or file names. Counts, byte sizes, timestamps, hashes and
+  session-id prefixes are the substitute, and `docs/privacy.md` lists exactly
+  which fields exist to be quoted.
+- **Another project by name.** Route shapes, field names and parameter names may
+  be quoted as evidence — that is what the documents in this repository do — but
+  not the project, author or store listing they were read out of. Naming a
+  competitor in a public issue points the reader at that project instead of at
+  the claim being made.
+- **Your own machine.** No machine names, no absolute paths, no home-directory
+  names, no account identifiers, no e-mail addresses, and no origin carrying a
+  tenant or workspace identifier. A path that names your work directory names
+  your employer.
+- **A document the reader cannot open.** Anything under `.private/` — an ADR, a
+  plan, a worker report — is not published, so citing one as the authority for a
+  claim leaves the reader nothing to check. State the fact, and where it is
+  verifiable give the public source. (A bare `ADR-nn` label in a published
+  document — `contracts/nativehost-protocol.md` names one — is a naming
+  convention rather than a citation: the difference is whether the reader is
+  asked to accept something on the word of a document they cannot read.)
+
+A redacted report still has to be worth reading. Reduce the case to a synthetic
+reproduction where you can, and say which facts you verified, which you assumed,
+and which you could not check — in this repository "not found" and "does not
+exist" are different answers, and a report that blurs them costs more than it
+gives.
+
 ## Pull requests
 
 Describe:

@@ -103,7 +103,8 @@ the sentence.
    `apps/extension/entrypoints/dw-bridge.content.ts:613-639`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
-   ChatGPT's own `/api/auth/session` on the same origin. The token is held only
+   ChatGPT's own `/api/auth/session` on the same origin
+   (`apps/extension/lib/platform-auth.ts:47`, `:90-105`). The token is held only
    in the page's content-script memory: it is never written to storage, never
    logged, never sent to the `chat-stasher` host, and never attached to any
    other request (`apps/extension/lib/platform-auth.ts:61-71`, `:111-130`).
@@ -210,7 +211,9 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:698`, `:559-576`). The one feature that does
+  (`apps/extension/lib/page-hook.ts:698`, `:559-576`; the extra request and the
+  token it carries: `apps/extension/entrypoints/dw-bridge.content.ts:613-639`,
+  `apps/extension/lib/platform-auth.ts:47`, `:90-105`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
   [section 4](#4-who-your-data-is-shared-with).
 - **Check the code for a tracker.** Searching the extension and CLI sources for
@@ -579,7 +582,7 @@ The extension declares exactly four permissions and no host permissions
 |---|---|---|
 | `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:75-88`, `:341-385`, `:1909-1943`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-48`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
-| `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the chat tab open; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
+| `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:53`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
 
 **No permission here shows an install-time warning.** `downloads` — which did
