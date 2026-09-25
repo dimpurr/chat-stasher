@@ -22,7 +22,11 @@ import {
 } from '../lib/hook-status';
 import { deliver, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import { recordLiveCapture } from '../lib/live-capture';
-import { contentFingerprint, isUnchangedSinceDelivery, rememberDelivered } from '../lib/recapture';
+import {
+  captureFingerprint,
+  isUnchangedCapture,
+  rememberDeliveredQuietly,
+} from '../lib/recapture';
 import {
   drainOutbox,
   enqueue,
@@ -227,8 +231,11 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   // Unchanged since its last acknowledged delivery ⇒ do not append another
   // identical copy (lib/recapture.ts). Only platforms with known volatile fields
   // get a fingerprint; everything else is always delivered.
-  const platformId = findPlatformForUrl(captured.url)?.id ?? null;
-  const fingerprint = platformId ? await contentFingerprint(platformId, captured.text) : null;
+  // 🔴 W50 · `{ platform, fingerprint }` is derived by one function shared with the
+  //    backfill leg (lib/recapture.ts), so "which platform is this capture" has one
+  //    answer on both legs. See the note below on why that matters.
+  const derived = await captureFingerprint(captured);
+  const platformId = derived.platform;
 
   /**
    * 🔴 W69 · **The one place a live capture is written down as an arrival.**
@@ -265,7 +272,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     await recordLiveCapture(recaptureStore, { platform: platformId, at: Date.now(), newlyStored });
   };
 
-  if (fingerprint && await isUnchangedSinceDelivery(recaptureStore, name, fingerprint)) {
+  if (await isUnchangedCapture(recaptureStore, name, derived)) {
     // 🔴 W69 · This **is** an arrival. The page produced a capture and the archive
     //    already held exactly this copy, so nothing was sent again — but the whole
     //    path from the page to here demonstrably worked. Recording only fresh acks
@@ -334,18 +341,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
     //    basis would lose a conversation that was never stored. Failing to record
     //    it is not a delivery failure — the cost of a missing record is one extra
     //    copy, so the ack's outcome must not be touched by it.
-    if (fingerprint) {
-      try {
-        await rememberDelivered(recaptureStore, name, fingerprint);
-      } catch (err) {
-        // Metadata only (platform + fingerprint prefix): never a URL, id or body.
-        console.warn(
-          '[chat-stasher] could not record the delivered fingerprint for'
-          + ` ${platformId}/${fingerprint.slice(0, 12)}`,
-          (err as Error).message,
-        );
-      }
-    }
+    await rememberDeliveredQuietly(recaptureStore, name, derived);
     // 🔴 W69 · The other arrival: the host acknowledged this conversation, so it
     //    is on disk. Recorded here, after the fingerprint write above and before
     //    the answer — see `recordArrival`.
@@ -495,8 +491,56 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
   const prepared = await preparePayload(captured, browserLocalStore());
   if (!prepared.ok) return { saved: false, reason: prepared.reason };
 
+  /**
+   * 🔴 W50 · **The same unchanged-since-delivery guard the live leg uses.**
+   *
+   * Same measured reason (lib/recapture.ts's header: ChatGPT re-sends the whole
+   * conversation on every view, two copies differing only in `safe_urls`), reached
+   * on this leg by a **relist** — a re-enumeration after a ledger loss re-names
+   * conversations that are already archived and fetches each body a second time
+   * (W45's prognosis text in `lib/backfill/ledger.ts:723-725` says so in as many
+   * words). The second body **fetch** is unavoidable: both the file name and the
+   * fingerprint can only be computed from the body. The second **copy** is not.
+   *
+   * 🔴 A match is answered `saved: true`, and that is the honest answer, not a
+   *    convenience. `rememberDelivered` writes only after a matching ack, so a
+   *    matching fingerprint means this exact content is on record as stored under
+   *    this exact file name. The engine reads `saved: true` as "settle the debt"
+   *    (engine.ts `sinkVerdict` → `settleDebt`, into `archived`), which is what the
+   *    debt ledger should say: that conversation is in the archive. The live leg
+   *    answers `status:'unchanged'` for the same situation; answering `saved:false`
+   *    here would send an archived conversation to the failure list and out of
+   *    `pending` for good — the "unknown recorded as a conclusion" failure this
+   *    project treats as least acceptable, inverted.
+   *
+   * 🔴 It runs **before** the delivery attempt, so it does not depend on the host
+   *    being reachable: a matching fingerprint is a statement about the archive, and
+   *    a host that is momentarily down does not change it. The next item in the same
+   *    tick reaches `deliver` as usual and reports `retryLater` if the host is gone,
+   *    so the leg still pauses exactly when it should.
+   *
+   * A platform with no volatile-field table (grok, kimi, deepseek), a non-JSON body
+   * or an unreadable store all yield "not known to be unchanged" ⇒ delivered, so no
+   * conversation is ever skipped on the strength of a fingerprint we do not have.
+   */
+  const recaptureStore = browserLocalStore();
+  const derived = await captureFingerprint(captured);
+  if (await isUnchangedCapture(recaptureStore, prepared.name, derived)) {
+    return { saved: true, sessionId: prepared.sessionId };
+  }
+
   const result = await deliver(prepared.name, prepared.payload);
   if (result.delivered) {
+    // 🔴 W50 · The record point on this leg is **this leg's own ack**. The live leg's
+    //    precondition (`lookup.entry === null`, i.e. a matching ack deleted the
+    //    outbox entry) is unsatisfiable here by construction: this leg deliberately
+    //    does not go through the outbox (§10, the header of this function), so it
+    //    has no entry to observe disappearing. Sharing the *write*
+    //    (`rememberDeliveredQuietly`) is what keeps the two legs from drifting;
+    //    sharing the *observation* is impossible because the two legs acknowledge
+    //    by different mechanisms, and inventing an outbox entry here would put one
+    //    conversation in two ledgers.
+    await rememberDeliveredQuietly(recaptureStore, prepared.name, derived);
     return { saved: true, sessionId: prepared.sessionId };
   }
   if (isItemRejected(result)) {

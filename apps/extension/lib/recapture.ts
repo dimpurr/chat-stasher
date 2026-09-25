@@ -14,6 +14,7 @@
  * delivery, so an unconfirmed copy is never skipped.
  */
 import { sha256Hex } from './native-host';
+import { findPlatformForUrl } from './contract';
 import type { BackfillStore } from './backfill/store';
 
 export const LAST_DELIVERED_KEY = 'cs_last_delivered_v1';
@@ -90,6 +91,62 @@ export async function contentFingerprint(platform: string, text: string): Promis
 
 type Remembered = Record<string, string>;
 
+/**
+ * 🔴 W50 · **"Which platform is this capture, and what is the fingerprint of its
+ * body" — derived by one function, used by both delivery legs.**
+ *
+ * Why it is one function and not one expression per leg: the fingerprint is only
+ * meaningful per platform (each has its own volatile-field table above), and the
+ * delivery name is built from the same platform id (`preparePayload`). The live
+ * leg's own comment already named the failure this prevents — *"'which platform is
+ * this capture' is one question with one answer, and a second derivation of it here
+ * is how two expressions of one fact drift apart"* (the failure C21 removed from the
+ * identity path). The backfill leg now asks the same function instead of repeating
+ * the expression, so the two legs cannot come to different answers.
+ */
+export interface CaptureFingerprint {
+  /** null ⇒ not a platform we fingerprint ⇒ this capture is never skipped. */
+  platform: string | null;
+  /**
+   * null ⇒ there is nothing to compare against, and the capture is never skipped:
+   * a platform with no registered volatile fields (grok, kimi, deepseek — see the
+   * notes above), a body that is not a JSON object, or a URL that names no platform.
+   * 🔴 "We have no fingerprint" is not "unchanged" — it is unknown, and an unknown
+   *    must never be recorded as unchanged (invariant 1). The null therefore flows
+   *    all the way to "deliver".
+   */
+  fingerprint: string | null;
+}
+
+export async function captureFingerprint(
+  captured: { url: string; text: string },
+): Promise<CaptureFingerprint> {
+  const platform = findPlatformForUrl(captured.url)?.id ?? null;
+  if (!platform) return { platform: null, fingerprint: null };
+  return { platform, fingerprint: await contentFingerprint(platform, captured.text) };
+}
+
+/**
+ * 🔴 W50 · **The one rule for "skip this capture": there is a fingerprint, and it
+ * matches the one written down for this delivery name.**
+ *
+ * Nothing else skips: a null fingerprint is answered `false` here rather than being
+ * left to each caller, because the two legs skipping on different terms is exactly
+ * the drift this task exists to remove.
+ *
+ * An unreadable store is answered `false` too (`isUnchangedSinceDelivery` catches
+ * it): not known to be unchanged ⇒ deliver. The safe direction of that error is one
+ * extra copy, never a change that went unnoticed.
+ */
+export async function isUnchangedCapture(
+  store: BackfillStore | null,
+  name: string,
+  derived: CaptureFingerprint,
+): Promise<boolean> {
+  if (derived.fingerprint === null) return false;
+  return await isUnchangedSinceDelivery(store, name, derived.fingerprint);
+}
+
 async function load(store: BackfillStore | null): Promise<Remembered> {
   if (!store) return {};
   const raw = await store.load(LAST_DELIVERED_KEY);
@@ -128,4 +185,45 @@ export async function rememberDelivered(
   const keys = Object.keys(current);
   for (const key of keys.slice(0, Math.max(0, keys.length - MAX_REMEMBERED))) delete current[key];
   await store.save(LAST_DELIVERED_KEY, current);
+}
+
+/**
+ * 🔴 W50 · **The one place a delivered fingerprint is written down, on either leg.**
+ *
+ * Two things are one place here rather than two:
+ *  · a null fingerprint records nothing (there is nothing to compare next time);
+ *  · a store that cannot be written **never throws into the delivery path**. A
+ *    missing record costs one extra copy of a conversation; the delivery's own
+ *    outcome is not allowed to depend on it. That was the live leg's rule and it is
+ *    now the backfill leg's too, because the backfill leg's answer settles a debt
+ *    (engine.ts `sinkVerdict` → `settleDebt` / `recordFailure`) and an exception
+ *    here would turn a stored conversation into a failure.
+ *
+ * 🔴 It is called only where a delivery has been **acknowledged**, and never before:
+ *    a copy that was merely queued or merely attempted proves nothing, and skipping
+ *    it next time on that basis would lose a conversation that was never stored.
+ *    The call sites differ because the two legs acknowledge differently — the live
+ *    leg after `lookup.entry === null` (a matching ack deleted its outbox entry),
+ *    the backfill leg after `result.delivered` (it does not go through the outbox at
+ *    all, so it has no such entry to observe) — but the write itself is this one
+ *    function on both.
+ *
+ * The log line carries metadata only (platform + the fingerprint's first 12 hex
+ * characters): never a URL, an id or a body.
+ */
+export async function rememberDeliveredQuietly(
+  store: BackfillStore | null,
+  name: string,
+  derived: CaptureFingerprint,
+): Promise<void> {
+  if (derived.fingerprint === null) return;
+  try {
+    await rememberDelivered(store, name, derived.fingerprint);
+  } catch (err) {
+    console.warn(
+      '[chat-stasher] could not record the delivered fingerprint for'
+      + ` ${derived.platform}/${derived.fingerprint.slice(0, 12)}`,
+      (err as Error).message,
+    );
+  }
 }
