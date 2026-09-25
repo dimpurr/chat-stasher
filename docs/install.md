@@ -467,17 +467,23 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:271-275`; the field itself is
+(`crates/chat-stasher/src/store.rs:153-156`, `:1467-1472`; the field itself is
 `crates/chat-stasher/src/config.rs:209-210`), so the option names below belong
 to the backend, not to this tool.
 
 **What was tested, and where that stops.** The configuration below was exercised
 end to end against Cloudflare R2: seeding one machine's partition, an ordinary
 push, a read of three sessions back out of the destination, and an integrity
-verification. No other S3-compatible service was tested. Cloudflare's own
-compatibility page lists the headers and operations R2 does not implement
-(<https://developers.cloudflare.com/r2/api/s3/api/>); the pitfall list at the
-end of this section says which of them this configuration can actually reach.
+verification. `disable_ec2_metadata` was added to it after that run, when its
+absence turned out to be a gap in this section rather than a choice; with both
+credential switches in the file, verification layers 1 and 2 were then re-run
+against the same destination and both reported `ok=true`, `findings=0`,
+`errors=0`, `warns=0` — layer 2 with `read_data=true`, so the credentials
+resolved and the requests were signed and served. No other S3-compatible service
+was tested. Cloudflare's own compatibility page lists the headers and operations
+R2 does not implement (<https://developers.cloudflare.com/r2/api/s3/api/>); the
+pitfall list at the end of this section says which of them this configuration can
+actually reach.
 
 **The configuration.**
 
@@ -495,6 +501,7 @@ root = "/chat-stasher/v1"
 access_key_id = "env:CHAT_STASHER_<NAME>_ACCESS_KEY_ID"
 secret_access_key = "env:CHAT_STASHER_<NAME>_SECRET_ACCESS_KEY"
 disable_config_load = "true"
+disable_ec2_metadata = "true"
 ```
 
 `root` is the prefix inside the bucket that the repository lives under, so one
@@ -512,13 +519,28 @@ Please find it by S3::detect_region() or set them in env.` (opendal-service-s3
 ship an R2-aware `detect_region` (`src/backend.rs` lines 654-655) — but that is
 a separate call this tool does not make, so write the value out.
 
-**`disable_config_load = "true"` is the one option here you are not asking the
-backend for.** Left out, the backend also looks for credentials in the ambient
-AWS environment, in `~/.aws/`, and at the EC2 metadata service — so a typo in
-`endpoint` or a missing credential can end up authenticating as whatever
-identity the machine happens to carry, against a bucket you did not name. With
-it set, those chains are switched off (opendal-service-s3 0.57.0
-`src/backend.rs` lines 856-857) and the only credentials are the two you wrote.
+**The credential switches are the options here you are not asking the backend
+for, and there are two of them, not one.** Left out, the backend looks for
+credentials beyond the two you wrote, and it does so in two independent places.
+`disable_config_load = "true"` removes the ambient AWS environment and the
+`~/.aws/` profiles (opendal-service-s3 0.57.0 `src/backend.rs` lines 856-857;
+the option's own description names `AWS_ACCESS_KEY_ID` and `~/.aws/config` at
+`src/config.rs` lines 114-121). It does **not** remove the EC2 metadata service:
+that is a separate switch, and `disable_ec2_metadata = "true"` is the one that
+takes IMDSv2 out of the chain (same file, `src/backend.rs` lines 860-861). Set
+both. On a machine that runs under an instance role, setting only the first
+leaves the metadata service in the chain, so a missing or mistyped credential can
+authenticate as that role — against whatever address the config names.
+
+**`disable_config_load` also gates the endpoint, which is the same hazard
+arriving through the address instead of the credential.** With it left out, an
+absent `endpoint` is filled in from `AWS_ENDPOINT_URL`, `AWS_ENDPOINT` or
+`AWS_S3_ENDPOINT` (`src/backend.rs` lines 830-839). With it set that fallback is
+off — but an absent `endpoint` still does not fail: it becomes
+`https://s3.amazonaws.com` (same file, line 517), AWS's own endpoint, carrying
+your bucket name and your credentials. So write `endpoint` out, and do not count
+on `dest-init` catching a missing one: AWS is reachable, and the request would go
+there rather than being refused locally.
 
 **Credentials: two shapes, one of them conditional.**
 
@@ -572,6 +594,21 @@ chat-stasher push --destination <name>
   this one. They stay only where they already were. A second destination
   therefore does not start out equal to the first, and `dest-init` is not the
   tool that makes it so.
+- **Two destinations are not expected to be equal, and equality is the wrong
+  thing to check.** Each is the archive as of its own last push, so comparing
+  them finds two kinds of difference and neither is a fault. Sessions that only
+  one of them holds are the machinery working: the other machine's partitions
+  live where they were made. Sessions *both* hold can differ too — a session
+  still being written when one destination is pushed has fewer shards there and
+  gets the rest at the next push. Measured between two destinations whose newest
+  snapshots were 4.5 hours apart: 3,198 sessions in common, 3,186 identical in
+  shard count and byte count, and 12 where the earlier-pushed copy was smaller —
+  all 12 in that direction, none the other way, and ten of the twelve were the
+  sessions whose last activity sits closest to the earlier snapshot's moment.
+  What a healthy pair looks like is therefore *direction*, not equality: the
+  later push holds at least as much, never less. `verify`'s layer 3 is where a
+  real loss would show, and it compares against the stage rather than against
+  the other destination.
 - **Do not set `checksum_algorithm`.** R2 implements `CRC-64/NVME` for full
   objects and lists `CRC-32`, `CRC-32C`, `SHA-1` and `SHA-256` as composite-only
   — that is, not usable as whole-object checksums
