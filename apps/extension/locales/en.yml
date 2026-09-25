@@ -874,6 +874,5 @@ coverage:
       how close together two requests are, and every gap keeps its irregularity —
       but it is the one setting here that asks more of the platform, which is why
       it is not the default.
-    applied: "Speed is now: {preset}."
     failed: "The speed setting could not be saved ({detail}), so nothing changed."
     what: "at most {cap} conversations a day, {tick} per wake"
