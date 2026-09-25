@@ -463,7 +463,9 @@ pub struct Stats {
     /// Reads not stored because the session being read is larger than a tenth
     /// of the quota.
     pub skipped_session: u64,
-    /// Cache I/O failures. Never fatal: the read falls through to the remote.
+    /// Cache I/O failures, and any refusal to delete a path that is not a
+    /// regular file inside the cache root (a pack directory replaced by a
+    /// symlink, say). Never fatal: the read falls through to the remote.
     pub errors: u64,
 }
 
@@ -596,13 +598,21 @@ impl BodyCache {
             // disposable by construction, and the archive it mirrors is on the
             // remote.
             //
-            // Only inside a directory this cache created: this is the one
-            // delete on a read path, and a `[cache] dir` that points somewhere
-            // else must not make a read delete anything, however much the file
-            // it found there looks like an entry. A miss costs a refetch; a
-            // delete here is not this cache's to make.
-            if root_state(&self.root) == RootState::Cache {
-                let _removed = fs::remove_file(&path);
+            // Only when the root is a directory this cache created **and** the
+            // path is a regular file inside that root, reached without following
+            // a symlink: this is the one delete on a read path, and a pack
+            // directory that has been replaced by a symlink — or a `[cache] dir`
+            // that points somewhere else — must not make a read delete a file it
+            // does not own. A miss costs a refetch; a delete here is not this
+            // cache's to make.
+            let removed = root_state(&self.root) == RootState::Cache
+                && canonical_root(&self.root)
+                    .is_some_and(|root| matches!(remove_owned_file(&root, &path), Ok(true)));
+            if !removed {
+                // A corrupt file that could not be deleted is a cache directory
+                // whose layout has been replaced by links, and it is counted so
+                // that state is visible rather than silently tolerated.
+                self.errors.fetch_add(1, Ordering::Relaxed);
             }
             self.corrupt.fetch_add(1, Ordering::Relaxed);
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -644,7 +654,7 @@ impl BodyCache {
             self.errors.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        if write_entry(&key.path(&self.root), payload).is_err() {
+        if write_entry(&self.root, &key.path(&self.root), payload).is_err() {
             self.errors.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -689,6 +699,8 @@ impl BodyCache {
     /// processes could believe they hold the same lock on two different inodes.
     pub fn clear(&self) -> std::io::Result<Usage> {
         ensure_our_root(&self.root)?;
+        let canonical = canonical_root(&self.root)
+            .ok_or_else(|| not_ours(&self.root, "the cache root could not be resolved"))?;
         let scanned = scan(&self.root)?;
         let mut removed = Usage {
             foreign_entries: scanned.foreign,
@@ -700,16 +712,20 @@ impl BodyCache {
             if entry.kind != Owned::Entry {
                 continue;
             }
-            match fs::remove_file(&entry.path) {
-                Ok(()) => {
+            match remove_owned_file(&canonical, &entry.path) {
+                Ok(true) => {
                     removed.bytes += entry.bytes;
                     removed.entries += 1;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // The scan called this an entry, but it is not a regular file
+                // inside the root by the time it is removed (it was swapped for
+                // a link, say). It is not touched, and it is reported as left
+                // alone rather than counted as cleared.
+                Ok(false) => removed.foreign_entries += 1,
                 Err(e) => return Err(e),
             }
         }
-        remove_empty_dirs(&self.root);
+        remove_empty_dirs(&self.root, &canonical);
         Ok(removed)
     }
 
@@ -732,6 +748,8 @@ impl BodyCache {
             return Ok(());
         }
         ensure_our_root(&self.root)?;
+        let canonical = canonical_root(&self.root)
+            .ok_or_else(|| not_ours(&self.root, "the cache root could not be resolved"))?;
         let _guard = self.lock()?;
         loop {
             let scanned = scan(&self.root)?;
@@ -759,14 +777,15 @@ impl BodyCache {
                 if total <= self.max_bytes {
                     break;
                 }
-                match fs::remove_file(&entry.path) {
-                    Ok(()) => {
+                match remove_owned_file(&canonical, &entry.path) {
+                    Ok(true) => {
                         total = total.saturating_sub(entry.bytes);
                         deleted_any = true;
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        total = total.saturating_sub(entry.bytes);
-                    }
+                    // Refused: not a regular file inside the root any more. Its
+                    // bytes are not counted as freed, so the pass stops instead
+                    // of pretending the quota was met.
+                    Ok(false) => {}
                     Err(_) => {}
                 }
             }
@@ -1217,14 +1236,88 @@ fn measured(path: PathBuf, kind: Owned) -> std::io::Result<Option<ScannedEntry>>
     }))
 }
 
+/// The canonical location of the cache root, or `None` when it cannot be
+/// resolved (it is gone, or unreadable).
+///
+/// Resolved once per pass, not once per file: every delete compares against it,
+/// and `canonicalize` walks each component of the path.
+fn canonical_root(root: &Path) -> Option<PathBuf> {
+    fs::canonicalize(root).ok()
+}
+
+/// Whether `dir` is a real directory — not a symlink — whose canonical location
+/// is a **strict descendant** of the canonical cache root.
+///
+/// `symlink_metadata` is `lstat`, so a symlink is seen as a symlink rather than
+/// as the directory it points at; a symlinked pack directory therefore fails
+/// here even when its target is inside the root, and `canonicalize` catches a
+/// link anywhere above it.
+fn is_owned_directory(canonical_root: &Path, dir: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return false;
+    }
+    match fs::canonicalize(dir) {
+        Ok(real) => real.starts_with(canonical_root) && real != canonical_root,
+        Err(_) => false,
+    }
+}
+
+/// Whether `path` is a regular file — not a symlink — inside a directory that is
+/// itself inside the canonical cache root.
+///
+/// Both checks are `lstat`: a symlinked entry fails the first, and a symlinked
+/// pack directory fails the second. This is the one predicate every delete goes
+/// through, so a file outside the cache can never be reached by one, however
+/// much its name looks like an entry.
+fn is_owned_regular_file(canonical_root: &Path, path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    match path.parent() {
+        Some(parent) => is_owned_directory(canonical_root, parent),
+        None => false,
+    }
+}
+
+/// Delete `path` only when it is a regular file inside the cache root, reached
+/// without following a symlink.
+///
+/// `Ok(true)` means the file is gone (deleted now, or already absent); `Ok(false)`
+/// means the delete was **refused** because the path is not one of the cache's
+/// own regular files, which the caller reports; `Err` is a real I/O failure on a
+/// file that did pass the check.
+///
+/// This is the only function in the module that removes a file whose name the
+/// cache recognised, and it is deliberately narrower than the names it is
+/// given: the caller's `scan` already filtered by layout, and this filters
+/// again by what is actually on the disk, because a name can be left behind
+/// pointing somewhere else.
+fn remove_owned_file(canonical_root: &Path, path: &Path) -> std::io::Result<bool> {
+    if !is_owned_regular_file(canonical_root, path) {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// Remove the pack directories left empty by eviction or `clear`. Best effort:
 /// a directory that is not empty (a concurrent writer just created something in
 /// it) simply stays.
 ///
-/// Only directories whose name is a pack id, one level below the root: a
+/// Only a real directory whose name is a pack id, one level below the root: a
 /// directory this cache did not name is not this cache's to remove, even when
-/// it happens to be empty.
-fn remove_empty_dirs(root: &Path) {
+/// it happens to be empty, and a symlink wearing a pack id fails
+/// [`is_owned_directory`] rather than being followed.
+fn remove_empty_dirs(root: &Path, canonical_root: &Path) {
     let Ok(reader) = fs::read_dir(root) else {
         return;
     };
@@ -1239,7 +1332,7 @@ fn remove_empty_dirs(root: &Path) {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if file_type.is_dir() {
+        if file_type.is_dir() && is_owned_directory(canonical_root, &entry.path()) {
             let _removed = fs::remove_dir(entry.path());
         }
     }
@@ -1289,11 +1382,30 @@ fn verify_entry(raw: &[u8]) -> Option<&[u8]> {
 /// The rename is what makes this safe without a lock: a reader either sees the
 /// old file or the new one, never a half-written one, and two processes storing
 /// the same key write identical bytes.
-fn write_entry(path: &Path, payload: &[u8]) -> std::io::Result<()> {
+///
+/// The pack directory is created here rather than with `create_dir_all`, and
+/// only after it is proven to be a real directory inside the cache root: a
+/// symlinked pack directory would make the temp file and the rename land
+/// outside the cache, and a rename is a delete of whatever name it replaced.
+fn write_entry(root: &Path, path: &Path, payload: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "entry path has no parent")
     })?;
-    fs::create_dir_all(parent)?;
+    let canonical = canonical_root(root)
+        .ok_or_else(|| not_ours(root, "the cache root could not be resolved"))?;
+    match fs::create_dir(parent) {
+        Ok(()) => {}
+        // Another thread or process got there first; the identity check below
+        // decides whether what is there is usable.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    if !is_owned_directory(&canonical, parent) {
+        return Err(not_ours(
+            parent,
+            "the pack directory is not a regular directory inside the cache root",
+        ));
+    }
     // Dot-prefixed and pid-suffixed: dot-prefixed so it is never mistaken for
     // an entry, pid-suffixed so two processes never share a temp file.
     let candidate = parent.join(format!(".tmp-{}-{}", std::process::id(), next_temp_seq()));
