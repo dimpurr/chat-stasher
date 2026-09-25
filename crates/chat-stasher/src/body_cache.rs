@@ -619,8 +619,9 @@ impl BodyCache {
             return None;
         };
         // LRU is the file's mtime, so a hit has to move it. Best effort: a
-        // failed touch costs eviction ordering, never correctness.
-        let _touched = file.set_times(FileTimes::new().set_modified(SystemTime::now()));
+        // failed touch costs eviction ordering, never correctness. See
+        // [`touch_entry`] for why the handle in hand is not always enough.
+        let _touched = touch_entry(&file, &path, SystemTime::now());
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(Bytes::copy_from_slice(payload))
     }
@@ -1394,6 +1395,51 @@ fn verify_entry(raw: &[u8]) -> Option<&[u8]> {
     Some(payload)
 }
 
+/// Move one entry to the most-recently-used end of the LRU, best effort.
+///
+/// The recency signal is the entry file's mtime, and nothing else moves it: a
+/// store writes a file whose mtime is the store time, and every eviction pass
+/// sorts by what it finds ([`enforce_quota`]). So a hit that does not move the
+/// mtime is not a hit as far as eviction is concerned — the entry keeps its old
+/// position and eviction degenerates into store order, which is not an LRU.
+///
+/// `handle` is the read handle the caller already holds, and on Unix that is
+/// enough for a file the caller owns. **On Windows it is not**, and that is why
+/// this is a function rather than one line at the call site: `File::set_times`
+/// is `SetFileTime` on *that* handle (`library/std/src/sys/fs/windows.rs` in the
+/// standard library), it needs `FILE_WRITE_ATTRIBUTES`, and `File::open` asks for
+/// `GENERIC_READ`, which does not carry that right. The call fails with
+/// "Access is denied" and the touch is silently lost. A second handle, opened
+/// for writing, does carry it — which is the same remedy the standard library
+/// uses for its own path-based `set_times`, and the same one the Rust project
+/// applied to its bootstrap (`rust-lang/rust#127849`, closed).
+///
+/// The open is a fallback and not the default so that the platform where the
+/// handle in hand suffices pays no second syscall per hit; a cache hit is on
+/// the hot path of every `read`.
+///
+/// Failure is swallowed by the caller: the bytes are already verified and
+/// already in hand, so a touch that cannot happen costs eviction ordering and
+/// never correctness — a read-only cache still serves, it just stops ordering
+/// by use.
+///
+/// Coverage: on Unix the fallback below cannot be reached (an owned file's
+/// times move through a read handle), so no local test exercises the Windows
+/// path and the `windows-latest` job is where it runs. It is deliberately not
+/// behind a `cfg`: it compiles and type-checks on every platform, so an error
+/// in it breaks the build here rather than one OS's CI, and the caller reaches
+/// it on any platform where the first attempt fails.
+fn touch_entry(handle: &File, path: &Path, when: SystemTime) -> std::io::Result<()> {
+    let times = FileTimes::new().set_modified(when);
+    match handle.set_times(times) {
+        Ok(()) => Ok(()),
+        Err(_) => OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|writable| writable.set_times(times)),
+    }
+}
+
 /// Write one entry: temp file in the target directory, then rename into place.
 ///
 /// The rename is what makes this safe without a lock: a reader either sees the
@@ -1692,6 +1738,21 @@ mod tests {
         }
         // Touch the oldest, so entry 10 becomes the most recent.
         assert!(cache.get(&keys[0]).is_some());
+        // The touch is the whole of the LRU: a hit that did not move the mtime
+        // leaves entry 10 the oldest, and it is then the one evicted. Asserted
+        // on its own because such a hit is exactly what Windows did (see
+        // [`touch_entry`]), and it would otherwise be reported two asserts down
+        // as "the wrong entry was evicted" — the symptom, not the cause.
+        let touched = keys[0]
+            .path(cache.root())
+            .metadata()
+            .expect("stat the touched entry")
+            .modified()
+            .expect("a regular file has an mtime");
+        assert!(
+            touched > SystemTime::UNIX_EPOCH + Duration::from_secs(1_002),
+            "a hit must move the entry's mtime, or eviction is store order and not an LRU"
+        );
 
         cache.put(&key(13, 0, 100), &[b'd'; 100]);
         assert!(cache.usage().expect("usage").bytes <= quota);
