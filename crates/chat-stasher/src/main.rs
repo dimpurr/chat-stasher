@@ -148,10 +148,18 @@ enum ScheduleAction {
 enum Command {
     /// Write a commented default config if none exists (non-destructive).
     Init,
-    /// Walk through first-run setup. Scan is read-only; later configuration
-    /// and scheduler steps are currently descriptive stubs.
+    /// Walk through first-run setup: scan, then the local first save (which
+    /// creates the encrypted local repository and its masterkey), then the
+    /// destination and scheduler steps, which are still descriptive stubs.
+    ///
+    /// The local first save runs two `run-once` passes and reads the result
+    /// back, so a first run archives once, then proves the second pass adds
+    /// nothing, reports the run-state verdict, and reads one session back out
+    /// of the repository. Non-TTY runs do the same work without prompting and
+    /// report it as one JSON object.
     Setup {
-        /// Stage directory that will hold sealed session shards.
+        /// Stage directory that will hold sealed session shards. Interactive
+        /// runs offer the default for this platform; this flag states it.
         #[arg(long)]
         stage: Option<PathBuf>,
         /// Optional configured destination to show in the destination stub.
@@ -160,6 +168,12 @@ enum Command {
         /// Include the scheduler-install stub in the walkthrough.
         #[arg(long)]
         install_schedule: bool,
+        /// Declare that you have your own copy of the masterkey (the
+        /// interactive run asks you to type "I saved it elsewhere" instead).
+        /// This is a declaration, not a verification: nothing here, and
+        /// nothing anywhere else, checks that a copy exists.
+        #[arg(long)]
+        masterkey_saved_elsewhere: bool,
         /// Print one JSON object, including any missing named parameters.
         /// Non-TTY runs always use this contract and never prompt.
         #[arg(long)]
@@ -1224,8 +1238,15 @@ fn run() -> ExitCode {
             stage,
             destination,
             install_schedule,
+            masterkey_saved_elsewhere,
             json,
-        } => cmd_setup(stage, destination, install_schedule, json),
+        } => cmd_setup(
+            stage,
+            destination,
+            install_schedule,
+            masterkey_saved_elsewhere,
+            json,
+        ),
         Command::RunOnce {
             stage,
             machine,
@@ -6895,11 +6916,67 @@ mod decision_surface_tests {
     #[test]
     fn setup_json_reports_named_missing_stage_without_prompting() {
         let report = report_with_sessions(0);
-        let value = setup_json_payload(scanner::scan_report_json(&report), None, None, false);
+        let value: serde_json::Value = serde_json::from_str(&setup_json_payload(
+            scanner::scan_report_json(&report),
+            None,
+            None,
+            false,
+            None,
+            None,
+            &["stage"],
+            2,
+        ))
+        .expect("the setup payload is one JSON object");
         assert_eq!(value["command"], "setup");
         assert_eq!(value["exit_code"], 2);
         assert_eq!(value["missing_parameters"], serde_json::json!(["stage"]));
         assert_eq!(value["steps"]["stage"], "missing");
+        // A stage that was never given means no pass ran, so the chain is its
+        // own tagged state and not three absent-looking links.
+        assert_eq!(value["chain"]["kind"], "not_attempted");
+        assert_eq!(value["masterkey"]["kind"], "absent");
+    }
+
+    /// The declaration is a sentence the user has to mean. Anything shorter,
+    /// differently cased or differently worded is not it — and a wizard that
+    /// accepted `yes` would be asking a question nobody reads.
+    #[test]
+    fn only_the_exact_sentence_counts_as_the_masterkey_declaration() {
+        assert!(setup_declaration_given("I saved it elsewhere"));
+        assert!(setup_declaration_given("  I saved it elsewhere\n"));
+        assert!(!setup_declaration_given("i saved it elsewhere"));
+        assert!(!setup_declaration_given("yes"));
+        assert!(!setup_declaration_given("y"));
+        assert!(!setup_declaration_given("I saved it"));
+        assert!(!setup_declaration_given(""));
+    }
+
+    /// An empty answer takes the offered default; a typed path is expanded
+    /// through the same boundary the config loader uses, so a `~` cannot reach
+    /// the filesystem as a directory literally named `~`.
+    #[test]
+    fn the_stage_answer_takes_the_default_or_expands_a_tilde() {
+        let default = PathBuf::from("/fixture/default-stage");
+        assert_eq!(
+            setup_stage_answer("", Some(&default)).unwrap(),
+            Some(default.clone()),
+            "an empty answer must take the default offered in the prompt"
+        );
+        assert_eq!(
+            setup_stage_answer("   ", Some(&default)).unwrap(),
+            Some(default),
+            "whitespace is an empty answer, not a path named spaces"
+        );
+        let home = chat_stasher::config::home_dir();
+        assert_eq!(
+            setup_stage_answer("~/stash/stage", None).unwrap(),
+            Some(home.join("stash").join("stage")),
+            "a typed ~/path must expand, never survive as a literal ~ component"
+        );
+        assert!(
+            setup_stage_answer("~someone-else/stage", None).is_err(),
+            "another user's home is rejected, not silently treated as relative"
+        );
     }
 
     #[test]
@@ -6919,7 +6996,18 @@ mod decision_surface_tests {
             .filter(|arg| !arg.is_positional())
             .map(|arg| arg.get_id().as_str().to_owned())
             .collect();
-        assert_eq!(args, ["stage", "destination", "install_schedule", "json"]);
+        assert_eq!(
+            args,
+            [
+                "stage",
+                "destination",
+                "install_schedule",
+                "masterkey_saved_elsewhere",
+                "json"
+            ],
+            "the new flag is a declaration, not a value: no option of setup may take a secret \
+             as its value"
+        );
     }
 
     #[test]
@@ -7762,61 +7850,147 @@ fn cmd_init() -> ExitCode {
     }
 }
 
-/// WIZ-1 setup state machine: scan first, then collect the local stage choice,
-/// then describe destination and scheduler work without performing it.
+/// The stage directory the wizard offers when the caller named none.
+///
+/// Deliberately the same location the bake-off log recorded
+/// (`_reconworker/readme-bakeoff/NOTES.md` §6, where `run-once --stage
+/// ~/stash/chat-stasher/stage` produced the INIT / NOOP / Healthy / read-back
+/// chain this step reproduces), and the same `~/stash/chat-stasher` family the
+/// shipped config template documents for `archive_root`, `rustic_repo` and
+/// `rustic_key_file`. One layout, stated in two places that agree.
+const SETUP_DEFAULT_STAGE: &str = "~/stash/chat-stasher/stage";
+
+/// The sentence a user types to declare they hold their own copy of the
+/// masterkey. An exact match, because the point of the question is that the
+/// user had to mean it — see [`print_setup_masterkey`].
+const SETUP_MASTERKEY_DECLARATION: &str = "I saved it elsewhere";
+
+/// WIZ-2 setup state machine: scan, then the local first save, then the
+/// destination and scheduler steps, which are still stubs.
+///
+/// The local first save is the step that does real work: it runs the pass the
+/// timer runs, runs it a second time to observe what a no-change pass does,
+/// reads the result back out of the repository, and shows the user the one file
+/// they cannot lose. What it never does is report a link of that chain it did
+/// not observe — a machine with nothing to archive has a real, short chain, and
+/// the wizard says so instead of printing a repository that does not exist.
 fn cmd_setup(
     mut stage: Option<PathBuf>,
     mut destination: Option<String>,
     mut install_schedule: bool,
+    masterkey_saved_elsewhere: bool,
     json: bool,
 ) -> ExitCode {
     let interactive = !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let scan = match Config::load()
-        .and_then(|config| scanner::scan(&config).map_err(anyhow::Error::from))
-    {
+    // Config and scan are resolved separately rather than chained, because the
+    // local first save below has to reuse the *same* config the scan used. A
+    // second `Config::load()` could read a different file — it is a
+    // hand-edited file on a live machine — and the cadence it reports would
+    // then describe a config this run never saw.
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => return setup_could_not_scan(&error, stage.as_ref(), interactive),
+    };
+    let scan = match scanner::scan(&config) {
         Ok(report) => report,
-        Err(error) => {
-            if !interactive {
-                println!(
-                    "{}",
-                    json_string(&serde_json::json!({
-                        "schema_version": 1,
-                        "command": "setup",
-                        "healthy": false,
-                        "exit_code": 3,
-                        "scanner": { "kind": "failed", "why": error.to_string() },
-                        "missing_parameters": setup_missing_parameters(stage.as_ref()),
-                    }))
-                );
-            } else {
-                eprintln!("setup: scan failed: {error}");
-            }
-            return ExitCode::from(3);
-        }
+        Err(error) => return setup_could_not_scan(&error.into(), stage.as_ref(), interactive),
     };
 
     if interactive {
         // Keep the scanner's established three-state wording byte-for-byte.
         print!("{}", render_setup_scan(&scan));
-        let mut input = String::new();
         if stage.is_none() {
-            match prompt_setup_value("Stage directory (required): ", &mut input) {
-                Ok(()) if !input.trim().is_empty() => {
-                    stage = Some(PathBuf::from(input.trim()));
-                    input.clear();
-                }
-                Ok(()) => {}
+            let default = setup_default_stage();
+            // The default is *shown in the prompt*, never applied silently: the
+            // stage is where every future run deposits sealed shards, so the
+            // user has to be able to read the path they are agreeing to.
+            let prompt = match &default {
+                Some(path) => format!("Stage directory [{}]: ", path.display()),
+                None => "Stage directory (required): ".to_string(),
+            };
+            let mut input = String::new();
+            match prompt_setup_value(&prompt, &mut input) {
+                Ok(()) => match setup_stage_answer(input.trim(), default.as_deref()) {
+                    Ok(chosen) => stage = chosen,
+                    Err(error) => {
+                        eprintln!("setup: stage: {error}");
+                        return ExitCode::from(2);
+                    }
+                },
                 Err(error) => {
                     eprintln!("setup: could not read stage choice: {error}");
                     return ExitCode::from(3);
                 }
             }
         }
+    }
+
+    // Nothing has been written yet, and nothing will be: choosing the directory
+    // the user's archive lands in is not a decision this tool makes for them.
+    let Some(stage) = stage.as_ref() else {
+        let missing = setup_missing_parameters(None);
+        if interactive {
+            eprintln!("setup: missing required parameter --stage");
+        } else {
+            println!(
+                "{}",
+                setup_json_payload(
+                    scanner::scan_report_json(&scan),
+                    None,
+                    destination.as_deref(),
+                    install_schedule,
+                    None,
+                    None,
+                    &missing,
+                    2,
+                )
+            );
+        }
+        return ExitCode::from(2);
+    };
+
+    // ADR-039 decision 2, step 2 — the local first save happens before the
+    // destination question. What is on offer locally is available now; the
+    // remote is where the account and credential friction lives, and it is the
+    // step a user is allowed to skip.
+    let local = setup_local_first_save(&config, stage, interactive);
+    let readback = setup_read_back(&config, &local);
+    // Built once, from the observations, and then used for the terminal, for
+    // the JSON and for the exit decision. Two constructions would be two
+    // opinions, and a wizard that says "observed" on stdout while its own JSON
+    // says "unknown" is the failure this shape exists to prevent.
+    let chain = setup_chain(&local, &readback);
+
+    let mut declared = masterkey_saved_elsewhere;
+    if interactive {
+        print_setup_local_report(&local, &chain);
+        if setup_has_key(&local.save) {
+            declared = print_setup_masterkey(&local);
+        } else {
+            println!(
+                "setup: masterkey: none exists yet, so there is nothing to declare saved — the \
+                 first pass that archives something creates it"
+            );
+        }
+    }
+
+    // A declaration is owed only when there is a key to declare. With no
+    // repository there is no key, and asking for the declaration anyway would
+    // ask the user to confirm something that is not true.
+    let declaration_missing = setup_has_key(&local.save) && !declared;
+    let mut missing = setup_missing_parameters(Some(stage));
+    if declaration_missing {
+        missing.push("masterkey_saved_elsewhere");
+    }
+    let incomplete = setup_incomplete(&local.save, &chain);
+    let exit_code = setup_exit_code(&missing, &incomplete);
+
+    if interactive {
         if destination.is_none() {
+            let mut input = String::new();
             match prompt_setup_value("Destination name (blank to skip): ", &mut input) {
                 Ok(()) if !input.trim().is_empty() => {
                     destination = Some(input.trim().to_string());
-                    input.clear();
                 }
                 Ok(()) => {}
                 Err(error) => {
@@ -7826,6 +8000,7 @@ fn cmd_setup(
             }
         }
         if !install_schedule {
+            let mut input = String::new();
             match prompt_setup_value("Plan scheduler installation? [y/N]: ", &mut input) {
                 Ok(()) => {
                     install_schedule = matches!(input.trim(), "y" | "Y" | "yes" | "YES");
@@ -7836,28 +8011,899 @@ fn cmd_setup(
                 }
             }
         }
+        print_setup_next_steps(destination.as_deref(), install_schedule);
+        // The two lines below are the human form of `missing_parameters` and
+        // the `incomplete` list. ADR-039 decision 5: an unfinished step is
+        // named, never left to be inferred from a missing line.
+        if !incomplete.is_empty() {
+            eprintln!(
+                "setup: INCOMPLETE exit_code=1 — did not finish: {}. Nothing here proves the \
+                 local archive is readable.",
+                incomplete.join(", ")
+            );
+        }
+        if declaration_missing {
+            // "not made", not "missing": in this codebase "missing" means a file
+            // could not be found, and nothing was looked for here — the user
+            // simply has not answered yet.
+            eprintln!(
+                "setup: the masterkey declaration was not made (--masterkey-saved-elsewhere): \
+                 this wizard has not been told that you keep a copy of the masterkey elsewhere, \
+                 so the archive is still readable only from this machine's copy of it"
+            );
+        }
+        return ExitCode::from(exit_code);
     }
 
-    let missing = setup_missing_parameters(stage.as_ref());
-    if !interactive {
-        let value = setup_json_payload(
+    println!(
+        "{}",
+        setup_json_payload(
             scanner::scan_report_json(&scan),
-            stage.as_ref(),
+            Some(stage),
             destination.as_deref(),
             install_schedule,
+            Some(&local),
+            Some(&chain),
+            &missing,
+            exit_code,
+        )
+    );
+    ExitCode::from(exit_code)
+}
+
+/// The failure path for "could not look at all".
+///
+/// 3, not 1: a config that will not load and a scan that will not run mean the
+/// wizard never started, so every absence downstream proves nothing. The JSON
+/// form is still written in non-TTY runs, so a wrapper gets one object on
+/// stdout rather than an empty pipe.
+fn setup_could_not_scan(
+    error: &anyhow::Error,
+    stage: Option<&PathBuf>,
+    interactive: bool,
+) -> ExitCode {
+    if !interactive {
+        println!(
+            "{}",
+            json_string(&serde_json::json!({
+                "schema_version": 1,
+                "command": "setup",
+                "healthy": false,
+                "exit_code": 3,
+                "scanner": { "kind": "failed", "why": error.to_string() },
+                "missing_parameters": setup_missing_parameters(stage),
+            }))
         );
-        println!("{}", json_string(&value));
-        return if missing.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(2)
+    } else {
+        eprintln!("setup: scan failed: {error}");
+    }
+    ExitCode::from(3)
+}
+
+/// The exit code for a run whose missing parameters and unfinished steps are
+/// known. One decision, used by the process exit status and by the `exit_code`
+/// field of the JSON object, so the two can never disagree.
+///
+/// Incompleteness wins over a missing parameter: a pass that failed is a
+/// stronger statement than a declaration that was not made, and reporting 2
+/// (a usage error) for a run that already wrote an archive would understate
+/// what happened.
+///
+/// 1 and not 3 for an unfinished step: the wizard read everything it set out to
+/// read and a step did not finish. 3 belongs to "could not look", which is the
+/// scan-failure path above.
+fn setup_exit_code(missing: &[&'static str], incomplete: &[&'static str]) -> u8 {
+    if !incomplete.is_empty() {
+        return 1;
+    }
+    if !missing.is_empty() {
+        return 2;
+    }
+    0
+}
+
+fn setup_missing_parameters(stage: Option<&PathBuf>) -> Vec<&'static str> {
+    if stage.is_some() {
+        Vec::new()
+    } else {
+        vec!["stage"]
+    }
+}
+
+/// Name every step that did not finish. Pure, so the human lines, the JSON and
+/// the exit code are all derived from one list rather than from three
+/// independent opinions about what happened.
+fn setup_incomplete(save: &SetupLocalSave, chain: &SetupChain) -> Vec<&'static str> {
+    let mut incomplete = Vec::new();
+    if setup_is_failed(save) {
+        incomplete.push("local_first_save");
+    }
+    // Named by the link, so "the second pass could not be shown to be a no-op"
+    // and "the archive could not be read back" stay different statements.
+    if matches!(chain.noop, SetupLink::Unknown(_)) {
+        incomplete.push("chain_noop");
+    }
+    if matches!(chain.readback, SetupLink::Unknown(_)) {
+        incomplete.push("readback");
+    }
+    incomplete
+}
+
+/// The stage directory the wizard offers.
+///
+/// `None` when there is no home directory to build the path from. A caller must
+/// then ask rather than offer a default: `config::home_dir()` falls back to a
+/// per-process temp directory, and offering *that* as a stage would put the
+/// user's first archive somewhere the operating system is about to delete.
+fn setup_default_stage() -> Option<PathBuf> {
+    chat_stasher::config::expand_and_verify(SETUP_DEFAULT_STAGE).ok()
+}
+
+/// Turn one line of interactive stage input into the stage to use.
+///
+/// An empty answer takes the offered default; anything else goes through the
+/// same expansion and verification boundary the config loader uses, so a typed
+/// `~/x` becomes a real path instead of a directory literally named `~` — the
+/// failure `TildeError` exists to prevent, and one a shell never gets the
+/// chance to prevent here, because this text never passes through a shell.
+fn setup_stage_answer(
+    typed: &str,
+    default: Option<&Path>,
+) -> Result<Option<PathBuf>, chat_stasher::config::TildeError> {
+    // Trims its own input rather than relying on the caller: "an empty answer
+    // takes the default" has to hold for a line of spaces too, and a helper
+    // whose contract is "the caller already trimmed" is one call site away from
+    // creating a stage directory named `   `.
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Ok(default.map(Path::to_path_buf));
+    }
+    chat_stasher::config::expand_and_verify(typed).map(Some)
+}
+
+/// One `run-once` pass, as this process observed it.
+///
+/// Every variant is an observation rather than an expectation. `Unrecorded`
+/// exists so that a pass which ran but left no record of its own is never
+/// reported by reading the previous pass's record a second time — that would
+/// turn "we do not know" into a confident duplicate of an older answer.
+#[derive(Debug)]
+enum SetupPass {
+    Recorded(chat_stasher::runstate::RunState),
+    Unrecorded { exit_code: i32 },
+    Failed { exit_code: i32 },
+    CannotRun { why: String },
+    Skipped { why: &'static str },
+}
+
+/// What the local first save did to the repository.
+#[derive(Debug)]
+enum SetupLocalSave {
+    /// The repository did not exist before the first pass and does after it.
+    /// The chain's `INIT` link, observed rather than assumed.
+    Created,
+    /// It was already there before the first pass — a re-run of `setup` on a
+    /// machine that has archived before.
+    Existed,
+    /// No repository exists and no pass reported a failure: there was nothing
+    /// to archive. Not an empty archive and not an error — nothing was created,
+    /// and the absence is named with its reason.
+    NothingToArchive,
+    /// A pass failed, could not be started, or could not be attributed.
+    Failed { why: String },
+    /// Whether a repository exists could not be established at all.
+    Unknown { why: String },
+}
+
+#[derive(Debug)]
+struct SetupLocalSaveReport {
+    save: SetupLocalSave,
+    first: SetupPass,
+    second: SetupPass,
+    key_file: PathBuf,
+    /// Snapshots in the repository after the first pass and after the second.
+    ///
+    /// This pair is what the idempotence link is decided on. It is a fact about
+    /// what the passes *did* to the archive, so unlike a run-state record it
+    /// cannot be confused by two passes landing in the same second — which is
+    /// exactly what a re-run produces.
+    snapshots_after_first: Result<usize, String>,
+    snapshots_after_second: Result<usize, String>,
+}
+
+/// The fields that tell one run-state record from another.
+type SetupRunFingerprint = (u64, u64, chat_stasher::runstate::RunOutcome, bool, usize);
+
+fn setup_run_fingerprint(state: &chat_stasher::runstate::RunState) -> SetupRunFingerprint {
+    (
+        state.finished_at_unix,
+        state.duration_ms,
+        state.outcome,
+        state.snapshot_created,
+        state.shards_written,
+    )
+}
+
+/// The run-state file's modification time, and the record inside it.
+///
+/// Two different witnesses on purpose. The record alone cannot prove it was
+/// written by the pass that just ran: on a re-run both passes are NOOP with the
+/// same outcome, and often the same duration inside the same second, so an
+/// identical record is a *normal* outcome rather than evidence of staleness. A
+/// test found this the hard way — a plain second `setup` run reported the
+/// idempotence link as `unknown`. The file's mtime alone is not proof either,
+/// because two passes milliseconds apart share a second on a filesystem with
+/// coarse timestamps.
+///
+/// So a pass's record counts as its own when *either* witness moved. This is
+/// used only for the `runs` audit field; no chain link rests on it, because a
+/// link a timing coincidence can flip is not an observation.
+type SetupRunStamp = (Option<std::time::SystemTime>, Option<SetupRunFingerprint>);
+
+fn setup_run_stamp() -> SetupRunStamp {
+    let path = chat_stasher::runstate::run_state_path(&chat_stasher::collect::default_state_dir());
+    (
+        fs::metadata(&path).and_then(|meta| meta.modified()).ok(),
+        setup_last_run_state().as_ref().map(setup_run_fingerprint),
+    )
+}
+
+/// The store the local first save writes to and reads back from: the config's
+/// own local default, with no destination named.
+///
+/// The same resolution `run-once` uses when the config declares no destination
+/// — which is what the bake-off log recorded, and what `search --repo <that
+/// path>` then read back.
+fn setup_local_store(config: &Config) -> StoreConfig {
+    store_config_from(config, None, None, None, &[])
+}
+
+/// Whether the local repository exists. `Err` is "could not tell", kept
+/// distinct from `Ok(false)` — the three states this project keeps apart.
+fn setup_local_repository_exists(config: &Config) -> Result<bool, String> {
+    BackupStore::for_metadata_query(setup_local_store(config))
+        .repository_exists()
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// The local first save: two `run-once` passes, then what they left behind.
+///
+/// Two passes, not one, because the chain this step reproduces makes its claim
+/// about the *second*: that a run with nothing new to archive creates no
+/// snapshot. Running the pass once and asserting that property would be the
+/// "a derived artifact can be green and wrong" failure — so the wizard runs the
+/// pass the timer runs, and then runs it again and looks.
+fn setup_local_first_save(config: &Config, stage: &Path, echo: bool) -> SetupLocalSaveReport {
+    let key_file = setup_local_store(config).key_file;
+    let before = setup_local_repository_exists(config);
+    let first = setup_run_pass(stage, echo, None);
+    let after_first = setup_local_repository_exists(config);
+    let snapshots_after_first = setup_snapshot_count(config);
+    let second = match &first {
+        SetupPass::Recorded(_) | SetupPass::Unrecorded { exit_code: 0 } => {
+            setup_run_pass(stage, echo, Some(setup_run_stamp()))
+        }
+        // A pass that did not complete is not worth repeating: the chain
+        // already has a hole, and a second pass cannot close it.
+        SetupPass::Unrecorded { .. } | SetupPass::Failed { .. } | SetupPass::CannotRun { .. } => {
+            SetupPass::Skipped {
+                why: "the first pass did not complete",
+            }
+        }
+        SetupPass::Skipped { why } => SetupPass::Skipped { why },
+    };
+    let snapshots_after_second = setup_snapshot_count(config);
+    let save = setup_local_save_state(&before, &after_first, &first, &key_file);
+    SetupLocalSaveReport {
+        save,
+        first,
+        second,
+        key_file,
+        snapshots_after_first,
+        snapshots_after_second,
+    }
+}
+
+/// How many snapshots the local repository holds, or why that could not be
+/// counted — counted through the same open-the-repository path `search` uses.
+///
+/// The count is the idempotence link's evidence: a pass that adds no snapshot
+/// took the no-change path. Unlike the pass's own run-state record, this cannot
+/// be a leftover from an earlier run, because it is read from the repository
+/// after the pass has returned.
+fn setup_snapshot_count(config: &Config) -> Result<usize, String> {
+    let cfg = setup_local_store(config);
+    let mk = store::load_key_file(&cfg).map_err(|error| format!("{error:#}"))?;
+    let backends = BackupStore::for_metadata_query(cfg.clone())
+        .backends()
+        .map_err(|error| format!("{error:#}"))?;
+    let repo = Repository::new(&cfg.repository_options(), &backends)
+        .and_then(|repo| repo.open(&Credentials::Masterkey(mk)))
+        .and_then(|repo| repo.to_indexed())
+        .map_err(|error| format!("{error:#}"))?;
+    repo.get_all_snapshots()
+        .map(|snapshots| snapshots.len())
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Decide what the two passes did to the repository, from observations only.
+fn setup_local_save_state(
+    before: &Result<bool, String>,
+    after_first: &Result<bool, String>,
+    first: &SetupPass,
+    key_file: &Path,
+) -> SetupLocalSave {
+    match first {
+        SetupPass::CannotRun { why } => {
+            return SetupLocalSave::Failed { why: why.clone() };
+        }
+        SetupPass::Failed { exit_code } => {
+            return SetupLocalSave::Failed {
+                why: format!("the first run-once pass exited {exit_code}"),
+            };
+        }
+        // Deliberately *not* a failure: the pass exited 0, so it did its job.
+        // Whether its run-state record could be attributed is a fact about the
+        // record, and this state is decided from the repository's existence —
+        // which is observed directly. A second pass that failed is likewise the
+        // idempotence link's problem, not the repository's: the chain reports it
+        // as unknown, and `save` still describes what is on the disk.
+        SetupPass::Recorded(_) | SetupPass::Unrecorded { .. } | SetupPass::Skipped { .. } => {}
+    }
+    let exists_now = match after_first {
+        Ok(exists) => *exists,
+        Err(why) => return SetupLocalSave::Unknown { why: why.clone() },
+    };
+    if !exists_now {
+        // Nothing was collected, so `push` skipped and never reached the
+        // repository step. No repository, therefore no masterkey either.
+        return SetupLocalSave::NothingToArchive;
+    }
+    // A repository whose key file is not where the config says it should be is
+    // an archive nobody can open — worse than no repository, because it looks
+    // like one. Reported as a failure rather than as `Created`.
+    if !key_file.exists() {
+        return SetupLocalSave::Failed {
+            why: format!(
+                "the repository exists but its masterkey is not at {}, so nothing can be read \
+                 back from it",
+                key_file.display()
+            ),
         };
     }
-
-    if !missing.is_empty() {
-        eprintln!("setup: missing required parameter --stage");
-        return ExitCode::from(2);
+    match before {
+        Ok(true) => SetupLocalSave::Existed,
+        Ok(false) => SetupLocalSave::Created,
+        Err(why) => SetupLocalSave::Unknown { why: why.clone() },
     }
+}
+
+/// Run one `run-once` pass as a child of this process.
+///
+/// A child rather than an in-process `run_once_pass`, for two reasons that are
+/// about the contract rather than about convenience:
+///
+///   * `--json` promises stdout carries exactly one JSON object (`json_out.rs`
+///     module docs), while `run_once_pass` narrates its `[collect]`, `[push]`
+///     and `result:` lines to *this* process's stdout. Redirecting a child's
+///     stdout keeps that promise without threading a quiet flag through the
+///     collector and the pusher, where one missed call site would silently
+///     corrupt the machine-readable output of a *scheduled* run too.
+///   * The wizard then reproduces the chain the bake-off log recorded — the
+///     documented CLI chain — instead of a second in-process path that could
+///     drift away from the command the timer actually runs.
+///
+/// `prior` is the fingerprint of the record read before this pass started; the
+/// record found afterwards has to differ from it to be accepted as this pass's
+/// own.
+fn setup_run_pass(stage: &Path, echo: bool, prior: Option<SetupRunStamp>) -> SetupPass {
+    let binary = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            return SetupPass::CannotRun {
+                why: format!("cannot resolve the running executable: {error}"),
+            };
+        }
+    };
+    let stdout = if echo {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::null()
+    };
+    let status = std::process::Command::new(binary)
+        .arg("run-once")
+        .arg("--stage")
+        .arg(stage)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        // stderr is inherited in both modes: the collector's diagnostics are
+        // for the human reading the terminal, and the JSON contract governs
+        // stdout only.
+        .status();
+    let exit_code = match status {
+        Ok(status) => status.code(),
+        Err(error) => {
+            return SetupPass::CannotRun {
+                why: format!("cannot start a run-once pass: {error}"),
+            };
+        }
+    };
+    let stamp = setup_run_stamp();
+    match (exit_code, setup_last_run_state()) {
+        (Some(0), Some(record)) => {
+            if prior == Some(stamp) {
+                SetupPass::Unrecorded { exit_code: 0 }
+            } else {
+                SetupPass::Recorded(record)
+            }
+        }
+        (Some(0), None) => SetupPass::Unrecorded { exit_code: 0 },
+        // A pass killed by a signal reports no code at all. Kept as its own
+        // value rather than folded into a bare "failed", because "exit code
+        // unknown" and "exited non-zero" carry different information.
+        (None, _) => SetupPass::Failed { exit_code: -1 },
+        (Some(code), _) => SetupPass::Failed { exit_code: code },
+    }
+}
+
+/// One pass as `setup --json` reports it.
+///
+/// The raw outcomes are carried, not just the chain verdicts: they are the
+/// measurement each link is derived from, and a wrapper that wants to know what
+/// the passes actually did should not have to go and read `run-state.json`,
+/// which by then holds only the *last* of the two.
+fn setup_pass_json(pass: &SetupPass) -> serde_json::Value {
+    match pass {
+        SetupPass::Recorded(state) => serde_json::json!({
+            "kind": "recorded",
+            "outcome": setup_outcome_word(state),
+            "snapshot_created": state.snapshot_created,
+            "shards_written": state.shards_written,
+            "duration_ms": state.duration_ms,
+        }),
+        SetupPass::Unrecorded { exit_code } => serde_json::json!({
+            "kind": "unrecorded",
+            "exit_code": exit_code,
+        }),
+        SetupPass::Failed { exit_code } => serde_json::json!({
+            "kind": "failed",
+            "exit_code": exit_code,
+        }),
+        SetupPass::CannotRun { why } => serde_json::json!({
+            "kind": "cannot_run",
+            "why": why,
+        }),
+        SetupPass::Skipped { why } => serde_json::json!({
+            "kind": "skipped",
+            "why": why,
+        }),
+    }
+}
+
+/// The most recent `run-once` record, when there is one to read.
+fn setup_last_run_state() -> Option<chat_stasher::runstate::RunState> {
+    match chat_stasher::runstate::load(&chat_stasher::collect::default_state_dir()) {
+        chat_stasher::runstate::RunStateRead::Present(state) => Some(state),
+        // "Never ran" and "unreadable" are both *not a record*, and neither may
+        // be read as one.
+        chat_stasher::runstate::RunStateRead::Missing
+        | chat_stasher::runstate::RunStateRead::Unreadable(_) => None,
+    }
+}
+
+/// Whether a masterkey exists to declare anything about.
+fn setup_has_key(local: &SetupLocalSave) -> bool {
+    matches!(local, SetupLocalSave::Created | SetupLocalSave::Existed)
+}
+
+fn setup_is_failed(local: &SetupLocalSave) -> bool {
+    matches!(
+        local,
+        SetupLocalSave::Failed { .. } | SetupLocalSave::Unknown { .. }
+    )
+}
+
+/// What reading the just-written repository could establish.
+#[derive(Debug)]
+enum SetupReadback {
+    Read {
+        sessions: usize,
+        snapshots: usize,
+    },
+    /// No repository exists, so nothing was read. Explicitly *not* a count of
+    /// zero: no measurement happened, and reporting one would be the exact
+    /// "unknown recorded as empty" failure this project forbids.
+    NoRepository,
+    /// A repository exists and could not be read in full.
+    Unknown {
+        why: String,
+    },
+    /// The local first save did not establish what is on the disk, so no read
+    /// was attempted. Counted against the *save* step, not this one: naming the
+    /// same failure twice would make one problem look like two.
+    NotAttempted {
+        why: String,
+    },
+}
+
+/// Read the archive back through the same store, key and query `search --repo`
+/// uses, so "the wizard read it back" and "`search` reads it back" are one
+/// claim and not two.
+fn setup_read_back(config: &Config, local: &SetupLocalSaveReport) -> SetupReadback {
+    match &local.save {
+        // No repository was created, so there is nothing to read and no
+        // measurement to report.
+        SetupLocalSave::NothingToArchive => return SetupReadback::NoRepository,
+        // The save itself did not establish what is on the disk, so a read
+        // could not interpret whatever it found. Named once, on the step that
+        // failed, rather than blamed on the read as well.
+        SetupLocalSave::Failed { why } | SetupLocalSave::Unknown { why } => {
+            return SetupReadback::NotAttempted {
+                why: format!("the local first save did not finish ({why})"),
+            };
+        }
+        SetupLocalSave::Created | SetupLocalSave::Existed => {}
+    }
+    let cfg = setup_local_store(config);
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(error) => {
+            return SetupReadback::Unknown {
+                why: format!("cannot read the masterkey: {error:#}"),
+            };
+        }
+    };
+    // The empty selector is every session, whatever its harness or its time —
+    // the same query `search --repo <path>` runs with no filters.
+    let selector = chat_stasher::selector::Selector {
+        session_id_prefix: None,
+        machine: None,
+        harnesses: None,
+        window: None,
+    };
+    match chat_stasher::search::search_sessions(&store, &mk, &selector) {
+        Ok(report) => {
+            if !report.unreadable.is_empty() {
+                return SetupReadback::Unknown {
+                    why: format!(
+                        "{} part(s) of the repository could not be read, so the session count is \
+                         unknown, not {}",
+                        report.unreadable.len(),
+                        report.hits.len()
+                    ),
+                };
+            }
+            SetupReadback::Read {
+                sessions: report.hits.len(),
+                snapshots: report.snapshots_in_repo,
+            }
+        }
+        Err(error) => SetupReadback::Unknown {
+            why: format!("cannot read the repository: {error:#}"),
+        },
+    }
+}
+
+/// One link of the chain the local first save reproduces, as observed.
+///
+/// The chain is built once, from the observations, and then rendered twice —
+/// once as prose and once as JSON. Building it twice, once per renderer, is
+/// how a wizard ends up claiming `init: observed` in the terminal while its own
+/// JSON says `not_observed`; the two answers must come from one decision.
+#[derive(Debug)]
+enum SetupLink {
+    /// The link happened and was seen to happen.
+    Observed(String),
+    /// The link did not happen, with the reason. A real state, not a failure:
+    /// on a machine with nothing to archive the `INIT` link genuinely did not
+    /// occur, and saying so is the point.
+    NotObserved(String),
+    /// The link's subject does not apply here at all — there is no repository,
+    /// so there is no read-back to attempt.
+    NotApplicable(String),
+    /// It could not be determined. Never rendered as one of the above.
+    Unknown(String),
+    /// A link that carries a measurement.
+    Measured {
+        sessions: usize,
+        snapshots: usize,
+        why: String,
+    },
+}
+
+impl SetupLink {
+    /// The machine-readable tag, the same vocabulary `json_out::CountState`
+    /// uses for "measured / unknown / does not apply".
+    fn kind(&self) -> &'static str {
+        match self {
+            SetupLink::Observed(_) => "observed",
+            SetupLink::NotObserved(_) => "not_observed",
+            SetupLink::NotApplicable(_) => "not_applicable",
+            SetupLink::Unknown(_) => "unknown",
+            SetupLink::Measured { .. } => "known",
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        match self {
+            SetupLink::Measured {
+                sessions,
+                snapshots,
+                why,
+            } => serde_json::json!({
+                "kind": self.kind(),
+                "sessions": sessions,
+                "snapshots_in_repo": snapshots,
+                "why": why,
+            }),
+            SetupLink::Observed(why)
+            | SetupLink::NotObserved(why)
+            | SetupLink::NotApplicable(why)
+            | SetupLink::Unknown(why) => serde_json::json!({
+                "kind": self.kind(),
+                "why": why,
+            }),
+        }
+    }
+
+    /// The sentence that follows the link's name in the terminal.
+    fn human(&self) -> String {
+        match self {
+            SetupLink::Measured {
+                sessions,
+                snapshots,
+                ..
+            } => format!(
+                "{sessions} session(s) read back from the repository ({snapshots} snapshot(s) in \
+                 it)"
+            ),
+            SetupLink::Observed(why)
+            | SetupLink::NotObserved(why)
+            | SetupLink::NotApplicable(why)
+            | SetupLink::Unknown(why) => why.clone(),
+        }
+    }
+}
+
+/// The three links the local first save is supposed to reproduce.
+#[derive(Debug)]
+struct SetupChain {
+    init: SetupLink,
+    noop: SetupLink,
+    readback: SetupLink,
+}
+
+impl SetupChain {
+    /// The `chain` object of `setup --json`: one tagged entry per link, so a
+    /// wrapper can tell an observed link from one that never happened without
+    /// parsing prose.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "init": self.init.json(),
+            "noop": self.noop.json(),
+            "readback": self.readback.json(),
+        })
+    }
+}
+
+/// Build the chain from what the two passes and the read-back established —
+/// never from what they were expected to establish.
+///
+/// Every link keys on [`SetupLocalSave`], which is itself derived only from
+/// observed state (did the repository exist before, does it exist now, is the
+/// key file there). The pass records supply the supporting detail; they are
+/// never the reason a link is called observed.
+fn setup_chain(local: &SetupLocalSaveReport, readback: &SetupReadback) -> SetupChain {
+    let init = match &local.save {
+        SetupLocalSave::Created => {
+            SetupLink::Observed("the first run-once pass created the repository".to_string())
+        }
+        SetupLocalSave::Existed => SetupLink::NotObserved(
+            "a repository already existed before this run, so this run created none".to_string(),
+        ),
+        SetupLocalSave::NothingToArchive => SetupLink::NotObserved(
+            "nothing was collected, so no repository was created and no masterkey exists"
+                .to_string(),
+        ),
+        SetupLocalSave::Failed { why } | SetupLocalSave::Unknown { why } => {
+            SetupLink::Unknown(why.clone())
+        }
+    };
+    // Decided on the repository's own snapshot count, never on the pass's
+    // run-state record: the record is legitimately identical to the previous
+    // pass's on a re-run, and reading that as "we do not know" made this link
+    // report `unknown` on an ordinary second run.
+    let noop = match &local.save {
+        SetupLocalSave::Created | SetupLocalSave::Existed => setup_noop_link(local),
+        SetupLocalSave::Failed { why } | SetupLocalSave::Unknown { why } => {
+            SetupLink::Unknown(why.clone())
+        }
+        SetupLocalSave::NothingToArchive => SetupLink::NotObserved(
+            "no repository exists, so there is nothing for a second pass to be idempotent about"
+                .to_string(),
+        ),
+    };
+    let readback = match readback {
+        SetupReadback::Read {
+            sessions,
+            snapshots,
+        } => SetupLink::Measured {
+            sessions: *sessions,
+            snapshots: *snapshots,
+            why: "read back through the same path `search --repo` takes".to_string(),
+        },
+        SetupReadback::NoRepository => SetupLink::NotApplicable(
+            "no repository exists, so no session could be read back — this is not a count of zero"
+                .to_string(),
+        ),
+        SetupReadback::Unknown { why } | SetupReadback::NotAttempted { why } => {
+            SetupLink::Unknown(why.clone())
+        }
+    };
+    SetupChain {
+        init,
+        noop,
+        readback,
+    }
+}
+
+/// The idempotence link, decided on what the second pass did to the repository.
+///
+/// The evidence is the snapshot count before and after that pass: a repository
+/// holding the same number of snapshots afterwards is a run that archived
+/// nothing new. The pass's own run-state record is reported alongside as
+/// supporting detail when it can be attributed, and never turns a counted fact
+/// into an unknown.
+fn setup_noop_link(local: &SetupLocalSaveReport) -> SetupLink {
+    let (first, second) = match (&local.snapshots_after_first, &local.snapshots_after_second) {
+        (Ok(first), Ok(second)) => (*first, *second),
+        (Err(why), _) | (_, Err(why)) => {
+            return SetupLink::Unknown(format!(
+                "the repository's snapshots could not be counted, so whether the second pass \
+                 added one is unknown: {why}"
+            ));
+        }
+    };
+    let outcome = match &local.second {
+        SetupPass::Recorded(state) => {
+            format!(", and it finished {}", setup_outcome_word(state))
+        }
+        _ => String::new(),
+    };
+    if second == first {
+        SetupLink::Observed(format!(
+            "the second run-once pass added no snapshot: the repository still holds {second} \
+             snapshot(s){outcome}"
+        ))
+    } else if second > first {
+        SetupLink::NotObserved(format!(
+            "the second run-once pass added a snapshot ({first} → {second}), so it did not take \
+             the no-change path"
+        ))
+    } else {
+        // Snapshots do not disappear; a count that fell means the second
+        // reading is not describing the same repository as the first.
+        SetupLink::Unknown(format!(
+            "the repository held {first} snapshot(s) after the first pass and {second} after the \
+             second — a count that drops is not something a pass can do, so what happened is \
+             unknown"
+        ))
+    }
+}
+
+/// Print the local first save: what it wrote, then each link of the chain.
+///
+/// The link lines and their JSON twins are rendered from the same
+/// [`SetupChain`], so the terminal and the machine-readable object cannot
+/// disagree about what happened.
+fn print_setup_local_report(local: &SetupLocalSaveReport, chain: &SetupChain) {
+    match &local.save {
+        SetupLocalSave::Created => {
+            println!("setup: local save: created — this pass created the repository");
+        }
+        SetupLocalSave::Existed => {
+            println!("setup: local save: already existed — this pass created nothing");
+        }
+        SetupLocalSave::NothingToArchive => {
+            println!(
+                "setup: local save: nothing to archive — no repository and no masterkey were \
+                 created; the first pass that collects something will create them"
+            );
+        }
+        SetupLocalSave::Failed { why } => {
+            eprintln!("setup: local save FAILED: {why}");
+        }
+        SetupLocalSave::Unknown { why } => {
+            eprintln!("setup: local save: whether the repository exists is UNKNOWN: {why}");
+        }
+    }
+    for (label, link) in [
+        ("init", &chain.init),
+        ("noop", &chain.noop),
+        ("read-back", &chain.readback),
+    ] {
+        let kind = link.kind().replace('_', " ");
+        let line = format!("setup: chain {label:<9}: {kind} — {}", link.human());
+        // Only the "unknown" links go to stderr, so a reader piping stdout
+        // still sees every link that was established and is left in no doubt
+        // that the others were not.
+        if matches!(link, SetupLink::Unknown(_)) {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
+}
+
+fn setup_outcome_word(state: &chat_stasher::runstate::RunState) -> &'static str {
+    match state.outcome {
+        chat_stasher::runstate::RunOutcome::Completed => "COMPLETED",
+        chat_stasher::runstate::RunOutcome::Noop => "NOOP",
+        chat_stasher::runstate::RunOutcome::Error => "ERROR",
+    }
+}
+/// Print the masterkey path and ask for the declaration; returns whether the
+/// user made it.
+///
+/// The wording carries a safety duty no check can: this file cannot be
+/// recreated, so an archive whose key is lost is an archive nobody reads again.
+/// The question is therefore asked as a *declaration* and is labelled one,
+/// because the honest thing to tell the user is that this tool cannot tell
+/// whether a copy exists — not to imply that answering "yes" proved anything.
+fn print_setup_masterkey(local: &SetupLocalSaveReport) -> bool {
+    let key_file = &local.key_file;
+    println!("setup: masterkey: {}", key_file.display());
+    println!(
+        "setup: That file is the only thing that can decrypt the archive. If it is lost the \
+         archive can never be read again — not by this tool and not by anyone else. Copy it \
+         somewhere else now: another disk, a password manager, a backup you already keep."
+    );
+    println!(
+        "setup: To use the archive on another machine, put the copy back at that exact path and \
+         name — nothing else is needed to read it there."
+    );
+    println!(
+        "setup: chat-stasher cannot check that a copy exists. The next answer is a declaration, \
+         recorded as unverified — it is not a verification."
+    );
+    let prompt =
+        format!("Type `{SETUP_MASTERKEY_DECLARATION}` to declare you have your own copy: ");
+    let mut input = String::new();
+    match prompt_setup_value(&prompt, &mut input) {
+        Ok(()) if setup_declaration_given(&input) => {
+            println!("setup: masterkey declaration: declared (unverified)");
+            true
+        }
+        Ok(()) => {
+            eprintln!(
+                "setup: masterkey declaration: NOT declared — this step is unfinished, and the \
+                 archive is still readable only from this machine's copy of that file"
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("setup: could not read the masterkey declaration: {error}");
+            false
+        }
+    }
+}
+
+/// Whether an answer counts as the declaration.
+///
+/// An exact match after trimming, and deliberately case-sensitive and not
+/// shortenable: the whole point of asking for a sentence is that the user had to
+/// read it, and accepting `yes`, `y` or `Y` would turn the one question standing
+/// between a user and an unreadable archive back into a keypress.
+fn setup_declaration_given(answer: &str) -> bool {
+    answer.trim() == SETUP_MASTERKEY_DECLARATION
+}
+
+/// The destination (WIZ-3) and scheduler (WIZ-4) steps, still stubs: they print
+/// what they would do and write nothing. "planned (not installed)" is the
+/// point — a rendered template is not an installed timer, and saying it was
+/// installed would be the one lie this project has paid for before.
+fn print_setup_next_steps(destination: Option<&str>, install_schedule: bool) {
     println!("setup: stage configuration planned (not written)");
     if destination.is_some() {
         println!("setup: destination choice planned (not configured)");
@@ -7869,37 +8915,94 @@ fn cmd_setup(
     } else {
         println!("setup: scheduler installation skipped");
     }
-    ExitCode::SUCCESS
 }
 
-fn setup_missing_parameters(stage: Option<&PathBuf>) -> Vec<&'static str> {
-    if stage.is_some() {
-        Vec::new()
-    } else {
-        vec!["stage"]
-    }
-}
-
+/// The `setup --json` object. `exit_code` is passed in rather than recomputed
+/// here, so the number in the object and the process exit status are the same
+/// decision.
+#[allow(clippy::too_many_arguments)]
 fn setup_json_payload(
     scan: serde_json::Value,
     stage: Option<&PathBuf>,
     destination: Option<&str>,
     install_schedule: bool,
-) -> serde_json::Value {
-    let missing = setup_missing_parameters(stage);
-    serde_json::json!({
+    local: Option<&SetupLocalSaveReport>,
+    chain: Option<&SetupChain>,
+    missing: &[&'static str],
+    exit_code: u8,
+) -> String {
+    let save = local.map(|local| &local.save);
+    let declared = !missing.contains(&"masterkey_saved_elsewhere");
+    let chain = match chain {
+        Some(chain) => chain.to_json(),
+        // No stage means no pass ran. An explicit tagged object, never `null`:
+        // a null here would read as "the chain was empty", and the chain was
+        // not produced at all.
+        None => serde_json::json!({
+            "kind": "not_attempted",
+            "why": "no stage was given, so no run-once pass was attempted and no chain exists",
+        }),
+    };
+    let runs = match local {
+        Some(local) => serde_json::json!({
+            "first": setup_pass_json(&local.first),
+            "second": setup_pass_json(&local.second),
+        }),
+        None => serde_json::json!({
+            "kind": "not_attempted",
+            "why": "no stage was given, so no run-once pass was attempted",
+        }),
+    };
+    let value = serde_json::json!({
         "schema_version": 1,
         "command": "setup",
-        "healthy": missing.is_empty(),
-        "exit_code": if missing.is_empty() { 0 } else { 2 },
+        "healthy": exit_code == 0,
+        "exit_code": exit_code,
         "scanner": scan,
         "missing_parameters": missing,
         "steps": {
             "stage": if stage.is_some() { "provided" } else { "missing" },
+            "local_save": match save {
+                Some(SetupLocalSave::Created) => "created",
+                Some(SetupLocalSave::Existed) => "existed",
+                Some(SetupLocalSave::NothingToArchive) => "nothing_to_archive",
+                Some(SetupLocalSave::Failed { .. }) => "failed",
+                Some(SetupLocalSave::Unknown { .. }) => "unknown",
+                None => "not_attempted",
+            },
+            "masterkey": match save {
+                Some(SetupLocalSave::Created | SetupLocalSave::Existed) => {
+                    if declared { "declared" } else { "not_declared" }
+                }
+                // No repository, therefore no key: the question does not apply,
+                // which is a third answer and not a "no".
+                _ => "absent",
+            },
             "destination": if destination.is_some() { "planned" } else { "skipped" },
             "schedule": if install_schedule { "planned" } else { "skipped" },
         },
-    })
+        "chain": chain,
+        "runs": runs,
+        "masterkey": match (save, local) {
+            (Some(SetupLocalSave::Created | SetupLocalSave::Existed), Some(local)) => {
+                serde_json::json!({
+                    "path": local.key_file.display().to_string(),
+                    "declaration": if declared { "declared" } else { "not_declared" },
+                    // The declaration is a statement by the user. Nothing here,
+                    // and nothing anywhere else, checks it — recorded so that a
+                    // reader of this object cannot mistake one for a
+                    // verification.
+                    "declaration_is_verified": false,
+                })
+            }
+            _ => serde_json::json!({
+                "kind": "absent",
+                "why": "no repository and no masterkey exist, so there is nothing to declare \
+                        saved",
+            }),
+        },
+    });
+    json_string(&value)
 }
 
 fn render_setup_scan(report: &scanner::ScanReport) -> String {
