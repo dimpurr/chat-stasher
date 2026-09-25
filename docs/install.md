@@ -180,7 +180,7 @@ backfill has been observed in a real browser, so read the row as *implemented,
 not verified*.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:867-880`).
+(`apps/extension/lib/popup-view.ts:938-951`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
