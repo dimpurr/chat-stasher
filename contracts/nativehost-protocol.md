@@ -302,7 +302,7 @@ nothing.
 | Situation | `nack` | `retryable` | `detail` says |
 |---|---|---|---|
 | `[native_host] destination` missing or empty | `config` | false | which key to set, and where |
-| the child exited before it printed a URL | `io` | true | the exit status, mapped to the meaning `chat-stasher ui` documents for it (usage error / nothing to show / could not read the archive) |
+| the child exited before it printed a URL | `io` | true | the exit status, mapped to the meaning `chat-stasher ui` documents for it (usage error / could not read the archive — a destination that holds nothing is still served as its honest empty page, so there is no "nothing to show" exit any more) |
 | no URL within the host's start timeout | `io` | true | that the child was killed, and that no browser tab was opened |
 | the URL line could not be read at all | `io` | true | that the child's output could not be read |
 

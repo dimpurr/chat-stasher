@@ -43,7 +43,7 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:775-784`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:695-745`).
+   (`crates/chat-stasher/src/main.rs:697-747`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
    (`crates/chat-stasher/src/main.rs:274-311`).
@@ -169,7 +169,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:1923-1957`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:1931-1965`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -403,7 +403,7 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:1923-1957`).
+  (`crates/chat-stasher/src/nativehost.rs:1931-1965`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
@@ -479,7 +479,7 @@ machine:
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:747-779`).
+  the old inode (`crates/chat-stasher/src/main.rs:749-781`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -497,9 +497,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:5719-5815`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:5723-5819`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:5691-5698`).
+  (`crates/chat-stasher/src/main.rs:5695-5702`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -510,7 +510,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:4154-4210`).
+  as many words (`crates/chat-stasher/src/main.rs:4158-4214`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -552,12 +552,12 @@ a real limitation of the current code.
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
    `activity-index`, `machine-declare`, `machine-label`, `overview`
-  (`crates/chat-stasher/src/main.rs:148-1104`); **a command that puts sessions
+  (`crates/chat-stasher/src/main.rs:148-1106`); **a command that puts sessions
    back into a harness's own directories does not exist**. There are two
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:370-372,6051-6190`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:370-372,6055-6194`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:579-659`) — see exposure 5

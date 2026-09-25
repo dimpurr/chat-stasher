@@ -55,6 +55,7 @@ nav.sub{display:flex;gap:1rem}
 <h1>chat-stasher</h1>
 <p class=sub>destination <b>dest-under-test</b> · 2 snapshot(s) scanned of 2 in repository · this page rendered 2026-02-02 02:40 UTC of the archive metadata only</p>
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
+<div class=warn><b>Machines without an activity index.</b> 1 machine(s) hold sessions but no activity index beside the snapshot, so their conversation times were never recorded: their heatmap rows, and any time filter below, are <i>UNKNOWN</i> for them, not empty. Run <code>chat-stasher activity-index</code> on that machine to record one.<ul><li class=mono>m-3</li></ul></div>
 <section class=stats><div class=stat><span class=v>4</span><span class=l>sessions</span></div><div class=stat><span class=v>370 B</span><span class=l>bytes (shard sizes)</span></div><div class=stat><span class=v>3</span><span class=l>machines</span></div><div class=stat><span class=v>3</span><span class=l>sources</span></div></section>
 <section><h2>Machines</h2>
 <div class=scroll><table>

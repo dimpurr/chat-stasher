@@ -6,7 +6,26 @@ browser extension has its own version and ships on its own schedule; see
 
 ## Unreleased — 0.5.0
 
-Nothing yet.
+### CLI
+
+#### Changed
+
+- `ui` now starts its server even when the archive read matched nothing: the
+  destination is served as an honest empty page (`(this destination holds no
+  sessions)` on a complete read; a floor sentence when parts were unreadable)
+  instead of exiting `1` before any socket was bound. `ui` no longer exits
+  `1`; a served read that could not complete still exits `3`.
+- `chat-stasher ui` names machines that hold sessions but have no activity
+  index on the HTML overview: a banner carrying exactly the machine list of
+  the `machines_without_activity_index` API field, and their heatmap rows read
+  as unknown — `?` cells with the reason and the `chat-stasher activity-index`
+  repair command on the page — instead of a row of empty cells.
+
+#### Fixed
+
+- `ui`'s `[ui] sessions : N in view / M in the archive` narration quoted the
+  launch-filtered count as if it were the archive count; it now quotes the
+  archive.
 
 ## 0.4.0 — 2026-09-24
 
