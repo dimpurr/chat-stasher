@@ -55,6 +55,47 @@ export interface DebtRecord {
   state: 'pending' | 'archived';
   /** Monotonic within a (platform, scope). A debt settled and later re-enqueued takes a fresh one, i.e. goes to the back. */
   seq: number;
+  /**
+   * 🔴 W113 · **The time the platform's own list gave for this conversation**, as epoch milliseconds, when
+   *    its list response carried one. ADR-032 §6 needs it to say *when* the stored conversations are from,
+   *    and the extension had nowhere to keep it: the list parsers either discarded such a field or kept
+   *    only a page-level maximum, so the coverage page had no monthly distribution to draw.
+   *
+   * 🔴 **It is not a conversation time and must never be presented as one.** ADR-035 refused file mtimes
+   *    because they are not the conversation's time; a list's `updated_at` is the platform's own value and
+   *    is therefore a legitimate source, but it is *the list's* view — it moves when a conversation is
+   *    renamed, for instance. `atFrom` below is what says so, and a reader that wants "the conversation
+   *    time" has to decide for itself whether this is good enough. There is deliberately no fallback: a
+   *    record without one of these is a record with no time, never `Date.now()`.
+   *
+   * Optional, and absent on every row written before W113 — which reads as "no time recorded", the same
+   * fact as "the platform gave none". That is deliberate and it is not an unknown-becomes-empty mistake:
+   *   · the **field** is not the unknown, the *absence of a time for this conversation* is, and the page
+   *     counts those into their own bucket rather than into any month;
+   *   · nothing writes to this field on a path that could also be reached by an older build, so a missing
+   *     value cannot be a value that was lost — it can only be a value that was never written;
+   *   · no migration, no version bump: the key path is unchanged, so IndexedDB stores the field on new rows
+   *     and old rows keep reading exactly as they did.
+   */
+  at?: number;
+  /** Where `at` came from. Both this and `at` are present, or neither is — see `timeOfRow`. */
+  atFrom?: DebtTimeSource;
+}
+
+/**
+ * W113 · Which field of the platform's list a recorded time was read from.
+ *
+ * Two values rather than one, because they are two different claims about the same conversation: a list
+ * sorted by update time is telling you when it was last *touched*, which is not when it was *started*.
+ * Folding them would make that difference unreadable later, which is the one thing a timestamp column must
+ * not do.
+ */
+export type DebtTimeSource = 'list-update' | 'list-create';
+
+/** One recorded conversation time, on its way into the store. */
+export interface DebtTime {
+  at: number;
+  from: DebtTimeSource;
 }
 
 export const BACKFILL_DB_NAME = 'chat-stasher-backfill';
@@ -118,6 +159,18 @@ export interface DebtSetSnapshot {
   archived: string[];
   /** One past the highest `seq` seen — where the next addition starts. */
   nextSeq: number;
+  /**
+   * 🔴 W113 · **The recorded conversation times of this scope, by id.**
+   *
+   * A map rather than a parallel array, and separate from the two id lists, so that adding it changed
+   * nothing about how a debt set is read or compared: `pending`/`archived` are the same arrays in the same
+   * order they always were, and every existing caller that ignores this field behaves identically.
+   *
+   * Only ids with a time appear. An id in `pending` that is missing here has **no recorded time**, which is
+   * a fact about the platform's list response and not about the debt — the coverage page reports those
+   * separately (`unknownTime`) rather than in any month.
+   */
+  times: Map<string, DebtTime>;
 }
 
 /** What one `persist` wants the store to become. Both lists are ids; `drop` and `settle` differ in where the id lands. */
@@ -362,11 +415,89 @@ export async function readDebtSet(platform: string, scope: string): Promise<Debt
   const ordered = [...rows].sort((a, b) => (a.seq - b.seq) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   let maxSeq = 0;
   for (const row of ordered) if (row.seq > maxSeq) maxSeq = row.seq;
+  // 🔴 W113 · Times are collected from the **same read** as the ids, so a caller can never see a set of ids
+  //    and a set of times that came from two different moments. A row with a number but no source, or a
+  //    source this build does not know, is treated as having no time — see `timeOfRow` in
+  //    lib/coverage-read.ts for why a bare number is not enough.
+  const times = new Map<string, DebtTime>();
+  for (const row of ordered) {
+    const time = timeInRow(row);
+    if (time) times.set(row.id, time);
+  }
   return {
     pending: ordered.filter((r) => r.state === 'pending').map((r) => r.id),
     archived: ordered.filter((r) => r.state === 'archived').map((r) => r.id),
     nextSeq: maxSeq + 1,
+    times,
   };
+}
+
+/**
+ * W113 · The recorded time on one row, or `null`.
+ *
+ * 🔴 Both halves are required and neither is defaulted: a finite positive number **and** a source this
+ *    build knows. A row written by a newer build with a third source is not read as one of the two we
+ *    know — the coverage page would otherwise print a month for a value whose meaning it is guessing.
+ */
+function timeInRow(row: DebtRecord): DebtTime | null {
+  const { at, atFrom } = row;
+  if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) return null;
+  if (atFrom !== 'list-update' && atFrom !== 'list-create') return null;
+  return { at, from: atFrom };
+}
+
+/**
+ * 🔴 W113 · **Record the list's own times onto rows that are already in the store.**
+ *
+ * Why this is a separate write rather than part of `applyDebtDiff`, and why that separation is the whole
+ * safety argument: the debt set's invariants — a debt is on disk before it is worked on, an unknown is
+ * never read as empty, a drop is not a settle — all live in the diff's three lists. A timestamp is not one
+ * of those facts, and threading it through them would have meant a new field in a structure that is
+ * compared, migrated and counted by tests written to protect exactly those invariants. This function
+ * touches `at`/`atFrom` on named rows and **nothing else about the debt set**: not `state`, not `seq`, and
+ * it never creates a row.
+ *
+ * 🔴 It cannot invent a debt. An id with no row is skipped, because a timestamp is only ever *about* a
+ *    conversation we already owe or already have — a row created here would be a debt nothing enumerated,
+ *    and `readDebtSet` would hand it to the engine to fetch.
+ *
+ * 🔴 It cannot overwrite a time with a different one. A row that already carries a time is left alone, so a
+ *    re-listing (W98's migration, or a recovery) cannot silently move a conversation to another month. The
+ *    time is a property of the conversation, and the second reading is not better evidence than the first.
+ *
+ * Returns how many rows it actually changed, so a caller can tell "recorded" from "there was nothing new" —
+ * and `null` when the store could not be read at all, which is a different fact from 0.
+ */
+export async function recordDebtTimes(
+  platform: string,
+  scope: string,
+  times: ReadonlyMap<string, DebtTime>,
+): Promise<number | null> {
+  if (times.size === 0) return 0;
+  const db = await openDb();
+  if (!db) return null;
+  const rows = await readRows(platform, scope);
+  if (rows === null) return null;
+
+  const puts: DebtRecord[] = [];
+  for (const row of rows) {
+    if (timeInRow(row)) continue;
+    const time = times.get(row.id);
+    if (!time) continue;
+    puts.push({ ...row, at: time.at, atFrom: time.from });
+  }
+  if (puts.length === 0) return 0;
+
+  try {
+    const tx = db.transaction(DEBTS_STORE, 'readwrite');
+    const store = tx.objectStore(DEBTS_STORE);
+    for (const record of puts) store.put(record);
+    await txDone(tx);
+  } catch {
+    return null;
+  }
+  for (const record of puts) countWrite('debt', record);
+  return puts.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,13 +532,17 @@ export async function applyDebtDiff(
   for (const id of diff.enqueue) {
     puts.push({ platform, scope, id, state: 'pending', seq: seq++ });
   }
-  for (const id of diff.settle) {
-    // A settled id takes a fresh `seq`: order only ever mattered for ids that are
-    // still owed, and the id is leaving `pending` for good. `settleDebt` is
-    // idempotent, so settling one twice cannot resurrect a `seq` that is already
-    // gone.
-    puts.push({ platform, scope, id, state: 'archived', seq: seq++ });
-  }
+  /**
+   * 🔴 W113b · **A settle's `seq` is taken here, but its record is written inside the
+   *    transaction below, because it has to read the row it is replacing first.**
+   *
+   * A settled id takes a fresh `seq`: order only ever mattered for ids that are
+   * still owed, and the id is leaving `pending` for good. `settleDebt` is
+   * idempotent, so settling one twice cannot resurrect a `seq` that is already
+   * gone.
+   */
+  const settled: Array<{ id: string; seq: number }> = [];
+  for (const id of diff.settle) settled.push({ id, seq: seq++ });
   // An id that is enqueued *and* dropped inside one persist is owed again — the
   // enqueue is the later fact, so it must not be deleted by the drop's tombstone.
   // (Not reachable from the engine's tick order today; written down because the
@@ -417,16 +552,52 @@ export async function applyDebtDiff(
     .filter((id) => !owed.has(id))
     .map((id) => [platform, scope, id]);
 
+  const settledPuts: DebtRecord[] = [];
   try {
     const tx = db.transaction(DEBTS_STORE, 'readwrite');
     const store = tx.objectStore(DEBTS_STORE);
     for (const record of puts) store.put(record);
     for (const key of deletes) store.delete(key);
+    /**
+     * 🔴 W113b · **The settle carries the row's recorded list time through, and that is not a
+     *    nicety — IndexedDB's `put` replaces the whole record.**
+     *
+     * The row being archived is the only place the platform's time for this conversation was
+     * ever written (`recordDebtTimes`, while it was pending), so a settle that writes the
+     * shape `{platform, scope, id, state, seq}` and nothing else destroys it at the moment the
+     * conversation is stored — which is the one moment the coverage page (ADR-032 §6) wants it.
+     * Nothing restores it: a complete enumeration never lists those ids again, so the whole
+     * by-month *stored* column would read "time unknown" on every archived conversation while
+     * the data was sitting there a moment earlier.
+     *
+     * The read is a `get` in **this same transaction**, so it cannot see a store state other
+     * than the one the settle commits against, and the idempotent-settle argument above
+     * survives it: re-settling an archived row reads back the same time it wrote.
+     *
+     * 🔴 `timeInRow` decides whether there is a time to carry, and it is deliberately the same
+     *    reader `readDebtSet` uses: a bare number, or a source this build does not know, is not
+     *    a time, so a settle cannot resurrect a value the reader would refuse to interpret.
+     */
+    for (const entry of settled) {
+      const request = store.get([platform, scope, entry.id]);
+      request.onsuccess = () => {
+        const had = request.result as DebtRecord | undefined;
+        const record: DebtRecord = { platform, scope, id: entry.id, state: 'archived', seq: entry.seq };
+        const time = had ? timeInRow(had) : null;
+        if (time) {
+          record.at = time.at;
+          record.atFrom = time.from;
+        }
+        store.put(record);
+        settledPuts.push(record);
+      };
+    }
     await txDone(tx);
   } catch {
     return false;
   }
   for (const record of puts) countWrite('debt', record);
+  for (const record of settledPuts) countWrite('debt', record);
   for (const key of deletes) countWrite('debt', key);
   return true;
 }

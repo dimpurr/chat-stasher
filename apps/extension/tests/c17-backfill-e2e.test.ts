@@ -125,7 +125,12 @@ async function bootAndDispatch(payload: CapturedFetch): Promise<{ mod: any; resp
    *    minimum — i.e. exactly the numbers this file was written against. The
    *    jitter *itself* is exercised in tests/w3-jitter.test.ts, not here.
    */
-  mod.configureBackfillPace({ clock: fakeClock, random: () => 0 });
+  // 🔴 W113 · `preset: 'standard'` is named rather than inherited. Every tick count in this file was
+  //    written against 2 bodies per tick (ADR-033), which is now the *standard* preset's budget; the
+  //    shipped default is `gentle` (1 per tick, ADR-032 §3). Saying which preset this file is about keeps
+  //    the assertions about the chain — enumerate → debts → paced fetch → write down — instead of about
+  //    which rate happens to be the default this month. See lib/backfill/speed.ts.
+  mod.configureBackfillPace({ clock: fakeClock, random: () => 0, preset: 'standard' });
   if (runtimeListeners.length === 0) await mod.default();
   const responded = await new Promise<any>((resolve) => {
     const ret = runtimeListeners[0]!({ type: 'chat-captured', payload }, { id: 's' }, resolve);

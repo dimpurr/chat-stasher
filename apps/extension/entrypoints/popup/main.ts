@@ -27,6 +27,9 @@ import {
   browserLocalStore,
   browserLocalSnapshot,
 } from '../../lib/backfill/store';
+import { buildCoverage } from '../../lib/coverage';
+import { readCoverageInputs } from '../../lib/coverage-read';
+import { coverageCard, coverageCardTitle, openCoverageLabel } from '../../lib/coverage-view';
 import {
   isBackfillEnabled,
   setBackfillEnabled,
@@ -467,6 +470,62 @@ async function refresh(): Promise<void> {
   const model = await collect();
   lastModel = previous === undefined ? model : { ...model, summary: previous };
   paint(renderPopup(lastModel));
+  // 🔴 ADR-032 · The coverage card is refreshed with every repaint, because the two things that change
+  //    what it says — the switch and the stored progress — are both things the user can change from this
+  //    popup. It is deliberately *not* fetched on a timer: the popup is opened, read and closed, and a
+  //    card that aged while nobody was looking would be the one thing it must not be.
+  void refreshCoverageCard();
+}
+
+/**
+ * ADR-032 §1 · The summary card: one line per (platform, scope), and the way into the full page.
+ *
+ * 🔴 This reads the **same model** the page does (`lib/coverage.ts`, via `lib/coverage-read.ts`), so the
+ *    card and the page cannot disagree about a count. What it deliberately does *not* show is anything
+ *    needing a caveat: no percentage, no estimate, no monthly distribution. Those are the page's job, and
+ *    a two-line card that abbreviated them would be the place a fabricated number first appeared.
+ */
+async function refreshCoverageCard(): Promise<void> {
+  const card = document.getElementById('coverage-card') as HTMLElement | null;
+  const open = document.getElementById('open-coverage') as HTMLButtonElement | null;
+  if (!card || !open) return;
+  try {
+    const now = Date.now();
+    const report = buildCoverage(await readCoverageInputs(browserLocalStore(), now));
+    const view = coverageCard(report, now);
+    card.replaceChildren();
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = coverageCardTitle();
+    card.appendChild(title);
+    for (const line of view.lines) {
+      const div = document.createElement('div');
+      div.className = 'line';
+      // textContent, not innerHTML: a line carries a platform id and an account scope.
+      div.textContent = line.text;
+      card.appendChild(div);
+    }
+    if (view.note) {
+      const div = document.createElement('div');
+      div.className = 'line';
+      div.textContent = view.note;
+      card.appendChild(div);
+    }
+    card.hidden = false;
+    open.textContent = openCoverageLabel();
+    open.hidden = false;
+  } catch (err) {
+    // 🔴 A card that cannot be built is hidden rather than shown empty: an empty card would read as
+    //    "nothing has been archived", which is the one thing this card may not say by accident.
+    card.hidden = true;
+    open.hidden = true;
+    console.warn('[chat-stasher] coverage card failed', (err as Error).message);
+  }
+}
+
+/** Open the standalone coverage page in a tab. No permission is needed to create one, and no request is made. */
+async function onOpenCoverage(): Promise<void> {
+  await browser.tabs.create({ url: browser.runtime.getURL('/coverage.html') });
 }
 
 /**
@@ -604,6 +663,12 @@ document.getElementById('clear-failures')?.addEventListener('click', () => {
   void onClearFailures().catch((err) => {
     console.warn('[chat-stasher] popup clear-failures failed', (err as Error).message);
     void refresh();
+  });
+});
+
+document.getElementById('open-coverage')?.addEventListener('click', () => {
+  void onOpenCoverage().catch((err) => {
+    console.warn('[chat-stasher] popup open-coverage failed', (err as Error).message);
   });
 });
 

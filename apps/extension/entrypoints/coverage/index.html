@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chat Stasher — Coverage</title>
+    <style>
+      /* All inline — no external fonts/CSS, so this page makes zero network requests.
+         That is a requirement of the page, not a style preference: it is the capture's
+         own progress view and it must not talk to anything but this browser's storage. */
+      :root { color-scheme: light dark; }
+      [hidden] { display: none !important; }
+      body {
+        margin: 0;
+        padding: 20px 22px 48px;
+        max-width: 900px;
+        font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      h1 { margin: 0 0 4px; font-size: 20px; }
+      h2 { margin: 26px 0 6px; font-size: 17px; padding-bottom: 4px; border-bottom: 1px solid rgba(128,128,128,.3); }
+      h3 { margin: 18px 0 4px; font-size: 14px; font-weight: 600; opacity: .95; }
+      .subtitle { margin: 0 0 14px; font-size: 12px; opacity: .8; white-space: pre-wrap; }
+      .note {
+        margin: 8px 0; padding: 8px 10px; font-size: 13px; white-space: pre-wrap;
+        border-left: 3px solid rgba(128,128,128,.55);
+      }
+      .note.warn { border-left-color: #b7791f; background: rgba(183,121,31,.10); }
+      .note.bad { border-left-color: #c0392b; background: rgba(192,57,43,.10); font-weight: 600; }
+      .facts { margin: 8px 0; }
+      .fact { display: flex; gap: 10px; margin: 2px 0; font-size: 13px; }
+      .fact .label { flex: 0 0 190px; opacity: .8; }
+      .fact .value { flex: 1 1 auto; white-space: pre-wrap; }
+      table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+      th, td { text-align: left; padding: 3px 14px 3px 0; font-variant-numeric: tabular-nums; }
+      th { border-bottom: 1px solid rgba(128,128,128,.4); font-weight: 600; }
+      .speed { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 8px; }
+      .speed button {
+        font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
+        border: 1px solid rgba(128,128,128,.5); border-radius: 5px; background: transparent;
+      }
+      .speed button[aria-pressed="true"] { border-color: #2b6cb0; box-shadow: inset 0 0 0 1px #2b6cb0; font-weight: 600; }
+      .speed .what { flex: 1 1 100%; font-size: 12px; opacity: .75; }
+      .empty { margin: 16px 0; font-size: 13px; white-space: pre-wrap; opacity: .9; }
+      .error { margin: 16px 0; padding: 10px; font-weight: 600; border-left: 3px solid #c0392b; background: rgba(192,57,43,.12); white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1 id="title"></h1>
+    <p class="subtitle" id="subtitle"></p>
+    <div id="banners"></div>
+    <div id="empty" class="empty" hidden></div>
+    <main id="sections"></main>
+    <div id="speed"></div>
+    <div id="error" class="error" hidden></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

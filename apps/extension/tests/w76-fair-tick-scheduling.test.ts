@@ -162,7 +162,11 @@ const runtimeClock = {
 
 async function bootBackground(): Promise<any> {
   const mod: any = await import('../entrypoints/background');
-  mod.configureBackfillPace({ clock: runtimeClock, random: () => 0 });
+  // 🔴 W113 · `preset: 'standard'` is named rather than inherited. This file counts archived rows per
+  //    wake, and "2 bodies per tick" is the *standard* preset's budget (ADR-033); the shipped default
+  //    is `gentle`, 1 per tick (ADR-032 §3). Naming the preset keeps the assertion about the rotation
+  //    rather than about which rate is the default. See lib/backfill/speed.ts.
+  mod.configureBackfillPace({ clock: runtimeClock, random: () => 0, preset: 'standard' });
   if (runtimeListeners.length === 0) await mod.default();
   return mod;
 }

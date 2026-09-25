@@ -29,7 +29,8 @@ import {
   type TimeState,
   type UndeliveredReason,
 } from './native-host';
-import { formatProgress, progressOfHeader, retryMinutesLeft } from './backfill/progress';
+import { formatProgress, progressOfHeader } from './backfill/progress';
+import { haltNote } from './halt-note';
 import {
   describeFailureReason,
   droppedOf,
@@ -60,6 +61,7 @@ import {
   isHeader,
   stateKey,
   type BackfillHeader,
+  type BackfillState,
 } from './backfill/types';
 import type { HostPauseRecord, HostStatusRecord } from './host-status';
 import {
@@ -1385,96 +1387,14 @@ function notesFor(model: PopupModel): string[] {
     }));
   }
 
+  // 🔴 W113 · The stop, in plain words. The sentences themselves moved into `haltNote` when the coverage
+  //    page needed the same six cases; this is the popup's use of that one copy. Behaviour is unchanged —
+  //    same guard, same inputs, same order in `notes`.
   if (model.state?.halted) {
-    // 🔴 C22 · 'unsupported-platform' is not "it broke and stopped", it is "we
-    //    have not written this platform yet". Both must leave a trace, and they
-    //    must never be the same sentence.
-    if (model.state.halted.reason === 'unsupported-platform') {
-      notes.push(t('popup.notes.halted.unsupportedPlatform', {
-        platform: model.state.platform,
-        detail: model.state.halted.detail,
-      }));
-    } else if (model.state.halted.reason === 'auth-refused') {
-      // 🔴 W61 · The platform refused the request **in its own answer**, with HTTP
-      //    200 — so no status line this popup prints could have shown it, and the
-      //    reason it must never read as is `other`. `other` would say "the platform
-      //    refused a request (auth-refused) — <detail>", which describes the record
-      //    instead of the two things a user needs: that nothing was read, and that
-      //    the fix is a login.
-      //
-      // 🔴 W61b · It carries the retry moment as well (the reason is transient now,
-      //    `haltClassOf`), and both halves have to be in one sentence: the login is
-      //    what makes the *next* round work, and the leg is what comes back to ask.
-      //    Leaving the retry out would describe a stop the record does not describe
-      //    — and, before the fix, a stop nothing in the product could clear.
-      //
-      // 🔴 W61b · And the sentence says nothing about *which* request was refused.
-      //    The same reason is raised on the list segment and on the body segment,
-      //    and the first version of it named the list: for a body refusal that
-      //    sentence was false in both directions (the list had been read, and its
-      //    ids were already pending — the review's third finding). The sentence a
-      //    user sees must be true of every state it is printed in; `{detail}` names
-      //    the segment for anyone who needs it.
-      notes.push(t('popup.notes.halted.authRefused', {
-        platform: model.state.platform,
-        detail: model.state.halted.detail,
-        attempts: model.state.halted.attempts ?? 1,
-        minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
-      }));
-    } else if (model.state.halted.reason === 'refused-unknown') {
-      // 🔴 W61b · The same in-band refusal, with a code this build cannot read. It
-      //    gets its own sentence rather than the generic `waitingRetry` one, and the
-      //    difference is the whole reason it exists: `waitingRetry` says the leg is
-      //    waiting out a backoff after the platform "refused or dropped a request",
-      //    which is a claim about *why* — true for a rate limit, and not established
-      //    here. This one says what is true: the platform named a code this build
-      //    does not know, the code and its message are in the detail, and the leg
-      //    will look again.
-      notes.push(t('popup.notes.halted.refusedUnknown', {
-        platform: model.state.platform,
-        detail: model.state.halted.detail,
-        attempts: model.state.halted.attempts ?? 1,
-        minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
-      }));
-    } else if (haltClassOf(model.state.halted.reason) === 'transient') {
-      // 🔴 W13 · This is the sentence that did not exist, and its absence is why a
-      //    real account sat at 0 archived for over an hour. A transient stop must
-      //    NOT read like the `other` fallback below ("this leg has stopped"): it has
-      //    not stopped. It is waiting out a backoff, it will come back by itself,
-      //    and not one debt was written off while it waited. So the note says all
-      //    four of those things, plus the one number the user actually wants —
-      //    when the next attempt is.
-      notes.push(t('popup.notes.halted.waitingRetry', {
-        reason: model.state.halted.reason,
-        attempts: model.state.halted.attempts ?? 1,
-        minutes: retryMinutesLeft(model.state.halted, model.now ?? Date.now()),
-        detail: model.state.halted.detail,
-      }));
-    } else if (model.state.halted.reason === 'org-ambiguous' || model.state.halted.reason === 'org-unresolved') {
-      // 🔴 W31c · The two organization halts. Each gets its own sentence, and
-      //    neither may fall through to `other`: `other` prints the reason code and
-      //    the technical detail, which is a description of the state rather than
-      //    the one thing a user can do about it. Both of these have exactly one
-      //    action, and it is a human action — which is why the leg stopped.
-      notes.push(t(model.state.halted.reason === 'org-ambiguous'
-        ? 'popup.notes.halted.orgAmbiguous'
-        : 'popup.notes.halted.orgUnresolved'));
-    } else if (model.state.halted.reason === 'detail-unsupported') {
-      // 🔴 C26 · This one must **not** say "stopped before issuing any request" —
-      //    the list request really went out and conversations really were listed.
-      //    Stopping half way and never starting are two different things to a user.
-      notes.push(t('popup.notes.halted.detailUnsupported', {
-        platform: model.state.platform,
-        pending: model.state.pendingCount,
-        detail: model.state.halted.detail,
-      }));
-    } else {
-      notes.push(t('popup.notes.halted.other', {
-        reason: model.state.halted.reason,
-        detail: model.state.halted.detail,
-      }));
-    }
+    const stop = haltNote(model.state.halted, model.state.platform, model.state.pendingCount, model.now ?? Date.now());
+    if (stop) notes.push(stop);
   }
+
 
   // 🔴 W44 · **A stop that stopped applying, said out loud.**
   //

@@ -75,6 +75,35 @@ export interface PacePlan {
    * carries a non-zero band.
    */
   jitterMs?: number;
+  /**
+   * 🔴 W113 · **The band the day's cap is drawn from**, for a plan whose ceiling
+   * is not `DAILY_CAP_MAX` (ADR-032's speed presets, lib/backfill/speed.ts).
+   *
+   * It exists because `drawDailyCap` used to hard-code `[DAILY_CAP_MIN,
+   * DAILY_CAP_MAX]` and then clamp to `DAILY_CAP_MAX`. A preset that only lowered
+   * `maxPerDay` would therefore not get a *drawn* cap at all: the roll would come
+   * out somewhere in 300–400 and be clamped to, say, 200 on every single day —
+   * i.e. exactly the fixed, maximally predictable ceiling W16 added the draw to
+   * remove. So the band travels with the plan.
+   *
+   * optional, and absent ⇒ `DEFAULT_DAILY_CAP_BAND`, which is the pair this file
+   * already published. Every caller that does not know this field exists — which
+   * is every caller before W113, including each `pace` override in the suite —
+   * keeps the drawn values it had, character for character.
+   */
+  dailyCapBand?: DailyCapBand;
+}
+
+/**
+ * W113 · The inclusive range a day's body cap is drawn from.
+ *
+ * 🔴 `band.max` is also the draw's hard ceiling, and `PacePlan.maxPerDay` is a second one: the value that
+ *    reaches the engine is `min(rolled, band.max, maxPerDay)`. The two agreeing is what makes a preset's
+ *    band its real limit rather than a wish (see `drawDailyCap`).
+ */
+export interface DailyCapBand {
+  readonly min: number;
+  readonly max: number;
 }
 
 export const DEFAULT_ENUM_PACE: PacePlan = {
@@ -129,15 +158,28 @@ export const DAILY_CAP_MAX = 400;
 export const QUIET_DAILY_CAP_MIN = 150;
 export const QUIET_DAILY_CAP_MAX = 200;
 
-/** The day's cap: uniform in `[DAILY_CAP_MIN, DAILY_CAP_MAX]`, clamped to the plan's ceiling. `null` ⇒ nothing to draw. */
-export function drawDailyCap(maxPerDay: number | null, random: RandomFn): number | null {
+/**
+ * The band a plan that does not name one draws from: the pair ADR-033 set.
+ *
+ * 🔴 It is the *default argument* below rather than a hard-coded pair inside the function, so that "no band
+ *    named" and "this band" are the same code path — a separate branch is a second place for the two to
+ *    disagree, and the disagreement would be silent in the direction that raises the rate.
+ */
+export const DEFAULT_DAILY_CAP_BAND: DailyCapBand = { min: DAILY_CAP_MIN, max: DAILY_CAP_MAX };
+
+/** The day's cap: uniform in `band`, clamped to the plan's ceiling. `null` ⇒ nothing to draw. */
+export function drawDailyCap(
+  maxPerDay: number | null,
+  random: RandomFn,
+  band: DailyCapBand = DEFAULT_DAILY_CAP_BAND,
+): number | null {
   if (maxPerDay === null) return null;
-  // `+ 1` then floor makes the top of the range inclusive: random()=0 ⇒ DAILY_CAP_MIN, random()→1 ⇒ DAILY_CAP_MAX.
-  const rolled = Math.floor(uniformBetween(random, DAILY_CAP_MIN, DAILY_CAP_MAX + 1));
+  // `+ 1` then floor makes the top of the range inclusive: random()=0 ⇒ band.min, random()→1 ⇒ band.max.
+  const rolled = Math.floor(uniformBetween(random, band.min, band.max + 1));
   // The plan's ceiling always wins over the roll, so a smaller maxPerDay is never raised.
-  // DAILY_CAP_MAX is applied here too, so the function never returns more than
-  // DAILY_CAP_MAX on its own, whatever ceiling a future caller passes.
-  return Math.max(0, Math.min(rolled, DAILY_CAP_MAX, maxPerDay));
+  // `band.max` is applied here too, so the function never returns more than the band's
+  // own ceiling on its own, whatever ceiling a future caller passes.
+  return Math.max(0, Math.min(rolled, band.max, maxPerDay));
 }
 
 /**

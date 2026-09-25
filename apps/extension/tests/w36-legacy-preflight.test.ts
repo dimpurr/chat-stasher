@@ -240,7 +240,9 @@ describe('W36 · the migration preflight', () => {
     //    keeps every id and the trace blames the debt store forever, on the
     //    strength of one transient open.
     const second = await readDebtSet(PLATFORM, SCOPE);
-    expect(second).toEqual({ pending: [], archived: [], nextSeq: 1 });
+    // 🔴 W113 · `times` is part of the snapshot now: no id here has a recorded conversation time, which
+    //    is the same fact as "this scope's list never gave us one".
+    expect(second).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map() });
   });
 
   it('clears an orphaned pre-W18 key once its copy in the debt store is confirmed equal', async () => {

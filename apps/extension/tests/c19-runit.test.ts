@@ -296,7 +296,11 @@ function liveCapture(): CapturedFetch {
 
 async function bootBackground(): Promise<any> {
   const mod: any = await import('../entrypoints/background');
-  mod.configureBackfillPace({ clock: runtimeClock });
+  // 🔴 W113 · `preset: 'standard'` is named rather than inherited: the run-level assertions below count
+  //    bodies per tick, and 2 per tick is the *standard* preset's budget (ADR-033). The shipped default is
+  //    `gentle` — 1 per tick (ADR-032 §3). Naming it keeps this file about the runtime wiring rather than
+  //    about which rate is the default. See lib/backfill/speed.ts.
+  mod.configureBackfillPace({ clock: runtimeClock, preset: 'standard' });
   if (runtimeListeners.length === 0) await mod.default();
   return mod;
 }

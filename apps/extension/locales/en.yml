@@ -648,6 +648,19 @@ tick:
     ran: it ran
     unknown: "outcome code: {reason}"
 
+  # 🔴 W113 · **Why one target's wake did not run** — the `TickSchedule.skipped` codes, in plain words.
+  # The keys are camel case here and kebab case on the record (`TICK_SKIP_*` values); the mapping is in
+  # lib/coverage.ts's `describeSkipReason`, which falls back to `unknown` rather than composing a key from
+  # the code — a code we have never seen must read as "a code this build cannot word", not as a catalog
+  # entry that renders its own name.
+  skip:
+    noHttpPort: no page of this platform was open at the time, so there was nothing to fetch through
+    halted: this platform is held by a stop that still applies
+    waitingRetry: this platform is inside its backoff after a refusal, and will be asked again by itself
+    dailyCap: today's body quota for this platform was already spent
+    stateUnreadable: this platform's saved progress record could not be read, so it was left untouched
+    unknown: "a skip reason this build does not know: {reason}"
+
 # ---------------------------------------------------------------------------
 # Progress (the only place a percentage may ever be produced)
 # ---------------------------------------------------------------------------
@@ -704,3 +717,163 @@ failure:
 # live probe), so the notes block is empty. If a future partial plan arrives,
 # its note goes back under a `platformNote:` key here and in zh_CN.yml together.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# ADR-032 · The coverage page (the standalone extension page) and its popup card.
+#
+# 🔴 The rules these sentences are written under, because they are easy to lose
+#    one at a time:
+#   · a lower bound is never drawn as a total — while the list is still being
+#     read the number is printed with a `≥`, and `complete` is a claim about the
+#     cursor, not a round number;
+#   · an estimate is always labelled one, and which rate produced it is named;
+#   · "we do not know" is said, and never as a zero, a dash, or an empty box.
+# ---------------------------------------------------------------------------
+coverage:
+  title: Backfill coverage
+  subtitle: >-
+    What the extension itself has recorded, as of {when}. This page reads this
+    browser's own progress records only — it sends nothing to any platform, and
+    the archive's own view is the "chat-stasher ui" command.
+  empty: >-
+    No progress record exists yet. That is not "nothing has been archived" — it
+    means this browser has never backfilled a platform, which happens the first
+    time you open one of the supported platforms with the backfill switch on.
+  # ADR-032 §4 · The state, in plain words. `in-progress` deliberately has no
+  # sentence: the ordinary case must not read like a notice.
+  state:
+    off: >-
+      The backfill switch is off. Nothing is being fetched and no request will be
+      made until you turn it on in the extension's popup.
+    hostPaused: >-
+      This machine's chat-stasher host is unreachable, so this leg has paused
+      rather than fetching bodies it cannot deliver. Start the host and it
+      resumes from the same conversation.
+    haltedNoRecord: >-
+      A stop was recorded here but its record could not be read, so the reason is
+      unknown. Nothing is being fetched until it is looked at.
+    unregistered: >-
+      There is a progress record for {platform} but no registered target for it,
+      so nothing runs here. Opening {platform} once registers it again.
+    capped: >-
+      Today's quota for this platform is done ({cap} conversations), which is the
+      pacing working as intended rather than a failure. It continues by itself
+      tomorrow.
+    waiting: "Not running right now: {why}."
+    done: Every conversation this platform has listed has been stored.
+  counts:
+    fromHeader: >-
+      The stored debt list could not be read, so the archived and owed numbers
+      below are the ones the progress header recorded — a convenience copy, not
+      the authority. The list itself is untouched.
+  enum:
+    complete: "listed: {listed} — the list has been read to its end"
+    inProgress: "still listing: ≥ {listed} so far"
+    # 🔴 W113b · `truncated` is an **unfinished** list like `inProgress`, so its number carries the `≥` too
+    #    (ADR-032 §1: any list that was not read to its end carries the `≥`). The words said "NOT read to
+    #    its end" while the number was printed
+    #    bare, which is exactly the shape — a lower bound drawn as a total — the rule exists to forbid.
+    truncated: "listed: ≥ {listed} so far, and the list was NOT read to its end — {why}"
+    why:
+      cursorMissing: the platform's answer carried no continuation cursor, so only the page we had was listed
+      hasMoreMissing: the platform's answer said nothing about whether another page exists, so we stopped rather than assume
+      emptyPageInferred: the platform has no explicit end-of-list signal, and it returned an empty page — that is an inference, not a confirmation
+      shortPageInferred: the platform has no explicit end-of-list signal, and it returned a short page — that is an inference, not a confirmation
+      unknown: "the list stopped for a reason this build does not know: {kind}"
+  totals:
+    label: "Total, as the platform reports it"
+    # 🔴 W113b · ADR-032 §2 asks for **where the total came from**, and that is all this sentence says: the
+    #    number is the platform's own claim, not a measurement of the account. It opened with "at least see
+    #    above;", a fragment of an earlier draft that named nothing above it and read as a leftover.
+    fromResponse: "the platform's own total is {total}"
+    unknown: the platform does not provide a total for this list, so there is no denominator
+    contradicted: >-
+      the platform's own total has already been exceeded by the rows actually
+      returned, so it is not used as a denominator
+  labels:
+    archived: stored in full
+    archivedOf: "{archived} of {total} listed ({percent}%)"
+    # 🔴 The percentage is missing **by rule** (computeProgress), and the sentence says which
+    #    condition failed rather than leaving the reader to wonder why there is no number.
+    noPercent: "no percentage: {reason}"
+    pending: still owed
+    percent: "of the listed conversations" 
+    failures: not stored, by reason
+    failuresDropped: "{count} older entries were dropped from this list (it is capped)"
+    parked: >-
+      parked because their body came back empty and nothing has yet proved the
+      platform still returns conversations
+    emptyStreak: "empty bodies in a row: {count}"
+    relisted: >-
+      This platform's stored list of conversations had to be read again on
+      {when}: the record claimed {recorded} conversation id(s) and the stored
+      debt list held {held}. Nothing was deleted from your archive, and a
+      conversation that had already been stored cannot be told apart from one
+      that never was.
+    never: never
+  speed:
+    noCap: "No daily limit in force (this plan fetches no bodies)."
+    cap: "Daily limit in force today: {cap} conversations, at most {tick} per wake."
+    measured: "measured over today so far: about {rate}/day ({bodies} in {hours} h)"
+    measuredUnknown: >-
+      measured rate: not enough of a day yet to publish one ({hours} h of today
+      have passed)
+    eta: >-
+      estimate: about {days} day(s) to finish the {pending} still owed at the
+      {basis} — an estimate, not a promise: it assumes the leg keeps fetching
+    etaUnknown: >-
+      estimate: none — there is no rate to divide by yet, because no quota is in
+      force and no measured rate is available
+    etaNothingOwed: "estimate: nothing is owed here, so there is nothing to finish"
+    # 🔴 W113b · A scope with no registered target runs nothing, so there is no estimate to give — and the
+    #    sentence has to name that reason, because the two sentences beside it give one (a rate the row does
+    #    have) or name a different cause (no rate to divide by yet). A reader who saw this row next to a row
+    #    with an ETA must be able to tell which of the two is going to finish.
+    etaUnregistered: >-
+      estimate: none — nothing runs for this platform here, so the {pending} still owed will not be
+      fetched until it is registered again
+    # 🔴 Under a day the sentence switches units. "about 0.0 day(s)" is arithmetically right and
+    #    useless: the reader cannot tell it from "no time at all".
+    etaHours: >-
+      estimate: about {hours} hour(s) of fetching left for the {pending} still owed at the {basis} —
+      an estimate, not a promise: it assumes the leg keeps fetching
+    basisMeasured: rate measured today
+    basisCap: daily limit
+    neverFetched: no conversation body has been fetched yet
+    lastBody: "last conversation fetched {minutes} min ago"
+  # 🔴 The popup's summary card. Counts and a state word only — never a percentage and never an estimate:
+  # those need the caveats that live on the page, and a two-line card cannot carry them.
+  card:
+    open: Open the coverage page
+    title: Coverage
+    line: "{platform} · {scope} · stored {archived}, owed {pending} — {state}"
+    running: running
+  months:
+    title: When the conversations are from
+    note: >-
+      By the time the platform's own list gave for each conversation, counted in
+      this browser's calendar. Months the platform gave no time for are counted
+      separately below and are NOT spread across the months — an unrecorded time
+      is not a month.
+    archived: stored
+    pending: owed
+    unknownTime: >-
+      time unknown: {archived} stored and {pending} owed — the platform's list
+      gave no time for these, so they are not in any month above
+    none: >-
+      No conversation here has a recorded time yet, so there is no monthly
+      distribution to show. It is not an empty history: the times simply have not
+      been recorded.
+  preset:
+    title: Speed
+    gentle: Gentle (default)
+    standard: Standard
+    faster: Faster
+    risky: >-
+      Faster raises how much is fetched per day and per wake. It does not change
+      how close together two requests are, and every gap keeps its irregularity —
+      but it is the one setting here that asks more of the platform, which is why
+      it is not the default.
+    failed: "The speed setting could not be saved ({detail}), so nothing changed."
+    what: "at most {cap} conversations a day, {tick} per wake"
