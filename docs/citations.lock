@@ -565,14 +565,16 @@ crates/chat-stasher/src/main.rs:7682-7689  e726e719a9a4  lines=8
   <- docs/install.md:544  :: Err(ActivityIndexError::Write(message)) => {
 crates/chat-stasher/src/main.rs:7732-7744  4c3eaca94d5c  lines=13
   <- docs/install.md:226  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:7913-8123  e3ac7039117c  lines=211
-  <- README.md:179, README.md:186  :: fn cmd_status(
-crates/chat-stasher/src/main.rs:7930-7945  199d1f99db5b  lines=16
+crates/chat-stasher/src/main.rs:7913-8107  141f941c71d7  lines=195
+  <- README.md:179, README.md:186  :: #[allow(clippy::too_many_arguments)]
+crates/chat-stasher/src/main.rs:7931-7945  2648ec54bc2b  lines=15
   <- docs/install.md:554  :: let config = match Config::load() {
-crates/chat-stasher/src/main.rs:8080-8081  45ab8d39f01f  lines=2
+crates/chat-stasher/src/main.rs:8081-8082  45ab8d39f01f  lines=2
   <- docs/install.md:510  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:8261-8552  44e8b605cec0  lines=292
-  <- README.md:179, README.md:186, docs/install.md:531  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
+crates/chat-stasher/src/main.rs:8260-8552  400244927fb3  lines=293
+  <- README.md:179, README.md:186  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
+crates/chat-stasher/src/main.rs:8262-8552  2ef434c0d81b  lines=291
+  <- docs/install.md:531  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs/privacy.md:594, docs/threat-model.md:401  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
 crates/chat-stasher/src/nativehost.rs:204-320  9f3a51e5f984  lines=117

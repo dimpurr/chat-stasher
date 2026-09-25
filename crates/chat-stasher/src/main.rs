@@ -7767,8 +7767,9 @@ fn cmd_setup(
     json: bool,
 ) -> ExitCode {
     let interactive = !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let config = Config::load();
-    let scan = match scanner::scan(&config) {
+    let scan = match Config::load()
+        .and_then(|config| scanner::scan(&config).map_err(anyhow::Error::from))
+    {
         Ok(report) => report,
         Err(error) => {
             if !interactive {
