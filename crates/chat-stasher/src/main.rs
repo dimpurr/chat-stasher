@@ -6495,7 +6495,7 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) ->
 }
 
 /// `verify` — prove the archive is intact, level by level. Each level prints
-/// its own verdict; the exit code is FAILURE if any requested level failed.
+/// its own verdict; exit 1 means a completed check failed, and 3 means reading failed.
 #[allow(clippy::too_many_arguments)]
 fn cmd_verify(
     level: VerifyLevel,
@@ -6531,7 +6531,7 @@ fn cmd_verify(
         Err(e) => {
             eprintln!("verify: {e}");
             reap_remote(&cfg, keep_ssh_masters);
-            return ExitCode::FAILURE;
+            return ExitCode::from(3);
         }
     };
     let need_stage = matches!(level, VerifyLevel::L3 | VerifyLevel::All);
@@ -6540,7 +6540,7 @@ fn cmd_verify(
         (true, None) => {
             eprintln!("verify: `--stage` is required for level l3 / all");
             reap_remote(&cfg, keep_ssh_masters);
-            return ExitCode::FAILURE;
+            return ExitCode::from(2);
         }
         (false, _) => PathBuf::from("."),
     };
@@ -6560,23 +6560,55 @@ fn cmd_verify(
     );
 
     let mut failed = 0usize;
+    let mut unreadable = 0usize;
     match level {
-        VerifyLevel::L1 => run_check(&store, &mk, false, "L1 structure", &mut failed),
-        VerifyLevel::L2 => run_check(&store, &mk, true, "L2 content", &mut failed),
+        VerifyLevel::L1 => run_check(
+            &store,
+            &mk,
+            false,
+            "L1 structure",
+            &mut failed,
+            &mut unreadable,
+        ),
+        VerifyLevel::L2 => run_check(
+            &store,
+            &mk,
+            true,
+            "L2 content",
+            &mut failed,
+            &mut unreadable,
+        ),
         VerifyLevel::L3 => {
             println!("[verify] stage          : {}", stage.display());
-            run_reconcile(&store, &mk, &stage, full_ids, &mut failed);
+            run_reconcile(&store, &mk, &stage, full_ids, &mut failed, &mut unreadable);
         }
         VerifyLevel::All => {
-            run_check(&store, &mk, false, "L1 structure", &mut failed);
-            run_check(&store, &mk, true, "L2 content", &mut failed);
+            run_check(
+                &store,
+                &mk,
+                false,
+                "L1 structure",
+                &mut failed,
+                &mut unreadable,
+            );
+            run_check(
+                &store,
+                &mk,
+                true,
+                "L2 content",
+                &mut failed,
+                &mut unreadable,
+            );
             println!("[verify] stage          : {}", stage.display());
-            run_reconcile(&store, &mk, &stage, full_ids, &mut failed);
+            run_reconcile(&store, &mk, &stage, full_ids, &mut failed, &mut unreadable);
         }
     }
 
     reap_remote(&cfg, keep_ssh_masters);
-    if failed == 0 {
+    if unreadable > 0 {
+        println!("[verify] RESULT         : INCOMPLETE ({unreadable} level(s) unreadable)");
+        ExitCode::from(3)
+    } else if failed == 0 {
         println!("[verify] RESULT         : OK");
         ExitCode::SUCCESS
     } else {
@@ -6585,7 +6617,14 @@ fn cmd_verify(
     }
 }
 
-fn run_check(store: &BackupStore, mk: &MasterKey, data: bool, name: &str, failed: &mut usize) {
+fn run_check(
+    store: &BackupStore,
+    mk: &MasterKey,
+    data: bool,
+    name: &str,
+    failed: &mut usize,
+    unreadable: &mut usize,
+) {
     match store.check_repo(mk, data) {
         Ok(summary) => {
             print_check_summary(&summary, name);
@@ -6599,7 +6638,7 @@ fn run_check(store: &BackupStore, mk: &MasterKey, data: bool, name: &str, failed
                 &e,
                 &store.cfg,
             );
-            *failed += 1;
+            *unreadable += 1;
         }
     }
 }
@@ -6629,6 +6668,7 @@ fn run_reconcile(
     stage: &Path,
     full_ids: bool,
     failed: &mut usize,
+    unreadable: &mut usize,
 ) {
     match store.reconcile_manifest(mk, stage) {
         Ok(report) => {
@@ -6639,7 +6679,7 @@ fn run_reconcile(
         }
         Err(e) => {
             chat_stasher::remote_err::eprint_remote_error("verify: L3 reconcile", &e, &store.cfg);
-            *failed += 1;
+            *unreadable += 1;
         }
     }
 }

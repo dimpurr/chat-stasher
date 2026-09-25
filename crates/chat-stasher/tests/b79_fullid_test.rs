@@ -117,6 +117,39 @@ fn run_verify(fixture: &Fixture, full_ids: bool) -> Result<Output, Box<dyn Error
     Ok(command.output()?)
 }
 
+#[test]
+fn verify_unreadable_repository_exits_three() -> Result<(), Box<dyn Error>> {
+    let fixture = make_fixture()?;
+    let mut command = isolated_command(fixture.sandbox.path())?;
+    let output = command
+        .args(["verify", "--level", "l3", "--stage"])
+        .arg(&fixture.stage)
+        .args(["--repo"])
+        .arg(fixture.sandbox.path().join("absent-repo"))
+        .args(["--key-file"])
+        .arg(&fixture.key)
+        .args(["--machine", MACHINE, "--keep-ssh-masters"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(3));
+    Ok(())
+}
+
+#[test]
+fn verify_completed_reconcile_mismatch_exits_one() -> Result<(), Box<dyn Error>> {
+    let fixture = make_fixture()?;
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &fixture.stage,
+        MACHINE,
+        "opencode.synthetic-later-session",
+        &[r#"{"synthetic":true,"seq":2}"#.to_string()],
+    )?;
+    let output = run_verify(&fixture, false)?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("MISSING IN ARCHIVE"));
+    Ok(())
+}
+
 fn text(output: Output) -> Result<String, Box<dyn Error>> {
     if !output.status.success() {
         return Err(format!(
