@@ -140,14 +140,50 @@ export function drawDailyCap(maxPerDay: number | null, random: RandomFn): number
   return Math.max(0, Math.min(rolled, DAILY_CAP_MAX, maxPerDay));
 }
 
+/**
+ * 🔴 W127 · **A list-only plan's pages are paced at the detail segment's rhythm.**
+ *
+ * `LIST_PAGES_PER_TICK` (engine.ts) replaced `Infinity` with 8, which bounds how
+ * many pages one alarm wake may read but does **not** bound the rate: eight pages
+ * on `DEFAULT_ENUM_PACE` land 2-6 s apart, so the tick's peak is 8 requests in
+ * 16-48 s — about **10-30 req/min**, against the 8-10 requests a whole account's
+ * list ever needs and against the standard plan's derived peak of about 4 req/min
+ * (28-RATE-LIMITS §3.3 item 3). The per-tick cap and the per-request interval are
+ * different brakes, and only the second one bounds the rate.
+ *
+ * So a plan with no body segment — the one whose enumeration *is* its whole leg —
+ * reads its pages on the **same floor and band as a body fetch**: 20-45 s apart,
+ * which is about 1.3-3 req/min, the detail plan's own rhythm, and still well above
+ * the 30 s `Retry-After` floor. The daily cap is `null` because list pages are not
+ * counted against it (only bodies are; see `DEFAULT_DETAIL_PACE.maxPerDay`).
+ *
+ * 🔴 The numbers are **derived from `DEFAULT_DETAIL_PACE`**, not copied, so "the
+ *    detail-plan rhythm" cannot drift away from the detail plan: if the detail
+ *    floor moves, this moves with it. The tick is longer (8 pages ≈ 160-360 s) but
+ *    the alarm is one-shot and drawn after the tick ends (alarm.ts), so it cannot
+ *    overlap the next wake.
+ */
+export const DEFAULT_LIST_ONLY_ENUM_PACE: PacePlan = {
+  minIntervalMs: DEFAULT_DETAIL_PACE.minIntervalMs,
+  maxPerDay: null,
+  jitterMs: DEFAULT_DETAIL_PACE.jitterMs,
+};
+
 export interface BackfillPace {
   enumerate: PacePlan;
   detail: PacePlan;
+  /**
+   * 🔴 W127 · Optional and absent ⇒ `DEFAULT_LIST_ONLY_ENUM_PACE`. It is a separate
+   * seat so a test (or a future preset) can slow list-only enumeration without
+   * touching the one-page-per-tick rhythm every body-bearing plan already has.
+   */
+  listOnlyEnumerate?: PacePlan;
 }
 
 export const DEFAULT_PACE: BackfillPace = {
   enumerate: DEFAULT_ENUM_PACE,
   detail: DEFAULT_DETAIL_PACE,
+  listOnlyEnumerate: DEFAULT_LIST_ONLY_ENUM_PACE,
 };
 
 /**

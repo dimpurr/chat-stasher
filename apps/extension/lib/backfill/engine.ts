@@ -46,7 +46,15 @@ import {
   type BackfillRequestInit,
 } from './enumerate';
 import { countsOf, formatProgress } from './progress';
-import { DEFAULT_PACE, Pacer, drawDailyCap, systemClock, type BackfillPace, type Clock } from './pace';
+import {
+  DEFAULT_LIST_ONLY_ENUM_PACE,
+  DEFAULT_PACE,
+  Pacer,
+  drawDailyCap,
+  systemClock,
+  type BackfillPace,
+  type Clock,
+} from './pace';
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 import { sha256Hex } from '../native-host';
 import type { BackfillStore } from './store';
@@ -59,6 +67,7 @@ import {
   haltSubjectOf,
   initialState,
   isTransientReason,
+  parseRetryAfterMs,
   transientRetryDelayMs,
   type BackfillState,
   type DetailOutcomeRecord,
@@ -86,6 +95,17 @@ export interface HttpResponse {
    * allowed to set, and `haltReasonForStatus` for who reads it.
    */
   survivedCredentialReread?: boolean;
+  /**
+   * 🔴 W127 · **The platform's own `Retry-After`, carried from the response the
+   * page fetched and read here rather than inferred from the status.**
+   *
+   * It is the **raw header value**, parsed and clamped in one place
+   * (`parseRetryAfterMs`, types.ts) so the response shape carries a fact and not a
+   * decision. Absent = the header was not there, or the wrapper did not carry it
+   * (a fixture, an older content script) — which is `parseRetryAfterMs`'s `null`,
+   * and means the ladder decides. A non-2xx response is the only one that reads it.
+   */
+  retryAfter?: string;
 }
 
 /**
@@ -713,6 +733,27 @@ function haltReasonForStatus(
 }
 
 /**
+ * 🔴 W127 · **The `Retry-After` this response may move the retry by, or `undefined`
+ * so the ladder decides.**
+ *
+ * Two conditions, both deliberate:
+ *  · the status is **429 or 503** — the two statuses RFC 9110 defines
+ *    `Retry-After` for; a 403 or a 500/502/504 stays on the ladder even if a
+ *    header is present, because those are not the platform saying "wait this
+ *    long";
+ *  · the value parses and clamps to a usable wait (`parseRetryAfterMs`).
+ *
+ * Absent, empty, garbage and a value outside the band all answer `undefined`
+ * (after clamping, out-of-band values do produce a number — the band is the
+ * point). The caller (`halt`) only honours it for the `rate-limited` reason.
+ */
+function retryAfterMsFor(res: HttpResponse, now: number): number | undefined {
+  if (res.status !== 429 && res.status !== 503) return undefined;
+  const ms = parseRetryAfterMs(res.retryAfter, now);
+  return ms === null ? undefined : ms;
+}
+
+/**
  * 🔴 W45 · **Turn a `ledger-mismatch` refusal into the detail that says what happens next.**
  *
  * The refusal's own detail is the diagnosis (four numbers, and what was tried
@@ -940,7 +981,29 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // so the interval takes effect across ticks.
   // Old sets have no such field ⇒ null ⇒ byte-identical to C11.
   const anchors = state.lastFetchAt ?? { enumerate: null, detail: null };
-  const enumPacer = new Pacer(pace.enumerate, clock, 'enumerate', anchors.enumerate, random);
+  /**
+   * 🔴 W127 · **Which plan this run is for, asked once, up front** — because the
+   *    enumeration pacer's interval depends on it now: a list-only plan's pages are
+   *    paced at the detail rhythm (`DEFAULT_LIST_ONLY_ENUM_PACE`), and a plan that
+   *    can fetch bodies keeps the old one-page-per-tick 2-6 s rhythm.
+   *
+   *    This is a pure table read, not a request. The two halts that act on these
+   *    values (`shape-changed` for an unknown origin, `unsupported-platform` for a
+   *    platform with no plan) still run in their own places below, after `halt` is
+   *    defined; here `null` only means "there is no plan to pace for", and the
+   *    pacer is built with the default rhythm either way — it will not fetch.
+   */
+  const platformRow = getPlatformByOrigin(opts.origin, opts.channel ?? currentReleaseChannel());
+  const plannedPlan = platformRow ? (opts.plans ?? backfillPlanFor)(platformRow.id) : null;
+  const enumPacer = new Pacer(
+    plannedPlan && !canBackfillDetail(plannedPlan)
+      ? (pace.listOnlyEnumerate ?? DEFAULT_LIST_ONLY_ENUM_PACE)
+      : pace.enumerate,
+    clock,
+    'enumerate',
+    anchors.enumerate,
+    random,
+  );
   const detailPacer = new Pacer(pace.detail, clock, 'detail', anchors.detail, random);
   /** Write the moment a segment was just let through back into state (persisting is each caller's own job). */
   const anchor = (segment: 'enumerate' | 'detail', at: number | null): void => {
@@ -1150,6 +1213,15 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
        * to name.
        */
       verdict?: false;
+      /**
+       * 🔴 W127 · **The platform's own `Retry-After`, already parsed and clamped
+       * (`parseRetryAfterMs`, types.ts).** When it is a number it replaces the
+       * ladder's delay for this one retry; absent or `null` means the header said
+       * nothing usable and the ladder decides. Only the non-2xx branches that saw a
+       * 429/503 pass it (see `retryAfterMsFor`), and it is additionally gated on
+       * `rate-limited` below, so it can never leak onto another rung.
+       */
+      retryAfterMs?: number | null;
     } = {},
   ): Promise<RunReport> => {
     const at = clock.now();
@@ -1167,12 +1239,21 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     //    which is what keeps the permanent semantics byte-identical.
     if (haltClassOf(reason) === 'transient' && isTransientReason(reason)) {
       transientStreak += 1;
+      /**
+       * 🔴 W127 · **`Retry-After` replaces the delay, it does not replace the
+       *    streak.** The consecutive-failure count still grows, so the moment the
+       *    platform stops sending a usable header the ladder picks up from where it
+       *    would have been, not from attempt 1. The gate on `rate-limited` is the
+       *    second of the two conditions (the first is at the call site): a
+       *    `transport-error` never reads a header, even if one were somehow attached.
+       */
+      const honoured = reason === 'rate-limited' ? opts2.retryAfterMs : undefined;
       state.halted = {
         reason,
         at,
         detail,
         attempts: transientStreak,
-        retryAt: at + transientRetryDelayMs(reason, transientStreak, random),
+        retryAt: at + (honoured ?? transientRetryDelayMs(reason, transientStreak, random)),
       };
     } else {
       /**
@@ -1453,11 +1534,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     }
   }
 
-  const platformRow = getPlatformByOrigin(opts.origin, opts.channel ?? currentReleaseChannel());
+  // 🔴 W127 · `platformRow` was resolved above, before the enumeration pacer was
+  // built; the stop for an unknown origin still happens here, after `halt` exists.
   if (!platformRow) {
     return halt('shape-changed', `origin ${opts.origin} is not in the platform table`);
   }
-
   // 🔴 C22 · **Before issuing any request**, ask: have we actually written this
   // platform's enumeration at all?
   //
@@ -1467,7 +1548,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // account, get a 404 back, and leave a 'shape-changed' row in the ledger.
   // That trace was an **accurately worded lie**: the API had not changed, we had
   // simply never written it.
-  const plan = (opts.plans ?? backfillPlanFor)(platformRow.id);
+  const plan = plannedPlan;
   if (!plan) {
     const gap = unsupportedBackfillFor(platformRow.id);
     // In the platform table but registered in neither ⇒ the wiring missed it, and that has to be sayable too.
@@ -1716,6 +1797,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       return halt(
         haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true),
         `${listWhere()} returned HTTP ${res.status}`,
+        { retryAfterMs: retryAfterMsFor(res, clock.now()) },
       );
     }
     /**
@@ -2185,7 +2267,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
     if (res.status < 200 || res.status > 299) {
-      return halt(haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true), `detail returned HTTP ${res.status}`);
+      return halt(haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true), `detail returned HTTP ${res.status}`, { retryAfterMs: retryAfterMsFor(res, clock.now()) });
     }
 
     /**
@@ -2237,7 +2319,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         return halt('transport-error', `detail step 2: ${(err as Error).message}`);
       }
       if (res2.status < 200 || res2.status > 299) {
-        return halt(haltReasonForStatus(res2.status, plan.platform, res2.survivedCredentialReread === true), `detail step 2 returned HTTP ${res2.status}`);
+        return halt(haltReasonForStatus(res2.status, plan.platform, res2.survivedCredentialReread === true), `detail step 2 returned HTTP ${res2.status}`, { retryAfterMs: retryAfterMsFor(res2, clock.now()) });
       }
       deliveredUrl = step2Url;
       deliveredMethod = 'POST';
@@ -2311,7 +2393,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           return halt('transport-error', `detail page: ${(err as Error).message}`);
         }
         if (next.status < 200 || next.status > 299) {
-          return halt(haltReasonForStatus(next.status, plan.platform, next.survivedCredentialReread === true), `detail page returned HTTP ${next.status}`);
+          return halt(haltReasonForStatus(next.status, plan.platform, next.survivedCredentialReread === true), `detail page returned HTTP ${next.status}`, { retryAfterMs: retryAfterMsFor(next, clock.now()) });
         }
         if (!matchesResponseShape(platformRow, next.text)) {
           return halt('shape-changed', `detail page does not match the ${platformRow.id} response shape`);

@@ -72,6 +72,16 @@ export function needsChatgptBearer(url: string, pageOrigin: string): boolean {
 export interface MinimalResponse {
   status: number;
   text: () => Promise<string>;
+  /**
+   * 🔴 W127 · The response's headers, when the underlying object is a real
+   * `Response` — which the page's own `fetch` is. Optional because every synthetic
+   * response in the test suite is a `{status, text}` object, and "no headers" has to
+   * keep meaning exactly that: nothing to read, not an empty set.
+   *
+   * Only `Retry-After` is read from it, by the bridge's projection, and the value
+   * travels as a string to the engine's parser.
+   */
+  headers?: { get(name: string): string | null };
 }
 
 export type RawFetch = (url: string, init: RequestInit) => Promise<MinimalResponse>;

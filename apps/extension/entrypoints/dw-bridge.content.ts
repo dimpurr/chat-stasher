@@ -578,9 +578,13 @@ export default defineContentScript({
       //    `text()` is called later — down in `serveBackfillFetch`, after this
       //    projection. Reading the status here and the body there is only possible
       //    because that object is passed on rather than rebuilt.
+      // 🔴 W127 · The same object is where `Retry-After` is read: it is a response
+      //    header, so only the code holding the response can see it. The raw value is
+      //    passed on; nothing is parsed or decided here.
+      const retryAfter = answer.response.headers?.get('retry-after') ?? null;
       return answer.survivedCredentialReread === true
-        ? { status: answer.response.status, text: () => answer.response.text(), survivedCredentialReread: true }
-        : { status: answer.response.status, text: () => answer.response.text() };
+        ? { status: answer.response.status, text: () => answer.response.text(), survivedCredentialReread: true, retryAfter }
+        : { status: answer.response.status, text: () => answer.response.text(), retryAfter };
     };
 
     /**

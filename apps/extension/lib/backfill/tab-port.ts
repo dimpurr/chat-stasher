@@ -221,7 +221,7 @@ export type BackfillFetchReply =
    * so that a reply from any other wrapper, and every existing reply shape, stays what
    * it was.
    */
-  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean }
+  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean; retryAfter?: string }
   | { ok: false; error: string };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -763,7 +763,26 @@ export function isAllowedBackfillUrl(
 export type FetchLike = (
   url: string,
   init?: BackfillRequestInit,
-) => Promise<{ status: number; text: () => Promise<string>; survivedCredentialReread?: boolean }>;
+) => Promise<{
+  status: number;
+  text: () => Promise<string>;
+  survivedCredentialReread?: boolean;
+  /**
+   * 🔴 W127 · The platform's raw `Retry-After` response header, if the page-side
+   * fetch can see one (`Response.headers.get('retry-after')`). Carried as the raw
+   * value and parsed/clamped by the engine rather than here. Optional on every hop
+   * so a fixture — and an older content script — produces exactly the reply shape
+   * it did before.
+   */
+  retryAfter?: string | null;
+}>;
+
+/**
+ * 🔴 W127 · A `Retry-After` value worth forwarding: a delta-seconds header is a few
+ * characters and an HTTP-date is under 30. Anything longer is not a header this leg
+ * has a use for, and it is dropped at the boundary rather than carried.
+ */
+const RETRY_AFTER_HEADER_MAX_CHARS = 64;
 
 /**
  * The content-script-side fetch. **This code runs in the context of the page the
@@ -796,17 +815,54 @@ export async function serveBackfillFetch(
       : { method: 'GET' };
     // 🔴 A GET segment keeps C22's call byte for byte: pass the url only, not one argument more.
     const res = verdict.method === 'GET' ? await fetchImpl(verdict.url) : await fetchImpl(verdict.url, init);
-    const text = await res.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
-      // The same size red line as the live leg: an over-large response is not conversation JSON.
-      return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
+    // 🔴 W127 · The platform's `Retry-After`, when the page-side fetch could read it,
+    //    is forwarded as the raw header value and bounded in length. The engine parses
+    //    and clamps it (`parseRetryAfterMs`, types.ts); a value that is not a short
+    //    string is left off, which the engine reads as "no header".
+    const retryAfter = typeof res.retryAfter === 'string' && res.retryAfter.length <= RETRY_AFTER_HEADER_MAX_CHARS
+      ? res.retryAfter
+      : null;
+    /**
+     * 🔴 W127b · **A 429/503 carries its status and `Retry-After` independently of
+     * its body.** Those are the two statuses RFC 9110 defines `Retry-After` for,
+     * and the engine only reads the header on them (`retryAfterMsFor`). Reading
+     * the body first meant a body-read failure or an over-`MAX_RAW_BYTES` body
+     * turned the whole reply into `{ok:false}`, which `tabHttpPort` throws and the
+     * engine records as `transport-error` — a shorter, unrequested retry instead
+     * of the rate-limit the platform asked us to wait out.
+     *
+     * So on these two statuses the body is best-effort: an unreadable or
+     * oversized one is replaced by the empty string, which the non-2xx branch
+     * never parses anyway. Every other status keeps the old contract — a body
+     * that cannot be read or measured is a transport failure, not an empty
+     * conversation.
+     */
+    const status = res.status;
+    const rateLimited = status === 429 || status === 503;
+    const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
+    let text: string;
+    try {
+      text = await res.text();
+      if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
+        // The same size red line as the live leg: an over-large response is not conversation JSON.
+        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+        return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
+      }
+    } catch (err) {
+      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+      // Only the technical detail goes back, never the body.
+      return { ok: false, error: (err as Error).message };
     }
     // 🔴 W64c · The one fact the engine cannot derive is passed on here, and only when
     //    it is claimed (`true`). A response that carries nothing stays a reply of
     //    exactly the shape it was.
-    return res.survivedCredentialReread === true
-      ? { ok: true, status: res.status, text, survivedCredentialReread: true }
-      : { ok: true, status: res.status, text };
+    return {
+      ok: true,
+      status,
+      text,
+      ...(res.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
+      ...carryRetryAfter,
+    };
   } catch (err) {
     // Only the technical detail goes back, never the body.
     return { ok: false, error: (err as Error).message };
@@ -986,9 +1042,12 @@ export function tabHttpPort(
     //    content script, another platform's wrapper — produces the response it always
     //    did, with no field added, so the classifier sees "no evidence" and not a fact
     //    invented by the transport.
-    return reply.survivedCredentialReread === true
-      ? { status: reply.status, text: reply.text, survivedCredentialReread: true }
-      : { status: reply.status, text: reply.text };
+    // 🔴 W127 · Same rule for `Retry-After`: forwarded only when the page fetched a
+    //    string. The engine reads it on a 429/503 only (`retryAfterMsFor`).
+    const response: HttpResponse = { status: reply.status, text: reply.text };
+    if (reply.survivedCredentialReread === true) response.survivedCredentialReread = true;
+    if (typeof reply.retryAfter === 'string') response.retryAfter = reply.retryAfter;
+    return response;
   };
 }
 
