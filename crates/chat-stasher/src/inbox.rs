@@ -99,6 +99,19 @@ pub struct Consumed {
     /// Reported so a run can say how many bundles actually carried the axis
     /// instead of asserting up front that none do.
     pub identity_level: Option<String>,
+    /// 🔴 W128 step 1 · `account.kind` carried by an `inbox@2` bundle (`fingerprint`
+    /// or `unknown` on the shapes this build writes), `None` when the bundle
+    /// carried no `account` object with a string `kind`.
+    ///
+    /// 🔴 `None` here is **two different facts** — a `@1` bundle that predates the
+    /// field, and an `account` object that is not a fingerprint envelope — and the
+    /// report cannot tell them apart from this field alone. That is why the bundle's
+    /// `schema` is reported beside it: `@1` + `None` is "the field did not exist
+    /// yet" and is expected for legacy files, while `@2` + `None` is a producer that
+    /// wrote an `account` this build could not read. Neither is read as "the account
+    /// was unknown": an unknown account is `kind: "unknown"`, which reports as
+    /// `Some("unknown")`.
+    pub account_kind: Option<String>,
 }
 
 /// A file whose bytes were already archived by an earlier run.
@@ -424,6 +437,10 @@ struct Bundle {
     /// `inbox@2` only. Not part of `raw`, so dropping it here loses it for
     /// good — `raw.text` cannot re-derive it.
     identity: Option<serde_json::Value>,
+    /// 🔴 W128 step 1 · `inbox@2` only, and not part of `raw` either: the salted
+    /// account fingerprint is computed from state outside the captured response,
+    /// so `raw.text` cannot re-derive it — an unparsed drop here is permanent.
+    account: Option<serde_json::Value>,
 }
 
 /// Record stored inside each sealed shard (one JSONL line per bundle).
@@ -451,6 +468,25 @@ struct ShardRecord {
     /// silently discarding the field is not.
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<IdentityEnvelope>,
+    /// 🔴 W128 step 1 · The account fingerprint envelope, preserved **verbatim**
+    /// when the bundle carried an object with a string `kind`.
+    ///
+    /// Held as the bundle's own JSON rather than decomposed into typed fields, for
+    /// two reasons: the two kinds in use (`fingerprint`, `unknown`) share only
+    /// `kind`, and `kind` is an open set — a newer extension may add one. A typed
+    /// struct would either drop a kind this build does not know, recording a
+    /// present field as absent, or normalise a shape the producer did not write.
+    /// Provenance is kept as written; [`Consumed::account_kind`] is the typed
+    /// summary for callers that need to switch on it.
+    ///
+    /// Omitted entirely for `@1` bundles — and for an `account` that is not a
+    /// fingerprint envelope at all (no string `kind`), which is a different fact
+    /// from "the bundle predates the field": see [`Consumed::account_kind`].
+    ///
+    /// Like `identity`, it is *stored* and deliberately does NOT take part in the
+    /// id or the dedup key — those remain `platform.sessionId` / `file_sha256`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<serde_json::Value>,
 }
 
 /// The `identity` envelope — the account axis an `inbox@2` bundle carries.
@@ -677,6 +713,7 @@ pub fn seal_payload(
             .raw
             .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
         identity: parsed.identity,
+        account: parsed.account,
     };
     let line = serde_json::to_string(&record)
         .context("serialise shard record")
@@ -693,6 +730,12 @@ pub fn seal_payload(
         file_sha256,
         kind: record.kind.to_string(),
         identity_level: record.identity.as_ref().map(|i| i.level.clone()),
+        account_kind: record
+            .account
+            .as_ref()
+            .and_then(|a| a.get("kind"))
+            .and_then(|k| k.as_str())
+            .map(String::from),
     }))
 }
 
@@ -1033,6 +1076,9 @@ struct ParseOutcome {
     parsed: Option<ParsedEnvelope>,
     raw: Option<RawEnvelope>,
     identity: Option<IdentityEnvelope>,
+    /// W128 step 1 · the `account` envelope as written, or `None` when the bundle
+    /// carried no object with a string `kind`.
+    account: Option<serde_json::Value>,
 }
 
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
@@ -1056,6 +1102,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         }),
         raw: None,
         identity: None,
+        account: None,
     };
 
     let bundle: Bundle = match serde_json::from_slice(bytes) {
@@ -1144,6 +1191,18 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
                 level: level.to_string(),
                 value: value.to_string(),
             });
+        }
+    }
+    // 🔴 W128 step 1 · The account fingerprint. Preserved **verbatim** rather than
+    // decomposed, so a `kind` this build does not know still reaches the archive
+    // instead of being dropped as if the bundle had never carried one. The one
+    // requirement is the discriminator: an object whose `kind` is not a string is
+    // not a fingerprint envelope, and `Consumed::account_kind` stays `None` for it
+    // (which is why that field distinguishes `@1` by the bundle's `schema`, not by
+    // this alone).
+    if let Some(v) = bundle.account.as_ref() {
+        if v.get("kind").and_then(|x| x.as_str()).is_some() {
+            out.account = Some(v.clone());
         }
     }
     Ok(out)
@@ -1309,6 +1368,160 @@ mod tests {
         let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-d");
         assert_eq!(rec["identity"]["level"], "default");
         assert_eq!(rec["identity"]["value"], "");
+    }
+
+    /// An `inbox@2` bundle carrying the W128 step 1 account envelope, whose value
+    /// is interpolated **verbatim** so a test can state any shape it likes.
+    fn synthetic_bundle_v2_account(session_id: &str, raw_text: &str, account: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher/inbox@2","platform":"deepseek","sessionId":"{sid}","method":"POST","status":200,"capturedAt":"2026-08-16T00:00:00.000Z","parsed":{{"hasJson":true,"keys":["id"]}},"raw":{{"text":{raw},"bytes":{n}}},"identity":{{"level":"platform_uid","value":"uid-fixture"}},"account":{account}}}"#,
+            sid = session_id,
+            raw = serde_json::to_string(raw_text).unwrap(),
+            n = raw_text.len(),
+        )
+    }
+
+    /// W128 step 1: the account fingerprint must survive ingest. It is computed from
+    /// state outside the captured response (this install's salt), so `raw.text`
+    /// cannot re-derive it — dropping it here loses it permanently.
+    #[test]
+    fn v2_account_fingerprint_is_archived_verbatim() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("deepseek-sess-acct.json"),
+            synthetic_bundle_v2_account(
+                "sess-acct",
+                "hello acct",
+                r#"{"kind":"fingerprint","value":"6f1e0d4c3b2a190807f6e5d4c3b2a190807f6e5d4c3b2a190807f6e5d4c3b2a19","source":"request-url-organization","saltId":"salt-fixture-1"}"#,
+            ),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        assert_eq!(
+            report.consumed[0].account_kind.as_deref(),
+            Some("fingerprint"),
+        );
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-acct");
+        assert_eq!(rec["account"]["kind"], "fingerprint");
+        assert_eq!(
+            rec["account"]["value"],
+            "6f1e0d4c3b2a190807f6e5d4c3b2a190807f6e5d4c3b2a190807f6e5d4c3b2a19",
+        );
+        assert_eq!(rec["account"]["source"], "request-url-organization");
+        assert_eq!(rec["account"]["saltId"], "salt-fixture-1");
+        // Stored, but it must NOT have moved the id or the dedup key — the same
+        // decision the identity axis makes (ADR-002).
+        assert_eq!(rec["id"], "deepseek.sess-acct");
+    }
+
+    /// `kind: "unknown"` is a *value*, not an absence: the reason has to reach the
+    /// archive, or "we could not tell" reads as "there was nothing to tell".
+    #[test]
+    fn v2_account_unknown_is_kept_not_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("deepseek-sess-unk.json"),
+            synthetic_bundle_v2_account(
+                "sess-unk",
+                "hello unk",
+                r#"{"kind":"unknown","reason":"no-account-id-in-capture"}"#,
+            ),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed[0].account_kind.as_deref(), Some("unknown"));
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-unk");
+        assert_eq!(rec["account"]["kind"], "unknown");
+        assert_eq!(rec["account"]["reason"], "no-account-id-in-capture");
+    }
+
+    /// Forward compatibility: a `kind` this build does not know must still be
+    /// archived. Decomposing the envelope into the two known shapes would have
+    /// dropped it, recording a present field as absent.
+    #[test]
+    fn unrecognised_account_kind_is_preserved_not_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("deepseek-sess-fut.json"),
+            synthetic_bundle_v2_account(
+                "sess-fut",
+                "hello fut",
+                r#"{"kind":"future-kind","extra":{"nested":true}}"#,
+            ),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(
+            report.consumed[0].account_kind.as_deref(),
+            Some("future-kind"),
+        );
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-fut");
+        assert_eq!(rec["account"]["kind"], "future-kind");
+        assert_eq!(rec["account"]["extra"]["nested"], true);
+    }
+
+    /// An `@1` bundle's shard line must not grow an `account` key — existing
+    /// archives keep their bytes, and "the field did not exist yet" stays
+    /// distinguishable from `kind: "unknown"` (which reports a kind).
+    #[test]
+    fn v1_bundle_has_no_account_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        write_bundle(&inbox, "deepseek-sess-a1.json", "sess-a1", "hello a1");
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed[0].account_kind, None);
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-a1");
+        assert!(
+            rec.get("account").is_none(),
+            "an @1 bundle must not gain an account key",
+        );
+    }
+
+    /// An `account` that is not a fingerprint envelope (no string `kind`) is not
+    /// read as one, and the `None` it produces is distinguishable from a `@1`
+    /// bundle's by the reported `schema`. This is the case
+    /// `Consumed::account_kind`'s own note says the field alone cannot separate.
+    #[test]
+    fn account_without_a_string_kind_is_not_read_as_a_fingerprint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("deepseek-sess-nokind.json"),
+            synthetic_bundle_v2_account("sess-nokind", "hello nokind", r#"{"kind":42}"#),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed[0].account_kind, None);
+        assert_eq!(report.consumed[0].kind, "bundle");
+
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-nokind");
+        assert!(
+            rec.get("account").is_none(),
+            "an account object with no string kind is not a fingerprint envelope",
+        );
     }
 
     #[test]

@@ -993,11 +993,103 @@ export interface InboxIdentity {
   value: string;
 }
 
+/**
+ * 🔴 W128 step 1 · Where the id behind an account fingerprint came from.
+ *
+ * The source travels with the value because the two mechanisms are not equally
+ * strong, and a reader who cannot tell them apart would treat an unverified scan
+ * as a verified platform field:
+ *  · 'request-url-organization'   — the id is a path segment of the page's own
+ *    request (claude.ai addresses every conversation by organization). Verified,
+ *    page-owned, and already the run scope's own source.
+ *  · 'response-body-platform-uid' — the ADR-002 account axis, read out of the
+ *    captured response body by the generic scan. That scan's candidate key names
+ *    are explicitly **not** confirmed against a logged-in page, so this is the
+ *    value the ledger already scopes by rather than a verified platform field.
+ */
+export type AccountIdSource = 'request-url-organization' | 'response-body-platform-uid';
+
+/**
+ * 🔴 W128 step 1 · Why a bundle carries no fingerprint. Every value is a fact, and
+ * none of them is the same fact as another:
+ *  · 'platform-not-recognized'          — the capture's URL matched no platform
+ *                                         row, so there is no id whose shape to
+ *                                         look for in the first place.
+ *  · 'organization-not-in-request-url'  — an account-scoped plan, and this capture's
+ *                                         URL named no organization.
+ *  · 'no-account-id-in-capture'         — nothing account-shaped was visible.
+ *  · 'email-is-not-an-account-id'       — an email was visible; an email is not an
+ *                                         account/org id, and this field is never
+ *                                         derived from one.
+ *  · 'handle-is-not-an-account-id'      — a handle/display name was visible; it is
+ *                                         not an id and it can change.
+ *  · 'salt-unavailable'                 — this install has no readable salt and one
+ *                                         could not be created or persisted, so no
+ *                                         value could be made reproducible.
+ *  · 'salt-unreadable'                  — a salt record exists and does not parse.
+ *                                         Deliberately **not** replaced by a fresh
+ *                                         one: that would re-key every later
+ *                                         fingerprint and read as an account switch.
+ *  · 'crypto-unavailable'               — WebCrypto HMAC is not usable here.
+ */
+export type AccountUnknownReason =
+  | 'platform-not-recognized'
+  | 'organization-not-in-request-url'
+  | 'no-account-id-in-capture'
+  | 'email-is-not-an-account-id'
+  | 'handle-is-not-an-account-id'
+  | 'salt-unavailable'
+  | 'salt-unreadable'
+  | 'crypto-unavailable';
+
+/**
+ * 🔴 W128 step 1 · **The irreversible account fingerprint an `inbox@2` bundle
+ * carries**, or the named fact that it has none.
+ *
+ * What it is for: the same word the run scope uses for the same account, as a
+ * value that can be compared without ever holding the account's id. A browser
+ * profile signed in to A and then to B produces two different values, and nothing
+ * in the archive can be turned back into either id.
+ *
+ * 🔴 `kind` has exactly two values and there is no third: a bundle either carries a
+ *    fingerprint or carries the fact that it does not. There is no empty-string
+ *    spelling of "not known" (CLAUDE.md invariant 1), and absent-vs-unknown stays
+ *    readable: a `@1` bundle has no `account` key at all, and that is a different
+ *    statement from `{kind:'unknown'}`.
+ * 🔴 The value is a **keyed** digest (HMAC-SHA256 over a domain- and
+ *    platform-separated message, keyed with this install's random salt), so a
+ *    small id space cannot be brute-forced out of the archive.
+ * 🔴 `saltId` is the salt's public half: an opaque per-install id, not the key and
+ *    not derivable from it. Two fingerprints may only be compared when their
+ *    `saltId`s are equal — a second install, a second profile or a cleared
+ *    `cs_account_salt_v1` all produce incomparable values, which is inherent to a
+ *    per-install salt and must not be read as an account switch.
+ * 🔴 Not part of the id or the dedup key: those stay `platform.sessionId` and
+ *    `file_sha256` (ADR-002). Adding this field changes no name and no key.
+ */
+export type AccountFingerprint =
+  | {
+    kind: 'fingerprint';
+    /** Lowercase hex. Never the raw id, never an email. */
+    value: string;
+    source: AccountIdSource;
+    /** The public half of this install's salt. Not the salt. */
+    saltId: string;
+  }
+  | { kind: 'unknown'; reason: AccountUnknownReason };
+
 export interface InboxBundle {
   schema: typeof SCHEMA;
   platform: PlatformId;
   sessionId: string;
   identity: InboxIdentity;
+  /**
+   * 🔴 W128 step 1 · Since `@2`. Every bundle produced by this build carries one of
+   * the two kinds — see `AccountFingerprint`. An `@1` bundle has no `account` key,
+   * and the CLI reads that as "the field did not exist yet", never as `unknown`:
+   * those two are different facts about a bundle.
+   */
+  account: AccountFingerprint;
   url: string;
   method: string;
   status: number;

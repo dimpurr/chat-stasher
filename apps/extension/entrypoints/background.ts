@@ -11,8 +11,9 @@ import {
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
+import { accountFingerprintFor } from '../lib/account-fingerprint';
 import { refreshBadge } from '../lib/badge';
-import { browserLocalStore } from '../lib/backfill/store';
+import { browserLocalStore, type BackfillStore } from '../lib/backfill/store';
 import {
   HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN,
   HOOK_DECLINE_UNREADABLE_MESSAGE,
@@ -147,8 +148,14 @@ export interface HandledResult {
  * Build the inbox JSON document.
  * WHY raw-first: the parsed envelope is best-effort; if our field guesses are
  * wrong the CLI can re-derive structure from `raw.text` instead of losing data.
+ *
+ * 🔴 W128 step 1 · `async` since it carries the account fingerprint: the salt it is
+ *    keyed with lives in `storage.local`, and reading it is async. The session id is
+ *    resolved first and passed to both the identity axis and the fingerprint, so
+ *    the C21 guard ("a per-session id is never an account id") is applied to one
+ *    value rather than two derivations of it.
  */
-function buildBundle(captured: CapturedFetch): InboxBundle {
+async function buildBundle(captured: CapturedFetch, store: BackfillStore | null): Promise<InboxBundle> {
   const parsed = { hasJson: false, keys: [] as string[] };
   try {
     const obj = JSON.parse(captured.text);
@@ -166,6 +173,14 @@ function buildBundle(captured: CapturedFetch): InboxBundle {
     // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` guard keeps a
     // per-session id from ever being mistaken for the stable account id.
     identity: extractIdentity(captured.text, sessionId === 'unknown' ? null : sessionId),
+    // 🔴 W128 step 1 · The irreversible account fingerprint. It never throws and
+    //    never guesses: when no id is visible it is `{kind:'unknown', reason}`,
+    //    which is a value on the bundle rather than an absent field.
+    account: await accountFingerprintFor(
+      captured,
+      store,
+      sessionId === 'unknown' ? null : sessionId,
+    ),
     url: captured.url,
     method: captured.method,
     status: captured.status,
@@ -198,7 +213,12 @@ function resolveSessionId(captured: CapturedFetch): string | null {
 }
 
 export async function handleCaptured(captured: CapturedFetch): Promise<HandledResult> {
-  const prepared = preparePayload(captured);
+  // One store for the whole path: the bundle's account fingerprint, the recapture
+  // fingerprint and the arrival row all read `storage.local`, and the store is
+  // memoised per area anyway (lib/backfill/store.ts's W33 note) — asking once keeps
+  // it obvious that they share one area.
+  const recaptureStore = browserLocalStore();
+  const prepared = await preparePayload(captured, recaptureStore);
   if (!prepared.ok) {
     return { saved: false, status: 'refused', reason: prepared.reason };
   }
@@ -207,7 +227,6 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   // Unchanged since its last acknowledged delivery ⇒ do not append another
   // identical copy (lib/recapture.ts). Only platforms with known volatile fields
   // get a fingerprint; everything else is always delivered.
-  const recaptureStore = browserLocalStore();
   const platformId = findPlatformForUrl(captured.url)?.id ?? null;
   const fingerprint = platformId ? await contentFingerprint(platformId, captured.text) : null;
 
@@ -371,7 +390,10 @@ export type PreparedPayload =
   | { ok: true; name: string; payload: string; bytes: number; sessionId: string }
   | { ok: false; reason: string };
 
-function preparePayload(captured: CapturedFetch): PreparedPayload {
+async function preparePayload(
+  captured: CapturedFetch,
+  store: BackfillStore | null,
+): Promise<PreparedPayload> {
   const sessionId = resolveSessionId(captured);
   if (cancelledIdLike(sessionId)) {
     // Per-session naming is the inbox contract; a session-less capture has no
@@ -379,7 +401,7 @@ function preparePayload(captured: CapturedFetch): PreparedPayload {
     return { ok: false, reason: 'no-session-id (skipped in report only)' };
   }
 
-  const bundle = buildBundle(captured);
+  const bundle = await buildBundle(captured, store);
   // 🔴 C21 · Naming is an **identity mapping**, not "replace unsafe characters":
   //    sanitizePathSegment is many-to-one ('a b' and 'a/b' collide), and the old
   //    download path overwrote ⇒ two different conversations could erase each
@@ -470,7 +492,7 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
   sessionId?: string;
   retryLater?: boolean;
 }> {
-  const prepared = preparePayload(captured);
+  const prepared = await preparePayload(captured, browserLocalStore());
   if (!prepared.ok) return { saved: false, reason: prepared.reason };
 
   const result = await deliver(prepared.name, prepared.payload);

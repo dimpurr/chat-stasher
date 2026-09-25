@@ -129,6 +129,25 @@ test('1 · a conversation response is captured, and stays queued with no native 
   // untouched, so an archive built from it holds the response, not our reading of it.
   expect(bundle.raw).toMatchObject({ text: CHATGPT_BODY, bytes: Buffer.byteLength(CHATGPT_BODY, 'utf8') });
 
+  // 🔴 W128 step 1 · In a real browser, through the real service worker and the
+  //    real `storage.local`, every bundle carries an account field — and it is
+  //    never absent, because `unknown` is a value with a reason rather than a
+  //    missing key.
+  //
+  //    The kind asserted here is a fact about **this fixture**, not a claim about
+  //    ChatGPT's real wire shape: `chatgpt-conversation.json` spells the
+  //    conversation id and the mapping and nothing account-shaped, exactly as the
+  //    file's own header says its bodies are hand-written against declared field
+  //    names. So the honest answer for it is a named unknown, and a fingerprint
+  //    appearing here would mean the scan had matched something that is not an
+  //    account id. The fingerprint half — and every per-platform source — is
+  //    pinned in `tests/w165-account-fingerprint.test.ts`, where a body can be
+  //    stated exactly.
+  expect(bundle.account).toEqual({ kind: 'unknown', reason: 'no-account-id-in-capture' });
+  // 🔴 And irreversible in the observable sense: nothing in the field is the one
+  //    id the capture certainly saw — the conversation's own.
+  expect(JSON.stringify(bundle.account)).not.toContain(CHATGPT_SESSION_ID);
+
   // 🔴 No host is registered in this context, so the delivery attempt cannot
   //    succeed. The record must still be there afterwards: the outbox is
   //    write-ahead, and only a matching `ack` ever removes an entry (§1, §10).
