@@ -22,7 +22,10 @@
 //! (`tests/.../chatgpt-detail.json` `title`, `claude-detail.json` `name`), and
 //! `activity-index` has to record it instead of the by-design
 //! `no_label_recorded` a harness with no extractor gets. That runs the real
-//! binary against a synthetic stage.
+//! binary against a synthetic stage. The label is read from the same body the
+//! time pass reads this session's own metadata from, so a **one-row** list body
+//! labels from its row while a page of several conversations labels nothing —
+//! that boundary is asserted here on both platforms.
 //!
 //! Everything here is synthetic and shape-only: no real conversation, title,
 //! session id, account or machine appears, and no request leaves the machine
@@ -154,6 +157,43 @@ fn claude_follows_the_active_branch_and_counts_the_side_branch() {
         !text.contains("Synthetic abandoned answer"),
         "an abandoned branch is not part of the conversation: {text}"
     );
+}
+
+#[test]
+fn a_claude_message_whose_first_parent_spelling_is_empty_still_finds_its_link() {
+    // The two parent spellings are accepted by the capture side as "the first
+    // one that is a non-empty string" (`claudeParentKeyOf`), so a message that
+    // carries `parent_message_uuid: ""` *and* a real `parent_uuid` was accepted
+    // for capture and has to walk here too. Reading the empty spelling as the
+    // answer hides the middle link of z1→z2→z3: the walk then stops at z2, z1
+    // drops off the active branch and is counted as a side branch instead.
+    let body = serde_json::json!({
+        "uuid": "55555555-5555-4555-8555-555555555555",
+        "name": "synthetic",
+        "current_leaf_message_uuid": "z3",
+        "chat_messages": [
+            {"uuid": "z1", "sender": "human", "parent_message_uuid": "00000000-0000-0000-0000-000000000001",
+             "content": [{"type": "text", "text": "Synthetic one"}]},
+            {"uuid": "z2", "sender": "assistant", "parent_message_uuid": "", "parent_uuid": "z1",
+             "content": [{"type": "text", "text": "Synthetic two"}]},
+            {"uuid": "z3", "sender": "human", "parent_message_uuid": "z2",
+             "content": [{"type": "text", "text": "Synthetic three"}]}
+        ]
+    })
+    .to_string();
+    let conversation = normalize("claude", &bundle_line("claude", "w190claude0005", &body));
+
+    assert_eq!(
+        conversation.messages.len(),
+        3,
+        "the whole chain z1..z3 is the conversation: {}",
+        rendered(&conversation)
+    );
+    assert_eq!(
+        conversation.branch_nodes, 0,
+        "no message is off the active chain"
+    );
+    assert!(conversation.canonical_follows_active);
 }
 
 #[test]
@@ -404,11 +444,15 @@ const MACHINE: &str = "mbp-w190";
 const CHATGPT_TITLED: &str = "chatgpt.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d001";
 const CLAUDE_TITLED: &str = "claude.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d002";
 const CHATGPT_UNTITLED: &str = "chatgpt.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d003";
-const CLAUDE_LIST_ONLY: &str = "claude.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d004";
+const CLAUDE_LIST_ROW: &str = "claude.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d004";
 const CHATGPT_LONG_TITLE: &str = "chatgpt.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d005";
+const CLAUDE_LIST_PAGE: &str = "claude.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d006";
+const CHATGPT_LIST_PAGE: &str = "chatgpt.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d007";
+const CHATGPT_LIST_ROW: &str = "chatgpt.mbp-w190.019bf00d-97b6-7eb2-9bf8-eacbacc0d008";
 
 const CHATGPT_LABEL: &str = "Synthetic chatgpt conversation";
 const CLAUDE_LABEL: &str = "Synthetic claude conversation";
+const CLAUDE_LIST_ROW_LABEL: &str = "Synthetic claude list row";
 const LONG_LABEL: &str = "synthetic label long enough to be cut by the hundred character cap, written out \
                            so the cut has an honest body to take and the flag has something to report";
 
@@ -417,8 +461,8 @@ fn a_web_body_labels_its_session_from_its_own_metadata() {
     let sandbox = tempfile::TempDir::new().unwrap();
     let stage = sandbox.path().join("stage");
 
-    // The two titled sessions are the fixtures themselves; the other three are
-    // the shapes that must stay unlabelled or capped.
+    // The two titled sessions are the fixtures themselves; the others are the
+    // shapes that must stay unlabelled or capped.
     let untitled = {
         let mut body: serde_json::Value = serde_json::from_str(CHATGPT_DETAIL).unwrap();
         body.as_object_mut().unwrap().remove("title");
@@ -430,16 +474,37 @@ fn a_web_body_labels_its_session_from_its_own_metadata() {
             serde_json::Value::String(LONG_LABEL.split_whitespace().collect::<Vec<_>>().join(" "));
         body.to_string()
     };
-    // A conversation-LIST body, which is a top-level array of summaries. It is
-    // not a record of this conversation, so it labels nothing.
-    let list_only = r#"[{"uuid":"44444444-4444-4444-8444-444444444444","name":"Synthetic sidebar page","created_at":"2025-01-15T12:30:00.000Z","updated_at":"2025-01-15T13:00:00.000Z"}]"#;
+    // A ONE-ROW list body: the conversation's own metadata record, the shape the
+    // time pass reads its `ListUpdated` span from (`claude_span`'s one-item page,
+    // activity.rs). The label and that time are one reading of one body, so this
+    // labels — it is the row's own `name`, not a sidebar entry's.
+    let list_row = r#"[{"uuid":"44444444-4444-4444-8444-444444444444","name":"Synthetic claude list row","created_at":"2025-01-15T12:30:00.000Z","updated_at":"2025-01-15T13:00:00.000Z"}]"#;
+    // A page holding SEVERAL conversations is nobody's own record. Whatever its
+    // rows are called, none of their names is this session's label: the page is
+    // the failure the single-row rule exists to refuse.
+    let list_page = r#"[{"uuid":"44444444-4444-4444-8444-444444444444","name":"Synthetic first sidebar entry","created_at":"2025-01-15T12:30:00.000Z","updated_at":"2025-01-15T13:00:00.000Z"},{"uuid":"55555555-5555-4555-8555-555555555555","name":"Synthetic second sidebar entry","created_at":"2025-01-15T12:40:00.000Z","updated_at":"2025-01-15T13:10:00.000Z"}]"#;
+    // ChatGPT's measured list route answers a page under `items` (`total`/
+    // `limit`/`offset` beside it), and a list row's times are ISO strings —
+    // this reader reads epochs, so such a body yields no time at all. A row of
+    // that page, lifted out as if it were the whole body, still carries a
+    // `title`: it labels nothing either, because the label is read only from the
+    // body that gives this session its time, and this body gives it none.
+    let chatgpt_page = r#"{"items":[{"id":"66666666-6666-4666-8666-666666666666","title":"Synthetic sidebar entry","create_time":"2025-01-15T12:30:00.000Z","update_time":"2025-01-15T13:00:00.000Z"}],"total":1,"limit":28,"offset":0}"#;
+    let chatgpt_list_row_with_iso_times = r#"{"id":"66666666-6666-4666-8666-666666666666","title":"Synthetic chatgpt list row","create_time":"2025-01-15T12:30:00.000Z","update_time":"2025-01-15T13:00:00.000Z"}"#;
 
     for (session, platform, body) in [
         (CHATGPT_TITLED, "chatgpt", CHATGPT_DETAIL.to_string()),
         (CLAUDE_TITLED, "claude", CLAUDE_DETAIL.to_string()),
         (CHATGPT_UNTITLED, "chatgpt", untitled),
-        (CLAUDE_LIST_ONLY, "claude", list_only.to_string()),
+        (CLAUDE_LIST_ROW, "claude", list_row.to_string()),
         (CHATGPT_LONG_TITLE, "chatgpt", long),
+        (CLAUDE_LIST_PAGE, "claude", list_page.to_string()),
+        (CHATGPT_LIST_PAGE, "chatgpt", chatgpt_page.to_string()),
+        (
+            CHATGPT_LIST_ROW,
+            "chatgpt",
+            chatgpt_list_row_with_iso_times.to_string(),
+        ),
     ] {
         write_shard(
             &stage,
@@ -473,6 +538,7 @@ fn a_web_body_labels_its_session_from_its_own_metadata() {
     for (session, expected) in [
         (CHATGPT_TITLED, CHATGPT_LABEL),
         (CLAUDE_TITLED, CLAUDE_LABEL),
+        (CLAUDE_LIST_ROW, CLAUDE_LIST_ROW_LABEL),
     ] {
         let row = label(session);
         assert_eq!(row["state"], "known", "{session}: {row}");
@@ -489,9 +555,15 @@ fn a_web_body_labels_its_session_from_its_own_metadata() {
     let row = label(CHATGPT_UNTITLED);
     assert_eq!(row["state"], "no_label_recorded", "{row}");
 
-    // A conversation-list page is not this conversation's own record.
-    let row = label(CLAUDE_LIST_ONLY);
-    assert_eq!(row["state"], "no_label_recorded", "{row}");
+    // A page of several conversations is not this conversation's own record, on
+    // either platform: no entry's name is lent to whatever session the page was
+    // filed under. A chatgpt list row lifted out of its page is refused too —
+    // its ISO-string times are not a time this reader can read, so it is not the
+    // body this session's `ListUpdated` row came from either.
+    for session in [CLAUDE_LIST_PAGE, CHATGPT_LIST_PAGE, CHATGPT_LIST_ROW] {
+        let row = label(session);
+        assert_eq!(row["state"], "no_label_recorded", "{session}: {row}");
+    }
 
     // A label over the cap is stored cut, and says so.
     let row = label(CHATGPT_LONG_TITLE);

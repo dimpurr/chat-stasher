@@ -494,14 +494,19 @@ const CLAUDE_PARENT_KEYS: [&str; 2] = ["parent_message_uuid", "parent_uuid"];
 
 /// The message a claude.ai record names as its parent, if it names one.
 ///
-/// A key that is present but empty is not a link: the capture side reads it the
-/// same way (`claudeParentKeyOf`), so a body whose root carries `""` is a root
-/// here too rather than an unwalkable branch.
+/// The first spelling that carries a **non-empty** string wins, and an empty
+/// one does not end the search: the capture side reads the pair exactly this way
+/// (`claudeParentKeyOf` accepts a message when *either* key holds a non-empty
+/// string), so a message that spells one key `""` and the other as a real uuid
+/// was accepted for capture and has to walk here too. A message whose both keys
+/// are absent or empty names no parent and is a root, not an unwalkable branch.
 fn claude_parent(message: &Value) -> Option<&str> {
-    CLAUDE_PARENT_KEYS
-        .iter()
-        .find_map(|key| message.get(*key).and_then(Value::as_str))
-        .filter(|parent| !parent.is_empty())
+    CLAUDE_PARENT_KEYS.iter().find_map(|key| {
+        message
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|parent| !parent.is_empty())
+    })
 }
 
 /// The messages of a claude.ai body, on its active branch, oldest first.

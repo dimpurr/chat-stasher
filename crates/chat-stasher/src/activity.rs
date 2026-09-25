@@ -1334,15 +1334,29 @@ fn web_numeric_seconds(raw: &serde_json::Value) -> Option<i64> {
 /// The label a web chat harness's own archived body carries for the
 /// conversation, if it carries one.
 ///
-/// The label is read from the body's own conversation-level field — chatgpt
-/// `title`, claude `name` — and only from a body that is *this conversation's*
-/// record. That is what the route's own shape says the body is: the capture
-/// contract requires `mapping` + `current_node` of a chatgpt body
-/// (`contract.ts:434-460`) and `chat_messages` of a claude body
-/// (`contract.ts:498-560`), so requiring the same marker here means a
-/// conversation-LIST page filed under a session — an array of summaries, which
-/// the extension does not capture at all — labels nothing rather than lending
-/// one sidebar entry's title to whatever session it was filed under.
+/// The label is the conversation-level field — chatgpt `title`, claude `name` —
+/// of the body that carries *this conversation's* own record, and it is read
+/// from the same body the time pass reads the conversation's own metadata from
+/// (the design's "the list title is the `ListUpdated` row's metadata from the
+/// same source"). Two shapes are that body, and [`web_span`] decides both:
+///
+/// * **the conversation's detail body** — the capture contract requires
+///   `mapping` + `current_node` of a chatgpt body (`contract.ts:434-450`) and
+///   `chat_messages` of a claude body (`contract.ts:493-516`), so a body
+///   carrying the same marker is this conversation's record;
+/// * **this conversation's own metadata record** — a body the time pass reads
+///   as [`WebSpan::List`], i.e. one written with *one* conversation's
+///   conversation-level update time and no messages. Every harness's list
+///   branch reads that time from a single record's own fields
+///   (`claude_span`'s one-item page above all, whose reason is exactly this:
+///   "only a single-item page is unambiguous enough to attribute to this
+///   session"), so the label and the `ListUpdated` time it produces are one
+///   reading of one body.
+///
+/// What neither shape admits is a **page of several conversations**: every
+/// list branch requires the single-record form, so a sidebar page filed under a
+/// session still labels nothing rather than lending one entry's title to
+/// whatever session it was filed under.
 ///
 /// A body with no such field, or one whose field is empty or not a string,
 /// yields `None`: the row then records
@@ -1373,10 +1387,22 @@ fn web_title(harness: &str, line: &serde_json::Value) -> Option<String> {
         // not read from whichever key looks plausible.
         _ => return None,
     };
-    // The marker the conversation's own route requires of this body. Absent, it
-    // is some other shape and this reader will not label from it.
-    body.get(marker)?;
-    body.get(field)
+    // The record the label is read from: the body itself, or — when the body is
+    // a one-row page — that row, which is the same record the time pass reads
+    // the conversation's own list-level metadata from.
+    let record = match body {
+        serde_json::Value::Array(items) if items.len() == 1 => &items[0],
+        _ => body,
+    };
+    // Two shapes are this conversation's own record: the detail body, whose
+    // marker the capture contract requires, and the single metadata record whose
+    // span the time pass reads as `List`.
+    let detail = record.get(marker).is_some();
+    if !detail && !matches!(web_span(harness, body), WebSpan::List(_)) {
+        return None;
+    }
+    record
+        .get(field)
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|title| !title.is_empty())
@@ -1409,7 +1435,16 @@ fn web_time(harness: &str, line: &serde_json::Value) -> LineTime {
         None => line,
     };
 
-    let span = match harness {
+    web_span(harness, payload).into_line_time()
+}
+
+/// The span one web harness's JSON body yields. One dispatcher, because two
+/// readers ask the same question of the same body: [`web_time`] reads the time
+/// from it, and [`web_title`] reads the label only from a body this returns
+/// [`WebSpan::List`] for — the label and the `ListUpdated` time are one
+/// conversation-level metadata record, so they are read from one body.
+fn web_span(harness: &str, payload: &serde_json::Value) -> WebSpan {
+    match harness {
         "chatgpt" => chatgpt_span(payload),
         "deepseek" => deepseek_span(payload),
         "claude" => claude_span(payload),
@@ -1417,8 +1452,7 @@ fn web_time(harness: &str, line: &serde_json::Value) -> LineTime {
         "perplexity" => perplexity_span(payload),
         "kimi" => kimi_span(payload),
         _ => WebSpan::Absent,
-    };
-    span.into_line_time()
+    }
 }
 
 /// Iterate `payload[path]` as an array of objects, following `.` separators.
@@ -3250,6 +3284,63 @@ mod tests {
     fn a_harness_without_a_title_reader_records_no_label_by_design() {
         let codex = codex(RFC_T1, "user_message");
         let a = analyze_session("codex", &[codex.as_str()]);
+        assert_eq!(a.title, SessionTitle::NoLabelRecorded);
+    }
+
+    /// The label is the `ListUpdated` row's metadata **from the same body**: a
+    /// body the time pass reads as this session's own list-level record labels
+    /// from that body. Claude has two such shapes — one metadata record, and a
+    /// page holding exactly one — and both are shapes `claude_span` already
+    /// attributes to this session.
+    #[test]
+    fn a_web_list_record_labels_from_the_body_that_gives_it_its_time() {
+        let expected = SessionTitle::Known {
+            text: "synthetic list label".into(),
+            source: TitleSource::HarnessTitle,
+            truncated: false,
+        };
+        for body in [
+            serde_json::json!({"uuid":"u","name":"synthetic list label","created_at":RFC_T1,"updated_at":RFC_T2}),
+            serde_json::json!([{"uuid":"u","name":"synthetic list label","created_at":RFC_T1,"updated_at":RFC_T2}]),
+        ] {
+            let line = web_line("claude", &body.to_string());
+            let a = analyze_session("claude", &[line.as_str()]);
+            assert_eq!(a.time_source, TimeSource::ListUpdated, "{body}");
+            assert_eq!(a.title, expected, "{body}");
+        }
+    }
+
+    /// …and a body the time pass reads no list-level time from labels nothing,
+    /// even when it carries the very field a label is read from. ChatGPT's
+    /// list rows carry ISO-string times, which is not a time this reader reads,
+    /// so such a body is not this session's own record and its `title` is not
+    /// lent to the session it was filed under.
+    #[test]
+    fn a_web_body_without_a_list_time_labels_nothing() {
+        let row = serde_json::json!({
+            "id": "u",
+            "title": "synthetic chatgpt list row",
+            "create_time": RFC_T1,
+            "update_time": RFC_T2,
+        })
+        .to_string();
+        let line = web_line("chatgpt", &row);
+        let a = analyze_session("chatgpt", &[line.as_str()]);
+        assert_eq!(a.title, SessionTitle::NoLabelRecorded);
+    }
+
+    /// A page of several conversations is nobody's own record: the label is read
+    /// from the row only when the page holds one, so no entry's name is lent to
+    /// whatever session the page was filed under.
+    #[test]
+    fn a_multi_row_web_page_labels_nothing() {
+        let page = serde_json::json!([
+            {"uuid":"u1","name":"synthetic first","created_at":RFC_T1,"updated_at":RFC_T2},
+            {"uuid":"u2","name":"synthetic second","created_at":RFC_T1,"updated_at":RFC_T2},
+        ])
+        .to_string();
+        let line = web_line("claude", &page);
+        let a = analyze_session("claude", &[line.as_str()]);
         assert_eq!(a.title, SessionTitle::NoLabelRecorded);
     }
 
