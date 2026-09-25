@@ -3542,7 +3542,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     }
     let label = destination
         .clone()
-        .unwrap_or_else(|| "(explicit --repo)".to_string());
+        .unwrap_or_else(|| chat_stasher::ui::EXPLICIT_REPO_LABEL.to_string());
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
