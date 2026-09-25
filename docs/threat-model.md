@@ -38,7 +38,7 @@ Understanding the roles below requires knowing the path the content takes.
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:755-805`;
-   `crates/chat-stasher/src/nativehost.rs:1139-1166`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:1146-1173`). The bundle leaves the
    outbox **only** on a matching `ack`
    (`apps/extension/lib/native-host.ts:775-784`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
@@ -59,7 +59,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:26-27`; `crates/chat-stasher/src/config.rs:95-100,146-162`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:136-139`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:422-461`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:26-27`; `crates/chat-stasher/src/config.rs:100-105,151-167`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:136-139`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:422-461`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:30`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -77,7 +77,7 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:271-345,1146-1231`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:26-27`; `crates/chat-stasher/src/config.rs:146-162`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:271-345,1146-1231`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:26-27`; `crates/chat-stasher/src/config.rs:151-167`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
@@ -169,7 +169,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:1909-1943`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:1923-1957`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -403,12 +403,12 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:1909-1943`).
+  (`crates/chat-stasher/src/nativehost.rs:1923-1957`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:915-975`, `:980-1009`).
+  (`crates/chat-stasher/src/nativehost.rs:915-982`, `:987-1016`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
@@ -419,11 +419,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:1115-1124`;
+  (`crates/chat-stasher/src/nativehost.rs:1122-1131`;
   `apps/extension/lib/native-host.ts:775-784`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:1131-1137`).
+  (`crates/chat-stasher/src/nativehost.rs:1138-1144`).
 - **The host also answers two read-only questions, and writes nothing for
   either.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -497,9 +497,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:5620-5713`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:5696-5792`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:5592-5599`).
+  (`crates/chat-stasher/src/main.rs:5668-5675`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -510,7 +510,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:4081-4137`).
+  as many words (`crates/chat-stasher/src/main.rs:4131-4187`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -557,7 +557,7 @@ a real limitation of the current code.
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:353-355,5949-6085`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:353-355,6028-6167`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:562-642`) — see exposure 5

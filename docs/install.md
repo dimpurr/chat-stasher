@@ -213,7 +213,25 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:149-150`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,611-622`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:23,638-649`).
+
+🔴 **A config file that exists has to be valid, and the tool will not pretend
+otherwise.** If it does not parse, if a value has the wrong type, or if a path in
+it cannot be resolved, every command that reads it stops with **exit code `3`**
+and prints the file, the position and the reason
+(`crates/chat-stasher/src/config.rs:352-364,715-722`). It does **not** warn
+and continue on the built-in defaults: those defaults declare no destination, so a
+scheduled `push` would then run exactly as if you had never declared one, and the
+archive would quietly stop being copied anywhere
+(`crates/chat-stasher/src/main.rs:7679-7691`).
+
+Two exceptions, and only two. `doctor` is the one command that keeps going — it
+reports the error and lists the checks it therefore could not perform, so "no
+destination declared" is never printed as a finding about a config nobody read
+(`crates/chat-stasher/src/doctor.rs:1153-1181,1186-1192`). And an **absent** config file is a
+different state altogether, not an error: that is the normal first run, and it
+does use the defaults (`crates/chat-stasher/src/config.rs:352-359`). If you want
+the defaults back, move the file aside rather than leaving a broken one in place.
 
 ---
 
@@ -259,7 +277,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:963-974`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:970-981`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -324,7 +342,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:963-974`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:970-981`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -336,10 +354,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:896-924`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:915-975`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:915-982`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:1162-1166`). In every case the reason
+  (`crates/chat-stasher/src/nativehost.rs:1169-1173`). In every case the reason
   names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -349,7 +367,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:980-1009`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:987-1016`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -378,7 +396,7 @@ Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
 (`crates/chat-stasher/src/store.rs:153-156`, `:306-310`; the config field itself
-is `crates/chat-stasher/src/config.rs:222-223`).
+is `crates/chat-stasher/src/config.rs:227-228`).
 
 **Why this step exists.** A remote destination is reached by running the system
 `ssh` client. The first time it meets a host it has no record of, it refuses:
@@ -389,11 +407,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:3885-3898`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:3932-3945`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:3921-3945`). An
+it does anything else (`crates/chat-stasher/src/main.rs:3968-3992`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -425,10 +443,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3900-3909`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3947-3956`;
 `crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:3888-3896`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:3935-3943`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -489,12 +507,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:7741-7742`). This is the
+does not (`crates/chat-stasher/src/main.rs:7876-7877`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:7445-7446`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:7536-7537`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -510,7 +528,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:7901-8192`):
+(`crates/chat-stasher/src/main.rs:8057-8348`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -523,7 +541,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:7538-7545`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:7629-7636`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -531,7 +549,10 @@ Its four exit codes are: `0` = the timer is judged healthy · `1` = the scan
 finished, but the timer is judged unhealthy (including **never having run**) ·
 `3` = the scan did not complete at all (the registry could not be read, for
 example; in that case it has no conclusion about your machine) · `2` = usage
-error. **Note:** the entire report goes to **stderr**, so a pipeline like
+error. A config file it could not read is the same case, not a fifth one: nothing
+was scanned, so nothing is claimed
+(`crates/chat-stasher/src/main.rs:7726-7741`). **Note:** the entire report goes to
+**stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`.
 
@@ -545,11 +566,11 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:816-958`, `:996-1056`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:829-971`, `:1009-1069`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:838-958`).
+(`crates/chat-stasher/src/doctor.rs:851-971`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. This is the one thing `doctor` does that touches
 the network; see section 4.4 if it reports a host it cannot trust.

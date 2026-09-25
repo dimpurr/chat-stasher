@@ -445,11 +445,19 @@ fn hello_returns_the_stage_and_the_machine() {
 fn stdout_carries_exactly_one_frame_even_when_stderr_is_busy() {
     // A config warning is the point of this test: it proves the diagnostic went
     // to stderr by asserting stdout is *byte-exactly* one frame while stderr is
-    // demonstrably non-empty. `~otheruser` cannot be expanded, so the loader
-    // warns and resets that option.
+    // demonstrably non-empty.
+    //
+    // The warning used to be `harness_roots.codex = "~otheruser/..."`, which the
+    // loader reset to its default with a warning. Since W145 an unexpandable path
+    // makes the whole config unusable instead, so that fixture would now exercise
+    // a refusal (`nack config`, nothing on stderr) rather than a warning — while
+    // still passing, which is exactly the trap this comment is here to prevent.
+    // A Windows path pasted into a basic string is the warning the loader still
+    // emits and still recovers from, so the frame-vs-stderr property keeps a
+    // fixture that really does warn.
     let fixture = Fixture::new();
     fixture.write_config(&format!(
-        "[native_host]\nstage = {}\n\n[harness_roots]\ncodex = \"~otheruser/.codex/sessions\"\n",
+        "[native_host]\nstage = {}\n\n[harness_roots]\ncodex = \"C:\\Users\\me\\AppData\\Roaming\\Codex\\sessions\"\n",
         serde_json::to_string(&fixture.stage.to_string_lossy()).expect("path")
     ));
 

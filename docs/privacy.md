@@ -135,7 +135,7 @@ the sentence.
    `runtime.sendNativeMessage`
    (`apps/extension/lib/native-host.ts:30`, `:755-805`). The host seals it into
    the stage you configured, using the same code path and the same guarantees as
-   `ingest` (`crates/chat-stasher/src/nativehost.rs:1139-1166`).
+   `ingest` (`crates/chat-stasher/src/nativehost.rs:1146-1173`).
    🔴 **The bundle is deleted from the outbox only when the host answers an
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
@@ -409,7 +409,7 @@ Three things in that table deserve to be called out rather than buried:
 
 **c. Your archive destination.** Whatever you configured: a directory on your
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
-hold (`crates/chat-stasher/src/config.rs:96`). Content is encrypted
+hold (`crates/chat-stasher/src/config.rs:101`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
 kept on your machine (`crates/chat-stasher/src/store.rs:271-345,1146-1231`).
 A directory written by `export --out` is **not** this: it is a separate,
@@ -591,7 +591,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:75-88`, `:341-385`, `:1909-1943`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:75-88`, `:341-385`, `:1923-1957`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-48`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:53`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |

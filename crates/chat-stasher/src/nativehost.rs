@@ -915,17 +915,24 @@ enum HostTarget {
 fn resolve_target() -> HostTarget {
     let refused = |kind: NackKind, detail: String| HostTarget::Refused { kind, detail };
 
-    let config = Config::load();
-    if config.source.is_error_fallback() {
-        return refused(
-            NackKind::Config,
-            format!(
-                "the config file {} could not be read or parsed, so no stage is configured; \
-                 fix it, then re-run `chat-stasher install-native-host --stage <path>`",
-                crate::config::config_path().display()
-            ),
-        );
-    }
+    // A config that cannot be used is a `nack config` here, exactly as it was
+    // when the loader reported the failure through `source`: the host answers the
+    // browser over a protocol, not a terminal, so it cannot exit non-zero at
+    // anyone. The difference is that the reason now reaches the popup verbatim
+    // (file, line, what is wrong with it) instead of a sentence saying only that
+    // it "could not be read or parsed".
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            return refused(
+                NackKind::Config,
+                format!(
+                    "{e:#}; no stage is configured until that file is fixed, then re-run \
+                     `chat-stasher install-native-host --stage <path>`"
+                ),
+            );
+        }
+    };
     let declared = config
         .native_host
         .as_ref()
@@ -1831,13 +1838,20 @@ pub fn dashboard_response(url: &str) -> serde_json::Value {
 
 /// `open_dashboard` — start the dashboard and hand back its URL (§6.5).
 fn open_dashboard(request_id: Option<String>) -> serde_json::Value {
-    let config = Config::load();
     // The same gate `hello` uses: a host that cannot name its stage is not
     // configured, and a dashboard launched from it would be a second,
     // differently-configured view of the same archive.
     if let HostTarget::Refused { kind, detail } = resolve_target() {
         return nack(request_id, kind, detail);
     }
+    // Reached only once `resolve_target()` did **not** refuse, which already
+    // covers every config that cannot be read — so an `Err` here means the file
+    // changed between the two reads of this one request, and refusing is the only
+    // honest answer to that as well.
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => return nack(request_id, NackKind::Config, format!("{e:#}")),
+    };
     let destination = match dashboard_destination(&config) {
         Ok(name) => name,
         Err(detail) => return nack(request_id, NackKind::Config, detail),

@@ -786,19 +786,32 @@ fn build_risks(
 #[derive(Debug)]
 pub struct DoctorReport {
     pub config_source: crate::config::ConfigSource,
+    /// `Some(reason)` when the config file exists but could not be used. Every
+    /// check that reads the config was then **not performed**, and
+    /// [`DoctorReport::not_checked`] names them: this field being set is exactly
+    /// the condition under which the empty collections in this report mean "did
+    /// not look" rather than "found nothing".
+    pub config_error: Option<String>,
     pub claude: ClaudeCheck,
     pub gemini: GeminiRetention,
     pub footprints: Vec<HarnessFootprint>,
     pub other_present: Vec<PathBuf>,
     pub risks: Vec<String>,
-    pub reclaim: ReclaimCheck,
+    /// `None` when the config could not be read, so the repository this check
+    /// would have opened was never named — see [`DoctorReport::config_error`].
+    pub reclaim: Option<ReclaimCheck>,
     /// D6 — how much the local rustic metadata cache occupies (and whether
-    /// `rustic_no_cache` has turned it off).
-    pub cache: CacheCheck,
+    /// `rustic_no_cache` has turned it off). `None` for the same reason as
+    /// `reclaim`: a cache directory comes from the config, and a cache measured
+    /// at a path nobody configured is not an answer.
+    pub cache: Option<CacheCheck>,
     /// D9 — how much this machine's **body** cache occupies, and against which
     /// quota (ADR-034). A different cache from D6's: that one holds metadata,
-    /// this one holds conversation bodies.
-    pub body_cache: BodyCacheCheck,
+    /// this one holds conversation bodies. `None` for the same reason as
+    /// `reclaim` and `cache`: both the root and the quota come out of the config,
+    /// so a report whose config could not be read has nothing to measure and must
+    /// not report a number taken at a root nobody chose.
+    pub body_cache: Option<BodyCacheCheck>,
     /// Per-harness fate decided by the path registry (`scanner::scan`).
     pub probes: Vec<scanner::HarnessProbe>,
     /// Registry-recognised sessions that are not represented by a
@@ -1113,6 +1126,72 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
     }
 }
 
+/// The checks a run cannot perform without a usable config, in the order
+/// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
+/// list only for a report whose `config_error` is set.
+const CHECKS_NEEDING_CONFIG: [&str; 8] = [
+    "D3 harness scan, footprints and archive gaps",
+    "D4 risk summary",
+    "D5 repository reclaim",
+    "D6 local metadata cache",
+    "D9 body cache",
+    "D7 destination probes",
+    "D8 native host stage",
+    "machine identity",
+];
+
+/// The report for a config file that exists and cannot be used.
+///
+/// Deliberately **not** a diagnosis: it carries the two checks that read no
+/// config (D1 Claude settings, D2 Gemini settings, and the directories merely
+/// listed) plus the reason, and says out loud which checks were skipped. Every
+/// config-derived field is left empty, and `config_error` is what tells a
+/// consumer those empties are "did not look" — this is the whole reason `doctor`
+/// is the one command that does not refuse: the user needs to be told *which*
+/// half of their setup is broken, and that answer is worthless if it is dressed
+/// up as a healthy machine.
+pub fn config_unreadable(error: String) -> DoctorReport {
+    let home = crate::config::home_dir();
+    let other_present = OTHER_HARNESS_DIRS
+        .iter()
+        .filter(|d| home.join(d).is_dir())
+        .map(|d| home.join(d))
+        .collect();
+    DoctorReport {
+        config_source: crate::config::ConfigSource::Unreadable,
+        config_error: Some(error),
+        claude: inspect_claude_settings(&home),
+        gemini: inspect_gemini_settings(&home),
+        footprints: Vec::new(),
+        other_present,
+        risks: Vec::new(),
+        reclaim: None,
+        cache: None,
+        // D9's root and quota both come from the config, so it is one of the
+        // checks that did not run — not a body cache of zero bytes.
+        body_cache: None,
+        probes: Vec::new(),
+        archive_gaps: Vec::new(),
+        // True as well: the scan is one of the checks that did not run, and this
+        // is the field a consumer that predates `config_error` already reads.
+        scan_failed: true,
+        destinations: Vec::new(),
+        native_host: None,
+    }
+}
+
+impl DoctorReport {
+    /// The checks this run did **not** perform. Empty for a report built from a
+    /// usable config; [`CHECKS_NEEDING_CONFIG`] otherwise.
+    pub fn not_checked(&self) -> &'static [&'static str] {
+        if self.config_error.is_some() {
+            &CHECKS_NEEDING_CONFIG
+        } else {
+            &[]
+        }
+    }
+}
+
 /// Run every check against the real machine and assemble the report.
 pub fn run() -> DoctorReport {
     let home = crate::config::home_dir();
@@ -1123,9 +1202,18 @@ pub fn run() -> DoctorReport {
     // D2
     let gemini = inspect_gemini_settings(&home);
 
+    // The config gates more than half of this report, so an unusable one is an
+    // early, explicit answer rather than a report about a machine the tool could
+    // not see. Filling the config-derived sections from `Config::default()`
+    // would print "no destination declared", "no repository", "no stage" —
+    // findings about a config nobody read.
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => return config_unreadable(format!("{e:#}")),
+    };
+
     // D3 — use the registry-driven scanner for every directory harness. The
     // doctor no longer has a second Gemini suffix/pattern implementation.
-    let config = Config::load();
     let (scan, scan_failed) = match scanner::scan(&config) {
         Ok(s) => (s, false),
         Err(e) => {
@@ -1222,14 +1310,15 @@ pub fn run() -> DoctorReport {
     let probes = scan.probes;
     DoctorReport {
         config_source: config.source,
+        config_error: None,
         claude,
         gemini,
         footprints,
         other_present,
         risks,
-        reclaim,
-        cache,
-        body_cache,
+        reclaim: Some(reclaim),
+        cache: Some(cache),
+        body_cache: Some(body_cache),
         probes,
         archive_gaps,
         scan_failed,
@@ -1931,15 +2020,18 @@ pub struct HostManifestCheck {
 }
 
 /// The `[native_host] stage` key, in the same tri-state style as the rest of
-/// this file: "no key written" and "the config could not be read" are two
-/// different findings and neither is "the path is gone".
+/// this file: "no key written", "the path is gone" and "the path is not a
+/// directory" are three different findings for three different fixes.
+///
+/// There is deliberately no "the config could not be read" variant here. That
+/// case no longer reaches this function at all: an unusable config makes
+/// [`crate::config::Config::load`] fail, and [`run`] answers with
+/// [`config_unreadable`] instead — so a `NotConfigured` reaching a caller means
+/// the key really is absent, not merely unread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageConfigCheck {
     /// The key is absent. The host answers every request `nack config`.
     NotConfigured,
-    /// The config exists but could not be read or parsed, so whether the key is
-    /// there is *unknown*, not absent.
-    ConfigUnreadable { error: String },
     /// Configured, and the directory is there.
     Present { path: PathBuf },
     /// Configured, and nothing is at that path.
@@ -1952,7 +2044,6 @@ impl StageConfigCheck {
     pub fn kind_label(&self) -> &'static str {
         match self {
             StageConfigCheck::NotConfigured => "not_configured",
-            StageConfigCheck::ConfigUnreadable { .. } => "config_unreadable",
             StageConfigCheck::Present { .. } => "present",
             StageConfigCheck::Missing { .. } => "missing",
             StageConfigCheck::NotADirectory { .. } => "not_a_directory",
@@ -2106,29 +2197,24 @@ pub fn inspect_native_host(config: &Config, root: &Path) -> NativeHostCheck {
         .map(|browser| inspect_host_manifest(*browser, root))
         .collect();
 
-    let stage = if config.source.is_error_fallback() {
-        StageConfigCheck::ConfigUnreadable {
-            error: format!(
-                "config {} could not be read or parsed",
-                crate::config::config_path().display()
-            ),
-        }
-    } else {
-        match config
-            .native_host
-            .as_ref()
-            .and_then(|section| section.stage.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            None => StageConfigCheck::NotConfigured,
-            Some(declared) => {
-                let path = PathBuf::from(declared);
-                match fs::metadata(&path) {
-                    Ok(meta) if meta.is_dir() => StageConfigCheck::Present { path },
-                    Ok(_) => StageConfigCheck::NotADirectory { path },
-                    Err(_) => StageConfigCheck::Missing { path },
-                }
+    // No "the config could not be read" arm here: a config that cannot be used
+    // makes `Config::load` fail, and `run()` returns `config_unreadable` instead
+    // of calling this at all. A caller that reaches this function holds a config
+    // that was read, so the absent key below really is absent.
+    let stage = match config
+        .native_host
+        .as_ref()
+        .and_then(|section| section.stage.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => StageConfigCheck::NotConfigured,
+        Some(declared) => {
+            let path = PathBuf::from(declared);
+            match fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => StageConfigCheck::Present { path },
+                Ok(_) => StageConfigCheck::NotADirectory { path },
+                Err(_) => StageConfigCheck::Missing { path },
             }
         }
     };
@@ -2168,9 +2254,6 @@ pub fn native_host_json(check: &NativeHostCheck) -> serde_json::Value {
     let stage = {
         let mut value = serde_json::json!({"kind": check.stage.kind_label()});
         match &check.stage {
-            StageConfigCheck::ConfigUnreadable { error } => {
-                value["error"] = serde_json::json!(error);
-            }
             StageConfigCheck::Present { path }
             | StageConfigCheck::Missing { path }
             | StageConfigCheck::NotADirectory { path } => {
@@ -2206,14 +2289,30 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "command": "doctor",
         "scan_failed": r.scan_failed,
         "config_source": r.config_source.label(),
+        // `null` for a healthy run. When it is a string, every empty collection
+        // in this object means "did not look", and `not_checked` names them —
+        // without it, `"probes": []` would read as a machine with no harness.
+        "config_error": r.config_error,
+        "not_checked": r.not_checked(),
         "claude": claude_json(&r.claude),
         "gemini": gemini_json(&r.gemini),
         "footprints": r.footprints.iter().map(footprint_json).collect::<Vec<_>>(),
         "other_present": r.other_present.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "risks": r.risks.iter().map(|text| risk_json(text)).collect::<Vec<_>>(),
-        "reclaim": reclaim_json(&r.reclaim),
-        "cache": cache_json(&r.cache),
-        "body_cache": body_cache_json(&r.body_cache),
+        "reclaim": match &r.reclaim {
+            Some(reclaim) => reclaim_json(reclaim),
+            // Same idiom as `native_host` below: not "no repository", but "this
+            // run did not look", which is a different finding.
+            None => serde_json::json!({"checked": false}),
+        },
+        "cache": match &r.cache {
+            Some(cache) => cache_json(cache),
+            None => serde_json::json!({"checked": false}),
+        },
+        "body_cache": match &r.body_cache {
+            Some(body_cache) => body_cache_json(body_cache),
+            None => serde_json::json!({"checked": false}),
+        },
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
@@ -2490,10 +2589,36 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
     eprintln!("doctor — “Is your harness silently deleting your data?”");
     eprintln!("      read-only probe; prints only paths / counts / bytes / timestamps, never session bodies.");
-    if r.config_source.is_error_fallback() {
+    // Only when there is no usable configuration. This line used to carry the
+    // fallback labels (`defaults_after_parse_error`); it now carries
+    // `unreadable`, and the label change is deliberate and visible: a wrapper
+    // that greps `config_source=` still sees that the run had a config problem,
+    // and a healthy report keeps the byte-for-byte output it had.
+    if r.config_error.is_some() {
         eprintln!("config_source={}", r.config_source.label());
     }
     eprintln!();
+
+    if let Some(error) = &r.config_error {
+        // The one report that is deliberately partial, and says so before it
+        // prints anything a reader could mistake for a finding. The two checks
+        // below need no config, so they are still real; everything config-derived
+        // is named here instead of being printed from defaults.
+        // The error text already opens with the file and what is wrong with it
+        // (`config file <path> exists but cannot be used: …`), so this adds the
+        // alarm marker and nothing that repeats it.
+        eprintln!("🔴 {error}");
+        eprintln!();
+        eprintln!("🔴 NOT CHECKED — these read the config, so this run has no answer for them:");
+        for check in r.not_checked() {
+            eprintln!("     · {check}");
+        }
+        eprintln!(
+            "   An absent result above is NOT a count of zero and NOT a clean verdict: this run did \
+             not look. Fix the config file and run `doctor` again."
+        );
+        eprintln!();
+    }
 
     // D1
     eprintln!("D1 · Claude Code rotation settings");
@@ -2539,6 +2664,25 @@ pub fn print_report(r: &DoctorReport) {
     eprintln!();
 
     // D3
+    // Checked before `scan_failed`, which `config_unreadable` also sets: the two
+    // situations are different, and the line below is only true of one. A config
+    // this run could not read means the registry was never opened — "unknown",
+    // not "missing/unparseable" — and the note the `scan_failed` text points at
+    // ("Refusing to scan with hardcoded roots") was never printed on this path
+    // either. Reporting a registry fault here would answer a question nobody
+    // asked with a cause that is not the user's (CLAUDE.md invariant 1). The
+    // report ends here rather than falling through: every section after D3 in
+    // the `scan_failed` branch is config-derived, and `not_checked` above has
+    // already named all of it — an empty "D4 · Risk summary" heading under a
+    // "did not look" banner reads as "no risks", which is the same mistake.
+    if r.config_error.is_some() {
+        eprintln!(
+            "D3 · Coverage — NOT CHECKED: the config file could not be read, so this run never reached the path registry. Its state is unknown, not missing."
+        );
+        eprintln!();
+        return;
+    }
+
     if r.scan_failed {
         eprintln!("D3 · Coverage — 🔴 registry missing / unparseable, session coverage unknown.");
         eprintln!(
@@ -2584,16 +2728,27 @@ pub fn print_report(r: &DoctorReport) {
             eprintln!("  {}. {risk}", i + 1);
         }
         eprintln!();
-        eprintln!("D5 · How much reclaimable garbage is in the repository?");
-        eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
-        print_reclaim(&r.reclaim);
-        eprintln!();
-        eprintln!("D6 · Local metadata cache occupancy");
-        print_cache(&r.cache);
-        eprintln!();
-        eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
-        print_body_cache(&r.body_cache);
-        eprintln!();
+        // These three are `Option` only because a report whose config could not
+        // be read has no repository or cache path to measure. That report has
+        // returned above, so a `None` here would mean a caller assembled a report
+        // by hand: printing the section without an answer would be worse than
+        // leaving it out, and `not_checked` is what names it.
+        if let Some(reclaim) = &r.reclaim {
+            eprintln!("D5 · How much reclaimable garbage is in the repository?");
+            eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
+            print_reclaim(reclaim);
+            eprintln!();
+        }
+        if let Some(cache) = &r.cache {
+            eprintln!("D6 · Local metadata cache occupancy");
+            print_cache(cache);
+            eprintln!();
+        }
+        if let Some(body_cache) = &r.body_cache {
+            eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
+            print_body_cache(body_cache);
+            eprintln!();
+        }
         print_destinations(&r.destinations);
         // D8 does not depend on the scan at all — it reads the browser
         // manifests and the config — so it is reported on this path too.
@@ -2670,19 +2825,30 @@ pub fn print_report(r: &DoctorReport) {
     }
     eprintln!();
 
-    // D5 — reclaimable garbage in the archive repository (prune_plan, read-only)
-    eprintln!("D5 · How much reclaimable garbage is in the repository?");
-    eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
-    print_reclaim(&r.reclaim);
-    eprintln!();
+    // D5 — reclaimable garbage in the archive repository (prune_plan, read-only).
+    // `Option` because a report with no usable config has no repository path to
+    // measure; see the note on the same pair on the scan-failed path above.
+    if let Some(reclaim) = &r.reclaim {
+        eprintln!("D5 · How much reclaimable garbage is in the repository?");
+        eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
+        print_reclaim(reclaim);
+        eprintln!();
+    }
 
     // D6 — how much the local metadata cache actually occupies
-    eprintln!("D6 · Local metadata cache occupancy");
-    print_cache(&r.cache);
-    eprintln!();
-    eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
-    print_body_cache(&r.body_cache);
-    eprintln!();
+    if let Some(cache) = &r.cache {
+        eprintln!("D6 · Local metadata cache occupancy");
+        print_cache(cache);
+        eprintln!();
+    }
+
+    // D9 — how much the body cache occupies, against the quota ADR-034 gives it.
+    // `Option` for the same reason as D5/D6 above: no config, no root to measure.
+    if let Some(body_cache) = &r.body_cache {
+        eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
+        print_body_cache(body_cache);
+        eprintln!();
+    }
 
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
@@ -2761,9 +2927,6 @@ fn print_native_host(check: &NativeHostCheck) {
         StageConfigCheck::NotConfigured => eprintln!(
             "  stage: no `[native_host] stage` in {} — every delivery answers nack config",
             crate::config::config_path().display()
-        ),
-        StageConfigCheck::ConfigUnreadable { error } => eprintln!(
-            "  stage: UNKNOWN — {error}, so whether the key is set cannot be answered"
         ),
         StageConfigCheck::Present { path } => {
             eprintln!("  stage: {} (present)", path.display())
@@ -3438,6 +3601,7 @@ mod json_tests {
     fn report() -> DoctorReport {
         DoctorReport {
             config_source: crate::config::ConfigSource::DefaultsMissing,
+            config_error: None,
             claude: ClaudeCheck {
                 layers: vec![(
                     PathBuf::from("/nowhere/.claude/settings.json"),
@@ -3452,15 +3616,15 @@ mod json_tests {
                 "🔴 Claude Code: cleanupPeriodDays is unset → default 30 days.".to_string(),
                 "🟢 Gemini: disabled — no risk.".to_string(),
             ],
-            reclaim: ReclaimCheck::NoRepo {
+            reclaim: Some(ReclaimCheck::NoRepo {
                 repo_root: PathBuf::from("/nowhere/repo"),
-            },
-            cache: CacheCheck::NoCacheDir {
+            }),
+            cache: Some(CacheCheck::NoCacheDir {
                 root: PathBuf::from("/nowhere/rustic"),
-            },
-            body_cache: BodyCacheCheck::NoCacheDir {
+            }),
+            body_cache: Some(BodyCacheCheck::NoCacheDir {
                 root: PathBuf::from("/nowhere/body"),
-            },
+            }),
             probes: vec![probe()],
             archive_gaps: Vec::new(),
             scan_failed: false,
@@ -3497,11 +3661,13 @@ mod json_tests {
                 "cache",
                 "claude",
                 "command",
+                "config_error",
                 "config_source",
                 "destinations",
                 "footprints",
                 "gemini",
                 "native_host",
+                "not_checked",
                 "other_present",
                 "probes",
                 "reclaim",
