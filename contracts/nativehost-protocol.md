@@ -124,12 +124,18 @@ Request:
  "request_id": "<1–128 chars of [A-Za-z0-9_-]>",
  "name": "<platform>-<path-safe session id>.json",
  "payload": "<the bundle, serialised with JSON.stringify>",
- "sha256": "<64 lowercase hex chars: SHA-256 of the UTF-8 bytes of payload>"}
+ "sha256": "<64 lowercase hex chars: SHA-256 of the UTF-8 bytes of payload>",
+ "fingerprint": "<optional; 64 lowercase hex chars>"}
 ```
 
 - `payload` is a **string**, byte-for-byte what a bundle file would contain.
   That is what makes the content hash identical across every channel
   (native messaging, the export file, a bundle file in an inbox).
+- `fingerprint` is **optional** and does not take part in the duplicate decision
+  (§7 is unchanged). When present it is recorded on the sealed shard as
+  `fingerprint`, and it is what §6.6 answers from. It is absent for a payload the
+  extension has no capture-body derivation for, and an older extension never sends
+  it at all — both are ordinary, and neither is an error.
 - `name` must match `^[a-z0-9]+-[^/\\]+\.json$`. It is recorded as the shard's
   `source_file` and is the fallback id source, as a file name is for `ingest`.
 - The host recomputes SHA-256 over the UTF-8 bytes of `payload`. A mismatch is
@@ -155,7 +161,7 @@ bytes were already sealed; `shard` names the existing one).
 | `kind` | Scope | `retryable` | Meaning |
 |---|---|---|---|
 | `protocol-version` | host | false | `protocol` missing or not supported. The response adds `"supported": [1]`. |
-| `bad-request` | item | false | Not JSON, unknown `type`, missing or malformed field (`request_id`, `name`, `sha256`). |
+| `bad-request` | item | false | Not JSON, unknown `type`, missing or malformed field (`request_id`, `name`, `sha256`, `fingerprint`, `platform`, `session_id`). |
 | `too-large` | item | false | Length prefix above 64 MiB. |
 | `integrity` | item | true | `sha256` does not match `payload`. |
 | `invalid-bundle` | item | false | `payload` is not a valid inbox bundle. |
@@ -312,6 +318,70 @@ that has no business holding one. The exit status is enough to say which of the
 CLI's documented outcomes happened; the detail points at running `chat-stasher
 ui` by hand for the full text.
 
+### 6.6 `has` — does the stage already hold this content?
+
+Request:
+
+```json
+{"protocol": 1, "type": "has",
+ "request_id": "<1–128 chars of [A-Za-z0-9_-]>",
+ "platform": "<the bundle's raw platform>",
+ "session_id": "<the bundle's raw sessionId>",
+ "fingerprint": "<64 lowercase hex chars>"}
+```
+
+Response (or a `nack`):
+
+```json
+{"protocol": 1, "type": "has", "ok": true, "request_id": "<same>",
+ "held": true, "shard": "<shard file name, or null>"}
+```
+
+**What "held" means.** The host looks in exactly one place — the directory that a
+`deliver` of this bundle would write to,
+`<stage>/sessions/<machine>/<platform>.<sessionId>/` — for a shard whose record
+carries this `fingerprint`, and answers with the shard's name. The two identity
+fields are sanitised exactly as `deliver` sanitises the bundle's, so the lookup
+cannot name a different directory than the write does.
+
+**Why the extension asks.** *Is this exact content already stored?* must not be
+answered from the extension's own memory. A remembered "we stored this" survives
+the archive being replaced or restored at the same path, and a conversation would
+then be settled as archived without one byte reaching the new archive. The
+archive is the only thing that cannot be stale relative to itself, so the question
+is put to the host that owns it.
+
+**Three outcomes, and they stay three.**
+
+| Outcome | Means | The extension |
+|---|---|---|
+| `ok`, `held: true` | a shard in that directory carries this fingerprint | settles the capture as archived, unchanged — nothing is sent |
+| `ok`, `held: false` | **asked and answered**: nothing there holds it. An empty stage, a stage whose session directory was recreated, and a stage that never saw this conversation all land here | delivers |
+| `nack` | the question could not be asked: no configured stage, an unreadable directory, a malformed request | delivers |
+
+The middle row is a measurement and the last row is an unknown; `held: false`
+must never be sent for a question that was not actually answered (invariant: an
+unknown is never recorded as empty).
+
+**The fingerprint is opaque.** The host compares it as a string and never
+recomputes it: it is derived by the extension from the capture body with that
+platform's volatile fields removed, and a second derivation in another language
+would have to reproduce JavaScript's `JSON.stringify` byte for byte — number
+formatting, key order, escapes — to agree. Recording it on the sealed shard
+(`deliver`'s optional `fingerprint`) and comparing strings is the only version of
+this that cannot silently disagree with itself.
+
+**Not a lock, and not a reservation.** `has` is read-only and takes no stage lock.
+A shard published by a rename is never seen half-written, and a lookup that races
+a concurrent seal at worst misses it, which answers `held: false` ⇒ delivered ⇒
+the writer's byte-level duplicate scan still sees the second copy. Nothing about
+the answer is a promise that the content will still be there at delivery time.
+
+**An older host** answers this with `nack` `bad-request` (`unknown message type
+"has"`), exactly as §6.4/§6.5 describe, and the extension delivers. No version
+negotiation is involved, and none is needed: every outcome other than
+`held: true` ⇒ deliver.
+
 ## 7. Idempotency
 
 The duplicate key is the SHA-256 of the payload bytes — the same `fileSha256`
@@ -357,6 +427,12 @@ version is a new document section, never an edit to an existing one.
   pending item, the extension keeps its own low-frequency retry timer, and
   clears it once the outbox is empty.
 - There is no automatic file download anywhere.
+- **A capture is skipped as already-stored only when the host answered `has` with
+  `held: true` for that capture's own fingerprint (§6.6).** Every other outcome —
+  `held: false`, a `nack`, a timeout, a send failure, a malformed response, a
+  response whose `request_id` is not the one that was sent — means "deliver". An
+  extension must not treat its own record of an earlier delivery as that answer:
+  the record cannot see the archive being replaced.
 - The popup asks `summary` **once, when it opens**. It does not poll, and it has
   no timer of its own.
 - The popup opens a browser tab **only** with the `url` of a successful

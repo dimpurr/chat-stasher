@@ -848,6 +848,21 @@ struct DeliverRequest {
     name: String,
     payload: String,
     sha256: String,
+    /// W50c · optional content fingerprint (§6.2). Absent is the ordinary case for
+    /// an older extension, and it is not an error: the shard is then recognised
+    /// only by its exact bytes, which is exactly the behaviour before this field
+    /// existed.
+    fingerprint: Option<String>,
+}
+
+/// `has` request body (§6.6). `protocol` and `type` are checked before this is
+/// parsed, so — like [`DeliverRequest`] — only the payload fields are named here.
+#[derive(Debug, Deserialize)]
+struct HasRequest {
+    request_id: String,
+    platform: String,
+    session_id: String,
+    fingerprint: String,
 }
 
 /// `[A-Za-z0-9_-]{1,128}` (§6.2).
@@ -1057,6 +1072,8 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
     match request.get("type").and_then(|value| value.as_str()) {
         Some("hello") => hello(echoed_id),
         Some("deliver") => deliver(request, echoed_id),
+        // §6.6 — the content question, answered from the stage (W50c).
+        Some("has") => has(request, echoed_id),
         // §6.4/§6.5 — the two parameterless read-only queries.
         Some("summary") => match no_parameters(&request) {
             Ok(()) => summary(echoed_id),
@@ -1117,6 +1134,11 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
     if !valid_sha256(&parsed.sha256) {
         return nack(request_id, NackKind::BadRequest, "malformed `sha256`");
     }
+    if let Some(fingerprint) = parsed.fingerprint.as_deref() {
+        if !valid_sha256(fingerprint) {
+            return nack(request_id, NackKind::BadRequest, "malformed `fingerprint`");
+        }
+    }
     let request_id = Some(parsed.request_id.clone());
 
     // Recomputed over the UTF-8 bytes of the *decoded* payload, which is what
@@ -1149,6 +1171,7 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         &stage,
         &machine,
         crate::store::DEFAULT_SHARD_BUCKET_CAP,
+        parsed.fingerprint.as_deref(),
     ) {
         Ok(inbox::SealOutcome::Stored(consumed)) => serde_json::json!({
             "protocol": PROTOCOL,
@@ -1170,6 +1193,83 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
             nack(request_id, NackKind::StageUnavailable, format!("{e:#}"))
         }
         Err(inbox::SealError::Other(e)) => nack(request_id, NackKind::Io, format!("{e:#}")),
+    }
+}
+
+/// `has` — §6.6, W50c · **does the stage already hold this exact content?**
+///
+/// The question the extension used to answer from its own `storage.local`
+/// memory ("we remember acking this fingerprint"), and could not answer safely:
+/// the memory is keyed by content and destination, so an archive that was
+/// replaced or restored at the same path left every record standing and a
+/// conversation could be settled as archived without one byte reaching the new
+/// archive. Here the answer comes from the only thing that cannot be stale
+/// relative to the archive — the archive.
+///
+/// Three outcomes, and they stay three:
+///  · `ok` with `held: true` — a shard in that conversation's directory carries
+///    this fingerprint; `shard` names it, so the answer can be audited;
+///  · `ok` with `held: false` — **asked and answered**: nothing there holds it.
+///    An empty or recreated stage lands here, and the extension delivers;
+///  · `nack` — the question could not be asked (no stage, unreadable directory,
+///    malformed request). The extension reads every one of those as "not known to
+///    be held" ⇒ deliver, so a host that cannot answer never causes a skip.
+///
+/// 🔴 A request that names a different conversation than its fingerprint came from
+///    is not an error this can detect, and does not need to be: the answer is
+///    scoped to the directory named by `platform`/`session_id`, so a mismatch can
+///    only ever produce `held: false` — one extra copy, never a wrong skip.
+fn has(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let parsed: HasRequest = match serde_json::from_value(request) {
+        Ok(parsed) => parsed,
+        Err(e) => return nack(request_id, NackKind::BadRequest, e.to_string()),
+    };
+    if !valid_request_id(&parsed.request_id) {
+        return nack(request_id, NackKind::BadRequest, "malformed `request_id`");
+    }
+    if !valid_sha256(&parsed.fingerprint) {
+        return nack(request_id, NackKind::BadRequest, "malformed `fingerprint`");
+    }
+    // Bounded rather than charset-restricted: the values are path components only
+    // after `session_dir_id` has sanitised them, and restricting them further here
+    // would reject a request for a bundle `deliver` would happily accept.
+    for (field, value) in [
+        ("platform", parsed.platform.as_str()),
+        ("session_id", parsed.session_id.as_str()),
+    ] {
+        if value.is_empty() || value.len() > 512 {
+            return nack(
+                request_id,
+                NackKind::BadRequest,
+                format!("`{field}` must be 1-512 characters"),
+            );
+        }
+    }
+    let request_id = Some(parsed.request_id.clone());
+
+    let (machine, stage) = match resolve_target() {
+        HostTarget::Ready { machine, stage } => (machine, stage),
+        HostTarget::Refused { kind, detail } => return nack(request_id, kind, detail),
+    };
+
+    let dir = crate::store::session_shard_dir(
+        &stage,
+        &machine,
+        &inbox::session_dir_id(&parsed.platform, &parsed.session_id),
+    );
+    match inbox::hold_lookup(&dir, &parsed.fingerprint) {
+        Ok(found) => serde_json::json!({
+            "protocol": PROTOCOL,
+            "type": "has",
+            "ok": true,
+            "request_id": parsed.request_id,
+            "held": found.is_some(),
+            "shard": found,
+        }),
+        // A directory that exists but cannot be read is *not* "nothing is held".
+        // `io` is host-scope and retryable: the item stays pending, and the
+        // extension delivers it rather than skipping it (§6.3).
+        Err(e) => nack(request_id, NackKind::Io, format!("{e:#}")),
     }
 }
 

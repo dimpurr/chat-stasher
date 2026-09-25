@@ -487,6 +487,25 @@ struct ShardRecord {
     /// id or the dedup key — those remain `platform.sessionId` / `file_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<serde_json::Value>,
+    /// W50c · The **content fingerprint** the delivery was made under — the
+    /// extension's "same conversation, volatile fields aside" key
+    /// (`apps/extension/lib/recapture.ts`), which the byte-level `file_sha256`
+    /// cannot express: ChatGPT re-sends a whole conversation on every view with
+    /// only `safe_urls` differing, so two views are two `file_sha256` values and
+    /// one fingerprint.
+    ///
+    /// 🔴 Stored on the shard, not in a sidecar index, and that is the point: the
+    ///    question "is this content already held?" is answered from the archive
+    ///    itself (`hold_lookup`), so nothing can be present while the archive is
+    ///    not. A recreated or restored stage holds no shards and therefore holds
+    ///    no fingerprints — which is exactly the review finding this closes.
+    ///
+    /// `None` for every path that has no capture body to fingerprint (`ingest`
+    /// of a bundle file, an export line) and for every shard sealed before this
+    /// field existed. Omitted entirely when absent, so those shard lines keep
+    /// their existing bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
 }
 
 /// The `identity` envelope — the account axis an `inbox@2` bundle carries.
@@ -518,6 +537,69 @@ struct RawEnvelope {
 #[derive(Debug, Deserialize)]
 struct LookupRecord {
     file_sha256: Option<String>,
+}
+
+/// Lightweight view for the fingerprint scan of existing shard lines (W50c).
+///
+/// A field that is absent, of another type, or a shard line that is not JSON all
+/// leave `fingerprint` as `None` — the same reading, and the only safe one: a
+/// line we cannot read is not a line that holds this content.
+#[derive(Debug, Deserialize)]
+struct FingerprintRecord {
+    fingerprint: Option<String>,
+}
+
+/// The stage session-directory name for a conversation: `<platform>.<sessionId>`,
+/// each component passed through the same sanitiser.
+///
+/// 🔴 One function, called by both `parse_bundle` (which names the directory a
+///    delivery is written into) and `nativehost::has` (which names the directory
+///    it looks in). Two expressions of this mapping is how a `has` would come to
+///    look somewhere other than where the delivery went, and the failure would be
+///    silent: a miss reads as "not held", so the answer would be an extra copy
+///    rather than an error anyone could see.
+pub fn session_dir_id(platform: &str, session_id: &str) -> String {
+    format!(
+        "{}.{}",
+        sanitize_component(platform),
+        sanitize_component(session_id)
+    )
+}
+
+/// Does `session_dir` already hold a shard whose record carries this content
+/// fingerprint? `Ok(Some(shard))` names the first shard that does; `Ok(None)`
+/// means the question was answered and nothing held it.
+///
+/// 🔴 `Ok(None)` is a measurement, not a fallback. A missing directory is the
+///    same answer — an empty stage holds nothing — while a directory that cannot
+///    be *read* is an `Err`, which the host reports as a `nack` and the extension
+///    reads as "not known to be held" ⇒ deliver. "Nothing is held" and "we could
+///    not look" must not collapse into one another (invariant 1).
+///
+/// Read-only, and deliberately **without the stage lock**: `write_shard_atomic`
+/// publishes a shard by renaming a fully written temp file, so no reader can see
+/// a partial shard, and a lookup that races a seal at worst misses it — which
+/// answers "not held" and delivers, while the writer's own byte-level duplicate
+/// scan still sees the second copy. Both directions of that race cost one extra
+/// copy at most; neither can lose or wrongly-skip a conversation.
+pub fn hold_lookup(session_dir: &Path, fingerprint: &str) -> anyhow::Result<Option<String>> {
+    let mut entries = store::sealed_shard_entries(session_dir)?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    for (_, path) in entries {
+        let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| store::shard_filename(0));
+        for line in raw.lines() {
+            if let Ok(record) = serde_json::from_str::<FingerprintRecord>(line) {
+                if record.fingerprint.as_deref() == Some(fingerprint) {
+                    return Ok(Some(name));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------- ingest
@@ -670,12 +752,20 @@ impl std::error::Error for SealError {}
 /// The registration is honest for the host: it seals through `Ingest`'s
 /// semantics and reconciles through the same content-addressed `file_sha256`
 /// lookup.
+///
+/// `fingerprint` is the W50c content fingerprint of the capture this payload was
+/// built from, when the caller has one. It is recorded on the sealed shard and is
+/// what [`hold_lookup`] later answers from; `None` (an inbox file, an export line)
+/// simply records no fingerprint, which means that conversation can only ever be
+/// recognised by its exact bytes. It takes no part in the duplicate decision — §7
+/// is unchanged and the key is still `file_sha256`.
 pub fn seal_payload(
     source_file: &str,
     bytes: &[u8],
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    fingerprint: Option<&str>,
 ) -> Result<SealOutcome, SealError> {
     store::assert_stage_writer_audited(store::StageWriter::Ingest).map_err(SealError::Other)?;
 
@@ -714,6 +804,7 @@ pub fn seal_payload(
             .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
         identity: parsed.identity,
         account: parsed.account,
+        fingerprint: fingerprint.map(str::to_string),
     };
     let line = serde_json::to_string(&record)
         .context("serialise shard record")
@@ -774,7 +865,9 @@ fn consume_one(
     bucket_cap: usize,
 ) -> anyhow::Result<SealOutcome> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap)?;
+    // No fingerprint: an inbox file is the user's own drop box and carries no
+    // capture-body derivation. The shard records the exact bytes instead.
+    let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap, None)?;
     // Seal first, retire second.
     retire(name, path, consumed_dir)?;
     Ok(outcome)
@@ -839,7 +932,10 @@ fn ingest_export_file(
             });
             continue;
         }
-        match seal_payload(&source_file, line, stage, machine, bucket_cap) {
+        // No fingerprint: §8's export file is the escape hatch used when the host
+        // was unreachable, so there is no extension-side derivation to carry — the
+        // line's own bytes are the key (§7).
+        match seal_payload(&source_file, line, stage, machine, bucket_cap, None) {
             Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
             Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
             Err(e) => report.errors.push(ErrorEntry {
@@ -1132,12 +1228,13 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("bundle sessionId is missing"))?;
-    let platform = sanitize_component(platform_raw);
-    let session = sanitize_component(session_raw);
+    // 🔴 The id is built by the one shared function `nativehost::has` also uses to
+    //    name the directory it looks in — see `session_dir_id`.
+    let id = session_dir_id(platform_raw, session_raw);
     out.kind = "bundle";
-    out.platform = platform.clone();
-    out.session_id = session.clone();
-    out.id = format!("{platform}.{session}");
+    out.platform = sanitize_component(platform_raw);
+    out.session_id = sanitize_component(session_raw);
+    out.id = id;
     out.captured_at = bundle.capturedAt.filter(|s| !s.is_empty());
 
     // `parsed` is explicitly best-effort in the contract. Preserve absence
