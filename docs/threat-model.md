@@ -573,8 +573,12 @@ a real limitation of the current code.
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
    through the blob layer. The sidecar is metadata by declaration — it lives
-   under `meta/`, is written by `activity-index`, and holds timestamps, not
-   conversation text. `search` counts the two apart (`data_blobs_read` stays 0;
+   under `meta/`, is written by `activity-index`, and holds timestamps plus one
+   capped one-line label per session (at most 100 characters: a harness title,
+   or the head of the session's first user line, recorded so the dashboard can
+   name sessions). That label is the one piece of conversation-derived text the
+   declaration admits; a session's conversation itself is still only ever read
+   from its data blobs. `search` counts the two apart (`data_blobs_read` stays 0;
    the sidecar reads are reported separately), and
    `crates/chat-stasher/src/search.rs:16-34` states exactly which claim holds.
    It also distinguishes "nothing matched" from "could not finish reading"
