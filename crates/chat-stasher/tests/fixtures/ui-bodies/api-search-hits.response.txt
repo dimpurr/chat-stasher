@@ -1,0 +1,90 @@
+status: 200 OK
+content-type: application/json; charset=utf-8
+
+{
+  "command": "ui",
+  "complete": true,
+  "could_not_be_placed": 0,
+  "coverage": {
+    "complete": true,
+    "in_view": 4,
+    "indexed": 4,
+    "machines_behind": [],
+    "not_searchable": 0
+  },
+  "destination": "dest-under-test",
+  "index": {
+    "documents": 4,
+    "reason": null,
+    "state": "ready",
+    "written_note": "the index file's mtime; the index records no build time of its own",
+    "written_unix": 1770000000
+  },
+  "matched": 2,
+  "mode": "fts",
+  "no_hit": null,
+  "not_in_view": 0,
+  "not_matched": 0,
+  "paging": {
+    "limit": 100,
+    "offset": 0,
+    "order": "relevance",
+    "ranked_by": "bm25",
+    "total": 2
+  },
+  "payload_loaded": false,
+  "query": "synthetic",
+  "query_error": null,
+  "query_state": "answered",
+  "results": [
+    {
+      "href": "/reader?i=0&m=0&n=50&token=golden-token#m3",
+      "index": 0,
+      "machine": "m-1",
+      "matched_in": "message",
+      "message_ordinal": 4,
+      "rank": 0.0,
+      "session_short_id": "claude-c~e58aa6",
+      "snippet": [
+        {
+          "matched": false,
+          "text": "the "
+        },
+        {
+          "matched": true,
+          "text": "synthetic"
+        },
+        {
+          "matched": false,
+          "text": " first turn"
+        }
+      ],
+      "source": "claude-code",
+      "title": {
+        "state": "no_label"
+      }
+    },
+    {
+      "href": "/reader?i=2&token=golden-token",
+      "index": 2,
+      "machine": "m-2",
+      "matched_in": "not_relocated",
+      "message_ordinal": null,
+      "rank": 1.0,
+      "session_short_id": "claude-c~5690f8",
+      "snippet": null,
+      "source": "claude-code",
+      "title": {
+        "state": "no_label"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "sessions_not_placed": [],
+  "tier": "index",
+  "tokenizer": "trigram",
+  "too_short": null,
+  "truncated": false,
+  "unfiltered_matched": 2,
+  "unreadable_parts": []
+}

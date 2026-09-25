@@ -1,0 +1,36 @@
+status: 200 OK
+content-type: application/json; charset=utf-8
+
+{
+  "command": "ui",
+  "complete": true,
+  "could_not_be_placed": null,
+  "coverage": null,
+  "destination": "dest-under-test",
+  "index": {
+    "documents": null,
+    "reason": null,
+    "state": "missing",
+    "written_note": "the index file's mtime; the index records no build time of its own",
+    "written_unix": null
+  },
+  "matched": null,
+  "mode": "fts",
+  "no_hit": null,
+  "not_in_view": null,
+  "not_matched": null,
+  "paging": null,
+  "payload_loaded": false,
+  "query": "synthetic",
+  "query_error": null,
+  "query_state": "no_index",
+  "results": [],
+  "schema_version": 1,
+  "sessions_not_placed": null,
+  "tier": "index",
+  "tokenizer": "trigram",
+  "too_short": null,
+  "truncated": null,
+  "unfiltered_matched": null,
+  "unreadable_parts": []
+}

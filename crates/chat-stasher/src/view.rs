@@ -253,6 +253,15 @@ pub fn host_is_local(hosts: &[String], port: u16) -> bool {
 /// is checked before the path so that an unauthorised caller cannot use
 /// 404-vs-200 to learn which routes exist. `Host` may safely precede the token
 /// because it carries no secret — the attacker chose its value.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "A router's arguments are the ambient facts it may read: the request \
+              (method, target, host, port) and its three injected capabilities. \
+              Bundling the last three into a struct would name the same handles \
+              once more while making it easier for a route to reach one it was \
+              not given — the explicit parameter list is what lets the router \
+              tests prove which routes reach the payload tier and the index."
+)]
 pub fn route(
     method: &str,
     target: &str,
@@ -261,6 +270,7 @@ pub fn route(
     port: u16,
     data: &crate::ui::UiData,
     content: &dyn crate::ui::ContentSource,
+    index: &dyn crate::ui::TextIndex,
 ) -> Response {
     if method != "GET" {
         return Response::text(
@@ -295,7 +305,7 @@ pub fn route(
             );
         }
     }
-    match crate::ui::handle(path, &params, token, data, content) {
+    match crate::ui::handle(path, &params, token, data, content, index) {
         Some(resp) => resp,
         None => Response::text(404, "Not Found", crate::ui::no_route_message()),
     }
@@ -399,6 +409,7 @@ pub fn serve(
     data: &crate::ui::UiData,
     idle: Duration,
     content: &dyn crate::ui::ContentSource,
+    index: &dyn crate::ui::TextIndex,
 ) -> std::io::Result<ServeStats> {
     listener.set_nonblocking(true)?;
     // Read once: the `Host` allowlist is "our own address", and our own port is
@@ -439,9 +450,9 @@ pub fn serve(
                     continue;
                 }
                 let resp = match read_head(&mut stream) {
-                    Ok(Some(h)) => {
-                        route(&h.method, &h.target, &h.hosts, token, port, data, content)
-                    }
+                    Ok(Some(h)) => route(
+                        &h.method, &h.target, &h.hosts, token, port, data, content, index,
+                    ),
                     Ok(None) => Response::text(400, "Bad Request", "view: malformed request\n"),
                     Err(_) => continue,
                 };
@@ -496,7 +507,7 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{fixture, NoContent};
+    use crate::ui::{fixture, NoContent, NoIndex};
 
     /// Every route the dashboard serves, read from the router's own table so
     /// this list cannot drift from what `ui::handle` answers and what the 404
@@ -514,7 +525,16 @@ mod tests {
 
     /// One request, with the payload tier stubbed out.
     fn get(target: &str, token: &str, hosts: &[String]) -> Response {
-        route("GET", target, hosts, token, P, &fixture::data(), &NoContent)
+        route(
+            "GET",
+            target,
+            hosts,
+            token,
+            P,
+            &fixture::data(),
+            &NoContent,
+            &NoIndex,
+        )
     }
 
     #[test]
@@ -584,7 +604,8 @@ mod tests {
                         "t",
                         P,
                         &fixture::data(),
-                        &NoContent
+                        &NoContent,
+                        &NoIndex,
                     )
                     .status,
                     405,
@@ -609,7 +630,8 @@ mod tests {
                 "t",
                 P,
                 &fixture::data(),
-                &NoContent
+                &NoContent,
+                &NoIndex,
             )
             .status,
             405
@@ -799,6 +821,7 @@ mod tests {
                 &data,
                 Duration::from_secs(2),
                 &NoContent,
+                &NoIndex,
             )
         });
 

@@ -1,0 +1,85 @@
+status: 200 OK
+content-type: text/html; charset=utf-8
+
+<!doctype html>
+<html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>chat-stasher · search · dest-under-test</title>
+<style>
+:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--muted:#5c5c5c;--line:#d8d8d8;
+--head:#f4f4f4;--note-bg:#fffbe6;--note-line:#e6d98a;--warn-bg:#ffecec;--warn-line:#e0a0a0;
+--ok:#1c6b3c;--bad:#a33;--link:#0b57d0;--up:#1c6b3c;--down:#8a1c1c}
+@media (prefers-color-scheme:dark){:root{--fg:#e6e6e6;--bg:#141414;--muted:#a8a8a8;--line:#3a3a3a;
+--head:#1f1f1f;--note-bg:#2e2a17;--note-line:#6b5f22;--warn-bg:#2e1a1a;--warn-line:#6b2a2a;
+--ok:#7ddc9f;--bad:#ff9b9b;--link:#8ab4f8;--up:#7ddc9f;--down:#ff9b9b}}
+*{box-sizing:border-box}
+body{font:15px/1.55 -apple-system,system-ui,"Segoe UI",sans-serif;margin:0;padding:1.5rem 1.25rem 4rem;
+color:var(--fg);background:var(--bg);max-width:76rem}
+h1{font-size:1.4rem;margin:0 0 .2rem}
+h2{font-size:1.05rem;margin:2rem 0 .6rem;border-bottom:1px solid var(--line);padding-bottom:.25rem}
+a{color:var(--link)}
+.sub{color:var(--muted);margin:0 0 1rem}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.88em}
+table{border-collapse:collapse;width:100%;margin:.4rem 0}
+th,td{border-bottom:1px solid var(--line);padding:.35rem .55rem;text-align:left;vertical-align:top}
+th{background:var(--head);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.note{background:var(--note-bg);border:1px solid var(--note-line);padding:.7rem 1rem;margin:.9rem 0;border-radius:4px}
+.warn{background:var(--warn-bg);border:1px solid var(--warn-line);padding:.7rem 1rem;margin:.9rem 0;border-radius:4px}
+.stats{display:flex;flex-wrap:wrap;gap:1.5rem;margin:1rem 0}
+.stat{min-width:8rem}
+.stat .v{display:block;font-size:1.6rem;font-weight:600;font-variant-numeric:tabular-nums}
+.stat .l{color:var(--muted);font-size:.85rem}
+.scroll{overflow-x:auto}
+.heat td.cell{padding:0;text-align:center}
+.heat td.cell a,.heat td.cell span{display:block;padding:.2rem .35rem;text-decoration:none;color:inherit}
+.heat td.cell a:hover{outline:1px solid var(--link)}
+.heat th.week{font-weight:400;font-size:.75rem;writing-mode:vertical-rl;transform:rotate(180deg);
+white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
+.heat td.uk{text-align:center;color:var(--muted)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+/* UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns grouped and coloured
+   by platform group — labels first, colour second (the group name sits in the
+   header row), and drawn only from the variables above (§8.1: no new colours). */
+th.ghead{font-weight:400;font-size:.78rem;padding-bottom:.05rem}
+.g-web{color:var(--link)}
+.g-agents{color:var(--ok)}
+.g-ungrouped{color:var(--muted)}
+footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;
+border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
+.message{border:1px solid var(--line);border-radius:5px;margin:1rem 0;padding:.75rem 1rem}
+.message>header{color:var(--muted);font-size:.85rem;margin-bottom:.5rem}
+.message>header b{color:var(--fg)}
+.message p:first-child{margin-top:0}.message p:last-child{margin-bottom:0}
+.message details{margin:.6rem 0}
+.message summary{cursor:pointer}
+.thinking{border-left:3px solid var(--note-line);padding-left:.7rem}
+.tool{border-left:3px solid var(--link);padding-left:.7rem}
+.attachment{color:var(--muted);border-left:3px solid var(--line);padding-left:.7rem}
+nav.sub{display:flex;gap:1rem}
+</style></head><body>
+<h1>Search</h1>
+<p class=sub><a href="/?token=golden-token">← overview</a> · <a href="/sessions?token=golden-token">sessions</a> · destination <b>dest-under-test</b></p>
+<form method=get action="/search" role=search>
+<p><label for=q>Search sessions</label> (title + message text) <input type=search id=q name=q value="synthetic" autofocus size=40> <button type=submit>Search</button></p>
+<input type=hidden name=token value="golden-token">
+</form>
+<p class=sub>The index is not the archive: it holds the sessions that were readable when it was built. The coverage line on every result says how much of this view&#39;s 4 session(s) that is.</p>
+<p class=ok>Read in full — every snapshot scanned was readable.</p>
+<p class=sub>index coverage: <b>4</b> of <b>4</b> session(s) in this view indexed · index file written: 2026-02-02 02:40 UTC (the file's mtime, not a recorded build time) · mode: fts (trigram)</p>
+<p class=sub>query: <b>synthetic</b> · mode: fts (trigram) · <b>2</b> result(s) over 2 indexed document(s) the text matched</p>
+<p class=sub>Results 2–2 of 2 · ranked by the index (bm25, best match first)</p>
+<nav class=sub aria-label="search result pages"><a href="/search?q=synthetic&limit=1&offset=0&token=golden-token">‹ previous</a> · <a href="/search?q=synthetic&limit=1&offset=0&token=golden-token">1</a> · <b aria-current="page">2</b></nav>
+<ol class=results start=2>
+<li><p class=sub><span class=mono>m-2</span> · claude-code · <span class=mono>claude-c~5690f8</span> · last message 2026-02-02 02:31 UTC</p>
+<blockquote class=sub>matched in the session label: no label was recorded for this session</blockquote>
+<p><a href="/reader?i=2&token=golden-token">open the conversation from the top ▸</a> <span class=sub>(the index matched this session, but the matched text could not be located in the stored messages, so no message number is claimed)</span></p>
+</li>
+</ol>
+<footer>
+<p><b>Index tier.</b> This page was rendered from one archive-metadata read taken before the server started plus the local full-text index. Each hit shows at most about 240 characters of conversation text around the match, taken from that index — not from the archive: the index is a plaintext cache built by <code>chat-stasher index build</code>, and an excerpt's absence proves nothing about the archive, only about the index. This page fetched 0 session shard blob(s).</p>
+<p>Machines are named by their archive partition id, which is the key the repository actually partitions on. Times are UTC. No JavaScript, no external asset, no off-host link is loaded by this page.</p>
+<p><b>This server is on 127.0.0.1, which is not a security boundary</b> — any other program on this machine can connect to it. Access is gated only by the random token in this page's URL. Do not share the URL. The server exits by itself when idle.</p>
+</footer>
+</body></html>

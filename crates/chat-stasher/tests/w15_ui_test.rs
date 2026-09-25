@@ -1828,3 +1828,206 @@ fn platform_groups_reach_the_matrix_and_the_json_rows() {
         }
     }
 }
+
+/// One synthetic claude-code turn whose text is given, so a search has real
+/// words to match rather than the fixture's two-character "hi".
+fn cc_turn(text: &str, ts: &str) -> String {
+    format!(
+        r#"{{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{{"role":"user","content":"{text}"}},"uuid":"u1","timestamp":"{ts}","cwd":"/x","version":"1.0.31"}}"#
+    )
+}
+
+/// The search page against an index the **real** command built.
+///
+/// This is the half of `/search` no unit test can reach: the identity the
+/// server derives for a `--repo` launch has to be the one `index build` wrote,
+/// the index has to be read from the cache directory the OS gives the sandbox,
+/// and the whole chain — archived JSONL → extracted text → per-message offsets
+/// → a message number → a `/reader#m<n>` anchor — has to come out the other end
+/// with the conversation's own characters escaped on the way.
+#[test]
+fn the_search_page_reads_the_index_the_cli_built() {
+    const SESSION: &str = "claude-code.mbp-s.019bf00d-97b6-7eb2-9bf8-eacbacc09799";
+    let sb = sandbox();
+    let sandbox = sb.path();
+    let stage = stage_for(
+        sandbox,
+        "mbp-s",
+        &[(
+            SESSION,
+            vec![
+                cc_turn(
+                    "the first turn says nothing in particular",
+                    "2025-03-01T00:00:00Z",
+                ),
+                cc_turn(
+                    // Conversation text carrying markup and an ampersand, so
+                    // the escaping on the way to the page is exercised by a
+                    // real indexed document rather than by a fixture string.
+                    "a <script>alert(1)</script> & turn mentions hedgehogs",
+                    "2025-03-01T00:01:00Z",
+                ),
+            ],
+        )],
+    );
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let run_ok = |args: &[&str]| {
+        let out = run(sandbox, args);
+        assert!(
+            out.status.success(),
+            "{args:?} failed: {}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run_ok(&[
+        "activity-index",
+        "--stage",
+        stage.to_str().unwrap(),
+        "--machine",
+        "mbp-s",
+    ]);
+    run_ok(&[
+        "push",
+        "--stage",
+        stage.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--key-file",
+        key.to_str().unwrap(),
+        "--machine",
+        "mbp-s",
+        "--keep-ssh-masters",
+    ]);
+
+    let ui = Ui::start(sandbox, &repo, &key, &[], "ui");
+
+    // Before any index exists: the page says so, names the command that builds
+    // one, and offers no count that could be read as a result.
+    let (status, body) = ui.get("/search?q=hedgehogs");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("No index."), "{body}");
+    assert!(body.contains("chat-stasher index build"), "{body}");
+    assert!(
+        !body.contains("Not in the indexed archive"),
+        "an unbuilt index must never render as a proven absence: {body}"
+    );
+
+    // The real command, and the running server picks it up: no restart, which
+    // is also what a user does after being told to build one.
+    run_ok(&[
+        "index",
+        "build",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--key-file",
+        key.to_str().unwrap(),
+    ]);
+
+    let (status, body) = ui.get("/search?q=hedgehogs");
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("<mark>hedgehogs</mark>"),
+        "the matched span must be marked in the excerpt: {body}"
+    );
+    assert!(
+        body.contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; turn"),
+        "the conversation's own characters must be escaped: {body}"
+    );
+    assert!(
+        !body.contains("<script>alert(1)</script>"),
+        "conversation text must never reach the page as markup: {body}"
+    );
+    assert!(
+        body.contains("#m1"),
+        "the match is in the second message, so the hit must anchor to message 1: {body}"
+    );
+    assert!(
+        body.contains("/reader?i=0&m=0&n=50"),
+        "the anchor must sit in the window the reader opens by default: {body}"
+    );
+    assert!(
+        body.contains("index coverage: <b>1</b> of <b>1</b> session(s)"),
+        "a complete index over the archived session must say so: {body}"
+    );
+
+    // The JSON body answers the same question the same way, and names the
+    // message it anchored to rather than leaving a consumer to parse the href.
+    let (status, body) = ui.get("/api/search?q=hedgehogs");
+    assert_eq!(status, 200, "{body}");
+    let value = first_json(body.as_bytes());
+    assert_eq!(
+        value["query_state"],
+        serde_json::json!("answered"),
+        "{body}"
+    );
+    assert!(value["no_hit"].is_null(), "{body}");
+    assert_eq!(value["mode"], serde_json::json!("fts"), "{body}");
+    assert_eq!(value["matched"], serde_json::json!(1), "{body}");
+    assert_eq!(
+        value["results"][0]["matched_in"],
+        serde_json::json!("message")
+    );
+    assert_eq!(
+        value["results"][0]["message_ordinal"],
+        serde_json::json!(2),
+        "message numbers are 1-based for a reader, and the index's are 0-based: {body}"
+    );
+    assert!(
+        value["results"][0]["snippet"]
+            .as_array()
+            .is_some_and(|segments| segments
+                .iter()
+                .any(|s| s["matched"] == serde_json::json!(true))),
+        "the excerpt must carry which runs matched: {body}"
+    );
+
+    // A text the archive really does not hold, over a complete index and a
+    // complete read: this is the one case that earns an absence.
+    let (status, body) = ui.get("/search?q=definitelynotinthearchive");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Not in the indexed archive"), "{body}");
+
+    // …and one character fewer than the tokenizer can answer is neither a
+    // result nor an absence.
+    let (status, body) = ui.get("/search?q=ab");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("This query cannot be evaluated"), "{body}");
+}
+
+/// A query that cannot resolve is refused on the search routes exactly as it is
+/// on the list ones, in both wire forms — never as a page of zero results.
+#[test]
+fn the_search_routes_refuse_an_unresolvable_parameter() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    for (target, needle) in [
+        ("/search?q=hi&day=yesterday", "day"),
+        ("/search?q=hi&limit=0", "limit"),
+        ("/search?q=hi&sort=size-desc", "sort"),
+    ] {
+        let (status, body) = ui.get(target);
+        assert_eq!(status, 400, "{target}: {body}");
+        assert!(body.contains(needle), "{target}: {body}");
+    }
+    for (target, needle) in [
+        ("/api/search?q=hi&day=yesterday", "day"),
+        ("/api/search?q=hi&limit=0", "limit"),
+        ("/api/search?q=hi&sort=size-desc", "sort"),
+    ] {
+        let (status, body) = ui.get(target);
+        assert_eq!(status, 400, "{target}: {body}");
+        let value = first_json(body.as_bytes());
+        assert_eq!(value["status"], serde_json::json!(400), "{target}: {body}");
+        assert_eq!(value["query_state"], serde_json::json!("refused"), "{body}");
+        assert!(
+            value["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("not an empty result")),
+            "{target} must not answer a refusal with something a consumer reads as empty: {body}"
+        );
+        let _ = needle;
+    }
+}

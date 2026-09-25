@@ -23,7 +23,8 @@ use crate::selector::{Resolved, UnplacedBy, UsageError};
 use super::html::describe_selector;
 use super::overview::count_by_machine;
 use super::{
-    health_of, page_window, percent_encode, select, sort_rows, Page, Selection, UiData, UiSession,
+    health_of, page_window, percent_encode, select, sort_rows, IndexState, Page, Query, Response,
+    Selection, TextIndex, UiData, UiSession,
 };
 
 // ---------------------------------------------------------------- json routes
@@ -188,6 +189,222 @@ pub(super) fn json_sessions(
         })).collect::<Vec<_>>(),
     });
     json_string(&v)
+}
+
+/// `/api/search` — the same answer `/search` renders, as an object.
+///
+/// It carries the same three facts the page prints (the index's coverage, its
+/// file's write time, the query mode) and the same distinction between the
+/// states a zero can be in, as one of [`super::search::NoHit`]'s words. A
+/// consumer therefore never has to parse a sentence to tell "the index cannot
+/// look" from "it looked and the text is not there" — the words are the same
+/// ones the page's own sentences are chosen from, decided once by
+/// `search::no_hit`.
+pub(super) fn api_search(
+    params: &Query,
+    token: &str,
+    data: &UiData,
+    index: &dyn TextIndex,
+) -> Response {
+    let request = match super::search::Request::parse(params) {
+        Ok(request) => request,
+        Err(message) => {
+            return Response::json(
+                400,
+                "Bad Request",
+                json_string(&serde_json::json!({
+                    "schema_version": 1,
+                    "command": "ui",
+                    "destination": data.destination_label,
+                    "tier": "index",
+                    "payload_loaded": false,
+                    "status": 400,
+                    "error": message,
+                    "query_state": "refused",
+                    "matched": serde_json::Value::Null,
+                    "no_hit": serde_json::Value::Null,
+                    "note": "the query was refused, so nothing was searched — this is not an empty result",
+                })),
+            )
+        }
+    };
+    let answer = super::search::solve(&request, data, index);
+    Response::json(
+        200,
+        "OK",
+        json_string(&search_json(&request, &answer, token, data)),
+    )
+}
+
+fn search_json(
+    request: &super::search::Request,
+    answer: &super::search::Answer,
+    token: &str,
+    data: &UiData,
+) -> serde_json::Value {
+    use super::search::QueryOutcome;
+
+    let (index_state, index_reason, written_unix, documents) = match &answer.index {
+        IndexState::Missing => ("missing", serde_json::Value::Null, None, None),
+        IndexState::Unreadable(reason) => (
+            "unreadable",
+            serde_json::Value::String(reason.clone()),
+            None,
+            None,
+        ),
+        IndexState::Ready(summary) => (
+            "ready",
+            serde_json::Value::Null,
+            summary.written_unix,
+            Some(summary.documents),
+        ),
+    };
+    let coverage = answer.coverage.as_ref().map(|coverage| {
+        serde_json::json!({
+            "indexed": coverage.indexed,
+            "in_view": coverage.total,
+            "not_searchable": coverage.not_searchable(),
+            "complete": coverage.complete(),
+            "machines_behind": coverage.behind.iter().map(|(machine, indexed, in_view)| {
+                serde_json::json!({"machine": machine, "indexed": indexed, "in_view": in_view})
+            }).collect::<Vec<_>>(),
+        })
+    });
+    let (query_state, hits, too_short) = match &answer.outcome {
+        QueryOutcome::NoQuery => ("no_query", None, None),
+        QueryOutcome::NoIndex => ("no_index", None, None),
+        QueryOutcome::TooShort(too_short) => ("too_short", None, Some(*too_short)),
+        QueryOutcome::Failed(_) => ("failed", None, None),
+        QueryOutcome::Hits(hits) => ("answered", Some(hits), None),
+    };
+    let hits: Option<&super::search::Hits> = hits;
+    // A query that never ran has no window: `results` is then an empty array
+    // because there is nothing to report, and `query_state` above is what says
+    // why — not because a missing answer was defaulted into an empty one.
+    let window = match &hits {
+        Some(hits) => hits.window(request.page),
+        None => &[],
+    };
+    let results: Vec<serde_json::Value> = window
+        .iter()
+        .map(|hit| {
+            let row = data.session_at(hit.row_index);
+            serde_json::json!({
+                "index": hit.row_index,
+                "machine": row.map(|r| r.machine.clone()),
+                "source": row.map(|r| r.source_label()),
+                "session_short_id": row.map(|r| r.short_id.clone()),
+                "title": row.map(title_json),
+                // The excerpt as the tokenizer marked it: `matched` runs and
+                // plain runs, so a consumer renders a highlight without having
+                // to know the marker characters.
+                "snippet": hit.matched.snippet.as_deref().map(|snippet| {
+                    crate::fts::marked_segments(snippet)
+                        .into_iter()
+                        .map(|segment| serde_json::json!({
+                            "matched": segment.matched,
+                            "text": segment.text,
+                        }))
+                        .collect::<Vec<_>>()
+                }),
+                "matched_in": match &hit.place {
+                    crate::fts::MatchPlace::Message { .. } => "message",
+                    crate::fts::MatchPlace::Label => "label",
+                    crate::fts::MatchPlace::NotRelocated => "not_relocated",
+                },
+                "message_ordinal": match &hit.place {
+                    crate::fts::MatchPlace::Message { ordinal } => Some(ordinal + 1),
+                    _ => None,
+                },
+                "rank": hit.matched.rank,
+                "href": reader_href(hit, token, row.map(|r| r.index)),
+            })
+        })
+        .collect();
+    let body = match &answer.outcome {
+        QueryOutcome::Failed(reason) => serde_json::json!(reason),
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "schema_version": 1,
+        "command": "ui",
+        "destination": data.destination_label,
+        "tier": "index",
+        "payload_loaded": false,
+        "query": request.query,
+        // The query mode is always present, as it is on the page: `scan` does
+        // not exist yet, so every answer this server can give is `fts`, and
+        // saying so is what keeps a future mode from being assumed.
+        "mode": "fts",
+        "tokenizer": "trigram",
+        "query_state": query_state,
+        "query_error": body,
+        // Present only when the query was refused for its length: the two
+        // numbers a caller needs to say which length would have been answered.
+        "too_short": too_short.map(|too_short| serde_json::json!({
+            "chars": too_short.chars,
+            "minimum": too_short.minimum,
+        })),
+        "index": {
+            "state": index_state,
+            "reason": index_reason,
+            "documents": documents,
+            "written_unix": written_unix,
+            "written_note": "the index file's mtime; the index records no build time of its own",
+        },
+        "coverage": coverage,
+        // The destination read, which is not the same thing as the index's
+        // coverage: a complete read can still be covered by a stale index.
+        "complete": data.complete(),
+        "unreadable_parts": data.unreadable,
+        "matched": hits.map(|h| h.total()),
+        "unfiltered_matched": hits.map(|h| h.unfiltered),
+        "not_matched": hits.map(|h| h.not_matched),
+        "could_not_be_placed": hits.map(|h| h.unplaced.len()),
+        "not_in_view": hits.map(|h| h.not_in_view),
+        "truncated": hits.map(|h| h.truncated),
+        // The zero, named. `null` when the query matched something or never ran.
+        "no_hit": super::search::no_hit(answer, data).map(|reason| reason.wire()),
+        "paging": match hits {
+            Some(hits) => serde_json::json!({
+                "total": hits.total(),
+                "limit": request.page.limit,
+                "offset": request.page.offset,
+                // `/search` has no `sort`: the order is the index's relevance
+                // rank. Reported as its own field rather than as a `sort` value
+                // a consumer could mistake for one of the list's keys.
+                "order": "relevance",
+                "ranked_by": "bm25",
+            }),
+            None => serde_json::Value::Null,
+        },
+        "results": results,
+        "sessions_not_placed": hits.map(|h| h.unplaced.iter().map(|(id, why)| {
+            serde_json::json!({
+                "machine": super::machine_of_document_id(id),
+                "why": why,
+            })
+        }).collect::<Vec<_>>()),
+    })
+}
+
+/// The reader URL a hit points at, anchored when the index could place the
+/// match. The same URL the page's link carries, built by the same rule.
+fn reader_href(hit: &super::search::Hit, token: &str, row_index: Option<usize>) -> String {
+    let Some(index) = row_index else {
+        return String::new();
+    };
+    match &hit.place {
+        crate::fts::MatchPlace::Message { ordinal } => {
+            let width = crate::normalize::DEFAULT_WINDOW;
+            format!(
+                "/reader?i={index}&m={}&n={width}&token={}#m{ordinal}",
+                ordinal - (ordinal % width),
+                percent_encode(token)
+            )
+        }
+        _ => format!("/reader?i={index}&token={}", percent_encode(token)),
+    }
 }
 
 /// A query that does not resolve — a filter value or a paging parameter — is

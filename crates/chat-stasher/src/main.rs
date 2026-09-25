@@ -3866,6 +3866,12 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     // has for "which destination the dashboard opens" — names it. The two
     // callers a config can leave unresolvable both exit 2 here, with the
     // state on stderr; nothing is ever guessed and served.
+    // A `--repo` override is kept beside `destination` because `resolve_store_config`
+    // below takes `repo` by value, and the text index is located from the same
+    // two facts the `index` command uses — the destination (or that override)
+    // and the resolved repo root — through the same `index_identity`. Without
+    // this the page could read a different index than `index build` wrote.
+    let repo_override = repo.clone();
     let mut default_from: Option<String> = None;
     let destination = match (destination, repo.as_deref()) {
         (Some(name), _) => Some(name),
@@ -3903,6 +3909,23 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         connections,
         &options,
     );
+    // The FTS index root, by the same derivation `index build`/`check`/`clear`
+    // use, so one destination has exactly one index. `None` when the platform
+    // reports no cache directory at all: the page then says so instead of
+    // serving a search that could only ever be empty.
+    let text_index = scanner::user_cache_dirs()
+        .into_iter()
+        .next()
+        .map(|cache_root| {
+            chat_stasher::fts::Index::for_destination(
+                &cache_root,
+                &index_identity(
+                    destination.as_deref(),
+                    repo_override.as_deref(),
+                    &cfg.repo_root,
+                ),
+            )
+        });
     // ADR-034: the dashboard is the other single-session body reader. Every
     // route except `load` is metadata-tier, and only `load` reaches this cache.
     let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
@@ -4049,13 +4072,15 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         store: &store,
         mk: &mk,
     };
-    let stats = match chat_stasher::view::serve(&listener, &token, &data, idle, &content) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("ui: serve loop failed: {e}");
-            return ExitCode::from(3);
-        }
-    };
+    let text_index = RepoTextIndex { index: text_index };
+    let stats =
+        match chat_stasher::view::serve(&listener, &token, &data, idle, &content, &text_index) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ui: serve loop failed: {e}");
+                return ExitCode::from(3);
+            }
+        };
     say!(
         "[ui] exiting      : idle for {}s · requests served={} rejected={}",
         idle_timeout,
@@ -4093,6 +4118,61 @@ impl chat_stasher::ui::ContentSource for RepoContent<'_> {
             body: String::from_utf8_lossy(&bytes).into_owned(),
             shards,
         })
+    }
+}
+
+/// The one implementation of the index tier: `/search` and `/api/search` ask
+/// this, and no other route does.
+///
+/// "Missing" is decided by looking at the index file rather than by matching
+/// the wording of an error message: the two are the same fact, and only one of
+/// them stays true if the message is ever reworded.
+struct RepoTextIndex {
+    index: Option<chat_stasher::fts::Index>,
+}
+
+impl RepoTextIndex {
+    fn index(&self) -> Result<&chat_stasher::fts::Index, String> {
+        self.index.as_ref().ok_or_else(|| {
+            "this system reports no cache directory, so no local index can exist".to_string()
+        })
+    }
+}
+
+impl chat_stasher::ui::TextIndex for RepoTextIndex {
+    fn state(&self) -> chat_stasher::ui::IndexState {
+        use chat_stasher::ui::IndexState;
+        let index = match self.index() {
+            Ok(index) => index,
+            Err(reason) => return IndexState::Unreadable(reason),
+        };
+        if !index.db_path().exists() {
+            return IndexState::Missing;
+        }
+        match index.summary() {
+            Ok(summary) => IndexState::Ready(summary),
+            Err(error) => IndexState::Unreadable(format!("{error:#}")),
+        }
+    }
+
+    fn query(&self, query: &str) -> Result<chat_stasher::ui::QueryResult, String> {
+        use chat_stasher::ui::QueryResult;
+        let index = self.index()?;
+        match index.matches(query) {
+            Ok(Ok(set)) => Ok(QueryResult::Matches(set)),
+            Ok(Err(too_short)) => Ok(QueryResult::TooShort(too_short)),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    }
+
+    fn placements(
+        &self,
+        query: &str,
+        ids: &[String],
+    ) -> Result<Vec<chat_stasher::fts::MatchPlace>, String> {
+        self.index()?
+            .placements(query, ids)
+            .map_err(|error| format!("{error:#}"))
     }
 }
 
@@ -6888,10 +6968,11 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         repo.dump(&entries_all[*idx].1, &mut raw)
                             .context("read changed archived document")?;
                     }
-                    let (fallback_title, body) = chat_stasher::fts::extract_index_text(&raw)?;
+                    let extracted = chat_stasher::fts::extract_index_document(&raw)?;
                     Ok(chat_stasher::fts::DocText {
-                        title: titles.get(id).cloned().unwrap_or(fallback_title),
-                        body,
+                        title: titles.get(id).cloned().unwrap_or(extracted.title),
+                        body: extracted.body,
+                        message_offsets: extracted.message_offsets,
                     })
                 })
             })();
