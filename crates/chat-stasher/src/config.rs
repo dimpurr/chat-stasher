@@ -288,6 +288,21 @@ pub enum StageKeyWrite {
     Unchanged,
 }
 
+/// What [`Config::set_destination`] did to the file.
+///
+/// There is deliberately no `Updated` variant. A destination that is already
+/// declared is the user's — `rustic init`'s precedent, which ADR-039 cites — and
+/// a wizard that rewrote it could silently repoint an archive at a different
+/// bucket or drop options it does not know about. So the only two outcomes are
+/// "added a block that was not there" and "left a block that was".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationWrite {
+    /// `[destinations.<name>]` was not in the file and now is.
+    Added,
+    /// `[destinations.<name>]` was already in the file. Nothing was written.
+    AlreadyDeclared,
+}
+
 /// Replace `path` with `bytes` through a temp file in the same directory plus a
 /// rename, so a reader — or a crash — sees either the old file or the new one,
 /// never a half-written one. The temp name is dot-prefixed and pid-suffixed:
@@ -605,6 +620,176 @@ impl Config {
         Ok(outcome)
     }
 
+    /// Whether `[destinations.<name>]` is already declared in the file, as a
+    /// real table rather than a commented-out example.
+    ///
+    /// Read from the file, not from `Config`: the caller has a `Config` in hand,
+    /// but a `Config` whose `[destinations]` section could not be read is
+    /// precisely the case where the answer must not be "no, add one".
+    pub fn destination_is_declared(name: &str) -> anyhow::Result<bool> {
+        let path = config_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // No config file yet ⇒ nothing is declared. Not an error: that is
+            // the normal first-run state, and it is the same reading
+            // `Config::load` gives it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let doc = toml_edit::ImDocument::parse(&raw)
+            .with_context(|| format!("parse {} as TOML", path.display()))?;
+        Ok(doc
+            .get("destinations")
+            .and_then(|section| section.get(name))
+            .is_some())
+    }
+
+    /// Add one `[destinations.<name>]` block, with its `options` table, to the
+    /// config file.
+    ///
+    /// Appends at EOF, for the same reason [`Config::set_native_host_stage`]
+    /// does: the shipped template has no live table at all (every line is a
+    /// comment), and `DocumentMut::insert` places a root table above the file's
+    /// header comment when the root has no key-value pair. Appending is
+    /// deterministic in every shape of the file — a file that already has
+    /// `[destinations.other]`, and one that has nothing — and leaves every
+    /// pre-existing byte alone. The result is re-parsed below, so the format is
+    /// still checked.
+    ///
+    /// Writes nothing and reports [`DestinationWrite::AlreadyDeclared`] when the
+    /// name is already there. That is the `rustic init` precedent ADR-039 cites
+    /// (check before you overwrite, so a re-run cannot clobber a hand-edited
+    /// destination): a declared destination is the user's, and the caller
+    /// verifies it rather than replacing it.
+    ///
+    /// `options` values are written **verbatim**, which is what makes this safe
+    /// for credentials: an `env:NAME` value stays the three-character prefix and
+    /// a variable name, and no secret ever passes through this function. The
+    /// caller is responsible for that, and `setup`'s flags give it no other way
+    /// to spell a credential.
+    pub fn set_destination(
+        name: &str,
+        repo: &str,
+        options: &BTreeMap<String, String>,
+    ) -> anyhow::Result<DestinationWrite> {
+        // A name that is not a bare TOML key is refused rather than quoted: a
+        // name containing a dot would be appended as `[destinations.a.b]`, which
+        // parses as a *nested* table and would make the whole `destinations`
+        // map fail to deserialize — a config the tool then cannot load at all.
+        // Refusing here keeps the user's file loadable.
+        if !is_bare_toml_key(name) {
+            // The rule stated here is the rule `is_bare_toml_key` enforces, and
+            // nothing more: a leading digit is *allowed* (`[destinations.1box]` is
+            // a key called `1box`), so a message that forbade it was describing a
+            // check this code does not make.
+            anyhow::bail!(
+                "`{name}` cannot be a destination name: a destination is written as \
+                 `[destinations.<name>]`, so the name must be letters, digits, `_` or `-`"
+            );
+        }
+        if Self::destination_is_declared(name)? {
+            return Ok(DestinationWrite::AlreadyDeclared);
+        }
+
+        let path = config_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Same first-run path `init` takes, reused rather than
+                // re-implemented, so the block lands in the documented template
+                // instead of in a one-file invention.
+                Config::init_default(DEFAULT_CONFIG_TEMPLATE)
+                    .with_context(|| format!("write default config {}", path.display()))?;
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?
+            }
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+
+        let mut next = raw.clone();
+        if !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&format!(
+            "\n# ---------------------------------------------------------------- \
+             destinations.{name}\n\
+             # Written by `chat-stasher setup`. A full copy, not a shard: `dest-init` gives it\n\
+             # the union of your local sources and what your other destinations hold.\n\
+             [destinations.{name}]\nrepo = {repo}\n",
+            repo = toml_edit::Value::from(repo).to_string()
+        ));
+        if !options.is_empty() {
+            next.push_str(&format!("\n[destinations.{name}.options]\n"));
+            for (key, value) in options {
+                next.push_str(&format!(
+                    "{key} = {value}\n",
+                    value = toml_edit::Value::from(value.as_str()).to_string()
+                ));
+            }
+        }
+
+        // The post-condition, checked rather than assumed: the text about to be
+        // written must parse, and every value asked for must read back from it
+        // exactly. Writing a config the tool cannot read would be worse than
+        // failing here, where the user's original file is still untouched.
+        let reparsed: toml_edit::DocumentMut = next.parse().with_context(|| {
+            format!(
+                "the updated config for {} would not be valid TOML; nothing was written",
+                path.display()
+            )
+        })?;
+        let written_repo = reparsed
+            .get("destinations")
+            .and_then(|section| section.get(name))
+            .and_then(|entry| entry.get("repo"))
+            .and_then(|item| item.as_str());
+        if written_repo != Some(repo) {
+            anyhow::bail!(
+                "the updated config for {} would not read back `destinations.{name}.repo`; \
+                 nothing was written",
+                path.display()
+            );
+        }
+        for (key, value) in options {
+            let written = reparsed
+                .get("destinations")
+                .and_then(|section| section.get(name))
+                .and_then(|entry| entry.get("options"))
+                .and_then(|table| table.get(key))
+                .and_then(|item| item.as_str());
+            if written != Some(value.as_str()) {
+                anyhow::bail!(
+                    "the updated config for {} would not read back \
+                     `destinations.{name}.options.{key}`; nothing was written",
+                    path.display()
+                );
+            }
+        }
+
+        // The tool must be able to *use* what was written, not merely parse it.
+        // `from_text` runs the whole load path — path expansion, and the
+        // `env:NAME` resolution that turns a written reference into the option
+        // the backend receives — so a block that parses but does not load is
+        // caught here, with the user's original file untouched.
+        let loaded = Config::from_text(&next).with_context(|| {
+            format!(
+                "the updated config for {} would not load; nothing was written",
+                path.display()
+            )
+        })?;
+        if !loaded.destinations.contains_key(name) {
+            anyhow::bail!(
+                "the updated config for {} parses but declares no destination `{name}`; nothing \
+                 was written",
+                path.display()
+            );
+        }
+
+        write_atomic(&path, next.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(DestinationWrite::Added)
+    }
+
     /// Expand every path-typed field in place. Fields whose `~` cannot be
     /// expanded (missing home, `~otheruser`) — or that still contain a literal
     /// `~` component after expansion — are *dropped to their default* (`None`,
@@ -773,6 +958,63 @@ fn classify_env_reference(
     }
 }
 
+/// Whether `name` is a legal environment-variable name for an `env:NAME`
+/// reference: a non-empty run of `A-Z`, `0-9` and `_`, not starting with a
+/// digit.
+///
+/// One definition, used in two places that must agree — the config loader that
+/// resolves such a reference ([`resolve_option_env_refs`]) and the wizard that
+/// *writes* one from a name the user typed (`setup`'s `--remote-…-env` flags).
+/// If they disagreed, the wizard could write a reference its own loader refuses,
+/// and the destination would come back missing a credential with no explanation
+/// of where it went.
+///
+/// The strictness carries a second duty at the writing end: a pasted credential
+/// is not a legal variable name (AWS keys contain lowercase letters; a secret
+/// access key contains `/` and `+`; a token contains `.` or `-`), so a secret
+/// typed where a variable name was meant is refused by shape rather than
+/// silently written into the config as a literal `env:` reference that would
+/// never resolve.
+pub fn is_env_reference_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    // The first character cannot be a digit. `env:1FOO` names a variable no
+    // shell can export, so accepting it accepts a reference that can only
+    // resolve if something other than a shell set the variable.
+    //
+    // Written as two steps rather than one `enumerate`-indexed `match` because
+    // that is what this used to be, and the first-character arm was
+    // **unreachable**: the arm below it keyed on `_` for the index, so it
+    // matched every first character the first arm did. The rule was stated and
+    // not enforced, and a test written for the wizard (whose messages tell the
+    // user this rule) is what found it.
+    match chars.next() {
+        Some(first) if first.is_ascii_uppercase() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+/// Whether `name` can be written as a **bare** TOML key in a table header —
+/// the only form [`Config::set_destination`] writes.
+///
+/// Deliberately narrower than what TOML accepts. A quoted key (`"my.dest"`) is
+/// legal TOML and would work in a header, but a *dotted* name is what this has
+/// to exclude: `[destinations.a.b]` is a nested table, not a destination called
+/// `a.b`, and `destinations` would stop deserializing as a map of
+/// [`DestinationConfig`] — taking the whole config file down with it. Refusing
+/// the shape is the difference between "that name is not allowed" and "your
+/// config no longer loads".
+///
+/// No first-character rule, unlike [`is_env_reference_name`]: TOML's bare keys
+/// are `A-Za-z0-9_-`, and a leading digit is legal there — `[destinations.1box]`
+/// is a key called `1box`, and nothing about that is ambiguous in a header.
+fn is_bare_toml_key(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
 /// Replace backend option values spelled `env:NAME` with the matching process
 /// environment value. Invalid, empty, non-Unicode, and unset references are all
 /// omitted, each with its own message; the value itself must never enter a log,
@@ -785,16 +1027,8 @@ fn resolve_option_env_refs(cfg: &mut Config, problems: &mut Vec<String>) {
             let Some(name) = value.strip_prefix("env:") else {
                 continue;
             };
-            let valid_name = name
-                .chars()
-                .enumerate()
-                .all(|(index, ch)| match (index, ch) {
-                    (0, 'A'..='Z' | '_') => true,
-                    (_, 'A'..='Z' | '0'..='9' | '_') => true,
-                    _ => false,
-                });
             let label = format!("destinations.{destination}.options.{key}");
-            if !valid_name || name.is_empty() {
+            if !is_env_reference_name(name) {
                 // Deliberately does not echo `name`: a typo here is often a
                 // secret written where a variable name was meant.
                 problems.push(format!("{label}: invalid environment variable reference"));
@@ -1660,6 +1894,131 @@ mod tests {
         let distinct: std::collections::BTreeSet<&String> =
             reasons.iter().map(|(reason, _)| reason).collect();
         assert_eq!(distinct.len(), 3);
+    }
+
+    /// What counts as a variable name, on both sides of every boundary.
+    ///
+    /// This predicate is shared by the loader that resolves `env:NAME` and by
+    /// the wizard that writes one, so a wrong answer here is either a config
+    /// that loads a reference the tool cannot use, or a reference the tool
+    /// writes and its own loader drops.
+    #[test]
+    fn an_env_reference_name_is_a_shell_variable_name() {
+        for good in ["A", "_", "_X9", "CHAT_STASHER_R2_ACCESS_KEY_ID", "A1_B2"] {
+            assert!(is_env_reference_name(good), "`{good}` is a variable name");
+        }
+        // A leading digit is the case a `match` on `(index, ch)` could not
+        // express, because the arm for the remaining characters matched a first
+        // character too: the rule was stated in prose and never enforced.
+        // `env:1FOO` names a variable no shell can export, so it is refused now.
+        for bad in [
+            "",
+            "1FOO",
+            "9",
+            "lowercase",
+            "Mixed_Case",
+            "HAS-DASH",
+            "HAS.DOT",
+            "HAS SLASH/",
+            "UNICODE_É",
+        ] {
+            assert!(
+                !is_env_reference_name(bad),
+                "`{bad}` is not a variable name"
+            );
+        }
+        // An access key id is the shape this cannot catch, written down here so
+        // the wizard's second guard (the `AKIA`/`ASIA` prefix rule) has a
+        // reason to exist that a reader can check.
+        assert!(is_env_reference_name("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    /// What counts as a destination name. Narrower than TOML on purpose: a
+    /// dotted name would be appended as a *nested* table and would stop the
+    /// whole `destinations` map deserializing.
+    #[test]
+    fn a_destination_name_is_a_bare_toml_key() {
+        for good in ["laptop", "storagebox", "r2", "my-dest", "_x", "1box", "A1"] {
+            assert!(is_bare_toml_key(good), "`{good}` is a bare TOML key");
+        }
+        for bad in ["", "my.dest", "my dest", "my/dest", "naïve", "a\"b"] {
+            assert!(!is_bare_toml_key(bad), "`{bad}` is not a bare TOML key");
+        }
+    }
+
+    /// The block the wizard writes, read back by the tool that has to use it.
+    ///
+    /// The property under test is not "the text looks right" but "the config
+    /// that was written is the config the loader produces" — including the
+    /// `env:NAME` reference staying a reference at the file level while the
+    /// loader resolves it in memory.
+    #[test]
+    fn a_destination_block_round_trips_with_its_credential_references() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let config_home = home.path().join("config");
+        let old_home = std::env::var_os("HOME");
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let mut options = BTreeMap::new();
+        options.insert("bucket".to_string(), "a-bucket".to_string());
+        options.insert(
+            "endpoint".to_string(),
+            "https://example.invalid".to_string(),
+        );
+        options.insert("access_key_id".to_string(), "env:VAR_A".to_string());
+        options.insert("secret_access_key".to_string(), "env:VAR_B".to_string());
+
+        let _ = Config::set_destination("box", "opendal:s3", &options).unwrap();
+        // The file on disk carries the *reference*, not a resolved value: this
+        // is what "no secret in the config" means at the byte level.
+        let text = std::fs::read_to_string(config_path()).unwrap();
+        assert!(text.contains("env:VAR_A"), "{text}");
+        assert!(text.contains("env:VAR_B"), "{text}");
+        assert!(text.contains("[destinations.box]"), "{text}");
+        assert!(text.contains("repo = \"opendal:s3\""), "{text}");
+
+        // And the tool reads its own block back with every value intact.
+        let loaded = Config::load().unwrap();
+        let entry = loaded.destinations.get("box").expect("the block loads");
+        assert_eq!(entry.repo.as_deref(), Some("opendal:s3"));
+        assert_eq!(
+            entry.options.get("bucket").map(String::as_str),
+            Some("a-bucket")
+        );
+        // Neither variable is set, so the reference is *omitted* rather than
+        // substituted — a credential error rather than a silently empty value.
+        assert!(!entry.options.contains_key("access_key_id"));
+        assert!(!entry.options.contains_key("secret_access_key"));
+
+        // A second call is a no-op that says so: a destination already declared
+        // is the user's, and a wizard re-run must not rewrite it.
+        assert_eq!(
+            Config::set_destination("box", "opendal:sftp", &BTreeMap::new()).unwrap(),
+            DestinationWrite::AlreadyDeclared
+        );
+        assert_eq!(
+            std::fs::read_to_string(config_path()).unwrap(),
+            text,
+            "an already-declared destination must leave the file byte-for-byte as it was"
+        );
+
+        // A name that would be appended as a nested table is refused, so the
+        // file cannot be broken by a name typed at a prompt.
+        let dotted = Config::set_destination("a.b", "opendal:s3", &BTreeMap::new());
+        assert!(dotted.is_err());
+        assert_eq!(std::fs::read_to_string(config_path()).unwrap(), text);
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_xdg {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 
     /// The exact shape that made `doctor_consistency_test` red on

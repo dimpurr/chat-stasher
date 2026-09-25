@@ -114,6 +114,35 @@ impl Sandbox {
             .expect("run chat-stasher")
     }
 
+    fn config_file(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("config")
+            .join("chat-stasher")
+            .join("config.toml")
+    }
+
+    /// Write a `config.toml` for this sandbox, verbatim.
+    ///
+    /// Used to declare a destination by hand, which is how a destination the
+    /// wizard did not spell itself gets adopted: ADR-039 keeps the local-path
+    /// and REST candidates explicitly selectable, and this is the test's stand-in
+    /// for all of them — a real backend that is not a network.
+    fn write_config(&self, text: &str) {
+        let path = self.config_file();
+        fs::create_dir_all(path.parent().expect("a config directory")).expect("create config dir");
+        fs::write(&path, text).expect("write the sandbox config");
+    }
+
+    fn read_config(&self) -> String {
+        fs::read_to_string(self.config_file()).expect("read the sandbox config")
+    }
+
+    /// A directory inside the sandbox that no destination has used yet.
+    fn fake_remote(&self) -> PathBuf {
+        self.root.path().join("fake-remote")
+    }
+
     /// `setup --stage <this sandbox's stage>`, plus whatever else the case adds.
     ///
     /// The stage is passed explicitly rather than typed at a prompt: the
@@ -418,4 +447,491 @@ fn setup_and_status_commands_emit_the_same_scan_json() {
         .unwrap()
         .remove("writer_versions");
     assert_eq!(setup["scanner"], status_scan);
+}
+
+// ---------------------------------------------------------------------------
+// WIZ-3: the remote step.
+//
+// Every backend here is a **fake**: a directory inside the sandbox, or a closed
+// port on loopback. Nothing in this file opens a socket to a host that is not
+// this machine, and no test ever writes to a real `known_hosts` — the sandbox's
+// HOME is a temp directory, so even a trust path that ran by mistake could only
+// touch the sandbox.
+// ---------------------------------------------------------------------------
+
+/// The three states a destination can be in, on one machine, in one run each.
+///
+/// The point of the trio is the third: a destination that cannot be reached is
+/// reported as *unread* with exit 3 — the code that means "what was not read
+/// proves nothing" — and not as an empty destination or a completed run.
+#[test]
+fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
+    // (1) A destination declared by hand, pointing at a directory inside the
+    // sandbox. This is the "adopt what the file says" path: the wizard writes
+    // nothing, connects, and lets `dest-init` seed it. The key file is the one
+    // the local first save already created, so the adopt path is exercised
+    // rather than short-circuited by a missing key.
+    let sandbox = Sandbox::new(true);
+    let remote = sandbox.fake_remote();
+    sandbox.write_config(&format!(
+        "[destinations.fake]\nrepo = '{}'\nkey_file = '{}'\n",
+        remote.display(),
+        sandbox.masterkey().display()
+    ));
+    let output = sandbox.setup(&["--destination", "fake", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+
+    assert_eq!(
+        exit_code(&output),
+        0,
+        "a reachable destination must not make the run fail: {value}"
+    );
+    assert_eq!(value["steps"]["destination"], "reachable");
+    assert_eq!(value["destination"]["config"]["kind"], "already_declared");
+    assert_eq!(value["destination"]["reach"]["kind"], "reached");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "ran");
+    assert_eq!(value["destination"]["dest_init"]["exit_code"], 0);
+    assert_eq!(
+        value["destination"]["trust"]["known_hosts_write_authorized"],
+        false
+    );
+    assert_eq!(value["unread"], serde_json::json!([]));
+    assert_eq!(value["incomplete"], serde_json::json!([]));
+    // The report has to describe something that actually happened.
+    assert!(
+        remote.join("config").exists() || remote.join("data").exists(),
+        "dest-init reported exit 0, so it must have created a repository at {}",
+        remote.display()
+    );
+
+    // (2) A destination declared by hand whose endpoint is a closed port on
+    // loopback. Connection refused, no network, and — the property under test —
+    // *not* an empty destination.
+    let unreachable = Sandbox::new(true);
+    unreachable.write_config(
+        "[destinations.gone]\n\
+         repo = 'opendal:sftp'\n\
+         key_file = '/nonexistent/key.json'\n\
+         [destinations.gone.options]\n\
+         endpoint = 'ssh://127.0.0.1:1'\n\
+         user = 'nobody'\n",
+    );
+    let output = unreachable.setup(&["--destination", "gone", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+
+    assert_eq!(
+        exit_code(&output),
+        3,
+        "an unreachable destination is 'did not finish reading', not a failed read: {value}"
+    );
+    assert_eq!(value["exit_code"], 3);
+    assert_eq!(value["steps"]["destination"], "unread");
+    assert_eq!(value["destination"]["reach"]["kind"], "unreachable");
+    assert_eq!(
+        value["destination"]["trust"]["known_hosts_write_authorized"],
+        false
+    );
+    // Nothing was connected to, so nothing may be reported as run.
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+    assert_eq!(value["unread"], serde_json::json!(["destination"]));
+    assert_eq!(value["incomplete"], serde_json::json!([]));
+    // The reach object must not carry a repository verdict: the probe never got
+    // one, and `false` here would read as "we looked and there was nothing".
+    assert!(
+        value["destination"]["reach"]
+            .get("repository_exists")
+            .is_none(),
+        "nothing was measured at the destination, so no verdict may be present: {value}"
+    );
+
+    // (3) The same two runs, but the whole remote step skipped. Exit 0 — the
+    // archive really does exist — with the cost stated rather than implied.
+    let skipped = Sandbox::new(true);
+    let output = skipped.setup(&["--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 0, "value={value}");
+    assert_eq!(value["steps"]["destination"], "skipped");
+    assert!(
+        value["destination"]["consequence"]
+            .as_str()
+            .is_some_and(|text| text.contains("loses the archive")),
+        "the skip branch must say what it costs: {value}"
+    );
+}
+
+/// A destination declared by hand with no `repo` is a config-content problem
+/// this run *read* — so it is reported, not treated as a usage error.
+///
+/// The block below is the shape ADR-039 keeps open for the local-path and REST
+/// candidates, and the shape a half-filled-in block has. Every other command
+/// resolves a destination through `resolve_store_config`, which ends the process
+/// with 2; reached from inside the wizard, that made a `--json` run print
+/// **nothing at all** on stdout — not even the object that says what is wrong —
+/// and called a config the run had already read a command-line mistake. Two of
+/// the three exit codes exist precisely to keep those apart.
+#[test]
+fn a_declared_destination_without_a_repo_is_reported_rather_than_exiting() {
+    let sandbox = Sandbox::new(true);
+    sandbox.write_config("[destinations.bare]\nkey_file = '/nonexistent/key.json'\n");
+    let before = sandbox.read_config();
+    let output = sandbox.setup(&["--destination", "bare", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+
+    assert_eq!(
+        exit_code(&output),
+        3,
+        "the destination was never consulted, so what was not read proves nothing: {value}"
+    );
+    assert_eq!(value["steps"]["destination"], "unread");
+    assert_eq!(value["destination"]["reach"]["kind"], "unreadable");
+    assert_eq!(value["unread"], serde_json::json!(["destination"]));
+    assert_eq!(value["incomplete"], serde_json::json!([]));
+    // A half-written block is the user's: the wizard adopts it as it stands and
+    // never rewrites it.
+    assert_eq!(value["destination"]["config"]["kind"], "already_declared");
+    assert_eq!(
+        sandbox.read_config(),
+        before,
+        "the adopted block must be left exactly as it was found"
+    );
+    // The reason has to name what is missing, or a wrapper knows only that
+    // something is wrong.
+    let why = value["destination"]["reach"]["why"]
+        .as_str()
+        .expect("a why string");
+    assert!(
+        why.contains("repo"),
+        "the reason must name the missing key: {why}"
+    );
+    // Nothing may be reported as run against a destination that was never
+    // resolved.
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+}
+
+/// The credential observation reaches the JSON, not only the terminal.
+///
+/// A non-TTY run prints no wizard lines at all — stdout is one JSON object, and
+/// that object is the whole of what a wrapper sees — so an observation that
+/// existed only as a stderr sentence was missing for exactly the half of the
+/// acceptance surface the flags exist for. The two variables are reported
+/// separately because they have two different fixes, and neither is reported as
+/// a missing *parameter*: the parameter was given, the variable is absent.
+#[test]
+fn an_unusable_credential_variable_is_reported_to_a_non_tty_caller() {
+    let sandbox = Sandbox::new(true);
+    let unset = "CHAT_STASHER_W177_NOT_SET_ANYWHERE";
+    let empty = "CHAT_STASHER_W177_SET_BUT_EMPTY";
+    let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args([
+            "setup",
+            "--stage",
+            sandbox.stage().to_str().expect("utf-8 stage"),
+            "--destination",
+            "r2box",
+            "--masterkey-saved-elsewhere",
+            "--remote",
+            "s3",
+            "--remote-endpoint",
+            "https://127.0.0.1:1",
+            "--remote-bucket",
+            "fixture-bucket",
+            "--remote-access-key-id-env",
+            unset,
+            "--remote-secret-key-env",
+            empty,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HOME", sandbox.home())
+        .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+        .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+        .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env(
+            "CHAT_STASHER_REGISTRY",
+            sandbox.root.path().join("registry.json"),
+        )
+        .env_remove(unset)
+        .env(empty, "")
+        .output()
+        .expect("run chat-stasher");
+
+    let value = json_of(&output);
+    // The endpoint is a closed loopback port, so the destination is unread. What
+    // is under test is the observation, which is taken before any connection.
+    assert_eq!(exit_code(&output), 3, "value={value}");
+    assert_eq!(value["destination"]["credentials"]["kind"], "checked");
+    assert_eq!(
+        value["destination"]["credentials"]["variables"][0]["name"],
+        unset
+    );
+    assert_eq!(
+        value["destination"]["credentials"]["variables"][0]["state"], "not_set",
+        "an unset variable is a state in the object, not an absent field: {value}"
+    );
+    assert_eq!(
+        value["destination"]["credentials"]["variables"][1]["state"], "empty",
+        "set-but-empty has a different fix, so it is a different state: {value}"
+    );
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!([]),
+        "the parameter was supplied; the *variable* it names is what is absent: {value}"
+    );
+}
+
+/// The property the credential indirection exists for, checked on the bytes.
+///
+/// The run is aimed at a **closed port on loopback** with credentials that are
+/// set to recognisable fake values. Two things are asserted about the config the
+/// wizard wrote: it carries `env:VAR`, and it does not carry the fake secret
+/// anywhere. The second is the one that matters — a config that loads fine and
+/// leaks a credential is the failure this design exists to prevent.
+#[test]
+fn the_written_destination_carries_credential_references_and_never_the_secret() {
+    let sandbox = Sandbox::new(true);
+    let access = "not-a-real-access-key-id";
+    let secret = "not-a-real-secret-value";
+    let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args([
+            "setup",
+            "--stage",
+            sandbox.stage().to_str().expect("utf-8 stage"),
+            "--destination",
+            "r2box",
+            "--masterkey-saved-elsewhere",
+            "--remote",
+            "s3",
+            "--remote-endpoint",
+            "https://127.0.0.1:1",
+            "--remote-bucket",
+            "fixture-bucket",
+            "--remote-access-key-id-env",
+            "W177_FAKE_ACCESS_KEY_ID",
+            "--remote-secret-key-env",
+            "W177_FAKE_SECRET",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HOME", sandbox.home())
+        .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+        .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+        .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env(
+            "CHAT_STASHER_REGISTRY",
+            sandbox.root.path().join("registry.json"),
+        )
+        .env("W177_FAKE_ACCESS_KEY_ID", access)
+        .env("W177_FAKE_SECRET", secret)
+        .output()
+        .expect("run chat-stasher");
+
+    let value = json_of(&output);
+    // The endpoint is a closed loopback port, so the destination is unread —
+    // and that is fine: what is under test is the file that was written before
+    // the connection was attempted.
+    assert_eq!(exit_code(&output), 3, "value={value}");
+    assert_eq!(value["destination"]["config"]["kind"], "written");
+    assert_eq!(value["destination"]["reach"]["kind"], "unreachable");
+    assert_eq!(value["destination"]["remote_kind"], "s3");
+    assert_eq!(value["destination"]["recommended_remote_kind"], "s3");
+
+    let written = sandbox.read_config();
+    assert!(
+        written.contains("env:W177_FAKE_ACCESS_KEY_ID"),
+        "the credential must be written as a reference: {written}"
+    );
+    assert!(written.contains("env:W177_FAKE_SECRET"), "{written}");
+    assert!(
+        !written.contains(access) && !written.contains(secret),
+        "the credentials must not reach the config file: {written}"
+    );
+    // §4.5 requires both switches, and they are the reason a missing credential
+    // cannot fall through to the ambient AWS chain or to the instance metadata
+    // service.
+    assert!(written.contains("region = \"auto\""), "{written}");
+    assert!(
+        written.contains("disable_config_load = \"true\""),
+        "{written}"
+    );
+    assert!(
+        written.contains("disable_ec2_metadata = \"true\""),
+        "{written}"
+    );
+    // The secret must not reach stdout or stderr either — those are the streams
+    // that end up in a log or a CI transcript.
+    let streams = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!streams.contains(access), "a credential reached the output");
+    assert!(!streams.contains(secret), "a credential reached the output");
+}
+
+/// A pasted credential where a variable name belongs is refused before anything
+/// is written, and the value is never echoed — on either stream, in either mode.
+#[test]
+fn a_pasted_credential_is_refused_and_never_echoed() {
+    for pasted in [
+        // The shape a secret access key has, and the shape most tokens have.
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        // The shape the variable-name check cannot catch on its own: an access
+        // key id is all uppercase letters and digits.
+        "AKIAIOSFODNN7EXAMPLE",
+    ] {
+        let sandbox = Sandbox::new(true);
+        let output = sandbox.setup(&[
+            "--destination",
+            "r2box",
+            "--remote",
+            "s3",
+            "--remote-endpoint",
+            "https://127.0.0.1:1",
+            "--remote-bucket",
+            "fixture-bucket",
+            "--remote-access-key-id-env",
+            pasted,
+            "--remote-secret-key-env",
+            "W177_PLACEHOLDER",
+        ]);
+        let value = json_of(&output);
+
+        assert_eq!(exit_code(&output), 2, "value={value}");
+        assert_eq!(
+            value["invalid_parameters"],
+            serde_json::json!(["--remote-access-key-id-env"])
+        );
+        // Separate from `missing_parameters`: the parameter is present and
+        // unusable, so a wrapper that supplied it still has to change it.
+        assert_eq!(value["missing_parameters"], serde_json::json!([]));
+        assert!(
+            !sandbox.config_file().exists(),
+            "a refused command line must write nothing, including no config file"
+        );
+        assert!(
+            !sandbox.stage().exists() && !sandbox.data_root().exists(),
+            "the refusal is checked before any work, so the local archive must not exist either"
+        );
+        let streams = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !streams.contains(pasted),
+            "the refusal must not echo the value it refused"
+        );
+    }
+}
+
+/// A kind that was named without its parameters reports them by name, writes
+/// nothing, and says which flag supplies each one.
+#[test]
+fn an_incomplete_remote_names_every_parameter_it_needs() {
+    let sandbox = Sandbox::new(true);
+    let output = sandbox.setup(&[
+        "--destination",
+        "r2box",
+        "--masterkey-saved-elsewhere",
+        "--remote",
+        "s3",
+        "--remote-endpoint",
+        "https://127.0.0.1:1",
+    ]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!([
+            "remote_bucket",
+            "remote_access_key_id_env",
+            "remote_secret_key_env"
+        ])
+    );
+    assert_eq!(value["destination"]["config"]["kind"], "not_written");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+    // The names are the flag ids, so the report and the flag are one word.
+    for name in [
+        "remote_bucket",
+        "remote_access_key_id_env",
+        "remote_secret_key_env",
+    ] {
+        assert!(
+            value["destination"]["config"]["why"]
+                .as_str()
+                .is_some_and(|why| !why.is_empty()),
+            "an unwritten config must say why: {name} in {value}"
+        );
+    }
+    assert!(
+        !sandbox.config_file().exists(),
+        "an incomplete command line must not write a partial destination block"
+    );
+}
+
+/// A destination the wizard cannot spell is not a destination it may guess at:
+/// naming one without a kind is a named missing parameter, and nothing is
+/// written.
+#[test]
+fn naming_an_undeclared_destination_without_a_kind_asks_for_the_kind() {
+    let sandbox = Sandbox::new(true);
+    let output = sandbox.setup(&["--destination", "nowhere", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(value["missing_parameters"], serde_json::json!(["remote"]));
+    assert_eq!(value["destination"]["config"]["kind"], "not_written");
+    assert!(
+        !sandbox.config_file().exists(),
+        "nothing may be written when the kind is unknown"
+    );
+}
+
+/// `--trust-host` is a declaration, and an SFTP destination that never gets as
+/// far as a host key must not record one.
+///
+/// This is the property ADR-039's rejected option E is about, and it is checked
+/// on the sandbox's own `known_hosts`: an unreachable host writes nothing to it,
+/// whether or not the declaration was made. The end-to-end "unknown host stops
+/// and waits" path needs a real ssh handshake and is **not** exercised here —
+/// see the report; what is exercised is that the flag cannot cause a write on a
+/// destination that was never reached.
+#[test]
+fn a_run_that_never_reached_a_host_writes_nothing_to_known_hosts() {
+    for extra in [vec![], vec!["--trust-host"]] {
+        let sandbox = Sandbox::new(true);
+        sandbox.write_config(
+            "[destinations.gone]\n\
+             repo = 'opendal:sftp'\n\
+             key_file = '/nonexistent/key.json'\n\
+             [destinations.gone.options]\n\
+             endpoint = 'ssh://127.0.0.1:1'\n\
+             user = 'nobody'\n",
+        );
+        let mut args = vec!["--destination", "gone", "--masterkey-saved-elsewhere"];
+        args.extend_from_slice(&extra);
+        let output = sandbox.setup(&args);
+        let value = json_of(&output);
+
+        assert_eq!(exit_code(&output), 3, "value={value}");
+        assert_eq!(
+            value["destination"]["trust"]["known_hosts_write_authorized"],
+            false
+        );
+        assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+        let known_hosts = sandbox.home().join(".ssh").join("known_hosts");
+        assert!(
+            !known_hosts.exists(),
+            "nothing may be recorded for a host that was never reached ({}): {}",
+            if extra.is_empty() {
+                "no declaration"
+            } else {
+                "--trust-host given"
+            },
+            known_hosts.display()
+        );
+    }
 }

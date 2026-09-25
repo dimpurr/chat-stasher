@@ -423,7 +423,17 @@ pub enum Preflight {
     /// The destination answered. `repository_exists` is that answer.
     Reached { repository_exists: bool },
     /// The destination did not answer; the reason has been printed.
-    Unreachable,
+    ///
+    /// `kind` is the classification [`classify_error_str`] made of the failure,
+    /// or `None` when it recognised nothing. The wizard needs it because two
+    /// very different situations arrive here as the *same* exit code 3: a host
+    /// nobody has met before (whose key may be checked out of band and then
+    /// recorded) and a host whose key has **changed** (which is never recorded,
+    /// and must never be offered). Deciding between them from the exit code
+    /// alone is impossible; deciding from the printed prose is guessing. This is
+    /// the same classifier the printed advice already rests on, so the two
+    /// cannot disagree about which situation this is.
+    Unreachable { kind: Option<RemoteErrorKind> },
 }
 
 /// Connect once to a destination before the caller commits to expensive work.
@@ -437,10 +447,11 @@ pub fn preflight(cfg: &StoreConfig, prefix: &str) -> Preflight {
         },
         Err(e) => {
             eprint_remote_error(prefix, &e, cfg);
-            if classify_error_str(&format!("{e:#}")) == Some(RemoteErrorKind::HostUntrusted) {
+            let kind = classify_error_str(&format!("{e:#}"));
+            if kind == Some(RemoteErrorKind::HostUntrusted) {
                 print_first_connection_guidance(cfg, prefix);
             }
-            Preflight::Unreachable
+            Preflight::Unreachable { kind }
         }
     }
 }
