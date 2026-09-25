@@ -571,6 +571,94 @@ pub fn uninstall_launchd_agents(
     Ok(removed)
 }
 
+pub fn install_systemd_units(
+    home: &Path,
+    files: &[TemplateFile],
+    systemctl: &Path,
+) -> Result<Vec<InstallResult>> {
+    let units = home.join(".config/systemd/user");
+    fs::create_dir_all(&units)
+        .with_context(|| format!("create systemd user unit directory {}", units.display()))?;
+    let mut changed = false;
+    let mut timers = Vec::new();
+    for file in files {
+        let path = units.join(&file.name);
+        let same = fs::read(&path)
+            .map(|bytes| bytes == file.content.as_bytes())
+            .unwrap_or(false); // reason: absent or unreadable units must be rewritten before they can be enabled
+        if !same {
+            write_atomic(&path, file.content.as_bytes())
+                .with_context(|| format!("write systemd unit {}", path.display()))?;
+            changed = true;
+        }
+        if file.name.ends_with(".timer") {
+            timers.push(file.name.clone());
+        }
+    }
+    systemctl_run(systemctl, &["--user", "daemon-reload"])?;
+    let mut active = true;
+    for timer in &timers {
+        let output = Command::new(systemctl)
+            .args(["--user", "is-active", "--quiet", timer])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("check systemd timer {timer}"))?;
+        active &= output.success();
+    }
+    if !active || changed {
+        for timer in &timers {
+            systemctl_run(systemctl, &["--user", "enable", "--now", timer])?;
+        }
+    }
+    Ok(vec![if changed || !active {
+        InstallResult::Installed
+    } else {
+        InstallResult::Unchanged
+    }])
+}
+
+pub fn uninstall_systemd_units(home: &Path, timers: &[String], systemctl: &Path) -> Result<usize> {
+    let units = home.join(".config/systemd/user");
+    let mut removed = 0;
+    for timer in timers {
+        let timer_path = units.join(timer);
+        if timer_path.exists() {
+            systemctl_run(systemctl, &["--user", "disable", "--now", timer])?;
+        }
+        for name in [
+            timer
+                .strip_suffix(".timer")
+                .map(|stem| format!("{stem}.service")),
+            Some(timer.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = units.join(name);
+            if path.exists() {
+                fs::remove_file(&path)
+                    .with_context(|| format!("remove systemd unit {}", path.display()))?;
+                removed += 1;
+            }
+        }
+    }
+    systemctl_run(systemctl, &["--user", "daemon-reload"])?;
+    Ok(removed)
+}
+
+fn systemctl_run(systemctl: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new(systemctl)
+        .args(args)
+        .status()
+        .with_context(|| format!("run {}", systemctl.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{} exited with status {}", systemctl.display(), status)
+    }
+}
+
 fn launchctl_status(launchctl: &Path, target: &str) -> Result<bool> {
     let status = Command::new(launchctl)
         .arg("print")
@@ -1479,5 +1567,65 @@ mod tests {
         let calls = fs::read_to_string(log).expect("read fake launchctl log");
         assert_eq!(calls.matches("bootstrap").count(), 1);
         assert_eq!(calls.matches("bootout").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn systemd_install_and_uninstall_are_idempotent_with_fake_systemctl() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("systemctl");
+        let state = temp.path().join("active");
+        let log = temp.path().join("calls");
+        let script_body = format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> \"{}\"\n\
+             case \"$2\" in\n\
+               is-active) test -f \"{}\";;\n\
+               enable) touch \"{}\";;\n\
+               disable) rm -f \"{}\";;\n\
+               *) exit 0;;\n\
+             esac\n",
+            log.display(),
+            state.display(),
+            state.display(),
+            state.display()
+        );
+        fs::write(&script, script_body).expect("write fake systemctl");
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("make fake systemctl executable");
+
+        let files = vec![
+            TemplateFile {
+                name: "chat-stasher-run-once.service".into(),
+                content: "service-v1".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once.timer".into(),
+                content: "timer-v1".into(),
+            },
+        ];
+        assert_eq!(
+            install_systemd_units(temp.path(), &files, &script).unwrap(),
+            vec![InstallResult::Installed]
+        );
+        assert_eq!(
+            install_systemd_units(temp.path(), &files, &script).unwrap(),
+            vec![InstallResult::Unchanged]
+        );
+        let timer = "chat-stasher-run-once.timer".to_string();
+        assert_eq!(
+            uninstall_systemd_units(temp.path(), std::slice::from_ref(&timer), &script).unwrap(),
+            2
+        );
+        assert_eq!(
+            uninstall_systemd_units(temp.path(), &[timer], &script).unwrap(),
+            0
+        );
+        let calls = fs::read_to_string(log).expect("read fake systemctl log");
+        assert_eq!(calls.matches("enable --now").count(), 1);
+        assert_eq!(calls.matches("disable --now").count(), 1);
     }
 }

@@ -371,6 +371,108 @@ fn setup_without_a_stage_names_the_parameter_and_writes_nothing() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn setup_installs_scheduler_idempotently_and_reports_next_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new(true);
+    let scheduler = sandbox.root.path().join("fake-scheduler");
+    let calls = sandbox.root.path().join("scheduler-calls");
+    let state = sandbox.root.path().join("scheduler-active");
+    let script = if cfg!(target_os = "macos") {
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
+            calls.display(), state.display(), state.display(), state.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\n",
+            calls.display(), state.display(), state.display(), state.display()
+        )
+    };
+    fs::write(&scheduler, script).expect("write fake scheduler");
+    let mut permissions = fs::metadata(&scheduler)
+        .expect("scheduler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+
+    let stage = sandbox.stage();
+    let args = [
+        "setup",
+        "--stage",
+        stage.to_str().expect("stage path"),
+        "--masterkey-saved-elsewhere",
+        "--install-schedule",
+        "--json",
+    ];
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("HOME", sandbox.home())
+            .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
+            .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
+            .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+            .env(
+                "CHAT_STASHER_REGISTRY",
+                sandbox.root.path().join("registry.json"),
+            )
+            .env(
+                "CHAT_STASHER_SCHEDULE_BINARY",
+                "/usr/local/bin/chat-stasher",
+            )
+            .env("CHAT_STASHER_LAUNCHCTL", &scheduler)
+            .env("CHAT_STASHER_SYSTEMCTL", &scheduler)
+            .output()
+            .expect("run setup with fake scheduler")
+    };
+
+    for _ in 0..2 {
+        let output = run(&args);
+        let value = json_of(&output);
+        assert_eq!(exit_code(&output), 0, "value={value}");
+        assert_eq!(value["steps"]["schedule"], "installed");
+        assert_eq!(value["schedule"]["status"], "installed");
+        assert!(value["schedule"]["next_run"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+    }
+    let uninstall_args = [
+        "setup",
+        "--stage",
+        stage.to_str().expect("stage path"),
+        "--masterkey-saved-elsewhere",
+        "--uninstall-schedule",
+        "--json",
+    ];
+    let output = run(&uninstall_args);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 0, "value={value}");
+    assert_eq!(value["steps"]["schedule"], "uninstalled");
+    assert_eq!(value["schedule"]["status"], "uninstalled");
+    let calls = fs::read_to_string(calls).expect("read fake scheduler calls");
+    assert_eq!(
+        calls.matches("enable --now").count(),
+        usize::from(cfg!(target_os = "linux"))
+    );
+    assert_eq!(
+        calls.matches("bootstrap").count(),
+        usize::from(cfg!(target_os = "macos"))
+    );
+    assert_eq!(
+        calls.matches("disable --now").count(),
+        usize::from(cfg!(target_os = "linux"))
+    );
+    assert_eq!(
+        calls.matches("bootout").count(),
+        usize::from(cfg!(target_os = "macos"))
+    );
+}
+
 #[test]
 fn non_tty_setup_emits_json_missing_parameters_and_does_not_echo_stdin() {
     let home = tempfile::tempdir().unwrap();
