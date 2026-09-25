@@ -397,11 +397,11 @@ crates/chat-stasher/src/config.rs:96  cf52ab144fd4  lines=1
   <- docs/privacy.md:398  :: /// Local rustic repository that `push`/`read` operate on.
 crates/chat-stasher/src/config.rs:146-162  ed3020d28acc  lines=17
   <- docs/threat-model.md:62, docs/threat-model.md:80  :: /// snapshot re-writes the tree of every touched session di…
-crates/chat-stasher/src/config.rs:177-201  95915a96bb8c  lines=25
+crates/chat-stasher/src/config.rs:191-215  95915a96bb8c  lines=25
   <- README.md:161  :: pub cache: Option<CacheSectionConfig>,
-crates/chat-stasher/src/config.rs:208-209  0d8761a6b3af  lines=2
+crates/chat-stasher/src/config.rs:222-223  0d8761a6b3af  lines=2
   <- docs/install.md:366  :: /// Absolute path of the stage the browser-spawned host wri…
-crates/chat-stasher/src/config.rs:550-561  96eee33c567e  lines=12
+crates/chat-stasher/src/config.rs:604-615  96eee33c567e  lines=12
   <- docs/install.md:201  :: }
 crates/chat-stasher/src/destinit.rs:57-72  9da3f5cced7a  lines=16
   <- docs/threat-model.md:493  :: //! Skipping the ones that are not there is worse, though, …
@@ -521,15 +521,15 @@ crates/chat-stasher/src/main.rs:5647-5765  05ff287b2ae6  lines=119
   <- README.md:227, docs/threat-model.md:541  :: },
 crates/chat-stasher/src/main.rs:5680-5816  df47dfc98035  lines=137
   <- README.md:176  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:7100-7101  a70af44131aa  lines=2
+crates/chat-stasher/src/main.rs:7176-7177  a70af44131aa  lines=2
   <- docs/install.md:478  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:7193-7200  e726e719a9a4  lines=8
+crates/chat-stasher/src/main.rs:7269-7276  e726e719a9a4  lines=8
   <- docs/install.md:507  :: Err(ActivityIndexError::Write(message)) => {
-crates/chat-stasher/src/main.rs:7248-7439  c9f1287ef8af  lines=192
+crates/chat-stasher/src/main.rs:7324-7515  c9f1287ef8af  lines=192
   <- README.md:169, README.md:176  :: fn cmd_status(
-crates/chat-stasher/src/main.rs:7396-7397  45ab8d39f01f  lines=2
+crates/chat-stasher/src/main.rs:7472-7473  45ab8d39f01f  lines=2
   <- docs/install.md:473  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:7556-7847  44e8b605cec0  lines=292
+crates/chat-stasher/src/main.rs:7632-7923  44e8b605cec0  lines=292
   <- README.md:169, README.md:176, docs/install.md:494  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs/privacy.md:580, docs/threat-model.md:382  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
