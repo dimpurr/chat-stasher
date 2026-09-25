@@ -62,6 +62,8 @@ bash scripts/check-workflows.sh
 bash scripts/check-workflows.sh --selftest
 bash scripts/selftest-release-tag-gate.sh
 bash scripts/selftest-check-static-binary.sh
+bash scripts/selftest-crates-version-state.sh
+bash scripts/selftest-npm-latest-tag.sh
 bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
 bash scripts/self-test-install.sh
@@ -129,6 +131,19 @@ knew only `statically linked`. Two of its probes therefore hand the gate a
 headers. A check that can only be exercised on Linux is a check nobody can
 reproduce before pushing; the Linux artifacts are built in CI and cannot be built
 here.
+
+`selftest-crates-version-state.sh` and `selftest-npm-latest-tag.sh` are the same
+arrangement for the two registry steps `release.yml` runs last, and they are
+here for the reason the whole list is: both steps are where a release stops
+being reversible. The first asks crates.io whether an exact crate version is
+already published, and its probes shim `curl` so the answer can be any status —
+the recorded `403` from crates.io's data-access policy above all, because the
+branch that reads a `403` as "not published yet" is the branch that publishes
+over a version that cannot be unpublished. The second re-points npm's `latest`
+dist-tag, and its probes shim `npm` so no real dist-tag is touched; two of them
+exist to catch a *wrong* answer that looks like a successful repair, which is
+what a lexicographic version comparison produces (0.9.0 over 0.10.0). Neither
+needs a network, a registry account, or a published package.
 
 The npm launcher's tests need no toolchain either: they run against a fake
 platform package built in a temp directory, and they force the platform they
