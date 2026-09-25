@@ -62,6 +62,15 @@
 #      bare name that resolved to nothing at --old — plus a continuation whose
 #      sentence named one file at --old and another after the merge, and a path
 #      the parent's own document writes and its own tree does not have
+#   R  the two symlink shapes R66e found, each beside a certain shift: a cited
+#      file that is a symlink in the working tree (git show reads the link's
+#      target text, the working tree follows the link), and one that is a
+#      symlink only at --old, replaced by a regular file the merge left the old
+#      link text in
+#   S  a `:N` that is part of another side's `name:N`: the merged tree drops the
+#      token (`Makefile` deleted, so it is no longer path-shaped), the colon
+#      reads as a continuation, and the range is called "already right" against
+#      a file the sentence never named
 #
 # 🔴 Probes 4, 5 and 6 are the point of the tool, not decoration. A relocation
 #    that guesses when the answer is not unique is worse than the hand work it
@@ -2506,11 +2515,161 @@ contains README.md '`src/moved.ts:2-3`' "the control shift beside it still reloc
 
 echo
 echo "=============================================================="
+echo "Fixture R: a cited file that is a symlink"
+echo "  A symlink is one path name for two different byte"
+echo "  sequences: git show prints the link's target text, while the"
+echo "  working-tree read follows the link to the target's contents."
+echo "  When the link text happens to appear in the target, the search"
+echo "  finds it and \"relocates\" the citation onto that line, exit 0"
+echo "  (R66e). The first case below has the link on both sides; the"
+echo "  second has it only at --old, replaced by a regular file the"
+echo "  merge left the old link text in. A certain shift sits beside"
+echo "  them, so refusing everything is not a way to pass."
+echo "=============================================================="
+FIXR="$TMP/r"
+seed_repo "$FIXR"
+mkdir -p "$FIXR/pkg"
+printf 'KEEP_A\nK2\nK3\n' > "$FIXR/pkg/real.ts"
+ln -s ../pkg/real.ts "$FIXR/src/link.ts"
+printf 'OLDLINK\n' > "$FIXR/pkg/target.ts"
+ln -s ../pkg/target.ts "$FIXR/src/old.ts"
+printf 'm1\nm2\nm3\n' > "$FIXR/src/mover.ts"
+cat > "$FIXR/docs/install.md" <<'MD'
+# The symlink cases
+
+The working-tree link is `src/link.ts:1`.
+
+The --old link is `src/old.ts:1`.
+
+The certain one is `src/mover.ts:1-2`.
+MD
+cat > "$FIXR/docs/privacy.md" <<'MD'
+# Fixture R
+
+Privacy cites nothing.
+MD
+(
+  cd "$FIXR" || exit 2
+  git add -A
+  git commit -qm "fixture R: a symlink in the working tree and one only at --old"
+)
+OLDR="$(cd "$FIXR" && git rev-parse HEAD)"
+echo "  fixture R at ${OLDR:0:7}"
+# The merge: each target gains the link text, so an unchecked run finds the
+# link text in the target and shifts the citation onto it; mover.ts shifts for
+# real.
+printf 'KEEP_A\n../pkg/real.ts\nK2\nK3\n' > "$FIXR/pkg/real.ts"
+rm -f "$FIXR/src/old.ts"
+printf 'OLDLINK\n../pkg/target.ts\n' > "$FIXR/src/old.ts"
+printf 'NEW1\nNEW2\nm1\nm2\nm3\n' > "$FIXR/src/mover.ts"
+if [ ! -L "$FIXR/src/link.ts" ] || [ -L "$FIXR/src/old.ts" ] \
+  || ! grep -q 'real.ts' "$FIXR/pkg/real.ts"; then
+  echo "  ✘ fixture R's merged tree is not what this selftest means to write; it is void"
+  FAILED=1
+fi
+
+cd "$FIXR" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 47: a symlink in the working tree is refused, and the"
+echo "  link's target text is not taken as the cited line"
+echo "=============================================================="
+cp docs/install.md "$TMP/r-install.before"
+python3 scripts/relocate-citations.py --old "$OLDR" >"$TMP/run26.out" 2>&1
+rc=$?
+expect 1 "$rc" "a cited symlink is an error, not a relocation"
+refused "$TMP/run26.out" 'REFUSE.*src/link\.ts:1-1 .*symlink in the working tree' \
+  "the working-tree symlink is refused and named"
+absent docs/install.md 'src/link.ts:2' "the link's target text was not written for it"
+contains docs/install.md '`src/link.ts:1`' "the citation keeps the text it had"
+
+echo
+echo "=============================================================="
+echo "Probe 48: a symlink only at --old is refused by the side it"
+echo "  is a link on, not by the merged file it is now"
+echo "=============================================================="
+refused "$TMP/run26.out" 'REFUSE.*src/old\.ts:1-1 .*symlink at --old' \
+  "the --old symlink is refused and named"
+absent docs/install.md 'src/old.ts:2' "the old link text was not written for it"
+contains docs/install.md '`src/old.ts:1`' "the citation keeps the text it had"
+contains docs/install.md '`src/mover.ts:3-4`' "the control shift beside the two links still relocated"
+
+echo
+echo "=============================================================="
+echo "Fixture S: a colon that belongs to another side's token"
+echo "  README cites \`src/a.ts:1\` and \`Makefile:10\`. The merge"
+echo "  deletes Makefile, so in the merged tree the token is no"
+echo "  longer path-shaped, the parser drops it, and \`:10\` inherits"
+echo "  src/a.ts from the sentence. src/a.ts did not move, so the"
+echo "  citation used to be reported \`right\` as src/a.ts:10-10 and"
+echo "  the run exited 0 while the sentence still says Makefile."
+echo "  A certain shift sits beside it, so refusing everything is"
+echo "  not a way to pass."
+echo "=============================================================="
+FIXS="$TMP/s"
+seed_repo "$FIXS"
+printf 'K1\nK2\nK3\nK4\nK5\nK6\nK7\nK8\nK9\ncode10\nK11\n' > "$FIXS/src/a.ts"
+printf 'm1\nm2\nm3\n' > "$FIXS/src/mover.ts"
+cat > "$FIXS/Makefile" <<'MK'
+m1
+m2
+m3
+m4
+m5
+m6
+m7
+m8
+m9
+m10
+MK
+cat > "$FIXS/docs/install.md" <<'MD'
+# The odd continuation
+
+See `src/a.ts:1` and `Makefile:10`.
+
+The certain one is `src/mover.ts:1-2`.
+MD
+cat > "$FIXS/docs/privacy.md" <<'MD'
+# Fixture S
+
+Privacy cites nothing.
+MD
+(
+  cd "$FIXS" || exit 2
+  git add -A
+  git commit -qm "fixture S: a citation of an extensionless file"
+)
+OLDS="$(cd "$FIXS" && git rev-parse HEAD)"
+echo "  fixture S at ${OLDS:0:7}"
+(cd "$FIXS" && git rm -q Makefile)
+printf 'NEW1\nNEW2\nm1\nm2\nm3\n' > "$FIXS/src/mover.ts"
+
+cd "$FIXS" || exit 2
+
+echo
+echo "=============================================================="
+echo "Probe 49: the deleted file's citation is refused, not reported"
+echo "  right against the file the merged parse inherited"
+echo "=============================================================="
+cp docs/install.md "$TMP/s-install.before"
+python3 scripts/relocate-citations.py --old "$OLDS" >"$TMP/run27.out" 2>&1
+rc=$?
+expect 1 "$rc" "a colon that is part of another side's token is not a continuation"
+refused "$TMP/run27.out" 'REFUSE.*src/a\.ts:10-10 .*is written `Makefile:10`' \
+  "the refusal names the other side's token at that range"
+absent "$TMP/run27.out" 'right    docs/install.md:  src/a.ts:10-10' \
+  "and it is not listed among the citations that are already right"
+contains docs/install.md 'and `Makefile:10`' "the citation keeps the text it had"
+contains docs/install.md '`src/mover.ts:3-4`' "the control shift beside it still relocated"
+
+echo
+echo "=============================================================="
 echo "After: each fixture's own git status"
 echo "=============================================================="
 for d in "$FIXA" "$FIXB" "$FIXC" "$FIXD" "$FIXF" "$FIXG" "$FIXH" \
          "$FIXI" "$FIXI_OTHER" "$FIXJ" "$FIXK" "$FIXL" "$FIXM" "$FIXO" \
-         "$FIXQ1" "$FIXQ2" "$FIXQ3" "$FIXQ4" "$FIXQ5" "$FIXQ6"; do
+         "$FIXQ1" "$FIXQ2" "$FIXQ3" "$FIXQ4" "$FIXQ5" "$FIXQ6" "$FIXR" "$FIXS"; do
   echo "  $(basename "$d"):"
   (cd "$d" && git status --porcelain | sed 's/^/    /')
 done
@@ -2525,6 +2684,8 @@ if [ "$FAILED" -eq 0 ]; then
   echo "  one, a blank range, a name that resolves to a different file), the"
   echo "  whitespace-only range, the disagreeing sides, the range only another"
   echo "  file's document wrote, the citation that is a suffix of a longer token,"
+  echo "  a cited file that is a symlink (in the working tree or only at --old), a"
+  echo "  colon that is part of another side's token rather than a continuation,"
   echo "  the document that keeps its own newlines, the failed write that is put"
   echo "  back, and the failed read-back restore that is reported instead of"
   echo "  traced back."
