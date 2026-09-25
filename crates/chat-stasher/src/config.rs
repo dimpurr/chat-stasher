@@ -689,19 +689,33 @@ impl Config {
 /// built-in repo path would push to a different repository than the one written
 /// down). The fields are still cleared in place — a literal `~` is never handed
 /// to the filesystem — but the caller does not keep the resulting config.
+///
+/// [`resolve_option_env_refs`] runs in the same pass, and its failures are
+/// deliberately not part of this refusal: an `env:NAME` reference that cannot be
+/// resolved **removes** the option instead of substituting a value, and the
+/// reason is printed. Removing a key cannot silently point a destination at a
+/// value the file did not write — the destination is left without the option its
+/// author named, and the run that needs it fails loudly — which is not the
+/// "act on a default nobody asked for" failure this function exists to refuse.
+/// See `docs/install.md` §4.5 for the operator-facing contract.
 fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
     let mut problems: Vec<String> = Vec::new();
     cfg.expand_all_paths(&mut problems);
-    if problems.is_empty() {
-        return Ok(());
+    if !problems.is_empty() {
+        return Err(unusable_config(
+            &config_path(),
+            format!(
+                "it sets a path this tool cannot resolve: {}",
+                problems.join("; ")
+            ),
+        ));
     }
-    Err(unusable_config(
-        &config_path(),
-        format!(
-            "it sets a path this tool cannot resolve: {}",
-            problems.join("; ")
-        ),
-    ))
+    let mut env_problems: Vec<String> = Vec::new();
+    resolve_option_env_refs(cfg, &mut env_problems);
+    for problem in &env_problems {
+        eprintln!("warning: backend option environment reference was omitted: {problem}");
+    }
+    Ok(())
 }
 
 /// The error for a config file that exists but cannot be used.
@@ -719,6 +733,86 @@ fn unusable_config(path: &Path, reason: String) -> anyhow::Error {
          state and runs with the built-in defaults; this one exists and is not being ignored",
         path.display()
     )
+}
+
+/// Replacement for an `env:NAME` option value, or the reason there is none.
+///
+/// The two states are kept apart here rather than inside the loop so that every
+/// arm is reachable in a test on every platform: an environment variable whose
+/// value is not valid Unicode cannot be planted portably, but the `Err` it
+/// produces can be written down as a value.
+enum EnvReference {
+    /// The variable was set and non-empty; this is the secret.
+    Resolved(String),
+    /// The reference could not be used. Carries the message to print, which
+    /// names the option and the variable and never the value.
+    Unusable(String),
+}
+
+/// Turn one lookup outcome into a value or a named reason.
+///
+/// `NotPresent` and `NotUnicode` are different states with different fixes, so
+/// they get different messages: collapsing them into one "unavailable" would
+/// tell the operator to look for a variable that is already set.
+fn classify_env_reference(
+    label: &str,
+    name: &str,
+    lookup: Result<String, std::env::VarError>,
+) -> EnvReference {
+    match lookup {
+        Ok(value) if !value.is_empty() => EnvReference::Resolved(value),
+        Ok(_) => EnvReference::Unusable(format!(
+            "{label}: environment variable {name} is set but empty"
+        )),
+        Err(std::env::VarError::NotUnicode(_)) => EnvReference::Unusable(format!(
+            "{label}: environment variable {name} is set to a value that is not valid Unicode"
+        )),
+        Err(std::env::VarError::NotPresent) => EnvReference::Unusable(format!(
+            "{label}: environment variable {name} is not set in this process"
+        )),
+    }
+}
+
+/// Replace backend option values spelled `env:NAME` with the matching process
+/// environment value. Invalid, empty, non-Unicode, and unset references are all
+/// omitted, each with its own message; the value itself must never enter a log,
+/// and neither must a malformed reference, which may be a secret pasted by
+/// mistake.
+fn resolve_option_env_refs(cfg: &mut Config, problems: &mut Vec<String>) {
+    for (destination, entry) in &mut cfg.destinations {
+        let mut unresolved = Vec::new();
+        for (key, value) in &mut entry.options {
+            let Some(name) = value.strip_prefix("env:") else {
+                continue;
+            };
+            let valid_name = name
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| match (index, ch) {
+                    (0, 'A'..='Z' | '_') => true,
+                    (_, 'A'..='Z' | '0'..='9' | '_') => true,
+                    _ => false,
+                });
+            let label = format!("destinations.{destination}.options.{key}");
+            if !valid_name || name.is_empty() {
+                // Deliberately does not echo `name`: a typo here is often a
+                // secret written where a variable name was meant.
+                problems.push(format!("{label}: invalid environment variable reference"));
+                unresolved.push(key.clone());
+                continue;
+            }
+            match classify_env_reference(&label, name, std::env::var(name)) {
+                EnvReference::Resolved(secret) => *value = secret,
+                EnvReference::Unusable(reason) => {
+                    problems.push(reason);
+                    unresolved.push(key.clone());
+                }
+            }
+        }
+        for key in unresolved {
+            entry.options.remove(&key);
+        }
+    }
 }
 
 /// The two lines a backslash-repaired config is reported with.
@@ -1425,6 +1519,132 @@ mod tests {
     /// parallel threads and `set_var` is process-global. (Same pattern as the
     /// scanner tests.)
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn load_resolves_backend_option_environment_references() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        const SECRET: &str = "CHAT_STASHER_TEST_OPTION_SECRET";
+        let old_home = std::env::var_os("HOME");
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_secret = std::env::var_os(SECRET);
+        let home = tempfile::TempDir::new().unwrap();
+        let xdg = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+        std::env::remove_var("USERPROFILE");
+        std::env::set_var(SECRET, "test-only-secret-value");
+        let config_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[destinations.d1.options]\nsecret = \"env:CHAT_STASHER_TEST_OPTION_SECRET\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        let resolved = cfg.destinations["d1"].options.get("secret");
+        assert!(resolved.is_some_and(|value| value == "test-only-secret-value"));
+
+        for (name, value) in [
+            ("HOME", old_home),
+            ("XDG_CONFIG_HOME", old_xdg),
+            ("USERPROFILE", old_userprofile),
+            (SECRET, old_secret),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn backend_option_environment_references_resolve_and_missing_values_are_omitted() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        const PRESENT: &str = "CHAT_STASHER_TEST_OPTION_SECRET";
+        const MISSING: &str = "CHAT_STASHER_TEST_OPTION_MISSING";
+        let old_present = std::env::var_os(PRESENT);
+        let old_missing = std::env::var_os(MISSING);
+        std::env::set_var(PRESENT, "test-only-secret-value");
+        std::env::remove_var(MISSING);
+
+        let mut cfg: Config = toml::from_str(
+            "[destinations.d1.options]\nsecret = \"env:CHAT_STASHER_TEST_OPTION_SECRET\"\nmissing = \"env:CHAT_STASHER_TEST_OPTION_MISSING\"\n",
+        )
+        .unwrap();
+        let mut problems = Vec::new();
+        resolve_option_env_refs(&mut cfg, &mut problems);
+
+        let options = &cfg.destinations["d1"].options;
+        assert!(options
+            .get("secret")
+            .is_some_and(|value| value == "test-only-secret-value"));
+        assert!(!options.contains_key("missing"));
+        assert_eq!(problems.len(), 1);
+        assert!(!problems[0].contains("test-only-secret-value"));
+
+        match old_present {
+            Some(value) => std::env::set_var(PRESENT, value),
+            None => std::env::remove_var(PRESENT),
+        }
+        match old_missing {
+            Some(value) => std::env::set_var(MISSING, value),
+            None => std::env::remove_var(MISSING),
+        }
+    }
+
+    /// Every arm of the classifier is reachable without planting an environment
+    /// variable, including the one this platform cannot portably plant (a value
+    /// that is not valid Unicode). "Set but empty", "set to non-Unicode bytes",
+    /// and "not set" stay three states with three repairs, and none of the
+    /// messages may quote the value.
+    #[test]
+    fn env_reference_failures_keep_their_distinct_causes() {
+        const MARKER: &str = "marker-that-must-not-be-quoted";
+        let label = "destinations.d1.options.secret";
+        let name = "CHAT_STASHER_TEST_OPTION_SECRET";
+        let ask = |lookup: Result<String, std::env::VarError>| {
+            classify_env_reference(label, name, lookup)
+        };
+
+        assert!(matches!(
+            ask(Ok("resolved".to_string())),
+            EnvReference::Resolved(ref value) if value == "resolved"
+        ));
+
+        let cases = [
+            (Ok(String::new()), "is set but empty"),
+            (
+                Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                    MARKER,
+                ))),
+                "not valid Unicode",
+            ),
+            (
+                Err(std::env::VarError::NotPresent),
+                "is not set in this process",
+            ),
+        ];
+        let mut reasons = Vec::new();
+        for (lookup, expected) in cases {
+            match ask(lookup) {
+                EnvReference::Resolved(_) => panic!("a failure was read as a value"),
+                EnvReference::Unusable(reason) => reasons.push((reason, expected)),
+            }
+        }
+        for (reason, expected) in &reasons {
+            assert!(reason.contains(expected), "unexpected reason: {reason}");
+            assert!(reason.contains(label), "reason lost the option label");
+            assert!(reason.contains(name), "reason lost the variable name");
+            assert!(!reason.contains(MARKER), "reason quoted the value");
+        }
+        // Three failures, three messages: a distinction that collapses into one
+        // string is not a distinction the operator can act on.
+        let distinct: std::collections::BTreeSet<&String> =
+            reasons.iter().map(|(reason, _)| reason).collect();
+        assert_eq!(distinct.len(), 3);
+    }
 
     /// The exact shape that made `doctor_consistency_test` red on
     /// `windows-latest`: a Windows path pasted verbatim into a basic string.
