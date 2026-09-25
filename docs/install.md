@@ -582,8 +582,8 @@ Please find it by S3::detect_region() or set them in env.` (opendal-service-s3
 ship an R2-aware `detect_region` (`src/backend.rs` lines 654-655) — but that is
 a separate call this tool does not make, so write the value out.
 
-**The credential switches are the options here you are not asking the backend
-for, and there are two of them, not one.** Left out, the backend looks for
+**Two of the options here are about what you are asking the backend *not* to
+do, and they are separate switches.** Left out, the backend looks for
 credentials beyond the two you wrote, and it does so in two independent places.
 `disable_config_load = "true"` removes the ambient AWS environment and the
 `~/.aws/` profiles (opendal-service-s3 0.57.0 `src/backend.rs` lines 856-857;
