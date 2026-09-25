@@ -363,3 +363,144 @@ jobs:
           fi
           echo "published asset set OK:"
           printf '%s\n' "$published_assets"
+
+  # ---------------------------------------------------------------------------
+  # Homebrew tap update — opens a draft PR against dimpurr/homebrew-tap.
+  #
+  # Why this needs a second job for a one-line guard: a job-level `if` may NOT
+  # read the `secrets` context (`jobs.<job_id>.if` allows only
+  # `github, needs, vars, inputs` — GitHub Actions contexts reference, "Context
+  # availability", read 2026-09-25:
+  # https://docs.github.com/en/actions/reference/accessing-contexts-in-workflows).
+  # `tap-guard` gets to read the secret because a *step* may, and publishes the
+  # answer as a job output that `homebrew-tap` reads through `needs`. An absent
+  # `TAP_TOKEN` therefore *skips* the update instead of failing the release run.
+  #
+  # This job never merges and never gates the release: it runs after the assets
+  # are published, opens a draft PR for the owner to review (RELEASING.md
+  # step 9), and stops.
+  tap-guard:
+    name: tap update preconditions
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Decide whether to update the tap
+        id: check
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          enabled=false
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "TAP_TOKEN is not set — skipping the Homebrew tap update."
+          elif printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            enabled=true
+          else
+            echo "'${TAG}' is not a stable vX.Y.Z tag — skipping the Homebrew tap update."
+          fi
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+
+  homebrew-tap:
+    name: open Homebrew tap PR (draft)
+    needs: [build-and-release, tap-guard]
+    if: needs.tap-guard.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+
+    env:
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      # The Release, and therefore SHA256SUMS, exists before this job starts
+      # (needs: build-and-release). Reading it back is what pins the tap to the
+      # bytes this run published rather than to a local rebuild.
+      - name: Fetch this release's SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS -D .
+
+      - name: Check out the tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          # gh reads GH_TOKEN; setup-git points git's credential helper at gh so
+          # the later `git push` authenticates without the token in a URL.
+          gh auth setup-git
+          git clone https://github.com/dimpurr/homebrew-tap.git tap
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update Formula/chat-stasher.rb
+        run: |
+          set -euo pipefail
+          ARM64="$(awk -v a=chat-stasher-darwin-arm64 '$2 == a { print $1 }' SHA256SUMS)"
+          X86="$(awk -v a=chat-stasher-darwin-x86_64 '$2 == a { print $1 }' SHA256SUMS)"
+          if [ -z "$ARM64" ] || [ -z "$X86" ]; then
+            echo "error: SHA256SUMS is missing a darwin binary digest" >&2
+            exit 1
+          fi
+          # The tag is passed as argv, never interpolated into the script text,
+          # so a tag cannot become code here.
+          python3 - "${TAG#v}" "$ARM64" "$X86" <<'PY'
+          import re
+          import sys
+
+          version, arm64, x86 = sys.argv[1:4]
+          path = "tap/Formula/chat-stasher.rb"
+          with open(path) as handle:
+              text = handle.read()
+
+          # Both URLs carry the version as their `vX.Y.Z` path segment.
+          text = re.sub(r"download/v[^/]+/", f"download/v{version}/", text)
+
+
+          def set_sha(text, artifact, digest):
+              pattern = re.compile(
+                  r'(download/v[^/]+/' + re.escape(artifact) + r'"\s*\n\s*sha256 ")[0-9a-f]{64}(")'
+              )
+              text, count = pattern.subn(lambda m: m.group(1) + digest + m.group(2), text)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one sha256 for {artifact}, found {count}")
+              return text
+
+
+          for artifact, digest in (
+              ("chat-stasher-darwin-arm64", arm64),
+              ("chat-stasher-darwin-x86_64", x86),
+          ):
+              text = set_sha(text, artifact, digest)
+
+          with open(path, "w") as handle:
+              handle.write(text)
+          PY
+          git --no-pager -C tap diff
+
+      - name: Commit and open a draft PR
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="chat-stasher-${TAG#v}"
+          cd tap
+          git add Formula/chat-stasher.rb
+          if git diff --cached --quiet; then
+            echo "Formula/chat-stasher.rb already pins ${TAG#v}; nothing to open."
+            exit 0
+          fi
+          if gh pr list --repo dimpurr/homebrew-tap --head "$BRANCH" \
+               --json number --jq 'length' | grep -q '^[1-9]'; then
+            echo "a pull request for ${BRANCH} already exists; leaving it alone."
+            exit 0
+          fi
+          git commit -m "chat-stasher ${TAG#v}"
+          git push -u origin "$BRANCH"
+          gh pr create --draft --repo dimpurr/homebrew-tap \
+            --base main --head "$BRANCH" \
+            --title "chat-stasher ${TAG#v}" \
+            --body "Automated formula update for \`chat-stasher ${TAG#v}\`.
+
+          The two \`sha256\` values and the \`vX.Y.Z\` URL segments come from this
+          release's \`SHA256SUMS\`. Review, then run \`brew audit --strict --online\`
+          and \`brew style\` before merging."

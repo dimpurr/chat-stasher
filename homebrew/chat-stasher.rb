@@ -18,7 +18,6 @@ class ChatStasher < Formula
   desc "Append-only archive for every LLM conversation, across harnesses"
   homepage "https://github.com/dimpurr/chat-stasher"
   license "Apache-2.0"
-  version "0.4.0"
 
   # macOS-only, precompiled-binary tap. `on_macos` + Hardware::CPU.arm? picks
   # the per-architecture URL. There is intentionally no top-level `url`: no
