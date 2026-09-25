@@ -27,7 +27,7 @@ different owner and a different release-time edit:
 |---|---|---|
 | `crates/chat-stasher/Cargo.toml` | `version` | **The CLI's version.** It is what `chat-stasher --version` prints and what the native host reports as `host_version`. On `main` it always carries a `-dev` suffix. |
 | `scripts/install.sh` | `VERSION` default | Which release `curl \| sh` installs. Pinned on purpose — the installer never resolves "latest". |
-| `homebrew/chat-stasher.rb` | `version`, both `url`s, both `sha256`s | The Homebrew tap. |
+| `homebrew/chat-stasher.rb` | both `url`s (the `vX.Y.Z` path segment of each is the formula's version), both `sha256`s | The source copy of the Homebrew tap formula. It deliberately has no separate `version` line: `brew audit --strict` flags an explicit version as redundant when the URL already carries one. Its `test` compares the installed binary against `version` itself rather than repeating the string, so a release edits the two URLs and the two digests and nothing else. |
 | `SECURITY.md` | "Supported versions" table | Which line receives fixes. |
 | `apps/extension/package.json` | `version` | **The extension's own version**, independent of the CLI. See "The extension" below. |
 
@@ -57,9 +57,11 @@ automation creates one.
    The tag pushed in step 6 must equal this string exactly, and the binary must
    report the released version rather than a development one.
 4. **Update the version pins** in `scripts/install.sh` (the `VERSION` default),
-   the `homebrew/chat-stasher.rb` `version` and both `url`s, and the
-   "Supported versions" table in `SECURITY.md`. The Homebrew `sha256` values can
-   only be filled in after step 7.
+   both `url`s in `homebrew/chat-stasher.rb` (the `vX.Y.Z` segment of each is
+   the formula's version — there is no separate `version` line, on purpose, and
+   the formula's `test` reads that scanned version rather than a copy of it),
+   and the "Supported versions" table in `SECURITY.md`. The Homebrew `sha256`
+   values can only be filled in after step 7.
 
    The `VERSION` default is the release that `curl | sh` installs for everyone
    who does not name one, so it is the newest **stable** version — never a
@@ -88,11 +90,40 @@ automation creates one.
    - `sha256` of each downloaded asset, including the extension zip, matches its
      `SHA256SUMS` line;
    - the downloaded arm64 binary prints `chat-stasher X.Y.Z`.
-8. **Fill the Homebrew `sha256` values** from that `SHA256SUMS` and commit them
-   to the tap.
-9. **Move `main` forward**: bump `crates/chat-stasher/Cargo.toml` to the next
-   development version (`X.Y.(Z+1)-dev` or `X.(Y+1).0-dev`) in a new commit.
-   `main` never sits on an unsuffixed version.
+8. **Fill the Homebrew `sha256` values** from that `SHA256SUMS` in
+   `homebrew/chat-stasher.rb`. Step 4 set the URLs; this step makes them
+   checksum-pinned.
+9. **Update the Homebrew tap.** The tap is
+   [`dimpurr/homebrew-tap`](https://github.com/dimpurr/homebrew-tap) (Homebrew
+   short name `dimpurr/tap`); its formula is `Formula/chat-stasher.rb`, and
+   users install it with `brew install dimpurr/tap/chat-stasher`. When the
+   `TAP_TOKEN` repository secret is set, `release.yml`'s `homebrew-tap` job does
+   this for you — it copies this release's `sha256` digests into the tap formula
+   and opens a **draft PR** against `dimpurr/homebrew-tap`. Review that PR, run
+   `brew audit --strict --online` and `brew style` against it, and merge it only
+   after step 7 passed. When `TAP_TOKEN` is absent the job is skipped and this
+   step is manual: copy the two `sha256` values (and the `vX.Y.Z` segment of
+   both URLs) into the tap's `Formula/chat-stasher.rb`, run the same two checks,
+   and open the PR.
+
+   The job opens a *draft* PR and never merges — publishing to the tap is the
+   step the owner reviews. `TAP_TOKEN` is a fine-grained personal access token
+   with `contents: write` and `pull_requests: write` on
+   `dimpurr/homebrew-tap`, because the workflow's own `GITHUB_TOKEN` cannot
+   write to a different repository. The acceptance test is
+   `brew install dimpurr/tap/chat-stasher` on a clean Mac, which must install
+   the version just released.
+
+   `brew test dimpurr/tap/chat-stasher` finishes that test. `brew test`
+   installs nothing — it runs the `test do` block of a formula that is already
+   installed — so run it after the `brew install` above. The block asserts that
+   the binary in the Cellar reports the version the URLs pin. Neither `brew
+   audit` nor `brew style` runs the formula's `test do` block, so the two lint
+   checks above cannot see a formula that installs but reports the wrong
+   version. This one can.
+10. **Move `main` forward**: bump `crates/chat-stasher/Cargo.toml` to the next
+    development version (`X.Y.(Z+1)-dev` or `X.(Y+1).0-dev`) in a new commit.
+    `main` never sits on an unsuffixed version.
 
 If a release is wrong, do not delete the tag and re-push it: an installer that
 already ran will have the old binary, and `install.sh` pins by tag. Cut the
@@ -218,6 +249,16 @@ thing it does not.
   staged files are uploaded with `--clobber`, and the workflow fails unless the
   Release's asset set then equals the staged set exactly. First publication is
   unaffected — `gh release create` starts from nothing.
+- **The Homebrew tap job does not gate the release.** It runs only after the
+  Release is published, only for a stable `vX.Y.Z` tag, and only when
+  `TAP_TOKEN` is set; otherwise it is skipped. It opens a draft PR from a
+  `chat-stasher-X.Y.Z` branch and stops — it never merges, so a tap that is
+  broken cannot make a release fail, and a release cannot merge to the tap
+  without the owner's review (step 9). A pull request for that branch is never
+  opened twice: an existing one, open or closed, is left alone and reported.
+  A failure inside the job still marks the workflow *run* red — the Release
+  itself is already published at that point, so that red is a report on the tap
+  update, not a failed release.
 
 It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
 every check above, so `git tag -a` in step 6 is a step the owner follows and not
