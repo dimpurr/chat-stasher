@@ -144,6 +144,18 @@ describe('W113 · item 2 — where the total came from', () => {
     expect(row.percent).toBeNull();
     expect(row.unknownReasonKey).toBe('progress.reason.noTotalFromApi');
   });
+
+  it('🔴 W113b · a response total is printed as the platform\'s own number, with nothing else in the sentence', () => {
+    const blocks = coverageView(buildCoverage(input({
+      scopes: [scope({ header: header({ totalKnown: 900, totalSource: 'response-total' }) })],
+    })), NOW).sections[0]!.blocks;
+    const values = blocks.flatMap((b) => (b.kind === 'facts' ? b.rows.map((r) => r.value) : []));
+    // §2 asks *where* the total came from, and that is the whole claim: a number the platform reports, not a
+    // measurement of the account. The sentence used to open with a fragment ("at least see above;") that
+    // pointed at nothing.
+    expect(values).toContain("the platform's own total is 900");
+    expect(values.some((v) => v.includes('see above'))).toBe(false);
+  });
 });
 
 describe('W113 · item 3 — stored, owed, failed, parked', () => {

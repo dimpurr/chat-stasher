@@ -782,7 +782,10 @@ coverage:
       unknown: "the list stopped for a reason this build does not know: {kind}"
   totals:
     label: "Total, as the platform reports it"
-    fromResponse: "at least see above; the platform's own total is {total}"
+    # 🔴 W113b · ADR-032 §2 asks for **where the total came from**, and that is all this sentence says: the
+    #    number is the platform's own claim, not a measurement of the account. It opened with "at least see
+    #    above;", a fragment of an earlier draft that named nothing above it and read as a leftover.
+    fromResponse: "the platform's own total is {total}"
     unknown: the platform does not provide a total for this list, so there is no denominator
     contradicted: >-
       the platform's own total has already been exceeded by the rows actually
