@@ -205,7 +205,7 @@ What that new path does and does not change:
 
 Two things worth stating plainly:
 
-- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui/sessions.rs:54`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
+- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui/sessions.rs:55`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
 - **Whether the macOS application firewall prompts for a server bound only to `127.0.0.1` is documented, not verified.** Apple's firewall documentation describes protection against connections from other computers and does not mention loopback either way; third-party documentation states that the application firewall does not filter loopback. We have not observed the behaviour on a machine with the firewall turned on.
 
 ### Someone with physical access to your machine, or your stolen disk

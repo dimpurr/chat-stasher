@@ -38,6 +38,13 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+/* UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns grouped and coloured
+   by platform group — labels first, colour second (the group name sits in the
+   header row), and drawn only from the variables above (§8.1: no new colours). */
+th.ghead{font-weight:400;font-size:.78rem;padding-bottom:.05rem}
+.g-web{color:var(--link)}
+.g-agents{color:var(--ok)}
+.g-ungrouped{color:var(--muted)}
 footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;
 border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
@@ -55,6 +62,9 @@ nav.sub{display:flex;gap:1rem}
 <h1>Sessions</h1>
 <p class=sub><a href="/?token=golden-token">← overview</a> · destination <b>dest-under-test</b></p>
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
+<nav class=sub aria-label="platform groups">Platform groups: <b aria-current="true">All 4</b> · <a href="/sessions?limit=2&harness=chatgpt,claude,deepseek,gemini,grok,kimi,perplexity&token=golden-token">Web platforms 1</a> · <a href="/sessions?limit=2&harness=aider,claude-code,codex,continue,crush,cursor,gemini-cli,github-copilot-cli,kimi-code,opencode,zed&token=golden-token">Coding agents 2</a> · <span title="no source in this view is unclassified, so the ungrouped filter would name no id at all">ungrouped 0</span></nav>
+<p class=sub>Each group link carries every other filter in force unchanged and replaces the harness filter with its group's sources — the same <code>--harness</code> list <code>search</code> reads — so it yields this list over a different harness set. The number beside a group is the number of session(s) that link's page reports matched. Sources this build does not classify sit under <i>ungrouped</i> and are still filterable on their own.</p>
+<p class=sub>1 session(s) in view carry no group: their archived id has no harness prefix, so no <code>--harness</code> filter can select them. They are counted under <b>All</b> only — a group link lists them under "could not be placed", not as absent.</p>
 <p><b>4</b> session(s) matched.</p>
 <p class=sub>Sessions 3–4 of 4 · sorted by last message time, newest first · sessions with an unknown conversation time are not ranked and stay at the bottom</p>
 <nav class=sub aria-label="session pages"><a href="/sessions?limit=2&offset=0&token=golden-token">‹ previous</a> · <a href="/sessions?limit=2&offset=0&token=golden-token">1</a> · <b aria-current="page">2</b></nav>

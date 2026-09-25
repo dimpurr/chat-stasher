@@ -127,6 +127,13 @@ pub(super) fn json_sessions(
             "machine": s.machine,
             "source": s.source_label(),
             "harness": s.harness,
+            // The group the row's harness falls into (UIA-3). Mirrors
+            // `harness` exactly: `null` when the archived id carries no
+            // prefix — not a group, and not guessable into one — and a wire
+            // word otherwise, `ungrouped` included, so a consumer sees an
+            // unclassified source as what it is rather than as the closest
+            // classified guess.
+            "platform_group": s.harness.as_deref().map(super::facets::group_of).map(|g| g.wire()),
             "session_short_id": s.short_id,
             "shards": s.shard_count,
             "bytes": s.bytes,

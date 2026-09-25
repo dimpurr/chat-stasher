@@ -85,6 +85,13 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+/* UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns grouped and coloured
+   by platform group — labels first, colour second (the group name sits in the
+   header row), and drawn only from the variables above (§8.1: no new colours). */
+th.ghead{font-weight:400;font-size:.78rem;padding-bottom:.05rem}
+.g-web{color:var(--link)}
+.g-agents{color:var(--ok)}
+.g-ungrouped{color:var(--muted)}
 footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;
 border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
