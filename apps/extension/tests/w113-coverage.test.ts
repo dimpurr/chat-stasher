@@ -26,7 +26,7 @@ import { withI18n } from './i18n-harness';
 import { buildCoverage, describeSkipReason, enumNote, localMonthKey, problemRows, stateNote, speedNote, type CoverageInput, type CoverageRow, type CoverageScopeInput } from '../lib/coverage';
 import { coverageCard, coverageView, presetWhat } from '../lib/coverage-view';
 import { SPEED_PLANS } from '../lib/backfill/speed';
-import { initialState, type BackfillHeader, type HaltRecord } from '../lib/backfill/types';
+import { haltClassOf, initialState, TRANSIENT_RETRY_BASE_MS, type BackfillHeader, type HaltReason, type HaltRecord } from '../lib/backfill/types';
 import type { CoveragePageView } from '../lib/coverage-view';
 
 const NOW = Date.UTC(2026, 8, 24, 12, 0, 0); // 2026-09-24T12:00:00Z
@@ -737,6 +737,121 @@ describe('W149d · the all-clear line covers moving and finished legs, and nothi
     const view = coverageView(buildCoverage(input({ scopes: [withWork] })), NOW);
     expect(view.health!.tone).toBe('ok');
     expect(view.health!.text).toContain('moving or finished');
+  });
+});
+
+describe('W149e · the retry bucket is worded for every reason that reaches it', () => {
+  /**
+   * 🔴 This bucket is the one health branch that is not one reason: **every** transient reason lands in it
+   * (`isRetrying` → `haltClassOf`), and one sentence is printed over all of them. So that sentence may not
+   * carry a claim true of some and false of others — and the first version carried two:
+   *
+   *   · "the platform turned a request away" — false for `scope-mismatch`, which is raised **before any
+   *     request goes out** (the page's active organization differs from the stored scope; the engine's own
+   *     detail string says "the page active organization differs from the stored backfill scope"), and for
+   *     `transport-error`, where a request is dropped rather than turned away;
+   *   · "Nothing to do" — false for `auth-refused`, whose own card sentence sends the user to sign in again
+   *     while the leg keeps asking.
+   *
+   * The reason set is **derived**, not typed out: `EVERY_REASON` is a `Record<HaltReason, true>`, so the
+   * compiler refuses to build until a member added to the union is named here, and the transient half is
+   * then whatever `haltClassOf` says — the same function `isRetrying` uses. That shape is the bug: the old
+   * test pinned one reason (`rate-limited`), so four fifths of this sentence's own inputs were never
+   * rendered, and the two clauses above were never read against the states they were printed in.
+   */
+  const EVERY_REASON: Record<HaltReason, true> = {
+    'rate-limited': true,
+    'shape-changed': true,
+    'transport-error': true,
+    'scope-mismatch': true,
+    'storage-unavailable': true,
+    'unsupported-platform': true,
+    'detail-unsupported': true,
+    'detail-empty-unverified': true,
+    'state-unreadable': true,
+    'org-ambiguous': true,
+    'org-unresolved': true,
+    'ledger-mismatch': true,
+    'auth-refused': true,
+    'refused-unknown': true,
+  };
+  const ALL_REASONS = Object.keys(EVERY_REASON) as HaltReason[];
+  const TRANSIENT = ALL_REASONS.filter((reason) => haltClassOf(reason) === 'transient');
+
+  /** One page whose only leg is halted on `reason`, with a retry moment in the future. */
+  const pageOn = (reason: HaltReason) => input({
+    scopes: [scope({
+      header: header({ halted: { reason, detail: 'synthetic detail', at: 1, attempts: 2, retryAt: NOW + 15 * 60_000 } }),
+    })],
+  });
+
+  /** The one state sentence a card carries — the details row, which a dismissal cannot remove. */
+  const stateOf = (reason: HaltReason) => {
+    const rows = cardOf(pageOn(reason)).detailRows.filter((r) => r.label === 'state');
+    expect(rows, reason).toHaveLength(1);
+    return rows[0]!.value;
+  };
+
+  it('the set under test is the ladder table\'s own key set, and it is not a single reason', () => {
+    // Two lists that must agree are one edit: the ladder is a total `Record<TransientHaltReason, …>`, so a
+    // transient reason with no rung does not compile, and `haltClassOf` answers from the same set.
+    expect([...TRANSIENT].sort()).toEqual(Object.keys(TRANSIENT_RETRY_BASE_MS).sort());
+    expect(TRANSIENT.length).toBeGreaterThan(1);
+    // The two that make the sentence's claims false, named so this test cannot quietly stop covering them.
+    expect(TRANSIENT).toContain('scope-mismatch');
+    expect(TRANSIENT).toContain('auth-refused');
+  });
+
+  it('🔴 the retry line names no cause and grants no free pass, for any reason that lands in it', () => {
+    for (const reason of TRANSIENT) {
+      const health = coverageView(buildCoverage(pageOn(reason)), NOW).health!;
+      expect(health.tone, reason).toBe('wait');
+      expect(health.text, reason).toContain('chatgpt');
+      expect(health.text, reason).toMatch(/retry/i);
+      // The refusal claim: false of scope-mismatch (no request is sent) and of transport-error (dropped,
+      // not turned away) — and this one string is printed over both of them.
+      expect(health.text, reason).not.toMatch(/refus|turned \S+ away|dropped a request|unhappy/i);
+      // The free pass: false of auth-refused, whose card sends the user to sign in again.
+      expect(health.text, reason).not.toMatch(/nothing to do|no action/i);
+      // And it points at the card, which is where each reason and each action actually live.
+      expect(health.text, reason).toMatch(/card/i);
+    }
+  });
+
+  it('🔴 the card for a scope mismatch does not claim the platform refused or dropped anything', () => {
+    // `scope-mismatch` shares `waitingRetry` with the two reasons where the platform really did answer, so
+    // that sentence may not name a refusal — and on this reason no request was ever built.
+    const sentence = stateOf('scope-mismatch');
+    expect(sentence).not.toMatch(/refus|dropped a request|unhappy/i);
+    // …and it still says the two things that ARE true of it, so the fix cannot be "print less".
+    expect(sentence).toContain('NOT stopped');
+    expect(sentence).toContain('carry on by itself');
+    // The reason and the engine's own detail survive in the same sentence: the cause is not deleted,
+    // it is left to the two fields that carry it.
+    expect(sentence).toContain('scope-mismatch');
+    expect(sentence).toContain('synthetic detail');
+  });
+
+  it('🔴 a refusal keeps its own sentence, and the shared one may not borrow it back', () => {
+    // These two reasons were split away from `waitingRetry` for exactly this rule. Loosening the overview
+    // line may not loosen them: their cards still say what happened and what to do about it.
+    const auth = stateOf('auth-refused');
+    expect(auth).toContain('refused a request');
+    expect(auth).toContain('sign in again');
+    const unknown = stateOf('refused-unknown');
+    expect(unknown).toContain('refused a request');
+    // An unreadable code is not a login problem, and this sentence refuses to guess one.
+    expect(unknown).toContain('does not recognise');
+    expect(unknown).not.toMatch(/sign in/i);
+  });
+
+  it('🔴 the skip line for a waiting retry names no cause either', () => {
+    // The same bucket one layer up: a tick skipped because the leg is in its backoff. Every transient
+    // reason reaches this line, so "after a refusal" was false here for the same two reasons.
+    const skip = describeSkipReason('waiting-retry');
+    expect(skip).not.toMatch(/refus|turned \S+ away|dropped a request/i);
+    expect(skip).toMatch(/backoff/i);
+    expect(skip).toMatch(/asked again|retry/i);
   });
 });
 

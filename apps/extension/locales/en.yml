@@ -573,13 +573,25 @@ popup:
         it next has the evidence rather than a guess. Nothing was counted, passed
         over, or written off while this stood: a refused request records nothing,
         and every debt the leg already held is still held.
+      # 🔴 This sentence covers `rate-limited`, `transport-error` and `scope-mismatch` — the three
+      #    transient reasons `haltNote` does not word separately. Its first version said "the platform
+      #    refused or dropped a request", which is true of the first two and false of the third: on
+      #    `scope-mismatch` **no request goes out at all** (the page's active organization differs from
+      #    the stored scope, so the attempt stops before it is sent — the engine's own detail says so).
+      #    The tail had the same hole from the other end ("the platform is genuinely unhappy rather than
+      #    briefly unreachable" — the platform is not involved in a scope mismatch). Both halves are now
+      #    claims about the **attempt**, which is what all three have in common, and the cause stays where
+      #    it belongs: in `{reason}` and `{detail}`, which this sentence already carries. This is the same
+      #    rule `refusedUnknown` above was split out for, applied inside the sentence rather than by
+      #    splitting it again — the rest of it ("NOT stopped", nothing written off, same place, attempt N)
+      #    is true of all three, so only the clauses that were not had to move.
       waitingRetry: >-
-        This leg is NOT stopped and nothing has been written off: the platform
-        refused or dropped a request ({reason}), so it is waiting out its backoff
-        and will carry on by itself, from exactly the same place, in about
+        This leg is NOT stopped and nothing has been written off: this attempt
+        did not go through ({reason}), so the leg is waiting out its backoff and
+        will carry on by itself, from exactly the same place, in about
         {minutes} minute(s). That is attempt {attempts} of this streak — if the
-        number keeps climbing, the platform is genuinely unhappy rather than
-        briefly unreachable. Technical detail: {detail}
+        number keeps climbing, whatever stopped it is persisting rather than
+        being a one-off. Technical detail: {detail}
       other: "This leg has stopped and left a record: {reason} — {detail}"
     # 🔴 W44 · **A stop that stopped applying, because the extension changed.**
     #
@@ -677,7 +689,11 @@ tick:
   skip:
     noHttpPort: no page of this platform was open at the time, so there was nothing to fetch through
     halted: this platform is held by a stop that still applies
-    waitingRetry: this platform is inside its backoff after a refusal, and will be asked again by itself
+    # 🔴 "after a refusal" was true of `rate-limited` and false of the other four reasons that reach this
+    #    line: `scope-mismatch` never sends a request, `transport-error` has one dropped rather than
+    #    refused, and `auth-refused` / `refused-unknown` are refusals the card words on its own terms.
+    #    `halted` above names no cause either — this line says which of the two a skip was, not why.
+    waitingRetry: this platform is inside its backoff, and will be asked again by itself
     dailyCap: today's body quota for this platform was already spent
     stateUnreadable: this platform's saved progress record could not be read, so it was left untouched
     unknown: "a skip reason this build does not know: {reason}"
@@ -928,9 +944,22 @@ coverage:
   health:
     ok: "all {total} platform leg(s) moving or finished"
     stopped: "{count} stopped: {list}. Each card names the reason and the fix."
+    # 🔴 This is the one health sentence whose bucket is not one reason but five: every transient reason
+    #    lands here (`isRetrying`, i.e. `haltClassOf`). So it may name neither a cause nor an action.
+    #    A cause: "the platform turned a request away" is false for `scope-mismatch`, which is raised
+    #    before any request goes out (the page's active organization differs from the stored scope), and
+    #    for `transport-error`, where the request was dropped rather than turned away. An action: "nothing
+    #    to do" is false for `auth-refused`, whose own card sentence sends the user to sign in again while
+    #    the leg keeps asking. What is true of all five is what a claim about the *leg* says — it is
+    #    waiting out a retry and it carries on by itself — plus the pointer to the card, which is where
+    #    each reason, each action and each next-attempt time actually live. `stopped` above already has
+    #    this shape ("Each card names the reason and the fix"); this is the same shape with the one thing
+    #    a backoff can promise in place of a fix. 🔴 It also may not use the word "stopped" anywhere: the
+    #    W149d test beside this line asserts that the retry sentence never contains it, because that is
+    #    the word this page reserves for a leg that is not coming back.
     retrying: >-
-      {count} waiting out a retry: {list}. Nothing to do — the platform turned a
-      request away and each card says when the next attempt is.
+      {count} waiting out a retry: {list}. Each card names why it is waiting and
+      when the next attempt is; the leg carries on by itself.
     waiting: >-
       {count} waiting for an open page: {list}. Open one of those pages and it
       carries on by itself.

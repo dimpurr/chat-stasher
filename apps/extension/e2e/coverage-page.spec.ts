@@ -254,6 +254,14 @@ test('a stopped leg is a dismissible card alert, and dismissing it writes nothin
   //    this exact fixture — the chip said "stopped" next to an action text reading "NOT stopped" — so
   //    the chip is pinned here as well as in the unit tests, on the page a reader actually sees.
   await expect(card.locator('.chip')).toHaveText('retrying');
+  // 🔴 The overview line's retry branch is **one** sentence printed over every transient reason, so it may
+  //    name neither a cause ("the platform turned a request away" is false of a scope mismatch, which is
+  //    raised before any request goes out) nor an action ("Nothing to do" is false of `auth-refused`,
+  //    whose card sends the user to sign in). The unit tests cover all five reasons (W149e); this is the
+  //    same claim on the page a reader actually sees.
+  const health = page.locator('#health');
+  await expect(health).toContainText(/retry/i);
+  await expect(health).not.toContainText(/Nothing to do|turned a request away/i);
   const alert = card.locator('[data-alert-id$=":halt"]');
   await expect(alert).toBeVisible();
   await expect(alert).toContainText(/min/);
