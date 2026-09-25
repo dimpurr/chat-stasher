@@ -389,11 +389,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:3867-3880`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:3772-3785`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:3903-3927`). An
+it does anything else (`crates/chat-stasher/src/main.rs:3808-3832`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -425,10 +425,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3882-3891`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3787-3796`;
 `crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:3870-3878`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:3775-3783`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -485,12 +485,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:7480-7481`). This is the
+does not (`crates/chat-stasher/src/main.rs:7515-7516`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:7184-7185`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:7219-7220`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -506,7 +506,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:7640-7931`):
+(`crates/chat-stasher/src/main.rs:7675-7966`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -519,7 +519,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:7277-7284`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:7312-7319`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -536,12 +536,16 @@ There is also a related command: `doctor`. It answers a different question —
 only paths, counts, bytes, and timestamps
 (`crates/chat-stasher/src/main.rs:377-388`).
 
-`doctor` also **connects once to each destination you declared**, read-only, and
+`doctor` also **connects to each destination you declared**, read-only, and
 reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:816-845`, `:883-921`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:816-958`, `:996-1056`).
+When the repository is there it also reads each machine's `writer.json` and
+reports the machines whose archived activity index was written by an older
+`chat-stasher`, with the exact command that rebuilds each one
+(`crates/chat-stasher/src/doctor.rs:838-958`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. This is the one thing `doctor` does that touches
 the network; see section 4.4 if it reports a host it cannot trust.

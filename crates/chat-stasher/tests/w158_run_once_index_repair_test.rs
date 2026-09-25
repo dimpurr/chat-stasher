@@ -277,7 +277,10 @@ fn doctor_names_the_exact_repair_command_for_a_stale_index() {
 
     let out = run(sandbox, &["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(out.status.success(), "doctor --json should exit 0:\n{stdout}");
+    assert!(
+        out.status.success(),
+        "doctor --json should exit 0:\n{stdout}"
+    );
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("doctor --json prints one JSON object");
     let probe = &value["destinations"][0];
@@ -289,7 +292,10 @@ fn doctor_names_the_exact_repair_command_for_a_stale_index() {
         serde_json::Value::Null,
         "no writer record is null, not an empty version"
     );
-    assert_eq!(probe["activity_index"]["stale"][0]["repair_command"], expected);
+    assert_eq!(
+        probe["activity_index"]["stale"][0]["repair_command"],
+        expected
+    );
 
     let out = run(sandbox, &["doctor"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
