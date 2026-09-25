@@ -210,7 +210,7 @@ fn pattern_matches(pattern: &str, text: &str) -> bool {
 }
 
 /// Assert a value satisfies the whole committed schema, and that the top level
-/// is still the `oneOf` of the five message shapes.
+/// is still the `oneOf` over the message shapes the protocol defines.
 #[track_caller]
 fn assert_matches_schema(value: &Value) {
     let root = schema();
