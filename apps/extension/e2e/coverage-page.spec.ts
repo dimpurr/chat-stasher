@@ -20,6 +20,13 @@
  *   · an id with a recorded conversation time and one without, so a month and the time-unknown bucket both
  *     have to be drawn;
  *   · a platform with no total, so the "no denominator" sentence has to appear instead of a percentage.
+ *
+ * W149 · The page is a card grid now, so this spec also pins the shapes the redesign added: the overview
+ * sums and health line, the chip word, the composition bar's segments, the ring that may only exist when a
+ * percentage was computed, the quota meter, the months SVG with the time-unknown column labelled as its
+ * own thing, the radio segmented control, and the session-only dismissal of a card alert. Facts that live
+ * behind a details disclosure are read with every disclosure opened first, because innerText does not
+ * include closed ones — expanding them is reading the page, not changing it.
  */
 
 import { expect } from '@playwright/test';
@@ -118,6 +125,13 @@ async function openCoverage(ext: Extension) {
   return page;
 }
 
+/** Open every disclosure, so `innerText` (which respects closed details) sees the whole card. */
+async function expandAllDetails(page: Awaited<ReturnType<typeof openCoverage>>) {
+  await page.evaluate(() => {
+    document.querySelectorAll('details').forEach((node) => { node.open = true; });
+  });
+}
+
 async function seed(ext: Extension): Promise<void> {
   await writeStorage(ext, {
     [HEADER_KEY]: header(),
@@ -130,8 +144,25 @@ async function seed(ext: Extension): Promise<void> {
 test('the coverage page is a real page that renders the record, and sends nothing anywhere', async ({ ext }) => {
   await seed(ext);
   const page = await openCoverage(ext);
+  await expandAllDetails(page);
 
   const body = await page.locator('body').innerText();
+
+  // The overview header: the sums of the cards, from the store's own numbers (1 stored / 1 owed).
+  await expect(page.locator('#stat-stored')).toHaveText('1');
+  await expect(page.locator('#stat-owed')).toHaveText('1');
+  await expect(page.locator('#health')).toBeVisible();
+  await expect(page.locator('#health')).toContainText(/moving|finished/);
+
+  // The card: chip, composition bar, quota meter, months chart — all in place, all named.
+  const card = page.locator('.card', { has: page.locator('h2', { hasText: PLATFORM }) });
+  await expect(card.locator('.chip')).toHaveText('running');
+  await expect(card.locator('.bar .seg-ok')).toHaveCount(1);
+  await expect(card.locator('.quota .meter')).toBeVisible();
+  await expect(card.locator('.months svg')).toHaveCount(1);
+  // 🔴 No percentage exists for this row (the platform gave no total), so no ring may exist either —
+  //    a bare ring would be the % the model refused to print.
+  await expect(page.locator('.ring')).toHaveCount(0);
 
   // 1 · the listed count is a **lower bound** while the list is unfinished.
   expect(body).toContain('≥');
@@ -150,19 +181,25 @@ test('the coverage page is a real page that renders the record, and sends nothin
   // 4 · the state, in plain words. Nothing is stopping this leg, so it must not claim a stop.
   expect(body).not.toContain('has stopped');
 
-  // 5 · speed and an estimate that says it is one.
+  // 5 · speed and an estimate that says it is one — the card face's short line and the
+  //     details' full sentence both carry the label.
   expect(body).toContain('Daily limit in force today');
   expect(body).toContain('estimate');
 
-  // 6 · the month with a recorded time, and the time-unknown bucket kept out of it.
-  expect(body).toContain('2026-03');
+  // 6 · the month with a recorded time, and the time-unknown bucket kept out of it: the chart draws
+  //     the month column, the table lists the numbers, and the unknown bucket never becomes a month.
+  expect(body).toContain('26/03');
   expect(body).toContain('time unknown');
   await expect(page.locator('table')).toHaveCount(1);
+  // The chart's unknown column is the last one and carries its name, never a month label.
+  const chartLabels = await page.locator('.months text.m-label').allTextContents();
+  expect(chartLabels[chartLabels.length - 1]).toBe('time unknown');
 
   // The control: three presets, and the default is the one ADR-032 §3 names.
-  const buttons = page.locator('.speed button');
-  await expect(buttons).toHaveCount(3);
-  await expect(page.locator('.speed button[aria-pressed="true"]')).toHaveText('Gentle (default)');
+  const radios = page.locator('.speed input[type="radio"]');
+  await expect(radios).toHaveCount(3);
+  await expect(page.locator('.speed input[value="gentle"]')).toBeChecked();
+  await expect(page.locator('label[for="speed-gentle"]')).toContainText(/Gentle \(default\)/);
 
   // 🔴 And the point of the whole spec: not one request left this page.
   //    `installFakePlatforms` is not installed here on purpose — the context is
@@ -179,14 +216,48 @@ test('picking a preset writes the choice, and the page repaints with it', async 
   await seed(ext);
   const page = await openCoverage(ext);
 
-  await page.locator('.speed button', { hasText: 'Faster' }).click();
+  await page.locator('label[for="speed-faster"]').click();
 
   // The write is the one thing this page does, and it is a local setting, not a request.
   await expect.poll(async () => (await readStorage(ext, null))[PRESET_KEY]).toBe('faster');
-  await expect(page.locator('.speed button[aria-pressed="true"]')).toHaveText('Faster');
+  await expect(page.locator('.speed input[value="faster"]')).toBeChecked();
   // Choosing it surfaces the risk note, which is the promise ADR-032 §3 makes about the fast preset.
-  const body = await page.locator('body').innerText();
-  expect(body).toContain('Faster raises how much is fetched per day');
+  await expect(page.locator('.speed-risk')).toContainText('Faster raises how much is fetched per day');
+  // And the note was absent before (it lives beside the control, not inside the cards).
+  await page.locator('label[for="speed-gentle"]').click();
+  await expect(page.locator('.speed-risk')).toHaveCount(0);
+  await expect.poll(async () => (await readStorage(ext, null))[PRESET_KEY]).toBe('gentle');
+
+  await page.close();
+});
+
+test('a stopped leg is a dismissible card alert, and dismissing it writes nothing', async ({ ext }) => {
+  await seed(ext);
+  // The same row, held by a transient stop: the card opens with the model's own action sentence.
+  await writeStorage(ext, {
+    [HEADER_KEY]: {
+      ...header(),
+      halted: {
+        reason: 'rate-limited',
+        detail: 'HTTP 429 from the history endpoint',
+        at: 1,
+        retryAt: Date.now() + 25 * 60_000,
+        attempts: 2,
+      },
+    },
+  });
+
+  const page = await openCoverage(ext);
+  const alert = page.locator('.card .alert', { hasText: '429' });
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText(/min/);
+  // Dismissing hides it — and the dismissal survives the repaint a preset change causes, because
+  // it is memory on the page, not a write to storage.
+  await alert.locator('.dismiss').click();
+  await expect(alert).toHaveCount(0);
+  await page.locator('label[for="speed-standard"]').click();
+  await expect(page.locator('.speed input[value="standard"]')).toBeChecked();
+  await expect(page.locator('.card .alert', { hasText: '429' })).toHaveCount(0);
 
   await page.close();
 });
@@ -202,8 +273,14 @@ test('the popup carries the summary card and the link into the page', async ({ e
   // page's caveats.
   const cardText = await card.innerText();
   expect(cardText).toContain(PLATFORM);
+  expect(cardText).toContain('stored 1');
+  expect(cardText).toContain('owed 1');
   expect(cardText).not.toContain('%');
   expect(cardText).not.toContain('estimate');
+  // The compact form of the page's card: a chip word and a two-segment mini bar, whose segments are
+  // exactly the two counts above.
+  await expect(card.locator('.cv-chip')).toHaveText('running');
+  await expect(card.locator('.cv-bar').locator('i')).toHaveCount(2);
 
   const link = page.locator('#open-coverage');
   await expect(link).toBeVisible();
