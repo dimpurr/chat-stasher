@@ -116,6 +116,7 @@ pub struct OverviewRow {
     pub last_unix: Option<i64>,
     pub line_count: u64,
     pub time_source: TimeSource,
+    pub provenance: Option<crate::activity::ProjectProvenance>,
 }
 
 /// The vertical axis of the heatmap.
@@ -305,7 +306,7 @@ fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_
             "this session recorded no time boundary on this end",
         ),
     };
-    serde_json::json!({
+    let mut row = serde_json::json!({
         "session_id": r.session_id,
         "machine": r.machine,
         "machine_display": display_name(&r.machine, display_names),
@@ -314,7 +315,11 @@ fn row_json(r: &OverviewRow, display_names: &BTreeMap<String, String>) -> serde_
         "time_source": r.time_source,
         "first_unix": boundary(r.first_unix),
         "last_unix": boundary(r.last_unix),
-    })
+    });
+    if let Some(provenance) = &r.provenance {
+        row["provenance"] = serde_json::json!(provenance);
+    }
+    row
 }
 
 fn display_name(machine: &str, display_names: &BTreeMap<String, String>) -> String {
@@ -1019,6 +1024,7 @@ mod tests {
             last_unix: last,
             line_count: lines,
             time_source: ts,
+            provenance: None,
         }
     }
 

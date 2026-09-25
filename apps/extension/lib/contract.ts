@@ -863,6 +863,23 @@ export interface CapturedFetch {
    *    live-leg behaviour.
    */
   sessionId?: string;
+  /** Extension-authored source facts for an enumerated ChatGPT conversation. */
+  provenance?: ChatGptProvenance;
+  /** A later observation appended separately; it never rewrites provenance.project. */
+  provenanceSupplement?: ChatGptProvenanceSupplement;
+}
+
+export interface ChatGptProvenance {
+  workspace: string | 'unknown';
+  project: { id: string; name: string } | null | 'unknown';
+  archived: boolean;
+}
+
+export interface ChatGptProvenanceSupplement {
+  workspace: string;
+  project: { id: string; name: string } | null;
+  source: 'project-list' | 'project-enumeration-complete';
+  observedAt: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -947,6 +964,8 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   //    **reject on sight** — a payload from a page should never have this field at
   //    all.
   if ('sessionId' in value) return false;
+  if ('provenance' in value) return false;
+  if ('provenanceSupplement' in value) return false;
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
   }
@@ -1090,6 +1109,10 @@ export interface InboxBundle {
    * those two are different facts about a bundle.
    */
   account: AccountFingerprint;
+  /** Immutable source membership recorded by extension enumeration. */
+  provenance?: ChatGptProvenance;
+  /** Append-only later source observation, if one was separately delivered. */
+  provenanceSupplement?: ChatGptProvenanceSupplement;
   url: string;
   method: string;
   status: number;

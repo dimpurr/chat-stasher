@@ -158,6 +158,7 @@ fn index_row(machine: &str, session: &str, harness: &str, first: i64, last: i64)
         time_source: ActivityTimeSource::Exact,
         source_zone: None,
         title: None,
+        provenance: None,
     }
 }
 

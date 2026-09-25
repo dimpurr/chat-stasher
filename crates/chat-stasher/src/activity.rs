@@ -72,6 +72,20 @@ pub struct ActivityRow {
     /// an old archive never stops being readable.
     #[serde(default)]
     pub title: Option<SessionTitle>,
+    /// ChatGPT source facts from archived inbox metadata. `None` means no
+    /// provenance record was written; an explicit `project: "unknown"` stays
+    /// inside `captured` and is never converted to no-project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProjectProvenance>,
+}
+
+/// Capture-time project evidence plus the latest append-only source supplement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectProvenance {
+    pub captured: Option<serde_json::Value>,
+    #[serde(rename = "effectiveProject")]
+    pub effective_project: Option<serde_json::Value>,
+    pub supplement: Option<serde_json::Value>,
 }
 
 /// Where the first/last time came from (or why it could not be obtained).
@@ -1867,7 +1881,59 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         time_source: a.time_source,
         source_zone: a.source_zone,
         title: Some(a.title),
+        provenance: project_provenance(lines),
     }
+}
+
+fn project_provenance(lines: &[&str]) -> Option<ProjectProvenance> {
+    let mut captured = None;
+    let mut supplement: Option<serde_json::Value> = None;
+    for line in lines {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if captured.is_none()
+            && record
+                .get("provenance")
+                .is_some_and(serde_json::Value::is_object)
+        {
+            captured = record.get("provenance").cloned();
+        }
+        let next = record
+            .get("provenanceSupplement")
+            .or_else(|| record.get("provenance_supplement"));
+        if let Some(next) = next.filter(|v| v.is_object()) {
+            let next_time = next
+                .get("observedAt")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok());
+            let prior_time = supplement
+                .as_ref()
+                .and_then(|v| v.get("observedAt"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok());
+            if supplement.is_none()
+                || matches!((next_time, prior_time), (Some(next), Some(prior)) if next > prior)
+                || matches!((next_time, prior_time), (Some(_), None))
+                || matches!((next_time, prior_time), (None, None))
+            {
+                supplement = Some(next.clone());
+            }
+        }
+    }
+    if captured.is_none() && supplement.is_none() {
+        return None;
+    }
+    let effective_project = supplement
+        .as_ref()
+        .and_then(|v| v.get("project"))
+        .cloned()
+        .or_else(|| captured.as_ref().and_then(|v| v.get("project")).cloned());
+    Some(ProjectProvenance {
+        captured,
+        effective_project,
+        supplement,
+    })
 }
 
 /// Serialise one row as a single JSONL line (trailing newline included).
@@ -3149,6 +3215,34 @@ mod tests {
         assert!(
             line.contains(r#""title":{"state":"no_label_recorded"}"#),
             "the absence must be a recorded state, never a missing string: {line}"
+        );
+    }
+
+    #[test]
+    fn activity_index_keeps_unknown_capture_and_exposes_later_supplement() {
+        let capture = r#"{"provenance":{"workspace":"unknown","project":"unknown","archived":false},"raw":{"text":"{}"}}"#;
+        let supplement = r#"{"provenanceSupplement":{"workspace":"workspace-fixture","project":{"id":"project-fixture","name":"Synthetic Project"},"source":"project-list","observedAt":"2026-09-25T12:00:00.000Z"},"raw":{"text":"{}"}}"#;
+        let row = build_row(
+            "chatgpt.session-fixture",
+            "machine-fixture",
+            "chatgpt",
+            &[capture, supplement],
+        );
+        let provenance = row
+            .provenance
+            .expect("source facts must reach the activity index");
+        assert_eq!(provenance.captured.as_ref().unwrap()["project"], "unknown");
+        assert_eq!(
+            provenance.effective_project.as_ref().unwrap()["name"],
+            "Synthetic Project"
+        );
+        assert_eq!(
+            provenance.supplement.as_ref().unwrap()["source"],
+            "project-list"
+        );
+        assert_eq!(
+            provenance.supplement.as_ref().unwrap()["observedAt"],
+            "2026-09-25T12:00:00.000Z"
         );
     }
 

@@ -175,6 +175,7 @@ fn index_row(machine: &str, session: &str, first: i64, last: i64) -> ActivityRow
         time_source: TimeSource::Exact,
         source_zone: None,
         title: None,
+        provenance: None,
     }
 }
 

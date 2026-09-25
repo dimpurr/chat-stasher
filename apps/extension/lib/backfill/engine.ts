@@ -2726,6 +2726,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       //      impossible now: the file-name fragment = the debt key itself (the
       //      identity map; see pathSafeSessionId in contract.ts).
       sessionId: id,
+      ...(opts.platform === 'chatgpt' ? {
+        provenance: { workspace: 'unknown', project: 'unknown', archived: false },
+      } : {}),
     };
     // 🔴 C20 · This fix's landing point: **the sink's result decides.**
     //

@@ -151,6 +151,38 @@
           }
         }
       ]
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Immutable ChatGPT source facts recorded at capture. project='unknown' means membership had not been resolved; it is not no-project.",
+      "required": ["workspace", "project", "archived"],
+      "properties": {
+        "workspace": { "type": "string", "minLength": 1 },
+        "project": {
+          "oneOf": [
+            { "type": "null" },
+            { "const": "unknown" },
+            { "type": "object", "required": ["id", "name"], "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "name": { "type": "string", "minLength": 1 }
+            } }
+          ]
+        },
+        "archived": { "type": "boolean" }
+      }
+    },
+    "provenanceSupplement": {
+      "type": "object",
+      "description": "Append-only later observation. Consumers retain provenance.project as the original capture fact.",
+      "required": ["workspace", "project", "source", "observedAt"],
+      "properties": {
+        "workspace": { "type": "string", "minLength": 1 },
+        "project": { "oneOf": [ { "type": "null" }, { "type": "object", "required": ["id", "name"], "properties": {
+          "id": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 }
+        } } ] },
+        "source": { "enum": ["project-list", "project-enumeration-complete"] },
+        "observedAt": { "type": "string", "format": "date-time" }
+      }
     }
   }
 }

@@ -259,6 +259,7 @@ pub fn to_overview_row(row: &ActivityRow) -> OverviewRow {
         first_unix: row.first_unix,
         last_unix: row.last_unix,
         line_count: row.line_count,
+        provenance: row.provenance.clone(),
         time_source: match &row.time_source {
             ActivityTimeSource::Exact => OverviewTimeSource::Exact,
             ActivityTimeSource::Inferred { how } => {
@@ -392,6 +393,7 @@ mod tests {
             time_source: ActivityTimeSource::Exact,
             source_zone: None,
             title: None,
+            provenance: None,
         };
         let o = to_overview_row(&exact);
         assert_eq!(o.session_id, "s1");

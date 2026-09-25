@@ -291,9 +291,42 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     const backfillFiles = finalWrites().filter((f) => UUIDS.some((id) => f.includes(id)));
     console.log('[C17-1] evidence H — the 4 final files the backfill leg wrote down:', backfillFiles);
     expect(backfillFiles.length).toBe(4);
+    const archivedCapture = host.deliveries
+      .map((delivery) => JSON.parse(delivery.payload) as Record<string, any>)
+      .find((bundle) => bundle.sessionId === UUIDS[0]);
+    expect(archivedCapture?.provenance).toEqual({ workspace: 'unknown', project: 'unknown', archived: false });
+    expect(archivedCapture?.provenanceSupplement).toBeUndefined();
 
     console.log('[C17-1] evidence I — the final progress text:', trail[trail.length - 1]!.progress);
     expect(trail[trail.length - 1]!.progress).toContain('100%');
+  });
+});
+
+describe('W176 ChatGPT provenance delivery', () => {
+  it('serializes a later supplement as separate evidence without replacing capture-time unknown', async () => {
+    const mod: any = await import('../entrypoints/background');
+    const result = await mod.handleCaptured({
+      url: 'https://chatgpt.com/backend-api/conversation/conv-w176-supplement-fixture',
+      pageUrl: 'https://chatgpt.com/c/conv-w176-supplement-fixture',
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ mapping: {}, current_node: 'node-fixture', account_id: 'acct-fixture' }),
+      capturedAt: fakeNow,
+      sessionId: 'conv-w176-supplement-fixture',
+      provenance: { workspace: 'unknown', project: 'unknown', archived: false },
+      provenanceSupplement: {
+        workspace: 'workspace-fixture',
+        project: { id: 'project-fixture', name: 'Synthetic Project' },
+        source: 'project-list',
+        observedAt: '2026-09-25T12:00:00.000Z',
+      },
+    });
+    expect(result.saved).toBe(true);
+    const bundle = JSON.parse(host.deliveries[0]!.payload);
+    expect(bundle.provenance.project).toBe('unknown');
+    expect(bundle.provenanceSupplement.project.id).toBe('project-fixture');
+    expect(bundle.provenanceSupplement.source).toBe('project-list');
+    expect(bundle.provenanceSupplement.observedAt).toBe('2026-09-25T12:00:00.000Z');
   });
 });
 
