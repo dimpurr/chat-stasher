@@ -36,6 +36,7 @@ import {
   tickBlockReason,
 } from '../../lib/backfill/schedule';
 import {
+  evictionLogOf,
   loadLastTick,
   loadTargets,
   migrateLegacyScopes,
@@ -209,6 +210,13 @@ async function collect(): Promise<PopupModel> {
     //    its hook and it is broken" above — they are two different facts and the
     //    popup words them differently.
     hookDecline: await loadHookDecline(store),
+    // 🔴 W54b · The registry's eviction record, out of the same snapshot the
+    //    failures and hook records above were read from — the popup reads the
+    //    registry beside this record, and an eviction that leaves no trace
+    //    here would be as silent as one that left no record at all. The
+    //    reader names its own refusals (null), so an unreadable one renders no
+    //    note rather than a guessed one.
+    evictions: evictionLogOf(snapshot),
     lastTick,
     legacyMigration,
     // 🔴 C33 · The two preconditions of the "start backfilling this platform"

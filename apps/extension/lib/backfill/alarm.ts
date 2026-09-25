@@ -755,11 +755,294 @@ export async function loadTargets(
 }
 
 /**
+ * 🔴 W54 · **Why one registry row left, in one written-down word.**
+ *
+ * A registry write can remove rows for two different reasons, and they must not
+ * be conflated because what they say about the scope is different:
+ *  · `'non-organization'` (W49/W49b): the row named no account — a leftover
+ *    conversation title or the unresolved sentinel — and the platform it
+ *    belonged to now has a real organization row. That drop is permanent.
+ *  · `'registry-cap'` (W54): the row lost its seat in the `MAX_TARGET_ENTRIES`
+ *    cache. The scope is real (it can be a live organization); only its seat is
+ *    gone, and a later capture re-registers it.
+ *
+ * Why the second reason had to become a recorded fact rather than an
+ * implementation detail: before W54 the cap was a plain `slice`, so an evicted
+ * row fell out of both bookkeepings a write has — it never entered `dropped`
+ * (which only the organization-scoped writer filled, and only with
+ * non-organization rows of the platform being collapsed) and it was not in
+ * `stillPresent` (built from what survived). The registry row vanished while
+ * the scope's `cs_backfill_v2:<platform>:<scope>` header stayed behind, and
+ * since W49b the popup hides a header whose scope is no longer a registered
+ * target — an orphaned ledger, invisible as well as uncleaned. An organization
+ * could be the row that fell off, which is the same starvation D1 was written
+ * against, arriving through a different door.
+ */
+export type TargetDropReason = 'non-organization' | 'registry-cap';
+
+/** One registry row a write removed, with the reason it may never be silent about. */
+export interface DroppedTarget {
+  target: BackfillTarget;
+  reason: TargetDropReason;
+}
+
+/**
+ * 🔴 W54 · Apply D4's rule to every row a registry write dropped, whatever
+ * dropped it. A row that lost its seat also loses its local ledger header
+ * (`cs_backfill_v2:<platform>:<scope>` — halt, cursor, failures), unless the
+ * same platform+scope still holds a seat: stored storage can carry a duplicated
+ * row, one copy can fall off the cap while the other stays, and the header
+ * belongs to the identity, not to either copy. The host archive is append-only
+ * and is never touched.
+ */
+async function removeDroppedHeaders(
+  store: BackfillStore,
+  dropped: readonly DroppedTarget[],
+  next: readonly BackfillTarget[],
+): Promise<void> {
+  const stillPresent = new Set(next.map((t) => `${t.platform}\0${t.scope}`));
+  for (const { target } of dropped) {
+    if (stillPresent.has(`${target.platform}\0${target.scope}`)) continue;
+    await store.remove(stateKey(target.platform, target.scope));
+  }
+}
+
+/**
+ * 🔴 W54 · The rows one registry write's cap evicts, recorded with their reason.
+ *
+ * Pure: given the active rows a write keeps *before* the cap is applied — the
+ * `[target, ...rest]` both writers build — this is the tail `MAX_TARGET_ENTRIES`
+ * slices off, as `dropped` entries with `reason: 'registry-cap'`. Both writers
+ * take their eviction record from here so the record cannot drift from the
+ * slice it describes, and a test can pin the reason without intercepting
+ * anything.
+ *
+ * 🔴 The record is deliberately **not** a console line. This module warns for
+ *    faults — a write that failed, a store that could not be listed — and a cap
+ *    eviction is not one: it is the bounded cache doing what it is for, exactly
+ *    like W49b's collapse drop, which also removes a row and its header without
+ *    a warn. What made the eviction *silent* was the pre-W54 shape: the row
+ *    fell out of both of a write's bookkeepings (`dropped` and
+ *    `stillPresent`), so its `cs_backfill_v2:<platform>:<scope>` header stayed
+ *    behind — orphaned, and since W49b hidden by the popup's registered-scope
+ *    filter.
+ *
+ * 🔴 W54b · Removing the header closed one half and left the other open: an
+ *    absent header is a *gap*, not a trace. After W54 the reason still lived
+ *    only in the writer's local `dropped` array, discarded the moment the call
+ *    returned — nothing observable identified the evicted target or why it
+ *    left, which is the review finding this section exists to close. Every
+ *    entry this function returns is therefore also written, durably, to
+ *    `cs_backfill_evicted_v1` (`recordEvictions` below): a small bounded
+ *    record the popup reads beside the same registry state it already
+ *    snapshots. Storage then tells one story — the row left when it left,
+ *    with which reason — instead of leaving an absence for a surface to guess
+ *    at.
+ */
+export function capEvictions(
+  withIncoming: readonly BackfillTarget[],
+  cap: number = MAX_TARGET_ENTRIES,
+): DroppedTarget[] {
+  return withIncoming
+    .slice(cap)
+    .map((target) => ({ target, reason: 'registry-cap' }));
+}
+
+// ---------------------------------------------------------------------------
+// 🔴 W54b · The eviction record — the durable half of W54, found missing in
+// review (2026-09-25). The registry write itself is the moment a seat is
+// lost; everything a write computes about *why* is lost with the call unless
+// it is written down beside the registry it belongs to. So the receipt lives
+// in the same `cs_backfill_*` key family, one bounded list, and the popup
+// reads it where it already reads the registry state.
+// ---------------------------------------------------------------------------
+
+/** The receipt of seats the `MAX_TARGET_ENTRIES` cap has taken. Same key family; no new permission. */
+export const BACKFILL_EVICTED_KEY = 'cs_backfill_evicted_v1';
+
+/**
+ * 🔴 W54b · **How many evictions the receipt keeps** — 16, twice the registry's
+ *    bound (`MAX_TARGET_ENTRIES`), newest first. Rows pushed off that cap leave
+ *    the list, and the count of those is kept in `EvictionLog.dropped` — never a
+ *    silent truncation, the rule `MAX_FAILURES` set (C20): a receipt that
+ *    quietly forgets its own oldest rows is a window pretending to be a
+ *    ledger. Unlike the failure list this one is a window on purpose: an
+ *    eviction is about a seat, and the seat's current owner and current state
+ *    are facts the registry and the popup already hold; only *how recently* an
+ *    eviction is worth naming, so 16 newest entries are enough for the note
+ *    that renders beside them, bounded along the way (16 × ~60 bytes ≈ 1 KiB).
+ */
+export const MAX_EVICTED_ENTRIES = 16;
+
+/** One seat the cap took, as a record a later reader can name. Metadata only: ids, codes, a timestamp — never a conversation body. */
+export interface EvictedTarget {
+  /** Platform id, as in a registry row. */
+  platform: string;
+  /** The account/organization scope of the evicted row — the same value the registry row held. */
+  scope: string;
+  /** Why the row left. This build writes `'registry-cap'`; an unrecognised code from a newer build prints verbatim (the closed-set rule `FailureReason` follows). */
+  reason: TargetDropReason | string;
+  /** When the registration that evicted the row happened (`Date.now()`). */
+  at: number;
+}
+
+/** The stored receipt: newest first, bounded, and honest about its own bound. */
+export interface EvictionLog {
+  entries: EvictedTarget[];
+  /**
+   * How many earlier records the `MAX_EVICTED_ENTRIES` bound pushed off the
+   * list. 0 while the list has never overflowed.
+   */
+  dropped: number;
+}
+
+/**
+ * The stored receipt as data, or `null` when it is not a shape this build
+ * reads (absent, unreadable byte, another type).
+ *
+ * The rules are the ones `readTickCursor` set for the same family of problems:
+ *  · the **outer** shape must be the record — anything else reads as "there is
+ *    no receipt on file", which on a key this build writes can only be true
+ *    when no eviction has happened yet;
+ *  · one **entry** whose fields are the wrong type is dropped and the rest of
+ *    the record is kept: one corrupt row must not cost every other evicted
+ *    target its trace, and a wholly-fabricated entry is never invented to
+ *    take its place.
+ *
+ * Never throws: a record this build cannot read is a refused read, not a
+ * fabricated one.
+ */
+export function readEvictionLog(raw: unknown): EvictionLog | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const entriesRaw = (raw as { entries?: unknown }).entries;
+  if (!Array.isArray(entriesRaw)) return null;
+  const entries: EvictedTarget[] = [];
+  for (const entry of entriesRaw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const e = entry as Partial<EvictedTarget>;
+    if (typeof e.platform !== 'string' || typeof e.scope !== 'string') continue;
+    if (typeof e.reason !== 'string') continue;
+    if (typeof e.at !== 'number' || !Number.isFinite(e.at)) continue;
+    entries.push({ platform: e.platform, scope: e.scope, reason: e.reason, at: e.at });
+  }
+  const dropped = (raw as { dropped?: unknown }).dropped;
+  return {
+    entries,
+    dropped: typeof dropped === 'number' && Number.isSafeInteger(dropped) && dropped >= 0
+      ? dropped
+      : 0,
+  };
+}
+
+/**
+ * 🔴 W54b · The receipt read for one release channel, out of the same
+ * `storage.local` snapshot the popup already takes.
+ *
+ * Why a snapshot reader rather than a keyed `store.load`: the popup takes one
+ * snapshot of `storage.local` on open and reads every record out of it
+ * (`browserLocalSnapshot`), and a second keyed read would add a storage round
+ * trip to one the snapshot has already paid for — the same shape
+ * `hookStatusOf` / `liveCaptureOf` follow.
+ *
+ * 🔴 W91b · Entries are kept to platforms this channel serves, the same rule
+ *    the popup applies to hook records and live-capture rows: a stable build
+ *    must not speak about a platform it does not inject into, and a dev
+ *    build's evictions in a shared profile are that build's own news. Rows
+ *    the filter removes leave the stored record untouched.
+ *
+ * `null` means "no note to render": no snapshot, no record at the key, a
+ * record this build cannot read, or no rows for a platform this channel
+ * serves. That is not "no evictions ever happened" — the record in storage is
+ * the authority on that, and it stays where it is either way.
+ */
+export function evictionLogOf(
+  snapshot: Record<string, unknown> | null,
+  channel: ReleaseChannel = currentReleaseChannel(),
+): EvictionLog | null {
+  const log = readEvictionLog(snapshot?.[BACKFILL_EVICTED_KEY]);
+  if (!log) return null;
+  const entries = log.entries.filter((entry) => isPlatformActiveInChannel(entry.platform, channel));
+  if (entries.length === 0) return null;
+  return { entries, dropped: log.dropped };
+}
+
+/**
+ * 🔴 W54b · Write the receipt for the rows a registry write's cap evicted.
+ *
+ * Called by both writers, with exactly the entries `capEvictions` returned for
+ * that write (not the whole `dropped` array: the organization-scoped writer's
+ * `dropped` also carries the W49b collapse's `non-organization` rows — those
+ * are deliberate replacements under the account model, and their scope can be
+ * a leftover conversation title, which is user content a surfaced record must
+ * not start storing; an eviction under cache pressure is the fact this key
+ * exists for). A no-op with nothing to record: an ordinary registration with a
+ * free seat writes no receipt.
+ *
+ * 🔴 Best-effort, by the same rule as the tick trace: a failed read or write
+ *    is a **fault** — this module's warns exist for exactly that — and a
+ *    faulting receipt must never fail the registration that carried it out.
+ *    One asymmetry is deliberate: a **read** that throws leaves the stored
+ *    record alone rather than writing a fresh one over it, because
+ *    "could not read the previous records" and "there were none" are different
+ *    facts, and overwriting on the first would destroy up to
+ *    `MAX_EVICTED_ENTRIES` records we could not see. The *write* failing
+ *    costs this eviction its receipt, which the warn names.
+ */
+async function recordEvictions(
+  store: BackfillStore,
+  evicted: readonly DroppedTarget[],
+): Promise<void> {
+  if (evicted.length === 0) return;
+  let prev: EvictionLog | null = null;
+  try {
+    prev = readEvictionLog(await store.load(BACKFILL_EVICTED_KEY));
+  } catch (err) {
+    console.warn('[chat-stasher] backfill eviction record read failed', (err as Error).message);
+    return;
+  }
+  const now = Date.now();
+  const entries: EvictedTarget[] = [
+    ...evicted.map(
+      ({ target, reason }): EvictedTarget => ({
+        platform: target.platform,
+        scope: target.scope,
+        reason,
+        at: now,
+      }),
+    ),
+    ...(prev?.entries ?? []),
+  ];
+  let dropped = prev?.dropped ?? 0;
+  while (entries.length > MAX_EVICTED_ENTRIES) {
+    entries.pop();
+    dropped += 1;
+  }
+  try {
+    await store.save(BACKFILL_EVICTED_KEY, { entries, dropped });
+  } catch (err) {
+    console.warn('[chat-stasher] backfill eviction record write failed', (err as Error).message);
+  }
+}
+
+/**
  * Record one target (deduplicated by platform+scope, most recent first).
  *
  * 🔴 W91b · The cap is applied to the **active** rows only, and the leftover
  * rows of the other channel are appended untouched: an experimental row must
  * neither consume a stable slot nor be evicted when a stable row is recorded.
+ *
+ * 🔴 W54 · The rows the cap pushes off the tail are *recorded drops*, never a
+ *    silent truncation: each one carries `reason: 'registry-cap'` (the record
+ *    comes from `capEvictions`, so it cannot drift from the slice), loses its
+ *    local ledger header (`removeDroppedHeaders`), and never stays behind as
+ *    an orphan the popup hides — whatever the row kind.
+ *
+ * 🔴 W54b · And the record is **durable**: the same entries are written to
+ *    `cs_backfill_evicted_v1` (`recordEvictions`) before the call returns, so
+ *    the eviction remains nameable — by whom it took, and with which reason —
+ *    after the writer is gone. The local array W54 passed to
+ *    `removeDroppedHeaders` was not a trace: nothing could read it once the
+ *    call ended.
  */
 export async function rememberTarget(
   store: BackfillStore | null,
@@ -774,8 +1057,12 @@ export async function rememberTarget(
   const rest = active.filter(
     (t) => !(t.platform === target.platform && t.scope === target.scope),
   );
-  const nextActive = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
+  const withIncoming = [target, ...rest];
+  const nextActive = withIncoming.slice(0, MAX_TARGET_ENTRIES);
+  const dropped: DroppedTarget[] = capEvictions(withIncoming);
   await store.save(BACKFILL_TARGETS_KEY, [...nextActive, ...leftover]);
+  await removeDroppedHeaders(store, dropped, nextActive);
+  await recordEvictions(store, dropped);
   return nextActive;
 }
 
@@ -832,11 +1119,33 @@ export async function forgetTarget(
  *
  * The registry is one `save`. A kill between a previous delete-then-insert
  * pair left the platform with no row; that window is gone. Dropped
- * non-organization rows also lose their `cs_backfill_v2:<platform>:<scope>`
- * header (halt, cursor, failures): that key is not unreachable — the popup
- * walks every header — and claiming nothing was written there was false.
- * The host archive is append-only and is not touched. A header whose scope
- * is re-inserted (collapsing title → `'default'` when no org exists) is kept.
+ * rows — the collapsed non-organization ones, and 🔴 W54 also every row the
+ * `MAX_TARGET_ENTRIES` cap pushes off the tail, whatever its kind — lose their
+ * `cs_backfill_v2:<platform>:<scope>` header (halt, cursor, failures): that key
+ * is not unreachable — the popup walks every header — and claiming nothing was
+ * written there was false. The host archive is append-only and is not touched.
+ * A header whose scope is re-inserted (collapsing title → `'default'` when no
+ * org exists) is kept, and so is the header of an evicted duplicate whose
+ * identity still holds a seat.
+ *
+ * 🔴 W54 · An eviction is recorded, never silent: every row the cap pushes off
+ *    is a `dropped` entry with `reason: 'registry-cap'`, taken from
+ *    `capEvictions` so the record cannot drift from the slice. Before W54 an
+ *    evicted organization fell out of both `dropped` and `stillPresent`: its
+ *    registry row gone, its ledger header left behind, hidden since W49b by
+ *    the popup's registered-scope filter. Cap evictions are by-design cache
+ *    pressure, so like W49b's collapse drop they carry no console warn — this
+ *    module's warns are for faults; the eviction's record is the drop and the
+ *    header that leaves with the row.
+ *
+ * 🔴 W54b · *Durable*, not just recorded: the cap's rows are kept apart from
+ *    the collapse's in this writer for the receipt too — `recordEvictions`
+ *    receives only the entries `capEvictions` returned, never the
+ *    `non-organization` ones (a collapse is a deliberate replacement under the
+ *    account model, and its scope can be a leftover conversation title, which
+ *    a surfaced record must not start storing). The receipt is written to
+ *    `cs_backfill_evicted_v1` before the call returns, so an organization
+ *    losing its seat stays nameable afterwards.
  *
  * The caller names what an organization looks like, because this module does
  * not know any platform's identifier shape.
@@ -845,7 +1154,8 @@ export async function forgetTarget(
  *    the active channel, edits only the active rows, and appends the leftover
  *    rows back untouched. A stable build therefore cannot drop a dev build's
  *    Perplexity/Kimi target — and their ledger headers are not touched either,
- *    because only rows of the active platform are ever `dropped`.
+ *    because only rows of the active platform are ever `dropped`, by the
+ *    collapse or by the cap alike.
  */
 export async function rememberOrganizationScopedTarget(
   store: BackfillStore | null,
@@ -856,11 +1166,11 @@ export async function rememberOrganizationScopedTarget(
   if (!store) return [];
   const { active: current, leftover } = partitionTargetsByChannel(await loadRawTargets(store), channel);
   const incomingIsOrg = isOrganizationScope(target.scope);
-  const dropped: BackfillTarget[] = [];
+  const dropped: DroppedTarget[] = [];
   const kept: BackfillTarget[] = [];
   for (const t of current) {
     if (t.platform === target.platform && !isOrganizationScope(t.scope)) {
-      dropped.push(t);
+      dropped.push({ target: t, reason: 'non-organization' });
     } else {
       kept.push(t);
     }
@@ -869,20 +1179,28 @@ export async function rememberOrganizationScopedTarget(
     (t) => t.platform === target.platform && isOrganizationScope(t.scope),
   );
   let next: BackfillTarget[];
+  // 🔴 W54b · The cap's rows, kept apart from the collapse's: the receipt
+  //    (`capEvictions` → `recordEvictions`) records who lost a seat to cache
+  //    pressure, and must not record who the account model replaced.
+  let capDropped: DroppedTarget[] = [];
   if (!incomingIsOrg && platformHasOrg) {
     next = kept;
   } else {
     const rest = kept.filter(
       (t) => !(t.platform === target.platform && t.scope === target.scope),
     );
-    next = [target, ...rest].slice(0, MAX_TARGET_ENTRIES);
+    const withIncoming = [target, ...rest];
+    next = withIncoming.slice(0, MAX_TARGET_ENTRIES);
+    // 🔴 W54 · Whatever the row kind — the collapse above only ever records
+    //    non-organization rows of this platform, so an organization pushed off
+    //    the cap would otherwise fall out of both `dropped` and `stillPresent`,
+    //    its registry row gone and its ledger header left invisible behind it.
+    capDropped = capEvictions(withIncoming);
+    dropped.push(...capDropped);
   }
   await store.save(BACKFILL_TARGETS_KEY, [...next, ...leftover]);
-  const stillPresent = new Set(next.map((t) => `${t.platform}\0${t.scope}`));
-  for (const t of dropped) {
-    if (stillPresent.has(`${t.platform}\0${t.scope}`)) continue;
-    await store.remove(stateKey(t.platform, t.scope));
-  }
+  await removeDroppedHeaders(store, dropped, next);
+  await recordEvictions(store, capDropped);
   return next;
 }
 
