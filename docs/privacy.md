@@ -94,7 +94,7 @@ the sentence.
    requests **the page itself already made** in your already-logged-in session
    (`apps/extension/lib/page-hook.ts:659`, `:698`, `:559-576`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:315-768`, `:930-958`).
+   (`apps/extension/lib/contract.ts:315-768`, `:947-976`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
@@ -550,7 +550,7 @@ extension is not running.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:926-945`, `:930-958`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:926-945`, `:947-976`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
 (`apps/extension/lib/contract.ts:831`; `apps/extension/lib/page-hook.ts:374`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
