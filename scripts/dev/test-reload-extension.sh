@@ -15,7 +15,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELOAD="$here/reload-extension.sh"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/test-reload-ext.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
+# The CDP mock server is the only child this test starts; kill only that pid.
+MOCK_PID=""
+cleanup() {
+  if [ -n "$MOCK_PID" ]; then kill "$MOCK_PID" 2>/dev/null || true; fi
+  rm -rf "$SCRATCH"
+}
+trap cleanup EXIT
 
 # --- a minimal committed repo so `git worktree add` has a ref to build ------
 REPO="$SCRATCH/repo"
@@ -244,6 +250,207 @@ grep -q "warning: could not remove the throwaway worktree" "$SCRATCH/o15" || fai
 stale="$(git -C "$REPO" worktree list | grep "chat-stasher-reload" || true)"
 [ -z "$stale" ] || fail "a stale worktree entry was left in git worktree list: $stale"
 note "an undeletable worktree is reported and left no stale entry"
+
+# --- CDP reload (--cdp-port) ------------------------------------------------
+# These cases mock Chrome's DevTools endpoint: a tiny HTTP + WebSocket server
+# that lists one chat-stasher service worker and answers Runtime.evaluate the
+# way a worker would. No real browser is involved. The helper is Node, so the
+# whole block is skipped (loudly, not silently) when node is absent; CI and a
+# development machine have it.
+if ! command -v node >/dev/null 2>&1; then
+  echo "note: node not found; skipping the --cdp-port cases"
+else
+  cat > "$SCRATCH/cdp-mock.mjs" <<'EOF'
+// A fake Chrome DevTools endpoint for test-reload-extension.sh. Test-only.
+import http from 'node:http';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+
+function arg(name, fallback) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback;
+}
+
+const mode = arg('--mode', 'ok');                 // ok | notfound | stuck
+const expectedVersion = arg('--expected-version', '0.1.0.2');
+const portFile = arg('--port-file');
+let running = arg('--old-version', '0.1.0.1');
+
+const EXT_ID = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const server = http.createServer((req, res) => {
+  if (req.url === '/json/list') {
+    res.setHeader('content-type', 'application/json');
+    if (mode === 'notfound') { res.end('[]'); return; }
+    res.end(JSON.stringify([{
+      id: 'mock-sw',
+      type: 'service_worker',
+      url: `chrome-extension://${EXT_ID}/service-worker.js`,
+      webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/page/mock-sw`,
+    }]));
+    return;
+  }
+  res.statusCode = 404;
+  res.end();
+});
+
+// Minimal unmasked protocol plumbing: the test only exchanges one small text
+// frame in each direction, so a general implementation would be untested weight.
+function decodeFrame(buf) {
+  const opcode = buf[0] & 0x0f;
+  const masked = (buf[1] & 0x80) !== 0;
+  let len = buf[1] & 0x7f;
+  let offset = 2;
+  if (len === 126) { len = buf.readUInt16BE(2); offset = 4; }
+  else if (len === 127) { len = Number(buf.readBigUInt64BE(2)); offset = 10; }
+  let mask = null;
+  if (masked) { mask = buf.subarray(offset, offset + 4); offset += 4; }
+  const payload = Buffer.from(buf.subarray(offset, offset + len));
+  if (mask) for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
+  return { opcode, text: payload.toString('utf8') };
+}
+
+function encodeText(str) {
+  const data = Buffer.from(str, 'utf8');
+  if (data.length < 126) return Buffer.concat([Buffer.from([0x81, data.length]), data]);
+  const header = Buffer.alloc(4);
+  header[0] = 0x81;
+  header[1] = 126;
+  header.writeUInt16BE(data.length, 2);
+  return Buffer.concat([header, data]);
+}
+
+server.on('upgrade', (req, socket) => {
+  const key = String(req.headers['sec-websocket-key'] || '');
+  const accept = crypto.createHash('sha1')
+    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    .digest('base64');
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n'
+    + 'Upgrade: websocket\r\n'
+    + 'Connection: Upgrade\r\n'
+    + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+  );
+  socket.on('data', (buf) => {
+    const frame = decodeFrame(buf);
+    // Answer the close handshake. Without this the client's socket stays in
+    // CLOSING, which keeps its event loop alive and hangs the helper process
+    // after it has already printed its success line.
+    if (frame.opcode === 0x8) {
+      socket.write(Buffer.from([0x88, 0x00]));
+      socket.end();
+      return;
+    }
+    if (frame.opcode !== 0x1) return;
+    let message;
+    try { message = JSON.parse(frame.text); } catch { return; }
+    if (message.method !== 'Runtime.evaluate') return;
+    const expression = String((message.params && message.params.expression) || '');
+    let value = null;
+    if (expression.includes('chrome.runtime.reload')) {
+      // 'stuck' keeps the old version: the reload is acknowledged but does not
+      // take effect, which is the case the version check has to catch.
+      if (mode === 'ok') running = expectedVersion;
+      value = 'reload-sent';
+    } else if (expression.includes('getManifest')) {
+      value = JSON.stringify({ name: '__MSG_extName__', dn: 'Chat Stasher', version: running });
+    }
+    socket.write(encodeText(JSON.stringify({ id: message.id, result: { result: { type: 'string', value } } })));
+  });
+});
+
+server.listen(0, '127.0.0.1', () => {
+  const port = server.address().port;
+  // The caller reads the port from a file, so it never parses a log line.
+  if (portFile) fs.writeFileSync(portFile, String(port));
+  console.log(`test-cdp-mock: listening on 127.0.0.1:${port} (mode ${mode})`);
+});
+EOF
+
+  # start_mock <mode> <old-version> <expected-version> — prints the port.
+  start_mock() {
+    mock_port_file="$SCRATCH/cdp-port"
+    rm -f "$mock_port_file"
+    node "$SCRATCH/cdp-mock.mjs" --mode "$1" --old-version "$2" \
+      --expected-version "$3" --port-file "$mock_port_file" >"$SCRATCH/mock.log" 2>&1 &
+    MOCK_PID=$!
+    for _ in $(seq 1 100); do
+      [ -s "$mock_port_file" ] && break
+      sleep 0.05
+    done
+    [ -s "$mock_port_file" ] || fail "the CDP mock did not report a port"
+    cat "$mock_port_file"
+  }
+  stop_mock() {
+    kill "$MOCK_PID" 2>/dev/null || true
+    wait "$MOCK_PID" 2>/dev/null || true
+    MOCK_PID=""
+  }
+
+  # 16. --cdp-port reloads the worker and verifies the version. The mock starts
+  #     on 0.1.0.89 and moves to the expected version only when it sees the
+  #     reload call, so a pass means the call really arrived.
+  port="$(start_mock ok 0.1.0.89 0.1.0.90)"
+  if ! bash "$RELOAD" --load-dir "$LOAD" --build-number 90 --cdp-port "$port" >"$SCRATCH/o16" 2>&1; then
+    cat "$SCRATCH/o16" >&2
+    fail "--cdp-port should reload and verify"
+  fi
+  grep -q "reloaded and verified version 0.1.0.90" "$SCRATCH/o16" || fail "the verification should be reported"
+  grep -q "running version is 0.1.0.90" "$SCRATCH/o16" || fail "the script should report the reloaded version"
+  grep -q "reload the platform tabs" "$SCRATCH/o16" || fail "reloading the tabs is still manual and should be said"
+  [ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.90" ] || fail "the swap should have happened"
+  stop_mock
+  note "--cdp-port reloads the worker and verifies the new version"
+
+  # 17. a reachable CDP port with no chat-stasher worker fails, and the swap
+  #     that already happened stays (it is not rolled back by a CDP failure).
+  port="$(start_mock notfound 0.1.0.90 0.1.0.91)"
+  if CS_CDP_TIMEOUT_MS=800 bash "$RELOAD" --load-dir "$LOAD" --build-number 91 --cdp-port "$port" >"$SCRATCH/o17" 2>&1; then
+    fail "no matching worker should exit non-zero"
+  fi
+  grep -q "no chat-stasher service worker found" "$SCRATCH/o17" || fail "the failure should name the missing worker"
+  grep -q "remaining manual step" "$SCRATCH/o17" || fail "the manual fallback should be printed"
+  [ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.91" ] || fail "the swap must not be rolled back on a CDP failure"
+  stop_mock
+  note "a CDP port with no matching worker fails and prints the manual step"
+
+  # 18. the reload call can be sent while the worker never comes back on the
+  #     new version. The helper must wait out its budget and fail, otherwise the
+  #     version check would be decoration. CS_CDP_TIMEOUT_MS (test-only, see the
+  #     helper header) keeps this under a second.
+  port="$(start_mock stuck 0.1.0.91 0.1.0.92)"
+  if CS_CDP_TIMEOUT_MS=800 bash "$RELOAD" --load-dir "$LOAD" --build-number 92 --cdp-port "$port" >"$SCRATCH/o18" 2>&1; then
+    fail "a worker that never reaches the new version should exit non-zero"
+  fi
+  grep -q "chrome.runtime.reload() sent" "$SCRATCH/o18" || fail "the reload should still have been attempted"
+  grep -q "did not come back on 0.1.0.92" "$SCRATCH/o18" || fail "the version mismatch should be reported"
+  stop_mock
+  note "a worker stuck on the old version fails verification"
+
+  # 19. an unreachable CDP port fails fast with the transport error. Port 1 is
+  #     privileged, so nothing can be listening on it.
+  if bash "$RELOAD" --load-dir "$LOAD" --build-number 93 --cdp-port 1 >"$SCRATCH/o19" 2>&1; then
+    fail "an unreachable CDP port should exit non-zero"
+  fi
+  grep -q "no chat-stasher service worker found" "$SCRATCH/o19" || fail "the unreachable port should be reported"
+  note "an unreachable CDP port fails and prints the manual step"
+
+  # 20. --cdp-port is validated before any build: a non-port is a usage error.
+  if bash "$RELOAD" --load-dir "$LOAD" --cdp-port not-a-port >"$SCRATCH/o20" 2>&1; then
+    fail "a bad --cdp-port should fail"
+  else
+    rc=$?
+    [ "$rc" = "2" ] || fail "a bad --cdp-port should exit 2 (usage), got $rc"
+  fi
+  grep -q "cdp-port must be a TCP port number" "$SCRATCH/o20" || fail "the usage error should name --cdp-port"
+  note "--cdp-port is validated up front as a usage error"
+
+  # 21. a dry run with --cdp-port plans the reload and touches nothing.
+  if ! bash "$RELOAD" --load-dir "$LOAD" --cdp-port "$port" --dry-run >"$SCRATCH/o21" 2>&1; then
+    fail "a dry run with --cdp-port should exit 0"
+  fi
+  grep -q "reload over CDP on 127.0.0.1:" "$SCRATCH/o21" || fail "the dry run should plan the CDP reload"
+  note "a dry run with --cdp-port plans the reload"
+fi
 
 echo
 echo "test-reload-extension: ${PASS} cases passed"
