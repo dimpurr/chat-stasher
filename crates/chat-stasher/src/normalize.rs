@@ -11,6 +11,12 @@ use serde_json::Value;
 pub const DEFAULT_WINDOW: usize = 50;
 pub const MAX_WINDOW: usize = 200;
 
+/// How much of one message's source text the reader will render before it
+/// shows the head and the tail and counts the rest. A single message carrying
+/// a pasted file must not be able to spend a whole page's budget, and the
+/// bytes that were dropped have to be a number rather than a silence.
+pub const MESSAGE_BUDGET: usize = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     User,

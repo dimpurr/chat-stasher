@@ -1704,8 +1704,9 @@ fn page_reader(
             end,
             conversation.message_total
         ));
+        let raw_href = format!("/content?i={}&token={}", s.index, percent_encode(token));
         for (index, message) in conversation.messages[start..end].iter().enumerate() {
-            out.push_str(&render_message(start + index, message));
+            out.push_str(&render_message(start + index, message, &raw_href));
         }
         out.push_str(&reader_nav(s, token, start, width, total));
     }
@@ -1778,16 +1779,25 @@ fn reader_nav(s: &UiSession, token: &str, start: usize, width: usize, total: usi
     }
 }
 
-fn render_message(index: usize, message: &crate::normalize::Message) -> String {
+fn render_message(index: usize, message: &crate::normalize::Message, raw_href: &str) -> String {
     let time = match &message.time {
-        crate::normalize::MessageTime::Known { unix, .. } => {
-            format!("<time>{}</time>", esc(&fmt_unix(*unix)))
-        }
+        crate::normalize::MessageTime::Known { unix, source } => format!(
+            "<time>{}</time> · {}",
+            esc(&fmt_unix(*unix)),
+            time_source_label(source)
+        ),
         crate::normalize::MessageTime::Unknown { why } => {
             format!("<span class=bad title=\"{}\">time unknown</span>", esc(why))
         }
     };
-    let blocks = message.blocks.iter().map(render_block).collect::<String>();
+    // One budget for the whole message, not one per block: a turn made of many
+    // medium parts is the same hazard as one huge part.
+    let mut remaining = crate::normalize::MESSAGE_BUDGET;
+    let blocks = message
+        .blocks
+        .iter()
+        .map(|block| render_block(block, &mut remaining, raw_href))
+        .collect::<String>();
     format!(
         "<article id=\"m{index}\" class=message><header><b>{}</b> · {} </header>{blocks}</article>\n",
         message.role.label(),
@@ -1795,33 +1805,86 @@ fn render_message(index: usize, message: &crate::normalize::Message) -> String {
     )
 }
 
-fn render_block(block: &crate::normalize::Block) -> String {
+/// Name where a message's timestamp came from, in the vocabulary
+/// `activity::TimeSource` already uses for a session span. A time the reader
+/// had to interpret is not the same claim as one the harness recorded.
+fn time_source_label(source: &crate::activity::TimeSource) -> String {
+    use crate::activity::TimeSource;
+    match source {
+        TimeSource::Exact => "exact".to_string(),
+        TimeSource::Inferred { how } => format!("inferred ({})", esc(how)),
+        TimeSource::Messages { exact: true } => "from messages, exact".to_string(),
+        TimeSource::Messages { exact: false } => "from messages, interpreted".to_string(),
+        TimeSource::ListUpdated => "conversation list updated".to_string(),
+        TimeSource::NoConversationContent => "no conversation content".to_string(),
+        TimeSource::PartialRange { how, .. } => format!("partial range ({})", esc(how)),
+        TimeSource::Unknown { .. } => "unknown".to_string(),
+    }
+}
+
+/// Render one block within the message's remaining budget. Anything that does
+/// not fit is cut to its head and tail and the byte count in between is
+/// printed with a link to the raw shards, so a large message costs a bounded
+/// page without the hidden part being denied.
+fn render_block(
+    block: &crate::normalize::Block,
+    remaining: &mut usize,
+    raw_href: &str,
+) -> String {
     match block {
-        crate::normalize::Block::Text(text) => render_markdown(text),
-        crate::normalize::Block::CodeBlock { language, code } => format!(
-            "<pre><code{}>{}</code></pre>\n",
-            language
+        crate::normalize::Block::Text(text) => {
+            if text.len() <= *remaining {
+                *remaining -= text.len();
+                render_markdown(text)
+            } else {
+                render_elided(text, remaining, raw_href)
+            }
+        }
+        crate::normalize::Block::CodeBlock { language, code } => {
+            let class = language
                 .as_deref()
                 .map(|lang| format!(" class=\"language-{}\"", esc(lang)))
-                .unwrap_or_default(),
-            esc(code)
-        ),
+                .unwrap_or_default();
+            if code.len() <= *remaining {
+                *remaining -= code.len();
+                format!("<pre><code{class}>{}</code></pre>\n", esc(code))
+            } else {
+                render_elided(code, remaining, raw_href)
+            }
+        }
         crate::normalize::Block::Thinking(text) => format!(
             "<details class=thinking><summary>Thinking</summary>{}</details>\n",
-            render_markdown(text)
+            if text.len() <= *remaining {
+                *remaining -= text.len();
+                render_markdown(text)
+            } else {
+                render_elided(text, remaining, raw_href)
+            }
         ),
         crate::normalize::Block::ToolCall {
             name,
             input_summary,
             output_bytes,
-        } => format!(
-            "<details class=tool><summary>Tool call{} · output {}</summary><pre>{}</pre></details>\n",
-            name.as_deref()
-                .map(|name| format!(": {}", esc(name)))
-                .unwrap_or_default(),
-            esc(&fmt_bytes(*output_bytes as u64)),
-            esc(input_summary)
-        ),
+        } => {
+            // The recorded input is shown as bytes rather than as Markdown:
+            // it is a JSON argument list, and the reader does not claim to
+            // know what a tool would have done with it.
+            let body = if input_summary.len() <= *remaining {
+                *remaining -= input_summary.len();
+                format!("<pre>{}</pre>\n", esc(input_summary))
+            } else {
+                render_elided(input_summary, remaining, raw_href)
+            };
+            format!(
+                "<details class=tool><summary>Tool call{} · output {}</summary>{}</details>\n",
+                name
+                    .as_deref()
+                    .map(|name| format!(": {}", esc(name)))
+                    .unwrap_or_default(),
+                esc(&fmt_bytes(*output_bytes as u64)),
+                body
+            )
+        }
         crate::normalize::Block::AttachmentRef(attachment) => format!(
             "<p class=attachment>Attachment reference: <span class=mono>{}</span> · {} · {}</p>\n",
             esc(attachment.name.as_deref().unwrap_or("unnamed")),
@@ -1832,6 +1895,49 @@ fn render_block(block: &crate::normalize::Block) -> String {
                 .unwrap_or_else(|| "size unknown".to_string())
         ),
     }
+}
+
+/// The over-budget branch: keep the head and the tail, print how much was
+/// dropped, and link to the bytes themselves. The note lives inside the
+/// `<pre>` so the elision is visible exactly where the text stops, and the
+/// count is a measurement rather than a placeholder for what is missing.
+///
+/// A text that does not fit is rendered as `<pre>` rather than as Markdown:
+/// a truncated Markdown document can end mid-construct, and the point of this
+/// path is that what is shown is the recorded bytes and nothing derived
+/// from them.
+fn render_elided(text: &str, remaining: &mut usize, raw_href: &str) -> String {
+    let budget = *remaining;
+    *remaining = 0;
+    let head_len = budget / 2;
+    let head = prefix_at(text, head_len);
+    let tail = suffix_at(text, text.len().saturating_sub(budget - head_len));
+    format!(
+        "<pre>{}\n<span class=elided>[{} bytes elided — <a href=\"{}\">see raw</a>]</span>\n{}</pre>\n",
+        esc(head),
+        text.len().saturating_sub(head.len() + tail.len()),
+        esc(raw_href),
+        esc(tail)
+    )
+}
+
+/// The longest prefix of `text` that is at most `max` bytes, cut on a
+/// character boundary so the result is always a `&str`.
+fn prefix_at(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// The matching suffix, cut on a character boundary from the left.
+fn suffix_at(text: &str, start: usize) -> &str {
+    let mut begin = start.min(text.len());
+    while !text.is_char_boundary(begin) {
+        begin += 1;
+    }
+    &text[begin..]
 }
 
 /// Render a bounded Markdown subset after escaping all source text. Raw HTML
@@ -1847,7 +1953,7 @@ fn render_markdown(markdown: &str) -> String {
     for line in markdown.lines() {
         if let Some(language) = line.strip_prefix("```") {
             if in_fence {
-                out.push_str(&format!("<pre><code>{}</code></pre>\n", esc(&code)));
+                out.push_str(&fenced_code(&code, &fence_language));
                 code.clear();
                 in_fence = false;
                 fence_language.clear();
@@ -1895,16 +2001,24 @@ fn render_markdown(markdown: &str) -> String {
         }
     }
     if in_fence {
-        out.push_str(&format!(
-            "<pre><code class=\"language-{}\">{}</code></pre>\n",
-            esc(&fence_language),
-            esc(&code)
-        ));
+        out.push_str(&fenced_code(&code, &fence_language));
     }
     if list_open {
         out.push_str("</ul>\n");
     }
     out
+}
+
+/// A fenced block, with the info string carried through as a class only when
+/// one was written. An unclosed fence at the end of a message renders the same
+/// way as a closed one rather than losing its language.
+fn fenced_code(code: &str, language: &str) -> String {
+    let class = if language.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"language-{}\"", esc(language))
+    };
+    format!("<pre><code{class}>{}</code></pre>\n", esc(code))
 }
 
 fn render_inline(text: &str) -> String {
@@ -1946,15 +2060,19 @@ fn render_inline(text: &str) -> String {
         } else {
             let after = &rest[index + 1..];
             if let Some(label_end) = after.find("](") {
-                if let Some(url_end) = after[label_end + 2..].find(')') {
+                let target = &after[label_end + 2..];
+                if let Some((url, consumed)) = link_target(target) {
                     let label = &after[..label_end];
-                    let url = &after[label_end + 2..label_end + 2 + url_end];
                     if url.starts_with('/') || url.starts_with('#') {
                         out.push_str(&format!("<a href=\"{}\">{}</a>", esc(url), esc(label)));
                     } else {
-                        out.push_str(&esc(label));
+                        // An off-host target is not followed and not hidden:
+                        // the page loads no external resource and claims no
+                        // authority over where the link went, so the label and
+                        // the target are both printed as text.
+                        out.push_str(&format!("{} ({})", esc(label), esc(url)));
                     }
-                    rest = &after[label_end + 3 + url_end..];
+                    rest = &target[consumed..];
                     continue;
                 }
             }
@@ -1963,6 +2081,23 @@ fn render_inline(text: &str) -> String {
         rest = &rest[index + marker.len()..];
     }
     out
+}
+
+/// The target inside `](…)` and how many bytes it occupied including the
+/// closing `)`. Parentheses nest — a target may itself contain them — so
+/// stopping at the first `)` would cut the URL in half and leave the rest of
+/// it behind as stray text on the page.
+fn link_target(after_open: &str) -> Option<(&str, usize)> {
+    let mut depth = 0usize;
+    for (offset, c) in after_open.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some((&after_open[..offset], offset + 1)),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------- json routes
@@ -2424,6 +2559,12 @@ mod tests {
         );
         assert!(response.body.contains("User"), "{}", response.body);
         assert!(response.body.contains("Assistant"), "{}", response.body);
+        // An RFC 3339 timestamp is recorded, and the header says so.
+        assert!(
+            response.body.contains("</time> · exact"),
+            "{}",
+            response.body
+        );
         assert!(response.body.contains("Tool"), "{}", response.body);
         assert!(
             response.body.contains("<details class=thinking>"),
@@ -2603,6 +2744,105 @@ mod tests {
             reader_window(&params).unwrap(),
             (0, crate::normalize::MAX_WINDOW)
         );
+    }
+
+    /// One message must not be able to spend the whole window's budget. The
+    /// head and the tail are kept, the bytes in between are counted, and the
+    /// count is exact — an elision note that rounds would be a guess.
+    #[test]
+    fn one_huge_message_is_elided_and_counted_not_rendered_whole() {
+        const FILLER: usize = 300 * 1024;
+        struct HugeMessage;
+        impl ContentSource for HugeMessage {
+            fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
+                let filler = "a".repeat(FILLER);
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "11".repeat(32),
+                    bytes: filler.len(),
+                    body: serde_json::json!({
+                        "type": "user",
+                        "message": {"role": "user", "content": filler},
+                    })
+                    .to_string(),
+                })
+            }
+        }
+        let html = req("/reader?i=0", &fixture::data(), &HugeMessage).body;
+        let elided = FILLER - crate::normalize::MESSAGE_BUDGET;
+        assert!(
+            html.contains(&format!("[{elided} bytes elided")),
+            "the dropped byte count must be the measured one; {elided} expected"
+        );
+        assert!(html.contains("/content?i=0"), "the elision must be auditable");
+        assert!(
+            html.len() < 100 * 1024,
+            "one message must not blow the budget; page was {} bytes",
+            html.len()
+        );
+    }
+
+    /// The reader follows no off-host link and loads no external resource. An
+    /// external target is therefore printed as text — shown, not followed and
+    /// not hidden — while a local target stays a link, parentheses included.
+    #[test]
+    fn off_host_links_are_text_and_local_targets_keep_their_parentheses() {
+        struct Links;
+        impl ContentSource for Links {
+            fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
+                let content = "off [docs](https://example.invalid/x) local \
+                               [here](/reader?i=0) nested [n](/a(b)c) js \
+                               [j](javascript:alert(1)) end";
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "22".repeat(32),
+                    bytes: content.len(),
+                    body: serde_json::json!({
+                        "type": "user",
+                        "message": {"role": "user", "content": content},
+                    })
+                    .to_string(),
+                })
+            }
+        }
+        let html = req("/reader?i=0", &fixture::data(), &Links).body;
+        assert!(
+            html.contains("docs (https://example.invalid/x)"),
+            "an off-host target is shown as text: {html}"
+        );
+        assert!(html.contains("j (javascript:alert(1))"), "{html}");
+        assert!(!html.contains("href=\"https://"), "{html}");
+        assert!(!html.contains("href=\"javascript:"), "{html}");
+        assert!(html.contains("href=\"/reader?i=0\""), "{html}");
+        assert!(
+            html.contains("href=\"/a(b)c\""),
+            "a target's own parentheses are part of it: {html}"
+        );
+    }
+
+    /// A time the reader had to interpret is labelled as interpreted. Calling
+    /// a derived time "exact" would be the reader inventing provenance.
+    #[test]
+    fn a_derived_timestamp_is_named_as_derived() {
+        struct NumericTime;
+        impl ContentSource for NumericTime {
+            fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
+                Ok(Content {
+                    shards: Vec::new(),
+                    concat_sha256: "33".repeat(32),
+                    bytes: 72,
+                    body: "{\"type\":\"user\",\"timestamp\":1736944496,\
+                           \"message\":{\"role\":\"user\",\"content\":\"t\"}}\n"
+                        .to_string(),
+                })
+            }
+        }
+        let html = req("/reader?i=0", &fixture::data(), &NumericTime).body;
+        assert!(
+            html.contains("inferred (numeric epoch seconds)"),
+            "a numeric epoch is an inferred time: {html}"
+        );
+        assert!(!html.contains("· exact"), "{html}");
     }
 
     /// A failed fetch is a read failure, never an empty session.
