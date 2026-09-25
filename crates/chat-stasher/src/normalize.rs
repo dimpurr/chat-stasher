@@ -170,22 +170,27 @@ fn normalize_cli_line(harness: &str, value: &Value, conversation: &mut Conversat
         return;
     };
     let content = message.get("content").unwrap_or(message);
-    let mut role = if kind == "user" {
-        Role::User
-    } else {
-        Role::Assistant
-    };
     let blocks = blocks_from_content(content, conversation);
-    if blocks
-        .iter()
-        .any(|block| matches!(block, Block::ToolCall { .. }))
-    {
-        role = Role::Tool;
-    }
     if blocks.is_empty() {
         conversation.unrendered_lines += 1;
         return;
     }
+    // Tool traffic is normally returned under the turn that asked for it: a
+    // `user` line whose whole content is a `tool_result` is the harness handing
+    // back output, not the person speaking, so it is labelled `Tool`. That
+    // relabelling is only sound when *every* block is tool traffic. A turn that
+    // also carries prose, thinking or code keeps the role it was recorded with
+    // — calling a mixed turn `Tool` would erase who wrote the visible text.
+    let role = if blocks
+        .iter()
+        .all(|block| matches!(block, Block::ToolCall { .. }))
+    {
+        Role::Tool
+    } else if kind == "user" {
+        Role::User
+    } else {
+        Role::Assistant
+    };
     let mut blocks = blocks;
     if value.get("isMeta").and_then(Value::as_bool) == Some(true)
         || value.get("sidechain").and_then(Value::as_bool) == Some(true)
@@ -657,6 +662,13 @@ mod tests {
         let conversation = normalize("claude-code", body);
         assert_eq!(conversation.messages.len(), 3);
         assert!(matches!(conversation.messages[0].role, Role::User));
+        // The assistant turn also holds a tool call; it is still the assistant
+        // that wrote the prose, and the tool call is folded inside that turn.
+        assert!(matches!(conversation.messages[1].role, Role::Assistant));
+        assert!(conversation.messages[1]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Text(_))));
         assert!(conversation.messages[1]
             .blocks
             .iter()
