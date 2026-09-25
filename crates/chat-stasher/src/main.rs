@@ -21,7 +21,7 @@ use rustic_core::repofile::{MasterKey, NodeType};
 use rustic_core::{Credentials, LsOptions, Repository};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -148,6 +148,23 @@ enum ScheduleAction {
 enum Command {
     /// Write a commented default config if none exists (non-destructive).
     Init,
+    /// Walk through first-run setup. Scan is read-only; later configuration
+    /// and scheduler steps are currently descriptive stubs.
+    Setup {
+        /// Stage directory that will hold sealed session shards.
+        #[arg(long)]
+        stage: Option<PathBuf>,
+        /// Optional configured destination to show in the destination stub.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Include the scheduler-install stub in the walkthrough.
+        #[arg(long)]
+        install_schedule: bool,
+        /// Print one JSON object, including any missing named parameters.
+        /// Non-TTY runs always use this contract and never prompt.
+        #[arg(long)]
+        json: bool,
+    },
     /// Collect one pass, push only when configured and changed, then exit.
     ///
     /// Normal outcomes return 0: `result: NOOP` means no snapshot was created,
@@ -1201,6 +1218,12 @@ fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init => cmd_init(),
+        Command::Setup {
+            stage,
+            destination,
+            install_schedule,
+            json,
+        } => cmd_setup(stage, destination, install_schedule, json),
         Command::RunOnce {
             stage,
             machine,
@@ -6866,6 +6889,36 @@ mod decision_surface_tests {
     use std::fs;
 
     #[test]
+    fn setup_json_reports_named_missing_stage_without_prompting() {
+        let report = report_with_sessions(0);
+        let value = setup_json_payload(scanner::scan_report_json(&report), None, None, false);
+        assert_eq!(value["command"], "setup");
+        assert_eq!(value["exit_code"], 2);
+        assert_eq!(value["missing_parameters"], serde_json::json!(["stage"]));
+        assert_eq!(value["steps"]["stage"], "missing");
+    }
+
+    #[test]
+    fn setup_scan_renderer_is_the_status_scan_renderer() {
+        let report = report_with_sessions(3);
+        assert_eq!(render_setup_scan(&report), render_status(&report, false));
+    }
+
+    #[test]
+    fn setup_has_no_secret_valued_argv_options() {
+        let cli = Cli::command();
+        let setup = cli
+            .find_subcommand("setup")
+            .expect("setup subcommand exists");
+        let args: Vec<String> = setup
+            .get_arguments()
+            .filter(|arg| !arg.is_positional())
+            .map(|arg| arg.get_id().as_str().to_owned())
+            .collect();
+        assert_eq!(args, ["stage", "destination", "install_schedule", "json"]);
+    }
+
+    #[test]
     fn writer_metadata_records_current_version_and_drift_is_ordered() {
         let dir = tempfile::TempDir::new().unwrap();
         record_writer_version(dir.path(), "machine-a").unwrap();
@@ -7703,6 +7756,157 @@ fn cmd_init() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// WIZ-1 setup state machine: scan first, then collect the local stage choice,
+/// then describe destination and scheduler work without performing it.
+fn cmd_setup(
+    mut stage: Option<PathBuf>,
+    mut destination: Option<String>,
+    mut install_schedule: bool,
+    json: bool,
+) -> ExitCode {
+    let interactive = !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let config = Config::load();
+    let scan = match scanner::scan(&config) {
+        Ok(report) => report,
+        Err(error) => {
+            if !interactive {
+                println!(
+                    "{}",
+                    json_string(&serde_json::json!({
+                        "schema_version": 1,
+                        "command": "setup",
+                        "healthy": false,
+                        "exit_code": 3,
+                        "scanner": { "kind": "failed", "why": error.to_string() },
+                        "missing_parameters": setup_missing_parameters(stage.as_ref()),
+                    }))
+                );
+            } else {
+                eprintln!("setup: scan failed: {error}");
+            }
+            return ExitCode::from(3);
+        }
+    };
+
+    if interactive {
+        // Keep the scanner's established three-state wording byte-for-byte.
+        print!("{}", render_setup_scan(&scan));
+        let mut input = String::new();
+        if stage.is_none() {
+            match prompt_setup_value("Stage directory (required): ", &mut input) {
+                Ok(()) if !input.trim().is_empty() => {
+                    stage = Some(PathBuf::from(input.trim()));
+                    input.clear();
+                }
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("setup: could not read stage choice: {error}");
+                    return ExitCode::from(3);
+                }
+            }
+        }
+        if destination.is_none() {
+            match prompt_setup_value("Destination name (blank to skip): ", &mut input) {
+                Ok(()) if !input.trim().is_empty() => {
+                    destination = Some(input.trim().to_string());
+                    input.clear();
+                }
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("setup: could not read destination choice: {error}");
+                    return ExitCode::from(3);
+                }
+            }
+        }
+        if !install_schedule {
+            match prompt_setup_value("Plan scheduler installation? [y/N]: ", &mut input) {
+                Ok(()) => {
+                    install_schedule = matches!(input.trim(), "y" | "Y" | "yes" | "YES");
+                }
+                Err(error) => {
+                    eprintln!("setup: could not read scheduler choice: {error}");
+                    return ExitCode::from(3);
+                }
+            }
+        }
+    }
+
+    let missing = setup_missing_parameters(stage.as_ref());
+    if !interactive {
+        let value = setup_json_payload(
+            scanner::scan_report_json(&scan),
+            stage.as_ref(),
+            destination.as_deref(),
+            install_schedule,
+        );
+        println!("{}", json_string(&value));
+        return if missing.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        };
+    }
+
+    if !missing.is_empty() {
+        eprintln!("setup: missing required parameter --stage");
+        return ExitCode::from(2);
+    }
+    println!("setup: stage configuration planned (not written)");
+    if destination.is_some() {
+        println!("setup: destination choice planned (not configured)");
+    } else {
+        println!("setup: destination choice skipped");
+    }
+    if install_schedule {
+        println!("setup: scheduler installation planned (not installed)");
+    } else {
+        println!("setup: scheduler installation skipped");
+    }
+    ExitCode::SUCCESS
+}
+
+fn setup_missing_parameters(stage: Option<&PathBuf>) -> Vec<&'static str> {
+    if stage.is_some() {
+        Vec::new()
+    } else {
+        vec!["stage"]
+    }
+}
+
+fn setup_json_payload(
+    scan: serde_json::Value,
+    stage: Option<&PathBuf>,
+    destination: Option<&str>,
+    install_schedule: bool,
+) -> serde_json::Value {
+    let missing = setup_missing_parameters(stage);
+    serde_json::json!({
+        "schema_version": 1,
+        "command": "setup",
+        "healthy": missing.is_empty(),
+        "exit_code": if missing.is_empty() { 0 } else { 2 },
+        "scanner": scan,
+        "missing_parameters": missing,
+        "steps": {
+            "stage": if stage.is_some() { "provided" } else { "missing" },
+            "destination": if destination.is_some() { "planned" } else { "skipped" },
+            "schedule": if install_schedule { "planned" } else { "skipped" },
+        },
+    })
+}
+
+fn render_setup_scan(report: &scanner::ScanReport) -> String {
+    render_status(report, false)
+}
+
+fn prompt_setup_value(prompt: &str, value: &mut String) -> std::io::Result<()> {
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    value.clear();
+    std::io::stdin().read_line(value)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
