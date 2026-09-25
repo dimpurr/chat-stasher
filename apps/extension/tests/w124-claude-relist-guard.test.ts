@@ -99,6 +99,9 @@ async function seed(store: BackfillStore, scope: string, s: Seed): Promise<void>
     pending: s.pending,
     archived: s.archived,
     nextSeq: s.pending.length + s.archived.length + 1,
+    // 🔴 W113 · No recorded list times: this fixture writes a ledger as a pre-W113 build left it, which is
+    //    exactly the case the coverage page reports as "time unknown" rather than spreading it over months.
+    times: new Map(),
   });
   const header: BackfillHeader = {
     v: 2,
