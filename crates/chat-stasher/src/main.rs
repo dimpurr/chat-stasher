@@ -6850,31 +6850,35 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 }
                 let sources: Vec<_> = paths_by_id
                     .iter()
-                    .map(|(id, indexes)| {
+                    .map(|(id, indexes)| -> anyhow::Result<_> {
                         let shards: Vec<_> = indexes
                             .iter()
-                            .map(|idx| {
+                            .map(|idx| -> anyhow::Result<_> {
                                 let (path, node) = &entries_all[*idx];
-                                (
-                                    path.to_string_lossy().into_owned(),
-                                    node.content
-                                        .as_deref()
-                                        .unwrap_or_default()
+                                let data_ids = match node.content.as_deref() {
+                                    Some(data_ids) => data_ids
                                         .iter()
                                         .map(|data_id| data_id.to_hex().as_str().to_owned())
                                         .collect(),
-                                )
+                                    None if node.meta.size == 0 => vec!["empty-file".to_owned()],
+                                    None => {
+                                        return Err(anyhow::anyhow!(
+                                            "non-empty archived shard has no content IDs"
+                                        ));
+                                    }
+                                };
+                                Ok((path.to_string_lossy().into_owned(), data_ids))
                             })
-                            .collect();
-                        chat_stasher::fts::SourceDoc {
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        Ok(chat_stasher::fts::SourceDoc {
                             id: id.clone(),
                             source_sha256: index_source_fingerprint(
                                 &shards,
                                 titles.get(id).map(String::as_str),
                             ),
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 index.build(&sources, |id| {
                     let indexes = paths_by_id.get(id).ok_or_else(|| {
                         anyhow::anyhow!("changed source disappeared during index build")
