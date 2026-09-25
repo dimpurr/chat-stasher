@@ -5834,6 +5834,8 @@ fn cmd_read(
 /// is an unknown — the occupancy line says so and the command still exits 0,
 /// the same way `doctor` reports an unmeasurable metadata cache.
 fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
+    use chat_stasher::body_cache::RootState;
+
     let config = Config::load();
     let settings = match chat_stasher::body_cache::settings_for(&config) {
         Ok(settings) => settings,
@@ -5850,35 +5852,71 @@ fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
     };
     let root = settings.root.clone();
 
+    // Is this directory chat-stasher's own? `cache clear` deletes, and the only
+    // files it may delete are the ones the cache wrote, so a `[cache] dir` that
+    // points at a directory the cache did not create is refused — before
+    // anything is touched, and with the reason attached.
+    let state = chat_stasher::body_cache::root_state(&root);
+
     if let Some(CacheAction::Clear) = action {
-        if !root.exists() {
-            println!(
-                "cache: nothing to clear — no cache directory at {}",
-                root.display()
-            );
-            return ExitCode::SUCCESS;
-        }
-        return match settings.open().clear() {
-            Ok(removed) => {
+        return match state {
+            RootState::Absent => {
                 println!(
-                    "cache: cleared {} entries ({} B) from {}",
-                    removed.entries,
-                    removed.bytes,
+                    "cache: nothing to clear — no cache directory at {}",
                     root.display()
-                );
-                println!(
-                    "cache: the destination still holds every archive byte; the next read of a \
-                     session fetches it again"
                 );
                 ExitCode::SUCCESS
             }
-            Err(e) => {
+            RootState::Foreign(why) => {
+                eprintln!("cache: refusing to clear {}: {why}", root.display());
                 eprintln!(
-                    "cache: could not clear the cache at {}: {e}",
+                    "cache: nothing was deleted. A cache is only ever cleared inside a directory \
+                     chat-stasher created itself, so point `[cache] dir` at that directory, or \
+                     remove this one by hand."
+                );
+                // 2, not 1: nothing was attempted, and the fix is in the config.
+                ExitCode::from(2)
+            }
+            RootState::Unknown(why) => {
+                eprintln!(
+                    "cache: could not clear the cache at {}: {why}",
                     root.display()
                 );
-                ExitCode::FAILURE
+                eprintln!(
+                    "cache: nothing was deleted, because it could not be established that this \
+                     directory is the cache's own."
+                );
+                ExitCode::from(2)
             }
+            RootState::Cache => match settings.open().clear() {
+                Ok(removed) => {
+                    println!(
+                        "cache: cleared {} entries ({} B) from {}",
+                        removed.entries,
+                        removed.bytes,
+                        root.display()
+                    );
+                    if removed.foreign_entries > 0 {
+                        println!(
+                            "cache: left alone   : {} file(s) or directory(ies) here were not \
+                             written by chat-stasher",
+                            removed.foreign_entries
+                        );
+                    }
+                    println!(
+                        "cache: the destination still holds every archive byte; the next read of a \
+                         session fetches it again"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!(
+                        "cache: could not clear the cache at {}: {e}",
+                        root.display()
+                    );
+                    ExitCode::FAILURE
+                }
+            },
         };
     }
 
@@ -5892,21 +5930,40 @@ fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
             ""
         }
     );
-    if !root.exists() {
-        println!("cache: occupancy      : unknown (no cache directory yet)");
-        return ExitCode::SUCCESS;
-    }
-    match chat_stasher::body_cache::measure(&root) {
-        Ok(Some(usage)) => {
+    match state {
+        RootState::Absent => {
+            println!("cache: occupancy      : unknown (no cache directory yet)");
+        }
+        RootState::Foreign(why) => {
+            // Not a measured zero, and not another directory's bytes presented
+            // as this cache's occupancy: nothing here was measured at all.
+            println!("cache: occupancy      : unknown (not a chat-stasher body cache: {why})");
             println!(
-                "cache: occupancy      : {} B in {} entries",
-                usage.bytes, usage.entries
+                "cache: nothing here is measured, written or deleted; point `[cache] dir` at a \
+                 directory chat-stasher created, or remove this one by hand"
             );
         }
-        // The directory exists but could not be measured. Reported as an
-        // unknown, never as `0 B`, which would read as "the cache is empty".
-        Ok(None) => println!("cache: occupancy      : unknown (no cache directory yet)"),
-        Err(e) => println!("cache: occupancy      : unreadable ({e})"),
+        RootState::Unknown(why) => println!("cache: occupancy      : unreadable ({why})"),
+        RootState::Cache => match chat_stasher::body_cache::measure(&root) {
+            Ok(Some(usage)) => {
+                println!(
+                    "cache: occupancy      : {} B in {} entries",
+                    usage.bytes, usage.entries
+                );
+                if usage.foreign_entries > 0 {
+                    println!(
+                        "cache: foreign        : {} file(s) or directory(ies) here were not written \
+                         by chat-stasher; they are not counted above, and `cache clear` leaves \
+                         them alone",
+                        usage.foreign_entries
+                    );
+                }
+            }
+            // The directory exists but could not be measured. Reported as an
+            // unknown, never as `0 B`, which would read as "the cache is empty".
+            Ok(None) => println!("cache: occupancy      : unknown (no cache directory yet)"),
+            Err(e) => println!("cache: occupancy      : unreadable ({e})"),
+        },
     }
     ExitCode::SUCCESS
 }
@@ -5930,6 +5987,9 @@ fn body_cache_state_line(availability: &chat_stasher::body_cache::Availability) 
         Availability::Bulk => "not used (bulk read, ADR-034)".to_string(),
         Availability::Unresolved(why) => {
             format!("unavailable ({why}); this read goes to the remote uncached")
+        }
+        Availability::Foreign(why) => {
+            format!("off ({why}); this read goes to the remote uncached")
         }
     }
 }

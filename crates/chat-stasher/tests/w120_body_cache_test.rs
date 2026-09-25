@@ -123,13 +123,18 @@ impl Sandbox {
 
     /// Point the CLI at this sandbox's own cache, with `max_bytes = quota`.
     fn set_quota(&self, quota: &str) {
+        self.set_cache_dir(&self.cache_dir(), quota);
+    }
+
+    /// Point the CLI at `dir` as the body-cache root, with `max_bytes = quota`.
+    fn set_cache_dir(&self, dir: &Path, quota: &str) {
         let cfg_dir = self.path().join("config").join("chat-stasher");
         fs::create_dir_all(&cfg_dir).expect("config dir");
         fs::write(
             cfg_dir.join("config.toml"),
             format!(
                 "[cache]\ndir = \"{}\"\nmax_bytes = \"{quota}\"\n",
-                self.cache_dir().display()
+                dir.display()
             ),
         )
         .expect("write config");
@@ -208,6 +213,10 @@ impl Sandbox {
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// The `sha256=` field of `read`'s `concat len` line.
@@ -512,7 +521,17 @@ fn entries_are_bounded_by_the_blob_not_by_the_session() {
     let entries = entry_files(&sandbox.cache_dir());
     assert!(
         entries.len() > 1,
-        "a 6 MB session must be stored as several blob-sized entries, not one"
+        "a 6 MB session must be stored as several blob-sized entries, not one: \
+         entries={} stored={} misses={} hits={} corrupt={} too_large={} session_skips={} errors={} usage={}",
+        entries.len(),
+        cache_stat(&output, "stored"),
+        cache_stat(&output, "misses"),
+        cache_stat(&output, "hits"),
+        cache_stat(&output, "corrupt"),
+        cache_stat(&output, "skipped_too_large"),
+        cache_stat(&output, "skipped_session"),
+        cache_stat(&output, "errors"),
+        cache_stat(&output, "usage"),
     );
     let largest = entries.iter().map(|(_, size)| *size).max().unwrap_or(0);
     assert!(
@@ -638,6 +657,86 @@ fn the_cache_command_reports_and_clears() {
         reference,
         "a cleared cache must fall back to the destination and return the same bytes"
     );
+}
+
+/// A `[cache] dir` that points at a directory this cache did not create is
+/// refused, and nothing in that directory is touched.
+///
+/// The cache's entries are disposable by construction; the contents of a
+/// directory the user pointed at by mistake are not. So the fixed direction is
+/// to refuse loudly — on the report, on the `read` that would have filled it,
+/// and above all on `cache clear`, the one command that deletes.
+#[test]
+fn the_cache_refuses_a_directory_it_did_not_create() {
+    let sandbox = Sandbox::new(1, 40_000);
+    // A directory that exists, is not the cache's, and holds a file that was
+    // never a cache entry: no marker, so nothing here is chat-stasher's.
+    let dir = sandbox.path().join("someone-elses-dir");
+    fs::create_dir_all(&dir).expect("mkdir");
+    let keep = dir.join("keep-me.txt");
+    fs::write(&keep, b"not a cache entry").expect("write");
+
+    sandbox.set_cache_dir(&dir, "10MB");
+
+    // The report says what it found, without measuring somebody else's bytes as
+    // a cache occupancy.
+    let report = sandbox.command().arg("cache").output().expect("run cache");
+    let text = stdout(&report);
+    assert!(
+        !text.contains("occupancy      : ") || text.contains("unknown (not a chat-stasher"),
+        "the report must not present another directory's bytes as cache occupancy:\n{text}"
+    );
+    assert!(
+        text.contains("not a chat-stasher body cache"),
+        "the report must say the directory is not this cache's:\n{text}"
+    );
+
+    // Clearing refuses, and refuses before deleting anything.
+    let cleared = sandbox
+        .command()
+        .args(["cache", "clear"])
+        .output()
+        .expect("run cache clear");
+    assert_eq!(
+        cleared.status.code(),
+        Some(2),
+        "refusing to clear a directory that is not the cache's must not look like \
+         a successful clear:\n{}",
+        stdout(&cleared)
+    );
+    let refusal = format!("{}{}", stdout(&cleared), stderr(&cleared));
+    assert!(
+        refusal.contains(".chat-stasher-body-cache"),
+        "the refusal must name the marker it looked for:\n{refusal}"
+    );
+    assert!(
+        keep.exists(),
+        "`cache clear` deleted a file that is not a cache entry"
+    );
+
+    // A read still works — the cache is a speed-up, never a dependency — and it
+    // reports why it went to the destination instead, and writes nothing here.
+    let read = sandbox.read(0);
+    assert_eq!(read.status.code(), Some(0), "{}", stdout(&read));
+    assert!(
+        cache_state(&read).contains("off"),
+        "the read must report the cache as off, not as on: {}",
+        cache_state(&read)
+    );
+    let state = cache_state(&read);
+    assert!(
+        state.contains("not a chat-stasher body cache"),
+        "the read must say why the cache is off: {state}"
+    );
+    assert_eq!(
+        entry_files(&dir)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<PathBuf>>(),
+        vec![keep.clone()],
+        "the read stored entries in a directory that is not the cache's"
+    );
+    assert!(keep.exists(), "the read touched a file it did not write");
 }
 
 /// The second read of one session must fetch **no body bytes at all**: not

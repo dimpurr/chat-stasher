@@ -22,6 +22,12 @@
 //!   the entry and reports a miss, so a corrupt cache costs speed and never
 //!   costs correctness.
 //! * **Disposable.** Losing the whole directory changes nothing but timing.
+//! * **Its own files, and only its own.** A directory this cache creates carries
+//!   a marker file, and a directory without it is refused rather than filled or
+//!   emptied: `[cache] dir` is a path a user typed, and a typo in it must not
+//!   cost them the contents of the directory it points at. Inside a marked root
+//!   only files whose names match the layout below are ever written or deleted
+//!   — see [`scan`] for the two levels that are the whole of it.
 //!
 //! Filling is bounded by LRU eviction against the quota, by a per-entry ceiling
 //! (an entry larger than the whole quota can never be held), and by the
@@ -75,6 +81,26 @@ const STALE_TEMP: Duration = Duration::from_secs(3600);
 
 /// Name of the cross-process lock file, inside the cache root.
 const LOCK_NAME: &str = ".lock";
+
+/// Name of the marker file that says a directory is **this cache's** root.
+///
+/// Written when the cache creates its own directory, and required before
+/// anything in that directory is written or deleted: `[cache] dir` is a path a
+/// user typed, and a typo in it must not turn `cache clear`, or an ordinary
+/// read's eviction pass, into a delete of somebody else's files. Dot-prefixed,
+/// so it is never mistaken for an entry.
+const MARKER_NAME: &str = ".chat-stasher-body-cache";
+
+/// What the marker says. A line-oriented record, so a human who opens the file
+/// learns what put it there.
+const MARKER_CONTENTS: &[u8] = b"chat-stasher body cache v1\n";
+
+/// The part of the marker that is checked.
+///
+/// A prefix rather than the whole file: a later format may append its own line
+/// to the same marker, and requiring today's bytes exactly would refuse a
+/// directory this tool itself created yesterday.
+const MARKER_PREFIX: &[u8] = b"chat-stasher body cache";
 
 /// Whether an operation may use — and fill — the body cache.
 ///
@@ -290,10 +316,11 @@ pub fn default_root() -> PathBuf {
 
 /// Why a body cache is, or is not, in use for one operation.
 ///
-/// Four states, not two, because "no cache" has three different causes and only
+/// Five states, not two, because "no cache" has four different causes and only
 /// one of them is the user's decision. Collapsing them would mean a command
 /// that silently ran uncached while the user believed a 50 GB quota was in
-/// effect — the same class of mistake as recording an unknown as zero.
+/// effect — the same class of mistake as recording an unknown as zero — or one
+/// that wrote into a directory the user pointed at by mistake.
 #[derive(Debug, Clone)]
 pub enum Availability {
     /// The cache is installed for this operation.
@@ -302,18 +329,25 @@ pub enum Availability {
     Off,
     /// This operation is bulk work; ADR-034 keeps those out of the cache.
     Bulk,
-    /// The configured location could not be resolved. The read continues
-    /// uncached, and the reason is carried so the caller can say so rather than
-    /// pretending the cache is simply off.
+    /// The configured location could not be resolved, or could not be
+    /// inspected. The read continues uncached, and the reason is carried so the
+    /// caller can say so rather than pretending the cache is simply off.
     Unresolved(String),
+    /// The configured location is there and is not this cache's directory. The
+    /// read continues uncached: nothing is written to that directory, and
+    /// nothing in it is deleted.
+    Foreign(String),
 }
 
 impl Availability {
-    /// The handle to install, or `None` for the three off states.
+    /// The handle to install, or `None` for the off states.
     pub fn handle(&self) -> Option<Arc<BodyCache>> {
         match self {
             Availability::On(cache) => Some(cache.clone()),
-            Availability::Off | Availability::Bulk | Availability::Unresolved(_) => None,
+            Availability::Off
+            | Availability::Bulk
+            | Availability::Unresolved(_)
+            | Availability::Foreign(_) => None,
         }
     }
 }
@@ -324,7 +358,17 @@ pub fn for_operation(config: &crate::config::Config, policy: Policy) -> Availabi
         return Availability::Bulk;
     }
     match settings_for(config) {
-        Ok(settings) if settings.enabled() => Availability::On(Arc::new(settings.open())),
+        Ok(settings) if settings.enabled() => {
+            // The directory must be this cache's before a read may store in it
+            // (or delete a corrupt entry from it). Nothing there yet is the
+            // normal first run: the cache creates the root, and the marker that
+            // claims it, on the first store.
+            match root_state(&settings.root) {
+                RootState::Absent | RootState::Cache => Availability::On(Arc::new(settings.open())),
+                RootState::Foreign(why) => Availability::Foreign(why),
+                RootState::Unknown(why) => Availability::Unresolved(why),
+            }
+        }
         Ok(_) => Availability::Off,
         // A cache that cannot be resolved (a `~otheruser` path, say) is not a
         // reason to fail a read — but it is a reason to say so.
@@ -407,10 +451,25 @@ pub struct Stats {
 /// Bytes and entries under a cache root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Usage {
-    /// Sum of file sizes. This is what the quota is enforced against.
+    /// Sum of the file sizes the quota is enforced against: this cache's entry
+    /// files and the temporary files it is still writing. The marker and the
+    /// lock file are excluded — they are the cache's own spine, always present
+    /// and never evictable, so counting them could only make an eviction pass
+    /// delete something it must keep, or leave the cache permanently a few
+    /// bytes over a quota it cannot shrink below.
     pub bytes: u64,
-    /// Number of entry files (temporary files and the lock file are excluded).
+    /// Number of entry files (temporary files, the lock file and the marker are
+    /// excluded).
     pub entries: usize,
+    /// Files and directories under the root that this cache did not write.
+    ///
+    /// Counted so that a directory holding something else is never described as
+    /// an empty cache, and never counted in `bytes`: they are not something the
+    /// cache may shrink, so making the quota fit around them would evict the
+    /// user's entries to make room for files the cache cannot delete. A
+    /// directory that is not a pack directory counts as one and is not walked,
+    /// so this is a count of what is there, not a measurement of a tree.
+    pub foreign_entries: usize,
 }
 
 /// The body cache directory.
@@ -517,7 +576,15 @@ impl BodyCache {
             // cache entry is not deleting archived data — ADR-034's cache is
             // disposable by construction, and the archive it mirrors is on the
             // remote.
-            let _removed = fs::remove_file(&path);
+            //
+            // Only inside a directory this cache created: this is the one
+            // delete on a read path, and a `[cache] dir` that points somewhere
+            // else must not make a read delete anything, however much the file
+            // it found there looks like an entry. A miss costs a refetch; a
+            // delete here is not this cache's to make.
+            if root_state(&self.root) == RootState::Cache {
+                let _removed = fs::remove_file(&path);
+            }
             self.corrupt.fetch_add(1, Ordering::Relaxed);
             self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -550,6 +617,14 @@ impl BodyCache {
             self.skipped_session.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        // The root and its marker are made by the cache itself, so the first
+        // store on a machine leaves a directory the cache recognises later. A
+        // `[cache] dir` pointing at somebody else's directory is refused here
+        // rather than filled with entries.
+        if ensure_our_root(&self.root).is_err() {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         if write_entry(&key.path(&self.root), payload).is_err() {
             self.errors.fetch_add(1, Ordering::Relaxed);
             return;
@@ -562,31 +637,48 @@ impl BodyCache {
 
     /// Bytes and entries currently held.
     ///
-    /// `bytes` is **every** file under the root, in-flight temporary files and
-    /// the lock file included: it is a measurement of the disk, and a number
-    /// that excluded a 1 MiB blob because it was mid-rename would be a
-    /// measurement of something else. `entries` counts only real entries —
-    /// neither a temp file nor the lock file is something a user could be
-    /// shown.
+    /// `bytes` is the number the quota is enforced against: entry files and the
+    /// temporary files still being written, and nothing else — see [`Usage`].
+    /// `entries` counts only real entries: neither a temp file nor the lock file
+    /// nor the marker is something a user could be shown. `foreign_entries`
+    /// counts what is under the root and is not this cache's.
     pub fn usage(&self) -> std::io::Result<Usage> {
-        let mut usage = Usage::default();
-        for entry in scan(&self.root)? {
-            usage.bytes += entry.bytes;
-            if !entry.transient {
+        let scanned = scan(&self.root)?;
+        let mut usage = Usage {
+            foreign_entries: scanned.foreign,
+            ..Usage::default()
+        };
+        for entry in &scanned.ours {
+            if entry.kind.counts_toward_quota() {
+                usage.bytes += entry.bytes;
+            }
+            if entry.kind == Owned::Entry {
                 usage.entries += 1;
             }
         }
         Ok(usage)
     }
 
-    /// Delete every entry. Returns what was removed. The lock file is kept: it
-    /// is the one name that must not be unlinked while another process holds
-    /// it, or two processes could believe they hold the same lock on two
-    /// different inodes.
+    /// Delete every entry this cache wrote. Returns what was removed, and — in
+    /// `foreign_entries` — what it found and did not touch, so the caller can
+    /// say the latter out loud instead of leaving the user to wonder.
+    ///
+    /// Refuses outright unless the root is this cache's own directory: `clear`
+    /// is the one command in the cache that destroys data, and the only data it
+    /// may destroy is its own. The lock file is kept even then: it is the one
+    /// name that must not be unlinked while another process holds it, or two
+    /// processes could believe they hold the same lock on two different inodes.
     pub fn clear(&self) -> std::io::Result<Usage> {
-        let mut removed = Usage::default();
-        for entry in scan(&self.root)? {
-            if entry.transient {
+        ensure_our_root(&self.root)?;
+        let scanned = scan(&self.root)?;
+        let mut removed = Usage {
+            foreign_entries: scanned.foreign,
+            ..Usage::default()
+        };
+        for entry in &scanned.ours {
+            // Entry files only: the lock, the marker and any in-flight temp file
+            // stay, exactly as they did when this pass skipped dot-files.
+            if entry.kind != Owned::Entry {
                 continue;
             }
             match fs::remove_file(&entry.path) {
@@ -608,23 +700,39 @@ impl BodyCache {
     /// re-measured under that lock: another process may have evicted already,
     /// and two processes that each evicted to their own pre-lock measurement
     /// would delete twice as much as needed.
+    ///
+    /// Everything this pass can delete is this cache's own: [`scan`] does not
+    /// return a file the cache did not write, and the marker and the lock are
+    /// not evictable. The root is checked before the lock is taken, so a
+    /// `[cache] dir` pointing at somebody else's directory is refused rather
+    /// than shrunk.
     fn enforce_quota(&self) -> std::io::Result<()> {
         // Cheap check first: the common case is a cache far below its quota,
         // and taking the lock for that would serialize every read.
         if self.usage()?.bytes <= self.max_bytes {
             return Ok(());
         }
+        ensure_our_root(&self.root)?;
         let _guard = self.lock()?;
         loop {
-            let entries = scan(&self.root)?;
-            let mut total: u64 = entries.iter().map(|e| e.bytes).sum();
+            let scanned = scan(&self.root)?;
+            let mut total: u64 = scanned
+                .ours
+                .iter()
+                .filter(|e| e.kind.counts_toward_quota())
+                .map(|e| e.bytes)
+                .sum();
             if total <= self.max_bytes {
                 return Ok(());
             }
             let now = SystemTime::now();
-            let mut youngest_first = entries
+            let mut youngest_first = scanned
+                .ours
                 .iter()
-                .filter(|e| !e.is_lock && (!e.transient || is_stale(e, now)))
+                // An entry is evictable whenever it is the oldest; a temp file
+                // only once it is old enough to belong to a process that died
+                // before renaming it into place.
+                .filter(|e| e.kind.evictable() && (e.kind == Owned::Entry || is_stale(e, now)))
                 .collect::<Vec<_>>();
             youngest_first.sort_by_key(|e| (e.modified, e.path.clone()));
             let mut deleted_any = false;
@@ -658,7 +766,11 @@ impl BodyCache {
     /// error here; the caller treats that as "could not enforce", which is
     /// reported through `errors` and never fails a read.
     fn lock(&self) -> std::io::Result<LockGuard> {
-        fs::create_dir_all(&self.root)?;
+        // The root is made the same way it is made everywhere else — with its
+        // marker — so that no path in this module can leave a markerless cache
+        // directory behind for a later run to refuse. (In practice the root
+        // exists by now: this pass runs after a store.)
+        ensure_our_root(&self.root)?;
         let path = self.root.join(LOCK_NAME);
         let file = OpenOptions::new()
             .create(true)
@@ -702,10 +814,227 @@ struct ScannedEntry {
     path: PathBuf,
     bytes: u64,
     modified: SystemTime,
-    /// A temporary file still being written, or the lock file: counted in the
-    /// total but not an entry a user could be shown.
-    transient: bool,
-    is_lock: bool,
+    /// What this file is. Never optional: a file this cache did not write is
+    /// not returned by [`scan`] at all, so nothing that deletes can reach one.
+    kind: Owned,
+}
+
+/// The files this cache writes, by name and position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owned {
+    /// A stored entry: `<root>/<pack id>/<offset>-<length>`.
+    Entry,
+    /// A half-written entry: the `write_entry` temp name.
+    Temp,
+    /// `<root>/.lock`, the cross-process eviction lock.
+    Lock,
+    /// `<root>.chat-stasher-body-cache`, the claim on the directory.
+    Marker,
+}
+
+impl Owned {
+    /// Whether this file's bytes are part of what the quota is enforced
+    /// against. See [`Usage::bytes`] for why the marker and the lock are not.
+    fn counts_toward_quota(self) -> bool {
+        matches!(self, Owned::Entry | Owned::Temp)
+    }
+
+    /// Whether an eviction pass may delete this file once it is old enough.
+    fn evictable(self) -> bool {
+        matches!(self, Owned::Entry | Owned::Temp)
+    }
+}
+
+/// Whether `name` is a pack directory as this cache writes it: the lowercase
+/// hex of a pack id, and nothing else.
+///
+/// The round trip through [`Id`] is the check rather than a character count:
+/// it is the same parser the writer's `to_hex` is paired with, so a spelling it
+/// would accept but never print (uppercase hex, say) is refused instead of
+/// matched loosely. Nothing this cache wrote fails it.
+fn is_pack_dir_name(name: &str) -> bool {
+    name.parse::<Id>()
+        .map(|id| id.to_hex().as_str() == name)
+        // reason: a name this cache cannot parse as a pack id is not a pack
+        // directory it made. The default is "not ours", which is the direction
+        // that keeps files: the caller only ever refuses to delete on it.
+        .unwrap_or(false)
+}
+
+/// Whether `name` is exactly the `<offset>-<length>` an entry is written as.
+///
+/// Canonical decimal only: the writer is `format!("{offset}-{length}")`, so
+/// `007-8` and `0-4 ` are names this cache never produced, and refusing to
+/// delete one costs nothing.
+fn is_entry_name(name: &str) -> bool {
+    let Some((offset, length)) = name.split_once('-') else {
+        return false;
+    };
+    let canonical = |part: &str| {
+        part.parse::<u32>()
+            .is_ok_and(|value| value.to_string() == part)
+    };
+    canonical(offset) && canonical(length)
+}
+
+/// Whether `name` is a temp file as [`write_entry`] writes one:
+/// `.tmp-<pid>-<seq>`, both canonical decimals.
+fn is_temp_name(name: &str) -> bool {
+    match name.strip_prefix(".tmp-") {
+        Some(rest) => is_entry_name(rest),
+        None => false,
+    }
+}
+
+/// What is at the configured cache root.
+///
+/// Three states where a path check would give two, because "there is nothing
+/// there", "there is this cache's directory there" and "there is something else
+/// there" call for three different actions — the first two may be used, and the
+/// third must not be written to or deleted from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootState {
+    /// Nothing is at that path yet. The cache creates it, and its marker, on
+    /// the first store.
+    Absent,
+    /// This cache's own directory: the marker is there.
+    Cache,
+    /// A directory is there that this cache did not create, or a path that is
+    /// not a directory at all. Nothing may be written to it or deleted from it.
+    Foreign(String),
+    /// What is at that path could not be determined. Distinct from `Foreign`:
+    /// "could not look" is not "not ours".
+    Unknown(String),
+}
+
+/// What is at `root`, and whether this cache may operate there.
+pub fn root_state(root: &Path) -> RootState {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RootState::Absent,
+        Err(e) => {
+            return RootState::Unknown(format!(
+                "the configured cache path could not be inspected: {e}"
+            ))
+        }
+    };
+    // A symlink is never followed, here or in the walk below: a `[cache] dir`
+    // that is a symlink to somebody else's directory is not this cache's
+    // directory to fill or empty, and following one out of the tree is how a
+    // delete escapes the directory it was aimed at.
+    if metadata.file_type().is_symlink() {
+        return RootState::Foreign(
+            "the configured cache path is a symlink, and this cache never follows one".to_string(),
+        );
+    }
+    if !metadata.is_dir() {
+        return RootState::Foreign("the configured cache path is not a directory".to_string());
+    }
+    match marker_present(root) {
+        Ok(true) => RootState::Cache,
+        Ok(false) => RootState::Foreign(format!(
+            "there is a directory at the configured cache path that chat-stasher did not create \
+             (no `{MARKER_NAME}` marker file), so it is not a chat-stasher body cache"
+        )),
+        Err(why) => RootState::Unknown(why),
+    }
+}
+
+/// Whether `root` carries the marker this cache writes when it creates the
+/// directory: a regular file (not a symlink, not a directory) whose contents
+/// begin with [`MARKER_PREFIX`].
+///
+/// `Err` is "the marker is there but could not be read", which is a different
+/// answer from "there is no marker" and must stay one.
+fn marker_present(root: &Path) -> Result<bool, String> {
+    let path = root.join(MARKER_NAME);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("`{MARKER_NAME}` could not be inspected: {e}")),
+    };
+    if !metadata.file_type().is_file() {
+        // A directory, a symlink or a socket with that name is not a claim this
+        // cache made — a definite "not ours", not an unknown.
+        return Ok(false);
+    }
+    match fs::read(&path) {
+        Ok(raw) => Ok(raw.starts_with(MARKER_PREFIX)),
+        Err(e) => Err(format!("`{MARKER_NAME}` could not be read: {e}")),
+    }
+}
+
+/// The error every write-side refusal carries: the path, and why it is not the
+/// cache's to use.
+fn not_ours(root: &Path, why: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("{}: {why}", root.display()),
+    )
+}
+
+/// Create the cache root, with the marker already inside it, in **one** step.
+///
+/// The staging directory and the rename are what make this atomic for every
+/// other process and thread: at that path there is either nothing, or a
+/// directory that already carries the marker — never the directory in between.
+/// That in-between state is not a harmless instant: it is exactly what "a
+/// directory this cache did not create" looks like from outside, and a `read`
+/// that is filling a cold cache does store blobs from several threads at once
+/// (`rustic` reads bodies in parallel). Creating the root in two steps made
+/// those threads refuse their own cache — five blocks in six, on one measured
+/// read — which is the failure this shape exists to prevent.
+///
+/// A crash between the two leaves the staging directory, not a markerless root:
+/// and the staging directory is beside the root, where no walk of the cache ever
+/// looks.
+fn create_our_root(root: &Path) -> std::io::Result<()> {
+    let parent = match root.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(".tmp-{}-{}", std::process::id(), next_temp_seq()));
+    fs::create_dir(&staging)?;
+    fs::write(staging.join(MARKER_NAME), MARKER_CONTENTS)?;
+    match fs::rename(&staging, root) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _cleaned = fs::remove_dir_all(&staging);
+            Err(e)
+        }
+    }
+}
+
+/// Make sure `root` is a directory this cache may write to and delete from.
+///
+/// Creates it — and the marker that claims it — when nothing is there yet, so
+/// the first store on a machine leaves a directory the cache can recognise on
+/// every later run. Refuses when something is there that this cache did not
+/// create: writing entries into it would fill a directory nobody offered, and
+/// deleting from it is the mistake this check exists to prevent.
+///
+/// Losing the race to create it is not a refusal: what is at the path now is
+/// what decides, and a concurrent creator that got there first leaves the same
+/// marked directory this call would have made. Only a *second* look that still
+/// finds no usable root is an error.
+fn ensure_our_root(root: &Path) -> std::io::Result<()> {
+    let creation = match root_state(root) {
+        RootState::Cache => return Ok(()),
+        RootState::Absent => create_our_root(root),
+        RootState::Foreign(why) | RootState::Unknown(why) => return Err(not_ours(root, &why)),
+    };
+    match root_state(root) {
+        RootState::Cache => Ok(()),
+        RootState::Foreign(why) | RootState::Unknown(why) => Err(not_ours(root, &why)),
+        // Nothing is there even after the attempt: the creation failed for a
+        // reason the caller should see (a read-only parent, a full disk), or —
+        // when the attempt itself is what failed — its own error is the honest
+        // one to report.
+        RootState::Absent => Err(creation
+            .err()
+            .unwrap_or_else(|| not_ours(root, "the cache directory could not be created"))),
+    }
 }
 
 fn is_stale(entry: &ScannedEntry, now: SystemTime) -> bool {
@@ -717,81 +1046,183 @@ fn is_stale(entry: &ScannedEntry, now: SystemTime) -> bool {
     }
 }
 
-/// Every file under `root`, recursively. Symlinks are not followed (a symlink
-/// out of the tree would let `clear` or LRU delete something outside the
-/// cache), and a directory that cannot be read is skipped rather than fatal.
-fn scan(root: &Path) -> std::io::Result<Vec<ScannedEntry>> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let reader = match fs::read_dir(&dir) {
-            Ok(reader) => reader,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
+/// What a walk of a cache root found: the files this cache wrote, and how many
+/// things under the root it did not write.
+///
+/// The two halves are kept apart in the type on purpose. Every caller of this
+/// function deletes something, so a file this cache did not write must not be
+/// able to reach one: the foreign side is a count, and a count cannot be
+/// turned back into a path by accident.
+struct Scanned {
+    ours: Vec<ScannedEntry>,
+    /// Files and directories whose names are not this cache's, at the root or
+    /// inside a pack directory. A directory that is not a pack directory counts
+    /// as one entry and is not walked.
+    foreign: usize,
+}
+
+/// Walk the two levels this cache writes, and nothing else.
+///
+/// `<root>/<pack id>/<offset>-<length>` is the whole of the layout: one
+/// directory per pack id, one entry file inside it, plus the root's own
+/// `.lock` and marker files, and the `.tmp-<pid>-<seq>` files a store is in the
+/// middle of, which live beside the entry they are about to become. A file
+/// whose name does not match that, a directory whose name is not a pack id, a
+/// second level of nesting, and every symlink (a symlink out of the tree would
+/// let a delete land outside it) are **not ours**: they are counted and never
+/// entered. That is what keeps `clear` and the eviction pass inside the files
+/// the cache itself wrote.
+///
+/// A directory that cannot be read is fatal rather than skipped, because the
+/// caller is deciding what to delete: "could not look" must never be read as
+/// "there is nothing there".
+fn scan(root: &Path) -> std::io::Result<Scanned> {
+    let mut out = Scanned {
+        ours: Vec::new(),
+        foreign: 0,
+    };
+    let reader = match fs::read_dir(root) {
+        Ok(reader) => reader,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for entry in reader {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
         };
-        for entry in reader {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        // The cache's own root-level files, by exact name, and only as regular
+        // files: a directory or symlink wearing one of these names is not
+        // something this cache wrote.
+        if name == LOCK_NAME || name == MARKER_NAME {
+            if file_type.is_file() {
+                let kind = if name == LOCK_NAME {
+                    Owned::Lock
+                } else {
+                    Owned::Marker
+                };
+                if let Some(entry) = measured(entry.path(), kind)? {
+                    out.ours.push(entry);
+                }
+            } else {
+                out.foreign += 1;
             }
-            if !file_type.is_file() {
-                continue;
-            }
-            let metadata = entry.metadata()?;
-            let transient = name.starts_with('.');
-            out.push(ScannedEntry {
-                path,
-                bytes: metadata.len(),
-                modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                transient,
-                is_lock: name == LOCK_NAME,
-            });
+            continue;
         }
+        // Nothing else at the root is a temp file: both writers put their temp
+        // where the file is going — an entry's temp inside its pack directory,
+        // and the root's own creation inside a staging directory that is not the
+        // root at all (see `create_our_root`).
+        if file_type.is_dir() && is_pack_dir_name(&name) {
+            scan_pack_dir(&entry.path(), &mut out)?;
+            continue;
+        }
+        out.foreign += 1;
     }
     Ok(out)
 }
 
-/// Remove directories left empty by eviction or `clear`. Best effort: a
-/// directory that is not empty (a concurrent writer just created something in
-/// it) simply stays.
-fn remove_empty_dirs(root: &Path) {
-    let mut dirs = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(reader) = fs::read_dir(&dir) else {
-            continue;
+/// One level inside a pack directory: the entry files and in-flight temp files
+/// this cache writes there, and a count of anything else.
+fn scan_pack_dir(dir: &Path, out: &mut Scanned) -> std::io::Result<()> {
+    let reader = match fs::read_dir(dir) {
+        Ok(reader) => reader,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in reader {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
         };
-        for entry in reader.flatten() {
-            // An entry whose type cannot be read is skipped: this pass only
-            // removes empty directories, so the only consequence of skipping
-            // one is that it stays. Treating "could not stat" as "is a
-            // directory" would instead try to remove something we know nothing
-            // about.
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                let path = entry.path();
-                stack.push(path.clone());
-                dirs.push(path);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        // Anything that is not a regular file — a nested directory, a symlink —
+        // is somebody else's, whatever it is called.
+        let kind = if !file_type.is_file() {
+            None
+        } else if is_entry_name(&name) {
+            Some(Owned::Entry)
+        } else if is_temp_name(&name) {
+            Some(Owned::Temp)
+        } else {
+            None
+        };
+        match kind {
+            Some(kind) => {
+                if let Some(entry) = measured(entry.path(), kind)? {
+                    out.ours.push(entry);
+                }
             }
+            None => out.foreign += 1,
         }
     }
-    // Deepest first, so a parent that becomes empty is removed in the same pass.
-    dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
-    for dir in dirs {
-        let _removed = fs::remove_dir(&dir);
+    Ok(())
+}
+
+/// One file's size and modification time, or `None` when the name is gone.
+///
+/// "Gone" is not a failure, and it is not rare: a store writes its entry as a
+/// temp file and renames it into place, so a walk of the same pack directory —
+/// which a concurrent store runs, because one `read` stores blobs from several
+/// threads at once — can list a name that is no longer there by the time it is
+/// looked at. Returning an error for that would make the walk fail over a file
+/// that needs neither measuring nor deleting, and the `put` that caused it would
+/// count the failure against a store that succeeded.
+///
+/// Any other error is still an error: "could not look" must never read as
+/// "nothing is there".
+///
+/// `symlink_metadata` rather than `metadata`: callers reach this only for names
+/// that are already regular files, and not following a link is the rule
+/// everywhere in this module.
+fn measured(path: PathBuf, kind: Owned) -> std::io::Result<Option<ScannedEntry>> {
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(Some(ScannedEntry {
+        path,
+        bytes: metadata.len(),
+        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        kind,
+    }))
+}
+
+/// Remove the pack directories left empty by eviction or `clear`. Best effort:
+/// a directory that is not empty (a concurrent writer just created something in
+/// it) simply stays.
+///
+/// Only directories whose name is a pack id, one level below the root: a
+/// directory this cache did not name is not this cache's to remove, even when
+/// it happens to be empty.
+fn remove_empty_dirs(root: &Path) {
+    let Ok(reader) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in reader.flatten() {
+        if !is_pack_dir_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        // An entry whose type cannot be read is skipped: this pass only removes
+        // empty directories, so the only consequence of skipping one is that it
+        // stays. Treating "could not stat" as "is a directory" would instead
+        // try to remove something we know nothing about.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            let _removed = fs::remove_dir(entry.path());
+        }
     }
 }
 
@@ -973,17 +1404,30 @@ impl WriteBackend for BodyCacheBackend {
 }
 
 /// Measure a cache root for `doctor`: the bytes and entries it holds, `None`
-/// when the directory does not exist (which is *unmeasured*, not zero).
+/// when there is nothing of this cache's to measure.
+///
+/// `None` covers both "no directory there yet" and "a directory that is not
+/// this cache's", and the caller must ask [`root_state`] which of the two it
+/// is: they are different findings, and neither is a measured zero. The second
+/// is never measured at all — a directory this cache did not create is not its
+/// occupancy, and walking it to add up bytes would be measuring somebody else's
+/// disk.
 pub fn measure(root: &Path) -> std::io::Result<Option<Usage>> {
-    if !root.exists() {
-        return Ok(None);
+    match root_state(root) {
+        RootState::Cache => Ok(Some(BodyCache::new(root.to_path_buf(), 0).usage()?)),
+        RootState::Absent | RootState::Foreign(_) => Ok(None),
+        RootState::Unknown(why) => Err(std::io::Error::other(why)),
     }
-    Ok(Some(BodyCache::new(root.to_path_buf(), 0).usage()?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every cache below is rooted at `<tempdir>/body`, a directory the cache
+    // creates (with its marker) on the first store. The temporary directory
+    // itself is *not* a valid root — it exists and this cache did not create it
+    // — which is the point of `clear_refuses_a_directory_the_cache_did_not_create`.
 
     /// A pack id that is a function of `n`, so two keys in one test cannot
     /// collide by accident.
@@ -1029,7 +1473,7 @@ mod tests {
     #[test]
     fn entry_round_trips_and_a_flipped_byte_is_a_miss() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1 << 20);
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
         let k = key(1, 0, 16);
         let payload = b"ciphertext bytes";
         cache.put(&k, payload);
@@ -1059,7 +1503,7 @@ mod tests {
     #[test]
     fn a_truncated_entry_is_a_miss() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1 << 20);
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
         let k = key(2, 8, 4);
         cache.put(&k, b"abcd");
         let path = k.path(cache.root());
@@ -1072,7 +1516,7 @@ mod tests {
     #[test]
     fn a_file_that_is_not_ours_is_a_miss_not_a_payload() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1 << 20);
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
         let k = key(3, 0, 4);
         let path = k.path(cache.root());
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -1086,7 +1530,7 @@ mod tests {
         let dir = tempdir();
         // Room for three 100-byte payloads and their headers, not four.
         let quota = 3 * (ENTRY_HEADER_LEN as u64 + 100);
-        let cache = BodyCache::new(dir.path().to_path_buf(), quota);
+        let cache = BodyCache::new(dir.path().join("body"), quota);
         let keys = [key(10, 0, 100), key(11, 0, 100), key(12, 0, 100)];
         for (i, k) in keys.iter().enumerate() {
             cache.put(k, &[b'a' + i as u8; 100]);
@@ -1114,7 +1558,7 @@ mod tests {
     #[test]
     fn an_entry_larger_than_the_quota_is_never_stored() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 100);
+        let cache = BodyCache::new(dir.path().join("body"), 100);
         let k = key(20, 0, 200);
         cache.put(&k, &[0u8; 200]);
         assert_eq!(cache.stats().stored, 0);
@@ -1122,10 +1566,60 @@ mod tests {
         assert!(!k.path(cache.root()).exists());
     }
 
+    /// A cold cache filled by several threads at once stores everything.
+    ///
+    /// One `read` calls `put` from several threads — rustic reads bodies in
+    /// parallel — so the first store creates the root while other threads are
+    /// already asking whether that directory is the cache's. If creating it
+    /// were two steps (make the directory, then write the marker), those
+    /// threads would see a directory with no marker and refuse the store,
+    /// because "a directory this cache did not create" is exactly what that
+    /// looks like from outside. So the creation is one step: at that path there
+    /// is either nothing, or a directory that already carries the marker.
+    #[test]
+    fn a_cold_root_filled_by_several_threads_stores_everything() {
+        const THREADS: u8 = 8;
+        const ROUNDS: u8 = 20;
+        let dir = tempdir();
+        for round in 0..ROUNDS {
+            // A fresh root per round: the race is in the creation, so a single
+            // round would only ever exercise it once.
+            let cache = Arc::new(BodyCache::new(
+                dir.path().join(format!("body-{round}")),
+                1 << 20,
+            ));
+            let start = Arc::new(std::sync::Barrier::new(THREADS as usize));
+            let threads: Vec<_> = (0..THREADS)
+                .map(|n| {
+                    let cache = cache.clone();
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        cache.put(&key(n.wrapping_add(round), 0, 4), b"aaaa");
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().expect("thread must not panic");
+            }
+            assert_eq!(
+                cache.stats().errors,
+                0,
+                "round {round}: a store was refused, so the root was seen without its marker"
+            );
+            assert_eq!(
+                cache.stats().stored,
+                u64::from(THREADS),
+                "round {round}: every store must land"
+            );
+            assert_eq!(root_state(cache.root()), RootState::Cache);
+        }
+    }
+
     #[test]
     fn a_session_over_a_tenth_of_the_quota_is_not_stored() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1_000);
+        let cache = BodyCache::new(dir.path().join("body"), 1_000);
         let k = key(30, 0, 10);
         {
             // 101 > 1000 / 10: refused for the whole scope, and the refusal is
@@ -1151,7 +1645,7 @@ mod tests {
     #[test]
     fn session_scopes_nest_and_restore() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1_000);
+        let cache = BodyCache::new(dir.path().join("body"), 1_000);
         {
             let _outer = cache.declare_session(50);
             assert_eq!(cache.session_bytes.load(Ordering::Relaxed), 50);
@@ -1171,7 +1665,7 @@ mod tests {
     #[test]
     fn clear_removes_entries_and_keeps_the_lock() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1 << 20);
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
         cache.put(&key(40, 0, 4), b"aaaa");
         cache.put(&key(41, 0, 4), b"bbbb");
         let lock = cache.root().join(LOCK_NAME);
@@ -1189,19 +1683,237 @@ mod tests {
         );
     }
 
+    /// A directory this cache did not create is refused, loudly, and nothing in
+    /// it is touched — a `[cache] dir` with a typo in it must not be emptied.
+    #[test]
+    fn clear_refuses_a_directory_the_cache_did_not_create() {
+        let dir = tempdir();
+        let root = dir.path().join("not-a-cache");
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        fs::write(root.join("notes.txt"), b"someone else's file").expect("write");
+        fs::write(root.join("sub").join("keep.txt"), b"and another").expect("write");
+
+        let cache = BodyCache::new(root.clone(), 1 << 20);
+        let err = cache
+            .clear()
+            .expect_err("a directory without the cache's own marker must not be cleared");
+        assert!(
+            err.to_string().contains(".chat-stasher-body-cache"),
+            "the refusal must name the marker it looked for, so the fix is in the \
+             message: {err}"
+        );
+        assert!(
+            root.join("notes.txt").exists(),
+            "an unrelated file was deleted"
+        );
+        assert!(
+            root.join("sub").join("keep.txt").exists(),
+            "an unrelated subdirectory was emptied"
+        );
+        assert!(
+            !root.join(".chat-stasher-body-cache").exists(),
+            "the refusal must not write the marker: the next run would then treat \
+             this directory as the cache's own"
+        );
+    }
+
+    /// Everything under a cache root that this cache did not write is left
+    /// alone: at the root, in a directory of its own, inside one of the cache's
+    /// own pack directories, and one level deeper than the layout goes.
+    #[test]
+    fn clear_leaves_files_the_cache_did_not_write() {
+        let dir = tempdir();
+        let root = dir.path().join("body");
+        let cache = BodyCache::new(root.clone(), 1 << 20);
+        // Storing is what creates the root, marker included.
+        let k = key(40, 0, 4);
+        cache.put(&k, b"aaaa");
+        cache.put(&key(41, 0, 4), b"bbbb");
+        let pack = k.path(&root).parent().expect("pack dir").to_path_buf();
+
+        fs::write(root.join("notes.txt"), b"someone else's file").expect("write");
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        fs::write(root.join("sub").join("keep.txt"), b"and another").expect("write");
+        fs::write(pack.join("stray.txt"), b"not ours either").expect("write");
+        // A directory whose name is not a pack id, holding a file named exactly
+        // like an entry: only the layout makes a file ours, not the name alone.
+        let decoy = root.join("not-a-pack");
+        fs::create_dir_all(&decoy).expect("mkdir");
+        fs::write(decoy.join("0-4"), b"entry-shaped, not an entry").expect("write");
+        // And a pack-id directory one level too deep to be part of the layout.
+        let deep = root.join("aabb").join("ccdd");
+        fs::create_dir_all(&deep).expect("mkdir");
+        fs::write(deep.join("deep.txt"), b"one level too far").expect("write");
+
+        let removed = cache.clear().expect("clear a cache directory it created");
+        assert_eq!(
+            removed.entries, 2,
+            "the two entries are the only things that go"
+        );
+        for survivor in [
+            root.join("notes.txt"),
+            root.join("sub").join("keep.txt"),
+            pack.join("stray.txt"),
+            decoy.join("0-4"),
+            deep.join("deep.txt"),
+        ] {
+            assert!(
+                survivor.exists(),
+                "{} was deleted, and this cache did not write it",
+                survivor.display()
+            );
+        }
+        assert!(!k.path(&root).exists(), "the entries themselves must go");
+        assert_eq!(cache.usage().expect("usage").entries, 0);
+    }
+
+    /// Quota eviction deletes the same set `clear` does. A file this cache did
+    /// not write is not merely left alone — it is not picked as the oldest
+    /// thing to evict, which is what would happen if the LRU pass could see it.
+    #[test]
+    fn eviction_leaves_files_the_cache_did_not_write() {
+        let dir = tempdir();
+        let quota = 3 * (ENTRY_HEADER_LEN as u64 + 100);
+        let cache = BodyCache::new(dir.path().join("body"), quota);
+        let keys = [key(70, 0, 100), key(71, 0, 100), key(72, 0, 100)];
+        for (i, k) in keys.iter().enumerate() {
+            cache.put(k, &[b'a' + i as u8; 100]);
+            set_mtime(
+                &k.path(cache.root()),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + i as u64),
+            );
+        }
+        // Both foreign files are older than every entry, so a pass that could
+        // see them would delete them first.
+        let foreign = cache.root().join("keep-me.txt");
+        fs::write(&foreign, b"not a cache entry").expect("write");
+        set_mtime(&foreign, SystemTime::UNIX_EPOCH);
+        let pack = keys[0].path(cache.root());
+        let stray = pack.parent().expect("pack dir").join("stray.txt");
+        fs::write(&stray, b"nor this").expect("write");
+        set_mtime(&stray, SystemTime::UNIX_EPOCH);
+
+        // One entry more than the quota holds, which is what starts eviction.
+        cache.put(&key(73, 0, 100), &[b'd'; 100]);
+
+        assert!(foreign.exists(), "eviction deleted a file it did not write");
+        assert!(stray.exists(), "eviction deleted a file it did not write");
+        assert!(
+            cache.usage().expect("usage").bytes <= quota,
+            "the quota must still be met"
+        );
+        assert!(
+            !keys[0].path(cache.root()).exists(),
+            "the oldest entry of this cache is what the quota costs"
+        );
+        assert!(keys[2].path(cache.root()).exists());
+    }
+
     #[test]
     fn usage_counts_entries_and_ignores_transient_files() {
         let dir = tempdir();
-        let cache = BodyCache::new(dir.path().to_path_buf(), 1 << 20);
-        cache.put(&key(50, 0, 4), b"aaaa");
-        let transient = cache.root().join(".tmp-in-flight");
-        fs::write(&transient, b"partial").expect("write temp");
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
+        let k = key(50, 0, 4);
+        cache.put(&k, b"aaaa");
+        // An in-flight write, where the cache actually puts one: inside the pack
+        // directory, beside the entry it is about to become. (A dot-file at the
+        // root would be a file this cache never writes there — see
+        // `usage_reports_files_the_cache_did_not_write`.)
+        let in_flight = k
+            .path(cache.root())
+            .parent()
+            .expect("pack dir")
+            .join(format!(".tmp-{}-77", std::process::id()));
+        fs::write(&in_flight, b"partial").expect("write temp");
         let usage = cache.usage().expect("usage");
         assert_eq!(usage.entries, 1, "a temp file is not an entry");
         assert!(
             usage.bytes > ENTRY_HEADER_LEN as u64 + 4,
             "but its bytes are on the disk the quota is about"
         );
+        assert_eq!(
+            usage.foreign_entries, 0,
+            "a temp file the cache wrote is not foreign either"
+        );
+    }
+
+    /// The marker is what makes a directory the cache's own, and the cache
+    /// writes it when it creates that directory.
+    #[test]
+    fn storing_writes_the_marker_that_claims_the_root() {
+        let dir = tempdir();
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
+        assert!(!cache.root().exists(), "nothing is created before a store");
+
+        cache.put(&key(80, 0, 4), b"aaaa");
+        let marker = cache.root().join(".chat-stasher-body-cache");
+        assert!(
+            marker.is_file(),
+            "the first store must claim the directory it created"
+        );
+        let raw = fs::read(&marker).expect("read marker");
+        assert!(
+            raw.starts_with(b"chat-stasher body cache"),
+            "the marker must say what wrote it"
+        );
+        assert_eq!(root_state(cache.root()), RootState::Cache);
+    }
+
+    /// A store into a directory the cache did not create is refused: filling a
+    /// directory the user pointed at by mistake is the write-side half of what
+    /// `clear` refuses on the delete side.
+    #[test]
+    fn put_refuses_a_directory_the_cache_did_not_create() {
+        let dir = tempdir();
+        let root = dir.path().join("someone-elses-dir");
+        fs::create_dir_all(&root).expect("mkdir");
+        let cache = BodyCache::new(root.clone(), 1 << 20);
+        let k = key(90, 0, 4);
+        cache.put(&k, b"aaaa");
+
+        assert_eq!(cache.stats().stored, 0, "nothing may be stored there");
+        assert_eq!(
+            cache.stats().errors,
+            1,
+            "the refusal is counted, not silent"
+        );
+        assert!(
+            !k.path(&root).exists(),
+            "no entry may be written into a directory this cache did not create"
+        );
+        assert!(
+            !root.join(".chat-stasher-body-cache").exists(),
+            "and the refusal must not claim the directory"
+        );
+        assert_eq!(cache.get(&k), None);
+    }
+
+    /// Foreign files and directories are counted — so a directory with
+    /// something else in it is never described as an empty cache — and their
+    /// bytes are never the quota's business.
+    #[test]
+    fn usage_reports_files_the_cache_did_not_write() {
+        let dir = tempdir();
+        let cache = BodyCache::new(dir.path().join("body"), 1 << 20);
+        let k = key(100, 0, 4);
+        cache.put(&k, b"aaaa");
+        assert_eq!(cache.usage().expect("usage").foreign_entries, 0);
+
+        fs::write(cache.root().join("notes.txt"), b"not a cache entry").expect("write");
+        let sub = cache.root().join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        // A directory counts as one and is not walked, however much is inside.
+        fs::write(sub.join("deep.txt"), b"and another").expect("write");
+
+        let usage = cache.usage().expect("usage");
+        assert_eq!(usage.foreign_entries, 2, "a file and a directory");
+        assert_eq!(
+            usage.bytes,
+            ENTRY_HEADER_LEN as u64 + 4,
+            "the quota is enforced against this cache's own bytes only: a \
+             directory the cache cannot shrink must not cost it its entries"
+        );
+        assert_eq!(usage.entries, 1);
     }
 
     #[test]

@@ -1468,6 +1468,11 @@ pub enum BodyCacheCheck {
     /// root to report. Distinct from "off": the user asked for a cache and it
     /// is not where they asked for it.
     Unresolved { detail: String },
+    /// A directory is there that this cache did not create, so it is not the
+    /// cache's occupancy, not a measured zero, and not a directory this tool
+    /// will write to or delete from. Distinct from `NoCacheDir` (nothing is
+    /// there) and from `Unreadable` (could not look).
+    NotACacheRoot { root: PathBuf, detail: String },
     /// The cache is on and measured.
     Ok {
         root: PathBuf,
@@ -1484,6 +1489,7 @@ impl BodyCacheCheck {
             BodyCacheCheck::NoCacheDir { .. } => "no_cache_dir",
             BodyCacheCheck::Unreadable { .. } => "unreadable",
             BodyCacheCheck::Unresolved { .. } => "unresolved",
+            BodyCacheCheck::NotACacheRoot { .. } => "not_a_cache_root",
             BodyCacheCheck::Ok { .. } => "ok",
         }
     }
@@ -1495,6 +1501,8 @@ impl BodyCacheCheck {
 /// has one, because "the cache is using 40 GB" is only meaningful against the
 /// number the user set.
 pub fn inspect_body_cache(config: &Config) -> BodyCacheCheck {
+    use crate::body_cache::RootState;
+
     let settings = match crate::body_cache::settings_for(config) {
         Ok(settings) => settings,
         Err(e) => {
@@ -1503,6 +1511,21 @@ pub fn inspect_body_cache(config: &Config) -> BodyCacheCheck {
             }
         }
     };
+    match crate::body_cache::root_state(&settings.root) {
+        RootState::Foreign(detail) => {
+            return BodyCacheCheck::NotACacheRoot {
+                root: settings.root,
+                detail,
+            }
+        }
+        RootState::Unknown(detail) => {
+            return BodyCacheCheck::Unreadable {
+                root: settings.root,
+                error: detail,
+            }
+        }
+        RootState::Absent | RootState::Cache => {}
+    }
     if !settings.enabled() {
         let leftover = crate::body_cache::measure(&settings.root).ok().flatten();
         return BodyCacheCheck::Disabled {
@@ -1557,6 +1580,12 @@ fn body_cache_json(c: &BodyCacheCheck) -> serde_json::Value {
             "total_bytes": CountState::unknown(detail),
             "error": detail,
         }),
+        BodyCacheCheck::NotACacheRoot { root, detail } => serde_json::json!({
+            "kind": "not_a_cache_root",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::unknown(detail),
+            "error": detail,
+        }),
         BodyCacheCheck::Ok {
             root,
             max_bytes,
@@ -1567,6 +1596,10 @@ fn body_cache_json(c: &BodyCacheCheck) -> serde_json::Value {
             "max_bytes": CountState::known(*max_bytes),
             "total_bytes": CountState::known(usage.bytes),
             "entries": usage.entries,
+            // Always present in the JSON, even at zero: a script comparing two
+            // machines should be able to read the count rather than infer it
+            // from a missing key.
+            "foreign_entries": usage.foreign_entries,
         }),
     }
 }
@@ -1605,6 +1638,16 @@ fn print_body_cache(c: &BodyCacheCheck) {
                 "  fix `[cache] dir` in the config; reads keep working, and each one fetches from the destination."
             );
         }
+        BodyCacheCheck::NotACacheRoot { root, detail } => {
+            eprintln!("  body cache root: {}", root.display());
+            eprintln!("  not a chat-stasher body cache: {detail}");
+            eprintln!(
+                "  nothing here is measured, written or deleted; reads keep working and fetch from the destination."
+            );
+            eprintln!(
+                "  point `[cache] dir` at a directory chat-stasher created, or remove this one by hand."
+            );
+        }
         BodyCacheCheck::Ok {
             root,
             max_bytes,
@@ -1622,6 +1665,14 @@ fn print_body_cache(c: &BodyCacheCheck) {
                 fmt_bytes(*max_bytes),
                 max_bytes
             );
+            if usage.foreign_entries > 0 {
+                // Said only when there is something to say: at zero the
+                // occupancy above is already the whole of it.
+                eprintln!(
+                    "  foreign    : {} file(s) or directory(ies) here were not written by chat-stasher — not in the bytes above, and never deleted",
+                    usage.foreign_entries
+                );
+            }
             eprintln!(
                 "  note: this cache holds conversation bodies as the destination's own ciphertext. It is disposable —"
             );
@@ -3393,6 +3444,40 @@ mod json_tests {
             "a cache switched off must still show what it left on the disk"
         );
         assert_eq!(v["entries"], serde_json::json!(1));
+    }
+
+    /// A directory that is not the cache's own is reported as such, and its
+    /// bytes are not presented as this cache's occupancy.
+    #[test]
+    fn body_cache_report_distinguishes_another_directory_from_an_empty_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("someone-elses-dir");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("keep-me.txt"), b"not a cache entry").unwrap();
+        let config = Config {
+            cache: Some(crate::config::CacheSectionConfig {
+                max_bytes: Some(crate::body_cache::CacheSize(1 << 20)),
+                dir: Some(root.to_string_lossy().into_owned()),
+            }),
+            ..Config::default()
+        };
+
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "not_a_cache_root");
+        let v = body_cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("not_a_cache_root"));
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(".chat-stasher-body-cache"),
+            "the report must name the marker it looked for: {v}"
+        );
+        assert_ne!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":17}),
+            "another directory's bytes are not this cache's occupancy"
+        );
     }
 
     #[test]
