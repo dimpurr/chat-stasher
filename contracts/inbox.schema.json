@@ -91,6 +91,66 @@
           "type": "string"
         }
       }
+    },
+    "account": {
+      "description": "Since @2 (W128 step 1). An irreversible account fingerprint: HMAC-SHA256, keyed with a random salt this install keeps in storage.local and never syncs, over a domain- and platform-separated message containing the platform's stable account/org id. The raw id is never written, and no email is ever used as the input. A bundle either carries a fingerprint or carries the named fact that it does not; there is no third, empty spelling. '@1' bundles have no `account` key at all, which is a different statement from kind 'unknown'. The CLI stores this envelope verbatim and it takes no part in the id or the dedup key, which remain platform.sessionId and file_sha256.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "value",
+            "source",
+            "saltId"
+          ],
+          "properties": {
+            "kind": {
+              "const": "fingerprint"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "Lowercase hex HMAC-SHA256."
+            },
+            "source": {
+              "enum": [
+                "request-url-organization",
+                "response-body-platform-uid"
+              ],
+              "description": "Where the input id came from. 'request-url-organization' is a path segment of the page's own request (verified, page-owned). 'response-body-platform-uid' is the ADR-002 account axis read from the captured body by the generic scan, whose candidate key names are not confirmed against a logged-in page."
+            },
+            "saltId": {
+              "type": "string",
+              "description": "The public half of this install's salt: an opaque per-install id, not the key, and not derivable from it. Two fingerprints may only be compared when their saltId values are equal; a per-install salt makes values from different installs or profiles incomparable, and that must not be read as an account switch. It exists so that limit is visible in the archive instead of being inferred wrongly."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unknown"
+            },
+            "reason": {
+              "enum": [
+                "platform-not-recognized",
+                "organization-not-in-request-url",
+                "no-account-id-in-capture",
+                "email-is-not-an-account-id",
+                "handle-is-not-an-account-id",
+                "salt-unavailable",
+                "salt-unreadable",
+                "crypto-unavailable"
+              ],
+              "description": "Every value is a distinct fact. 'salt-unreadable' means a salt record exists and does not parse, and is deliberately not replaced by a fresh one: that would re-key every later fingerprint and read as an account switch."
+            }
+          }
+        }
+      ]
     }
   }
 }
