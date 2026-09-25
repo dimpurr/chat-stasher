@@ -1,0 +1,34 @@
+{
+  "name": "chat-stasher",
+  "version": "0.0.0",
+  "description": "Append-only archive for every LLM conversation, across harnesses.",
+  "keywords": [
+    "llm",
+    "archive",
+    "conversation",
+    "claude",
+    "codex",
+    "cli"
+  ],
+  "homepage": "https://github.com/dimpurr/chat-stasher",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dimpurr/chat-stasher.git"
+  },
+  "license": "Apache-2.0",
+  "bin": {
+    "chat-stasher": "bin/chat-stasher.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "NOTICE"
+  ],
+  "optionalDependencies": {
+    "@dimpurr/chat-stasher-darwin-arm64": "0.0.0",
+    "@dimpurr/chat-stasher-darwin-x64": "0.0.0"
+  },
+  "private": true
+}

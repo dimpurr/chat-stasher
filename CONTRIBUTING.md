@@ -61,6 +61,7 @@ python3 scripts/check-support-matrix.py --selftest
 python3 scripts/check-commit-messages.py --selftest
 bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
+node --test npm/test/*.test.mjs
 bash scripts/release-gate.sh
 ```
 
@@ -68,6 +69,11 @@ bash scripts/release-gate.sh
 repository and a stub build command, so it needs no extension toolchain, no
 network and no browser. It is the guard for the reload script's mechanics, which
 is why it sits here rather than only in the section below that describes them.
+
+The npm launcher's tests need no toolchain either: they run against a fake
+platform package built in a temp directory, and they force the platform they
+examine rather than reading the machine's, so the macOS paths are covered on any
+host. Node 18 is the floor `npm/package.json` declares, so that is what CI uses.
 
 The browser extension is a second project with its own toolchain. Its checks are
 the same CI runs for it, and they must exit 0 too:

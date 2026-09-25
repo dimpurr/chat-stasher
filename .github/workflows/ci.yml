@@ -275,6 +275,29 @@ jobs:
       - name: Extension reload script behaves
         run: bash scripts/dev/test-reload-extension.sh
 
+      # The npm launcher is the one thing in this repository that runs on a
+      # machine with no Rust and no build step, so its tests must not need one
+      # either. They are here, in the portable job, for the same reason the
+      # reload script's are: they build their own fixtures under a temp
+      # directory and touch nothing else.
+      #
+      # Node 18 is deliberate, not incidental. It is the floor npm/package.json
+      # declares in `engines`, and this step is what holds that claim to
+      # something. The launcher's tests force the platform they examine with a
+      # harness (`process.platform` is redefined in the child), so all of the
+      # darwin-specific paths are exercised here, on Linux, rather than being
+      # skipped on the one machine that runs them.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      # The file list is expanded by the shell, not by the test runner: Node 18
+      # has no glob support in `--test` arguments, and a new test file is picked
+      # up by the glob rather than by an edit to this line.
+      - name: npm launcher and packaging
+        run: node --test npm/test/*.test.mjs
+
   extension:
     # COVERAGE HOLE (deliberate): the extension is built and tested on Linux
     # only. WXT/vitest on macOS and Windows runners are NOT covered by CI.

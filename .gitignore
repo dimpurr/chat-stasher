@@ -21,6 +21,11 @@ scripts/__pycache__/
 # release artifacts produced by scripts/release-artifacts.sh
 dist/
 
+# npm packages: nothing in npm/ has dependencies, so a node_modules there is
+# always an accident, and a tarball is always a local experiment
+npm/node_modules/
+npm/**/*.tgz
+
 # A literal `~` directory: a config path that was never tilde-expanded
 # must never become a committed file in a public repo.
 ~/
