@@ -196,6 +196,23 @@ describe('W113 · item 4 — the state, and why', () => {
     expect(rowOf(input({ scopes: [scope({ registered: false })] })).state).toBe('unregistered');
   });
 
+  it('🔴 W113b · …and that does not depend on owing nothing: an unregistered scope that owes is not "in progress"', () => {
+    // Before W113b the unregistered test also required `pending.length === 0`, so a leftover that still owed
+    // work fell through to `in-progress` — "there is work and nothing is stopping it" — and `speedNote` then
+    // published a live ETA for a leg with no target in the registry. Measured here on the sentence itself,
+    // because the state alone would not catch a row that is `unregistered` and still quotes an estimate.
+    const owed = { pending: ['p1', 'p2'], archived: [], times: new Map() };
+    const row = rowOf(input({
+      scopes: [scope({ registered: false, debt: owed, header: header({ pendingCount: 2 }) })],
+    }));
+    expect(row.state).toBe('unregistered');
+    // The owed count is still reported — §3 asks for it, and "this cannot run" is not a reason to hide it.
+    expect(row.pending).toBe(2);
+    const note = speedNote(row, NOW);
+    expect(note).not.toContain('estimate: about');
+    expect(note).toContain('nothing runs for this platform here');
+  });
+
   it("today's quota being spent is not a stop", () => {
     const plan = SPEED_PLANS.standard;
     const row = rowOf(input({

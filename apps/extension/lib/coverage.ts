@@ -376,7 +376,20 @@ function stateOf(input: CoverageScopeInput, enabled: boolean, hostPaused: boolea
   //    silent success. `stopStillApplies` is the *engine's* question and is answered by the engine (a halt
   //    that expired or that another build left is not in force); this model reports what the header holds.
   if (header.halted) return 'halted';
-  if (!registered && debt !== null && debt.pending.length === 0) return 'unregistered';
+  /**
+   * 🔴 W113b · **The unregistered check is not conditioned on the debt being empty.**
+   *
+   * A scope the registry does not name is a leftover: the engine has no target to run for it, so no wake
+   * will ever fetch what it owes. Testing `pending.length === 0` here let a leftover that *did* owe
+   * something fall through to `capped`/`waiting`/`in-progress` — "there is work and nothing is stopping
+   * it" — and the row went on to publish a live ETA (`speedNote` reads this state to choose its sentence)
+   * for a leg that cannot run. The pending count is still reported, as a count: item 3 asks for the owed
+   * number, not for a guess about when it will be fetched.
+   *
+   * A store that cannot be read is still the other case, below: there the count is unknown, and that is a
+   * different fact from "this scope is not registered".
+   */
+  if (!registered && debt !== null) return 'unregistered';
   if (debt === null) {
     // The store could not be read. We know a header exists; we do not know whether work remains, so the
     // honest state is "there is work we cannot count" rather than either `done` or `in-progress`.
@@ -587,21 +600,27 @@ export function speedNote(row: CoverageRow, now: number): string {
     : t('coverage.speed.measured', { rate: Math.round(speed.measuredPerDay), bodies: speed.bodiesToday, hours: Math.floor(speed.hoursToday) });
   const eta = row.pending === 0
     ? t('coverage.speed.etaNothingOwed')
-    : speed.etaDays === null
-      ? t('coverage.speed.etaUnknown')
-      : speed.etaDays < 1
-        // 🔴 Under a day the sentence switches units rather than rounding to "0.0 days", which reads like
-        //    "no time at all" instead of "less than a day".
-        ? t('coverage.speed.etaHours', {
-          hours: Math.max(1, Math.round(speed.etaDays * 24)),
-          basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
-          pending: row.pending,
-        })
-        : t('coverage.speed.eta', {
-          days: speed.etaDays < 1.5 ? speed.etaDays.toFixed(1) : String(Math.ceil(speed.etaDays)),
-          basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
-          pending: row.pending,
-        });
+    // 🔴 W113b · A scope nothing runs for has no estimate to publish: `speedOf` still computes one from the
+    //    cap (it knows only the numbers), and printing it here would promise a finish to a leg with no
+    //    target in the registry. The sentence says **why** there is none rather than leaving the reader to
+    //    compare this row with the ones that do carry an estimate.
+    : row.state === 'unregistered'
+      ? t('coverage.speed.etaUnregistered', { pending: row.pending })
+      : speed.etaDays === null
+        ? t('coverage.speed.etaUnknown')
+        : speed.etaDays < 1
+          // 🔴 Under a day the sentence switches units rather than rounding to "0.0 days", which reads like
+          //    "no time at all" instead of "less than a day".
+          ? t('coverage.speed.etaHours', {
+            hours: Math.max(1, Math.round(speed.etaDays * 24)),
+            basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
+            pending: row.pending,
+          })
+          : t('coverage.speed.eta', {
+            days: speed.etaDays < 1.5 ? speed.etaDays.toFixed(1) : String(Math.ceil(speed.etaDays)),
+            basis: speed.etaBasis === 'measured' ? t('coverage.speed.basisMeasured') : t('coverage.speed.basisCap'),
+            pending: row.pending,
+          });
   const idle = speed.minutesSinceLastBody === null
     ? t('coverage.speed.neverFetched')
     : t('coverage.speed.lastBody', { minutes: speed.minutesSinceLastBody });

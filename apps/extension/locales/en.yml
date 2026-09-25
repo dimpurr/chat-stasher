@@ -819,6 +819,13 @@ coverage:
       estimate: none — there is no rate to divide by yet, because no quota is in
       force and no measured rate is available
     etaNothingOwed: "estimate: nothing is owed here, so there is nothing to finish"
+    # 🔴 W113b · A scope with no registered target runs nothing, so there is no estimate to give — and the
+    #    sentence has to name that reason, because the two sentences beside it give one (a rate the row does
+    #    have) or name a different cause (no rate to divide by yet). A reader who saw this row next to a row
+    #    with an ETA must be able to tell which of the two is going to finish.
+    etaUnregistered: >-
+      estimate: none — nothing runs for this platform here, so the {pending} still owed will not be
+      fetched until it is registered again
     # 🔴 Under a day the sentence switches units. "about 0.0 day(s)" is arithmetically right and
     #    useless: the reader cannot tell it from "no time at all".
     etaHours: >-
