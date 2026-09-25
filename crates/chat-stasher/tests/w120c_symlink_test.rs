@@ -13,18 +13,25 @@
 //! cannot be built there; the guard the tests exercise is platform-independent
 //! `lstat`, and the rest of the body-cache suite runs on every platform.
 
+#[cfg(unix)]
 use chat_stasher::body_cache::{root_state, BodyCache, CacheKey, RootState, ENTRY_HEADER_LEN};
+#[cfg(unix)]
 use rustic_core::Id;
+#[cfg(unix)]
 use std::fs::{self, FileTimes, OpenOptions};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::{Duration, SystemTime};
 
 /// A pack id that is a function of `n`, so two keys in one test cannot collide.
+#[cfg(unix)]
 fn key(n: u8, offset: u32, length: u32) -> CacheKey {
     let hex = format!("{:02x}", n.wrapping_mul(7)).repeat(32);
     CacheKey::new(&hex.parse::<Id>().expect("hex id"), offset, length)
 }
 
+#[cfg(unix)]
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
@@ -32,6 +39,7 @@ fn tempdir() -> tempfile::TempDir {
 /// A directory outside the cache, holding one file named exactly like a cache
 /// entry. `0-4` is what `key(_, 0, 4)` writes, so a link into here is the
 /// strongest possible decoy.
+#[cfg(unix)]
 fn outside_with_victim(base: &Path) -> PathBuf {
     let outside = base.join("outside");
     fs::create_dir_all(&outside).expect("mkdir outside");
@@ -42,12 +50,14 @@ fn outside_with_victim(base: &Path) -> PathBuf {
 /// Replace `<root>/<pack>/` with a symlink to `outside`, as an attacker or an
 /// accident could leave it. The real pack directory (and the entry inside it)
 /// is removed first, so only the link remains.
+#[cfg(unix)]
 fn link_pack_dir_to(root: &Path, k: &CacheKey, outside: &Path) {
     let pack = k.path(root).parent().expect("pack dir").to_path_buf();
     fs::remove_dir_all(&pack).expect("remove the real pack dir");
     std::os::unix::fs::symlink(outside, &pack).expect("symlink the pack directory");
 }
 
+#[cfg(unix)]
 fn set_mtime(path: &Path, when: SystemTime) {
     let file = OpenOptions::new()
         .write(true)

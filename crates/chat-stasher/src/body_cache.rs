@@ -1288,10 +1288,27 @@ fn is_owned_regular_file(canonical_root: &Path, path: &Path) -> bool {
 /// Delete `path` only when it is a regular file inside the cache root, reached
 /// without following a symlink.
 ///
-/// `Ok(true)` means the file is gone (deleted now, or already absent); `Ok(false)`
-/// means the delete was **refused** because the path is not one of the cache's
-/// own regular files, which the caller reports; `Err` is a real I/O failure on a
-/// file that did pass the check.
+/// `Ok(true)` means this call deleted the file; the one other way to reach it is
+/// the race where the file passed the check and vanished before the `unlink`, in
+/// which case `NotFound` is treated as already-removed. `Ok(false)` means the
+/// delete was **refused** because the path is not one of the cache's own regular
+/// files, which the caller reports — this includes a path that was already
+/// absent when checked, since [`is_owned_regular_file`]'s `lstat` fails first
+/// and only a vanish after a successful check reaches the `Ok(true)` arm. `Err`
+/// is a real I/O failure on a file that did pass the check.
+///
+/// # Accepted residual: the check and the unlink are two syscalls
+///
+/// [`is_owned_regular_file`] (`lstat`) and the `unlink` cannot be made one
+/// operation: a process that can write to the cache root can win the window
+/// between them and point the unlink at a path it planted after the check, and
+/// the store side has the same window between its identity check and its
+/// `rename` (see [`write_entry`]). Closing it would need a `dirfd`-relative,
+/// `O_NOFOLLOW` unlink/rename that std does not expose. This is accepted, not
+/// deferred: the planted-static-symlink scenario of the finding is refused
+/// outright, and an adversary with write access to the cache root can already
+/// poison entries inside a legitimate pack directory, so deleting outside the
+/// root buys no access it does not already have.
 ///
 /// This is the only function in the module that removes a file whose name the
 /// cache recognised, and it is deliberately narrower than the names it is
@@ -1387,6 +1404,9 @@ fn verify_entry(raw: &[u8]) -> Option<&[u8]> {
 /// only after it is proven to be a real directory inside the cache root: a
 /// symlinked pack directory would make the temp file and the rename land
 /// outside the cache, and a rename is a delete of whatever name it replaced.
+///
+/// The check and the rename are still two syscalls; the accepted race window
+/// that leaves is documented on [`remove_owned_file`].
 fn write_entry(root: &Path, path: &Path, payload: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "entry path has no parent")
