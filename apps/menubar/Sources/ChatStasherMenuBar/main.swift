@@ -16,12 +16,22 @@ private struct OverviewDocument: Decodable {
     let command: String
     let exitCode: Int
     let summary: Summary
+    let machines: Machines
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case command
         case exitCode = "exit_code"
         case summary
+        case machines
+    }
+}
+
+private struct Machines: Decodable {
+    let missingIndex: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case missingIndex = "missing_index"
     }
 }
 
@@ -49,6 +59,7 @@ private struct ArchiveSnapshot {
     let summary: Summary
     let refreshedAt: Date
     let completeWithoutIndex: Bool
+    let missingIndexCount: Int
 }
 
 @MainActor
@@ -81,7 +92,8 @@ private final class ArchiveModel: ObservableObject {
                     noConversationContentSessions: 1
                 ),
                 refreshedAt: Date(),
-                completeWithoutIndex: false
+                completeWithoutIndex: false,
+                missingIndexCount: 0
             )
             isRefreshing = false
             return
@@ -96,7 +108,8 @@ private final class ArchiveModel: ObservableObject {
                 self.snapshot = ArchiveSnapshot(
                     summary: document.summary,
                     refreshedAt: Date(),
-                    completeWithoutIndex: document.exitCode == 1
+                    completeWithoutIndex: document.exitCode == 1,
+                    missingIndexCount: document.machines.missingIndex.count
                 )
             case .failure(let reason):
                 self.snapshot = nil
@@ -148,7 +161,13 @@ private final class ArchiveModel: ObservableObject {
             guard process.terminationStatus == 0 || process.terminationStatus == 1 else {
                 return .failure("Archive overview could not be read (exit code \(process.terminationStatus)).")
             }
-            let document = try JSONDecoder().decode(OverviewDocument.self, from: data)
+            // The CLI writes its JSON document first, then may print SSH
+            // ControlMaster cleanup diagnostics to stdout. Decode the line
+            // that contains the document and ignore only the trailing status.
+            guard let jsonLine = data.split(separator: 0x0A, maxSplits: 1).first else {
+                return .failure("Archive overview returned an empty response.")
+            }
+            let document = try JSONDecoder().decode(OverviewDocument.self, from: Data(jsonLine))
             guard document.schemaVersion == 1,
                   document.command == "overview",
                   document.exitCode == process.terminationStatus,
@@ -201,6 +220,15 @@ private struct ArchivePopover: View {
                     Label("Read complete · no activity index", systemImage: "checkmark.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+                if snapshot.missingIndexCount > 0 {
+                    Label(
+                        "Coverage incomplete · \(snapshot.missingIndexCount) machine(s) missing an activity index",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("Source: chat-stasher overview · Updated \(snapshot.refreshedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2)
