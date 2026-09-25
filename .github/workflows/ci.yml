@@ -349,6 +349,16 @@ jobs:
       - name: Extension reload script behaves
         run: bash scripts/dev/test-reload-extension.sh
 
+      # CONTRIBUTING.md lists this as a local check, so CI has to run it too -
+      # otherwise the two sets drift and a green local run stops meaning a green
+      # pull request. It is in this job for the same reason the reload script's
+      # test is: it serves a mock Release over file:// and shadows `uname` on
+      # PATH, so it needs no network, no toolchain and no release artifact, and
+      # the platform branches a Linux runner would never take on its own are
+      # still exercised here.
+      - name: Installer platform branches
+        run: bash scripts/self-test-install.sh
+
       # The npm launcher is the one thing in this repository that runs on a
       # machine with no Rust and no build step, so its tests must not need one
       # either. They are here, in the portable job, for the same reason the
