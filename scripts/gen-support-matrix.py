@@ -82,6 +82,15 @@ SHORT_END = "<!-- support-matrix:short:end -->"
 FULL_START = "<!-- support-matrix:full:start -->"
 FULL_END = "<!-- support-matrix:full:end -->"
 
+# The CLI flag that rewrites each artifact. The failure texts in `check` name
+# these, and the self-test reads its own failure texts back and asserts every
+# flag they mention is one argparse accepts — a stale short block once told the
+# reader to run `--write-short`, which the CLI does not define, so the advice
+# was a dead end. Derived artifacts and the advice about them come from one
+# place or the advice goes wrong on its own.
+FIXTURE_FLAG = "--update-fixtures"
+WRITE_FLAG = {"short": "--write-readme", "full": "--write-docs"}
+
 OS_ORDER = ("macos", "linux", "windows")
 OS_LABEL = {"macos": "macOS", "linux": "Linux", "windows": "Windows"}
 
@@ -448,13 +457,13 @@ def check(root: str) -> tuple[list[str], list[str]]:
     for kind, rel in fixtures.items():
         path = os.path.join(root, rel)
         if not os.path.isfile(path):
-            failures.append(f"{rel}: committed table is missing (run --update-fixtures)")
+            failures.append(f"{rel}: committed table is missing (run {FIXTURE_FLAG})")
             continue
         with open(path, "r", encoding="utf-8") as fh:
             actual = fh.read()
         if normalize(actual) != normalize(expected[kind]):
             failures.append(
-                f"{rel}: committed {kind} table is stale — regenerate with --update-fixtures"
+                f"{rel}: committed {kind} table is stale — regenerate with {FIXTURE_FLAG}"
             )
 
     markers = {
@@ -479,7 +488,7 @@ def check(root: str) -> tuple[list[str], list[str]]:
             if normalize(content) != normalize(expected[kind]):
                 failures.append(
                     f"{rel}: {kind} table between markers is stale — regenerate "
-                    f"with --write-{kind if kind == 'short' else 'docs'}"
+                    f"with {WRITE_FLAG[kind]}"
                 )
     if not found_any:
         notes.append(
@@ -746,8 +755,7 @@ def selftest() -> int:
         with open(readme, "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{SHORT_START}\nold\n{SHORT_END}\n")
         probe("write replaces between markers", write_into_file(tmp, "README.md", "short") == 0)
-        with open(readme, "r", encoding="utf-8") as fh:
-            probe("write result passes the check", run_check(tmp) == 0)
+        probe("write result passes the check", run_check(tmp) == 0)
         probe("write refuses a missing file", write_into_file(tmp, "NOPE.md", "short") == 2)
 
         # Malformed inputs must fail loudly, never render a partial matrix.
@@ -756,6 +764,32 @@ def selftest() -> int:
         probe("a platform with no channel is an error", run_check(tmp) == 2)
         os.remove(os.path.join(tmp, REGISTRY_REL))
         probe("a missing registry is an error", run_check(tmp) == 2)
+
+        # Advice a failure text prints is only advice if the CLI accepts it.
+        # Stale the fixtures, a short block and a full block at once, so the
+        # probe sees every remediation message `check` can emit, then read the
+        # flags back out of those messages and hold them against argparse. This
+        # is the guard for the day one of them named a flag that does not exist.
+        _scaffold(tmp)
+        update_fixtures(tmp)
+        with open(short_path, "w", encoding="utf-8") as fh:
+            fh.write("stale\n")
+        with open(readme, "w", encoding="utf-8") as fh:
+            fh.write(f"# t\n\n{SHORT_START}\nwrong\n{SHORT_END}\n")
+        os.makedirs(os.path.join(tmp, "docs"), exist_ok=True)
+        with open(os.path.join(tmp, "docs", "support.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"# t\n\n{FULL_START}\nwrong\n{FULL_END}\n")
+        printed_flags = {
+            flag for text in check(tmp)[0] for flag in re.findall(r"--[a-z][a-z-]*", text)
+        }
+        probe(
+            "the stale-text probes reached every remediation flag",
+            printed_flags == {FIXTURE_FLAG, WRITE_FLAG["short"], WRITE_FLAG["full"]},
+        )
+        probe(
+            "every remediation flag the check prints is a flag the CLI accepts",
+            printed_flags <= cli_option_strings(),
+        )
 
     if failures:
         print(f"[selftest] FAILED: {failures}/{total} probe(s) did not hold")
@@ -769,7 +803,9 @@ def selftest() -> int:
 # --------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, in one place: `main` runs it, and the self-test asks it which
+    flags exist rather than trusting a second list of them to stay true."""
     ap = argparse.ArgumentParser(description="Render and check the chat-stasher support matrix")
     ap.add_argument("--root", default=default_root(), help="repository root (default: this checkout)")
     ap.add_argument("--emit", choices=["short", "full", "both"], default="both")
@@ -778,7 +814,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--write-docs", metavar="PATH", help="replace the full block in this file")
     ap.add_argument("--check", action="store_true", help="verify committed tables; exit 1 if stale")
     ap.add_argument("--selftest", action="store_true", help="prove the check can fail")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def cli_option_strings() -> set[str]:
+    """Every flag the CLI accepts, asked of the parser itself."""
+    return {s for action in build_parser()._actions for s in action.option_strings}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     root = os.path.abspath(args.root)
     try:
