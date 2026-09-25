@@ -516,8 +516,8 @@ coverage:
     why:
       cursorMissing: 平台的回复里没有带翻页游标，所以只列出了拿到的那一页
       hasMoreMissing: 平台的回复没有说还有没有下一页，所以我们停下，而不是去假设
-      emptyPageInferred: 这个平台没有明确的「列表结束」信号，而它返回了一个空页——那是推断，不是确认
-      shortPageInferred: 这个平台没有明确的「列表结束」信号，而它返回了一个不满的页——那是推断，不是确认
+      emptyPageInferred: 这个平台没有明确的「列表结束」信号，而它返回了一个空页：那是推断，不是确认
+      shortPageInferred: 这个平台没有明确的「列表结束」信号，而它返回了一个不满的页：那是推断，不是确认
       unknown: "列表停下的原因是这个 build 不认识的：{kind}"
   totals:
     label: "总数（平台自己报的）"

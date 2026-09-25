@@ -65,6 +65,7 @@
          keeps its own long-standing palette. */
       :root {
         --cv-ink: #212731;
+        --cv-surface: #ffffff;
         --cv-ok: #11793d;
         --cv-bad: #b3261e;
         --cv-warn: #8a5300;
@@ -76,6 +77,7 @@
       @media (prefers-color-scheme: dark) {
         :root {
           --cv-ink: #e7eaee;
+          --cv-surface: #191d23;
           --cv-ok: #6ecf95;
           --cv-bad: #f29b91;
           --cv-warn: #f0bf6f;
@@ -88,6 +90,7 @@
       #coverage-card {
         margin: 8px 0; padding: 6px 8px; font-size: 12px;
         border-left: 3px solid rgba(128,128,128,.55);
+        background: var(--cv-surface);
       }
       #coverage-card .title { font-weight: 600; margin-bottom: 2px; }
       #coverage-card .line { opacity: .92; white-space: pre-wrap; }
@@ -96,11 +99,13 @@
         flex: 0 0 auto; font-size: 10.5px; font-weight: 600; line-height: 1;
         padding: 3px 7px; border-radius: 6px; white-space: nowrap;
       }
-      #coverage-card .cv-chip-run   { color: var(--cv-ink); background: color-mix(in srgb, var(--cv-accent) 12%, transparent); }
-      #coverage-card .cv-chip-wait  { color: var(--cv-warn); background: color-mix(in srgb, var(--cv-warn) 12%, transparent); }
-      #coverage-card .cv-chip-ok    { color: var(--cv-ok); background: color-mix(in srgb, var(--cv-ok) 9%, transparent); }
-      #coverage-card .cv-chip-bad   { color: var(--cv-bad); background: color-mix(in srgb, var(--cv-bad) 10%, transparent); }
-      #coverage-card .cv-chip-muted { color: var(--cv-muted); background: color-mix(in srgb, var(--cv-muted) 12%, transparent); }
+      /* Chips mix with the card's own surface (opaque), so the word's contrast
+         is a property of the card, not of whatever sits behind the popup. */
+      #coverage-card .cv-chip-run   { color: var(--cv-ink); background: color-mix(in srgb, var(--cv-accent) 12%, var(--cv-surface)); }
+      #coverage-card .cv-chip-wait  { color: var(--cv-warn); background: color-mix(in srgb, var(--cv-warn) 12%, var(--cv-surface)); }
+      #coverage-card .cv-chip-ok    { color: var(--cv-ok); background: color-mix(in srgb, var(--cv-ok) 9%, var(--cv-surface)); }
+      #coverage-card .cv-chip-bad   { color: var(--cv-bad); background: color-mix(in srgb, var(--cv-bad) 10%, var(--cv-surface)); }
+      #coverage-card .cv-chip-muted { color: var(--cv-muted); background: color-mix(in srgb, var(--cv-muted) 12%, var(--cv-surface)); }
       #coverage-card .cv-text { flex: 1 1 auto; min-width: 0; }
       #coverage-card .cv-bar {
         display: flex; height: 5px; margin-top: 3px; border-radius: 3px;

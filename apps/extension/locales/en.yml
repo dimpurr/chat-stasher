@@ -806,8 +806,8 @@ coverage:
     why:
       cursorMissing: the platform's answer carried no continuation cursor, so only the page we had was listed
       hasMoreMissing: the platform's answer said nothing about whether another page exists, so we stopped rather than assume
-      emptyPageInferred: the platform has no explicit end-of-list signal, and it returned an empty page — that is an inference, not a confirmation
-      shortPageInferred: the platform has no explicit end-of-list signal, and it returned a short page — that is an inference, not a confirmation
+      emptyPageInferred: "the platform has no explicit end-of-list signal, and it returned an empty page: that is an inference, not a confirmation"
+      shortPageInferred: "the platform has no explicit end-of-list signal, and it returned a short page: that is an inference, not a confirmation"
       unknown: "the list stopped for a reason this build does not know: {kind}"
   totals:
     label: "Total, as the platform reports it"

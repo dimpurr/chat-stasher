@@ -271,14 +271,29 @@ function paintMonths(card: CoverageCardView): HTMLElement {
     }
     // The stride decides which months get a visible label, so labels never collide at small widths.
     // The time-unknown column always keeps its name: the name is the one thing that says it is not a
-    // month, and a missing name would let it pass for one.
-    const showLabel = column.kind === 'unknown' || index % geometry.stride === 0;
+    // month, and a missing name would let it pass for one. Its name sits right-anchored on the last
+    // edge, so the month before it drops *its* visible label when the unknown column exists — the
+    // chart's titles and the details table still name every month.
+    const hasUnknown = geometry.columns.some((entry) => entry.kind === 'unknown');
+    const lastMonthIndex = geometry.columns.length - (hasUnknown ? 2 : 0);
+    const showLabel = column.kind === 'unknown'
+      || (index % geometry.stride === 0 && !(hasUnknown && index === geometry.columns.length - 2));
     if (showLabel) {
       const axisLabel = svg('text');
       axisLabel.setAttribute('class', 'm-label');
-      axisLabel.setAttribute('x', String(column.x + column.w / 2));
       axisLabel.setAttribute('y', String(MONTHS_H + 10));
-      axisLabel.setAttribute('text-anchor', 'middle');
+      if (column.kind === 'unknown') {
+        // The unknown column is the last one: its name is anchored to the right edge so it can never
+        // be clipped by the viewBox (a half-visible name would read as a truncated month).
+        axisLabel.setAttribute('text-anchor', 'end');
+        axisLabel.setAttribute('x', String(MONTHS_W));
+      } else {
+        // Centred on the column, but clamped in from both edges: a centred label on the first or last
+        // column would otherwise reach past the chart and be cut off.
+        axisLabel.setAttribute('text-anchor', 'middle');
+        const desired = column.x + column.w / 2;
+        axisLabel.setAttribute('x', String(Math.max(16, Math.min(desired, MONTHS_W - 16))));
+      }
       axisLabel.textContent = column.kind === 'month' ? monthLabel(column.key) : card.months.unknownLabel;
       group.append(axisLabel);
     }
