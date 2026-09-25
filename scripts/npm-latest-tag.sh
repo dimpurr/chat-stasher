@@ -15,7 +15,16 @@
 # `latest` is the dist-tag `npm install <pkg>` resolves when the user names no
 # version and no tag. So the invariant this enforces is one sentence:
 #
-#   **`latest` must never point at a prerelease.**
+#   **`latest` must name the newest published stable version.**
+#
+# The narrower form of that sentence — "must never point at a prerelease" — is
+# what this script said until it was reviewed, and the difference is not
+# pedantic. A registry holding 0.4.0 and 0.5.0 with `latest` still on 0.4.0 has
+# no prerelease anywhere, so the narrow test passes it, and a plain
+# `npm install <pkg>` then installs the older build. That is the same user-visible
+# harm as installing a candidate, arrived at by a route the narrow test cannot
+# see. The two agree on every case where `latest` is a prerelease or absent;
+# they differ exactly where an older stable is left behind.
 #
 # npm gets that wrong on a package's FIRST publish. `npm publish --tag next`
 # sets `next` as asked — and also sets `latest`, which the docs say it does not
@@ -31,19 +40,25 @@
 # `npm install chat-stasher` installed a release candidate.
 #
 # Passing `--tag` is therefore necessary but not sufficient, and the repair has
-# to happen after the publish. Two outcomes, and only two:
+# to happen after the publish. The question the script asks is the invariant
+# itself — does `latest` name the newest published stable version? — and the
+# three answers to it:
 #
-#   · a stable version exists -> re-point `latest` at the newest one
-#                                (`npm dist-tag add <pkg>@<version> latest`).
-#   · no stable version exists -> there is nowhere to re-point it. Write a
-#                                clear notice to the job summary saying so,
-#                                because the state is expected and temporary,
-#                                not an error to fail the release over.
+#   · yes -> nothing to do. On an ordinary stable release this is the answer for
+#            every package, which is why the repair cannot undo the publish it
+#            follows.
+#   · no, and a stable version exists -> re-point `latest` at the newest one
+#            (`npm dist-tag add <pkg>@<version> latest`). Whether `latest` held
+#            a prerelease, an older stable, or no version at all, the repair is
+#            the same one, and it is what makes this idempotent: run it twice
+#            and the second run has nothing to do.
+#   · no, and no stable version exists -> there is nowhere to re-point it. Write
+#            a clear notice to the job summary saying so, because the state is
+#            expected and temporary, not an error to fail the release over.
 #
 # This is written as the invariant rather than as "run this after an rc" so it
-# is idempotent and self-describing: on a stable release it finds `latest`
-# already correct and does nothing, and it would also repair a package that had
-# been left wrong by any other route.
+# is self-describing, and so it also repairs a package left wrong by any other
+# route — including one whose `latest` was never touched by the publish at all.
 #
 # ---------------------------------------------------------------------------
 # Usage
@@ -190,8 +205,8 @@ while IFS= read -r package_dir; do
   if ! dist_tags_json="$(npm view "$name" dist-tags --json 2>"$TMPERR")"; then
     {
       echo "error: could not read the dist-tags of ${name}."
-      echo "       Whether 'latest' points at a prerelease is UNKNOWN, so nothing"
-      echo "       was changed for it."
+      echo "       Whether 'latest' names the newest stable version is UNKNOWN, so"
+      echo "       nothing was changed for it."
       cat "$TMPERR" >&2
     } >&2
     exit 3
@@ -220,25 +235,48 @@ while IFS= read -r package_dir; do
   # version per line, but the shape is not relied on.
   versions="$(printf '%s\n' "$versions_json" | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+(-[^"]*)?"' | tr -d '"' || true)"
 
-  # An absent `latest` is not "correct": a package with no latest tag is exactly
-  # one a fresh install cannot resolve, so it falls through to the repair path
-  # rather than being reported as fine.
-  if [ -n "$latest" ] && ! is_prerelease "$latest"; then
-    echo "${name}: latest=${latest} is a stable version; nothing to do."
+  stable="$(newest_stable "$versions")"
+
+  # Correct means `latest` IS the newest stable version — compared as the exact
+  # string the registry reports, not by re-parsing it, so this cannot drift from
+  # the value the read above produced.
+  #
+  # Everything else falls through to the repair path, and each excluded case is
+  # excluded for its own reason:
+  #   · a prerelease is not a stable version, so it cannot be the newest one;
+  #   · an absent `latest` is not "correct" either — a package with no latest
+  #     tag is exactly one a fresh install cannot resolve;
+  #   · a stable that is not the newest stable (0.4.0 while 0.5.0 is published)
+  #     is the case the prerelease-only test used to pass over, and it leaves a
+  #     plain `npm install` on the older build;
+  #   · a stable naming a version the registry no longer lists is not the newest
+  #     published stable by definition — whatever it points at is not published,
+  #     so a fresh install cannot resolve it either.
+  # `stable` being empty is the one thing that keeps a package out of the repair
+  # path regardless: with no stable version to point at, there is nothing to
+  # move `latest` to, and that is the notice path below.
+  if [ -n "$stable" ] && [ "$latest" = "$stable" ]; then
+    echo "${name}: latest=${latest} is the newest stable version; nothing to do."
     ALREADY=$((ALREADY + 1))
     continue
   fi
 
-  stable="$(newest_stable "$versions")"
-
   if [ -n "$stable" ]; then
+    # How the move reads in the log. A prerelease or an absent tag is what this
+    # exists for and needs no explanation; a stable that is merely older is the
+    # one a reader would not expect the repair to touch, so it says so.
+    if [ -n "$latest" ] && ! is_prerelease "$latest"; then
+      moved_from="${latest} (an older stable)"
+    else
+      moved_from="${latest:-<none>}"
+    fi
     if [ "$DRY_RUN" = 1 ]; then
-      echo "${name}: would re-point latest ${latest:-<none>} -> ${stable} (dry run)."
+      echo "${name}: would re-point latest ${moved_from} -> ${stable} (dry run)."
       REPAIRED=$((REPAIRED + 1))
       continue
     fi
     if npm dist-tag add "${name}@${stable}" latest; then
-      echo "${name}: latest re-pointed ${latest:-<none>} -> ${stable}."
+      echo "${name}: latest re-pointed ${moved_from} -> ${stable}."
       REPAIRED=$((REPAIRED + 1))
     else
       echo "error: failed to re-point latest of ${name} to ${stable}." >&2
@@ -248,8 +286,15 @@ while IFS= read -r package_dir; do
   fi
 
   # No stable release exists yet. There is nowhere to point `latest`, so the
-  # only honest thing is to say so where a human will see it.
-  echo "${name}: latest=${latest:-<none>} is a prerelease and no stable version exists yet." >&2
+  # only honest thing is to say so where a human will see it. The two reasons
+  # `latest` can be wrong here are different states and are named differently —
+  # an absent tag is not a prerelease, and reporting it as one would be the
+  # "record an unknown as a value" mistake in miniature.
+  if [ -n "$latest" ]; then
+    echo "${name}: latest=${latest} is a prerelease and no stable version exists yet." >&2
+  else
+    echo "${name}: no latest tag and no stable version exists yet." >&2
+  fi
   NOTICE_ROWS="${NOTICE_ROWS}| \`${name}\` | \`${latest:-<none>}\` | $(printf '%s' "$versions" | tr '\n' ' ') |
 "
   NOTICE_NEEDED=1

@@ -18,10 +18,18 @@
 #     recorded `dist-tag add` must name the stable version. This is the defect
 #     that shipped: all six packages came back from v0.5.0-rc.2 with
 #     `latest = 0.5.0-rc.2`.
+#   · **Nor is any other `latest` that is not the newest stable.** The two
+#     stables fixture is the one that makes the difference visible: it has no
+#     prerelease in it at all, so a probe set that only ever asks "is `latest` a
+#     prerelease?" passes it while `npm install` keeps resolving the older one.
 #   · **The newest stable, not the last one listed.** Version lists are not
 #     ordered by contract, and the two-digit probe (`0.9.0` vs `0.10.0`) is the
 #     one that catches a comparator using string order — under which "10" sorts
 #     below "9" and the script would re-point `latest` backwards.
+#   · **A stable `latest` that is not the newest stable is still repaired.** The
+#     narrower test — "is `latest` a prerelease?" — passes this case over and
+#     leaves `latest` on the older of two published stables, which hands a plain
+#     `npm install` the older build just as surely as a candidate would.
 #   · **No stable at all is a notice, not an error and not a repair.** The
 #     release must not go red, and the script must not invent a version to
 #     point at.
@@ -154,7 +162,9 @@ for spec in \
   "scoped @dimpurr/chat-stasher-darwin-arm64" \
   "two-digit chat-stasher-two-digit" \
   "correct chat-stasher-correct" \
+  "stale chat-stasher-stale"\
   "no-latest chat-stasher-no-latest" \
+  "fresh chat-stasher-fresh"\
   "betas chat-stasher-betas" \
   "tie chat-stasher-tie" \
   "unreadable chat-stasher-unreadable"
@@ -181,9 +191,20 @@ printf '%s\n' '{"next":"0.5.0-rc.2","latest":"0.5.0-rc.2"}' \
 fixture chat-stasher-two-digit 0.10.0-rc.1 0.9.0 0.10.0 0.10.0-rc.1
 # --- already correct: nothing to do, and nothing must be recorded.
 fixture chat-stasher-correct 0.4.0 0.4.0 0.5.0-rc.2
+# --- two published stables and `latest` on the OLDER one. Nothing here is a
+# prerelease, so a script asking only "is `latest` a prerelease?" reports this
+# package as correct and leaves the older build as what a plain `npm install`
+# resolves. The newest stable (0.5.0) is not the last entry, so taking the tail
+# does not accidentally get this right either.
+fixture chat-stasher-stale 0.4.0 0.5.0 0.4.0
 # --- the package answers and has no `latest` key at all, with a stable
 # available: must be repaired, not reported as unknown.
 fixture chat-stasher-no-latest - 0.4.0 0.5.0-rc.2
+# --- no `latest` key AND no stable version: the notice path, and the two states
+# it can be reached from must be told apart in words. An absent tag is not a
+# prerelease, and calling it one would be "record an unknown as a value" in
+# miniature — the notice is where a human is asked to act on that state.
+fixture chat-stasher-fresh - 0.5.0-rc.1
 # --- prerelease-only list in a shape that is not `-rc`.
 fixture chat-stasher-betas 1.0.0-beta.3 1.0.0-beta.1 1.0.0-beta.3
 # --- latest is a stable and is the only version: must not be moved.
@@ -331,10 +352,19 @@ probe "an absent latest tag with a stable available is repaired" \
 assert_eq "  ... and it pointed at the stable" \
   "$(cat "$ARGV_LOG")" "add chat-stasher-no-latest@0.4.0 latest"
 
+# A stable `latest` is not automatically a correct one. This is the case the
+# prerelease test alone cannot see, and it is a repair rather than a "nothing to
+# do": leaving it is a plain `npm install` installing 0.4.0 while 0.5.0 exists.
+probe "a stable latest that is not the newest stable is re-pointed" \
+  0 "re-pointed 0.4.0 (an older stable) -> 0.5.0" "$PKG/stale"
+assert_eq "  ... and the newest stable is what was recorded" \
+  "$(cat "$ARGV_LOG")" "add chat-stasher-stale@0.5.0 latest"
+assert_absent "  ... and no notice was written" "$NSUM" "release candidate"
+
 # ---- nothing to do ---------------------------------------------------------
 
 probe "a correct stable latest is left alone" \
-  0 "is a stable version; nothing to do" "$PKG/correct"
+  0 "latest=0.4.0 is the newest stable version; nothing to do" "$PKG/correct"
 assert_eq "  ... and no dist-tag add was recorded" "$NREC" "0"
 assert_absent "  ... and no notice was written" "$NSUM" "release candidate"
 
@@ -349,6 +379,17 @@ probe "prereleases that are not -rc are still prereleases" \
 assert_eq "  ... and nothing was re-pointed at a beta" "$NREC" "0"
 assert_eq "  ... and the notice lists the candidate it saw" \
   "$(printf '%s' "$NSUM" | grep -c '1.0.0-beta.3')" "1"
+
+# The absent-tag state, with nothing stable to point at either. It is the same
+# notice path as the probe above, and must not reuse its words: "is a
+# prerelease" about a tag that does not exist is a claim the registry did not
+# make.
+probe "no latest tag and no stable is a notice with its own wording" \
+  0 "no latest tag and no stable version exists yet" "$PKG/fresh"
+assert_eq "  ... and no dist-tag add was recorded" "$NREC" "0"
+assert_absent "  ... and it is not described as a prerelease" "$out" "is a prerelease"
+assert_eq "  ... and the summary prints <none> rather than an empty cell" \
+  "$(printf '%s' "$NSUM" | grep -c '`<none>`')" "1"
 
 # ---- failure paths ---------------------------------------------------------
 

@@ -972,12 +972,12 @@ jobs:
           #
           #    The repair runs on every release, not only on an rc, because its
           #    rule is an invariant rather than a step in a sequence: `latest`
-          #    must never point at a prerelease. On a stable release it finds
-          #    `latest` already correct and changes nothing, so it costs one
-          #    read per package and cannot undo the publish above. It is a
-          #    script so that the decision — re-point at the newest stable, or
-          #    say in the summary that there is none yet — is the thing
-          #    scripts/selftest-npm-latest-tag.sh drives.
+          #    must name the newest published stable version. On a stable release
+          #    the publish above has just made that true, so it finds `latest`
+          #    correct and changes nothing; it costs one read per package and
+          #    cannot undo the publish. It is a script so that the decision —
+          #    re-point at the newest stable, or say in the summary that there is
+          #    none yet — is the thing scripts/selftest-npm-latest-tag.sh drives.
           #
           #    The dry-run path returned above: a dry run published nothing, so
           #    there is no tag for it to have left wrong.

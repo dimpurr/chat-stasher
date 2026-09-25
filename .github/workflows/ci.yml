@@ -470,11 +470,13 @@ jobs:
       #
       # Its probes shim `npm`, so the decision — re-point `latest` at the newest
       # stable, or write the notice — is exercised against fixtures rather than
-      # the real registry, and no dist-tag anywhere is modified. Two of its
+      # the real registry, and no dist-tag anywhere is modified. Three of its
       # probes exist to catch an answer that is wrong in the direction that
       # looks like a successful repair: a lexicographic version comparison
-      # (which re-points `latest` backwards, 0.9.0 over 0.10.0) and a re-point
-      # when `latest` was already correct.
+      # (which re-points `latest` backwards, 0.9.0 over 0.10.0), a re-point when
+      # `latest` was already correct, and — the one that got through — a stable
+      # `latest` that is not the newest stable, which a test asking only "is
+      # `latest` a prerelease?" reports as correct and leaves standing.
       - name: npm latest dist-tag self-test
         run: bash scripts/selftest-npm-latest-tag.sh
 

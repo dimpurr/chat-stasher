@@ -120,10 +120,12 @@ automation creates one.
      uploading it, so this is the same check made by the owner, on the one
      platform the owner has to hand — not the first time any of these binaries
      was started.
-   - **npm's `latest` does not point at a release candidate**, for all six
-     packages. This is the check the workflow now makes for itself, and it is
-     still worth making by hand because it is the one registry state the
-     workflow cannot undo once written:
+   - **npm's `latest` names the newest stable version**, for all six packages —
+     with the one exception set out under the block below: a package whose first
+     stable release has not happened yet has no stable version to point `latest`
+     at, and naming the candidate is expected there. This is the check the
+     workflow now makes for itself, and it is still worth making by hand because
+     it is the one registry state the workflow cannot undo once written:
      ```sh
      # Stable release: every one must print the version just released.
      # Release candidate: chat-stasher must print the newest *stable* version,
@@ -136,9 +138,12 @@ automation creates one.
      ```
      A package whose first stable release has not happened yet has no stable
      version to point `latest` at; the job summary says so in as many words, and
-     `latest` naming the candidate is expected there and temporary. What is
-     *not* acceptable on any later release is `latest` still naming an older
-     candidate while a stable version exists.
+     `latest` naming the candidate is expected there and temporary. Everywhere
+     else `latest` must name the newest stable version — on an rc that means a
+     package which already has a stable release prints that stable, not the
+     candidate. What is *not* acceptable on any later release is `latest` still
+     naming an older version, whether that older version is a candidate or a
+     stable, while a newer stable exists.
 8. **Fill the Homebrew `sha256` values** from that `SHA256SUMS` in
    `homebrew/chat-stasher.rb`. Step 4 set the URLs; this step makes them
    checksum-pinned.
@@ -363,8 +368,8 @@ candidate published this way becomes the version a plain install gets. Measured
 on v0.5.0-rc.2 (2026-09-25): all six packages came back with
 `latest = 0.5.0-rc.2` and exactly one version each. The publish step therefore
 runs `scripts/npm-latest-tag.sh` afterwards, whose rule is the invariant
-**`latest` must never point at a prerelease**: it re-points `latest` at the
-newest stable version when one exists (`npm dist-tag add <pkg>@<version>
+**`latest` must name the newest published stable version**: it re-points
+`latest` at that version when one exists (`npm dist-tag add <pkg>@<version>
 latest`), and when none exists it writes a notice to the run's job summary
 saying that `latest` temporarily names the candidate and that the first stable
 release will correct it.
@@ -454,16 +459,18 @@ thing it does not.
   registry: `scripts/selftest-crates-version-state.sh` drives it with `curl`
   shimmed, including the recorded `403` body, and fails if the request stops
   carrying a descriptive `User-Agent` or starts using `curl -f`.
-- **npm's `latest` dist-tag is left off release candidates.**
+- **npm's `latest` dist-tag names the newest stable version.**
   `scripts/npm-latest-tag.sh` runs after the npm publishes and enforces one
-  invariant: `latest` must never point at a prerelease. If a stable version
-  exists it re-points `latest` at the newest one; if none does, it writes a
-  notice to the job summary instead — a notice rather than a failure, because
-  on a package's first release there is genuinely nowhere else to point it.
+  invariant: `latest` must name the newest *published stable* version. If such a
+  version exists it re-points `latest` at it — from a candidate, from an older
+  stable, or from no tag at all; if none does, it writes a notice to the job
+  summary instead, a notice rather than a failure, because on a package's first
+  release there is genuinely nowhere else to point it.
   `scripts/selftest-npm-latest-tag.sh` drives the same script against a shimmed
-  `npm`, including the two ways this can be wrong in the *wrong direction*:
-  re-pointing at a lexicographically-"larger" older version, and re-pointing
-  when `latest` was already correct.
+  `npm`, including the three ways this can be wrong in the *wrong direction*:
+  re-pointing at a lexicographically-"larger" older version, re-pointing when
+  `latest` was already correct, and leaving an older stable in place because the
+  test asked only whether `latest` was a prerelease.
 - **Development versions are refused.** Registry steps reject any version
   containing `-dev`; the tag gate also accepts only `vX.Y.Z` and `vX.Y.Z-rc.N`.
 
