@@ -1,0 +1,44 @@
+status: 200 OK
+content-type: application/json; charset=utf-8
+
+{
+  "command": "ui",
+  "complete": true,
+  "could_not_be_placed": 0,
+  "data_blobs_read": 0,
+  "destination": "dest-under-test",
+  "filter": "machine `m-1` · harness in {claude-code}",
+  "machines_with_legacy_index": [],
+  "matched": 1,
+  "not_matched": 3,
+  "payload_loaded": false,
+  "schema_version": 2,
+  "sessions": [
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 100,
+      "first_unix": {
+        "kind": "known",
+        "unix": 1769992800
+      },
+      "harness": "claude-code",
+      "href": "/session?i=0&token=golden-token",
+      "index": 0,
+      "last_unix": {
+        "kind": "known",
+        "unix": 1769993000
+      },
+      "line_count": 10,
+      "machine": "m-1",
+      "session_short_id": "claude-c~e58aa6",
+      "shards": 2,
+      "source": "claude-code",
+      "title": {
+        "state": "no_label"
+      }
+    }
+  ],
+  "sessions_not_placed": [],
+  "tier": "metadata",
+  "unreadable_parts": []
+}

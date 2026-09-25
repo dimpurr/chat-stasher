@@ -1,0 +1,15 @@
+status: 400 Bad Request
+content-type: application/json; charset=utf-8
+
+{
+  "command": "ui",
+  "complete": false,
+  "destination": "dest-under-test",
+  "error": "`yesterday` is not a calendar date; write it as YYYY-MM-DD, e.g. 2026-01-15",
+  "matched": null,
+  "note": "the filter could not be resolved, so nothing was searched — this is not an empty result",
+  "payload_loaded": false,
+  "schema_version": 1,
+  "status": 400,
+  "tier": "metadata"
+}

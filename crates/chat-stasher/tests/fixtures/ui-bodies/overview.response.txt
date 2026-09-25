@@ -1,0 +1,104 @@
+status: 200 OK
+content-type: text/html; charset=utf-8
+
+<!doctype html>
+<html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>chat-stasher · dest-under-test</title>
+<style>
+:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--muted:#5c5c5c;--line:#d8d8d8;
+--head:#f4f4f4;--note-bg:#fffbe6;--note-line:#e6d98a;--warn-bg:#ffecec;--warn-line:#e0a0a0;
+--ok:#1c6b3c;--bad:#a33;--link:#0b57d0;--up:#1c6b3c;--down:#8a1c1c}
+@media (prefers-color-scheme:dark){:root{--fg:#e6e6e6;--bg:#141414;--muted:#a8a8a8;--line:#3a3a3a;
+--head:#1f1f1f;--note-bg:#2e2a17;--note-line:#6b5f22;--warn-bg:#2e1a1a;--warn-line:#6b2a2a;
+--ok:#7ddc9f;--bad:#ff9b9b;--link:#8ab4f8;--up:#7ddc9f;--down:#ff9b9b}}
+*{box-sizing:border-box}
+body{font:15px/1.55 -apple-system,system-ui,"Segoe UI",sans-serif;margin:0;padding:1.5rem 1.25rem 4rem;
+color:var(--fg);background:var(--bg);max-width:76rem}
+h1{font-size:1.4rem;margin:0 0 .2rem}
+h2{font-size:1.05rem;margin:2rem 0 .6rem;border-bottom:1px solid var(--line);padding-bottom:.25rem}
+a{color:var(--link)}
+.sub{color:var(--muted);margin:0 0 1rem}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.88em}
+table{border-collapse:collapse;width:100%;margin:.4rem 0}
+th,td{border-bottom:1px solid var(--line);padding:.35rem .55rem;text-align:left;vertical-align:top}
+th{background:var(--head);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.note{background:var(--note-bg);border:1px solid var(--note-line);padding:.7rem 1rem;margin:.9rem 0;border-radius:4px}
+.warn{background:var(--warn-bg);border:1px solid var(--warn-line);padding:.7rem 1rem;margin:.9rem 0;border-radius:4px}
+.stats{display:flex;flex-wrap:wrap;gap:1.5rem;margin:1rem 0}
+.stat{min-width:8rem}
+.stat .v{display:block;font-size:1.6rem;font-weight:600;font-variant-numeric:tabular-nums}
+.stat .l{color:var(--muted);font-size:.85rem}
+.scroll{overflow-x:auto}
+.heat td.cell{padding:0;text-align:center}
+.heat td.cell a,.heat td.cell span{display:block;padding:.2rem .35rem;text-decoration:none;color:inherit}
+.heat td.cell a:hover{outline:1px solid var(--link)}
+.heat th.week{font-weight:400;font-size:.75rem;writing-mode:vertical-rl;transform:rotate(180deg);
+white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
+.heat td.uk{text-align:center;color:var(--muted)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;
+border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
+.message{border:1px solid var(--line);border-radius:5px;margin:1rem 0;padding:.75rem 1rem}
+.message>header{color:var(--muted);font-size:.85rem;margin-bottom:.5rem}
+.message>header b{color:var(--fg)}
+.message p:first-child{margin-top:0}.message p:last-child{margin-bottom:0}
+.message details{margin:.6rem 0}
+.message summary{cursor:pointer}
+.thinking{border-left:3px solid var(--note-line);padding-left:.7rem}
+.tool{border-left:3px solid var(--link);padding-left:.7rem}
+.attachment{color:var(--muted);border-left:3px solid var(--line);padding-left:.7rem}
+nav.sub{display:flex;gap:1rem}
+</style></head><body>
+<h1>chat-stasher</h1>
+<p class=sub>destination <b>dest-under-test</b> · 2 snapshot(s) scanned of 2 in repository · this page rendered 2026-02-02 02:40 UTC of the archive metadata only</p>
+<p class=ok>Read in full — every snapshot scanned was readable.</p>
+<section class=stats><div class=stat><span class=v>4</span><span class=l>sessions</span></div><div class=stat><span class=v>370 B</span><span class=l>bytes (shard sizes)</span></div><div class=stat><span class=v>3</span><span class=l>machines</span></div><div class=stat><span class=v>3</span><span class=l>sources</span></div></section>
+<section><h2>Machines</h2>
+<div class=scroll><table>
+<thead><tr><th>machine</th><th>newest snapshot</th><th>health</th><th class=n>sessions</th><th class=n>bytes</th><th>activity index</th></tr></thead>
+<tbody>
+<tr><td class=mono><a href="/sessions?machine=m-1&token=golden-token">m-1</a></td><td>2026-02-02 01:40 UTC<br><span class=mono>aaaaaaaa…</span></td><td><span class=ok>archived recently</span> · 1h ago</td><td class=n>2</td><td class=n>150 B</td><td><span class=ok>present, read</span></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-2&token=golden-token">m-2</a></td><td><i>no snapshot</i></td><td><span class=bad>snapshot time unknown</span></td><td class=n>2</td><td class=n>220 B</td><td><i>unknown</i></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-3&token=golden-token">m-3</a></td><td>2025-12-24 02:40 UTC<br><span class=mono>bbbbbbbb…</span></td><td><span class=bad>index missing</span></td><td class=n>0</td><td class=n>0 B</td><td><span class=bad>MISSING</span></td></tr>
+</tbody></table></div>
+<p class=sub>Health is one of four measured states — a snapshot age against a 14-day threshold, or an index that is missing or unreadable. There is no health percentage: nothing here measures a denominator that would make one mean anything.</p>
+</section>
+<section><h2>Machine × source</h2>
+<p class=sub>Session counts. A cell links to that machine and source; the row label links to the whole machine.</p>
+<div class=scroll><table>
+<thead><tr><th>machine</th><th class=n>(no harness prefix)</th><th class=n>claude-code</th><th class=n>deepseek</th><th class=n>total</th></tr></thead>
+<tbody>
+<tr><td class=mono><a href="/sessions?machine=m-1&token=golden-token">m-1</a></td><td class=n>·</td><td class=n><a href="/sessions?machine=m-1&harness=claude-code&token=golden-token">1</a></td><td class=n><a href="/sessions?machine=m-1&harness=deepseek&token=golden-token">1</a></td><td class=n><b>2</b></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-2&token=golden-token">m-2</a></td><td class=n title="not expressible as a harness filter — see the list below">1</td><td class=n><a href="/sessions?machine=m-2&harness=claude-code&token=golden-token">1</a></td><td class=n>·</td><td class=n><b>2</b></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-3&token=golden-token">m-3</a></td><td class=n>·</td><td class=n>·</td><td class=n>·</td><td class=n><b>0</b></td></tr>
+</tbody></table></div>
+<p class=sub>Sessions counted under <code>(no harness prefix)</code> cannot be selected with <code>--harness</code>: the archived id carries no harness prefix, so the filter has nothing to compare. Those cells are counts, not links, and the sessions are listed below.</p>
+</section>
+<section><h2>Activity, by week</h2>
+<p class=sub>One column per week (UTC, Monday). Density uses the same ramp as <code>overview</code>. A cell links to the sessions whose conversation interval <i>intersects</i> that week — the archive's time filter compares intervals, so a conversation spanning several weeks appears in each of them.</p>
+<div class=scroll><table class=heat>
+<thead><tr><th></th><th class=week title="2026-02-02..2026-02-08">2026-02-02</th><th class=week>?</th></tr></thead>
+<tbody>
+<tr><td class=mono><a href="/sessions?machine=m-1&token=golden-token">m-1</a></td><td class=cell><a title="2026-02-02..2026-02-08: 1 session(s)" href="/sessions?machine=m-1&since=2026-02-02&until=2026-02-08&token=golden-token">.</a></td><td class=uk title="time unknown"><span class=bad>1</span></td></tr>
+<tr><td class=mono><a href="/sessions?machine=m-2&token=golden-token">m-2</a></td><td class=cell><a title="2026-02-02..2026-02-08: 2 session(s)" href="/sessions?machine=m-2&since=2026-02-02&until=2026-02-08&token=golden-token">@</a></td><td class=uk title="time unknown"><span class=sub>·</span></td></tr>
+</tbody></table></div>
+<p class=sub>Last column: sessions with no known time, never merged into a week. Ramp . (fewest) to @ (most). Week boundaries are UTC days; the link's filter is a local calendar day, so a session within hours of a week edge can fall in a different column than the one you clicked.</p>
+</section>
+<section><h2>Time unknown</h2>
+<p>1 session(s) in view have no conversation time that could be <b>fully</b> placed — either none was recorded, or only part of the span could be read. They are <b>not</b> in any bucket above, and they are not "no sessions" — each carries its own reason.</p>
+<h3 class=sub>1 session(s): this session&#39;s lines recorded no timestamp</h3>
+<div class=scroll><table>
+<thead><tr><th>machine</th><th>source</th><th>session</th><th class=n>shards</th><th class=n>bytes</th><th>snapshot time</th></tr></thead>
+<tbody>
+<tr><td class=mono>m-1</td><td>deepseek</td><td><a class=mono href="/session?i=1&token=golden-token">deepseek~e4009d</a></td><td class=n>1</td><td class=n>50 B</td><td>2026-02-02 01:40 UTC</td></tr>
+</tbody></table></div>
+</section>
+<footer>
+<p><b>Metadata tier.</b> This page was rendered from one archive-metadata read taken before the server started (snapshots + index + tree + the activity sidecar). The only conversation text it holds is each session's one-line label — at most 100 characters, recorded in the activity index, which rode that same metadata read. 0 session shard blob(s) were fetched by that read — a session's full conversation is fetched only when you click it and then click <i>load</i>, and the cost is shown before you do.</p>
+<p>Machines are named by their archive partition id, which is the key the repository actually partitions on. Times are UTC. No JavaScript, no external asset, no off-host link is loaded by this page.</p>
+<p><b>This server is on 127.0.0.1, which is not a security boundary</b> — any other program on this machine can connect to it. Access is gated only by the random token in this page's URL. Do not share the URL. The server exits by itself when idle.</p>
+</footer>
+</body></html>

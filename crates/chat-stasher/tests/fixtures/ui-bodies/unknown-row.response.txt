@@ -1,0 +1,4 @@
+status: 400 Bad Request
+content-type: text/plain; charset=utf-8
+
+ui: `i` must name a row of this dashboard's session list. An index that resolves to nothing is a usage error, not an empty session.

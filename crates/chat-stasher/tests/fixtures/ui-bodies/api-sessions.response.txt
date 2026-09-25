@@ -1,0 +1,113 @@
+status: 200 OK
+content-type: application/json; charset=utf-8
+
+{
+  "command": "ui",
+  "complete": true,
+  "could_not_be_placed": 0,
+  "data_blobs_read": 0,
+  "destination": "dest-under-test",
+  "filter": null,
+  "machines_with_legacy_index": [],
+  "matched": 4,
+  "not_matched": 0,
+  "payload_loaded": false,
+  "schema_version": 2,
+  "sessions": [
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 100,
+      "first_unix": {
+        "kind": "known",
+        "unix": 1769992800
+      },
+      "harness": "claude-code",
+      "href": "/session?i=0&token=golden-token",
+      "index": 0,
+      "last_unix": {
+        "kind": "known",
+        "unix": 1769993000
+      },
+      "line_count": 10,
+      "machine": "m-1",
+      "session_short_id": "claude-c~e58aa6",
+      "shards": 2,
+      "source": "claude-code",
+      "title": {
+        "state": "no_label"
+      }
+    },
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 50,
+      "first_unix": {
+        "kind": "unknown",
+        "why": "this session's lines recorded no timestamp"
+      },
+      "harness": "deepseek",
+      "href": "/session?i=1&token=golden-token",
+      "index": 1,
+      "last_unix": {
+        "kind": "unknown",
+        "why": "this session's lines recorded no timestamp"
+      },
+      "line_count": 10,
+      "machine": "m-1",
+      "session_short_id": "deepseek~e4009d",
+      "shards": 1,
+      "source": "deepseek",
+      "title": {
+        "state": "no_label"
+      }
+    },
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 200,
+      "first_unix": {
+        "kind": "known",
+        "unix": 1769999400
+      },
+      "harness": "claude-code",
+      "href": "/session?i=2&token=golden-token",
+      "index": 2,
+      "last_unix": {
+        "kind": "known",
+        "unix": 1769999500
+      },
+      "line_count": 10,
+      "machine": "m-2",
+      "session_short_id": "claude-c~5690f8",
+      "shards": 3,
+      "source": "claude-code",
+      "title": {
+        "state": "no_label"
+      }
+    },
+    {
+      "archive_time_unix": 1769996400,
+      "bytes": 20,
+      "first_unix": {
+        "kind": "known",
+        "unix": 1769999900
+      },
+      "harness": null,
+      "href": "/session?i=3&token=golden-token",
+      "index": 3,
+      "last_unix": {
+        "kind": "known",
+        "unix": 1769999910
+      },
+      "line_count": 10,
+      "machine": "m-2",
+      "session_short_id": ".hidden-~7526f9",
+      "shards": 1,
+      "source": "(no harness prefix)",
+      "title": {
+        "state": "no_label"
+      }
+    }
+  ],
+  "sessions_not_placed": [],
+  "tier": "metadata",
+  "unreadable_parts": []
+}

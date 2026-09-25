@@ -297,11 +297,7 @@ pub fn route(
     }
     match crate::ui::handle(path, &params, token, data, content) {
         Some(resp) => resp,
-        None => Response::text(
-            404,
-            "Not Found",
-            "ui: no such route (/, /sessions, /session, /reader, /content, /api/overview, /api/sessions)\n",
-        ),
+        None => Response::text(404, "Not Found", crate::ui::no_route_message()),
     }
 }
 
@@ -502,17 +498,10 @@ mod tests {
     use super::*;
     use crate::ui::{fixture, NoContent};
 
-    /// Every route the dashboard serves. Kept in one place so a route added
-    /// without a token check cannot pass by being absent from a list.
-    const ROUTES: [&str; 7] = [
-        "/",
-        "/sessions",
-        "/session",
-        "/reader",
-        "/content",
-        "/api/overview",
-        "/api/sessions",
-    ];
+    /// Every route the dashboard serves, read from the router's own table so
+    /// this list cannot drift from what `ui::handle` answers and what the 404
+    /// body names.
+    use crate::ui::ROUTES;
 
     /// The port every test pretends the OS handed us.
     const P: u16 = 51234;
