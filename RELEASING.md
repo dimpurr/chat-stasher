@@ -337,9 +337,18 @@ thing it does not.
   origin is present.
 - **That each binary is the binary it says it is.** Each build job checks its
   own output before uploading: the macOS job asserts each Mach-O's architecture
-  with `file`, each Linux job asserts the file is statically linked (with `file`
-  and by `ldd` refusing it), names the architecture it should be, and runs it,
-  and the Windows job runs the `.exe`.
+  with `file`, each Linux job asserts the file names the architecture it should,
+  has no `PT_INTERP` program header and no `DT_NEEDED` dynamic entry, and runs,
+  and the Windows job runs the `.exe`. The Linux half is
+  `scripts/check-static-binary.sh`, called with each matrix cell's own machine
+  string so both architectures get identical logic, and driven locally by
+  `scripts/selftest-check-static-binary.sh` against recorded tool output. It
+  does not read `file`'s wording as the verdict: a static PIE is an `ET_DYN`
+  image that keeps a dynamic section for self-relocation, and `file` calls it
+  `static-pie linked` rather than `statically linked` — so a rule that accepted
+  only the second spelling refused a static binary, and took `v0.5.0-rc.1` with
+  it. The same applies to `ldd`, which exits 0 on such an image; the gate asks
+  the headers instead.
 - **The uploaded asset set on a re-run.** Re-running the job for a tag whose
   Release already exists replaces the assets rather than failing on them or
   adding to them: every asset the run does not stage is deleted first, the seven

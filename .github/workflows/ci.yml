@@ -371,6 +371,17 @@ jobs:
       - name: Release tag gate self-test
         run: bash scripts/selftest-release-tag-gate.sh
 
+      # The other gate release.yml calls before it publishes. It decides whether
+      # a Linux asset really is static, and its probes are recorded tool output
+      # rather than a built binary: the Linux artifacts cannot be built on the
+      # macOS host, and a check that was only ever exercised on Linux would be
+      # the check nobody can reproduce. The two probes that matter most give it
+      # a file(1) sentence and ELF headers that disagree — one says static-pie
+      # with a PT_INTERP, the other says static-pie with a DT_NEEDED — because a
+      # string-based check cannot refuse either of those and this one must.
+      - name: Static binary gate self-test
+        run: bash scripts/selftest-check-static-binary.sh
+
       # CONTRIBUTING.md lists this as a local check, so CI has to run it too, and
       # it belongs in this job rather than the extension one: it exercises the
       # reload script against a temp repository and a stub build command, so it

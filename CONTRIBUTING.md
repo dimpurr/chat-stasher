@@ -62,6 +62,7 @@ python3 scripts/check-commit-messages.py --selftest
 bash scripts/check-workflows.sh
 bash scripts/check-workflows.sh --selftest
 bash scripts/selftest-release-tag-gate.sh
+bash scripts/selftest-check-static-binary.sh
 bash scripts/dev/test-reload-extension.sh
 bash scripts/selftest-relocate-citations.sh
 bash scripts/self-test-install.sh
@@ -116,6 +117,19 @@ the two release shapes, a tag that disagrees with `Cargo.toml` — can be
 exercised without pushing a tag. `scripts/commit-message-range.sh` is the same
 arrangement for the same reason: a second copy of a gate drifts from the copy
 under test.
+
+`selftest-check-static-binary.sh` is that arrangement for the other gate
+`release.yml` calls: the one that decides whether a Linux asset is really static,
+which `scripts/check-static-binary.sh` owns. Its probes are recorded `file`
+and `readelf` output with those two tools shimmed on `PATH`, because the host
+this suite runs on is a Mac that has neither and cannot read a Linux ELF at all —
+and because the failure that motivated the check was a *string*: a binary that
+was static, reported by `file` as `static-pie linked`, refused by a test that
+knew only `statically linked`. Two of its probes therefore hand the gate a
+`file` sentence and ELF headers that disagree, and require it to believe the
+headers. A check that can only be exercised on Linux is a check nobody can
+reproduce before pushing; the Linux artifacts are built in CI and cannot be built
+here.
 
 The npm launcher's tests need no toolchain either: they run against a fake
 platform package built in a temp directory, and they force the platform they

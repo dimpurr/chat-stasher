@@ -263,12 +263,18 @@ jobs:
       # a compiler whose output links against musl. `musl-tools` is what puts
       # one on PATH, named `musl-gcc`, which is the name cc-rs looks for on a
       # musl target.
+      #
+      # `binutils` is named here for the same reason: the staging check below
+      # asks `readelf` what the program headers and the dynamic section say, and
+      # a dependency that is only implied by the runner image is one that can go
+      # missing without anyone editing this file. It is not worth hoping for.
       - name: Install the musl C toolchain
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools binutils
           musl-gcc --version
+          readelf --version | head -1
 
       - name: Install stable Rust with the musl target
         uses: dtolnay/rust-toolchain@stable
@@ -282,6 +288,15 @@ jobs:
       # of the file that comes out. A build that quietly used the runner's
       # glibc would run here — this runner has glibc — and fail on the user's
       # machine, which is the one place nobody would connect back to this run.
+      #
+      # The check is scripts/check-static-binary.sh rather than a here-doc here
+      # for the reason scripts/release-tag-gate.sh is: the rule has one owner,
+      # and scripts/selftest-check-static-binary.sh drives that same script, so
+      # the thing that is tested is the thing that runs. It refuses unless the
+      # file has no PT_INTERP program header and no DT_NEEDED entry and then
+      # runs — the header facts, not a sentence about them. Both matrix cells
+      # call it with their own machine string, so the two architectures are
+      # checked by identical logic.
       - name: Stage the binary, check it is static, and run it
         run: |
           set -euo pipefail
@@ -290,41 +305,9 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.rust_target }}/release/chat-stasher" "dist/$ASSET"
 
-          file -b "dist/$ASSET"
-
-          # `file` names the machine and says "statically linked"; an
-          # architecture check that only ran the binary would pass on a wrong
-          # binary the runner happened to be able to execute, and both of these
-          # cells run native code.
-          FILE_OUT="$(file -b "dist/$ASSET")"
-          case "$FILE_OUT" in
-            *"${{ matrix.file_machine }}"*) ;;
-            *)
-              echo "error: ${ASSET} is not a ${{ matrix.file_machine }} binary:" >&2
-              echo "       ${FILE_OUT}" >&2
-              exit 1
-              ;;
-          esac
-          case "$FILE_OUT" in
-            *"statically linked"*) ;;
-            *)
-              echo "error: ${ASSET} is not statically linked — it would need a libc the target machine may not have:" >&2
-              echo "       ${FILE_OUT}" >&2
-              exit 1
-              ;;
-          esac
-
-          # The same claim from the other direction: a dynamically linked
-          # executable is one `ldd` can parse and exit 0 on.
-          if ldd "dist/$ASSET" >/dev/null 2>&1; then
-            echo "error: ${ASSET} is a dynamic executable:" >&2
-            ldd "dist/$ASSET" >&2
-            exit 1
-          fi
-
-          # And it runs. A binary that is the right shape and refuses to start
-          # is not a release asset, and this is the cheapest place to find out.
-          "./dist/$ASSET" --version
+          bash scripts/check-static-binary.sh \
+            --binary "dist/$ASSET" \
+            --machine "${{ matrix.file_machine }}"
 
       - name: Upload ${{ matrix.asset }}
         uses: actions/upload-artifact@v4
