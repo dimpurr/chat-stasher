@@ -795,6 +795,10 @@ pub struct DoctorReport {
     /// D6 — how much the local rustic metadata cache occupies (and whether
     /// `rustic_no_cache` has turned it off).
     pub cache: CacheCheck,
+    /// D9 — how much this machine's **body** cache occupies, and against which
+    /// quota (ADR-034). A different cache from D6's: that one holds metadata,
+    /// this one holds conversation bodies.
+    pub body_cache: BodyCacheCheck,
     /// Per-harness fate decided by the path registry (`scanner::scan`).
     pub probes: Vec<scanner::HarnessProbe>,
     /// Registry-recognised sessions that are not represented by a
@@ -1043,6 +1047,9 @@ pub fn run() -> DoctorReport {
     // D6
     let cache = inspect_cache(&config);
 
+    // D9
+    let body_cache = inspect_body_cache(&config);
+
     // D8 — read-only, opens nothing but the manifests themselves. The root is
     // the machine's, resolved here because this is the one caller that means the
     // real machine: `%LOCALAPPDATA%` on Windows, and `home` everywhere else.
@@ -1060,6 +1067,7 @@ pub fn run() -> DoctorReport {
         risks,
         reclaim,
         cache,
+        body_cache,
         probes,
         archive_gaps,
         scan_failed,
@@ -1428,6 +1436,279 @@ pub fn inspect_cache(config: &Config) -> CacheCheck {
     }
 }
 
+// ---------------------------------------------------------------------------
+// D9 — how much does the local *body* cache occupy, against which quota?
+// ---------------------------------------------------------------------------
+
+/// Outcome of probing this machine's body cache (ADR-034). Every non-`Ok`
+/// variant is a graceful skip: `doctor` never crashes just because the cache is
+/// absent, off, or unreadable.
+///
+/// This is deliberately a *separate* type from [`CacheCheck`]: D6 measures
+/// rustic's metadata cache, whose root comes from `rustic_cache_dir` and whose
+/// occupancy is not governed by any quota, while this one holds conversation
+/// bodies under `[cache] max_bytes`. One type with two meanings would make
+/// `doctor --json` unable to say which cache it was answering about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyCacheCheck {
+    /// `[cache] max_bytes = 0`: the cache is deliberately off. `leftover` is
+    /// what is still on disk from before the switch was turned off — `None`
+    /// means there is no directory to measure (which is *unknown*, and also the
+    /// normal case for a machine that never had one).
+    Disabled {
+        root: PathBuf,
+        leftover: Option<crate::body_cache::Usage>,
+    },
+    /// The cache is on, but no directory exists yet. Occupancy is **unknown**
+    /// (never measured), never a fake `0`.
+    NoCacheDir { root: PathBuf },
+    /// The cache is on and the directory exists, but it could not be measured.
+    Unreadable { root: PathBuf, error: String },
+    /// The configured location could not be resolved at all, so there is no
+    /// root to report. Distinct from "off": the user asked for a cache and it
+    /// is not where they asked for it.
+    Unresolved { detail: String },
+    /// A directory is there that this cache did not create, so it is not the
+    /// cache's occupancy, not a measured zero, and not a directory this tool
+    /// will write to or delete from. Distinct from `NoCacheDir` (nothing is
+    /// there) and from `Unreadable` (could not look).
+    NotACacheRoot { root: PathBuf, detail: String },
+    /// `[cache]` was present and could not be read, so the body cache is off
+    /// and there is no quota to report. Distinct from `Disabled` (the user
+    /// wrote `max_bytes = 0`) and from an absent section (the default quota):
+    /// the fix is a different line of the config in each case.
+    Invalid { detail: String },
+    /// The cache is on and measured.
+    Ok {
+        root: PathBuf,
+        max_bytes: u64,
+        usage: crate::body_cache::Usage,
+    },
+}
+
+impl BodyCacheCheck {
+    /// Short machine-readable tag, mirrored by `body_cache_json`'s `kind`.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            BodyCacheCheck::Disabled { .. } => "disabled",
+            BodyCacheCheck::NoCacheDir { .. } => "no_cache_dir",
+            BodyCacheCheck::Unreadable { .. } => "unreadable",
+            BodyCacheCheck::Unresolved { .. } => "unresolved",
+            BodyCacheCheck::NotACacheRoot { .. } => "not_a_cache_root",
+            BodyCacheCheck::Invalid { .. } => "invalid",
+            BodyCacheCheck::Ok { .. } => "ok",
+        }
+    }
+}
+
+/// D9 — measure this machine's body cache (ADR-034).
+///
+/// The configured quota is reported next to the occupancy in every state that
+/// has one, because "the cache is using 40 GB" is only meaningful against the
+/// number the user set.
+pub fn inspect_body_cache(config: &Config) -> BodyCacheCheck {
+    use crate::body_cache::RootState;
+
+    // A `[cache]` section that could not be read comes first, before any
+    // resolution: there is no quota to report and no location the user's own
+    // value points at, and saying "off" here would read as if they had written
+    // `max_bytes = 0`.
+    if let Some(problem) = config.cache_error.as_deref() {
+        return BodyCacheCheck::Invalid {
+            detail: problem.to_string(),
+        };
+    }
+    let settings = match crate::body_cache::settings_for(config) {
+        Ok(settings) => settings,
+        Err(e) => {
+            return BodyCacheCheck::Unresolved {
+                detail: format!("{e:#}"),
+            }
+        }
+    };
+    match crate::body_cache::root_state(&settings.root) {
+        RootState::Foreign(detail) => {
+            return BodyCacheCheck::NotACacheRoot {
+                root: settings.root,
+                detail,
+            }
+        }
+        RootState::Unknown(detail) => {
+            return BodyCacheCheck::Unreadable {
+                root: settings.root,
+                error: detail,
+            }
+        }
+        RootState::Absent | RootState::Cache => {}
+    }
+    if !settings.enabled() {
+        let leftover = crate::body_cache::measure(&settings.root).ok().flatten();
+        return BodyCacheCheck::Disabled {
+            root: settings.root,
+            leftover,
+        };
+    }
+    match crate::body_cache::measure(&settings.root) {
+        Ok(Some(usage)) => BodyCacheCheck::Ok {
+            root: settings.root,
+            max_bytes: settings.max_bytes,
+            usage,
+        },
+        Ok(None) => BodyCacheCheck::NoCacheDir {
+            root: settings.root,
+        },
+        Err(e) => BodyCacheCheck::Unreadable {
+            root: settings.root,
+            error: e.to_string(),
+        },
+    }
+}
+
+/// D9 JSON. Like D6's, the byte count is a tri-state: unknown when there is
+/// nothing to measure (never `0`), not_applicable when the cache is off.
+fn body_cache_json(c: &BodyCacheCheck) -> serde_json::Value {
+    match c {
+        BodyCacheCheck::Disabled { root, leftover } => serde_json::json!({
+            "kind": "disabled",
+            "root": root.display().to_string(),
+            "total_bytes": match leftover {
+                Some(u) => CountState::known(u.bytes),
+                None => CountState::not_applicable(
+                    "cache is disabled and no leftover cache could be measured",
+                ),
+            },
+            "entries": leftover.as_ref().map(|u| u.entries),
+        }),
+        BodyCacheCheck::NoCacheDir { root } => serde_json::json!({
+            "kind": "no_cache_dir",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::unknown("cache directory does not exist"),
+        }),
+        BodyCacheCheck::Unreadable { root, error } => serde_json::json!({
+            "kind": "unreadable",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::unknown(error),
+            "error": error,
+        }),
+        BodyCacheCheck::Unresolved { detail } => serde_json::json!({
+            "kind": "unresolved",
+            "total_bytes": CountState::unknown(detail),
+            "error": detail,
+        }),
+        BodyCacheCheck::NotACacheRoot { root, detail } => serde_json::json!({
+            "kind": "not_a_cache_root",
+            "root": root.display().to_string(),
+            "total_bytes": CountState::unknown(detail),
+            "error": detail,
+        }),
+        BodyCacheCheck::Invalid { detail } => serde_json::json!({
+            "kind": "invalid",
+            "total_bytes": CountState::unknown(detail),
+            "error": detail,
+        }),
+        BodyCacheCheck::Ok {
+            root,
+            max_bytes,
+            usage,
+        } => serde_json::json!({
+            "kind": "ok",
+            "root": root.display().to_string(),
+            "max_bytes": CountState::known(*max_bytes),
+            "total_bytes": CountState::known(usage.bytes),
+            "entries": usage.entries,
+            // Always present in the JSON, even at zero: a script comparing two
+            // machines should be able to read the count rather than infer it
+            // from a missing key.
+            "foreign_entries": usage.foreign_entries,
+        }),
+    }
+}
+
+/// D9 printing — shared by the normal path and the scan-failed early return.
+fn print_body_cache(c: &BodyCacheCheck) {
+    match c {
+        BodyCacheCheck::Disabled { root, leftover } => {
+            eprintln!("  body cache is off (cache.max_bytes = 0) — every read fetches from the destination.");
+            eprintln!("  body cache root: {}", root.display());
+            match leftover {
+                Some(u) => eprintln!(
+                    "  leftover on disk: {} ({} B) in {} entry file(s) — written before the switch, not by it",
+                    fmt_bytes(u.bytes),
+                    u.bytes,
+                    u.entries
+                ),
+                None => eprintln!(
+                    "  leftover on disk: unknown (no directory to measure), which is not the same as empty"
+                ),
+            }
+        }
+        BodyCacheCheck::NoCacheDir { root } => {
+            eprintln!("  body cache root: {}", root.display());
+            eprintln!(
+                "  occupancy: unknown — the directory does not exist yet (never measured), not 0."
+            );
+        }
+        BodyCacheCheck::Unreadable { root, error } => {
+            eprintln!("  body cache root: {}", root.display());
+            eprintln!("  occupancy: could not be measured: {error}");
+        }
+        BodyCacheCheck::Unresolved { detail } => {
+            eprintln!("  body cache location could not be resolved: {detail}");
+            eprintln!(
+                "  fix `[cache] dir` in the config; reads keep working, and each one fetches from the destination."
+            );
+        }
+        BodyCacheCheck::NotACacheRoot { root, detail } => {
+            eprintln!("  body cache root: {}", root.display());
+            eprintln!("  not a chat-stasher body cache: {detail}");
+            eprintln!(
+                "  nothing here is measured, written or deleted; reads keep working and fetch from the destination."
+            );
+            eprintln!(
+                "  point `[cache] dir` at a directory chat-stasher created, or remove this one by hand."
+            );
+        }
+        BodyCacheCheck::Invalid { detail } => {
+            eprintln!("  body cache is off: {detail}");
+            eprintln!(
+                "  fix that value in the config; reads keep working, and each one fetches from the destination."
+            );
+        }
+        BodyCacheCheck::Ok {
+            root,
+            max_bytes,
+            usage,
+        } => {
+            eprintln!("  body cache root: {}", root.display());
+            eprintln!(
+                "  occupancy  : {} ({} B) in {} entry file(s)",
+                fmt_bytes(usage.bytes),
+                usage.bytes,
+                usage.entries
+            );
+            eprintln!(
+                "  quota      : {} ({} B) — one quota per machine, shared by every destination",
+                fmt_bytes(*max_bytes),
+                max_bytes
+            );
+            if usage.foreign_entries > 0 {
+                // Said only when there is something to say: at zero the
+                // occupancy above is already the whole of it.
+                eprintln!(
+                    "  foreign    : {} file(s) or directory(ies) here were not written by chat-stasher — not in the bytes above, and never deleted",
+                    usage.foreign_entries
+                );
+            }
+            eprintln!(
+                "  note: this cache holds conversation bodies as the destination's own ciphertext. It is disposable —"
+            );
+            eprintln!(
+                "        `chat-stasher cache clear` removes it, and the archive in the destination is untouched."
+            );
+        }
+    }
+}
+
 /// Default data dir for the repository + key file. Delegated to `config` so
 /// the CLI, `doctor` and the Native Messaging host cannot disagree on where
 /// this machine's identity file lives.
@@ -1770,6 +2051,7 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "risks": r.risks.iter().map(|text| risk_json(text)).collect::<Vec<_>>(),
         "reclaim": reclaim_json(&r.reclaim),
         "cache": cache_json(&r.cache),
+        "body_cache": body_cache_json(&r.body_cache),
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
@@ -2147,6 +2429,9 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!("D6 · Local metadata cache occupancy");
         print_cache(&r.cache);
         eprintln!();
+        eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
+        print_body_cache(&r.body_cache);
+        eprintln!();
         print_destinations(&r.destinations);
         // D8 does not depend on the scan at all — it reads the browser
         // manifests and the config — so it is reported on this path too.
@@ -2232,6 +2517,9 @@ pub fn print_report(r: &DoctorReport) {
     // D6 — how much the local metadata cache actually occupies
     eprintln!("D6 · Local metadata cache occupancy");
     print_cache(&r.cache);
+    eprintln!();
+    eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
+    print_body_cache(&r.body_cache);
     eprintln!();
 
     // D7 — can each declared destination actually be reached? (ADR-023)
@@ -2934,6 +3222,9 @@ mod json_tests {
             cache: CacheCheck::NoCacheDir {
                 root: PathBuf::from("/nowhere/rustic"),
             },
+            body_cache: BodyCacheCheck::NoCacheDir {
+                root: PathBuf::from("/nowhere/body"),
+            },
             probes: vec![probe()],
             archive_gaps: Vec::new(),
             scan_failed: false,
@@ -2952,6 +3243,12 @@ mod json_tests {
     /// The Native Messaging work added `native_host` under the same rule. The
     /// assertion below is unchanged — the same exact-list comparison — so the
     /// addition could not have been made quietly.
+    ///
+    /// ADR-034 added `body_cache`, again as a new key: the existing `cache`
+    /// keeps its meaning (rustic's metadata cache, D6) and a script reading it
+    /// is unaffected. The two caches are reported apart on purpose — one is
+    /// governed by a quota and the other is not, and a single merged number
+    /// could not be compared against either.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -2960,6 +3257,7 @@ mod json_tests {
             obj.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "archive_gaps",
+                "body_cache",
                 "cache",
                 "claude",
                 "command",
@@ -3060,6 +3358,180 @@ mod json_tests {
     /// A real directory measures its recursive bytes and counts one subdir per
     /// repository cached on this machine (rustic caches each repo under
     /// `<root>/<repository-id>`).
+    #[test]
+    fn body_cache_report_is_unknown_when_the_cache_dir_is_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-body-cache");
+        let config = Config {
+            cache: Some(crate::config::CacheSectionConfig {
+                max_bytes: None,
+                dir: Some(missing.to_string_lossy().into_owned()),
+            }),
+            ..Config::default()
+        };
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "no_cache_dir");
+        let v = body_cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("no_cache_dir"));
+        assert_eq!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"unknown","why":"cache directory does not exist"})
+        );
+        assert_ne!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":0}),
+            "a missing body-cache dir must never read as a measured empty"
+        );
+    }
+
+    /// A real body cache measures its bytes and its entry count, and reports
+    /// the quota it is measured against — a byte count without the quota it
+    /// must stay under answers a different question.
+    #[test]
+    fn body_cache_report_measures_a_real_dir_and_names_the_quota() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("body");
+        let cache = crate::body_cache::BodyCache::new(root.clone(), 1 << 20);
+        // Two entries of 4 bytes each, stored through the cache's own writer so
+        // the measurement covers real entries rather than arbitrary files.
+        let hex = "ab".repeat(32);
+        let key = crate::body_cache::CacheKey::new(
+            &hex.parse::<rustic_core::Id>().expect("hex id"),
+            0,
+            4,
+        );
+        cache.put(&key, b"aaaa");
+        let config = Config {
+            cache: Some(crate::config::CacheSectionConfig {
+                max_bytes: Some(crate::body_cache::CacheSize(1 << 20)),
+                dir: Some(root.to_string_lossy().into_owned()),
+            }),
+            ..Config::default()
+        };
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "ok");
+        let v = body_cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("ok"));
+        assert_eq!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":
+                crate::body_cache::ENTRY_HEADER_LEN + 4}),
+            "the measured bytes must be what is actually on the disk"
+        );
+        assert_eq!(v["entries"], serde_json::json!(1));
+        assert_eq!(
+            v["max_bytes"],
+            serde_json::json!({"kind":"known","count": 1048576}),
+            "the quota is part of the answer, not a separate command"
+        );
+    }
+
+    /// `max_bytes = 0` is a deliberate switch, not an empty cache: it is
+    /// reported as `disabled`, and a leftover directory is measured rather than
+    /// hidden.
+    #[test]
+    fn body_cache_report_distinguishes_off_from_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("body");
+
+        // Off with nothing on disk: not_applicable, never a measured zero.
+        let config = Config {
+            cache: Some(crate::config::CacheSectionConfig {
+                max_bytes: Some(crate::body_cache::CacheSize(0)),
+                dir: Some(root.to_string_lossy().into_owned()),
+            }),
+            ..Config::default()
+        };
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "disabled");
+        let v = body_cache_json(&check);
+        assert_eq!(
+            v["total_bytes"],
+            serde_json::json!({
+                "kind": "not_applicable",
+                "why": "cache is disabled and no leftover cache could be measured"
+            })
+        );
+
+        // Off with something left over from before: measured and reported.
+        let cache = crate::body_cache::BodyCache::new(root.clone(), 1 << 20);
+        let hex = "cd".repeat(32);
+        let key = crate::body_cache::CacheKey::new(
+            &hex.parse::<rustic_core::Id>().expect("hex id"),
+            8,
+            4,
+        );
+        cache.put(&key, b"bbbb");
+        let v = body_cache_json(&inspect_body_cache(&config));
+        assert_eq!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":
+                crate::body_cache::ENTRY_HEADER_LEN + 4}),
+            "a cache switched off must still show what it left on the disk"
+        );
+        assert_eq!(v["entries"], serde_json::json!(1));
+    }
+
+    /// A `[cache]` value that could not be read is a finding of its own: not
+    /// `disabled` (which is the user's own switch), not a missing directory,
+    /// and never a quota.
+    #[test]
+    fn body_cache_report_names_an_unreadable_cache_section() {
+        let config = Config {
+            cache_error: Some(
+                "`[cache]` could not be read: cache size `50G` has an unknown unit `G`".to_string(),
+            ),
+            ..Config::default()
+        };
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "invalid");
+        let v = body_cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("invalid"));
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("50G"),
+            "the report must quote the value to fix: {v}"
+        );
+        assert_ne!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":0}),
+            "a cache that could not be configured is not a measured empty one"
+        );
+    }
+
+    /// A directory that is not the cache's own is reported as such, and its
+    /// bytes are not presented as this cache's occupancy.
+    #[test]
+    fn body_cache_report_distinguishes_another_directory_from_an_empty_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("someone-elses-dir");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("keep-me.txt"), b"not a cache entry").unwrap();
+        let config = Config {
+            cache: Some(crate::config::CacheSectionConfig {
+                max_bytes: Some(crate::body_cache::CacheSize(1 << 20)),
+                dir: Some(root.to_string_lossy().into_owned()),
+            }),
+            ..Config::default()
+        };
+
+        let check = inspect_body_cache(&config);
+        assert_eq!(check.kind_label(), "not_a_cache_root");
+        let v = body_cache_json(&check);
+        assert_eq!(v["kind"], serde_json::json!("not_a_cache_root"));
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(".chat-stasher-body-cache"),
+            "the report must name the marker it looked for: {v}"
+        );
+        assert_ne!(
+            v["total_bytes"],
+            serde_json::json!({"kind":"known","count":17}),
+            "another directory's bytes are not this cache's occupancy"
+        );
+    }
+
     #[test]
     fn cache_report_measures_a_real_dir() {
         let dir = tempfile::TempDir::new().unwrap();

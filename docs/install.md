@@ -213,7 +213,7 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:136-137`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,510-521`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:15,604-615`).
 
 ---
 
@@ -366,9 +366,9 @@ read the repository and key file you select in config or arguments
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1189-1191`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1271-1273`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1289-1297`).
+(`crates/chat-stasher/src/store.rs:1371-1379`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -377,8 +377,8 @@ with owner-only-readable permissions, on platforms that can express them
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:271-275`; the config field itself
-is `crates/chat-stasher/src/config.rs:175-176`).
+(`crates/chat-stasher/src/store.rs:153-156`, `:306-310`; the config field itself
+is `crates/chat-stasher/src/config.rs:222-223`).
 
 **Why this step exists.** A remote destination is reached by running the system
 `ssh` client. The first time it meets a host it has no record of, it refuses:
@@ -389,11 +389,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:3834-3847`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:3867-3880`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:3870-3894`). An
+it does anything else (`crates/chat-stasher/src/main.rs:3903-3927`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -425,10 +425,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3849-3858`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:3882-3891`;
 `crates/chat-stasher/src/remote_err.rs:503-536`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:3837-3845`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:3870-3878`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -485,12 +485,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:7214-7215`). This is the
+does not (`crates/chat-stasher/src/main.rs:7480-7481`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:6918-6919`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:7184-7185`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -506,7 +506,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:7374-7665`):
+(`crates/chat-stasher/src/main.rs:7640-7931`):
 
 - When there are conversations: `[scan] N conversations (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No conversations found on this machine.`
@@ -519,7 +519,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:7011-7018`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:7277-7284`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -541,7 +541,7 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:812-841`, `:879-917`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:816-845`, `:883-921`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. This is the one thing `doctor` does that touches
 the network; see section 4.4 if it reports a host it cannot trust.
@@ -601,7 +601,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1189-1196`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1271-1278`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched **at most 300–400 per day** (the day's cap is drawn once per

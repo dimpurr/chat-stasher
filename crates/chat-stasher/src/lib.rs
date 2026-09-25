@@ -6,6 +6,7 @@
 //! spike, except when `read` verifies a session back from the repository.
 
 pub mod activity;
+pub mod body_cache;
 pub mod collect;
 pub mod config;
 pub mod destinit;

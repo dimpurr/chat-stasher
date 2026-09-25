@@ -1043,6 +1043,30 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
+    /// Manage this machine's body cache (ADR-034).
+    ///
+    /// The body cache holds the conversation bodies a read would otherwise pull
+    /// from a destination again, as the destination's own ciphertext. It is
+    /// disposable by design: nothing here is part of the archive, and deleting
+    /// all of it changes nothing except how long the next read takes. Without a
+    /// subcommand it prints the location, the quota and the current occupancy,
+    /// so a cache you never meant to have is visible before you clear it.
+    Cache {
+        /// What to do; omit to see the current occupancy.
+        #[command(subcommand)]
+        action: Option<CacheAction>,
+    },
+}
+
+/// `cache` subcommands.
+#[derive(Clone, Copy, clap::Subcommand)]
+enum CacheAction {
+    /// Delete every cached body block.
+    ///
+    /// Only the cache directory is touched — never the archive, never a
+    /// destination, never a key. Entries are re-fetched from the destination
+    /// the next time a session is read.
+    Clear,
 }
 
 /// export `--turns` selector. A value enum rather than a string so an unknown
@@ -1269,6 +1293,7 @@ fn run() -> ExitCode {
             keep_ssh_masters,
         ),
         Command::Doctor { json } => cmd_doctor(json),
+        Command::Cache { action } => cmd_cache(action),
         Command::Verify {
             level,
             stage,
@@ -3603,7 +3628,15 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         connections,
         &options,
     );
-    let store = BackupStore::for_metadata_query(cfg.clone());
+    // ADR-034: the dashboard is the other single-session body reader. Every
+    // route except `load` is metadata-tier, and only `load` reaches this cache.
+    let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
+        chat_stasher::body_cache::for_operation(
+            &config,
+            chat_stasher::body_cache::Policy::ReadThrough,
+        )
+        .handle(),
+    );
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -5682,10 +5715,25 @@ fn cmd_read(
         connections,
         options,
     );
+    // ADR-034: one session's body is exactly what the body cache is for, and
+    // `--all-machines` is exactly what it is not — that mode reads every
+    // session of every machine, so filling the cache from it would evict the
+    // sessions a user actually re-reads.
+    let cache_policy = if all_machines {
+        chat_stasher::body_cache::Policy::Bulk
+    } else {
+        chat_stasher::body_cache::Policy::ReadThrough
+    };
+    let body_cache = chat_stasher::body_cache::for_operation(&config, cache_policy);
     let store = match machine.as_deref() {
         Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
         None => BackupStore::for_metadata_query(cfg.clone()),
-    };
+    }
+    .with_body_cache(body_cache.handle());
+    println!(
+        "[read] body cache     : {}",
+        body_cache_state_line(&body_cache)
+    );
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -5752,6 +5800,9 @@ fn cmd_read(
                 return ExitCode::from(3);
             }
         };
+        if let Some(line) = body_cache_stats_line(&body_cache) {
+            println!("[read] body cache     : {line}");
+        }
         println!("[read] shards (seq order):");
         for (name, hash) in &hashes {
             println!("  {name}  sha256={hash}");
@@ -5770,6 +5821,221 @@ fn cmd_read(
     };
     reap_remote(&cfg, keep_ssh_masters);
     code
+}
+
+/// `cache` — report or clear this machine's body cache (ADR-034).
+///
+/// Read-only apart from `clear`, which touches the cache directory and nothing
+/// else: no destination is contacted, no key is read, and no archive content
+/// exists here to lose.
+///
+/// Exit codes follow the family the rest of the CLI uses, with one deliberate
+/// difference: a cache that cannot be *measured* is not a failure to report, it
+/// is an unknown — the occupancy line says so and the command still exits 0,
+/// the same way `doctor` reports an unmeasurable metadata cache.
+fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
+    use chat_stasher::body_cache::RootState;
+
+    let config = Config::load();
+    // A `[cache]` section that could not be read is neither an absent one (which
+    // takes the documented default quota) nor a path problem: the quota the user
+    // wrote is unknown, so the cache is off and this says which line to fix.
+    if let Some(problem) = config.cache_error.as_deref() {
+        eprintln!("cache: {problem}");
+        eprintln!(
+            "cache: the body cache is off until that value is fixed, and nothing was read or \
+             deleted"
+        );
+        // 2, not 1: nothing was attempted. The config is the thing to fix.
+        return ExitCode::from(2);
+    }
+    let settings = match chat_stasher::body_cache::settings_for(&config) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("cache: {e:#}");
+            eprintln!(
+                "cache: the configured location could not be resolved, so nothing was read or \
+                 deleted. Fix `[cache] dir` in the config and re-run."
+            );
+            // 2, not 1: nothing was attempted, so this is a usage error in the
+            // configured path, not "cleared and failed".
+            return ExitCode::from(2);
+        }
+    };
+    let root = settings.root.clone();
+
+    // Is this directory chat-stasher's own? `cache clear` deletes, and the only
+    // files it may delete are the ones the cache wrote, so a `[cache] dir` that
+    // points at a directory the cache did not create is refused — before
+    // anything is touched, and with the reason attached.
+    let state = chat_stasher::body_cache::root_state(&root);
+
+    if let Some(CacheAction::Clear) = action {
+        return match state {
+            RootState::Absent => {
+                println!(
+                    "cache: nothing to clear — no cache directory at {}",
+                    root.display()
+                );
+                ExitCode::SUCCESS
+            }
+            RootState::Foreign(why) => {
+                eprintln!("cache: refusing to clear {}: {why}", root.display());
+                eprintln!(
+                    "cache: nothing was deleted. A cache is only ever cleared inside a directory \
+                     chat-stasher created itself, so point `[cache] dir` at that directory, or \
+                     remove this one by hand."
+                );
+                // 2, not 1: nothing was attempted, and the fix is in the config.
+                ExitCode::from(2)
+            }
+            RootState::Unknown(why) => {
+                eprintln!(
+                    "cache: could not clear the cache at {}: {why}",
+                    root.display()
+                );
+                eprintln!(
+                    "cache: nothing was deleted, because it could not be established that this \
+                     directory is the cache's own."
+                );
+                ExitCode::from(2)
+            }
+            RootState::Cache => match settings.open().clear() {
+                Ok(removed) => {
+                    println!(
+                        "cache: cleared {} entries ({} B) from {}",
+                        removed.entries,
+                        removed.bytes,
+                        root.display()
+                    );
+                    if removed.foreign_entries > 0 {
+                        println!(
+                            "cache: left alone   : {} file(s) or directory(ies) here were not \
+                             written by chat-stasher",
+                            removed.foreign_entries
+                        );
+                    }
+                    println!(
+                        "cache: the destination still holds every archive byte; the next read of a \
+                         session fetches it again"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!(
+                        "cache: could not clear the cache at {}: {e}",
+                        root.display()
+                    );
+                    ExitCode::FAILURE
+                }
+            },
+        };
+    }
+
+    println!("cache: root           : {}", root.display());
+    println!(
+        "cache: quota          : {} B{}",
+        settings.max_bytes,
+        if settings.max_bytes == 0 {
+            " (cache off: every read goes to the destination)"
+        } else {
+            ""
+        }
+    );
+    match state {
+        RootState::Absent => {
+            println!("cache: occupancy      : unknown (no cache directory yet)");
+        }
+        RootState::Foreign(why) => {
+            // Not a measured zero, and not another directory's bytes presented
+            // as this cache's occupancy: nothing here was measured at all.
+            println!("cache: occupancy      : unknown (not a chat-stasher body cache: {why})");
+            println!(
+                "cache: nothing here is measured, written or deleted; point `[cache] dir` at a \
+                 directory chat-stasher created, or remove this one by hand"
+            );
+        }
+        RootState::Unknown(why) => println!("cache: occupancy      : unreadable ({why})"),
+        RootState::Cache => match chat_stasher::body_cache::measure(&root) {
+            Ok(Some(usage)) => {
+                println!(
+                    "cache: occupancy      : {} B in {} entries",
+                    usage.bytes, usage.entries
+                );
+                if usage.foreign_entries > 0 {
+                    println!(
+                        "cache: foreign        : {} file(s) or directory(ies) here were not written \
+                         by chat-stasher; they are not counted above, and `cache clear` leaves \
+                         them alone",
+                        usage.foreign_entries
+                    );
+                }
+            }
+            // The directory exists but could not be measured. Reported as an
+            // unknown, never as `0 B`, which would read as "the cache is empty".
+            Ok(None) => println!("cache: occupancy      : unknown (no cache directory yet)"),
+            Err(e) => println!("cache: occupancy      : unreadable ({e})"),
+        },
+    }
+    ExitCode::SUCCESS
+}
+
+/// One line saying whether this run used the body cache — and if not, which of
+/// the three different reasons applies (ADR-034).
+///
+/// The three off states are worded apart on purpose: a user who set a quota and
+/// sees `off` must be able to tell "I turned it off" from "this command is
+/// bulk" from "your configured location is broken", because only the last one
+/// is a problem to fix.
+fn body_cache_state_line(availability: &chat_stasher::body_cache::Availability) -> String {
+    use chat_stasher::body_cache::Availability;
+    match availability {
+        // The location is deliberately not printed here: `read`'s report is
+        // pinned byte-for-byte by tests precisely because it must not depend on
+        // this machine, and a cache root is a per-run path. `chat-stasher cache`
+        // and `doctor` (D9) both name it.
+        Availability::On(cache) => format!("on (quota={} B)", cache.max_bytes()),
+        Availability::Off => "off (cache.max_bytes = 0)".to_string(),
+        Availability::Bulk => "not used (bulk read, ADR-034)".to_string(),
+        Availability::Unresolved(why) => {
+            format!("unavailable ({why}); this read goes to the remote uncached")
+        }
+        // Two states, one sentence: neither is the user's decision, and in both
+        // the reason says which of the two it is — a directory that is not the
+        // cache's, or a `[cache]` value that could not be read. `doctor` words
+        // them apart with more room than a single line has.
+        Availability::Foreign(why) | Availability::Invalid(why) => {
+            format!("off ({why}); this read goes to the remote uncached")
+        }
+    }
+}
+
+/// What the cache did during this run, or `None` when it was not installed.
+///
+/// `usage` is reported separately from the counters because it is a
+/// measurement of the disk, and it can fail on its own: an unreadable
+/// directory prints as unreadable, never as 0 bytes.
+fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) -> Option<String> {
+    use chat_stasher::body_cache::Availability;
+    let Availability::On(cache) = availability else {
+        return None;
+    };
+    let stats = cache.stats();
+    let usage = match cache.usage() {
+        Ok(usage) => format!("{} B in {} entries", usage.bytes, usage.entries),
+        Err(e) => format!("<unreadable> {e}"),
+    };
+    Some(format!(
+        "hits={} misses={} corrupt={} stored={} skipped_too_large={} skipped_session={} errors={} usage={}",
+        stats.hits,
+        stats.misses,
+        stats.corrupt,
+        stats.stored,
+        stats.skipped_too_large,
+        stats.skipped_session,
+        stats.errors,
+        usage
+    ))
 }
 
 /// `read --all-machines` — group every snapshot by hostname, take each

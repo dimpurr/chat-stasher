@@ -144,7 +144,7 @@ the sentence.
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
    (`crates/chat-stasher/src/main.rs:236-273`;
-   `crates/chat-stasher/src/store.rs:261-296`).
+   `crates/chat-stasher/src/store.rs:271-345`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
 step that can involve a network, and the only destination it can reach is the
@@ -400,7 +400,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:96`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:261-296,1064-1149`).
+kept on your machine (`crates/chat-stasher/src/store.rs:271-345,1146-1231`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -415,7 +415,7 @@ The parties who *do* see something, stated plainly:
 | Party | What they see | Why |
 |---|---|---|
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:698`, `:559-576`; `apps/extension/lib/gemini-capture.ts:150-234` |
-| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:261-296`; see `docs/threat-model.md` |
+| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271-345`; see `docs/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:465-475` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
@@ -619,7 +619,7 @@ Chat Stasher does not call any AI model, does not send your conversations to a
 model provider, and does not use your conversations for training anything. The
 word "chat" in this product refers to conversations you already had, on someone
 else's service, that this tool copies into your own archive. The archive format
-is `rustic` encrypted backup objects (`crates/chat-stasher/src/store.rs:261-296`);
+is `rustic` encrypted backup objects (`crates/chat-stasher/src/store.rs:271-345`);
 nothing reads them except you.
 
 ## 9. How long data is kept, and how to delete it
@@ -675,10 +675,10 @@ dominant risk.
 **3. The master key is the only key, and losing it is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1189-1196,1151-1155`). The key file
+archive (`crates/chat-stasher/src/store.rs:1271-1278,1233-1237`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1231-1316`).
+(`crates/chat-stasher/src/store.rs:1313-1398`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin
