@@ -388,7 +388,7 @@ by something other than our own code.
 
 | | |
 |---|---|
-| **Can see** | Every bundle the extension delivers: the conversation text, the platform name, the session id, the account identity in it. It is the local process that writes your archive's input. It also answers the extension's two read-only questions — a count-only summary of the stage, and a request to start the dashboard (see the two bullets at the end of this section). |
+| **Can see** | Every bundle the extension delivers: the conversation text, the platform name, the session id, the account identity in it. It is the local process that writes your archive's input. It also answers the extension's three read-only questions — a count-only summary of the stage, a request to start the dashboard, and a per-conversation is-this-exact-content-already-stored lookup (see the last three bullets of this section). |
 | **Cannot see** | Nothing is withheld from it: it sees every bundle it is asked to archive. But it is *not* a network service — it opens no socket, the browser starts one process per request, and it writes only into the stage you configured. |
 
 The properties that bound this boundary:
@@ -424,8 +424,8 @@ The properties that bound this boundary:
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
   (`crates/chat-stasher/src/nativehost.rs:1138-1144`).
-- **The host also answers two read-only questions, and writes nothing for
-  either.** `summary` counts the sessions in the stage from its directory
+- **The host also answers three read-only questions, and writes nothing for
+  any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
   not open a shard, does not decrypt the repository and does not touch the
   network — and answers with counts, harness names, a window length and a push
@@ -434,14 +434,36 @@ The properties that bound this boundary:
   `contracts/nativehost-protocol.md` §6.4). `open_dashboard` starts this same
   binary as `ui --no-open` for the destination named in your config and returns
   the per-launch URL to the extension only; "The local dashboard" section above
-  covers what that hands over and to whom.
-- 🔴 **Both are parameterless, and anything else is refused.** An
+  covers what that hands over and to whom. `has` answers whether the stage
+  already holds one conversation's exact content: from the `platform`,
+  `session_id` and SHA-256 `fingerprint` the extension sends with the question,
+  it looks only in the directory a `deliver` of that same conversation would
+  write to, matches the fingerprint against what each sealed shard's record
+  carries, and answers `held` — true or false — with the matching shard's file
+  name, or `null` (`crates/chat-stasher/src/nativehost.rs`;
+  `contracts/nativehost-protocol.md` §6.6).
+- 🔴 **`summary` and `open_dashboard` are parameterless, and anything else is
+  refused.** An
   `open_dashboard` carrying a `destination`, a `repo`, a `key_file` or any other
   field the document does not define is answered `nack` `bad-request`, so a
   compromised or hostile extension — or a call from one of your *other*
   extensions, if it could reach this host at all, which it cannot — cannot
   direct the dashboard at a repository or a flag of its choosing
   (`contracts/nativehost-protocol.md` §6, §6.5).
+- 🔴 **`has` is the one parametered read-only question, and it is an oracle
+  over nothing the asker has not already seen.** It names one conversation
+  (`platform`, `session_id`) and a SHA-256 `fingerprint` the asking extension
+  computed from a body it holds; the answer is one bit plus a shard file name,
+  so the most a compromised or hostile extension can learn is whether a
+  conversation it already holds the body of is present in the stage, and under
+  which file. A request carrying a malformed `request_id`, a `fingerprint` that
+  is not 64 lowercase hex characters, or a `platform`/`session_id` outside the
+  1–512 character bound is answered `nack` `bad-request`, never a guess; the
+  lookup itself writes nothing and takes no stage lock
+  (`contracts/nativehost-protocol.md` §6, §6.6;
+  `crates/chat-stasher/src/nativehost.rs`). It cannot be used to direct
+  anything anywhere: like the other two, it is one fixed question about the one
+  stage your config names.
 
 What this boundary does **not** buy you: the host is an ordinary binary running
 as you, so anything that can replace it can do anything it can — see "A replaced
