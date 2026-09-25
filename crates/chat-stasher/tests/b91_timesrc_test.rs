@@ -163,10 +163,18 @@ fn deprecated_unix_flags_warn_on_stderr() {
     );
 }
 
-/// B's old behaviour counterexample: malformed config warns on stderr but
-/// status/doctor expose no machine-readable fact that defaults were used.
+/// B's old behaviour counterexample, re-aimed at the contract that replaced it.
+///
+/// It used to require that status and doctor *say* defaults came from a parse
+/// failure — the old loader's answer to a malformed config. That loader is gone
+/// (W145): a malformed config is no longer a fallback to be labelled, it is a
+/// refusal. The property this test exists for is unchanged, and is what is
+/// asserted here: the failure is visible to both readers, and never dressed up
+/// as an answer — a human reading stderr gets the file and the parse position,
+/// and a machine reading `status --json` gets one object saying it could not
+/// look.
 #[test]
-fn config_parse_fallback_is_visible_to_status_and_doctor() {
+fn config_parse_failure_is_visible_to_status_and_doctor() {
     let sandbox = tempfile::tempdir().unwrap();
     let registry = registry_for_empty_fixture(sandbox.path());
     let config = sandbox.path().join("xdg-config/chat-stasher/config.toml");
@@ -176,11 +184,33 @@ fn config_parse_fallback_is_visible_to_status_and_doctor() {
     for command in ["status", "doctor"] {
         let out = isolated_env(sandbox.path(), &[command], &registry);
         let text = combined(&out);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{command} must not report on a config it could not read;\n{text}"
+        );
         assert!(
-            text.contains("config_source=defaults_after_parse_error"),
-            "{command} must expose that defaults came from a config parse failure;\n{text}"
+            text.contains("config file") && text.contains(&config.display().to_string()),
+            "{command} must name the file it could not use;\n{text}"
+        );
+        assert!(
+            text.contains("line 1"),
+            "{command} must carry the parse position;\n{text}"
+        );
+        assert!(
+            !text.contains("defaults_after_parse_error"),
+            "{command} must not report defaults as the provenance of a broken config;\n{text}"
         );
     }
+
+    // The machine-readable surface, which is what B's counterexample was about:
+    // one JSON object on stdout, saying "not looked at", never `0` sessions.
+    let out = isolated_env(sandbox.path(), &["status", "--json"], &registry);
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("status --json must still write one object");
+    assert_eq!(v["exit_code"], serde_json::json!(3));
+    assert_eq!(v["config_source"], serde_json::json!("unreadable"));
+    assert_eq!(v["scanner"]["kind"], serde_json::json!("failed"));
 }
 
 /// Health guard: a fully inspectable empty fixture must not acquire a cloud of
