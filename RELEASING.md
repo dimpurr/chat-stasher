@@ -128,8 +128,10 @@ automation creates one.
      it is the one registry state the workflow cannot undo once written:
      ```sh
      # Stable release: every one must print the version just released.
-     # Release candidate: chat-stasher must print the newest *stable* version,
-     # or `latest` must be absent — never the rc.
+     # Release candidate: each package must print its newest *stable* version.
+     # The one exception is a package with no stable release yet: npm points
+     # `latest` at its first publish, so there it prints the rc until the
+     # first stable release moves it.
      for p in chat-stasher @dimpurr/chat-stasher-darwin-arm64 \
               @dimpurr/chat-stasher-darwin-x64 @dimpurr/chat-stasher-linux-arm64 \
               @dimpurr/chat-stasher-linux-x64 @dimpurr/chat-stasher-win32-x64; do
