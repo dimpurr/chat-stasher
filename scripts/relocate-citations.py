@@ -2,7 +2,7 @@
 """relocate-citations.py — move each `path:line` citation to where its text went.
 
 Every merge of a parallel branch edits code, which moves lines, which leaves the
-citations in README.md and docs/ pointing at text that is no longer there. The
+citations in README.md and docs-dev/ pointing at text that is no longer there. The
 relocation is mechanical — take the text a citation named at the commit whose
 numbers the document still carries, find that same text in the merged working
 tree, rewrite the range — and doing it by hand is what has cost this repository
@@ -50,7 +50,7 @@ run, that is what the already-relocated citations look like, which is why the
 second run is a refusal and not a second relocation.
 
 What counts as "the text a citation named" is the repository's own definition,
-the one docs/citations.lock already pins: the range's lines with surrounding
+the one docs-dev/citations.lock already pins: the range's lines with surrounding
 whitespace removed, joined by newlines. Pure reindentation is therefore not a
 move; a changed word is.
 
@@ -77,12 +77,12 @@ thing about a citation that the merge is allowed to change.
 
 **Which documents this rewrites** is not a list kept here: it is exactly
 `drift.doc_files()`, the scan set of scripts/check-citation-drift.py — README.md,
-SECURITY.md, CONTRIBUTING.md, docs/install.md, docs/privacy.md,
-docs/threat-model.md and every contracts/*.md. SECURITY.md, CONTRIBUTING.md and
+SECURITY.md, CONTRIBUTING.md, docs-dev/install.md, docs-dev/privacy.md,
+docs-dev/threat-model.md and every contracts/*.md. SECURITY.md, CONTRIBUTING.md and
 contracts/*.md are in that set deliberately: a citation left stale in one of
 them is the same stale anchor as one left stale in README.md, and they are the
 documents the drift check will fail on next. Source files, and
-docs/citations.lock itself, are never written.
+docs-dev/citations.lock itself, are never written.
 
 Each document is replaced in one step — a sibling temporary file and
 `os.replace` — and a document's own line endings and final-newline state are
@@ -467,7 +467,7 @@ def locate(old: SourceIndex, cur: SourceIndex, start: int, end: int) -> Decision
     A relocation requires the merged file to carry the cited block as the same
     run of lines, in exactly one place. "The same run of lines" is the
     repository's own definition of what a citation pins, the one
-    docs/citations.lock already uses: the range's lines with surrounding
+    docs-dev/citations.lock already uses: the range's lines with surrounding
     whitespace removed, joined by newlines. Pure reindentation is therefore not
     a move; a changed word is, and so is an inserted or deleted line, because
     both change the run.
@@ -1031,12 +1031,12 @@ def main() -> int:
                     "every document left as it was.",
         epilog="The documents this rewrites are the ones "
                "scripts/check-citation-drift.py scans: README.md, SECURITY.md, "
-               "CONTRIBUTING.md, docs/install.md, docs/privacy.md, "
-               "docs/threat-model.md and contracts/*.md. SECURITY.md, "
+               "CONTRIBUTING.md, docs-dev/install.md, docs-dev/privacy.md, "
+               "docs-dev/threat-model.md and contracts/*.md. SECURITY.md, "
                "CONTRIBUTING.md and contracts/*.md are included deliberately — a "
                "citation left stale in one of them fails the drift check exactly "
                "as one left stale in README.md does. Source files and "
-               "docs/citations.lock are never written. Each document is replaced "
+               "docs-dev/citations.lock are never written. Each document is replaced "
                "in one step and keeps its own line endings and final-newline "
                "state; if any document cannot be written, the documents already "
                "written in that run are put back, and a document that could not "

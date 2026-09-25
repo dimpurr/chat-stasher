@@ -9,8 +9,8 @@
  * have not changed. A sentence that was never put back is invisible to it, and so
  * is a sentence put back pointing at the wrong code — which is exactly what the
  * re-review of that merge found (`nm/R64b-grok.log`, finding 3: the sentences
- * about a stop written by an *older* build are absent from `docs/privacy.md` and
- * `docs/threat-model.md`, and main's one-line comment on `haltReasonForStatus` is
+ * about a stop written by an *older* build are absent from `docs-dev/privacy.md` and
+ * `docs-dev/threat-model.md`, and main's one-line comment on `haltReasonForStatus` is
  * absent from `engine.ts`).
  *
  * So two facts are pinned, per sentence:
@@ -20,7 +20,7 @@
  *  2. the range that sentence cites is the code it is about — read off disk, not
  *     trusted from the sentence. A citation that resolves is not the same as a
  *     citation that resolves *to the right text*, which is the failure mode the
- *     whole `docs/citations.lock` mechanism exists to catch and cannot.
+ *     whole `docs-dev/citations.lock` mechanism exists to catch and cannot.
  *
  * Nothing here is about Kimi or Gemini; it is the documentation half of this
  * branch's two review findings.
@@ -72,17 +72,17 @@ function citedText(rel: string, start: number, end: number): string {
 }
 
 describe('W64c-1 · the re-decision of a stale stop is stated in the documents', () => {
-  it('docs/privacy.md keeps the header field that names the build that spent the one re-decision', () => {
+  it('docs-dev/privacy.md keeps the header field that names the build that spent the one re-decision', () => {
     // The storage table's `cs_backfill_v2` row: the field is written while a stored
     // stop is being re-decided, and it holds a version string and a timestamp —
     // nothing else, because the row is user-facing.
-    expect(flat(doc('docs/privacy.md'))).toContain(
+    expect(flat(doc('docs-dev/privacy.md'))).toContain(
       flat('daily count, halt record, the record that a platform\'s id list had to be read again, and — while a stored stop is being re-decided — which build has already spent that one re-decision (a version string and a timestamp, nothing else).'),
     );
   });
 
-  it('docs/privacy.md keeps the sentence about a record an earlier build left', () => {
-    const text = flat(doc('docs/privacy.md'));
+  it('docs-dev/privacy.md keeps the sentence about a record an earlier build left', () => {
+    const text = flat(doc('docs-dev/privacy.md'));
     expect(text).toContain(flat('once **this build** has recorded that answer the page is not asked again on every wake-up'));
     expect(text).toContain(flat('A record an **earlier** build left is re-asked once, and only once: a recorded judgement is that build\'s, not this one\'s, and a refusal that repeats is written back naming the build that saw it.'));
     // The bound is enforced rather than intended: the attempt is written down
@@ -90,8 +90,8 @@ describe('W64c-1 · the re-decision of a stale stop is stated in the documents',
     expect(text).toContain(flat('"Once" is enforced rather than intended: the attempt is recorded **before** the request goes out'));
   });
 
-  it('docs/threat-model.md keeps its half of the same sentence', () => {
-    const text = flat(doc('docs/threat-model.md'));
+  it('docs-dev/threat-model.md keeps its half of the same sentence', () => {
+    const text = flat(doc('docs-dev/threat-model.md'));
     expect(text).toContain(flat('"several organizations, no signal" that **this build** recorded is not asked again'));
     expect(text).toContain(flat('one an earlier build recorded is re-asked exactly once, since a judgement written by another build is not this one\'s'));
     expect(text).toContain(flat('the attempt is recorded in the scope\'s own progress header before the request goes out so a write that does not land cannot make it once per wake-up'));
@@ -103,7 +103,7 @@ describe('W64c-1 · the re-decision of a stale stop is stated in the documents',
     // `scopeRetryDue` — the build stamp written into the header — so the cited range
     // must carry it.
     const { start, end } = citationAfter(
-      'docs/privacy.md',
+      'docs-dev/privacy.md',
       'the page is not asked again on every wake-up — the answer is already known',
       'apps/extension/entrypoints/background.ts',
     );
@@ -116,7 +116,7 @@ describe('W64c-1 · the re-decision of a stale stop is stated in the documents',
     // The citation that closes "… `default` … is refused outright for this platform
     // rather than written into a path segment".
     const { start, end } = citationAfter(
-      'docs/privacy.md',
+      'docs-dev/privacy.md',
       'is refused outright for this platform rather than written into a path segment',
       'apps/extension/lib/backfill/engine.ts',
     );

@@ -36,7 +36,7 @@
  *    something else.
  *
  * 🔴 **Where the salt lives, and where it must never go.** `storage.local` only,
- *    under `cs_account_salt_v1` — never `storage.sync` (`docs/privacy.md`), and
+ *    under `cs_account_salt_v1` — never `storage.sync` (`docs-dev/privacy.md`), and
  *    never into a page. All hashing happens in the extension's service worker, so
  *    the secret never crosses into a content script or the MAIN world; what travels
  *    from a page is the id, which the capture path already reads.

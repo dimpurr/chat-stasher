@@ -3,7 +3,7 @@
 
 Single source of truth for "what text does the CLI show to users", used by:
 
-  - scripts/output-inventory.py   (dumps every prod hit into docs/output-inventory.txt)
+  - scripts/output-inventory.py   (dumps every prod hit into docs-dev/output-inventory.txt)
   - scripts/check-terminology.py  (lints the prod hits against terminology rules)
 
 Why one module instead of two copies: this repo's ADRs are explicit that a

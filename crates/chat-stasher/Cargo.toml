@@ -31,7 +31,7 @@ sha2 = "0.11"
 zstd = "0.13"
 rayon = "1"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
-# Appended rather than inserted: `docs/threat-model.md` cites this table by
+# Appended rather than inserted: `docs-dev/threat-model.md` cites this table by
 # line (`Cargo.toml:26-27,33`) to name the pinned crates, and inserting in the
 # middle would move those lines onto whatever was written here — turning a
 # still-correct sentence into a wrong one without anybody editing it.

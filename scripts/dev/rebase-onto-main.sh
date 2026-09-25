@@ -59,10 +59,10 @@ import sys
 
 base, head = sys.argv[1:]
 paths = subprocess.run(
-    ["git", "diff", "--name-only", f"{base}...{head}", "--", "README.md", "docs"],
+    ["git", "diff", "--name-only", f"{base}...{head}", "--", "README.md", "docs-dev"],
     check=True, text=True, capture_output=True,
 ).stdout.splitlines()
-paths = [p for p in paths if p.endswith(".md") and p != "docs/citations.lock"]
+paths = [p for p in paths if p.endswith(".md") and p != "docs-dev/citations.lock"]
 number = re.compile(
     r"(?<![\w./-])(?P<path>[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)?"
     r":(?P<ranges>\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)(?![\d./A-Za-z-])"
@@ -101,7 +101,7 @@ while [ "$rebase_rc" -ne 0 ]; do
   bad=0
   while IFS= read -r path; do
     case "$path" in
-      README.md|docs/*.md|docs/citations.lock) ;;
+      README.md|docs-dev/*.md|docs-dev/citations.lock) ;;
       *)
         echo "[rebase-citations] code or unsupported conflict; aborting: $path" >&2
         bad=1
@@ -140,7 +140,7 @@ python3 scripts/check-citation-drift.py || {
   exit 1
 }
 
-git add -- README.md docs
+git add -- README.md docs-dev
 git commit -m "Relocate citations after rebasing onto main" || exit 1
 ROLLBACK=0
 trap - EXIT

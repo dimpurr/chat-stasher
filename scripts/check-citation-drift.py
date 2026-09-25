@@ -6,7 +6,7 @@
 的检查器对这种漂移完全失明 —— 这个脚本改为校验 **被引行的内容本身**。
 
 做法: 把每条引用解析成 (被引文件, 行范围), 对该范围的内容算一个摘要
-(逐行 strip 后用 \\n 连接, 取 SHA-256 前 12 位) 并写进 docs/citations.lock。
+(逐行 strip 后用 \\n 连接, 取 SHA-256 前 12 位) 并写进 docs-dev/citations.lock。
 再次运行时重新计算并与 lockfile 比对, 不一致就退出非零。
 
 默认只校验、绝不写 lockfile。要接受一次真实的内容变化, 必须显式跑 --update,
@@ -31,16 +31,16 @@ import sys
 from typing import Callable
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOCK_PATH = os.path.join(REPO, "docs", "citations.lock")
+LOCK_PATH = os.path.join(REPO, "docs-dev", "citations.lock")
 
 # 被扫描的公开文档。lockfile 自己不在其中。
 DOC_FILES = [
     "README.md",
     "SECURITY.md",
     "CONTRIBUTING.md",
-    "docs/install.md",
-    "docs/privacy.md",
-    "docs/threat-model.md",
+    "docs-dev/install.md",
+    "docs-dev/privacy.md",
+    "docs-dev/threat-model.md",
 ]
 
 
@@ -62,7 +62,7 @@ def doc_files() -> list[str]:
 
 
 # 解析被引文件时不进入的目录。
-SKIP_DIRS = {".git", "target", "node_modules", ".private", "dist", ".output", ".wxt"}
+SKIP_DIRS = {"target", "node_modules", "dist", ".output", ".wxt"}
 
 CITED_EXTS = ("rs", "ts", "tsx", "js", "mjs", "json", "toml", "sh", "py", "md", "html", "css", "yml", "yaml")
 
@@ -117,7 +117,7 @@ def build_basename_index() -> dict[str, list[str]]:
     """仓库内 basename -> 相对路径列表, 用于解析 `main.rs:37` 这种省略路径的引用。"""
     index: dict[str, list[str]] = {}
     for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         for name in files:
             rel = os.path.relpath(os.path.join(root, name), REPO)
             index.setdefault(name, []).append(rel)
@@ -422,7 +422,7 @@ def collect() -> tuple[dict[str, dict], list[str]]:
 
 
 LOCK_HEADER = """\
-# docs/citations.lock — 文档出处引用的内容锚点
+# docs-dev/citations.lock — 文档出处引用的内容锚点
 #
 # 由 scripts/check-citation-drift.py 生成。每条引用记录的是【被引行的内容摘要】,
 # 不是行号是否越界 —— 代码被编辑后行号还在、内容已经不是当初那段, 就是这里要抓的漂移。
@@ -561,7 +561,7 @@ def cmd_list(entries: dict[str, dict], problems: list[str]) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="校验文档出处引用是否漂移")
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--update", action="store_true", help="重新生成 docs/citations.lock (显式, 默认不做)")
+    g.add_argument("--update", action="store_true", help="重新生成 docs-dev/citations.lock (显式, 默认不做)")
     g.add_argument("--list", action="store_true", help="只打印解析出的引用")
     args = ap.parse_args()
 

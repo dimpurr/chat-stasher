@@ -1,5 +1,5 @@
 //! W156 — R3: session lists in `chat-stasher ui` show a recognisable label per
-//! session, per `.private/docs/29-UI-DESIGN.md` §2.2/§3.2/§3.3/§5.3.
+//! session, per the recorded label design's §2.2/§3.2/§3.3/§5.3.
 //!
 //! Everything here runs the real binary against a real rustic repository built
 //! from a synthetic stage, over a real loopback socket. No machine's archive is

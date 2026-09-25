@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""output-inventory.py — dump every user-visible string into docs/output-inventory.txt.
+"""output-inventory.py — dump every user-visible string into docs-dev/output-inventory.txt.
 
 The inventory is a DERIVED artifact, not an authority: it is regenerated from
 source by this script and any edit to it will be overwritten. Its job is to make
@@ -7,7 +7,7 @@ source by this script and any edit to it will be overwritten. Its job is to make
 line per string, sorted by file+line, so a one-word change moves exactly one
 line.
 
-    python3 scripts/output-inventory.py             # regenerate  docs/output-inventory.txt
+    python3 scripts/output-inventory.py             # regenerate  docs-dev/output-inventory.txt
     python3 scripts/output-inventory.py --check     # regenerate to memory, diff against the
                                                     # committed file, exit 1 if they differ
                                                     # (this is the CI gate form)
@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _user_strings as us  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT_PATH = os.path.join(REPO, "docs", "output-inventory.txt")
+OUT_PATH = os.path.join(REPO, "docs-dev", "output-inventory.txt")
 
 HEADER = """\
 # chat-stasher output inventory — DERIVED FILE. Do not edit by hand.
@@ -81,14 +81,14 @@ def main(argv: list[str]) -> int:
     with open(OUT_PATH, "r", encoding="utf-8") as fh:
         old_text = fh.read()
     if old_text == new_text:
-        print("output-inventory --check: OK — docs/output-inventory.txt is up to date")
+        print("output-inventory --check: OK — docs-dev/output-inventory.txt is up to date")
         return 0
 
     old_lines = old_text.splitlines()
     new_lines = new_text.splitlines()
     diff = list(difflib.unified_diff(old_lines, new_lines,
-                                     fromfile="docs/output-inventory.txt (committed)",
-                                     tofile="docs/output-inventory.txt (fresh)",
+                                     fromfile="docs-dev/output-inventory.txt (committed)",
+                                     tofile="docs-dev/output-inventory.txt (fresh)",
                                      lineterm=""))
     print(f"output-inventory --check: DRIFT — {len(old_lines)} committed lines, "
           f"{len(new_lines)} fresh, {len(diff) // 2} changed lines", file=sys.stderr)

@@ -68,7 +68,7 @@ fn doctor_report_is_diagnostic_and_stays_off_stdout() {
     );
 }
 
-/// A class: `status`'s run-once verdict. Only `docs/install.md:166,272` refers
+/// A class: `status`'s run-once verdict. Only `docs-dev/install.md:166,272` refers
 /// to it, and only as something a person reads.
 #[test]
 fn status_verdict_is_diagnostic_and_stays_off_stdout() {

@@ -1,7 +1,7 @@
 # Security Policy
 
 `chat-stasher` archives your own conversation history to storage you control.
-Before reporting, it may help to read [`docs/threat-model.md`](docs/threat-model.md),
+Before reporting, it may help to read [`docs-dev/threat-model.md`](docs-dev/threat-model.md),
 which states plainly who can see what — including the parts we do not defend.
 
 ## Reporting a vulnerability
@@ -36,7 +36,7 @@ response-time SLA and will not promise one.** Concretely:
 
 What we will do: acknowledge the report when the maintainer next works on the
 project, say plainly whether we consider it in scope, and — if we fix it —
-describe the fix in the commit and in `docs/threat-model.md` if it changes who
+describe the fix in the commit and in `docs-dev/threat-model.md` if it changes who
 can see what. If we decide *not* to fix something, we will say so rather than
 leave the report open indefinitely.
 
@@ -57,7 +57,7 @@ tagged releases, and the fix path for both is to update.
 ## Scope
 
 **In scope** — anything that breaks one of the four properties the project
-actually claims (each is derived from code in `docs/threat-model.md`):
+actually claims (each is derived from code in `docs-dev/threat-model.md`):
 
 1. Conversation content reaching a network destination the user did not
    configure.
@@ -70,7 +70,7 @@ actually claims (each is derived from code in `docs/threat-model.md`):
    (`crates/chat-stasher/src/main.rs:6057-6069`).
 
 **Known and already documented, so not a new finding** — these are written up in
-[`docs/threat-model.md`](docs/threat-model.md) and we are not currently defending
+[`docs-dev/threat-model.md`](docs-dev/threat-model.md) and we are not currently defending
 against them:
 
 - The plaintext window before delivery: a captured conversation sits unencrypted

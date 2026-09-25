@@ -96,7 +96,7 @@ git clone https://github.com/dimpurr/chat-stasher
 cd chat-stasher && cargo build --release
 ```
 
-See [`docs/install.md`](https://github.com/dimpurr/chat-stasher/blob/main/docs/install.md)
+See [`docs-dev/install.md`](https://github.com/dimpurr/chat-stasher/blob/main/docs-dev/install.md)
 in the main repository for the full manual-install guide.
 
 ## Security & trust

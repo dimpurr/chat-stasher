@@ -25,7 +25,7 @@
 #    coordinate must fail loudly here, never pass quietly.
 #
 #    Probe 1 goes one step further since W33: its line number is not written
-#    down at all. A two-line edit elsewhere in docs/threat-model.md moved the
+#    down at all. A two-line edit elsewhere in docs-dev/threat-model.md moved the
 #    dashboard row from :148 to :150 and the hardcoded 148 silently stopped
 #    pointing at it. The probe now finds the line by its content and refuses to
 #    run unless exactly one line matches, so the next such move is a loud void
@@ -41,7 +41,7 @@ TMP="$(mktemp -d)"
 FAILED=0
 
 restore() {
-  [ -f "$TMP/threat-model.md" ] && cp "$TMP/threat-model.md" "$REPO/docs/threat-model.md"
+  [ -f "$TMP/threat-model.md" ] && cp "$TMP/threat-model.md" "$REPO/docs-dev/threat-model.md"
   [ -f "$TMP/engine.ts" ] && cp "$TMP/engine.ts" "$REPO/apps/extension/lib/backfill/engine.ts"
   [ -f "$TMP/store.rs" ] && cp "$TMP/store.rs" "$REPO/crates/chat-stasher/src/store.rs"
   [ -f "$TMP/nativehost-protocol.md" ] && cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
@@ -66,9 +66,9 @@ echo "  has nothing to do with the claim it is attached to."
 # continuation `:180` on the dashboard row — and the guard below refuses to run
 # unless it is on exactly one line.
 PROBE1_ANCHOR='view.rs:256`, `:180`'
-PROBE1_HITS="$(grep -c -F "$PROBE1_ANCHOR" "$REPO/docs/threat-model.md")"
-PROBE1_LINE="$(grep -n -F "$PROBE1_ANCHOR" "$REPO/docs/threat-model.md" | head -1 | cut -d: -f1)"
-echo "  Target: docs/threat-model.md:${PROBE1_LINE:-none}, \`:180\` -> \`:1\`"
+PROBE1_HITS="$(grep -c -F "$PROBE1_ANCHOR" "$REPO/docs-dev/threat-model.md")"
+PROBE1_LINE="$(grep -n -F "$PROBE1_ANCHOR" "$REPO/docs-dev/threat-model.md" | head -1 | cut -d: -f1)"
+echo "  Target: docs-dev/threat-model.md:${PROBE1_LINE:-none}, \`:180\` -> \`:1\`"
 echo "  (Chosen because it is a *continuation* citation: the file name is"
 echo "   omitted and inferred from the citation before it on the same line, so"
 echo "   this exercises the other parsing branch. view.rs:1 is that module's own"
@@ -78,15 +78,15 @@ echo "   the previous checker let through: bounds and non-emptiness were the"
 echo "   whole test.)"
 echo "=============================================================="
 if [ "$PROBE1_HITS" != "1" ] || [ -z "$PROBE1_LINE" ]; then
-  echo "  ✘ probe 1's anchor is on ${PROBE1_HITS} line(s) of docs/threat-model.md, not 1;"
+  echo "  ✘ probe 1's anchor is on ${PROBE1_HITS} line(s) of docs-dev/threat-model.md, not 1;"
   echo "    the selftest itself is void (the citation moved, or the wording changed)"
   FAILED=1
   PROBE1_LINE=""
 fi
-cp "$REPO/docs/threat-model.md" "$TMP/threat-model.md"
+cp "$REPO/docs-dev/threat-model.md" "$TMP/threat-model.md"
 if [ -n "$PROBE1_LINE" ]; then
-  sed -i '' "${PROBE1_LINE}s/\`:180\`/\`:1\`/" "$REPO/docs/threat-model.md"
-  if ! sed -n "${PROBE1_LINE}p" "$REPO/docs/threat-model.md" | grep -q -F '`:1`'; then
+  sed -i '' "${PROBE1_LINE}s/\`:180\`/\`:1\`/" "$REPO/docs-dev/threat-model.md"
+  if ! sed -n "${PROBE1_LINE}p" "$REPO/docs-dev/threat-model.md" | grep -q -F '`:1`'; then
     echo "  ✘ probe 1 could not modify the document; the selftest itself is void"
     FAILED=1
   fi
@@ -94,7 +94,7 @@ fi
 $CHECK
 rc=$?
 expect 1 "$rc" "a citation moved to an unrelated but legal line must be red"
-cp "$TMP/threat-model.md" "$REPO/docs/threat-model.md"
+cp "$TMP/threat-model.md" "$REPO/docs-dev/threat-model.md"
 echo
 
 echo "=============================================================="
@@ -122,7 +122,7 @@ echo "  (This is the most common drift in the wild: code is edited, the line"
 echo "   numbers survive, the content moves on. Only hashing the whole range"
 echo "   catches it — comparing the snippet would not.)"
 echo "=============================================================="
-if ! grep -q "^${PROBE2_RANGE} " "$REPO/docs/citations.lock"; then
+if ! grep -q "^${PROBE2_RANGE} " "$REPO/docs-dev/citations.lock"; then
   echo "  ✘ probe 2's range ${PROBE2_RANGE} is no longer in the lockfile; the selftest itself is void"
   FAILED=1
 fi
@@ -206,13 +206,13 @@ echo
 echo "=============================================================="
 echo "Probe 6 (W35): an extensionless citation must be attributed to"
 echo "  its own file."
-echo "  docs/install.md:188 writes \`.gitignore:15\`. The parser used to"
+echo "  docs-dev/install.md:188 writes \`.gitignore:12\`. The parser used to"
 echo "  recognise a path only when its extension was in CITED_EXTS, so"
 echo "  \`:15\` read as a *continuation* and inherited"
 echo "  apps/extension/package.json — a file the sentence never names,"
 echo "  anchored to content that had nothing to do with the claim."
 echo ""
-echo "  The probe cites \`.gitignore:15\` from the contract document — a"
+echo "  The probe cites \`.gitignore:12\` from the contract document — a"
 echo "  citation the lockfile already holds, word for word — and asks"
 echo "  two things of the run: it must stay green (so the citation is"
 echo "  answered by .gitignore's own lines, which have not changed), and"
@@ -221,18 +221,18 @@ echo "  A parser that does not see .gitignore as a path reads the bare"
 echo "  \`:15\` instead, and there is no citation in that sentence for it"
 echo "  to inherit: red, and no such anchor in --list."
 echo "=============================================================="
-PROBE6_CITE='W35 probe: see `.gitignore:15`.'
-PROBE6_DOC_ANCHOR='`.gitignore:15`'
-PROBE6_DOC_HITS="$(grep -c -F "$PROBE6_DOC_ANCHOR" "$REPO/docs/install.md")"
+PROBE6_CITE='W35 probe: see `.gitignore:12`.'
+PROBE6_DOC_ANCHOR='`.gitignore:12`'
+PROBE6_DOC_HITS="$(grep -c -F "$PROBE6_DOC_ANCHOR" "$REPO/docs-dev/install.md")"
 echo "  Target: contracts/nativehost-protocol.md, citing ${PROBE6_DOC_ANCHOR}"
 if [ "$PROBE6_DOC_HITS" != "1" ]; then
-  echo "  ✘ probe 6's anchor is on ${PROBE6_DOC_HITS} line(s) of docs/install.md, not 1;"
+  echo "  ✘ probe 6's anchor is on ${PROBE6_DOC_HITS} line(s) of docs-dev/install.md, not 1;"
   echo "    the selftest itself is void (the citation moved, or the wording changed)"
   FAILED=1
   PROBE6_CITE=""
 fi
-if ! grep -q '^\.gitignore:15  ' "$REPO/docs/citations.lock"; then
-  echo "  ✘ .gitignore:15 is not a locked anchor; the probe would prove nothing"
+if ! grep -q '^\.gitignore:12  ' "$REPO/docs-dev/citations.lock"; then
+  echo "  ✘ .gitignore:12 is not a locked anchor; the probe would prove nothing"
   FAILED=1
   PROBE6_CITE=""
 fi
@@ -247,10 +247,10 @@ fi
 $CHECK >"$TMP/probe6.out" 2>&1
 rc=$?
 expect 0 "$rc" "an extensionless citation of an unchanged, locked range must be green"
-if $CHECK --list 2>/dev/null | grep -q '^\.gitignore:15  '; then
-  echo "  ✔ --list attributes the citation to .gitignore:15"
+if $CHECK --list 2>/dev/null | grep -q '^\.gitignore:12  '; then
+  echo "  ✔ --list attributes the citation to .gitignore:12"
 else
-  echo "  ✘ --list has no .gitignore:15 anchor; the citation was attributed elsewhere:"
+  echo "  ✘ --list has no .gitignore:12 anchor; the citation was attributed elsewhere:"
   sed 's/^/      /' "$TMP/probe6.out"
   FAILED=1
 fi
@@ -272,14 +272,14 @@ echo "  W35b narrowed what this probe can be aimed at: a token with no"
 echo "  slash is plain inline code there (HH:23), it is not a citation,"
 echo "  and inheriting is the documented behaviour for it. The slash is"
 echo "  what keeps this probe pointed at the fail-loudly rule."
-echo "  The locked anchor is read from docs/citations.lock at run time,"
+echo "  The locked anchor is read from docs-dev/citations.lock at run time,"
 echo "  so it cannot rot into a copy of a range that no longer exists."
 echo "=============================================================="
-PROBE7_ANCHOR="$(awk '!/^#/ && NF>=3 && $1 ~ /\// {print $1; exit}' "$REPO/docs/citations.lock")"
+PROBE7_ANCHOR="$(awk '!/^#/ && NF>=3 && $1 ~ /\// {print $1; exit}' "$REPO/docs-dev/citations.lock")"
 PROBE7_RANGE="${PROBE7_ANCHOR##*:}"
 echo "  Target: contracts/nativehost-protocol.md, anchor ${PROBE7_ANCHOR:-none}"
-if [ -z "$PROBE7_ANCHOR" ] || ! grep -q -F "$PROBE7_ANCHOR  " "$REPO/docs/citations.lock"; then
-  echo "  ✘ probe 7 found no path-shaped anchor in docs/citations.lock; the selftest itself is void"
+if [ -z "$PROBE7_ANCHOR" ] || ! grep -q -F "$PROBE7_ANCHOR  " "$REPO/docs-dev/citations.lock"; then
+  echo "  ✘ probe 7 found no path-shaped anchor in docs-dev/citations.lock; the selftest itself is void"
   FAILED=1
   PROBE7_ANCHOR=""
 fi

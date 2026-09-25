@@ -9,7 +9,7 @@
  * 🔴 That limitation is **deliberate design** and this file does not change a character of it
  *    (lib/backfill/alarm.ts:80-87: when the alarm wakes the SW is brand new with no tab and no
  *      account, and the only information that does not have to be invented is the one the live
- *      leg is holding; docs/privacy.md — the extension has no host permissions).
+ *      leg is holding; docs-dev/privacy.md — the extension has no host permissions).
  * ⇒ What this change adds is **one more registration entry point**: the user clicks once in the
  *   popup and says outright "backfill this platform". The "we do not guess" principle is
  *   unchanged — what changed is that there is now a "the user said so" source as well.

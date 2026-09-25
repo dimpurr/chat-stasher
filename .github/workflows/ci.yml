@@ -331,7 +331,7 @@ jobs:
       # extension's platform table. This fails when either source moved and the
       # committed tables under scripts/support-matrix/ were not re-derived, and
       # it checks any `<!-- support-matrix:*:start/end -->` block already in
-      # README.md or docs/*.md. The selftest is here for the same reason as the
+      # README.md or docs-dev/*.md. The selftest is here for the same reason as the
       # others: a gate that cannot prove it still catches staleness is not a gate.
       - name: Support matrix is up to date
         run: python3 scripts/check-support-matrix.py

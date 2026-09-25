@@ -8,7 +8,7 @@
  *
  * 🔴 This is **deliberate design**, not a bug (lib/backfill/alarm.ts:80-87):
  *    when the alarm wakes, the SW is brand new with no tab and no account; the answer is not to
- *    guess one, but to use only "the account the user really did use". docs/privacy.md:112 —
+ *    guess one, but to use only "the account the user really did use". docs-dev/privacy.md:112 —
  *    the extension has no host permissions and fetches only inside the user's own login.
  * ⇒ So this file **touches no decision logic** and pins one thing: that guidance sentence has to
  *   exist, has to spell out the concrete action and the reason, and **must not fire on a healthy
