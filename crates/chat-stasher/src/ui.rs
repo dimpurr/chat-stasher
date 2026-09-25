@@ -38,9 +38,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::activity::TimeSource;
+use crate::activity::{TimeSource, TitleSource};
 use crate::overview::{self, Granularity, HeatmapAxis, OverviewRow};
-use crate::search::{HostSnapshot, SearchReport};
+use crate::search::{HostSnapshot, SearchReport, SessionLabel};
 use crate::selector::{
     Resolved, Selector, SelectorArgs, SessionMeta, TimeBounds, UnplacedBy, UsageError, Verdict,
 };
@@ -80,6 +80,9 @@ pub struct UiSession {
     pub time_why: Option<String>,
     /// The activity index's own tri-state, carried through unchanged.
     pub time_source: TimeSource,
+    /// The label this session lists under, resolved from its index row with
+    /// the same honesty states as [`SessionLabel`] documents.
+    pub title: SessionLabel,
     pub line_count: u64,
     /// The snapshot's own time — the backup run, not the conversation's.
     pub archive_time_unix: i64,
@@ -89,6 +92,19 @@ pub struct UiSession {
 /// The label a session with no harness prefix gets in the matrix. Not a harness
 /// id, and deliberately shaped so it cannot be mistaken for one.
 pub const NO_HARNESS: &str = "(no harness prefix)";
+
+/// The destination label `cmd_ui` passes when the dashboard was opened with
+/// `--repo` instead of a declared destination name. Shared by value between
+/// the two modules on purpose — a shared *string* without a shared constant
+/// is how a page ends up comparing against a word nobody owns.
+pub const EXPLICIT_REPO_LABEL: &str = "(explicit --repo)";
+
+/// The two honest words a known label's provenance renders as — one sentence
+/// each so the reader never has to guess whether the harness wrote the label
+/// or we quoted it from the conversation. Constants (not rebuilt strings)
+/// because they also travel into the cells' title attributes verbatim.
+const PROVENANCE_HARNESS_TITLE: &str = "label source: the harness's own title";
+const PROVENANCE_FIRST_USER_LINE: &str = "label source: the first user line";
 
 impl UiSession {
     pub fn source_label(&self) -> String {
@@ -160,6 +176,10 @@ pub struct UiData {
     pub hosts: Vec<HostSnapshot>,
     /// Machines that hold sessions but no activity index beside them.
     pub machines_without_index: Vec<String>,
+    /// Machines whose activity index predates labels: their sessions' labels
+    /// read as unknown, and the list page explains each such machine once —
+    /// never once per row.
+    pub machines_with_legacy_index: Vec<String>,
     /// Non-empty == part of the destination could not be read. Every count on
     /// the page is then a floor, not a measurement.
     pub unreadable: Vec<String>,
@@ -211,6 +231,7 @@ impl UiData {
                 last_unix: h.last_unix,
                 time_why: h.time_why.clone(),
                 time_source: h.time_source.clone(),
+                title: h.title.clone(),
                 line_count: h.line_count,
                 archive_time_unix: h.archive_time_unix,
                 data_blobs: h.data_blobs,
@@ -240,6 +261,7 @@ impl UiData {
             launch,
             hosts,
             machines_without_index: report.machines_without_index.clone(),
+            machines_with_legacy_index: report.machines_with_legacy_index.clone(),
             unreadable: report.unreadable.clone(),
             data_blobs_read: report.data_blobs_read,
             index_files_read: report.index_files_read,
@@ -698,8 +720,10 @@ fn footer(data: &UiData) -> String {
         "<footer>\n\
          <p><b>Metadata tier.</b> This page was rendered from one archive-metadata read \
          taken before the server started (snapshots + index + tree + the activity sidecar). \
-         {} session shard blob(s) were fetched by that read — conversation text is fetched \
-         only when you click a session and then click <i>load</i>, and the cost is shown \
+         The only conversation text it holds is each session's one-line label — at most 100 \
+         characters, recorded in the activity index, which rode that same metadata read. \
+         {} session shard blob(s) were fetched by that read — a session's full conversation \
+         is fetched only when you click it and then click <i>load</i>, and the cost is shown \
          before you do.</p>\n\
          <p>Machines are named by their archive partition id, which is the key the repository \
          actually partitions on. Times are UTC. No JavaScript, no external asset, no \
@@ -1191,6 +1215,7 @@ fn page_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
         out.push_str(&format!("<div class=warn>{}</div>\n", esc(w)));
     }
     out.push_str(&completeness_banner(data));
+    out.push_str(&label_coverage_note(sel, data));
 
     if sel.matched.is_empty() {
         out.push_str(&no_hit_html(sel, data));
@@ -1206,7 +1231,8 @@ fn page_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
         ));
         out.push_str(
             "<div class=scroll><table>\n<thead><tr><th>machine</th><th>source</th>\
-             <th>session (short)</th><th class=n>shards</th><th class=n>bytes</th>\
+             <th>session (short)</th><th>label</th><th class=n>shards</th>\
+             <th class=n>bytes</th>\
              <th>first message</th><th>last message</th><th>snapshot time</th>\
              </tr></thead>\n<tbody>\n",
         );
@@ -1281,6 +1307,85 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
     )
 }
 
+/// How one session's label renders in the list (29-UI-DESIGN §2.2's three
+/// states): the text with its provenance in the cell's title attribute and a
+/// visible stop when the cap cut it, or one of the two honest non-labels —
+/// `no label recorded` (the index read this session and found nothing
+/// label-able, or the harness's lines are labelless by design) and
+/// `label unknown` (the row predates labels, or there is no row at all: a
+/// read that predates the label keys, never a session that was examined).
+fn label_cell_html(s: &UiSession) -> String {
+    match &s.title {
+        SessionLabel::Known {
+            text,
+            source,
+            truncated,
+        } => {
+            let provenance = match source {
+                TitleSource::HarnessTitle => PROVENANCE_HARNESS_TITLE,
+                TitleSource::FirstUserLine => PROVENANCE_FIRST_USER_LINE,
+            };
+            let dots = if *truncated { "\u{2026}" } else { "" };
+            format!("<td title=\"{provenance}\">{}{}</td>", esc(text), dots)
+        }
+        SessionLabel::NoLabelRecorded => "<td>no label recorded</td>".to_string(),
+        SessionLabel::LegacyIndex => format!(
+            "<td title=\"{}\">label unknown</td>",
+            esc(
+                "this machine's activity index predates labels — see the note above; \
+                re-running chat-stasher activity-index on that machine fills it in"
+            )
+        ),
+        SessionLabel::Unknown { why } => {
+            format!("<td title=\"{}\">label unknown</td>", esc(why))
+        }
+    }
+}
+
+/// The machine-level label-coverage note (29-UI-DESIGN §2.2 state 2): one
+/// note per machine whose pre-label rows are on this page, naming the real
+/// destination-side repair command. The rows themselves only say
+/// `label unknown`; this note is the one place the reason and the fix are
+/// spelled out, and it follows the machine filter so a fresh machine never
+/// reads as partial.
+fn label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
+    let on_page: BTreeSet<&str> = sel.matched.iter().map(|s| s.machine.as_str()).collect();
+    let legacy: Vec<&str> = data
+        .machines_with_legacy_index
+        .iter()
+        .map(String::as_str)
+        .filter(|m| on_page.contains(m))
+        .collect();
+    if legacy.is_empty() {
+        return String::new();
+    }
+    // A dashboard opened with `--repo` cannot name a destination; the repair
+    // command then uses the same `--repo` flag the user opened this dashboard
+    // with, and the repository path itself stays off the page (see the module
+    // privacy line).
+    let dest_flag = if data.destination_label == EXPLICIT_REPO_LABEL {
+        "--repo <repository>"
+    } else {
+        &format!("--destination {}", &data.destination_label)
+    };
+    legacy
+        .iter()
+        .map(|m| {
+            format!(
+                "<div class=note><b>Label coverage is partial.</b> Machine \
+                 <span class=mono>{m}</span>'s activity index predates labels, so its rows \
+                 show <i>label unknown</i> — that is the index's age, not a session with no \
+                 label. Backfill with <span class=mono>chat-stasher activity-index \
+                 --rebuild {dest_flag} --machine {m} --stage <an existing empty work \
+                 directory></span>: the rebuild restores that machine's archived shards \
+                 itself and appends a fresh snapshot.</div>\n",
+                m = esc(m),
+                dest_flag = esc(dest_flag),
+            )
+        })
+        .collect()
+}
+
 fn list_row(s: &UiSession, token: &str) -> String {
     let time = |v: Option<i64>| match v {
         // A bound that is only *part* of the span says so where it is shown: a
@@ -1292,9 +1397,10 @@ fn list_row(s: &UiSession, token: &str) -> String {
         None if s.time_source.is_no_conversation_content() => "no conversation content".to_string(),
         None => "<span class=bad title=\"unknown\">unknown</span>".to_string(),
     };
+    let label = label_cell_html(s);
     format!(
         "<tr><td class=mono>{m}</td><td>{h}</td>\
-         <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>\
+         <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{label}\
          <td class=n>{sh}</td><td class=n>{b}</td><td>{f}</td><td>{l}</td><td>{snap}</td></tr>\n",
         m = esc(&s.machine),
         h = esc(&s.source_label()),
@@ -1331,10 +1437,56 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
         t = percent_encode(token),
         d = esc(&data.destination_label),
     ));
+    // The label rows (29-UI-DESIGN §4.3): the label itself, and its source —
+    // the provenance row only exists for a known label, because there is
+    // nothing to attribute for the honest non-labels.
+    let legacy_hint = "this machine's activity index predates labels — re-running \
+                       chat-stasher activity-index on that machine fills it in";
+    let (label_row, label_source_row) = match &s.title {
+        SessionLabel::Known {
+            text,
+            source,
+            truncated,
+        } => {
+            let dots = if *truncated { "\u{2026}" } else { "" };
+            let word = match source {
+                TitleSource::HarnessTitle => "the harness's own title",
+                TitleSource::FirstUserLine => "the first user line",
+            };
+            (
+                format!(
+                    "<tr><th>label</th><td title=\"label source: {word}\">{}{}</td></tr>\n",
+                    esc(text),
+                    dots
+                ),
+                format!("<tr><th>label source</th><td>{word}</td></tr>\n"),
+            )
+        }
+        SessionLabel::NoLabelRecorded => (
+            "<tr><th>label</th><td>no label recorded</td></tr>\n".to_string(),
+            String::new(),
+        ),
+        SessionLabel::LegacyIndex => (
+            format!(
+                "<tr><th>label</th><td title=\"{}\">label unknown</td></tr>\n",
+                esc(legacy_hint)
+            ),
+            String::new(),
+        ),
+        SessionLabel::Unknown { why } => (
+            format!(
+                "<tr><th>label</th><td title=\"{}\">label unknown</td></tr>\n",
+                esc(why)
+            ),
+            String::new(),
+        ),
+    };
     out.push_str(&format!(
         "<div class=scroll><table>\n<tbody>\n\
          <tr><th>machine</th><td class=mono>{m}</td></tr>\n\
          <tr><th>source</th><td>{h}</td></tr>\n\
+         {label_row}\
+         {label_source_row}\
          <tr><th>first message</th><td>{f}</td></tr>\n\
          <tr><th>last message</th><td>{l}</td></tr>\n\
          <tr><th>shards</th><td class=n>{sh}</td></tr>\n\
@@ -1344,6 +1496,8 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
          </tbody></table></div>\n",
         m = esc(&s.machine),
         h = esc(&s.source_label()),
+        label_row = label_row,
+        label_source_row = label_source_row,
         f = time(s.first_unix),
         l = time(s.last_unix),
         sh = s.shard_count,
@@ -1465,6 +1619,38 @@ fn json_overview(data: &UiData) -> String {
     json_string(&v)
 }
 
+/// The wire shape of one row's label (29-UI-DESIGN §5.3): an object, never a
+/// bare string, so nothing can confuse an empty label with a recorded
+/// absence. `state` is one of the design's three words — plus `unknown` for
+/// the corner §2.2 names at machine level: a session the index holds no row
+/// for at all, whose `why` says which case it is.
+fn title_json(s: &UiSession) -> serde_json::Value {
+    match &s.title {
+        SessionLabel::Known {
+            text,
+            source,
+            truncated,
+        } => {
+            let source = match source {
+                TitleSource::HarnessTitle => "harness_title",
+                TitleSource::FirstUserLine => "first_user_line",
+            };
+            serde_json::json!({
+                "state": "known",
+                "text": text,
+                "source": source,
+                "truncated": truncated,
+            })
+        }
+        SessionLabel::NoLabelRecorded => serde_json::json!({"state": "no_label"}),
+        SessionLabel::LegacyIndex => serde_json::json!({"state": "legacy_index"}),
+        SessionLabel::Unknown { why } => serde_json::json!({
+            "state": "unknown",
+            "why": why,
+        }),
+    }
+}
+
 fn json_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &UiData) -> String {
     let row = |s: &UiSession| {
         serde_json::json!({
@@ -1479,11 +1665,12 @@ fn json_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
             "last_unix": time_state(s.last_unix, s.time_why.as_deref(), &s.time_source),
             "line_count": s.line_count,
             "archive_time_unix": s.archive_time_unix,
+            "title": title_json(s),
             "href": format!("/session?i={}&token={}", s.index, percent_encode(token)),
         })
     };
     let v = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "command": "ui",
         "destination": data.destination_label,
         "tier": "metadata",
@@ -1495,6 +1682,7 @@ fn json_sessions(sel: &Selection<'_>, resolved: &Resolved, token: &str, data: &U
         "matched": sel.matched.len(),
         "not_matched": sel.not_matched,
         "could_not_be_placed": sel.unplaced.len(),
+        "machines_with_legacy_index": data.machines_with_legacy_index,
         "sessions": sel.matched.iter().map(|s| row(s)).collect::<Vec<_>>(),
         "sessions_not_placed": sel.unplaced.iter().map(|(s, dim, why)| serde_json::json!({
             "index": s.index,
@@ -1596,6 +1784,7 @@ pub(crate) mod fixture {
             data_blobs: shards,
             line_count: 10,
             time_source: source,
+            title: crate::search::SessionLabel::NoLabelRecorded,
         }
     }
 
@@ -1635,6 +1824,7 @@ pub(crate) mod fixture {
             unplaced: Vec::new(),
             not_matched: 0,
             machines_without_index: vec!["m-3".into()],
+            machines_with_legacy_index: Vec::new(),
             hosts: vec![
                 HostSnapshot {
                     hostname: "m-1".into(),
@@ -2263,5 +2453,172 @@ mod tests {
         let text = describe_selector(&s).expect("one constraint");
         assert!(text.contains("m-1"));
         assert!(!text.contains('/'), "a partition id is not a path: {text}");
+    }
+
+    // ---------------------------------------------------------- W156 labels
+
+    /// The fixture archive with every label state on view: a harness title
+    /// (m-1), a truncated first-user-line label (m-2), a machine whose index
+    /// predates labels (flagged at machine level, on m-1), and a session with
+    /// no label recorded (m-2).
+    fn labelled() -> UiData {
+        let mut d = fixture::data();
+        d.machines_with_legacy_index = vec!["m-1".into()];
+        d.sessions[0].title = SessionLabel::Known {
+            text: "Fix the parser retry loop".into(),
+            source: TitleSource::HarnessTitle,
+            truncated: false,
+        };
+        d.sessions[1].title = SessionLabel::LegacyIndex;
+        d.sessions[2].title = SessionLabel::Known {
+            text: "a first-user-line fixture label that is deliberately longer than the \
+                   capping limit"
+                .into(),
+            source: TitleSource::FirstUserLine,
+            truncated: true,
+        };
+        d.sessions[3].title = SessionLabel::NoLabelRecorded;
+        d
+    }
+
+    /// The list page shows every label state in its own words, with each
+    /// known label's provenance on its row, and explains the pre-label
+    /// machine once at the top — never once per row.
+    #[test]
+    fn the_list_shows_each_label_state_in_its_own_words() {
+        let d = labelled();
+        let html = req("/sessions", &d, &NoContent).body;
+        assert!(html.contains("<th>label</th>"), "{html}");
+        assert!(html.contains("Fix the parser retry loop"), "{html}");
+        assert!(
+            html.contains("label source: the harness's own title"),
+            "the title's provenance travels with the row: {html}"
+        );
+        assert!(html.contains("label source: the first user line"), "{html}");
+        assert!(
+            html.contains("\u{2026}"),
+            "a truncated label is visibly stopped: {html}"
+        );
+        assert!(html.contains("<td>no label recorded</td>"), "{html}");
+        assert_eq!(
+            html.match_indices(">label unknown</td>").count(),
+            1,
+            "only the pre-label machine's row may say it: {html}"
+        );
+        assert_eq!(
+            html.match_indices("Label coverage is partial").count(),
+            1,
+            "one note per affected machine, not one per row: {html}"
+        );
+        assert!(html.contains("m-1"), "{html}");
+        assert!(
+            html.contains("activity-index --rebuild"),
+            "the note names the repair command: {html}"
+        );
+        // A fresh machine's page gets no coverage note at all.
+        let fresh = req("/sessions?machine=m-2", &d, &NoContent).body;
+        assert!(!fresh.contains("Label coverage is partial"), "{fresh}");
+    }
+
+    /// A session the index holds no row for is the fourth wire state — it is
+    /// `unknown` with a why, never `no_label`: no row read no content.
+    #[test]
+    fn a_session_without_a_row_is_unknown_with_a_why() {
+        let mut d = fixture::data();
+        let why = "machine `m-2`'s activity index in this snapshot has no row for this \
+                   session, so its label was never recorded"
+            .to_string();
+        d.sessions[3].title = SessionLabel::Unknown { why };
+        let body = req("/api/sessions", &d, &NoContent).body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let row = v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["index"] == 3)
+            .unwrap();
+        assert_eq!(row["title"]["state"], serde_json::json!("unknown"));
+        assert!(row["title"]["why"].as_str().unwrap().contains("no row"));
+        let html = req("/sessions", &d, &NoContent).body;
+        assert_eq!(
+            html.match_indices(">label unknown</td>").count(),
+            1,
+            "{html}"
+        );
+    }
+
+    /// `/api/sessions` pins the §5.3 contract: schema_version 2, a label
+    /// object per row, and the machine-level legacy list at the top level.
+    #[test]
+    fn api_sessions_pins_the_label_contract_at_schema_two() {
+        let d = labelled();
+        let body = req("/api/sessions", &d, &NoContent).body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(2), "{body}");
+        assert_eq!(
+            v["machines_with_legacy_index"],
+            serde_json::json!(["m-1"]),
+            "{body}"
+        );
+        let expect = |i: usize, state: &str| {
+            assert_eq!(
+                v["sessions"][i]["title"]["state"],
+                serde_json::json!(state),
+                "row {i} of {body}"
+            )
+        };
+        expect(0, "known");
+        expect(1, "legacy_index");
+        expect(2, "known");
+        expect(3, "no_label");
+        assert_eq!(
+            v["sessions"][0]["title"]["text"],
+            serde_json::json!("Fix the parser retry loop")
+        );
+        assert_eq!(
+            v["sessions"][0]["title"]["source"],
+            serde_json::json!("harness_title")
+        );
+        assert_eq!(
+            v["sessions"][0]["title"]["truncated"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v["sessions"][2]["title"]["source"],
+            serde_json::json!("first_user_line")
+        );
+        assert_eq!(
+            v["sessions"][2]["title"]["truncated"],
+            serde_json::json!(true)
+        );
+        // A recorded absence carries no text field at all — an empty string
+        // could be confused with one.
+        assert!(v["sessions"][3]["title"]["text"].is_null(), "{body}");
+    }
+
+    /// The session page shows the label with the same honesty, plus its
+    /// provenance row — which exists only when there is a label to attribute.
+    #[test]
+    fn the_session_page_shows_label_and_source_rows() {
+        let d = labelled();
+        let known = req("/session?i=0", &d, &NoContent).body;
+        assert!(known.contains("<th>label</th>"), "{known}");
+        assert!(known.contains("Fix the parser retry loop"), "{known}");
+        assert!(known.contains("<th>label source</th>"), "{known}");
+        assert!(known.contains("the harness's own title"), "{known}");
+        let legacy = req("/session?i=1", &d, &NoContent).body;
+        assert!(
+            legacy.contains("label unknown"),
+            "the same word as the list, not a new one: {legacy}"
+        );
+        assert!(!legacy.contains("no label recorded"), "{legacy}");
+        assert!(
+            !legacy.contains("<th>label source</th>"),
+            "nothing to attribute for a pre-label row: {legacy}"
+        );
+        assert!(
+            legacy.contains("predates labels"),
+            "the row's title attribute says why: {legacy}"
+        );
     }
 }

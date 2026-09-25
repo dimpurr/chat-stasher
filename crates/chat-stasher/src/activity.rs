@@ -4,15 +4,28 @@
 //! time). To draw a heatmap by **when the conversation happened**, we need a
 //! per-session earliest/latest *conversation* time, which only the session's
 //! own lines carry. This module reads those lines (metadata-only: we extract a
-//! timestamp and throw the line away — nothing else is ever kept or printed)
-//! and produces one [`ActivityRow`] per session, serialised as a JSONL line
-//! into `<stage>/meta/<machine>/activity-v1.jsonl`.
+//! timestamp and throw the line away) and produces one [`ActivityRow`] per
+//! session, serialised as a JSONL line into
+//! `<stage>/meta/<machine>/activity-v1.jsonl`.
+//!
+//! Besides the time, each row also carries a **label** for the session
+//! (29-UI-DESIGN §2.2): the harness's own title line, else the head of the
+//! first user line, capped at [`TITLE_CAP_CHARS`] characters. That label is
+//! conversation-derived text by declared design — the one place the metadata
+//! tier is allowed to carry any — and it is the only other thing this module
+//! keeps: everything about a line beyond its timestamp and (for claude-code)
+//! that one candidate label is read and thrown away, and never printed.
 //!
 //! The hard rule of this module: a time we cannot get is [`TimeSource::Unknown`]
 //! with an explicit `why`. We never fabricate `0`, never use "now", and never
 //! substitute the file's mtime. (This repo already paid for "0 as both sentinel
 //! and valid value" once — see `inbox.rs` `modified_ns`.) And "this line could
 //! not be parsed" is a different `why` from "this harness never records a time".
+//! The same rule governs the label: content read with nothing label-able in it
+//! records [`SessionTitle::NoLabelRecorded`] — an honest "no label recorded",
+//! never an empty string and never a guess — and a harness whose lines this
+//! module does not read a title from records the same `NoLabelRecorded`, by
+//! design, rather than pretending to have looked.
 //!
 //! Timestamp shapes handled:
 //!   * RFC 3339 string (`2025-01-15T12:34:56.789Z`) — unambiguous, [`TimeSource::Exact`],
@@ -48,6 +61,17 @@ pub struct ActivityRow {
     /// deserialize (as `None`) rather than failing the whole index read.
     #[serde(default)]
     pub source_zone: Option<String>,
+    /// The session's label: what a session is listed under in the dashboard
+    /// (29-UI-DESIGN §2.2). `None` is **not** "no label" — it is a row written
+    /// before this field existed, i.e. an index that predates labels, a
+    /// machine-level state the consumer reports once per machine. The two
+    /// recorded states are in [`SessionTitle`].
+    ///
+    /// Additive for the same reason as `source_zone` above: `#[serde(default)]`
+    /// turns a pre-label index line into `None` instead of a parse failure, so
+    /// an old archive never stops being readable.
+    #[serde(default)]
+    pub title: Option<SessionTitle>,
 }
 
 /// Where the first/last time came from (or why it could not be obtained).
@@ -119,6 +143,160 @@ impl TimeSource {
     }
 }
 
+/// How many characters a label text may hold (29-UI-DESIGN §2.2). Characters,
+/// not bytes — a CJK prompt's label must never be cut inside one.
+pub const TITLE_CAP_CHARS: usize = 100;
+
+/// Where a session's label text came from. The label's provenance travels with
+/// it (along ADR-031's "the source never lies"): a label that was invented by
+/// the harness and one that was quoted from the conversation are different
+/// claims, and the reader can tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    /// The harness's own title: a claude-code `ai-title` line, or a `summary`
+    /// line when the session has no title.
+    HarnessTitle,
+    /// The head of the session's first user line, capped at
+    /// [`TITLE_CAP_CHARS`] and flagged when the cap cut anything.
+    FirstUserLine,
+}
+
+/// The label state an index row records for one session — the design's honest
+/// words (29-UI-DESIGN §2.2):
+///
+/// * [`SessionTitle::Known`] — there is text to show, and the row says where
+///   it came from and whether the cap cut it;
+/// * [`SessionTitle::NoLabelRecorded`] — the content was read and holds
+///   nothing label-able, **and also** the recorded state for a harness whose
+///   lines this module does not read a title from (codex, cursor, the web
+///   platforms until their list metadata is read): no guess, no empty string.
+///
+/// A row that predates labels writes no `title` key at all (see
+/// [`ActivityRow::title`]) — that is the third, machine-level state, recorded
+/// at query time rather than in any row. There is deliberately no "unknown"
+/// variant here: a row records what a completed read found, and "we could not
+/// tell" is composed where the read happens, exactly like the time side composes
+/// its no-row cases in `search`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "snake_case"
+)]
+pub enum SessionTitle {
+    Known {
+        text: String,
+        source: TitleSource,
+        truncated: bool,
+    },
+    NoLabelRecorded,
+}
+
+/// The label candidates one claude-code scan picked up, before the priority
+/// order decides which of them becomes the row's title.
+///
+/// Only claude-code has candidates at all: it is the one harness whose title
+/// lines and prompt shape this module knows (`{"type":"ai-title","aiTitle":…}`
+/// and `{"type":"summary","summary":…}`, measured shapes in the W156 report).
+/// Every other harness records [`SessionTitle::NoLabelRecorded`] by design.
+#[derive(Default)]
+struct TitleCandidates {
+    /// The harness's own title, from `ai-title` lines. The **last** one wins:
+    /// a title can be revised mid-session, and the last line is the current
+    /// one.
+    ai_title: Option<String>,
+    /// A `summary` line — claude-code's resume marker, written at the head of
+    /// a continuation file. The **first** one wins: the head-of-file summary
+    /// describes the whole continuation.
+    summary: Option<String>,
+    /// The first user line that carries prompt text (a plain string content or
+    /// a `text` block — never a `tool_result` block, which is a tool answering,
+    /// not a person asking). Only the first is kept, and a line marked
+    /// `isMeta` never qualifies: that is the harness talking to itself.
+    first_user: Option<String>,
+}
+
+impl TitleCandidates {
+    /// Fold one parsed claude-code line's candidates.
+    fn fold(&mut self, value: &serde_json::Value) {
+        let ty = value.get("type").and_then(serde_json::Value::as_str);
+        let non_empty = |v: &serde_json::Value, key: &str| {
+            v.get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        match ty {
+            Some("ai-title") => {
+                if let Some(t) = non_empty(value, "aiTitle") {
+                    self.ai_title = Some(t);
+                }
+            }
+            Some("summary") => {
+                if self.summary.is_none() {
+                    if let Some(t) = non_empty(value, "summary") {
+                        self.summary = Some(t);
+                    }
+                }
+            }
+            Some("user") => {
+                if self.first_user.is_none()
+                    && value.get("isMeta").and_then(serde_json::Value::as_bool) != Some(true)
+                {
+                    if let Some(t) = user_prompt_text(value) {
+                        self.first_user = Some(t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The label this session's scan produced, in the row's recorded shape.
+    fn resolve(self) -> SessionTitle {
+        let (raw, source) = if let Some(t) = self.ai_title {
+            (t, TitleSource::HarnessTitle)
+        } else if let Some(t) = self.summary {
+            (t, TitleSource::HarnessTitle)
+        } else if let Some(t) = self.first_user {
+            (t, TitleSource::FirstUserLine)
+        } else {
+            return SessionTitle::NoLabelRecorded;
+        };
+        let cut = raw.chars().count() > TITLE_CAP_CHARS;
+        let text = raw.chars().take(TITLE_CAP_CHARS).collect();
+        SessionTitle::Known {
+            text,
+            source,
+            truncated: cut,
+        }
+    }
+}
+
+/// The prompt text of one claude-code user line, when it carries one: a
+/// string `message.content`, or the first `{"type":"text","text":…}` block of
+/// an array content. Tool-result blocks are skipped by construction — they are
+/// what a tool answered, not what the person asked, and would label the
+/// session with tool output.
+fn user_prompt_text(value: &serde_json::Value) -> Option<String> {
+    let content = value.get("message")?.get("content")?;
+    match content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Array(blocks) => blocks.iter().find_map(|block| {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+                return None;
+            }
+            block
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        }),
+        _ => None,
+    }
+}
+
 /// Result of analysing one session's lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeAnalysis {
@@ -127,6 +305,7 @@ pub struct TimeAnalysis {
     pub line_count: u64,
     pub time_source: TimeSource,
     pub source_zone: Option<String>,
+    pub title: SessionTitle,
 }
 
 /// Harnesses this module knows how to read times from. Everything else is
@@ -341,6 +520,9 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     let mut conversation_without_time = 0u64;
     let mut conversation_invalid_time = 0u64;
 
+    // The label candidates (claude-code only — see [`TitleCandidates`]).
+    let mut titles = TitleCandidates::default();
+
     for line in lines {
         let line = line.trim();
         if line.is_empty() {
@@ -355,6 +537,9 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
             }
             continue;
         };
+        if harness == "claude-code" {
+            titles.fold(&value);
+        }
         let line_class = classify_line(harness, &value);
         // Whether this line is positively a conversation record, needed by the
         // time-match below to tell "a conversation record we could not place in
@@ -461,6 +646,9 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
         line_count,
         time_source,
         source_zone: fold.source_zone,
+        // For any harness except claude-code no candidate was ever folded, so
+        // this is the design's "no label recorded" — see the module docs.
+        title: titles.resolve(),
     }
 }
 
@@ -1678,13 +1866,15 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         line_count: a.line_count,
         time_source: a.time_source,
         source_zone: a.source_zone,
+        title: Some(a.title),
     }
 }
 
 /// Serialise one row as a single JSONL line (trailing newline included).
 pub fn to_jsonl(row: &ActivityRow) -> String {
-    // Cannot fail for this shape: plain strings, an Option<i64>, an int, and an
-    // internally-tagged enum of strings. No NaN / recursion involved.
+    // Cannot fail for this shape: plain strings, an Option<i64>, an int, and
+    // internally-tagged enums of strings and one capped-text struct. No NaN /
+    // recursion involved.
     serde_json::to_string(row).expect("ActivityRow serializes to JSON") + "\n"
 }
 
@@ -2789,6 +2979,177 @@ mod tests {
         let old = r#"{"session_id":"s","machine":"m","harness":"claude-code","first_unix":1736944496,"last_unix":1736948707,"line_count":2,"time_source":{"kind":"exact"}}"#;
         let row: ActivityRow = serde_json::from_str(old).expect("pre-W97 row must deserialize");
         assert_eq!(row.source_zone, None);
+    }
+
+    // ------------------------------------------------------------- W156 label
+
+    fn cc_ai_title(title: &str) -> String {
+        format!(r#"{{"type":"ai-title","aiTitle":"{title}","sessionId":"s"}}"#)
+    }
+    fn cc_summary(summary: &str) -> String {
+        format!(r#"{{"type":"summary","summary":"{summary}","leafUuid":"u0"}}"#)
+    }
+    fn cc_prompt(content: &str) -> String {
+        format!(
+            r#"{{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{{"role":"user","content":"{content}"}},"uuid":"u1","timestamp":"{RFC_T1}","cwd":"/x","version":"1.0.31"}}"#
+        )
+    }
+
+    /// The harness's own title wins over the first user line, whatever order
+    /// the lines arrive in — and the *last* `ai-title` is the current one.
+    #[test]
+    fn claude_code_ai_title_wins_and_the_last_one_is_current() {
+        let user = cc_prompt("please help me sort a failing retry case");
+        let old_title = cc_ai_title("An earlier title");
+        let new_title = cc_ai_title("Fix the parser retry loop");
+        let a = analyze_session("claude-code", &[&user, &old_title, &new_title]);
+        assert_eq!(
+            a.title,
+            SessionTitle::Known {
+                text: "Fix the parser retry loop".into(),
+                source: TitleSource::HarnessTitle,
+                truncated: false,
+            }
+        );
+    }
+
+    /// With no `ai-title`, a `summary` line is the harness's own label — the
+    /// first one, because it is written at the head of the continuation it
+    /// describes.
+    #[test]
+    fn claude_code_summary_is_the_harness_title_when_no_ai_title() {
+        let first = cc_summary("Continuing the parser work");
+        let second = cc_summary("A second summary, later in the file");
+        let user = cc_prompt("and where were we");
+        let a = analyze_session("claude-code", &[&first, &second, &user]);
+        assert_eq!(
+            a.title,
+            SessionTitle::Known {
+                text: "Continuing the parser work".into(),
+                source: TitleSource::HarnessTitle,
+                truncated: false,
+            }
+        );
+    }
+
+    /// With no title lines at all, the first user line's head is the label,
+    /// capped at 100 characters and flagged when the cap cut anything.
+    #[test]
+    fn claude_code_first_user_line_is_capped_and_flagged() {
+        let over_cap: String = "word ".repeat(30); // 150 chars, single line
+        assert!(over_cap.chars().count() > TITLE_CAP_CHARS);
+        let user = cc_prompt(&over_cap);
+        let a = analyze_session("claude-code", &[user.as_str()]);
+        let SessionTitle::Known {
+            text,
+            source,
+            truncated,
+        } = &a.title
+        else {
+            panic!("expected a known title, got {:?}", a.title);
+        };
+        assert_eq!(source, &TitleSource::FirstUserLine);
+        assert_eq!(text.chars().count(), TITLE_CAP_CHARS);
+        assert!(*truncated, "the cut must be on record, not visual only");
+    }
+
+    /// A first user line whose content is the typed-blocks array shape is read
+    /// from its `text` block — and a tool-result-only user line never becomes
+    /// the label, because it is a tool answering, not a person asking.
+    #[test]
+    fn claude_code_first_user_line_comes_from_the_text_block() {
+        let tool_result = r#"{"parentUuid":"u1","isMeta":null,"sessionId":"s","type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"12 files changed"}]},"uuid":"u2","timestamp":"RFC_T1","cwd":"/x","version":"1.0.31"}"#.replace("RFC_T1", RFC_T1);
+        let blocks = r#"{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{"role":"user","content":[{"type":"text","text":"extract the retry policy from the config"}]},"uuid":"u1","timestamp":"RFC_T1","cwd":"/x","version":"1.0.31"}"#.replace("RFC_T1", RFC_T1);
+        let a = analyze_session("claude-code", &[tool_result.as_str(), blocks.as_str()]);
+        assert_eq!(
+            a.title,
+            SessionTitle::Known {
+                text: "extract the retry policy from the config".into(),
+                source: TitleSource::FirstUserLine,
+                truncated: false,
+            }
+        );
+    }
+
+    /// A user line the harness marked `isMeta` is the harness talking to
+    /// itself; the label waits for a line a person actually typed.
+    #[test]
+    fn claude_code_meta_user_lines_do_not_become_the_label() {
+        let meta = r#"{"parentUuid":null,"isMeta":true,"sessionId":"s","type":"user","message":{"role":"user","content":"Caveat: the messages below were generated"},"uuid":"u0","timestamp":"RFC_T1","cwd":"/x","version":"1.0.31"}"#.replace("RFC_T1", RFC_T1);
+        let prompt = cc_prompt("what is the ownership model");
+        let a = analyze_session("claude-code", &[meta.as_str(), prompt.as_str()]);
+        assert_eq!(
+            a.title,
+            SessionTitle::Known {
+                text: "what is the ownership model".into(),
+                source: TitleSource::FirstUserLine,
+                truncated: false,
+            }
+        );
+    }
+
+    /// A session whose lines are all metadata records an honest "no label
+    /// recorded" — never an empty string, never a guess.
+    #[test]
+    fn claude_code_metadata_only_session_records_no_label() {
+        let snapshot =
+            r#"{"type":"file-history-snapshot","sessionId":"s","uuid":"u7"}"#.to_string();
+        let a = analyze_session("claude-code", &[snapshot.as_str()]);
+        assert_eq!(a.title, SessionTitle::NoLabelRecorded);
+    }
+
+    /// A harness whose lines this module does not read a title from records
+    /// the same "no label recorded", by design (29-UI-DESIGN §2.2: no label
+    /// rather than a guess or an empty string) — its prompt text is NOT quoted
+    /// into the label.
+    #[test]
+    fn a_harness_without_a_title_reader_records_no_label_by_design() {
+        let codex = codex(RFC_T1, "user_message");
+        let a = analyze_session("codex", &[codex.as_str()]);
+        assert_eq!(a.title, SessionTitle::NoLabelRecorded);
+    }
+
+    /// An `activity-v1.jsonl` line written before `title` existed must still
+    /// deserialize — and read back as `None`, which is the machine-level
+    /// "index predates labels" state, not "no label".
+    #[test]
+    fn activity_row_without_title_still_deserializes_as_predates() {
+        let old = r#"{"session_id":"s","machine":"m","harness":"claude-code","first_unix":1736944496,"last_unix":1736948707,"line_count":2,"time_source":{"kind":"exact"},"source_zone":null}"#;
+        let row: ActivityRow = serde_json::from_str(old).expect("pre-W156 row must deserialize");
+        assert_eq!(row.title, None);
+    }
+
+    /// The row's title round-trips through the wire shape the whole pipeline
+    /// agrees on: `{"state":"known","text":…,"source":…,"truncated":…}` and
+    /// `{"state":"no_label_recorded"}`.
+    #[test]
+    fn title_states_round_trip_through_the_index_line() {
+        let known = build_row(
+            "claude-code.mbp.019bf00d-0000-0000-0000-000000000001",
+            "mbp",
+            "claude-code",
+            &[cc_ai_title("Fix the parser retry loop").as_str()],
+        );
+        let line = to_jsonl(&known);
+        assert!(
+            line.contains(r#""title":{"state":"known""#),
+            "the wire shape is the contract the UI consumes: {line}"
+        );
+        assert!(line.contains(r#""source":"harness_title""#), "{line}");
+        let back: ActivityRow = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(back.title, known.title);
+
+        let none_label = build_row(
+            "codex.mbp.99000001-0000-0000-0000-000000000002",
+            "mbp",
+            "codex",
+            &[codex(RFC_T1, "user_message").as_str()],
+        );
+        let line = to_jsonl(&none_label);
+        assert!(
+            line.contains(r#""title":{"state":"no_label_recorded"}"#),
+            "the absence must be a recorded state, never a missing string: {line}"
+        );
     }
 
     // helpers -----------------------------------------------------------------

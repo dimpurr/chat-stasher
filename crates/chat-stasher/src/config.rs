@@ -228,14 +228,21 @@ pub struct NativeHostConfig {
     /// a stage that appears because a host was pointed at it is a stage
     /// nothing pushes.
     pub stage: Option<String>,
-    /// Which declared destination `open_dashboard` opens (protocol §6.5).
+    /// Which declared destination `open_dashboard` opens (protocol §6.5), and —
+    /// since W156 — the default the `ui` command uses when the config declares
+    /// several and the command line named none.
     ///
-    /// Hand-written, and deliberately the *only* way that message learns a
-    /// destination: ADR-013 forbids a default destination, and the extension
-    /// that triggers the launch has no business naming — or choosing between —
-    /// copies of the archive. Absent means the dashboard cannot be opened from
-    /// the popup, which the host reports as `nack` `config` rather than
-    /// falling back to "there is only one, so it must be that one".
+    /// Hand-written, and deliberately the *only* way the extension's message
+    /// learns a destination: ADR-013 forbids a default destination for
+    /// retrieval, the extension that triggers the launch has no business
+    /// naming — or choosing between — copies of the archive, and absent still
+    /// means the dashboard cannot be opened from the popup (the host reports
+    /// `nack` `config` rather than falling back to "there is only one, so it
+    /// must be that one"). The `ui` command honours the same knob because one
+    /// knob must keep one meaning: it opens the only declared destination
+    /// without being told, and with several it opens only the one named here —
+    /// or asks. Retrieval commands (`search`, `export`, `overview`) still name
+    /// the copy, always.
     pub destination: Option<String>,
 }
 
@@ -1182,8 +1189,11 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # your local sources and what your existing destinations already hold.
 #
 # Once this table is non-empty, commands that reach a repository require
-# `--destination <name>` (or an explicit `--repo`). There is deliberately no
-# default destination: retrieval must name the copy it is reading.
+# `--destination <name>` (or an explicit `--repo`). Retrieval commands (`search`,
+# `export`, `overview`) have no default destination: naming the copy is their
+# rule. The `ui` dashboard is the one place that reads a default — it opens the
+# only destination declared, or the one `[native_host] destination` names when
+# several are.
 #
 # [destinations.laptop]
 # repo = "~/stash/chat-stasher/repo"

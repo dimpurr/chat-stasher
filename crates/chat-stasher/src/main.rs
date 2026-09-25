@@ -95,8 +95,13 @@ struct Cli {
 /// `day=X` cannot mean different things.
 #[derive(Debug, Clone, clap::Args)]
 struct UiArgs {
-    /// Destination to open. Required unless an explicit `--repo` is given:
-    /// there is no default destination and no cross-destination merge.
+    /// Destination to open. Optional when the config makes the choice
+    /// unambiguous: with exactly one `[destinations.<name>]` declared it
+    /// opens that one, and with several it opens the one
+    /// `[native_host] destination` names — or lists them and exits 2 when
+    /// no default is recorded. An explicit `--repo` or `--destination`
+    /// always wins. There is still no cross-destination merge: one dashboard
+    /// serves exactly one archive.
     #[arg(long)]
     destination: Option<String>,
     /// Filters applied when the dashboard opens. Omit them to see the whole
@@ -652,11 +657,13 @@ enum Command {
     /// URL as a secret for the lifetime of the process.
     ///
     /// Metadata tier: the dashboard and every list are rendered from one read of
-    /// snapshot + index + tree metadata plus the activity sidecar. Conversation
-    /// text is fetched and decrypted only when you click a session and then
-    /// click "load", and the byte cost is printed before you do. Exit codes
-    /// match `search`: 0 served the dashboard, 1 read it all and there was
-    /// nothing, 3 could not finish reading (or no key), 2 usage error.
+    /// snapshot + index + tree metadata plus the activity sidecar. The only
+    /// conversation text that read carries is each session's one-line label
+    /// (at most 100 characters, recorded in the activity index); a session's
+    /// full conversation is fetched and decrypted only when you click it and
+    /// then click "load", and the byte cost is printed before you do. Exit
+    /// codes match `search`: 0 served the dashboard, 1 read it all and there
+    /// was nothing, 3 could not finish reading (or no key), 2 usage error.
     Ui(UiArgs),
     /// Deprecated alias for `ui`; prints a one-line notice on stderr and behaves
     /// identically. Kept for one release.
@@ -911,9 +918,14 @@ enum Command {
     /// `claude-code`); short forms are handled too (`opencode~abc123` ->
     /// `opencode`, `cursor.d~xxx` -> `cursor`).
     ///
-    /// Metadata only: the extraction keeps a timestamp per line and throws the
-    /// line away. Nothing else about a conversation is ever read, kept or
-    /// printed — the report is counts and the output path only.
+    /// Metadata, with one declared exception: the extraction keeps a timestamp
+    /// per line and throws the line away, and — for claude-code sessions —
+    /// additionally keeps the capped one-line label the dashboard lists the
+    /// session under (the harness's own title, or the head of the session's
+    /// first user line; see the `ui` labels). That label — at most 100
+    /// characters, with its provenance — is the one piece of
+    /// conversation-derived text the metadata tier ever holds. Nothing else is
+    /// ever kept, and the report is counts and the output path only.
     ///
     /// Exit codes: `0` = the whole partition was read and the index written;
     /// `3` = the stage could not be read (or reading was interrupted) — nothing
@@ -3500,6 +3512,74 @@ fn cmd_export(
 /// function to the same rows. A repository read narrowed at the command line
 /// could not answer a drill-down for anything it had already discarded, and it
 /// would report `not_matched`/`unplaced` against a set the page never saw.
+/// The destination `ui` opens when the command line named none, or `None`
+/// after saying why on stderr (the caller exits 2 — a usage question, never a
+/// guessed archive).
+///
+/// One declared destination is the default. Several declare their default
+/// through `[native_host] destination` — the knob the extension's
+/// `open_dashboard` already reads (protocol §6.5), honoured here so one knob
+/// keeps one meaning; a default naming an undeclared destination is a config
+/// bug and is refused rather than fallen back. None declared leaves nothing to
+/// open, and the fix (declaring one) is in the message.
+fn default_destination_or_exit(config: &Config) -> Option<(String, String)> {
+    let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    let declared = names.join(", ");
+    // The recorded default is checked first, whatever the destination count:
+    // `[native_host] destination` declares "which destination the dashboard
+    // opens", so a value naming an undeclared destination is a config bug the
+    // popup shares, and serving something else here would mask it.
+    match config
+        .native_host
+        .as_ref()
+        .and_then(|section| section.destination.as_deref())
+    {
+        Some(name) if config.destinations.contains_key(name) => {
+            return Some((
+                name.to_string(),
+                "[native_host] destination in the config names it".to_string(),
+            ));
+        }
+        Some(name) => {
+            eprintln!(
+                "ui: `[native_host] destination` names `{name}`, which the config does not declare (declared: {declared})"
+            );
+            eprintln!(
+                "ui: a default naming an undeclared destination is never fallen back — fix the config, or pass `--destination <name>`"
+            );
+            return None;
+        }
+        None => {}
+    }
+    match names.len() {
+        0 => {
+            eprintln!(
+                "ui: there is no destination to open — the config declares no destination and no --repo was given"
+            );
+            eprintln!(
+                "ui: declare one with a `[destinations.<name>]` section in the config, or name a repository directly with `--repo <path>`"
+            );
+            None
+        }
+        1 => Some((
+            names[0].to_string(),
+            "the only destination the config declares".to_string(),
+        )),
+        _ => {
+            eprintln!(
+                "ui: the config declares {} destination(s) — name which one to open, with `--destination <name>`",
+                names.len()
+            );
+            eprintln!("ui: declared: {declared}");
+            eprintln!(
+                "ui: or record a default the dashboard opens: `[native_host] destination = \"<name>\"` in the config"
+            );
+            None
+        }
+    }
+}
+
 fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     if let Some(notice) = deprecated_alias {
         eprintln!("{notice}");
@@ -3517,15 +3597,27 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     } = args;
 
     let config = Config::load();
-    if destination.is_none() && repo.is_none() {
-        eprintln!(
-            "ui: name the destination to open (`--destination <name>`, or an explicit `--repo`)"
-        );
-        eprintln!(
-            "ui: there is no default destination and no cross-destination merge — archives are not required to agree"
-        );
-        return ExitCode::from(2);
-    }
+    // A dashboard is a look, not a retrieval: `search`, `export` and
+    // `overview` still require naming the copy (ADR-013 — recorded below by
+    // the unchanged `resolve_store_config`), but a human who typed `ui` and
+    // named nothing may be spared the choice when the config leaves no
+    // ambiguity: the only declared destination is the default, and with
+    // several, `[native_host] destination` — the one knob the config already
+    // has for "which destination the dashboard opens" — names it. The two
+    // callers a config can leave unresolvable both exit 2 here, with the
+    // state on stderr; nothing is ever guessed and served.
+    let mut default_from: Option<String> = None;
+    let destination = match (destination, repo.as_deref()) {
+        (Some(name), _) => Some(name),
+        (None, Some(_)) => None,
+        (None, None) => match default_destination_or_exit(&config) {
+            Some((name, how)) => {
+                default_from = Some(how);
+                Some(name)
+            }
+            None => return ExitCode::from(2),
+        },
+    };
     let resolved = match filters.resolve() {
         Ok(r) => r,
         Err(e) => {
@@ -3542,7 +3634,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     }
     let label = destination
         .clone()
-        .unwrap_or_else(|| "(explicit --repo)".to_string());
+        .unwrap_or_else(|| chat_stasher::ui::EXPLICIT_REPO_LABEL.to_string());
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -3642,6 +3734,9 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     };
     let url = format!("http://{addr}/?token={token}");
     say!("[ui] destination  : {}", data.destination_label);
+    if let Some(how) = &default_from {
+        say!("[ui] default      : {how}");
+    }
     say!(
         "[ui] snapshots    : {} scanned / {} in repo",
         data.snapshots_scanned,
