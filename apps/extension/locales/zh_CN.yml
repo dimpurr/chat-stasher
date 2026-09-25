@@ -600,11 +600,17 @@ coverage:
   health:
     ok: "{total} 条都在动或已完成"
     stopped: "{count} 条已停止：{list}。每张卡片都写了原因和对应处理。"
+    retrying: >-
+      {count} 条在等待重试：{list}。不需要你做什么——平台拒了这次请求，
+      每张卡片都写了下次尝试的时间。
     waiting: >-
       {count} 条在等一个打开的平台页面：{list}。打开其中一页，它就会自己继续。
+    idle: >-
+      {count} 条没有在跑：{list}。每张卡片的标签会写明是开关关闭还是主机不可达。
   chip:
     running: 运行中
     waiting: 等待中
+    retrying: 重试中
     cappedToday: 今日已满
     stopped: 已停止
     done: 已完成

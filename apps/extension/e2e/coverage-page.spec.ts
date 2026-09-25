@@ -248,16 +248,32 @@ test('a stopped leg is a dismissible card alert, and dismissing it writes nothin
   });
 
   const page = await openCoverage(ext);
-  const alert = page.locator('.card .alert', { hasText: '429' });
+  const card = page.locator('.card');
+  // 🔴 The chip and the sentence beside it are about the same leg, and a rate limit is a backoff: the
+  //    leg has **not** stopped and will come back. This is the exact contradiction the review found on
+  //    this exact fixture — the chip said "stopped" next to an action text reading "NOT stopped" — so
+  //    the chip is pinned here as well as in the unit tests, on the page a reader actually sees.
+  await expect(card.locator('.chip')).toHaveText('retrying');
+  const alert = card.locator('[data-alert-id$=":halt"]');
   await expect(alert).toBeVisible();
   await expect(alert).toContainText(/min/);
-  // Dismissing hides it — and the dismissal survives the repaint a preset change causes, because
-  // it is memory on the page, not a write to storage.
+  await expect(alert).toContainText('NOT stopped');
+  // Dismissing hides the alert — and may not take the reason with it. The alert is the first read, not
+  // the only copy: the details disclosure keeps the same sentence, so the page still says what happened
+  // and when the next attempt is after the alert is gone.
   await alert.locator('.dismiss').click();
   await expect(alert).toHaveCount(0);
+  const details = card.locator('details.details');
+  await expect(details.locator('.dr', { hasText: '429' })).toBeHidden();
+  await details.locator('summary').click();
+  await expect(details).toContainText('NOT stopped');
+  await expect(details).toContainText(/429/);
+  // …and the dismissal survives the repaint a preset change causes, because it is memory on the page,
+  // not a write to storage. The details survive it too — they are rebuilt from the record.
   await page.locator('label[for="speed-standard"]').click();
   await expect(page.locator('.speed input[value="standard"]')).toBeChecked();
   await expect(page.locator('.card .alert', { hasText: '429' })).toHaveCount(0);
+  await expect(page.locator('.card details.details')).toContainText('NOT stopped');
 
   await page.close();
 });

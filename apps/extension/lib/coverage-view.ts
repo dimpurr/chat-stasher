@@ -38,6 +38,7 @@ import {
   type CoverageRow,
 } from './coverage';
 import { SPEED_PLANS, SPEED_PRESET_ORDER, type SpeedPreset } from './backfill/speed';
+import { haltClassOf } from './backfill/types';
 import { describeTickReason } from './popup-view';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,18 @@ export type ChipTone = 'ok' | 'run' | 'wait' | 'bad' | 'muted';
 export interface StatusChip {
   word: string;
   tone: ChipTone;
+}
+
+/**
+ * 🔴 **Is this stop a backoff rather than a stop?** The one place the view layer asks, for the chip and
+ * for the overview line both. It is `haltClassOf` — the same classification the engine schedules the
+ * retry from (`entrypoints/background.ts`) — so the two cannot disagree about one card.
+ *
+ * Two copies of this question would drift in the direction that is hardest to notice: a chip reading
+ * "stopped" on a card whose own sentence says the leg has not stopped.
+ */
+function isRetrying(row: CoverageRow): boolean {
+  return row.halt !== null && haltClassOf(row.halt.reason) === 'transient';
 }
 
 /**
@@ -69,6 +82,19 @@ export function chipOf(row: CoverageRow): StatusChip {
     case 'done':
       return { word: t('coverage.chip.done'), tone: 'ok' };
     case 'halted':
+      // 🔴 **A transient stop is a backoff, not a stop, and the chip may not answer with the one word the
+      //    sentence beside it exists to deny.** `haltNote`'s own sentence for a transient reason says the
+      //    leg has NOT stopped and will come back by itself; the first version of this branch read
+      //    `halted` alone and put "stopped" next to it, so the card contradicted itself in two lines.
+      //    `haltClassOf` is the same classification the engine uses to schedule the retry, which is what
+      //    makes the two agree by construction rather than by two lists staying in step.
+      //
+      //    `row.halt === null` is "halted with no record to word" (`coverage.state.haltedNoRecord`), and
+      //    nothing there supports a retry claim — an unknown may not be read as the better state, so it
+      //    keeps the stopped reading rather than borrowing one the model did not report.
+      return isRetrying(row)
+        ? { word: t('coverage.chip.retrying'), tone: 'wait' }
+        : { word: t('coverage.chip.stopped'), tone: 'bad' };
     case 'unregistered':
       return { word: t('coverage.chip.stopped'), tone: 'bad' };
     case 'off':
@@ -442,11 +468,15 @@ function cardOf(row: CoverageRow, now: number): CoverageCardView {
   detailRows.push({ label: t('coverage.labels.archived'), value: storedFact(row) });
   detailRows.push({ label: t('coverage.labels.pending'), value: String(row.pending) });
 
-  // 4 · the state, when it has words of its own. A `halted` row's full sentence is the alert the card
-  //     opens with (it is the action half: what the reader has to do), so it is not repeated in the
-  //     details. `in-progress` has no sentence by design — the ordinary case must not read like a notice.
+  // 4 · the state, when it has words of its own. A `halted` row's sentence is *also* the alert the card
+  //     opens with (it is the action half: what the reader has to do), and it is repeated here on purpose
+  //     rather than left to the alert alone. 🔴 The alert is **dismissible** (`entrypoints/coverage/main.ts`),
+  //     and the first version of this branch treated the alert as the only copy — so one click removed the
+  //     reason and the action from the page entirely, and the card was left with a bare chip. A dismissal is
+  //     a hiding gesture; it may not be able to delete a fact the model reported.
+  //     `in-progress` has no sentence by design — the ordinary case must not read like a notice.
   const state = stateNote(row, now);
-  if (state !== null && row.state !== 'halted') {
+  if (state !== null) {
     detailRows.push({ label: t('coverage.stateLabel'), value: state });
   }
 
@@ -530,25 +560,44 @@ function cardOf(row: CoverageRow, now: number): CoverageCardView {
 /**
  * The one health line. Derived from the rows' states and nothing else, and every branch is either a
  * clean bill or a list of names: the overview may not soften a stop the model reported, nor may it
- * invent one the model did not.
+ * invent one the model did not — and, since the clean bill is a claim about **every** row, it may not be
+ * printed over rows its words are not true of.
  */
 function healthOf(report: CoverageReport): CoverageHealth | null {
   if (report.rows.length === 0) return null;
-  const stopped = [...new Set(report.rows
-    .filter((row) => row.state === 'halted' || row.state === 'unregistered')
-    .map((row) => row.platform))];
-  const waiting = [...new Set(report.rows
-    .filter((row) => row.state === 'waiting')
-    .map((row) => row.platform))];
-  if (stopped.length === 0 && waiting.length === 0) {
+  const namesOf = (keep: (row: CoverageRow) => boolean) =>
+    [...new Set(report.rows.filter(keep).map((row) => row.platform))];
+  // A transient stop is a backoff, and it is deliberately **not** in the stopped list: `stopped` is the
+  // word this page uses for "this needs you" (`coverage.health.stopped` names the reason and the fix).
+  // Nothing needs the reader here — the leg comes back by itself — so it gets the sentence that says so.
+  const stopped = namesOf((row) => (row.state === 'halted' && !isRetrying(row)) || row.state === 'unregistered');
+  const retrying = namesOf((row) => row.state === 'halted' && isRetrying(row));
+  const waiting = namesOf((row) => row.state === 'waiting');
+  // 🔴 `off` and `host-paused` used to be in neither list, so a page where **every** leg was switched off
+  //    fell through to the clean bill and read "all N platform leg(s) moving or finished" over N cards
+  //    whose chips said "switch off". They are not stops to act on — the page-level alert already covers
+  //    both globally — but they are not moving or finished either, so they get their own sentence rather
+  //    than being rounded into a list whose words would be false of them.
+  const idle = namesOf((row) => row.state === 'off' || row.state === 'host-paused');
+  const lists = [stopped, retrying, waiting, idle];
+  if (lists.every((list) => list.length === 0)) {
+    // Reached only when every row is `in-progress`, `done`, or `capped` — the states "moving or finished"
+    // is true of. (`capped` is not listed above precisely because "finished" *is* true of it: its chip
+    // says "done for today", and a day's work that is over is finished.)
     return { tone: 'ok', text: t('coverage.health.ok', { total: report.rows.length }) };
   }
   const parts: string[] = [];
   if (stopped.length > 0) {
     parts.push(t('coverage.health.stopped', { count: stopped.length, list: stopped.join(', ') }));
   }
+  if (retrying.length > 0) {
+    parts.push(t('coverage.health.retrying', { count: retrying.length, list: retrying.join(', ') }));
+  }
   if (waiting.length > 0) {
     parts.push(t('coverage.health.waiting', { count: waiting.length, list: waiting.join(', ') }));
+  }
+  if (idle.length > 0) {
+    parts.push(t('coverage.health.idle', { count: idle.length, list: idle.join(', ') }));
   }
   return { tone: stopped.length > 0 ? 'bad' : 'wait', text: parts.join(' ') };
 }

@@ -658,6 +658,88 @@ describe('W149 · the overview header', () => {
   });
 });
 
+describe('W149d · a leg waiting out a retry is never worded as a stop', () => {
+  /**
+   * 🔴 The transient half of `halted`. `haltNote`'s sentence for a backoff says the leg has **not** stopped
+   * and will come back by itself; a chip, an overview line and a details row all sit on the same card as
+   * that sentence, so none of them may contradict it. `halted` alone could not tell the two apart, and the
+   * chip read "stopped" beside an action text reading "NOT stopped".
+   */
+  const backoff = scope({
+    platform: 'claude',
+    scope: 'default',
+    debt: { pending: ['p'], archived: [], times: new Map() },
+    header: {
+      ...header({ pendingCount: 1 }),
+      platform: 'claude',
+      scope: 'default',
+      halted: { reason: 'rate-limited', detail: 'x', at: 1, attempts: 2, retryAt: NOW + 15 * 60_000 },
+    },
+  });
+
+  it('🔴 the chip says the leg is coming back, and the sentence beside it agrees', () => {
+    const card = cardOf(input({ scopes: [backoff] }));
+    expect(card.chip.word).not.toBe('stopped');
+    expect(card.chip.word).toBe('retrying');
+    expect(card.alerts.some((a) => a.text.includes('NOT stopped'))).toBe(true);
+  });
+
+  it('🔴 a permanent stop still says stopped — the transient rule may not soften it', () => {
+    const card = cardOf(input({
+      scopes: [scope({ header: header({ halted: { reason: 'shape-changed', detail: 'x', at: 1 } }) })],
+    }));
+    expect(card.chip.word).toBe('stopped');
+    expect(card.chip.tone).toBe('bad');
+  });
+
+  it('🔴 the overview line does not call a backoff a stop either', () => {
+    const view = coverageView(buildCoverage(input({ scopes: [backoff] })), NOW);
+    expect(view.health!.text).not.toContain('stopped');
+    expect(view.health!.text).toContain('claude');
+    expect(view.health!.tone).toBe('wait');
+  });
+
+  it('🔴 dismissing the alert cannot remove the reason from the page', () => {
+    // The halt sentence is the alert the card opens with *and* a details row. The alert is dismissible
+    // (`entrypoints/coverage/main.ts`), the disclosure is not — and a dismissal is a hiding gesture, so it
+    // may not be the only copy of a fact the model reported.
+    const card = cardOf(input({ scopes: [backoff] }));
+    expect(card.alerts.some((a) => a.id.endsWith(':halt'))).toBe(true);
+    const state = card.detailRows.filter((r) => r.label === 'state');
+    expect(state).toHaveLength(1);
+    expect(state[0]!.value).toContain('NOT stopped');
+  });
+});
+
+describe('W149d · the all-clear line covers moving and finished legs, and nothing else', () => {
+  const withWork = scope({
+    debt: { pending: ['p1'], archived: ['a1'], times: new Map() },
+    header: header({ pendingCount: 1, archivedCount: 1, enumCursor: { offset: 2, complete: false } }),
+  });
+
+  it('🔴 legs that are switched off are not "moving or finished"', () => {
+    // Every row is `off`, so both attention lists are empty — and the old branch answered that emptiness
+    // with the clean bill, contradicting every card under it.
+    const view = coverageView(buildCoverage(input({ enabled: false, scopes: [withWork] })), NOW);
+    expect(view.health!.tone).not.toBe('ok');
+    expect(view.health!.text).not.toContain('moving or finished');
+    expect(view.health!.text).toContain('chatgpt');
+  });
+
+  it('🔴 neither are legs paused by an unreachable host', () => {
+    const view = coverageView(buildCoverage(input({ hostPaused: true, scopes: [withWork] })), NOW);
+    expect(view.health!.tone).not.toBe('ok');
+    expect(view.health!.text).not.toContain('moving or finished');
+    expect(view.health!.text).toContain('chatgpt');
+  });
+
+  it('a leg that really is moving keeps the all-clear, so the rule is not "never say ok"', () => {
+    const view = coverageView(buildCoverage(input({ scopes: [withWork] })), NOW);
+    expect(view.health!.tone).toBe('ok');
+    expect(view.health!.text).toContain('moving or finished');
+  });
+});
+
 describe('W149 · the composition bar and the chip', () => {
   it('🔴 a contradicted total is never drawn as a remainder segment', () => {
     // The platform's total was exceeded by rows actually returned; `progress.ts` refuses it as a
