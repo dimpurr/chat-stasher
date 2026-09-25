@@ -1,10 +1,18 @@
 //! Configuration handling for chat-stasher.
 //!
-//! The config lives at `~/.config/chat-stasher/config.toml`. Per the spike
-//! requirements, a missing file is fine — the tool falls back to defaults
-//! instead of erroring out. Only a *broken* TOML (or an unreadable file for a
-//! reason other than "not there") is worth warning about, and even then we
-//! degrade to defaults rather than aborting a scan.
+//! The config lives at `~/.config/chat-stasher/config.toml`. A **missing** file
+//! is the normal first-run state and is not an error: the tool runs with the
+//! built-in defaults. A file that **exists but cannot be used** — unreadable, not
+//! valid TOML, or carrying a path this tool cannot resolve — is a hard error, and
+//! [`Config::load`] returns it rather than substituting defaults.
+//!
+//! The asymmetry is the point. `[destinations]` lists the places a copy of the
+//! archive lives, so replacing a file the user wrote with the built-in defaults
+//! *empties that list*: a scheduled `push` then runs as though no remote
+//! destination had ever been declared, and the archive looks complete on a
+//! machine whose copy was never written. "This config says nothing" and "I could
+//! not read this config" are two different states (`CLAUDE.md`, invariant 1) and
+//! a typo is not a statement that the user keeps no copies.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -15,17 +23,22 @@ use std::path::{Path, PathBuf};
 /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
 pub const CONFIG_RELATIVE_PATH: &str = "chat-stasher/config.toml";
 
-/// Where the effective configuration came from.  A missing file is the normal
-/// first-run default; the two error variants mean defaults were used after a
-/// config read/parse failure and must remain visible to machine consumers.
+/// Where the effective configuration came from.
+///
+/// A missing file is the normal first-run default. `Unreadable` is a different
+/// thing entirely: it records that *no* effective configuration exists because
+/// the file is there and could not be used, and it is the value `doctor` reports
+/// in that case. Nothing ever runs on defaults under it — that is what
+/// [`Config::load`] returning `Err` prevents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfigSource {
     File,
     FileAfterWindowsPathRepair,
     #[default]
     DefaultsMissing,
-    DefaultsAfterReadError,
-    DefaultsAfterParseError,
+    /// The file exists but could not be read, parsed or resolved, so there is no
+    /// effective configuration and the command did not run.
+    Unreadable,
 }
 
 impl ConfigSource {
@@ -34,16 +47,8 @@ impl ConfigSource {
             Self::File => "file",
             Self::FileAfterWindowsPathRepair => "file_after_windows_path_repair",
             Self::DefaultsMissing => "defaults_missing",
-            Self::DefaultsAfterReadError => "defaults_after_read_error",
-            Self::DefaultsAfterParseError => "defaults_after_parse_error",
+            Self::Unreadable => "unreadable",
         }
-    }
-
-    pub fn is_error_fallback(self) -> bool {
-        matches!(
-            self,
-            Self::DefaultsAfterReadError | Self::DefaultsAfterParseError
-        )
     }
 }
 
@@ -317,43 +322,59 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub const DEFAULT_BACKUP_INTERVAL_SECS: u64 = 3600;
 
 impl Config {
-    /// Load configuration, falling back to defaults.
+    /// Load the configuration, or say why it cannot be used.
     ///
-    /// Returns `Ok` for both "file missing" and "file present and valid".
-    /// Only a parse failure or an unexpected I/O error produces a warning
-    /// (still on stderr, still non-fatal), because a scan must never be
-    /// blocked by a config typo.
+    /// Three outcomes, three states:
     ///
-    /// One failure is not allowed to take the whole file down with it: a
-    /// `[cache]` section whose values could not be read leaves the rest of the
-    /// config in force, turns the body cache off and records why (see
-    /// [`Config::cache_error`]). Every other failure degrades to defaults as it
-    /// always did.
-    pub fn load() -> Self {
-        match std::fs::read_to_string(config_path()) {
-            Ok(raw) => Self::from_text(&raw),
+    /// - **file present and usable** → `Ok`, with `source` = [`ConfigSource::File`]
+    ///   (or [`ConfigSource::FileAfterWindowsPathRepair`] when the backslash
+    ///   recovery below is what made it parse) and every path field expanded;
+    /// - **file absent** → `Ok` with the built-in defaults and
+    ///   [`ConfigSource::DefaultsMissing`]. This is the normal first-run state;
+    /// - **file present and unusable** → `Err`, naming the file and the reason:
+    ///   line and column for a TOML error, the field name for a path that cannot
+    ///   be resolved.
+    ///
+    /// The third case deliberately does **not** produce a defaults-filled
+    /// `Config`. Defaults are the dangerous answer here rather than the safe
+    /// one: they empty `[destinations]`, so a `push` that runs on them is
+    /// indistinguishable from one whose config never named a destination — and
+    /// the archive silently stops being copied anywhere. A caller that must keep
+    /// going anyway (`doctor`, which reports what it could not check) handles the
+    /// `Err` explicitly instead of being handed a fallback it cannot see.
+    ///
+    /// One failure inside an otherwise-fine file is still recovered rather than
+    /// reported: a `[cache]` section whose values could not be read leaves the
+    /// rest of the config in force, turns the body cache off and records why (see
+    /// [`Config::cache_error`]). That is a *successful* load — the file was read,
+    /// and every key the user wrote is either in force or named in
+    /// `cache_error` — so it is `Ok`; see [`Config::recover`].
+    pub fn load() -> anyhow::Result<Self> {
+        let path = config_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // First run — no config yet. That is explicitly fine.
-                Config::default()
+                return Ok(Config::default());
             }
             Err(e) => {
-                eprintln!("warning: could not read config, using defaults: {e}");
-                Config {
-                    source: ConfigSource::DefaultsAfterReadError,
-                    ..Config::default()
-                }
+                return Err(unusable_config(&path, format!("it could not be read: {e}")));
             }
-        }
+        };
+        Self::from_text(&raw)
     }
 
     /// The text of a config file, as a config, degrading as far as the file
     /// itself allows.
-    fn from_text(raw: &str) -> Self {
+    ///
+    /// The recoveries below are the only degradations left; anything a recovery
+    /// cannot account for is an `Err` (see [`Config::recover`]).
+    fn from_text(raw: &str) -> anyhow::Result<Self> {
         match toml::from_str::<Config>(raw) {
             Ok(mut cfg) => {
                 cfg.source = ConfigSource::File;
-                expand_config_paths(&mut cfg);
-                cfg
+                expand_config_paths(&mut cfg)?;
+                Ok(cfg)
             }
             Err(strict_error) => Self::recover(raw, &strict_error),
         }
@@ -361,13 +382,17 @@ impl Config {
 
     /// What a config file means when a strict parse of it failed.
     ///
-    /// Two recoveries, in order, and then the old whole-file fallback. The
-    /// second one is why this is a function of its own: a bad value inside
-    /// `[cache]` used to replace the *entire* config with its defaults, which
-    /// silently dropped every other section and — because an absent `[cache]`
-    /// means the documented default quota — turned the cache on at a size
-    /// nobody wrote.
-    fn recover(raw: &str, strict_error: &toml::de::Error) -> Self {
+    /// Two recoveries, in order, and then a refusal. The second one is why this
+    /// is a function of its own: a bad value inside `[cache]` used to replace the
+    /// *entire* config with its defaults, which silently dropped every other
+    /// section and — because an absent `[cache]` means the documented default
+    /// quota — turned the cache on at a size nobody wrote.
+    ///
+    /// Neither recovery ends in a defaults-filled config. Both end in a config
+    /// that is genuinely the file's meaning; when neither applies the file is
+    /// refused rather than replaced, so "this file says something I cannot read"
+    /// can never be answered with "this file says nothing".
+    fn recover(raw: &str, strict_error: &toml::de::Error) -> anyhow::Result<Self> {
         // 1. A Windows path pasted verbatim into a basic string is not valid
         //    TOML, and rejecting the whole file over it would act as if the user
         //    never stated where their store lives.
@@ -376,8 +401,8 @@ impl Config {
             if let Ok(mut cfg) = toml::from_str::<Config>(fixed) {
                 warn_windows_paths();
                 cfg.source = ConfigSource::FileAfterWindowsPathRepair;
-                expand_config_paths(&mut cfg);
-                return cfg;
+                expand_config_paths(&mut cfg)?;
+                return Ok(cfg);
             }
         }
         // 2. A `[cache]` section that is present and unreadable. The rest of the
@@ -399,14 +424,16 @@ impl Config {
                 "         fix that value to turn the cache back on; `chat-stasher doctor` reports this too"
             );
             cfg.cache_error = Some(why);
-            expand_config_paths(&mut cfg);
-            return cfg;
+            // The salvaged file is still checked for unresolvable paths: the
+            // cache recovery accounts for one broken section, not for a `~`
+            // that cannot be expanded somewhere else.
+            expand_config_paths(&mut cfg)?;
+            return Ok(cfg);
         }
-        eprintln!("warning: config is not valid TOML, using defaults: {strict_error}");
-        Config {
-            source: ConfigSource::DefaultsAfterParseError,
-            ..Config::default()
-        }
+        Err(unusable_config(
+            &config_path(),
+            format!("it is not valid TOML: {strict_error}"),
+        ))
     }
 
     /// The store root the user explicitly declared for registry harness `id`,
@@ -653,19 +680,45 @@ impl Config {
     }
 }
 
-/// Run the post-parse path expansion over an effective config, printing a
-/// warning for every field that had to be reset to its default. Loading never
-/// aborts over a bad `~` (a scan must not be blocked by a config typo), but it
-/// also never lets a literal `~` through: the field is dropped and the reason
-/// is printed.
-fn expand_config_paths(cfg: &mut Config) {
+/// Run the post-parse path expansion over an effective config, returning an
+/// error when any field could not be resolved.
+///
+/// A configured path that cannot be expanded is a config this tool cannot act
+/// on, and *acting on the default instead* is the failure this whole module is
+/// arranged to prevent (a `rustic_repo` of `~/stash/repo` silently becoming the
+/// built-in repo path would push to a different repository than the one written
+/// down). The fields are still cleared in place — a literal `~` is never handed
+/// to the filesystem — but the caller does not keep the resulting config.
+fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
     let mut problems: Vec<String> = Vec::new();
     cfg.expand_all_paths(&mut problems);
-    for problem in &problems {
-        eprintln!(
-            "warning: the `~` in a config path could not be expanded; the option was reset to its default (a literal `~` is never written as a path): {problem}"
-        );
+    if problems.is_empty() {
+        return Ok(());
     }
+    Err(unusable_config(
+        &config_path(),
+        format!(
+            "it sets a path this tool cannot resolve: {}",
+            problems.join("; ")
+        ),
+    ))
+}
+
+/// The error for a config file that exists but cannot be used.
+///
+/// One shape for all three causes (unreadable, not valid TOML, a path that
+/// cannot be resolved) so the user sees the same two things every time: the file
+/// that has to be fixed, and what is wrong with it. The hint names the one action
+/// that turns this back into a working run — and deliberately spells out that a
+/// *missing* config file is a different, normal state, because the failure being
+/// reported is easy to misread as "you have no config".
+fn unusable_config(path: &Path, reason: String) -> anyhow::Error {
+    anyhow::anyhow!(
+        "config file {} exists but cannot be used: {reason}\n\
+         hint: fix that file, or move it aside — an absent config file is the normal first-run \
+         state and runs with the built-in defaults; this one exists and is not being ignored",
+        path.display()
+    )
 }
 
 /// The two lines a backslash-repaired config is reported with.
@@ -962,9 +1015,10 @@ impl std::error::Error for TildeError {}
 ///   a literal `~` directory gets created in the current working directory.
 /// - When no home is available the function **errors** (`MissingHome`) rather
 ///   than return a literal `~`: a `~` that reaches the filesystem is the bug
-///   this whole module exists to prevent. Callers that must not abort (config
-///   load) drop the field to its default and warn; callers at the disk
-///   boundary (repo/key resolution) treat the error as fatal.
+///   this whole module exists to prevent. Every caller treats that error as
+///   fatal, including config load: a configured path that cannot be resolved
+///   makes the config unusable rather than quietly falling back to a different
+///   path than the one written down.
 /// - A `~` that is *not* the first character (e.g. `stash/~/x`) is left alone
 ///   here; [`assert_no_literal_tilde`] is the check that rejects those.
 pub fn expand_tilde(s: &str) -> Result<PathBuf, TildeError> {
@@ -1033,8 +1087,10 @@ pub fn expand_and_verify(value: &str) -> Result<PathBuf, TildeError> {
 }
 
 /// Expand an `Option<String>` path field in place via [`expand_and_verify`].
-/// On failure, clear the field (`None`) and record a warning — a literal `~`
-/// must never survive into a path the tool then hands to the filesystem.
+/// On failure, clear the field (`None`) and record the reason — a literal `~`
+/// must never survive into a path the tool then hands to the filesystem. The
+/// recorded reason is what makes [`Config::load`] fail, so the cleared field is
+/// never part of a config a caller gets to act on.
 fn expand_opt_field(label: &str, value: &mut Option<String>, problems: &mut Vec<String>) {
     let Some(raw) = value.as_deref() else { return };
     match expand_and_verify(raw) {
@@ -1055,9 +1111,15 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Path values: a leading `~/` expands to your home directory (`~` alone is the
 # home directory too). Windows: `~\` is accepted, and `/`-separated relative
 # tails like `~/AppData/Roaming/...` work as well. `~username` (another user's
-# home) is not supported and is rejected. If no home is available ($HOME and
-# $USERPROFILE are both unset) the option is reset to its default with a
-# warning — a literal `~` directory is never created.
+# home) is not supported and is rejected. If a path here cannot be resolved (no
+# home available, or `~username`), the commands that read this file refuse to run
+# and say which option is at fault; they never substitute a default for it — a
+# `~` directory is never created, and a path is never silently replaced.
+#
+# A file that exists must be readable and valid: a typo stops every command that
+# reads it, with the file, the line and the reason. Delete or move this file
+# aside instead if you want the built-in defaults — an absent config file is the
+# normal first-run state.
 
 # Where `push` will archive snapshots once that step lands.
 # Default: unset (a local sibling directory of this config file).
@@ -1429,7 +1491,7 @@ root = "~/dest/remote"
         )
         .unwrap();
 
-        let cfg = Config::load();
+        let cfg = Config::load().expect("this fixture is a valid config");
         let h = home.path();
         assert_eq!(
             cfg.archive_root.as_deref(),
@@ -1506,7 +1568,7 @@ no_cache = false
         )
         .unwrap();
 
-        let cfg = Config::load();
+        let cfg = Config::load().expect("this fixture is a valid config");
         let h = home.path();
         assert_eq!(
             cfg.rustic_cache_dir.as_deref(),
@@ -1560,7 +1622,7 @@ max_bytes = "50GB"
         )
         .unwrap();
 
-        let cfg = Config::load();
+        let cfg = Config::load().expect("this fixture is a usable config");
         let h = home.path();
         assert_eq!(
             cfg.rustic_cache_dir.as_deref(),
@@ -1658,7 +1720,7 @@ max_bytes = "50G"
         )
         .unwrap();
 
-        let cfg = Config::load();
+        let cfg = Config::load().expect("the cache recovery is a successful load, not a refusal");
         // The typo does not cost the user the rest of the file: this is the
         // half of the change that has nothing to do with the cache itself.
         assert_eq!(cfg.machine.as_deref(), Some("m-alpha"));
@@ -1690,30 +1752,57 @@ max_bytes = "50G"
         }
     }
 
-    /// The recovery is scoped to `[cache]`: a file broken anywhere else keeps
-    /// the old whole-file behaviour, so this can never quietly promote a
-    /// *different* broken section into a config that looks valid.
+    /// The recovery is scoped to `[cache]`: a file broken anywhere else is
+    /// refused outright, so this can never quietly promote a *different* broken
+    /// section into a config that looks valid.
+    ///
+    /// Its pair is the test directly above: there `[cache]` is the *only* broken
+    /// thing and the load succeeds with `cache_error` set. Here the cache is not
+    /// the problem, and the same recovery must not fire.
     #[test]
     fn the_cache_recovery_does_not_mask_a_break_somewhere_else() {
-        // `connections` is not a number, and `[cache]` is absent.
+        // `connections` is not a number, and `[cache]` is absent. Removing a
+        // `cache` key cannot be what makes this parse — there is no such key —
+        // so the refusal has to be about the real break.
         let other_break =
             "machine = \"m-alpha\"\n[destinations.d1]\nrepo = \"/tmp/x\"\nconnections = \"lots\"\n";
-        let cfg = Config::from_text(other_break);
-        assert_eq!(cfg.source, ConfigSource::DefaultsAfterParseError);
-        assert!(cfg.cache_error.is_none());
-        assert!(cfg.machine.is_none(), "defaults, as before");
+        let err = Config::from_text(other_break)
+            .expect_err("a break outside `[cache]` must refuse the file, not default it");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("not valid TOML"),
+            "the refusal must name the real problem: {text}"
+        );
+        assert!(
+            text.contains("connections"),
+            "the refusal must point at the offending key: {text}"
+        );
 
         // A readable `[cache]` next to a break elsewhere: removing the cache
-        // key does not make the file parse, so this is not the cache recovery.
-        let mixed = "[cache]\nmax_bytes = 0\n[destinations.d1]\nrepo = \"/tmp/x\"\nconnections = \"lots\"\n";
-        let cfg = Config::from_text(mixed);
-        assert_eq!(cfg.source, ConfigSource::DefaultsAfterParseError);
-        assert!(cfg.cache_error.is_none());
-        assert!(cfg.cache.is_none());
+        // key does not make the file parse, so this is not the cache recovery
+        // either — and the refusal must not be phrased as a cache problem.
+        let mixed =
+            "[cache]\nmax_bytes = 0\n[destinations.d1]\nrepo = \"/tmp/x\"\nconnections = \"lots\"\n";
+        let err = Config::from_text(mixed)
+            .expect_err("a readable `[cache]` must not buy a break elsewhere an exemption");
+        let text = format!("{err:#}");
+        assert!(
+            !text.contains("could not be read"),
+            "the readable `[cache]` section is not what failed here: {text}"
+        );
+        assert!(
+            text.contains("connections"),
+            "the refusal must point at the offending key: {text}"
+        );
     }
 
+    /// A configured path that cannot be expanded makes the whole config
+    /// unusable. This used to reset the field to its (possibly different)
+    /// default and carry on — which meant `rustic_repo = "~/repo"` with no
+    /// `$HOME` silently became the *built-in* repo path, i.e. a push to a
+    /// different repository than the one written down.
     #[test]
-    fn load_drops_tilde_field_when_home_missing() {
+    fn load_refuses_when_a_path_cannot_be_expanded() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let xdg = tempfile::TempDir::new().unwrap();
         env::set_var("XDG_CONFIG_HOME", xdg.path());
@@ -1732,11 +1821,53 @@ key_file = "~/dest/key.json"
         )
         .unwrap();
 
-        let cfg = Config::load();
-        // Field reset to default (None); a literal `~` must never remain as a path.
-        assert_eq!(cfg.rustic_repo, None);
-        let d1 = cfg.destinations.get("d1").expect("d1 present");
-        assert_eq!(d1.key_file, None);
+        let err = Config::load().expect_err("an unresolvable path must not fall back to defaults");
+        let text = format!("{err:#}");
+        // The user has to be told which file and which option; the raw
+        // `MissingHome` text alone names neither.
+        assert!(
+            text.contains(&cfg_dir.join("config.toml").display().to_string()),
+            "the error must name the config file: {text}"
+        );
+        assert!(
+            text.contains("rustic_repo") && text.contains("destinations.d1.key_file"),
+            "the error must name every option that could not be resolved: {text}"
+        );
+    }
+
+    /// The other half of the asymmetry: a *missing* file is not an error and
+    /// still yields the built-in defaults.
+    #[test]
+    fn load_without_a_config_file_is_defaults_not_an_error() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+
+        let cfg = Config::load().expect("an absent config file is the normal first-run state");
+        assert_eq!(cfg.source, ConfigSource::DefaultsMissing);
+        assert!(cfg.destinations.is_empty());
+    }
+
+    /// A file that exists and is not TOML is an error naming the file and the
+    /// position — never a defaults-filled `Config`.
+    #[test]
+    fn load_refuses_invalid_toml_instead_of_using_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let path = cfg_dir.join("config.toml");
+        std::fs::write(&path, "this is not valid TOML = [\n").unwrap();
+
+        let err = Config::load().expect_err("invalid TOML must not fall back to defaults");
+        let text = format!("{err:#}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(
+            text.contains("line 1"),
+            "a TOML error must carry its position: {text}"
+        );
     }
 
     #[test]

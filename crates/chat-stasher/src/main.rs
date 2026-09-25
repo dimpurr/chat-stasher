@@ -2179,7 +2179,10 @@ fn cmd_activity_index(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("activity-index") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = match resolve_machine("activity-index", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
@@ -2499,7 +2502,10 @@ fn record_writer_version(stage: &Path, machine: &str) -> anyhow::Result<()> {
 /// `<stage>/meta/<machine>/machine.json` and rides into the archive on the next
 /// `push`, which archives the whole stage root.
 fn cmd_machine_declare(stage: &Path, display_name: Option<String>) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("machine-declare") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = match resolve_machine("machine-declare", &config, None) {
         Ok(machine) => machine,
         Err(code) => return code,
@@ -2549,7 +2555,10 @@ fn cmd_machine_declare(stage: &Path, display_name: Option<String>) -> ExitCode {
 /// machine (ADR-018). Exists for targets that can no longer declare for
 /// themselves. One writer per file, so concurrent machines never merge.
 fn cmd_machine_label(stage: &Path, target: &str, label: &str) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("machine-label") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let writer = match resolve_machine("machine-label", &config, None) {
         Ok(writer) => writer,
         Err(code) => return code,
@@ -2844,7 +2853,10 @@ fn cmd_overview(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("overview") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     if destination.is_none() && repo.is_none() {
         let msg = "overview: name the destination to open (`--destination <name>`, or an explicit `--repo`); there is no default destination and no cross-destination merge";
         eprintln!("{msg}");
@@ -3155,7 +3167,10 @@ fn cmd_search(
     }
     let selector = resolved.selector;
 
-    let config = Config::load();
+    let config = match config_or_refuse("search") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     if destination.is_none() && repo.is_none() {
         eprintln!(
             "search: name the destination to search (`--destination <name>`, or an explicit `--repo`)"
@@ -3397,7 +3412,10 @@ fn cmd_export(
     }
     let selector = resolved.selector;
 
-    let config = Config::load();
+    let config = match config_or_refuse("export") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     if destination.is_none() && repo.is_none() {
         eprintln!(
             "export: name the destination to export from (`--destination <name>`, or an explicit `--repo`)"
@@ -3596,7 +3614,13 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         keep_ssh_masters,
     } = args;
 
-    let config = Config::load();
+    // Fail closed first: a config that exists and cannot be used stops `ui`
+    // before any destination is resolved, exactly as it stops the other
+    // commands that read it.
+    let config = match config_or_refuse("ui") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     // A dashboard is a look, not a retrieval: `search`, `export` and
     // `overview` still require naming the copy (ADR-013 — recorded below by
     // the unchanged `resolve_store_config`), but a human who typed `ui` and
@@ -3840,12 +3864,32 @@ fn cmd_doctor(json: bool) -> ExitCode {
     // `doctor::run()` because a dozen integration tests call that entry point
     // directly and a test may not reach the network; the CLI is where a real
     // probe belongs.
-    report.destinations = chat_stasher::doctor::probe_destinations(&Config::load());
+    //
+    // Only when the config could be read at all: with none, there is no declared
+    // destination to dial, and an empty probe list would read as "no destination
+    // answered" — a claim about a destination list nobody managed to read.
+    if let Ok(config) = Config::load() {
+        report.destinations = chat_stasher::doctor::probe_destinations(&config);
+    }
     if json {
         let value = chat_stasher::doctor::report_to_json(&report);
         println!("{}", json_string(&value));
     } else {
         chat_stasher::doctor::print_report(&report);
+    }
+    if let Some(error) = &report.config_error {
+        // The one command that does not refuse on an unusable config, because
+        // "which of my setup is broken" is the question it exists to answer. It
+        // still cannot answer the config-dependent half, so it says which half,
+        // and exits non-zero: `doctor` reporting a clean machine it never
+        // inspected is the failure mode this replaces.
+        eprintln!("doctor: config={error}");
+        eprintln!(
+            "doctor: INCOMPLETE exit_code=3 — the config file could not be used, so every check that \
+             reads it was NOT performed (those are listed above and in `not_checked` under `--json`). \
+             Absent results there are unknown, not zero."
+        );
+        return ExitCode::from(3);
     }
     if report.scan_failed {
         eprintln!(
@@ -3874,7 +3918,10 @@ fn cmd_ingest(
     machine: Option<&str>,
     shard_bucket_cap: usize,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("ingest") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = match resolve_machine("ingest", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
@@ -3980,7 +4027,10 @@ fn cmd_dest_init(
     keep_ssh_masters: bool,
     trust_host: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("dest-init") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     if destination.is_none() && repo.is_none() {
         eprintln!(
             "dest-init: name the destination being initialised (`--destination <name>`, or an explicit `--repo`)"
@@ -4402,7 +4452,10 @@ fn cmd_collect(
     repo: Option<String>,
     key_file: Option<String>,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("collect") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = match resolve_machine("collect", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
@@ -4747,7 +4800,24 @@ fn run_once_pass(
 ) -> (ExitCode, chat_stasher::runstate::RunState) {
     use chat_stasher::runstate::{RunOutcome, RunState};
 
-    let config = Config::load();
+    // A config that cannot be used stops the pass here, before any destination is
+    // resolved. This is the path a timer takes, so the failure has to be loud in
+    // both channels a sleeping user has: the exit status (launchd and systemd
+    // record it, and `status` reports "no run has succeeded since") and stderr
+    // (the scheduled unit redirects it to
+    // `~/Library/Logs/chat-stasher/run-once.err.log`). Running the pass anyway
+    // would push to the built-in default repository, which is the one outcome
+    // that looks like success while copying nowhere the user named.
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("[run-once] result: ERROR exit_code=3 config={e:#}");
+            return (
+                ExitCode::from(3),
+                RunState::new(RunOutcome::Error, Some("config"), UNRESOLVED_MACHINE, 0),
+            );
+        }
+    };
     let machine_name = match resolve_machine("run-once", &config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => {
@@ -4994,7 +5064,10 @@ fn cmd_schedule(
     verify: bool,
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("schedule") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
 
     if matches!(action, Some(ScheduleAction::Uninstall))
         && !matches!(format, schedule::Format::Launchd)
@@ -5332,7 +5405,10 @@ fn cmd_seal(
         println!("[seal] active untouched : {}", active.display());
         return ExitCode::FAILURE;
     }
-    let config = Config::load();
+    let config = match config_or_refuse("seal") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = match resolve_machine("seal", &config, machine) {
         Ok(machine) => machine,
         Err(code) => return code,
@@ -5702,7 +5778,10 @@ fn cmd_push(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("push") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = match resolve_machine("push", &config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => return code,
@@ -5959,7 +6038,10 @@ fn cmd_read(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("read") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = if all_machines {
         query_machine(&config, machine)
     } else {
@@ -6097,7 +6179,10 @@ fn cmd_read(
 fn cmd_cache(action: Option<CacheAction>) -> ExitCode {
     use chat_stasher::body_cache::RootState;
 
-    let config = Config::load();
+    let config = match config_or_refuse("cache") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     // A `[cache]` section that could not be read is neither an absent one (which
     // takes the documented default quota) nor a path problem: the quota the user
     // wrote is unknown, so the cache is off and this says which line to fix.
@@ -6376,7 +6461,10 @@ fn cmd_verify(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("verify") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let machine = query_machine(&config, machine);
     let cfg = resolve_store_config(
         &config,
@@ -6596,7 +6684,10 @@ fn cmd_reclaim_stage(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
+    let config = match config_or_refuse("reclaim-stage") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
     let multi = !config.destinations.is_empty();
     if multi {
         if repo.is_some() || key_file.is_some() {
@@ -7574,6 +7665,31 @@ mod decision_surface_tests {
     }
 }
 
+/// Load the config, or report why it cannot be used and hand back the exit code
+/// that refuses the command.
+///
+/// Every command that reads the config goes through this, which is what makes
+/// "a config that exists and is invalid stops the command" a property of the
+/// program rather than of nineteen call sites that each remembered. The exit
+/// code is `3`, not `1`: `3` means *did not finish reading*, so an absence proves
+/// nothing — here, that the destination list, the harness roots and the machine
+/// identity are all **unknown**. `1` would mean "finished and failed", and this
+/// command never finished: it never started. `2` would blame the command line,
+/// which is not what is wrong.
+fn config_or_refuse(command: &str) -> Result<Config, ExitCode> {
+    match Config::load() {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            eprintln!("{command}: {e:#}");
+            eprintln!(
+                "{command}: exit_code=3 — the command did not run, so nothing here is a statement \
+                 about this machine's sessions, destinations or archive."
+            );
+            Err(ExitCode::from(3))
+        }
+    }
+}
+
 fn cmd_init() -> ExitCode {
     match Config::init_default(config::DEFAULT_CONFIG_TEMPLATE) {
         Ok(()) => {
@@ -7600,10 +7716,29 @@ fn cmd_status(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = Config::load();
-    if config.source.is_error_fallback() {
-        eprintln!("config_source={}", config.source.label());
-    }
+    // `status` is not a second exception to "an unusable config stops the
+    // command": its two halves both read the config (the cadence that decides
+    // staleness, the harness roots the scan walks), so a report built without it
+    // would answer "is my timer healthy?" from a machine the tool cannot see.
+    // It used to print `config_source=defaults_after_parse_error` and carry on
+    // with defaults — which is the fallback this change removes, spelled out
+    // rather than silent.
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            let why = format!("{e:#}");
+            if json {
+                println!("{}", status_json_config_error(&why));
+            }
+            eprintln!("status: {why}");
+            eprintln!(
+                "status: exit_code=3 — the config file could not be read, so this report has no \
+                 verdict on the timer, the scan, or any destination. Nothing below is a count of \
+                 zero; there is no count at all."
+            );
+            return ExitCode::from(3);
+        }
+    };
     let info = run_state_info(&config);
     eprintln!("[run-once] {}", info.verdict.line);
 
@@ -7832,6 +7967,27 @@ fn run_state_info(config: &Config) -> RunStateInfo {
 /// infallible.
 fn json_string(value: &serde_json::Value) -> String {
     serde_json::to_string(value).expect("serde_json cannot fail on a json! value")
+}
+
+/// The `status --json` object for a config that could not be used.
+///
+/// `--json` exists so a wrapper never has to parse prose, and that has to hold
+/// on the refusing path too: `status` still writes one object to stdout, with the
+/// same two fields it uses for any other "could not look" (`scanner.kind` is
+/// `failed`, `why` is the config error) plus `config_error` and
+/// `config_source: "unreadable"`. Every count is then absent rather than `0` —
+/// the same rule the scanner object follows.
+fn status_json_config_error(why: &str) -> String {
+    json_string(&serde_json::json!({
+        "schema_version": 1,
+        "command": "status",
+        "healthy": false,
+        "exit_code": 3,
+        "exit_semantics": status_exit_semantics(3),
+        "config_source": chat_stasher::config::ConfigSource::Unreadable.label(),
+        "config_error": why,
+        "scanner": { "kind": "failed", "why": why },
+    }))
 }
 
 /// The `status --json` object. `scan` is `Ok` when the registry-driven scan
