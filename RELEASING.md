@@ -27,7 +27,7 @@ different owner and a different release-time edit:
 |---|---|---|
 | `crates/chat-stasher/Cargo.toml` | `version` | **The CLI's version.** It is what `chat-stasher --version` prints and what the native host reports as `host_version`. On `main` it always carries a `-dev` suffix. |
 | `scripts/install.sh` | `VERSION` default | Which release `curl \| sh` installs. Pinned on purpose — the installer never resolves "latest". |
-| `homebrew/chat-stasher.rb` | both `url`s (the `vX.Y.Z` path segment of each is the formula's version), both `sha256`s | The source copy of the Homebrew tap formula. It deliberately has no separate `version` line: `brew audit --strict` flags an explicit version as redundant when the URL already carries one. |
+| `homebrew/chat-stasher.rb` | both `url`s (the `vX.Y.Z` path segment of each is the formula's version), both `sha256`s | The source copy of the Homebrew tap formula. It deliberately has no separate `version` line: `brew audit --strict` flags an explicit version as redundant when the URL already carries one. Its `test` compares the installed binary against `version` itself rather than repeating the string, so a release edits the two URLs and the two digests and nothing else. |
 | `SECURITY.md` | "Supported versions" table | Which line receives fixes. |
 | `apps/extension/package.json` | `version` | **The extension's own version**, independent of the CLI. See "The extension" below. |
 
@@ -58,7 +58,8 @@ automation creates one.
    report the released version rather than a development one.
 4. **Update the version pins** in `scripts/install.sh` (the `VERSION` default),
    both `url`s in `homebrew/chat-stasher.rb` (the `vX.Y.Z` segment of each is
-   the formula's version — there is no separate `version` line, on purpose),
+   the formula's version — there is no separate `version` line, on purpose, and
+   the formula's `test` reads that scanned version rather than a copy of it),
    and the "Supported versions" table in `SECURITY.md`. The Homebrew `sha256`
    values can only be filled in after step 7.
 
@@ -112,6 +113,12 @@ automation creates one.
    write to a different repository. The acceptance test is
    `brew install dimpurr/tap/chat-stasher` on a clean Mac, which must install
    the version just released.
+
+   `brew test dimpurr/tap/chat-stasher` is that acceptance test in one command:
+   it installs the tapped formula and asserts that the binary reports the
+   version the URLs pin. Neither `brew audit` nor `brew style` runs the formula's
+   `test do` block, so the two lint checks above cannot see a formula that
+   installs but reports the wrong version. This one can.
 10. **Move `main` forward**: bump `crates/chat-stasher/Cargo.toml` to the next
     development version (`X.Y.(Z+1)-dev` or `X.(Y+1).0-dev`) in a new commit.
     `main` never sits on an unsuffixed version.
@@ -242,9 +249,11 @@ thing it does not.
   unaffected — `gh release create` starts from nothing.
 - **The Homebrew tap job does not gate the release.** It runs only after the
   Release is published, only for a stable `vX.Y.Z` tag, and only when
-  `TAP_TOKEN` is set; otherwise it is skipped. It opens a draft PR and stops —
-  it never merges, so a tap that is broken cannot make a release fail, and a
-  release cannot merge to the tap without the owner's review (step 9).
+  `TAP_TOKEN` is set; otherwise it is skipped. It opens a draft PR from a
+  `chat-stasher-X.Y.Z` branch and stops — it never merges, so a tap that is
+  broken cannot make a release fail, and a release cannot merge to the tap
+  without the owner's review (step 9). A pull request for that branch is never
+  opened twice: an existing one, open or closed, is left alone and reported.
 
 It does not check the tag object. A *lightweight* tag named `vX.Y.Z` passes
 every check above, so `git tag -a` in step 6 is a step the owner follows and not

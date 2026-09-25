@@ -489,13 +489,28 @@ jobs:
             echo "Formula/chat-stasher.rb already pins ${TAG#v}; nothing to open."
             exit 0
           fi
-          if gh pr list --repo dimpurr/homebrew-tap --head "$BRANCH" \
-               --json number --jq 'length' | grep -q '^[1-9]'; then
-            echo "a pull request for ${BRANCH} already exists; leaving it alone."
+          # A pull request for this branch in *any* state means a person owns
+          # the decision now. `--state all` is what makes a closed-unmerged PR
+          # visible: it leaves its branch behind, and a run that looked only at
+          # open PRs would push over that branch and then die on `gh pr create`.
+          existing="$(gh pr list --repo dimpurr/homebrew-tap --head "$BRANCH" \
+            --state all --json number,state \
+            --jq 'map("\(.number) (\(.state))") | join(", ")')"
+          if [ -n "$existing" ]; then
+            echo "a pull request for ${BRANCH} already exists (${existing}); leaving it alone."
             exit 0
           fi
+          # A clone checks out the tap's *default* branch, so the commit below
+          # needs a branch of its own: without this line the push names a ref
+          # that does not exist and every run dies before opening anything.
+          git checkout -b "$BRANCH"
           git commit -m "chat-stasher ${TAG#v}"
-          git push -u origin "$BRANCH"
+          # The branch is machine-owned and carries a single commit on top of
+          # main, but an earlier run can leave one behind (a PR closed without
+          # being merged, its branch not deleted). --force-with-lease replaces
+          # only what this clone saw when it was made: a commit a person added
+          # since is a lease failure, not a silent overwrite.
+          git push --force-with-lease -u origin "$BRANCH"
           gh pr create --draft --repo dimpurr/homebrew-tap \
             --base main --head "$BRANCH" \
             --title "chat-stasher ${TAG#v}" \

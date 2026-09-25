@@ -45,8 +45,12 @@ class ChatStasher < Formula
   test do
     # Real verification, not a shell: `--version` must exit 0 (shell_output
     # fails the test on a non-zero exit) and the stdout must carry the version.
-    # clap derives `--version` from Cargo.toml version (0.4.0) → "chat-stasher 0.4.0".
+    # `version` is the one value Homebrew scans out of the URLs above, so this
+    # assertion is derived from the release URL rather than a second copy of the
+    # string: a release that moves the URLs moves this with them. clap derives
+    # `--version` from Cargo.toml, and release.yml's first gate refuses a tag
+    # that disagrees with it, so the two strings are equal by construction.
     version_output = shell_output("#{bin}/chat-stasher --version")
-    assert_match(/chat-stasher 0\.4\.0/, version_output)
+    assert_match "chat-stasher #{version}", version_output
   end
 end
