@@ -2604,7 +2604,10 @@ pub fn print_report(r: &DoctorReport) {
         // prints anything a reader could mistake for a finding. The two checks
         // below need no config, so they are still real; everything config-derived
         // is named here instead of being printed from defaults.
-        eprintln!("config file could not be used: {error}");
+        // The error text already opens with the file and what is wrong with it
+        // (`config file <path> exists but cannot be used: …`), so this adds the
+        // alarm marker and nothing that repeats it.
+        eprintln!("🔴 {error}");
         eprintln!();
         eprintln!("🔴 NOT CHECKED — these read the config, so this run has no answer for them:");
         for check in r.not_checked() {
