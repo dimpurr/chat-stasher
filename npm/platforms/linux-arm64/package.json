@@ -1,0 +1,29 @@
+{
+  "name": "@dimpurr/chat-stasher-linux-arm64",
+  "version": "0.0.0",
+  "description": "The Linux arm64 binary for chat-stasher, statically linked against musl. Installed by the chat-stasher package; not meant to be depended on directly.",
+  "homepage": "https://github.com/dimpurr/chat-stasher",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dimpurr/chat-stasher.git"
+  },
+  "license": "Apache-2.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "NOTICE"
+  ],
+  "preferUnplugged": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "private": true
+}

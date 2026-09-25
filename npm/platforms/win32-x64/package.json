@@ -1,0 +1,29 @@
+{
+  "name": "@dimpurr/chat-stasher-win32-x64",
+  "version": "0.0.0",
+  "description": "The Windows x86_64 binary for chat-stasher. Installed by the chat-stasher package; not meant to be depended on directly.",
+  "homepage": "https://github.com/dimpurr/chat-stasher",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dimpurr/chat-stasher.git"
+  },
+  "license": "Apache-2.0",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "NOTICE"
+  ],
+  "preferUnplugged": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "private": true
+}

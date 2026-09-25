@@ -83,7 +83,15 @@ export function makeFixture({ platform, arch, package: withPackage = true, binar
       `${JSON.stringify({ name: `@dimpurr/chat-stasher-${platform}-${arch}`, version: '0.0.0' }, null, 2)}\n`,
     );
     if (withBinary) {
-      const binaryPath = path.join(packageDir, 'bin', 'chat-stasher');
+      // The name is written out here rather than taken from the launcher: the
+      // fixture is the layout a test says exists, so a launcher that looked for
+      // a different name would fail to find this file instead of agreeing with
+      // itself. Windows runs a file only by its extension, so a win32 fixture
+      // holds `chat-stasher.exe` — a shebang plus a .exe name is still a valid
+      // executable on the hosts these tests run on, so the win32 layout is
+      // covered without a Windows machine.
+      const name = platform === 'win32' ? 'chat-stasher.exe' : 'chat-stasher';
+      const binaryPath = path.join(packageDir, 'bin', name);
       fs.writeFileSync(binaryPath, FAKE_BINARY);
       fs.chmodSync(binaryPath, executable ? 0o755 : 0o644);
     }

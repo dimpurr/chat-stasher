@@ -16,7 +16,14 @@ import { makeFixture, removeFixture, runLauncher, runLauncherAndSignal } from '.
 // interop lexer reads the named ones.
 import launcher from '../bin/chat-stasher.js';
 
-const { SUPPORTED, messageFor, packageNameFor, targetFor } = launcher;
+const { SUPPORTED, messageFor, packageNameFor, binaryNameFor, targetFor } = launcher;
+
+// A platform this package ships no binary for, used wherever a test needs one.
+// It was `linux-x64` until Linux became a supported platform, at which point
+// that case stopped testing "unshipped" and would have passed for the wrong
+// reason. The property is what matters, so the example moved rather than the
+// assertion.
+const UNSHIPPED = { platform: 'freebsd', arch: 'x64', key: 'freebsd-x64' };
 
 const fixtures = [];
 function fixture(options) {
@@ -52,15 +59,31 @@ describe('targetFor', () => {
 
   it('reports a platform with no package as unsupported, and does not look one up', () => {
     let looked = false;
-    const target = targetFor('linux', 'x64', () => { looked = true; });
+    const target = targetFor(UNSHIPPED.platform, UNSHIPPED.arch, () => { looked = true; });
     assert.equal(target.ok, false);
     assert.equal(target.reason, 'unsupported-platform');
     assert.equal(looked, false);
   });
 
   it('tells an unsupported platform apart from a package that did not install', () => {
-    assert.equal(targetFor('linux', 'x64', notFound).reason, 'unsupported-platform');
+    assert.equal(targetFor(UNSHIPPED.platform, UNSHIPPED.arch, notFound).reason, 'unsupported-platform');
     assert.equal(targetFor('darwin', 'arm64', notFound).reason, 'package-not-installed');
+  });
+
+  it('looks for the name the binary actually has on each platform', () => {
+    // Windows is the one platform where the file name is not the command name:
+    // CreateProcess appends `.exe` only to a name that has no extension, so a
+    // file literally called `chat-stasher` is not startable there.
+    const dir = fixture({ platform: 'win32', arch: 'x64' });
+    const manifestPath = path.join(dir, 'node_modules', '@dimpurr', 'chat-stasher-win32-x64', 'package.json');
+    const target = targetFor('win32', 'x64', () => manifestPath);
+    assert.equal(target.ok, true);
+    assert.equal(target.binPath, path.join(path.dirname(manifestPath), 'bin', 'chat-stasher.exe'));
+
+    for (const key of SUPPORTED) {
+      const expected = key.startsWith('win32-') ? 'chat-stasher.exe' : 'chat-stasher';
+      assert.equal(binaryNameFor(key), expected, `${key} resolves to ${expected}`);
+    }
   });
 
   it('carries the errno when the package is missing, and null when there is none', () => {
@@ -103,7 +126,7 @@ describe('messageFor', () => {
   // that do not go through npm: this line is the whole user-visible surface of a
   // failed launch.
   const cases = [
-    ['unsupported-platform', { key: 'linux-x64' }, 'linux-x64'],
+    ['unsupported-platform', { key: UNSHIPPED.key }, UNSHIPPED.key],
     ['package-not-installed', { key: 'darwin-arm64', packageName: '@dimpurr/chat-stasher-darwin-arm64', errno: 'MODULE_NOT_FOUND' }, 'darwin-arm64'],
     ['binary-unavailable', { key: 'darwin-arm64', packageName: '@dimpurr/chat-stasher-darwin-arm64', binPath: '/x/bin/chat-stasher', errno: 'EACCES' }, 'darwin-arm64'],
   ];
@@ -144,6 +167,20 @@ describe('running the binary', () => {
     assert.deepEqual(JSON.parse(result.stdout.trim()), argv);
   });
 
+  it('runs the Linux binary and the Windows .exe of a fresh install', async () => {
+    // Every supported platform key resolves through the same lookup, but these
+    // two are the ones whose layout differs from the macOS case the rest of
+    // this file uses (a different package name, and for win32 a different file
+    // name inside it), so they are run rather than assumed.
+    for (const [platform, arch] of [['linux', 'x64'], ['linux', 'arm64'], ['win32', 'x64']]) {
+      const dir = fixture({ platform, arch });
+      const result = await runLauncher(dir, ['doctor']);
+      assert.equal(result.stderr, '', `${platform}-${arch} must not print a diagnostic`);
+      assert.equal(result.code, 0, `${platform}-${arch} exited ${result.code}`);
+      assert.deepEqual(JSON.parse(result.stdout.trim()), ['doctor']);
+    }
+  });
+
   it('passes both streams through', async () => {
     const dir = fixture({ platform: 'darwin', arch: 'arm64' });
     const result = await runLauncher(dir, ['status'], { env: { FAKE_STDERR: 'a warning on stderr\n' } });
@@ -177,12 +214,12 @@ describe('running the binary', () => {
 
 describe('when there is no binary to run', () => {
   it('prints one line naming the unsupported platform and exits 1', async () => {
-    const dir = fixture({ platform: 'linux', arch: 'x64' });
+    const dir = fixture({ platform: UNSHIPPED.platform, arch: UNSHIPPED.arch });
     const result = await runLauncher(dir, ['doctor']);
     assert.equal(result.code, 1);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr.trim().split('\n').length, 1);
-    assert.match(result.stderr, /no prebuilt binary for linux-x64/);
+    assert.match(result.stderr, new RegExp(`no prebuilt binary for ${UNSHIPPED.key}`));
     assert.match(result.stderr, /https:\/\/chatstasher\.com\/install\.sh/);
   });
 
