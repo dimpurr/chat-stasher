@@ -168,8 +168,9 @@ pub const TITLE_CAP_CHARS: usize = 100;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TitleSource {
-    /// The harness's own title: a claude-code `ai-title` line, or a `summary`
-    /// line when the session has no title.
+    /// The harness's own title: a claude-code `ai-title` line, a `summary` line
+    /// when the session has no title, or the label a web platform's own archived
+    /// body carries for the conversation.
     HarnessTitle,
     /// The head of the session's first user line, capped at
     /// [`TITLE_CAP_CHARS`] and flagged when the cap cut anything.
@@ -183,8 +184,9 @@ pub enum TitleSource {
 ///   it came from and whether the cap cut it;
 /// * [`SessionTitle::NoLabelRecorded`] — the content was read and holds
 ///   nothing label-able, **and also** the recorded state for a harness whose
-///   lines this module does not read a title from (codex, cursor, the web
-///   platforms until their list metadata is read): no guess, no empty string.
+///   lines this module does not read a title from (codex, cursor, and the web
+///   platforms whose body carries no label of its own): no guess, no empty
+///   string.
 ///
 /// A row that predates labels writes no `title` key at all (see
 /// [`ActivityRow::title`]) — that is the third, machine-level state, recorded
@@ -207,13 +209,15 @@ pub enum SessionTitle {
     NoLabelRecorded,
 }
 
-/// The label candidates one claude-code scan picked up, before the priority
-/// order decides which of them becomes the row's title.
+/// The label candidates one scan picked up, before the priority order decides
+/// which of them becomes the row's title.
 ///
-/// Only claude-code has candidates at all: it is the one harness whose title
-/// lines and prompt shape this module knows (`{"type":"ai-title","aiTitle":…}`
-/// and `{"type":"summary","summary":…}`, measured shapes in the W156 report).
-/// Every other harness records [`SessionTitle::NoLabelRecorded`] by design.
+/// Two harness families have candidates: claude-code, whose title lines and
+/// prompt shape this module knows (`{"type":"ai-title","aiTitle":…}` and
+/// `{"type":"summary","summary":…}`, measured shapes in the W156 report), and
+/// the web platforms whose own archived body carries the conversation's label
+/// (see [`web_title`]). Every other harness records
+/// [`SessionTitle::NoLabelRecorded`] by design.
 #[derive(Default)]
 struct TitleCandidates {
     /// The harness's own title, from `ai-title` lines. The **last** one wins:
@@ -229,6 +233,12 @@ struct TitleCandidates {
     /// not a person asking). Only the first is kept, and a line marked
     /// `isMeta` never qualifies: that is the harness talking to itself.
     first_user: Option<String>,
+    /// The label a web platform's own archived body carries for the
+    /// conversation (see [`web_title`]). The **last** one wins, as for
+    /// `ai_title`: a re-capture is a later reading of the same conversation,
+    /// and a later body that carries no label leaves the recorded one alone
+    /// rather than erasing it.
+    web: Option<String>,
 }
 
 impl TitleCandidates {
@@ -267,11 +277,22 @@ impl TitleCandidates {
         }
     }
 
+    /// Fold the label a web platform's archived body carried, if it carried
+    /// one. A body with no label never clears a label an earlier body gave: the
+    /// conversation keeps the label it was recorded under.
+    fn fold_web(&mut self, title: Option<String>) {
+        if title.is_some() {
+            self.web = title;
+        }
+    }
+
     /// The label this session's scan produced, in the row's recorded shape.
     fn resolve(self) -> SessionTitle {
         let (raw, source) = if let Some(t) = self.ai_title {
             (t, TitleSource::HarnessTitle)
         } else if let Some(t) = self.summary {
+            (t, TitleSource::HarnessTitle)
+        } else if let Some(t) = self.web {
             (t, TitleSource::HarnessTitle)
         } else if let Some(t) = self.first_user {
             (t, TitleSource::FirstUserLine)
@@ -430,8 +451,11 @@ const KIMI_CODE_BOOKKEEPING_OPS: &[&str] = &[
 ];
 
 /// Web chat harnesses whose archived payload is an inbox bundle, not a message
-/// line. Their times live inside `raw.text` and are read by [`web_time`].
-const WEB_HARNESSES: &[&str] = &[
+/// line. Their times live inside `raw.text` and are read by [`web_time`]. The
+/// reader uses this same list to decide which harnesses have the generic reader
+/// as their reader — see `normalize::is_web_bundle` — so the two can never
+/// disagree about which archived line is a bundle.
+pub(crate) const WEB_HARNESSES: &[&str] = &[
     "chatgpt",
     "deepseek",
     "claude",
@@ -553,6 +577,8 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
         };
         if harness == "claude-code" {
             titles.fold(&value);
+        } else if WEB_HARNESSES.contains(&harness) {
+            titles.fold_web(web_title(harness, &value));
         }
         let line_class = classify_line(harness, &value);
         // Whether this line is positively a conversation record, needed by the
@@ -660,8 +686,8 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
         line_count,
         time_source,
         source_zone: fold.source_zone,
-        // For any harness except claude-code no candidate was ever folded, so
-        // this is the design's "no label recorded" — see the module docs.
+        // A harness whose candidates were never folded resolves to the design's
+        // "no label recorded" — see the module docs.
         title: titles.resolve(),
     }
 }
@@ -1303,6 +1329,58 @@ fn web_numeric_seconds(raw: &serde_json::Value) -> Option<i64> {
         serde_json::Value::String(s) => parse_numeric_epoch(s),
         _ => None,
     }
+}
+
+/// The label a web chat harness's own archived body carries for the
+/// conversation, if it carries one.
+///
+/// The label is read from the body's own conversation-level field — chatgpt
+/// `title`, claude `name` — and only from a body that is *this conversation's*
+/// record. That is what the route's own shape says the body is: the capture
+/// contract requires `mapping` + `current_node` of a chatgpt body
+/// (`contract.ts:434-460`) and `chat_messages` of a claude body
+/// (`contract.ts:498-560`), so requiring the same marker here means a
+/// conversation-LIST page filed under a session — an array of summaries, which
+/// the extension does not capture at all — labels nothing rather than lending
+/// one sidebar entry's title to whatever session it was filed under.
+///
+/// A body with no such field, or one whose field is empty or not a string,
+/// yields `None`: the row then records
+/// [`SessionTitle::NoLabelRecorded`], never an empty string and never the head
+/// of the conversation.
+fn web_title(harness: &str, line: &serde_json::Value) -> Option<String> {
+    let raw_text = line
+        .get("raw")
+        .and_then(|raw| raw.get("text"))
+        .and_then(serde_json::Value::as_str);
+    let owned;
+    let body: &serde_json::Value = match raw_text {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => {
+                owned = value;
+                &owned
+            }
+            // An unparsable body labels nothing. Its bytes are still counted by
+            // the time pass, which is the pass that has to say so.
+            Err(_) => return None,
+        },
+        None => line,
+    };
+    let (marker, field) = match harness {
+        "chatgpt" => ("mapping", "title"),
+        "claude" => ("chat_messages", "name"),
+        // Every other harness's label field is unknown to us. Not guessed, and
+        // not read from whichever key looks plausible.
+        _ => return None,
+    };
+    // The marker the conversation's own route requires of this body. Absent, it
+    // is some other shape and this reader will not label from it.
+    body.get(marker)?;
+    body.get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
 }
 
 /// Read a web chat harness's line into a [`LineTime`], unwrapping the inbox

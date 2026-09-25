@@ -1,0 +1,21 @@
+[
+  {
+    "role": "user",
+    "content": "Synthetic question one"
+  },
+  {
+    "role": "assistant",
+    "content": [{ "type": "text", "text": "Synthetic answer one" }]
+  },
+  {
+    "role": "user",
+    "content": [{ "type": "text", "text": "Synthetic question two" }]
+  },
+  {
+    "role": "assistant",
+    "content": [{ "type": "text", "text": "Synthetic answer two" }]
+  },
+  {
+    "channel": "synthetic-record-without-a-role"
+  }
+]
