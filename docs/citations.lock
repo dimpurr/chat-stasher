@@ -401,10 +401,10 @@ apps/extension/wxt.config.ts:126-132  2a2b23999f5f  lines=7
   <- docs/threat-model.md:402  :: // 🔴 ADR-014: this pins the Chrome extension ID to
 apps/extension/wxt.config.ts:148  84787b717b3c  lines=1
   <- docs/privacy.md:237  :: data_collection_permissions: { required: ['none'] },
-crates/chat-stasher/Cargo.toml:1-6  7ab89fd1f7e5  lines=6
+crates/chat-stasher/Cargo.toml:1-6  fa6a94482f21  lines=6
   <- docs/install.md:248  :: [package]
-crates/chat-stasher/Cargo.toml:3  080f11232e69  lines=1
-  <- SECURITY.md:47  :: version = "0.5.0-rc.1"
+crates/chat-stasher/Cargo.toml:3  d8cbd5409219  lines=1
+  <- SECURITY.md:47  :: version = "0.5.0-rc.2"
 crates/chat-stasher/Cargo.toml:6  2d9a3079e6a6  lines=1
   <- README.md:208, docs/privacy.md:741  :: license = "Apache-2.0"
 crates/chat-stasher/Cargo.toml:20-33  096bce56001a  lines=14

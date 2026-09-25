@@ -4,12 +4,17 @@ Version numbers here are the CLI's, and they match the `vX.Y.Z` git tags. The
 browser extension has its own version and ships on its own schedule; see
 [`RELEASING.md`](RELEASING.md) for what a release contains.
 
-## 0.5.0-rc.1 — 2026-09-25
+## 0.5.0-rc.2 — 2026-09-25
 
 A release candidate for `0.5.0`, cut so that these exact artifacts can be
 installed and run before the version becomes stable. It is not what an
 unqualified install gets: `scripts/install.sh` pins the newest stable release,
-so reaching this one means naming it (`CHAT_STASHER_VERSION=0.5.0-rc.1`).
+so reaching this one means naming it (`CHAT_STASHER_VERSION=0.5.0-rc.2`).
+
+`0.5.0-rc.1` was tagged but never released: the Linux x86_64 static check
+rejected the binary the build had just produced — a static one, which `file`
+calls `static-pie linked` rather than `statically linked` — and the run ended
+before anything was published.
 
 Compared against `v0.4.0`, tagged 2026-09-24.
 
