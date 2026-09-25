@@ -304,10 +304,10 @@ impl BackupStore {
     pub fn backends(&self) -> anyhow::Result<RepositoryBackends> {
         let mut opts = BackendOptions::default().repository(self.cfg.repo_root.as_str());
         if self.cfg.repo_root.starts_with("opendal:") || self.cfg.repo_root.starts_with("rest:") {
-            let mut options = BTreeMap::new();
-            options.insert("connections".to_string(), self.cfg.connections.to_string());
-            options.extend(self.cfg.options.iter().map(|(k, v)| (k.clone(), v.clone())));
-            opts = opts.options(options);
+            // Built by `StoreConfig::backend_options`, which is defined at the
+            // end of this file so that introducing it moved no cited line; the
+            // values in it are the destination's, passed through untouched.
+            opts = opts.options(self.cfg.backend_options());
         }
         let backends = opts.to_backends().context("build backend options")?;
         // ADR-034: the body cache sits *below* rustic, as a wrapper over the
@@ -1526,6 +1526,34 @@ fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+// A second `impl` block, kept at the end of the file on purpose: several
+// documents cite this file by line range (`docs/privacy.md`,
+// `docs/threat-model.md`, `README.md`, `docs/install.md`), so code added
+// anywhere above the last cited line re-numbers anchors that have not changed
+// — the same reason `Cargo.toml` appends dependencies instead of inserting
+// them. Nothing here needs to sit beside its siblings.
+impl StoreConfig {
+    /// The option map handed to a remote backend: the connections cap plus the
+    /// destination's own options, values untouched.
+    ///
+    /// Split out of `Store::backends` so a test can assert what reaches the
+    /// backend without opening anything. The credential switches are why that
+    /// matters: `disable_config_load` and `disable_ec2_metadata` are the
+    /// backend's own booleans (opendal-service-s3 0.57.0 `src/backend.rs` lines
+    /// 856-861), this tool holds options as the strings a TOML file holds, and
+    /// the backend reads them through a deserialiser that accepts `"true"` and
+    /// `"on"` (`opendal-core-0.57.0 src/raw/serde_util.rs` lines 121-127). A
+    /// value rewritten here — trimmed, lower-cased, or dropped for looking
+    /// redundant — would leave a credential source switched on, and nothing
+    /// downstream would say so.
+    pub fn backend_options(&self) -> BTreeMap<String, String> {
+        let mut options = BTreeMap::new();
+        options.insert("connections".to_string(), self.connections.to_string());
+        options.extend(self.options.iter().map(|(k, v)| (k.clone(), v.clone())));
+        options
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1631,6 +1659,57 @@ mod tests {
             opts.cache_dir.as_deref(),
             Some(Path::new("/tmp/cache")),
             "cache_dir must reach RepositoryOptions"
+        );
+    }
+
+    /// The credential switches must reach the backend exactly as written.
+    ///
+    /// This covers this tool's half of the claim and only that half: it says
+    /// `disable_ec2_metadata = "true"` in a config file becomes the string
+    /// `true` under that key in the map the backend is built from. Whether the
+    /// backend then honours it is the pinned crate's behaviour, cited in
+    /// `docs/install.md` §4.5 against that crate, not asserted here — opendal
+    /// is not a direct dependency of this crate, so a test that called into its
+    /// config deserialiser would add an edge to the build graph. Pure and
+    /// injectable — no backend is built, so this opens nothing.
+    #[test]
+    fn backend_options_forward_credential_switches_verbatim() {
+        let mut options = BTreeMap::new();
+        options.insert("disable_config_load".to_string(), "true".to_string());
+        options.insert("disable_ec2_metadata".to_string(), "true".to_string());
+        // Values a normalising layer would be tempted to touch: a bool spelled
+        // the other way the backend's deserialiser accepts, and a key in the
+        // case a TOML writer might have chosen.
+        options.insert("SKIP_SIGNATURE".to_string(), "off".to_string());
+        let cfg = StoreConfig {
+            repo_root: "opendal:s3".into(),
+            key_file: PathBuf::from("/tmp/x.key"),
+            options,
+            connections: 4,
+            cache_dir: None,
+            no_cache: false,
+        };
+
+        let forwarded = cfg.backend_options();
+        assert_eq!(
+            forwarded.get("disable_config_load").map(String::as_str),
+            Some("true"),
+            "a credential switch must reach the backend unrewritten"
+        );
+        assert_eq!(
+            forwarded.get("disable_ec2_metadata").map(String::as_str),
+            Some("true"),
+            "the metadata switch is a separate option and must be forwarded too"
+        );
+        assert_eq!(
+            forwarded.get("SKIP_SIGNATURE").map(String::as_str),
+            Some("off"),
+            "keys and values are the backend's, not ours to normalise"
+        );
+        assert_eq!(
+            forwarded.get("connections").map(String::as_str),
+            Some("4"),
+            "the connections cap rides in the same map"
         );
     }
 
