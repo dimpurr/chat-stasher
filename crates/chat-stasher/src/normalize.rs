@@ -460,7 +460,13 @@ fn normalize_chatgpt(value: &Value, conversation: &mut Conversation) {
         let Some(node) = mapping.get(id) else {
             continue;
         };
-        let Some(message) = node.get("message") else {
+        // A node whose `message` is absent or `null` is a mapping node that
+        // carries no message at all — ChatGPT writes exactly that for the
+        // active branch's root. It is a known-empty, not an unreadable one, so
+        // it is skipped rather than counted: counting it made every
+        // fully-rendered chatgpt conversation report a line it had lost, and
+        // "line" is the wrong unit for a mapping node in any case.
+        let Some(message) = node.get("message").filter(|message| !message.is_null()) else {
             continue;
         };
         let Some(role) = message
@@ -995,6 +1001,11 @@ mod tests {
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.branch_nodes, 1);
         assert!(result.canonical_follows_active);
+        assert_eq!(
+            result.unrendered_lines, 0,
+            "the `\"message\": null` root carries no message at all, so it is a \
+             mapping node with nothing to render — not a line the reader lost"
+        );
     }
 
     #[test]
