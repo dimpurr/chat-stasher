@@ -3,9 +3,11 @@
 # This is a BINARY formula: Homebrew downloads a prebuilt binary from the
 # dimpurr/chat-stasher GitHub Release and installs it as-is. It does NOT build
 # from source. This formula ships macOS only — see scripts/install.sh for the
-# platform story, which now covers Linux as well: the release carries
-# chat-stasher-linux-x86_64 and chat-stasher-linux-arm64, and a Homebrew
-# formula for those (with its own bottles) would be separate work.
+# platform story, which now covers Linux as well: the release workflow builds
+# chat-stasher-linux-x86_64 and chat-stasher-linux-arm64, though no Release
+# carries them yet (no version tag has been pushed since those jobs were
+# added), and a Homebrew formula for those (with its own bottles) would be
+# separate work.
 #
 # 🔴 URL + artifact names in this file MUST stay in sync with:
 #    - scripts/install.sh          (BASE_URL + ARTIFACT + VERSION)

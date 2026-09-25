@@ -43,9 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  # The workflow-wide grant is `contents: write` because the build-and-release
-  # job uses the auto-generated GITHUB_TOKEN to create the Release and upload
-  # its assets. The two tap jobs narrow it at the job level: tap-guard gets no
+  # The workflow-wide grant is `contents: write` because the `release` job uses
+  # the auto-generated GITHUB_TOKEN to create the Release and upload its assets.
+  # The two tap jobs narrow it at the job level: tap-guard gets no
   # scope at all, homebrew-tap only contents: read. The one stored secret this
   # workflow reads is TAP_TOKEN — a fine-grained PAT on dimpurr/homebrew-tap,
   # used only by the homebrew-tap job to clone that repository, push a branch,
@@ -680,7 +680,7 @@ jobs:
 
   homebrew-tap:
     name: open Homebrew tap PR (draft)
-    needs: [build-and-release, tap-guard]
+    needs: [release, tap-guard]
     if: needs.tap-guard.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     # The auto-generated token appears in one place — `gh release download` of
@@ -695,7 +695,7 @@ jobs:
 
     steps:
       # The Release, and therefore SHA256SUMS, exists before this job starts
-      # (needs: build-and-release). Reading it back is what pins the tap to the
+      # (needs: release). Reading it back is what pins the tap to the
       # bytes this run published rather than to a local rebuild.
       - name: Fetch this release's SHA256SUMS
         env:
