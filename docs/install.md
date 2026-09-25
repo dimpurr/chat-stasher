@@ -64,10 +64,10 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:775-784`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:933-942`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
-(`apps/extension/lib/outbox.ts:379-394`). There is no "probably delivered".
+(`apps/extension/lib/outbox.ts:380-395`). There is no "probably delivered".
 
 If you would rather not register the host at all, the extension can instead
 export everything it has not delivered as one file, which you feed to the CLI by
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:212`;
-`apps/extension/entrypoints/background.ts:740-742`). That page does not have to
+`apps/extension/entrypoints/background.ts:848-850`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -322,7 +322,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:970-981`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:985-996`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -344,7 +344,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:526-533`).
+`apps/extension/entrypoints/background.ts:634-641`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
@@ -359,7 +359,7 @@ The popup has an **"export undelivered captures"** button. It appears only when
 something has not been delivered, and it writes one file named
 `chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl` into your download directory —
 one line per undelivered capture, each line being exactly the payload that would
-have been sent to the host (`apps/extension/lib/outbox.ts:439-475`).
+have been sent to the host (`apps/extension/lib/outbox.ts:440-476`).
 
 Feed that directory to the CLI:
 
@@ -373,7 +373,7 @@ trailing newline — the same key the host would have used, so a line that was i
 fact delivered is recognised as a duplicate rather than archived twice
 (`crates/chat-stasher/src/inbox.rs:59-60`;
 `contracts/nativehost-protocol.md` §8). Exporting does not remove anything from
-the outbox (`apps/extension/lib/outbox.ts:457-464`).
+the outbox (`apps/extension/lib/outbox.ts:458-465`).
 
 ---
 
@@ -387,7 +387,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:970-981`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:985-996`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -396,13 +396,13 @@ Two properties of that directory, both from
   before they allocate a shard sequence number**, so two browsers, two profiles,
   or a host racing a manual `ingest` cannot pick the same number. The wait is
   bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
-  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:896-924`).
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:992-1020`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:915-982`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:930-997`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:1169-1173`). In every case the reason
+  (`crates/chat-stasher/src/nativehost.rs:1192-1196`). In every case the reason
   names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -412,7 +412,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:987-1016`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:1002-1031`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -739,7 +739,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:1503-1584`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:1611-1692`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4590-4621`) is covered.
@@ -753,7 +753,7 @@ confirmed in the code, not a temporary disclaimer.
 - **A captured conversation is plaintext until the host acknowledges it.** A
   live capture is written into the extension's own IndexedDB outbox before any
   delivery is attempted and deleted only on a matching `ack`
-  (`apps/extension/lib/outbox.ts:309-377`, `:379-394`); the popup's export file
+  (`apps/extension/lib/outbox.ts:310-378`, `:380-395`); the popup's export file
   contains the same bodies. Other programs running as you can read all of it.
   (The "Security and privacy" section of `README.md` says the same.)
 
