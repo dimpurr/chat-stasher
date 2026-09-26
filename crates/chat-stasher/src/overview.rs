@@ -330,7 +330,35 @@ pub const SUMMARY_WINDOW_DAYS: usize = 30;
 /// `last_saved_unix` is a number or `null`. `null` means no session of that
 /// source has a known time — the same "unknown is not zero" rule the
 /// per-machine `newest_snapshot_unix` follows — and never a fabricated epoch.
-fn summary_sources_json(rows: &[OverviewRow]) -> Vec<serde_json::Value> {
+fn silence_after_days<'a>(
+    rows: impl Iterator<Item = &'a OverviewRow>,
+    day_of: &dyn Fn(i64) -> Option<NaiveDate>,
+) -> u64 {
+    let mut days: Vec<NaiveDate> = rows
+        .filter(|row| row.has_known_time())
+        .filter_map(|row| row.first_unix.or(row.last_unix))
+        .filter_map(day_of)
+        .collect();
+    days.sort_unstable();
+    days.dedup();
+    let mut gaps: Vec<i64> = days
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).num_days())
+        .collect();
+    if gaps.is_empty() {
+        return 7;
+    }
+    gaps.sort_unstable();
+    let median = gaps[gaps.len() / 2].max(1);
+    // reason: this threshold is inferred from observed activity cadence; 1.4x
+    // allows a small delay, while the two-day floor avoids same-day flapping.
+    ((median as f64 * 1.4).ceil() as u64).max(2)
+}
+
+fn summary_sources_json(
+    rows: &[OverviewRow],
+    day_of: &dyn Fn(i64) -> Option<NaiveDate>,
+) -> Vec<serde_json::Value> {
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     let mut last: BTreeMap<&str, i64> = BTreeMap::new();
     for r in rows {
@@ -351,6 +379,10 @@ fn summary_sources_json(rows: &[OverviewRow]) -> Vec<serde_json::Value> {
                 "harness": harness,
                 "count": count,
                 "last_saved_unix": last.get(harness).copied(),
+                "silence_after_days": silence_after_days(
+                    rows.iter().filter(|row| row.harness == harness),
+                    day_of,
+                ),
             })
         })
         .collect()
@@ -427,6 +459,10 @@ pub fn overview_summary_json(
                 "display": display_name(machine, display_names),
                 "newest_snapshot_unix": unix,
                 "health": machine_health(machine, missing_index, writers),
+                "silence_after_days": silence_after_days(
+                    rows.iter().filter(|row| row.machine == *machine),
+                    day_of,
+                ),
             })
         })
         .collect();
@@ -458,7 +494,7 @@ pub fn overview_summary_json(
                 .count(),
         },
         "machines": machines,
-        "sources": summary_sources_json(rows),
+        "sources": summary_sources_json(rows, day_of),
         "days": days,
     })
 }
@@ -1974,6 +2010,7 @@ mod tests {
                 "display": "Studio Mac",
                 "newest_snapshot_unix": 1_700_000_001,
                 "health": "healthy",
+                "silence_after_days": 7,
             })
         );
         // `snapshot_times` is a BTreeMap, so machines are ordered by raw id.
@@ -1991,11 +2028,12 @@ mod tests {
                 "harness": "claude-code",
                 "count": 2,
                 "last_saved_unix": D1P1,
+                "silence_after_days": 7,
             })
         );
         assert_eq!(
             v["sources"][1],
-            serde_json::json!({"harness": "codex", "count": 1, "last_saved_unix": D1})
+            serde_json::json!({"harness": "codex", "count": 1, "last_saved_unix": D1, "silence_after_days": 7})
         );
 
         assert_eq!(v["days"].as_array().unwrap().len(), SUMMARY_WINDOW_DAYS);
@@ -2029,6 +2067,59 @@ mod tests {
             v["sources"][0]["last_saved_unix"],
             serde_json::json!(null),
             "no known time must be null, never a fabricated epoch"
+        );
+    }
+
+    #[test]
+    fn silence_threshold_tracks_daily_and_weekly_history_with_two_day_floor() {
+        let daily = vec![
+            row("d1", "air", "h", Some(D1), Some(D1), 1, TimeSource::Exact),
+            row(
+                "d2",
+                "air",
+                "h",
+                Some(D1P1),
+                Some(D1P1),
+                1,
+                TimeSource::Exact,
+            ),
+            row(
+                "d3",
+                "air",
+                "h",
+                Some(D1P1 + 86_400),
+                Some(D1P1 + 86_400),
+                1,
+                TimeSource::Exact,
+            ),
+        ];
+        assert_eq!(silence_after_days(daily.iter(), &day_of_offset(0)), 2);
+
+        let weekly = vec![
+            row("w1", "air", "h", Some(D1), Some(D1), 1, TimeSource::Exact),
+            row(
+                "w2",
+                "air",
+                "h",
+                Some(D1P7),
+                Some(D1P7),
+                1,
+                TimeSource::Exact,
+            ),
+            row(
+                "w3",
+                "air",
+                "h",
+                Some(D1P7 + 7 * 86_400),
+                Some(D1P7 + 7 * 86_400),
+                1,
+                TimeSource::Exact,
+            ),
+        ];
+        assert_eq!(silence_after_days(weekly.iter(), &day_of_offset(0)), 10);
+        assert_eq!(
+            silence_after_days(std::iter::empty::<&OverviewRow>(), &day_of_offset(0)),
+            7
         );
     }
 

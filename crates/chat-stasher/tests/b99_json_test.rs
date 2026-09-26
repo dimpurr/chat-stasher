@@ -256,8 +256,8 @@ fn status_json_unreadable_run_state_is_unreadable() {
     assert!(v["run_state"]["why"].is_string());
 }
 
-/// Top-level field names of `status --json` are pinned. Bumping one is a
-/// breaking change for every tray-plugin script that parsed this object.
+/// Top-level field names of `status --json` are pinned. New additive fields
+/// are deliberate so tray apps can verify the CLI version they are reading.
 #[test]
 fn status_json_top_level_schema_is_stable() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -269,6 +269,7 @@ fn status_json_top_level_schema_is_stable() {
     assert_eq!(
         keys,
         [
+            "cli_version",
             "command",
             "config_source",
             "exit_code",

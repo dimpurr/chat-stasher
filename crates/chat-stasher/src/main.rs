@@ -13181,6 +13181,7 @@ fn status_json_config_error(why: &str) -> String {
     json_string(&serde_json::json!({
         "schema_version": 1,
         "command": "status",
+        "cli_version": env!("CARGO_PKG_VERSION"),
         "healthy": false,
         "exit_code": 3,
         "exit_semantics": status_exit_semantics(3),
@@ -13350,6 +13351,7 @@ fn status_json(
     let value = serde_json::json!({
         "schema_version": 1,
         "command": "status",
+        "cli_version": env!("CARGO_PKG_VERSION"),
         "healthy": exit_code == 0,
         "exit_code": exit_code,
         "exit_semantics": status_exit_semantics(exit_code),
