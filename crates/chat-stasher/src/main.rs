@@ -553,8 +553,10 @@ enum Command {
     /// session's conversation shard, which is why it is cheap. On a local
     /// three-session fixture the metadata walk read 11,761 bytes against
     /// 1,206,285 bytes of data packs — two orders of magnitude apart. Use
-    /// `--cost` to see the payload size for the current hits before using
-    /// `--text` or `--scan`.
+    /// In a separate metadata-only run, use `--cost` to estimate the payload
+    /// size before choosing a full-text mode. `--scan` reads those payloads;
+    /// `--text` uses the local index and checks that it covers the selected
+    /// sessions before treating zero hits as a complete answer.
     ///
     /// One destination per run, always named: there is no automatic merge
     /// across destinations, and no default destination to search "everything".
@@ -596,9 +598,9 @@ enum Command {
         /// Read selected sessions and perform a case-insensitive substring scan.
         #[arg(long, requires = "text")]
         scan: bool,
-        /// Emit one JSON object on stdout instead of the human report. The
-        /// three groups (matched / not matched / could not be placed) stay
-        /// separate fields, so a consumer cannot read an unknown as an absence.
+        /// Emit one JSON object on stdout. Metadata searches include separate
+        /// matched / not matched / could-not-be-placed groups; text searches
+        /// include counts for metadata read failures and unplaceable sessions.
         #[arg(long)]
         json: bool,
         /// Also report what a full-text pass over the hits would cost.
@@ -3553,6 +3555,8 @@ fn cmd_search_text(
     let mut matches = BTreeSet::new();
     let mut read_failures = 0usize;
     let mut suggestion = false;
+    let mut index_coverage = None;
+    let mut index_truncated = false;
 
     if scan {
         let mut by_machine = BTreeMap::<String, BTreeSet<String>>::new();
@@ -3596,32 +3600,45 @@ fn cmd_search_text(
         };
         let identity = index_identity(destination, repo_override, &cfg.repo_root);
         let index = chat_stasher::fts::Index::for_destination(&cache_root, &identity);
-        if let Err(error) = index.check() {
-            eprintln!("search: mode=fts; {error:#}");
-            return ExitCode::from(3);
-        }
-        if query.chars().count() < 3 {
+        let summary = match index.summary() {
+            Ok(summary) => summary,
+            Err(error) => {
+                eprintln!("search: mode=fts; {error:#}");
+                return ExitCode::from(3);
+            }
+        };
+        let indexed = selected
+            .iter()
+            .filter(|id| summary.ids.contains(*id))
+            .count();
+        let missing = selected.len().saturating_sub(indexed);
+        index_coverage = Some((indexed, missing));
+        if query.chars().count() < chat_stasher::fts::MIN_QUERY_CHARS {
             suggestion = true;
-        } else if let Err(error) = index
-            .search(
-                &format!("\"{}\"", query.replace('"', "\"\"")),
-                i64::MAX as usize,
-            )
-            .map(|hits| {
-                matches.extend(
-                    hits.into_iter()
-                        .map(|hit| hit.id)
-                        .filter(|id| selected.contains(id)),
-                );
-            })
-        {
-            eprintln!("search: mode=fts; {error:#}");
-            return ExitCode::from(3);
+        } else {
+            match index.matches(query) {
+                Ok(Ok(found)) => {
+                    index_truncated = found.truncated;
+                    matches.extend(
+                        found
+                            .matches
+                            .into_iter()
+                            .map(|hit| hit.id)
+                            .filter(|id| selected.contains(id)),
+                    );
+                }
+                Ok(Err(_)) => suggestion = true,
+                Err(error) => {
+                    eprintln!("search: mode=fts; {error:#}");
+                    return ExitCode::from(3);
+                }
+            }
         }
     }
 
     if json {
         let fulltext_cost = report.fulltext_cost();
+        let coverage = index_coverage;
         println!(
             "{}",
             serde_json::json!({
@@ -3631,6 +3648,12 @@ fn cmd_search_text(
                 "matched": matches.len(),
                 "suggestion": suggestion.then_some("use a query of at least 3 characters"),
                 "read_failures": read_failures,
+                "index_covered": coverage.map(|coverage| coverage.0),
+                "index_missing": coverage.map(|coverage| coverage.1),
+                "index_truncated": index_truncated,
+                "metadata_unreadable_parts": report.unreadable.len(),
+                "unplaceable_sessions": report.unplaced.len(),
+                "metadata_answer_complete": report.answer_complete(),
                 "cost": cost.then(|| serde_json::json!({
                     "sessions": fulltext_cost.sessions,
                     "shards": fulltext_cost.shards,
@@ -3646,9 +3669,26 @@ fn cmd_search_text(
         if suggestion {
             println!("[search] suggestion: use a query of at least 3 characters");
         }
+        if let Some(coverage) = index_coverage {
+            println!("[search] index_covered={}", coverage.0);
+            println!("[search] index_missing={}", coverage.1);
+            if coverage.1 > 0 {
+                println!("[search] index is behind the selected archive sessions; run `chat-stasher index build`");
+            }
+        }
+        println!("[search] index_truncated={index_truncated}");
         if read_failures > 0 {
             println!("[search] unreadable_sessions={read_failures}");
         }
+        println!(
+            "[search] metadata_unreadable_parts={}",
+            report.unreadable.len()
+        );
+        println!("[search] unplaceable_sessions={}", report.unplaced.len());
+        println!(
+            "[search] metadata_answer_complete={}",
+            report.answer_complete()
+        );
         if cost {
             let c = report.fulltext_cost();
             println!(
@@ -3657,7 +3697,11 @@ fn cmd_search_text(
             );
         }
     }
-    if read_failures > 0 || !report.answer_complete() {
+    if read_failures > 0
+        || index_coverage.is_some_and(|coverage| coverage.1 > 0)
+        || index_truncated
+        || !report.answer_complete()
+    {
         ExitCode::from(3)
     } else if matches.is_empty() {
         ExitCode::from(1)
