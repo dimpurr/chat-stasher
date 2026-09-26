@@ -553,9 +553,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6701-6797`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6708-6804`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6673-6680`).
+  (`crates/chat-stasher/src/main.rs:6680-6687`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -566,7 +566,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:5026-5082`).
+  as many words (`crates/chat-stasher/src/main.rs:5033-5089`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -613,7 +613,7 @@ a real limitation of the current code.
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:415-417,7033-7172`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:415-417,7040-7179`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:638-718`) — see exposure 5
@@ -628,7 +628,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7334-7566`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7341-7573`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
