@@ -469,6 +469,21 @@ as you, so anything that can replace it can do anything it can — see "A replac
 binary" below. And the registration is per-user, not per-machine: another user
 account on the same computer registers its own host, with its own stage.
 
+Within one user account, the boundary is **one host for every browser and every
+profile on the machine**: one manifest per browser (`NativeMessagingHosts` sits
+beside the profile directories, not inside one, so all of a browser's profiles
+read the same file), every manifest naming the same binary, and the stage
+resolved from the one config. So the isolation this section describes is between
+users, and between the extension and everything else; it is **not** isolation
+between one profile's install and another's. Any install in any profile of any
+registered browser can reach the host, deliver into the stage, and ask the three
+read-only questions above, and the manifest's allowlist, which is what stops a
+different extension, is pinned to our extension id and is identical in all of
+them (`crates/chat-stasher/src/nativehost.rs:495-608`, `:484-487`;
+`crates/chat-stasher/src/main.rs:1970-1985`). The host's `summary` answer is
+therefore a count over the stage the whole machine shares, not over the asking
+install's own captures.
+
 ### Anyone else on the network between you and your destination
 
 | | |

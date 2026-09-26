@@ -282,6 +282,30 @@ the defaults back, move the file aside rather than leaving a broken one in place
 
 ## 3. Install the browser extension
 
+🔴 **Install it once in every browser profile you chat in.** An extension is
+installed into a single browser profile, not into the browser as a whole: the
+extension management page (`chrome://extensions`, `edge://extensions`, …) lists
+that profile's extensions only, so loading it in Chrome's *Personal* profile
+leaves its *Work* profile completely uncovered: no capture, no backfill, nothing
+in the popup. Section 3.1 is the other half of this and is **not** repeated per
+profile: the host is registered once per machine, and every browser on it shares
+that one registration.
+
+What one install per profile means, once done:
+
+- Each install captures the tabs of its own profile and nothing else.
+- Each install keeps its **own** outbox, its own backfill progress and debt
+  ledger, and its own speed preset, all in that profile's `storage.local`
+  (`apps/extension/lib/backfill/store.ts:85-97`). One install cannot read
+  another's, and the popup's counts are that install's own.
+- Every install in every browser delivers into the **same stage**, so the
+  archive stays one archive: the stage is a property of your config, not of an
+  install (`crates/chat-stasher/src/nativehost.rs:1275-1350`).
+- The popup's one host line is therefore **not** this install's number: the
+  host's `summary` counts the sessions in the stage directory it resolves from
+  your config, wherever they came from
+  (`crates/chat-stasher/src/nativehost.rs:1999-2009`, `:1736`).
+
 **It is not yet on any app store** (see section 6 for details). Stable releases
 include a stable-channel extension zip named `chat-stasher-extension-X.Y.Z.zip`.
 Download that asset from the GitHub Release, unzip it, then open your browser's
@@ -330,6 +354,41 @@ browser, byte-identical, exit 0 both times — and it prints every path it wrote
 left alone, skipped or removed, absolutely (`crates/chat-stasher/src/main.rs:887-909`).
 It is per-user; nothing needs elevation. `--uninstall` removes exactly the files
 it wrote and nothing else.
+
+🔴 **The host is one program per machine and per user account, shared by every
+browser and every profile on it.** Run this command once, not once per profile.
+Four properties of the registration say so, and each is the reason for one
+sentence the surrounding documents have to get right:
+
+- **The manifest is per browser, not per profile.** On macOS and Linux it goes
+  into the browser's own discovery directory, which is inside the browser's
+  folder and beside its profile directories, not inside any one of them
+  (`Google/Chrome/NativeMessagingHosts` on macOS), and every profile of that
+  browser reads the same file (`crates/chat-stasher/src/nativehost.rs:495-608`).
+  On Windows there is one JSON per browser plus a registry value that points at
+  it (`crates/chat-stasher/src/nativehost.rs:484-487`).
+- **All of them point at the same binary and the same stage.** The manifest
+  records this executable's absolute path, and the stage lives in your one config
+  as `[native_host] stage`, which the host resolves on every launch
+  (`crates/chat-stasher/src/main.rs:1970-1985`;
+  `crates/chat-stasher/src/nativehost.rs:1275-1350`). So several installs deliver
+  into one stage, which is what keeps the archive one archive.
+- **The default browser set is "whatever is installed here", sampled now.** With
+  no `--browser`, the command walks every browser it knows a path for and skips
+  the ones whose data directory is absent, saying so per browser
+  (`crates/chat-stasher/src/main.rs:1912-1922`;
+  `crates/chat-stasher/src/nativehost.rs:766-768`). A browser you install later
+  is therefore not registered until the command is run again.
+- **`--uninstall` is the whole registration, not one profile's share of it.** It
+  removes the manifest for every browser it knows in one pass (`--browser
+  chrome` limits it to the ones named, and `--stage` cannot be combined with it
+  at all, exit 2), and it leaves the config, the stage, the sealed captures and
+  every other vendor's manifest untouched
+  (`crates/chat-stasher/src/main.rs:1856-1862`, `:2021-2059`, `:2128-2134`).
+  "It is per-user" does **not** mean "it is per profile": removing the extension
+  from one profile is done on that profile's own extension page, and doing it
+  with `--uninstall` takes the channel away from the profiles you kept, whose
+  captures then wait in their own outboxes instead of being delivered.
 
 **What the browser asks you at install time.** Registering the host does not
 remove any browser prompt, but it changes which one you see. The extension
@@ -859,15 +918,35 @@ confirmed in the code, not a temporary disclaimer.
   words are in section 4.3 (`crates/chat-stasher/src/store.rs:1271-1278`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
-  Content is fetched **at most 300–400 per day** (the day's cap is drawn once per
-  local day and can never exceed 400; ADR-033 doubled the old 150–200 on
-  2026-09-24), up to two conversations per round, with at least 20 seconds plus a
-  random 0–25 seconds between two requests
-  (`apps/extension/lib/backfill/pace.ts:121-132`, `:154-155`;
-  `apps/extension/lib/backfill/schedule.ts:72`), and each round
+  Content is fetched under a **daily cap drawn once per local day**, and the cap
+  belongs to the speed preset in force. The shipped default is *gentle*, which
+  draws **150–200** bodies a day and fetches **one** conversation per round
+  (`apps/extension/lib/backfill/speed.ts:65`, `:92-136`;
+  `apps/extension/lib/backfill/pace.ts:158-159`); *standard* draws 300–400 and
+  fetches two (`apps/extension/lib/backfill/pace.ts:154-155`;
+  `apps/extension/lib/backfill/schedule.ts:72`); *faster* draws 600–800 and
+  fetches four. The gap between two requests is the same at all three: at least
+  20 seconds plus a random 0–25 seconds between two bodies
+  (`apps/extension/lib/backfill/pace.ts:121-132`), 2 plus 0–4 seconds between two
+  list pages (`apps/extension/lib/backfill/pace.ts:109-119`), and each round
   starts a random 5–10 minutes after the previous one
-  (`apps/extension/lib/backfill/alarm.ts:99-100`). At that cap, a thousand
-  conversations take 2.5–3.3 days. This is deliberately slow, not a bug.
+  (`apps/extension/lib/backfill/alarm.ts:99-100`). At the *gentle* cap a thousand
+  conversations take 5–6.7 days; at *standard*, 2.5–3.3. This is deliberately
+  slow, not a bug.
+
+- 🔴 **And every number above is per install, not per account.** The preset, the
+  day's draw, the day's counter and the request anchors all live in that
+  profile's own `storage.local`
+  (`apps/extension/lib/backfill/speed.ts:59`;
+  `apps/extension/lib/backfill/store.ts:85-97`), which no other install can read.
+  N profiles with backfill on are therefore N independent schedules, and the
+  account sees about N times the band above: three profiles at *faster* is up to
+  1,800–2,400 bodies a day against one account. **Nothing coordinates them in
+  this version**: the installs do not talk to each other, and there is no server
+  between them. Nor does the extra traffic buy extra coverage: two installs signed
+  into the same account list the same conversations and both deliver into the
+  same stage, so the second one fetches what the first will fetch anyway. Read
+  the section above as *per install* every time it states a rate.
 
 - **Backfill is off by default.** The default is off
   (`apps/extension/lib/backfill/schedule.ts:50`), and the source states the
@@ -960,6 +1039,10 @@ touch it again.**
 
 - 🔴 Decide the stage directory and register the Native Messaging host
   (section 3.1), then confirm the popup says "connected" (section 3.2)
+- 🔴 Load the extension in **every browser profile you chat in** (section 3), and
+  check the popup once per profile. This is the one item on this list whose count
+  is not one: the host half is registered once for the machine, but the extension
+  half is one install per profile, and a profile you skip captures nothing.
 - `chat-stasher init`
 - Decide where the archive lives
 - 🔴 Back up the master key file

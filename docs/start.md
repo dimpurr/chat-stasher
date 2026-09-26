@@ -138,5 +138,5 @@ The dashboard runs on your machine only (`127.0.0.1`) and closes itself after fi
 ## Next
 
 - **Add an off-site copy.** Right now the archive is on the same disk as the sessions it protects. That guards against a tool deleting its history, but not against losing the disk. [destinations.md](destinations.md) sets up Cloudflare R2, SFTP or an external disk.
-- **Archive your web chats.** Install the browser extension: [install.md → The browser extension](install.md#the-browser-extension). Register the extension's host with **the same stage** you used above.
+- **Archive your web chats.** Install the browser extension: [install.md → The browser extension](install.md#the-browser-extension). Register the extension's host with **the same stage** you used above, and load the extension itself in **every browser profile you chat in**: a copy in one profile does not cover the next one. The host, unlike the extension, is registered once for the whole machine.
 - **Use more than one computer.** Install chat-stasher on each machine and point them at the same destination. Each machine archives into its own part, and the dashboard shows them side by side.

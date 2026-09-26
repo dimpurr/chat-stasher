@@ -552,6 +552,14 @@ the extension's site access in `chrome://extensions` / `about:addons`, and it
 will name these sites and no others. On every other website you visit, this
 extension is not running.
 
+**And it runs only in the profiles where you installed it.** This is a list of
+where the extension *may* run, not a list of where it is running: an extension
+belongs to one browser profile, so a browser profile you never loaded it in has
+no capture at all, no backfill and no outbox. That is also why one install's
+storage is not another's; see
+[install.md → Install the browser extension](install.md#3-install-the-browser-extension)
+for what one install per profile means in full.
+
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
 (`apps/extension/lib/contract.ts:926-945`, `:947-976`). A body over 16 MiB is not
@@ -628,7 +636,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. (`crates/chat-stasher/src/nativehost.rs:151-164`, `:643-687`, `:2384-2418`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:151-164`, `:643-687`, `:2384-2418`, `:495-608`; `crates/chat-stasher/src/main.rs:1970-1985`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-48`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:54`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
@@ -680,7 +688,7 @@ Retention on **your** machine is under your control:
 
 | Where | How long it stays | How to delete it |
 |---|---|---|
-| Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:380-395`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** | Uninstall the extension, or clear its site data in your browser; there is no per-record delete button. |
+| Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:380-395`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** One outbox per install: it holds only what that profile's copy captured, and no other install can read or drain it. | Uninstall the extension **in that profile**, or clear its site data in your browser; there is no per-record delete button. Either one deletes that install's queue and leaves every other profile's alone. |
 | An export file you triggered | Until `ingest` consumes it, which moves it to `<inbox>/consumed/` once every line was sealed or found to be a duplicate (`crates/chat-stasher/src/inbox.rs:57-60`). | Delete it from your download directory with your file manager. |
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
@@ -689,11 +697,22 @@ Retention on **your** machine is under your control:
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
 | Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:161-1170`). Selective per-conversation deletion inside an archive is not implemented. |
 
-**Uninstalling the extension stops all capture immediately** and removes its
-local storage, which is where the outbox lives — so uninstalling also deletes
-every capture that had not been acknowledged yet. It does not delete the staged
-shards or your archive: those are yours, and deleting your backup without being
-asked would be the worse failure.
+**Uninstalling the extension in one profile stops capture in that profile
+immediately** and removes that profile's local storage, which is where its outbox
+lives, so uninstalling also deletes the captures *that install* had not been
+acknowledged yet. Other profiles and other browsers keep capturing and
+delivering; their outboxes are their own. Nor does it delete the staged shards or
+your archive: those are yours, and deleting your backup without being asked would
+be the worse failure.
+
+**The host registration is the larger removal of the two, and it is not how one
+profile is retired.** `chat-stasher install-native-host --uninstall` removes the
+host manifest for every browser on the machine in one pass, so an install you
+left in place can no longer deliver and its captures wait in its outbox instead
+(`crates/chat-stasher/src/main.rs:2021-2059`, `:2128-2134`). Draining each
+profile's outbox first is the subject of
+[install.md → Before you remove the host](../docs/install.md#before-you-remove-the-host),
+and it is worth doing because an outbox goes away with its profile.
 
 ## Known weaknesses
 

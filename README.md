@@ -87,12 +87,14 @@ For web chats, the extension works alongside the CLI. It is not in any extension
    chat-stasher install-native-host --stage ~/stash/chat-stasher/stage
    ```
 
-   The command prints every file it writes, and `--uninstall` removes exactly those.
+   The command prints every file it writes, and `--uninstall` removes exactly those. This half is per **machine**: one registration serves every browser and every profile on it, and `--uninstall` therefore takes the delivery channel away from all of them at once.
 2. Download the zip from the [latest release](https://github.com/dimpurr/chat-stasher/releases/latest) and unzip it into a folder you will keep.
 3. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and choose that folder.
 4. **Reload any AI chat tab that was already open.** Then open the extension's popup: it should say it can reach the host.
 
-Past conversations are a separate, opt-in step: switch on **backfill** in the popup. Backfill works through an open, logged-in tab of that platform, and goes gently by default. The full walkthrough is in [docs/install.md](docs/install.md#the-browser-extension).
+**Do steps 3 and 4 in every browser profile you chat in.** An extension belongs to one profile, so a copy in Chrome's Personal profile captures nothing in its Work profile. Each copy has its own queue and its own backfill settings; all of them deliver into the one stage above, so the archive is still one archive.
+
+Past conversations are a separate, opt-in step: switch on **backfill** in the popup. Backfill works through an open, logged-in tab of that platform, and goes gently by default. Its daily cap is **per install**: three profiles with backfill on are three schedules, so the account can see about three times one install's rate. The full walkthrough is in [docs/install.md](docs/install.md#the-browser-extension).
 
 ## Your first archive
 
@@ -208,6 +210,8 @@ chat-stasher dest-init --destination <name> --stage ~/stash/chat-stasher/stage
 Install chat-stasher on each computer and point them all at the same destination. Each computer gets its own random identity on its first run, and writes only to its own part of the archive. Two laptops never overwrite each other, even if they share a hostname.
 
 The dashboard shows every machine side by side, and `status --destination <name>` flags any machine running an older chat-stasher than the rest.
+
+Several browser profiles on one computer are the same idea one level down, with one difference: they share that machine's identity, so their captures land in the same part of the archive. Install the extension in each profile you chat in, as above. A conversation that two profiles both captured is stored once only when the two deliveries are byte-identical; otherwise both are kept, because the archive records what was captured rather than deciding which profile was right.
 
 ## Getting your conversations back
 
