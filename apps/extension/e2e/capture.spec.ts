@@ -123,6 +123,14 @@ test('1 · a conversation response is captured, and stays queued with no native 
   expect(bundle.install_id).toMatch(/^[0-9a-f-]{36}$/);
   expect(bundle.browser).toBe('Chrome');
   expect(bundle.profile_label).toBe('Unnamed profile');
+  // 🔴 W213 · The content fingerprint travels inside the bundle (the same value
+  //    `deliver` sends at message level), because an §8 export file holds the
+  //    payload and nothing else — this fixture is chatgpt with a JSON-object
+  //    body, so the derivation exists and the field must be present. Pinned
+  //    end to end in tests/w3-recapture.test.ts (equality with
+  //    `deliveryFingerprint`) and on the CLI side by the ingest tests in
+  //    crates/chat-stasher.
+  expect(bundle.fingerprint).toMatch(/^[0-9a-f]{64}$/);
   expect(bundle.platform).toBe('chatgpt');
   expect(bundle.sessionId).toBe(CHATGPT_SESSION_ID);
   expect(bundle.url).toBe(`https://chatgpt.com${CHATGPT_API_PATH}`);

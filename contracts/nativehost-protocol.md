@@ -369,8 +369,9 @@ recomputes it: it is derived by the extension from the capture body with that
 platform's volatile fields removed, and a second derivation in another language
 would have to reproduce JavaScript's `JSON.stringify` byte for byte — number
 formatting, key order, escapes — to agree. Recording it on the sealed shard
-(`deliver`'s optional `fingerprint`) and comparing strings is the only version of
-this that cannot silently disagree with itself.
+(`deliver`'s optional `fingerprint`; and, for a line of an export file, the same
+value carried inside the bundle — §8, W213) and comparing strings is the only
+version of this that cannot silently disagree with itself.
 
 **Not a lock, and not a reservation.** `has` is read-only and takes no stage lock.
 A shard published by a rename is never seen half-written, and a lookup that races
@@ -394,14 +395,36 @@ host answers `duplicate`, and exactly one shard exists.
 When the host cannot be reached for a long time, the extension can export
 everything it has not delivered as one file:
 
-- Name: `chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl`
+- Name: `chat-stasher-export-<UTC yyyymmddThhmmssZ>-<install_id short
+  form>-<nonce>.jsonl` (W213). The short install id is the first 8 hex of the
+  bundle-producing install's `install_id` (`contracts/inbox.schema.json`), and
+  the nonce is 6 hex drawn fresh per export. Two browser profiles exporting
+  within the same second into one download directory therefore cannot write
+  the same name, and each file says which install produced it; a nonce the
+  extension could not draw is a refusal to export, not a degraded name, and an
+  identity the extension could not read omits the segment rather than
+  inventing one. Older hosts never see the file name at all — `ingest` accepts
+  any `*.jsonl` — and older extensions' names (no segments after the stamp, or
+  a name from a pre-W213 build) remain accepted input.
 - One line per bundle. Each line is the exact `payload` string (a
   `JSON.stringify` result contains no raw newline), followed by `\n`.
+- A bundle produced since W213 carries its content fingerprint inside itself
+  (`contracts/inbox.schema.json` `fingerprint` — the same value the `deliver`
+  message would send at message level; see §6.6), because the export line is
+  the payload and nothing else: the host cannot re-derive a fingerprint, so
+  the bundle has to carry it or the import loses it.
 - `chat-stasher ingest --inbox <dir>` accepts `*.jsonl` files next to
   `*.json` bundle files. Each line is ingested as one bundle whose `fileSha256`
   is the SHA-256 of the line without its trailing newline — the same key as
   `deliver`. A synthetic `source_file` of `<export file name>#<line number>`
-  is recorded.
+  is recorded. For a line whose bundle carries `fingerprint`, the sealed shard
+  records it — the same field a `deliver` writes from its message-level value —
+  so `has` answers for content that entered through this manual channel
+  exactly as it answers for a live delivery. A line from an older export (no
+  field) seals with no fingerprint, and an imported bundle's conversation is
+  then recognised only by exact bytes, as §7 says. The plain `*.json` drop box
+  is unaffected: a hand-dropped file naming a `fingerprint` is not trusted to
+  know the content it names, and seals without one.
 - The export file is retired to `consumed/` only when every line was sealed or
   found to be a duplicate. Otherwise it stays; a re-run is safe because every
   line is content-addressed.

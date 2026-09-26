@@ -424,4 +424,54 @@ describe('W3-RECAPTURE · handleCaptured', () => {
     expect(second).toMatchObject({ saved: true, status: 'delivered' });
     expect(deliveries).toHaveLength(2);
   });
+
+  // 🔴 W213 · The fingerprint must travel **inside the bundle**, not only at the
+  //    `deliver` message level: an §8 export line is the payload and nothing else
+  //    (`nativehost-protocol.md` §8 — wrapping it would break line-hash ==
+  //    deliver-hash), and the host cannot re-derive the value (§6.6, "opaque"). A
+  //    bundle whose fingerprint cannot later be answered by `has` after an
+  //    export → `ingest` round trip is the W203 audit's "Export import dedupe"
+  //    finding, P1.
+  it('🔴 a queued bundle carries the fingerprint inside the payload — the same value delivery sends', async () => {
+    const body = buildChatgptBody(['https://example.invalid/link']);
+
+    // Host down: the write-ahead lands in the outbox and no ack ever comes, so
+    // the exact bytes a later export would write are inspectable.
+    hostMode = 'down';
+    const result = await dispatch(chatgptCapture(body));
+    expect(result).toMatchObject({ saved: false, status: 'queued' });
+
+    const { listEntries } = await import('../lib/outbox');
+    const { deliveryFingerprint } = await import('../lib/recapture');
+    const entries = (await listEntries())!;
+    expect(entries).toHaveLength(1);
+    const bundle = JSON.parse(entries[0]!.payload) as Record<string, unknown>;
+
+    // The embedded field is the same `contentFingerprint` of this platform and
+    // body that `deliver` sends at message level — one formula, and it is the
+    // one `deliveryFingerprint` re-derives from these very bytes.
+    const expected = await contentFingerprint('chatgpt', body);
+    expect(bundle.fingerprint).toBe(expected);
+    expect(await deliveryFingerprint(entries[0]!.payload)).toBe(expected);
+    expect(deliveries).toHaveLength(0);
+  });
+
+  // 🔴 The absence stays an absence: a platform with no volatile-field table has
+  //    no derivation, so its bundles omit the key rather than carrying a fake
+  //    one — "we have no fingerprint" is not a value (invariant 1), and `has`
+  //    answers for these conversations only by exact bytes, exactly as before.
+  it('🔴 a deepseek bundle omits the fingerprint key entirely', async () => {
+    const sid = 'dddddddd-1111-4222-8333-000000000002';
+    const body = JSON.stringify({ session_id: sid, message: { content: 'synthetic answer' } });
+
+    hostMode = 'down';
+    const result = await dispatch(deepseekCapture(body, sid));
+    expect(result).toMatchObject({ saved: false, status: 'queued' });
+
+    const { listEntries } = await import('../lib/outbox');
+    const entries = (await listEntries())!;
+    expect(entries).toHaveLength(1);
+    const bundle = JSON.parse(entries[0]!.payload) as Record<string, unknown>;
+    expect('fingerprint' in bundle).toBe(false);
+  });
 });

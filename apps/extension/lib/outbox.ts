@@ -453,15 +453,75 @@ export async function recordFailure(sha256: string, input: FailureInput): Promis
 // Export file (§8)
 // ---------------------------------------------------------------------------
 
+/** A §8 nonce: exactly 6 lowercase hex characters. */
+const EXPORT_NONCE_RE = /^[0-9a-f]{6}$/;
+
+/** A 6-hex nonce hides 24 random bits; the shape is what makes it policeable. */
+const EXPORT_NONCE_BYTES = 3;
+
 /**
- * §8 file name: `chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl`.
- * Built from the ISO form so it is UTC by construction, never local time.
+ * The per-export nonce of a §8 file name: 6 lowercase hex from the platform's
+ * random source, or `null` when no random source answered.
+ *
+ * It exists because the install identity is *stable*, which is exactly the
+ * property that makes it unable to separate two exports by the same install —
+ * or by two copies of one profile that still share an install id (the
+ * later-comer in D4's regenerate rule has not been told yet). The nonce is
+ * drawn fresh per export so a name, once written, is never written again.
+ *
+ * `null` is a refusal the caller must show, not a constant to fall back on: a
+ * fixed nonce would reintroduce the collision this function exists to prevent,
+ * and `deliver` already holds the same standard for `crypto`
+ * (lib/native-host.ts).
  */
-export function exportFilename(at: number): string {
+export async function exportNonce(): Promise<string | null> {
+  try {
+    const bytes = new Uint8Array(EXPORT_NONCE_BYTES);
+    crypto.getRandomValues(bytes);
+    return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * §8 file name:
+ * `chat-stasher-export-<UTC yyyymmddThhmmssZ><-install8>-<nonce>.jsonl`.
+ * Built from the ISO form so the stamp is UTC by construction, never local time.
+ *
+ * 🔴 W213 / EXT-4 · The stamp is only to the second, and two installs can press
+ *    "export" within one second (36-EXTENSION-TOPOLOGY §1: one user is N
+ *    browsers × K profiles, not one extension). The short install id — the
+ *    identity's first 8 hex — names the producing profile instead of leaving two
+ *    byte-equal files for the browser to rename or overwrite over; the nonce
+ *    keeps the name unique per export where the id cannot.
+ *
+ * `installId` is `null` when the identity could not be read: the segment is
+ * omitted rather than invented, because the export is the escape hatch for a
+ * broken delivery path and must not break on broken identity storage — the
+ * nonce alone still keeps the name from colliding.
+ *
+ * Malformed input throws rather than naming a file under false pretences: this
+ * module has no way to say a promise it did not keep.
+ */
+export function exportFilename(at: number, installId: string | null, nonce: string): string {
   const iso = new Date(at).toISOString(); // 2026-09-12T21:47:00.123Z
   const stamp = `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}`
     + `T${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}Z`;
-  return `chat-stasher-export-${stamp}.jsonl`;
+  if (!EXPORT_NONCE_RE.test(nonce)) {
+    throw new Error('export file name needs a 6-hex nonce (lib/outbox.ts exportNonce)');
+  }
+  let installSegment = '';
+  if (installId !== null) {
+    // A UUID's first segment is 8 hex before any dash; stripping dashes first
+    // keeps the slice right for any hex spell of the id.
+    const short = installId.replace(/-/g, '').slice(0, 8).toLowerCase();
+    if (short.length !== 8) {
+      throw new Error('install id cannot be shortened to 8 characters');
+    }
+    installSegment = `-${short}`;
+  }
+  return `chat-stasher-export-${stamp}${installSegment}-${nonce}.jsonl`;
 }
 
 export interface ExportFile {
@@ -479,8 +539,18 @@ export interface ExportFile {
  *
  * 🔴 Exporting does not remove anything: the entries stay queued, and the host
  * will eventually answer `duplicate` for them (§7).
+ *
+ * 🔴 W213 · `installId` and `nonce` become part of the file *name* only — the
+ *    lines stay the exact payloads, so §8's line-hash == deliver-key contract is
+ *    untouched, and the name is what says which browser profile wrote the file
+ *    into a download directory any number of installs may share.
  */
-export function buildExportFile(entries: readonly OutboxEntry[], at: number): ExportFile {
+export function buildExportFile(
+  entries: readonly OutboxEntry[],
+  at: number,
+  installId: string | null,
+  nonce: string,
+): ExportFile {
   const ordered = [...entries].sort(compareEntries);
   let content = '';
   let bytes = 0;
@@ -489,7 +559,12 @@ export function buildExportFile(entries: readonly OutboxEntry[], at: number): Ex
     content += '\n';
     bytes += entry.bytes + 1;
   }
-  return { filename: exportFilename(at), content, entries: ordered.length, bytes };
+  return {
+    filename: exportFilename(at, installId, nonce),
+    content,
+    entries: ordered.length,
+    bytes,
+  };
 }
 
 export interface LastExport {

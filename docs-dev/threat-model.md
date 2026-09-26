@@ -31,7 +31,7 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:318-386`;
-   `apps/extension/entrypoints/background.ts:319-336`).
+   `apps/extension/entrypoints/background.ts:339-356`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -107,7 +107,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:65-81`, `:318-386`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:209-212`). It sits there,
+   (`apps/extension/entrypoints/background.ts:229-232`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:388-403`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -115,7 +115,7 @@ Concretely, five separate plaintext exposures:
    it never is, the plaintext stays indefinitely. A second plaintext copy of a
    capture exists if you press the popup's export button, which writes the same
    bodies into an ordinary download file
-   (`apps/extension/lib/outbox.ts:483-493`). (An **archived** session can also be
+   (`apps/extension/lib/outbox.ts:535-568`). (An **archived** session can also be
    written out decrypted, by `export --out` — that is exposure 5, below.)
 
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
@@ -132,7 +132,10 @@ Concretely, five separate plaintext exposures:
 
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
-   `chat-stasher-export-<UTC>.jsonl` (`apps/extension/lib/outbox.ts:460-464`).
+   `chat-stasher-export-<UTC>-<install-short-id>-<nonce>.jsonl`
+   (`apps/extension/lib/outbox.ts:487-525`). The name's install segment is a
+   short id for this browser profile — metadata of the same kind as the one
+   the bundle carries — and the nonce says nothing but "this export".
    That is metadata, not content — it says an export happened and when, not
    which conversations were in it — and it may be synced by your browser to your
    browser vendor. **We have not investigated** whether any particular browser
@@ -326,9 +329,9 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:1173-1188`, `:1275-1291`). That value is written
+(`apps/extension/lib/contract.ts:1189-1204`, `:1291-1307`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:191-193`). It never leaves your
+(`apps/extension/entrypoints/background.ts:210-212`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 Since W128 step 1 the bundle also carries an **account fingerprint**: a keyed
@@ -359,7 +362,7 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1016-1072`, `:1143-1159`). Two limits
+(`apps/extension/entrypoints/background.ts:1036-1092`, `:1163-1179`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
@@ -431,7 +434,7 @@ The properties that bound this boundary:
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
-  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1107-1135`). Two browsers, two
+  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1160-1188`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
@@ -688,7 +691,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:70-148`;
-   `apps/extension/entrypoints/background.ts:1320-1380`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1340-1400`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure

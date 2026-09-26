@@ -450,6 +450,13 @@ struct Bundle {
     install_id: Option<String>,
     browser: Option<String>,
     profile_label: Option<String>,
+    /// W213 · The content fingerprint of the capture this bundle was built
+    /// from (`apps/extension/lib/recapture.ts` `contentFingerprint`), carried
+    /// inside the bundle so an §8 export line keeps it through `ingest`. The
+    /// host records it verbatim and compares it as a string (§6.6: opaque) —
+    /// same spelling and same meaning as the `deliver` message's optional
+    /// `fingerprint`, which stays a separate field for that channel.
+    fingerprint: Option<String>,
     provenance: Option<serde_json::Value>,
     #[serde(rename = "provenanceSupplement")]
     provenance_supplement: Option<serde_json::Value>,
@@ -524,10 +531,14 @@ struct ShardRecord {
     ///    not. A recreated or restored stage holds no shards and therefore holds
     ///    no fingerprints — which is exactly the review finding this closes.
     ///
-    /// `None` for every path that has no capture body to fingerprint (`ingest`
-    /// of a bundle file, an export line) and for every shard sealed before this
-    /// field existed. Omitted entirely when absent, so those shard lines keep
-    /// their existing bytes.
+    /// `None` for every path that has no fingerprint to record — the user's own
+    /// `*.json` drop box (`ingest` of a hand-dropped file, which `consume_one`
+    /// seals without one, because a hand-dropped file naming a fingerprint
+    /// proves nothing) and every shard sealed before this field existed. An §8
+    /// export line is not in that set: when its bundle carries a `fingerprint`
+    /// it is sealed with it via `ingest_export_file` (see [`seal_payload`]);
+    /// there `None` means only a pre-W213 bundle that carried none. Omitted
+    /// entirely when absent, so those shard lines keep their existing bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
 }
@@ -785,10 +796,14 @@ impl std::error::Error for SealError {}
 ///
 /// `fingerprint` is the W50c content fingerprint of the capture this payload was
 /// built from, when the caller has one. It is recorded on the sealed shard and is
-/// what [`hold_lookup`] later answers from; `None` (an inbox file, an export line)
-/// simply records no fingerprint, which means that conversation can only ever be
-/// recognised by its exact bytes. It takes no part in the duplicate decision — §7
-/// is unchanged and the key is still `file_sha256`.
+/// what [`hold_lookup`] later answers from; `None` (an inbox file — the user's
+/// own drop box carries no capture-body derivation; an export line whose bundle
+/// predates the W213 field and carries none) simply records no fingerprint,
+/// which means that conversation can only ever be recognised by its exact
+/// bytes. An §8 export line passes the fingerprint its bundle carries
+/// (`ingest_export_file`), which is the same value a live `deliver` sends at
+/// message level. It takes no part in the duplicate decision — §7 is unchanged
+/// and the key is still `file_sha256`.
 pub fn seal_payload(
     source_file: &str,
     bytes: &[u8],
@@ -959,8 +974,20 @@ fn install_identity_conflicts(
 /// It answers by calling the same parser rather than by re-implementing its
 /// conditions, so the two can never disagree about which inputs are bundles.
 pub fn check_bundle(bytes: &[u8]) -> Result<(), String> {
+    check_bundle_parsed(bytes).map(|_| ())
+}
+
+/// [`check_bundle`], handing the parsed bundle back to the caller instead of
+/// throwing it away.
+///
+/// W213 · `ingest_export_file` needs the parse it just paid for: the bundle's
+/// own `fingerprint` is what an §8 line seals onto the shard, so a second parse
+/// per line would be the only cost of the older `check_bundle`-shaped flow. The
+/// error strings are exactly `check_bundle`'s — one function, so the §6.3
+/// refusal wording cannot drift between the two machine-fed channels.
+fn check_bundle_parsed(bytes: &[u8]) -> Result<ParseOutcome, String> {
     match parse_bundle("(validation)", bytes) {
-        Ok(parsed) if parsed.kind == "bundle" => Ok(()),
+        Ok(parsed) if parsed.kind == "bundle" => Ok(parsed),
         Ok(_) => Err(
             "payload is not a valid inbox bundle: not JSON (it would be archived raw-only)"
                 .to_string(),
@@ -982,6 +1009,11 @@ fn consume_one(
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     // No fingerprint: an inbox file is the user's own drop box and carries no
     // capture-body derivation. The shard records the exact bytes instead.
+    // 🔴 W213 · That is a channel rule, not an oversight: unlike an §8 export
+    //    line (whose bundle this extension produced and whose fingerprint
+    //    `ingest_export_file` therefore seals), a hand-dropped file naming a
+    //    `fingerprint` proves nothing, so this channel does not read the field
+    //    at all.
     let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap, None)?;
     // Seal first, retire second.
     retire(name, path, consumed_dir)?;
@@ -1040,17 +1072,38 @@ fn ingest_export_file(
         }
         // `<export file name>#<line number>`, one-based, as §8 specifies.
         let source_file = format!("{name}#{line_no}");
-        if let Err(message) = check_bundle(line) {
-            report.errors.push(ErrorEntry {
-                source_file,
-                message,
-            });
-            continue;
-        }
-        // No fingerprint: §8's export file is the escape hatch used when the host
-        // was unreachable, so there is no extension-side derivation to carry — the
-        // line's own bytes are the key (§7).
-        match seal_payload(&source_file, line, stage, machine, bucket_cap, None) {
+        // 🔴 W213 · The bundle's own `fingerprint` is the one value `has` can
+        //    answer from for content that entered through this manual channel.
+        //    The host never re-derives a fingerprint (§6.6: opaque — a second
+        //    derivation would have to reproduce JavaScript's `JSON.stringify`
+        //    byte for byte), so an import that dropped it left the conversation
+        //    recognisable only by exact bytes (§7): a later byte-different copy
+        //    of the same content would then be stored a second time — the W203
+        //    audit's "Export import dedupe" finding. The bundle carries the
+        //    value since W213; every older export line has no field, and that
+        //    absence is kept as an absence. The validation this parse performs
+        //    is what earns the value its trust: an export line is a real inbox
+        //    bundle this extension produced, which is why the plain `*.json`
+        //    drop box (`consume_one`) still seals without a fingerprint — a
+        //    hand-dropped file naming a fingerprint proves nothing.
+        let fingerprint = match check_bundle_parsed(line) {
+            Ok(parsed) => parsed.fingerprint,
+            Err(message) => {
+                report.errors.push(ErrorEntry {
+                    source_file,
+                    message,
+                });
+                continue;
+            }
+        };
+        match seal_payload(
+            &source_file,
+            line,
+            stage,
+            machine,
+            bucket_cap,
+            fingerprint.as_deref(),
+        ) {
             Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
             Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
             Err(e) => report.errors.push(ErrorEntry {
@@ -1293,6 +1346,9 @@ struct ParseOutcome {
     install_id: Option<String>,
     browser: Option<String>,
     profile_label: Option<String>,
+    /// W213 · the bundle's own content fingerprint, or `None` when the bundle
+    /// predates the field or its capture had no derivation.
+    fingerprint: Option<String>,
     provenance: Option<serde_json::Value>,
     provenance_supplement: Option<serde_json::Value>,
 }
@@ -1322,6 +1378,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         install_id: None,
         browser: None,
         profile_label: None,
+        fingerprint: None,
         provenance: None,
         provenance_supplement: None,
     };
@@ -1364,6 +1421,12 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     out.install_id = bundle.install_id.filter(|s| !s.trim().is_empty());
     out.browser = bundle.browser.filter(|s| !s.trim().is_empty());
     out.profile_label = bundle.profile_label.filter(|s| !s.trim().is_empty());
+    // W213 · read verbatim like the extensions' other provenance fields: the
+    // host never re-derives a fingerprint (§6.6), so what it must not do is
+    // normalise one. An empty or whitespace-only value is treated as absent —
+    // the same rule the identity fields above apply — because an empty string
+    // held as a fingerprint would be a claim, and absence is the honest state.
+    out.fingerprint = bundle.fingerprint.filter(|s| !s.trim().is_empty());
 
     // `parsed` is explicitly best-effort in the contract. Preserve absence
     // as absence so a missing analysis envelope is not serialized as false/[];
@@ -2326,5 +2389,133 @@ mod tests {
             .iter()
             .any(|variant| variant["const"] == "unknown"));
         assert!(schema["properties"]["provenanceSupplement"].is_object());
+    }
+
+    // ------------------------------------------------------------------
+    // W213 / EXT-4 · a §8 export line's fingerprint
+    //
+    // The fingerprint travels inside the bundle (`contracts/inbox.schema.json`
+    // `fingerprint`); `ingest` of an export line must seal it onto the shard
+    // — the same value a `deliver` records from its message field — or `has`
+    // can never answer for a bundle that entered through the manual channel.
+    // These tests are the import half of the round trip the extension half
+    // pins in tests/w3-recapture.test.ts.
+    // ------------------------------------------------------------------
+
+    /// An `inbox@2` bundle carrying the W213 content fingerprint, as the
+    /// extension's `buildBundle` writes it for a platform with a volatile-field
+    /// table (`apps/extension/entrypoints/background.ts`).
+    fn synthetic_export_line(session_id: &str, raw_text: &str, fingerprint: &str) -> String {
+        serde_json::json!({
+            "schema": SCHEMA,
+            "platform": "chatgpt",
+            "sessionId": session_id,
+            "install_id": "7d3e9f21-1111-4222-8333-444444444444",
+            "browser": "Chrome",
+            "profile_label": "Unnamed profile",
+            "fingerprint": fingerprint,
+            "raw": {"text": raw_text, "bytes": raw_text.len()},
+        })
+        .to_string()
+    }
+
+    /// A fingerprint it makes no difference to spell: valid §6.6 wire shape.
+    const W213_FP: &str = "c294ed8b34c417f0fc80e81723e2a072dcc52f52b1d86960479075e4af2a5c5c";
+
+    #[test]
+    fn export_line_fingerprint_is_sealed_and_answers_hold_lookup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        let line = synthetic_export_line("sess-fpw", "synthetic body", W213_FP);
+        fs::write(
+            inbox.join("chat-stasher-export-20260912T050505Z-7d3e9f21-4f2a61.jsonl"),
+            format!("{line}\n"),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+
+        // Sealed with the bundle's own fingerprint — the value a live
+        // `deliver` would have recorded from its message field.
+        let record = only_shard_record(&stage, "mbp-test", "chatgpt.sess-fpw");
+        assert_eq!(record["fingerprint"], W213_FP);
+
+        // And `has` answers from it, which is the whole point: a redelivery
+        // of this conversation can be judged "already held" off a copy that
+        // entered through the manual channel.
+        let session_dir = store::session_shard_dir(&stage, "mbp-test", "chatgpt.sess-fpw");
+        assert_eq!(
+            hold_lookup(&session_dir, W213_FP).unwrap().as_deref(),
+            Some("000001.jsonl"),
+            "imported shard must answer has for its own fingerprint"
+        );
+    }
+
+    /// Every export line produced before W213 carries no fingerprint, and a
+    /// pre-W213-shaped line must seal to exactly the bytes it always did —
+    /// no key appears, so old shard lines and new un-fingerprinted ones stay
+    /// byte-identical (`ShardRecord.fingerprint` skips absent).
+    #[test]
+    fn an_export_line_without_a_fingerprint_seals_without_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        let line = serde_json::json!({
+            "schema": SCHEMA,
+            "platform": "chatgpt",
+            "sessionId": "sess-fpold",
+            "raw": {"text": "synthetic body", "bytes": 14},
+        })
+        .to_string();
+        fs::write(
+            inbox.join("chat-stasher-export-20260912T060606Z-7d3e9f21-5b3c77.jsonl"),
+            format!("{line}\n"),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        let record = only_shard_record(&stage, "mbp-test", "chatgpt.sess-fpold");
+        assert!(
+            record.get("fingerprint").is_none(),
+            "an absent fingerprint must stay absent, not become a value"
+        );
+        let session_dir = store::session_shard_dir(&stage, "mbp-test", "chatgpt.sess-fpold");
+        // A real measurement, not a fallback: nothing there holds this
+        // fingerprint, so the redelivery pre-gate still delivers (one extra
+        // copy at most — the safe direction, invariant 1 honoured).
+        assert_eq!(hold_lookup(&session_dir, W213_FP).unwrap(), None);
+    }
+
+    /// The plain `*.json` drop box does **not** gain a fingerprint from its
+    /// bytes. That channel is the user's own drop box and carries no
+    /// capture-body derivation by documented design (`consume_one`); only the
+    /// machine-fed §8 line, whose bundle this extension produced, is trusted
+    /// to name the content it was built from. A hand-dropped file claiming a
+    /// fingerprint therefore seals without one and can never win a `has`
+    /// answer on the strength of bytes alone.
+    #[test]
+    fn a_plain_inbox_file_does_not_gain_a_fingerprint_from_its_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("chatgpt-sess-drop.json"),
+            synthetic_export_line("sess-drop", "synthetic body", W213_FP),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        let record = only_shard_record(&stage, "mbp-test", "chatgpt.sess-drop");
+        assert!(
+            record.get("fingerprint").is_none(),
+            "the drop box channel must keep sealing without a fingerprint"
+        );
     }
 }

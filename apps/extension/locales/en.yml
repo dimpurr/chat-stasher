@@ -77,6 +77,9 @@ export:
   unreadable: >-
     Outbox: unreadable — this browser context has no IndexedDB. No export file
     was written.
+  noUniqueName: >-
+    Export: no file was written — this browser context cannot generate the
+    random bytes a unique export file name needs. Nothing has been deleted.
 
 # ---------------------------------------------------------------------------
 # Backfill pause (the host is unreachable)

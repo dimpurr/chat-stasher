@@ -177,7 +177,7 @@ Conversations you open are captured as you use the site. Your **past** conversat
 
 ### Without the host: the export file
 
-If you prefer not to register a host, the popup can export captures that have not been delivered as a file, named `chat-stasher-export-<UTC timestamp>.jsonl`. Point the CLI at the folder holding it:
+If you prefer not to register a host, the popup can export captures that have not been delivered as a file, named `chat-stasher-export-<UTC timestamp>-<install short id>-<nonce>.jsonl`. The install segment names the browser profile that produced the file and the nonce makes the name unique per export, so two profiles exporting in the same second cannot write the same file. Point the CLI at the folder holding it:
 
 ```sh
 chat-stasher ingest --inbox <folder with the export> --stage ~/stash/chat-stasher/stage

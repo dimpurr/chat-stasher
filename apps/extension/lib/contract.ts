@@ -1127,6 +1127,22 @@ export interface InboxBundle {
   install_id: string;
   browser: string;
   profile_label: string;
+  /**
+   * 🔴 W213 · The content fingerprint of the capture this bundle was built from
+   *    (`lib/recapture.ts` `contentFingerprint` over this same `platform` and
+   *    `raw.text`) — the *same value* `deliver` sends as its message-level
+   *    `fingerprint` (§6.6), carried inside the payload because the §8 export
+   *    file is the payload and nothing else: a host records this field on the
+   *    sealed shard for an imported export line exactly as a live delivery's
+   *    message field is recorded, so `has` answers for imported bundles too.
+   *    The host treats it as opaque and never recomputes it (§6.6).
+   *
+   *    Absent when no derivation exists (a platform without a volatile-field
+   *    table, a body that is not a JSON object) and on every bundle from a
+   *    build before this field. Takes no part in the id or the dedup key —
+   *    those remain `platform.sessionId` / `file_sha256`.
+   */
+  fingerprint?: string;
   /** Immutable source membership recorded by extension enumeration. */
   provenance?: ChatGptProvenance;
   /** Append-only later source observation, if one was separately delivered. */

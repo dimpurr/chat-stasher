@@ -462,7 +462,7 @@ describe('W2-OUTBOX · the export file', () => {
     const entries = (await ob.listEntries())!;
 
     const at = Date.parse('2026-09-12T21:47:03.123Z');
-    const file = ob.buildExportFile(entries, at);
+    const file = ob.buildExportFile(entries, at, null, 'a06f2b');
 
     expect(file.content).toBe(`${PAYLOAD_A}\n${PAYLOAD_B}\n`);
     // Byte level: the file bytes = each payload's UTF-8 bytes plus one \n per line.
@@ -478,13 +478,16 @@ describe('W2-OUTBOX · the export file', () => {
     expect(file.entries).toBe(2);
   });
 
-  it('🔴 the file name is strictly chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl', async () => {
+  // W213 moved the strict name pin to tests/w213-export-identity.test.ts, which
+  // covers the install and nonce segments; this keeps the UTC stamp pinned here
+  // because the stamp is §8's, not W213's.
+  it('🔴 the file name keeps the UTC stamp and the .jsonl tail', async () => {
     const ob = await outbox();
-    expect(ob.exportFilename(Date.parse('2026-09-12T21:47:03.123Z')))
-      .toBe('chat-stasher-export-20260912T214703Z.jsonl');
+    expect(ob.exportFilename(Date.parse('2026-09-12T21:47:03.123Z'), null, 'a06f2b'))
+      .toBe('chat-stasher-export-20260912T214703Z-a06f2b.jsonl');
     // Midnight and single-digit months/days are zero-padded too, and it is UTC rather than local time.
-    expect(ob.exportFilename(Date.parse('2026-01-02T03:04:05.000Z')))
-      .toBe('chat-stasher-export-20260102T030405Z.jsonl');
+    expect(ob.exportFilename(Date.parse('2026-01-02T03:04:05.000Z'), null, 'a06f2b'))
+      .toBe('chat-stasher-export-20260102T030405Z-a06f2b.jsonl');
   });
 
   it('rejected entries are in the export too (§10: they are kept and exported)', async () => {
@@ -495,7 +498,7 @@ describe('W2-OUTBOX · the export file', () => {
       deliver: async (name) => (name === NAME_A ? REJECTED : RETRYABLE),
     });
 
-    const file = ob.buildExportFile((await ob.undeliveredEntries())!, Date.now());
+    const file = ob.buildExportFile((await ob.undeliveredEntries())!, Date.now(), null, 'a06f2b');
     expect(file.content).toBe(`${PAYLOAD_A}\n${PAYLOAD_B}\n`);
     expect(file.entries).toBe(2);
   });
@@ -503,13 +506,13 @@ describe('W2-OUTBOX · the export file', () => {
   it('exporting **deletes nothing** (the host will confirm them as duplicates once it is back)', async () => {
     const ob = await outbox();
     await ob.enqueue(NAME_A, PAYLOAD_A);
-    ob.buildExportFile((await ob.undeliveredEntries())!, Date.now());
+    ob.buildExportFile((await ob.undeliveredEntries())!, Date.now(), null, 'a06f2b');
     expect(await ob.listEntries()).toHaveLength(1);
   });
 
   it('an empty outbox ⇒ empty content, 0 entries (the exporter decides whether to produce a file)', async () => {
     const ob = await outbox();
-    const file = ob.buildExportFile([], Date.now());
+    const file = ob.buildExportFile([], Date.now(), null, 'a06f2b');
     expect(file).toMatchObject({ content: '', entries: 0, bytes: 0 });
   });
 

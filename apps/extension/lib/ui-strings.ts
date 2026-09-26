@@ -190,6 +190,15 @@ export function exportUnreadable(): string {
   return t('export.unreadable');
 }
 
+/**
+ * The popup shows this when the platform random source did not answer, so the
+ * per-export file name nonce could not be drawn (W213). A download under a
+ * colliding name is refused, not attempted; nothing has been written.
+ */
+export function exportNoUniqueName(): string {
+  return t('export.noUniqueName');
+}
+
 // ---------------------------------------------------------------------------
 // Backfill pause
 // ---------------------------------------------------------------------------

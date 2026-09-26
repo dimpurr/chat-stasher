@@ -32,6 +32,7 @@ import { deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-
 import { recordLiveCapture } from '../lib/live-capture';
 import {
   captureFingerprint,
+  contentFingerprint,
   deliveryFingerprint,
   isUnchangedCapture,
   rememberDeliveredQuietly,
@@ -182,6 +183,24 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
   const sessionId = resolveSessionId(captured) ?? 'unknown';
   const platform = findPlatformForUrl(captured.url) ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
   const install = await getInstallIdentity();
+  // 🔴 W213 · The content fingerprint, embedded in the bundle itself. `deliver`
+  //    carries the same value at message level, but the §8 export file holds the
+  //    payload and nothing else — one line is the exact payload bytes, so the
+  //    fingerprint has to travel *inside* the bundle or an export → `ingest`
+  //    round trip loses it, and `has` can then never answer for an imported
+  //    bundle (the W203 audit's "Export import dedupe", P1). The host never
+  //    re-derives a fingerprint (§6.6: opaque, JS stringify semantics), so the
+  //    only copy that can survive the manual channel is this one.
+  //
+  //    The formula is the one shared derivation (`lib/recapture.ts`
+  //    `contentFingerprint` over this same platform and raw body), so the
+  //    embedded field, `deliveryFingerprint`'s message-level value, and what
+  //    the host records on the sealed shard are one value with one
+  //    derivation. `null` (no volatile-field table for this platform, a body
+  //    that is not a JSON object) omits the key: "we have no fingerprint" is
+  //    never spelled as a value (invariant 1), and those conversations keep
+  //    being answerable by exact bytes only, exactly as before.
+  const fingerprint = await contentFingerprint(platform?.id ?? 'deepseek', captured.text);
   return {
     schema: SCHEMA,
     ...install,
@@ -199,6 +218,7 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
       store,
       sessionId === 'unknown' ? null : sessionId,
     ),
+    ...(fingerprint === null ? {} : { fingerprint }),
     ...(captured.provenance ? { provenance: captured.provenance } : {}),
     ...(captured.provenanceSupplement ? { provenanceSupplement: captured.provenanceSupplement } : {}),
     url: captured.url,
