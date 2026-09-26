@@ -2990,6 +2990,7 @@ fn display_machine(
 /// display-name declaration.
 struct OverviewRead {
     rows: Vec<overview::OverviewRow>,
+    snapshot_times: BTreeMap<String, i64>,
     snapshot_machines: BTreeSet<String>,
     index_machines: BTreeSet<String>,
     /// Machines whose newest snapshot carries a `meta/<id>/machine.json`.
@@ -3039,6 +3040,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
 
     let mut out = OverviewRead {
         rows: Vec::new(),
+        snapshot_times: BTreeMap::new(),
         snapshot_machines: BTreeSet::new(),
         index_machines: BTreeSet::new(),
         declared_machines: BTreeSet::new(),
@@ -3050,6 +3052,8 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
 
     for snap in newest {
         let hostname = snap.hostname.clone();
+        out.snapshot_times
+            .insert(hostname.clone(), snap.time.timestamp().as_second());
         out.snapshot_machines.insert(hostname.clone());
         let root = repo
             .node_from_snapshot_and_path(&snap, "")
@@ -3208,6 +3212,7 @@ fn cmd_overview(
     };
     let OverviewRead {
         rows,
+        snapshot_times,
         snapshot_machines,
         index_machines,
         declared_machines,
@@ -3238,13 +3243,15 @@ fn cmd_overview(
             .map(|machine| (machine.clone(), display(machine)))
             .collect();
         let exit_code = if rows.is_empty() { 1 } else { 0 };
-        let mut value = overview::overview_json(
+        let mut value = overview::overview_json_with_freshness(
             &rows,
             &snapshot_machines,
             &index_machines,
             &declared_machines,
             &display_names,
             exit_code,
+            &snapshot_times,
+            &writer_status,
         );
         if let Some(object) = value.as_object_mut() {
             object.insert(
