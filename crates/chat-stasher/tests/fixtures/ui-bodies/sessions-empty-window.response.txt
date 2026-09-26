@@ -71,6 +71,12 @@ nav.sub{display:flex;gap:1rem}
 <p class=sub>1 session(s) in view carry no group: their archived id has no harness prefix, so no <code>--harness</code> filter can select them. They are counted under <b>All</b> only — a group link lists them under "could not be placed", not as absent.</p>
 <p><b>4</b> session(s) matched.</p>
 <div class=note><b>No rows on this page.</b> The filter matched <b>4</b> session(s), but this window starts past the last of them. That is a paging position, not a match count: it is not the same as matching nothing. <a href="/sessions?offset=0&token=golden-token">Back to page 1</a></div>
+<section id=export-cli>
+<h2>Export this view (CLI)</h2>
+<p>The same filters this page applied, spelled as <code>chat-stasher export</code> flags, ready to copy.</p>
+<pre>chat-stasher export --destination dest-under-test --out ~/out</pre>
+<p class=sub>Running it writes one file per selected session under <code>--out</code> — <code>&lt;out&gt;/&lt;machine&gt;/&lt;harness&gt;/&lt;session-id&gt;.jsonl</code>, and <code>--out</code> must name a new or empty directory — byte-identical to what <code>chat-stasher read</code> returns for that session, and <code>--dry-run</code> prints what it will do before it does any of it. One session needs no command: its session page offers a <b>download .jsonl</b> link whose bytes are exactly <code>read</code>'s, with the same digest the command prints riding the response as <code>X-Checksum-Sha256</code>.</p>
+</section>
 <footer>
 <p><b>Metadata tier.</b> This page was rendered from one archive-metadata read taken before the server started (snapshots + index + tree + the activity sidecar). The only conversation text it holds is each session's one-line label — at most 100 characters, recorded in the activity index, which rode that same metadata read. 0 session shard blob(s) were fetched by that read — a session's full conversation is fetched only when you click it and then click <i>load</i>, and the cost is shown before you do.</p>
 <p>Machines are named by their archive partition id, which is the key the repository actually partitions on. Times are UTC. No JavaScript, no external asset, no off-host link is loaded by this page.</p>

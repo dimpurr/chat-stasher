@@ -15,14 +15,14 @@ use crate::selector::{Resolved, UnplacedBy};
 
 use super::facets;
 use super::html::{
-    completeness_banner, describe_selector, destinations_block, esc, fmt_bytes, fmt_unix, footer,
-    head, merged_counts, read_from_note,
+    completeness_banner, conjoined_flags, describe_selector, destinations_block, esc, fmt_bytes,
+    fmt_unix, footer, head, merged_counts, read_from_note,
 };
 use super::{
-    index_param, page_from_query, page_href, page_window, paging_nav, percent_encode, select,
-    selector_from_query, sort_rows, Content, ContentSource, ListSort, Page, Query, Response,
-    Selection, UiData, UiSession, DESTINATION_JOIN, EXPLICIT_REPO_LABEL, LIST_CARRY,
-    PROVENANCE_FIRST_USER_LINE, PROVENANCE_HARNESS_TITLE,
+    bad_index_response, index_param, page_from_query, page_href, page_window, paging_nav,
+    percent_encode, select, selector_from_query, sort_rows, Content, ContentSource, ListSort, Page,
+    Query, Response, Selection, UiData, UiSession, DESTINATION_JOIN, EXPLICIT_REPO_LABEL,
+    LIST_CARRY, PROVENANCE_FIRST_USER_LINE, PROVENANCE_HARNESS_TITLE,
 };
 
 pub(super) fn list_page(params: &Query, token: &str, data: &UiData) -> Response {
@@ -46,24 +46,14 @@ pub(super) fn list_page(params: &Query, token: &str, data: &UiData) -> Response 
 
 pub(super) fn one_session_page(params: &Query, token: &str, data: &UiData) -> Response {
     let Some(row) = index_param(params, data) else {
-        return Response::text(
-            400,
-            "Bad Request",
-            "ui: `i` must name a row of this dashboard's session list. An index that \
-             resolves to nothing is a usage error, not an empty session.\n",
-        );
+        return bad_index_response();
     };
     Response::html(200, "OK", page_session(row, token, data))
 }
 
 pub(super) fn content_page(params: &Query, data: &UiData, content: &dyn ContentSource) -> Response {
     let Some(row) = index_param(params, data) else {
-        return Response::text(
-            400,
-            "Bad Request",
-            "ui: `i` must name a row of this dashboard's session list. An index that \
-             resolves to nothing is a usage error, not an empty session.\n",
-        );
+        return bad_index_response();
     };
     match content.fetch(&row.machine, &row.session_id) {
         Ok(c) => Response::html(200, "OK", page_content(row, &c, data)),
@@ -230,8 +220,72 @@ fn page_sessions(
         }
         out.push_str("</tbody></table></div></section>\n");
     }
+    out.push_str(&export_cli_block(resolved, data));
     out.push_str(&footer(data));
     out.push_str("</body></html>\n");
+    out
+}
+
+/// The CLI-parity block (29-UI-DESIGN §3.5/§4.7, R7): the `chat-stasher
+/// export` command that selects exactly this page's view, plus the pointer to
+/// the single-session download. The command's flags come from
+/// [`conjoined_flags`] — the same selector constraint walk
+/// [`describe_selector`] renders — so the page's prose sentence about the
+/// filter and the command it prints cannot drift apart.
+///
+/// `Err` from the walk is a filter pair that cannot both hold (or cannot be
+/// spelled on one command line). The block then says so and prints no
+/// command: a command that almost matches would export something other than
+/// what the page is showing, quietly. What the block never does is count the
+/// set for the command — the match sentence above the table already names
+/// exactly what the filter selected.
+fn export_cli_block(resolved: &Resolved, data: &UiData) -> String {
+    let mut out = String::from(
+        "<section id=export-cli>\n<h2>Export this view (CLI)</h2>\n<p>The same \
+                      filters this page applied, spelled as <code>chat-stasher export</code> \
+                      flags, ready to copy.</p>\n",
+    );
+    match conjoined_flags(&data.launch, &resolved.selector) {
+        Ok(flags) => {
+            // A dashboard opened with `--repo` has no destination to name; its
+            // label is a placeholder word, and the repository path itself stays
+            // off the page. The command carries the flag the reader fills in,
+            // never an argument nobody can type.
+            let target = if data.destination_label == EXPLICIT_REPO_LABEL {
+                "--repo <this dashboard's repository>".to_string()
+            } else {
+                format!("--destination {}", data.destination_label)
+            };
+            let mut command = format!("chat-stasher export {target}");
+            if !flags.is_empty() {
+                command.push_str(&format!(" {flags}"));
+            }
+            command.push_str(" --out ~/out");
+            out.push_str(&format!(
+                "<pre>{}</pre>\n\
+                 <p class=sub>Running it writes one file per selected session under \
+                 <code>--out</code> — <code>&lt;out&gt;/&lt;machine&gt;/&lt;harness&gt;/\
+                 &lt;session-id&gt;.jsonl</code>, and <code>--out</code> must name a new or \
+                 empty directory — byte-identical to what <code>chat-stasher read</code> \
+                 returns for that session, and <code>--dry-run</code> prints what it will do \
+                 before it does any of it. One session needs no command: its session page \
+                 offers a <b>download .jsonl</b> link whose bytes are exactly \
+                 <code>read</code>'s, with the same digest the command prints riding the \
+                 response as <code>X-Checksum-Sha256</code>.</p>\n</section>\n",
+                esc(&command)
+            ));
+        }
+        Err(why) => {
+            out.push_str(&format!(
+                "<p>This view's filters cannot be spelled as one \
+                 <code>chat-stasher export</code> command: {}. Nothing is exported by \
+                 accident — narrow the page's filter, or reopen <code>chat-stasher ui</code> \
+                 with different filter flags, and the command this block prints will select \
+                 exactly what that page shows.</p>\n</section>\n",
+                esc(&why)
+            ));
+        }
+    }
     out
 }
 
@@ -791,8 +845,12 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
          <b>{db} data blob(s)</b> — fetched from the destination and decrypted locally. \
          Nothing is fetched until you ask.<br><br>\
          <a href=\"/reader?i={i}&token={t}\"><b>Open reader</b></a> · \
-         <a href=\"/content?i={i}&token={t}\"><b>show raw shards</b></a> \
-         <span class=sub>({b})</span></div>\n",
+         <a href=\"/content?i={i}&token={t}\"><b>show raw shards</b></a> · \
+         <a href=\"/export?i={i}&fmt=jsonl&token={t}\"><b>download .jsonl</b></a> \
+         <span class=sub>({b} once, for whichever of the three you click)</span><br> \
+         The download is an attachment on this page's row: its bytes are exactly what <code>chat-stasher \
+         read</code> returns for this session, its name is the session's short id, and the digest \
+         <code>read</code> prints rides the response as <code>X-Checksum-Sha256</code>.</div>\n",
         b = esc(&fmt_bytes(payload_bytes)),
         sh = s.shard_count,
         db = s.data_blobs,

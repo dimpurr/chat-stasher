@@ -2170,3 +2170,308 @@ fn the_search_routes_refuse_an_unresolvable_parameter() {
         let _ = needle;
     }
 }
+
+// ------------------------------------------------------------- R7 /export
+
+/// One GET that preserves raw bytes — the download's body is the session's
+/// exact shard bytes and a lossy decode would hide exactly the class of
+/// difference this suite exists to catch. Returns the status, the whole head
+/// (the named headers are asserted against it) and the undecoded body.
+fn http_raw(port: u16, target: &str) -> (u16, String, Vec<u8>) {
+    use std::io::Write as _;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("a complete response head");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in {head:?}"));
+    (status, head, raw[split + 4..].to_vec())
+}
+
+fn head_value<'a>(head: &'a str, name: &str) -> &'a str {
+    head.lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim().eq_ignore_ascii_case(name).then_some(v.trim())
+        })
+        .unwrap_or_else(|| panic!("no {name} header in {head}"))
+}
+
+/// The row index the dashboard addresses a session by, found through the same
+/// `/api/sessions` a consumer walks — the raw session id never reaches a URL.
+fn row_index(ui: &Ui, machine: &str, session_id: &str) -> usize {
+    let (status, body) = ui.get("/api/sessions?limit=500");
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = v["sessions"].as_array().unwrap();
+    let short = chat_stasher::id::short_session_id(session_id);
+    let row = rows
+        .iter()
+        .find(|r| {
+            r["machine"].as_str() == Some(machine)
+                && r["session_short_id"].as_str() == Some(short.as_str())
+        })
+        .unwrap_or_else(|| panic!("machine {machine} session {short} missing from {body}"));
+    row["index"].as_u64().unwrap() as usize
+}
+
+/// The headline of R7 (29-UI-DESIGN §4.7): the download's bytes are exactly
+/// the session's archived lines — the same bytes the stage pushed, `read`
+/// reads back and the `export` CLI writes — with the digest `read` prints
+/// riding the response as `X-Checksum-Sha256`.
+#[test]
+fn ui_export_downloads_the_exact_read_bytes_as_an_attachment() {
+    use sha2::{Digest, Sha256};
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let index = row_index(&ui, "mbp-a", WIDE);
+
+    // The exact oracle bytes: the stage file `push` sealed into the archive,
+    // restored untouched ("not re-encoded, not re-serialised, not
+    // re-terminated" is export's own contract, and the download shares the
+    // fetch path that guarantees it).
+    let sealed = sb
+        .path()
+        .join("stage-mbp-a")
+        .join("sessions")
+        .join("mbp-a")
+        .join(WIDE)
+        .join("000")
+        .join("000001.jsonl");
+    let sealed = fs::read(&sealed).unwrap();
+    let digest = Sha256::digest(&sealed)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let short = chat_stasher::id::short_session_id(WIDE);
+
+    let (status, head, body) = http_raw(
+        ui.port,
+        &format!("/export?i={index}&fmt=jsonl&token={}", ui.token),
+    );
+    assert_eq!(status, 200, "{head}");
+    assert_eq!(
+        head_value(&head, "Content-Disposition"),
+        format!("attachment; filename=\"{short}.jsonl\""),
+        "an attachment named after the short id — no title, no full id"
+    );
+    assert_eq!(
+        head_value(&head, "X-Checksum-Sha256"),
+        digest,
+        "the header is the digest of exactly the bytes below it"
+    );
+    assert_eq!(
+        head_value(&head, "Content-Type"),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        head_value(&head, "Content-Length"),
+        sealed.len().to_string()
+    );
+    // The core claim, byte for byte: no line moved, nothing was re-encoded.
+    assert!(
+        body == sealed,
+        "downloaded {} bytes, archived {} — they must be identical",
+        body.len(),
+        sealed.len()
+    );
+
+    // The same selector through the CLI: `read` prints the concat digest
+    // (the CLI's own output for a session), and those numbers must be these
+    // numbers.
+    let out = run(
+        sb.path(),
+        &[
+            "read",
+            "--stage",
+            sb.path().join("stage-mbp-a").to_str().unwrap(),
+            "--session",
+            WIDE,
+            "--machine",
+            "mbp-a",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(out.status.success(), "read failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let concat_line = stdout
+        .lines()
+        .find(|l| l.starts_with("[read] concat len"))
+        .expect("read prints the concatenation digest");
+    assert!(
+        concat_line.contains(&format!("sha256={digest}")),
+        "read's own digest must match the response header: {concat_line}"
+    );
+    assert!(
+        concat_line.contains(&format!("{}  sha", sealed.len())),
+        "read's own length must match the download: {concat_line}"
+    );
+
+    // …and through the `export` CLI, which writes the same bytes to a file
+    // (P7: the UI's parity command is the real command, and its bytes are
+    // cannot-differ bytes). `--session WIDE` is the same shared selector the
+    // download's session is addressed by.
+    let out_dir = sb.path().join("export-by-ui");
+    let out = run(
+        sb.path(),
+        &[
+            "export",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-a",
+            "--session",
+            WIDE,
+            "--out",
+            out_dir.to_str().unwrap(),
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(out.status.success(), "export failed: {out:?}");
+    let written = fs::read(
+        out_dir
+            .join("mbp-a/claude-code")
+            .join(format!("{WIDE}.jsonl")),
+    )
+    .unwrap();
+    assert!(
+        written == sealed && written == body,
+        "export writes the same bytes"
+    );
+}
+
+/// The footer of /sessions names the CLI twin of the view (29-UI-DESIGN
+/// §3.5), and the session page links the single-session download with the
+/// digest stated beside it — the command must be the one the page claims:
+/// pasteable, and selecting the set the page shows.
+#[test]
+fn the_sessions_page_prints_the_equivalent_cli_command_and_the_download_link() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    // A filtered view: one machine, one source — the printed flags must be
+    // exactly these, in the vocabulary `export` reads.
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    let (status, html) = ui.get("/sessions?machine=mbp-a&harness=claude-code");
+    assert_eq!(status, 200, "{html}");
+    assert!(
+        html.contains("<h2>Export this view (CLI)</h2>"),
+        "the block must exist: {html}"
+    );
+    assert!(
+        html.contains("chat-stasher export --repo &lt;this dashboard&#39;s repository&gt;")
+            || html.contains("chat-stasher export --destination "),
+        "vs `--repo`, but the command must name a target: {html}"
+    );
+    assert!(
+        html.contains("--machine mbp-a --harness claude-code --out ~/out"),
+        "the filters this page applied, spelled as flags: {html}"
+    );
+
+    // The command is not decoration: it must select the set the page shows.
+    // Run it against this repository and compare the written set with the
+    // page's own matched count.
+    let (status, body) = ui.get("/api/sessions?machine=mbp-a&harness=claude-code");
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let matched = v["matched"].as_u64().unwrap();
+    let out_dir = sb.path().join("export-parity");
+    let out = run(
+        sb.path(),
+        &[
+            "export",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-a",
+            "--harness",
+            "claude-code",
+            "--out",
+            out_dir.to_str().unwrap(),
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(out.status.success(), "export failed: {out:?}");
+    let exported = fs::read_dir(out_dir.join("mbp-a").join("claude-code"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .count();
+    // The selector writes one file per session it could read; anything it
+    // could not is recorded in the manifest as a failure — but this synthetic
+    // archive is fully readable, so the counts must meet exactly.
+    assert_eq!(
+        exported, matched as usize,
+        "the page's command must select the page's set"
+    );
+
+    // The session page: the download link exists beside the cost, and the
+    // digest statement is on the page.
+    let index = row_index(&ui, "mbp-a", WIDE);
+    let (status, page) = ui.get(&format!("/session?i={index}"));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(&format!("/export?i={index}&fmt=jsonl&token=")),
+        "the row's own download link: {page}"
+    );
+    assert!(
+        page.contains("X-Checksum-Sha256</code>"),
+        "the digest statement rides the link: {page}"
+    );
+}
+
+/// `fmt` is a vocabulary, not a request: an unknown value is refused, and a
+/// refused or unresolvable request fetches nothing (the refusal page is a
+/// usage error, and no payload is paid for it).
+#[test]
+fn the_export_route_refuses_what_it_cannot_serve() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let index = row_index(&ui, "mbp-a", WIDE);
+
+    for target in [
+        format!("/export?i={index}&fmt=csv&token={}", ui.token),
+        format!("/export?i=9999&fmt=jsonl&token={}", ui.token),
+        format!("/export?token={}", ui.token),
+    ] {
+        let (status, head, body) = http_raw(ui.port, &target);
+        assert_eq!(status, 400, "{target}: {head}");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("usage error") || text.contains("must be one of"),
+            "the refusal must say which vocabulary: {text}"
+        );
+        assert!(
+            !head.contains("Content-Disposition:"),
+            "{target} must not be an attachment: {head}"
+        );
+    }
+}

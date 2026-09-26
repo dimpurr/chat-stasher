@@ -292,12 +292,10 @@ struct Body(&'static str, &'static str);
 
 impl ContentSource for Body {
     fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
-        Ok(Content {
-            shards: Vec::new(),
-            concat_sha256: "aa".repeat(32),
-            bytes: self.0.len(),
-            body: bundle_line(self.1, "w190reader0001", self.0),
-        })
+        Ok(Content::from_concat(
+            bundle_line(self.1, "w190reader0001", self.0).into_bytes(),
+            Vec::new(),
+        ))
     }
 }
 

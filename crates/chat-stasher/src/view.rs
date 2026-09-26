@@ -45,12 +45,27 @@ const MAX_HEAD_BYTES: usize = 8 * 1024;
 
 /// A rendered HTTP response. Kept as a value so routing is a pure function and
 /// the rejection paths are unit-testable without a socket.
+///
+/// A response is text by default: `body` is what the header block describes.
+/// The download route is the one text cannot serve — its body is the archived
+/// session's bytes, which are not valid UTF-8 the moment any archived line
+/// is not, and a lossy decode would corrupt a file the page pins as
+/// byte-identical to `read`'s output. For that case `body_bytes` overrides
+/// `body` on the wire, and `extra_headers` carries what an attachment needs
+/// (`Content-Disposition`, `X-Checksum-Sha256`). Everything else ignores both:
+/// an absent header adds no line, exactly the wire form it had before.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     pub status: u16,
     pub reason: &'static str,
     pub content_type: &'static str,
     pub body: String,
+    /// Additional response headers, written after the standard block, in the
+    /// order they were added. Empty for every route except the download.
+    pub extra_headers: Vec<(String, String)>,
+    /// Exact response bytes for the attachment route, overriding `body`.
+    /// `None` for every other response.
+    pub body_bytes: Option<Vec<u8>>,
 }
 
 impl Response {
@@ -60,6 +75,8 @@ impl Response {
             reason,
             content_type: "text/plain; charset=utf-8",
             body: body.into(),
+            extra_headers: Vec::new(),
+            body_bytes: None,
         }
     }
 
@@ -69,6 +86,8 @@ impl Response {
             reason,
             content_type: "text/html; charset=utf-8",
             body: body.into(),
+            extra_headers: Vec::new(),
+            body_bytes: None,
         }
     }
 
@@ -78,6 +97,46 @@ impl Response {
             reason,
             content_type: "application/json; charset=utf-8",
             body: body.into(),
+            extra_headers: Vec::new(),
+            body_bytes: None,
+        }
+    }
+
+    /// A body of exact bytes, for the one route that hands the archived
+    /// session itself to the browser. The content type stays explicit in the
+    /// caller — `octet-stream` rather than a scriptable type, so `nosniff`
+    /// and the attachment disposition leave the browser nothing to interpret.
+    pub fn bytes(
+        status: u16,
+        reason: &'static str,
+        content_type: &'static str,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            status,
+            reason,
+            content_type,
+            body: String::new(),
+            extra_headers: Vec::new(),
+            body_bytes: Some(body),
+        }
+    }
+
+    /// Attach one response header, in wire order. Used only by the download
+    /// route; a header here is a fact about the bytes (`Content-Disposition`,
+    /// `X-Checksum-Sha256`), never a second knob for content the type already
+    /// describes.
+    pub fn with_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name.to_string(), value.into()));
+        self
+    }
+
+    /// The bytes on the wire: `body` for text, `body_bytes` when the response
+    /// is a download.
+    fn wire_body(&self) -> &[u8] {
+        match &self.body_bytes {
+            Some(bytes) => bytes,
+            None => self.body.as_bytes(),
         }
     }
 
@@ -85,14 +144,21 @@ impl Response {
     /// manage in a single-threaded ephemeral server.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
             self.status,
             self.reason,
             self.content_type,
-            self.body.len()
+            self.wire_body().len()
         )
         .into_bytes();
-        out.extend_from_slice(self.body.as_bytes());
+        for (name, value) in &self.extra_headers {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(value.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n");
+        out.extend_from_slice(self.wire_body());
         out
     }
 }

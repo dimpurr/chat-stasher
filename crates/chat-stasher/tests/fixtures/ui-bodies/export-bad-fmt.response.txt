@@ -1,0 +1,4 @@
+status: 400 Bad Request
+content-type: text/plain; charset=utf-8
+
+ui: `fmt` must be one of jsonl (the only export format), not `csv`. An unknown format is a usage error, not an empty download.
