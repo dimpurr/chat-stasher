@@ -38,7 +38,14 @@ if (process.env.FAKE_STDERR) process.stderr.write(process.env.FAKE_STDERR);
 if (process.env.FAKE_SIGNAL) {
   process.kill(process.pid, process.env.FAKE_SIGNAL);
 } else if (process.env.FAKE_WAIT_FOR_SIGNAL) {
-  process.stdout.write('ready\\n');
+  // Arm the listener and the keep-alive before announcing readiness: an
+  // empty pipe can be written before process.stdout.write() returns, so a
+  // "ready" printed first makes the caller's signal race the listener that
+  // has not been installed yet. The signal lands on the default
+  // disposition, the "relay" under test becomes a crash, and the test
+  // flakes once per many runs — the CI failure this ordering exists to
+  // prevent. Printed last, "ready" means what the tests wait on it to
+  // mean: this process can now catch the SIGTERM it is about to be sent.
   process.on('SIGTERM', () => {
     fs.writeFileSync(process.env.FAKE_MARKER, 'SIGTERM\\n');
     process.exit(0);
@@ -50,6 +57,7 @@ if (process.env.FAKE_SIGNAL) {
   // in this exit code instead of a process that waits forever, which is the
   // difference between a test that fails and a test that hangs.
   setTimeout(() => process.exit(99), Number(process.env.FAKE_TIMEOUT_MS ?? '15000'));
+  process.stdout.write('ready\\n');
 } else {
   process.exit(Number(process.env.FAKE_EXIT ?? '0'));
 }
